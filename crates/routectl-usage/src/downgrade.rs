@@ -1,6 +1,6 @@
 //! Offline schema downgrade from v17 back to v16.
 //!
-//! A v16 binary refuses a v17 file (`VersionTooNew`), so rolling a hop back to
+//! A v16 binary refuses a v17 file (`VersionTooNew`), so rolling a host back to
 //! the previous binary needs the version stamp lowered first. v17 is strictly
 //! additive -- two nullable columns appended to `capability_events` -- and a
 //! v16 binary names every `capability_events` column it reads or writes, so the
@@ -47,19 +47,40 @@ const LOCK_TIMEOUT_MS: u64 = 250;
 /// declared type, `NOT NULL`, default expression, primary-key position, and
 /// the hidden flag (non-zero for a generated column).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColumnShape {
-    /// Column name.
-    pub name: String,
-    /// Declared type, as written in the DDL.
-    pub declared_type: String,
-    /// Whether the column is declared `NOT NULL`.
-    pub not_null: bool,
+struct ColumnShape {
+    name: String,
+    declared_type: String,
+    not_null: bool,
     /// The default expression's text, or `None` when there is no default.
-    pub default: Option<String>,
+    default: Option<String>,
     /// 1-based position in the primary key, or 0 when not part of it.
-    pub primary_key: i64,
+    primary_key: i64,
     /// `table_xinfo`'s hidden flag: 0 for an ordinary column.
-    pub hidden: i64,
+    hidden: i64,
+}
+
+/// Which part of the additive v17 check a file failed. A stable reason, not
+/// the columns themselves: those carry file-supplied text (a default
+/// expression) that has no business in an error a caller may log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotAdditiveReason {
+    /// `capability_events` has a different number of columns than v16 plus
+    /// the additive pair.
+    ColumnCount,
+    /// The count matches, but a column differs from its frozen record by
+    /// name, type, nullability, default, key position or hidden flag.
+    ColumnShape,
+}
+
+impl NotAdditiveReason {
+    /// The fixed description of the failed check.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::ColumnCount => "the column count differs from the additive v17 shape",
+            Self::ColumnShape => "a column's shape differs from the additive v17 shape",
+        }
+    }
 }
 
 /// A frozen column record: `(name, declared type, not null, primary-key
@@ -140,12 +161,11 @@ pub enum DowngradeError {
     /// `capability_events` is not exactly the v16 columns plus the v17
     /// additive pair -- by name, type, nullability, default, key, or hidden
     /// flag -- so stamping it v16 could hand a v16 binary a layout it does not
-    /// understand. The message names only which check failed; the columns
-    /// carry file-supplied text (defaults) and stay out of the rendering.
-    #[error("capability_events is not the additive v17 shape: {}", not_additive_reason(.found))]
+    /// understand. The message names only which check failed.
+    #[error("capability_events is not the additive v17 shape: {}", .reason.description())]
     NotAdditive {
-        /// The columns actually present, in physical order.
-        found: Vec<ColumnShape>,
+        /// Which check failed.
+        reason: NotAdditiveReason,
     },
 
     /// Any other SQLite failure.
@@ -230,30 +250,27 @@ fn verify_additive_v17(conn: &Connection) -> Result<(), DowngradeError> {
     }
 
     let columns = capability_events_columns(conn)?;
-    if !is_additive_v17(&columns) {
-        return Err(DowngradeError::NotAdditive { found: columns });
+    match not_additive_reason(&columns) {
+        Some(reason) => Err(DowngradeError::NotAdditive { reason }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// Whether `columns` is exactly the v16 set followed by the v17 additive pair:
-/// every column matching its frozen record in name, declared type, `NOT NULL`,
-/// default, primary-key position and hidden flag, in order, nothing missing or
-/// extra.
-fn is_additive_v17(columns: &[ColumnShape]) -> bool {
+/// Why `columns` is not exactly the v16 set followed by the v17 additive
+/// pair, or `None` when it is: every column matching its frozen record in
+/// name, declared type, `NOT NULL`, default, primary-key position and hidden
+/// flag, in order, nothing missing or extra.
+fn not_additive_reason(columns: &[ColumnShape]) -> Option<NotAdditiveReason> {
+    if columns.len() != V16_CAPABILITY_EVENTS_COLUMNS.len() + V17_ADDITIVE_COLUMNS.len() {
+        return Some(NotAdditiveReason::ColumnCount);
+    }
     let expected = V16_CAPABILITY_EVENTS_COLUMNS
         .iter()
         .chain(V17_ADDITIVE_COLUMNS);
-    columns.len() == V16_CAPABILITY_EVENTS_COLUMNS.len() + V17_ADDITIVE_COLUMNS.len()
-        && columns.iter().zip(expected).all(matches_frozen)
-}
-
-/// The fixed description of why `columns` failed the additive v17 check.
-const fn not_additive_reason(columns: &[ColumnShape]) -> &'static str {
-    if columns.len() == V16_CAPABILITY_EVENTS_COLUMNS.len() + V17_ADDITIVE_COLUMNS.len() {
-        "a column's shape differs from the additive v17 shape"
+    if columns.iter().zip(expected).all(matches_frozen) {
+        None
     } else {
-        "the column count differs from the additive v17 shape"
+        Some(NotAdditiveReason::ColumnShape)
     }
 }
 

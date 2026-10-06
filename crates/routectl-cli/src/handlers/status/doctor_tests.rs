@@ -79,6 +79,7 @@ fn sample_target(last_outcome: Option<LastOutcome>) -> RouteTargetStatus {
         provider_name: "anthropic".into(),
         upstream: "claude-opus-wire".into(),
         seat_label: Some("seat-a".into()),
+        learned_lane: None,
         gate: ProviderGateStatus {
             rpm_available: Some(12.0),
             circuit: CircuitPhase::Closed,

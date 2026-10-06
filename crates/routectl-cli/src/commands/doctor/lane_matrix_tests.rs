@@ -309,8 +309,81 @@ fn a_model_scoped_override_resolves_through_the_lane_nicknames() {
     let overridden = cell(&panel, "p#up", "web_search");
     assert_eq!(overridden.verdict, "forced_unsupported");
     assert_eq!(overridden.layer, Some("override"));
-    assert_eq!(overridden.action, "drop");
+    assert_eq!(
+        overridden.action, "mixed",
+        "only beta carries the override, so alpha and beta disagree"
+    );
+    let actions: Vec<(&str, &str)> = overridden
+        .nickname_actions
+        .iter()
+        .map(|n| (n.nickname.as_str(), n.action))
+        .collect();
+    assert_eq!(actions, [("alpha", "none"), ("beta", "drop")]);
     assert_eq!(cell(&panel, "p#other", "web_search").verdict, "unknown");
+}
+
+#[test]
+fn nicknames_on_one_lane_with_different_overrides_render_a_mixed_cell() {
+    // alpha force-supports web_search while beta routes it away: one lane,
+    // two actions, so no single action describes the cell.
+    let mut config = lane_config();
+    config.capability.overrides.insert(
+        "p:alpha".to_string(),
+        toml::from_str("force_supported = [\"web_search\"]").expect("override entry parses"),
+    );
+    config.capability.overrides.insert(
+        "p:beta".to_string(),
+        toml::from_str("unsupported = [\"web_search\"]").expect("override entry parses"),
+    );
+    let panel =
+        build_capability_matrix_panel(&context(config, available(Vec::new(), Instant::now(), 0)));
+
+    let mixed = cell(&panel, "p#up", "web_search");
+    assert_eq!(mixed.action, "mixed");
+    let actions: Vec<(&str, &str)> = mixed
+        .nickname_actions
+        .iter()
+        .map(|n| (n.nickname.as_str(), n.action))
+        .collect();
+    assert_eq!(actions, [("alpha", "allow"), ("beta", "drop")]);
+
+    let json = serde_json::to_value(&panel).expect("panel serializes");
+    let lane = json["lanes"]
+        .as_array()
+        .and_then(|lanes| lanes.iter().find(|l| l["lane"] == "p#up"))
+        .expect("p#up lane in json");
+    let column = panel
+        .columns
+        .iter()
+        .position(|c| c == "web_search")
+        .expect("web_search column");
+    assert_eq!(lane["cells"][column]["action"], "mixed");
+    assert_eq!(
+        lane["cells"][column]["nickname_actions"][1],
+        serde_json::json!({ "nickname": "beta", "action": "drop" })
+    );
+    let human = render_capability_matrix_panel(&panel);
+    assert!(
+        human.contains("mixed(alpha=allow,beta=drop)"),
+        "the human grid names each nickname's action: {human}"
+    );
+}
+
+#[test]
+fn nicknames_that_agree_on_a_lane_carry_no_per_nickname_actions() {
+    let mut config = lane_config();
+    for nickname in ["alpha", "beta"] {
+        config.capability.overrides.insert(
+            format!("p:{nickname}"),
+            toml::from_str("unsupported = [\"web_search\"]").expect("override entry parses"),
+        );
+    }
+    let panel =
+        build_capability_matrix_panel(&context(config, available(Vec::new(), Instant::now(), 0)));
+
+    let agreed = cell(&panel, "p#up", "web_search");
+    assert_eq!(agreed.action, "drop");
+    assert!(agreed.nickname_actions.is_empty());
 }
 
 #[test]

@@ -42,6 +42,7 @@ pub(crate) mod fidelity_status;
 mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
+mod learned_lanes;
 mod opening_lookup;
 mod overlays;
 mod paid_probe_authorize;
@@ -85,6 +86,7 @@ pub use fidelity_status::{
 pub use field_verdict_observability::{
     ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,
 };
+pub use learned_lanes::{LearnedLaneProjection, ResolvedLearnedLane};
 pub use opening_lookup::OpeningLane;
 use overlays::apply_layered_overlays;
 pub(crate) use overlays::operator_betas;

@@ -53,7 +53,7 @@ pub use capability_event::{
 };
 pub use cost::{CostBreakdown, Rates, estimate_cost, estimate_cost_tokens};
 pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail, open_rw};
-pub use downgrade::{ColumnShape, DowngradeError, downgrade_to_v16};
+pub use downgrade::{DowngradeError, NotAdditiveReason, downgrade_to_v16};
 pub use handle::{UsageCounters, UsageHandle};
 pub use migrate::MigrateError;
 pub use paid_probe_command::{PaidProbeAdmission, PaidProbeCommit, PaidProbeReceipt};

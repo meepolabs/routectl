@@ -4490,6 +4490,66 @@ impl<T> typenum::type_operators::Same for routectl_router::FieldVerdictStatus
 pub type routectl_router::FieldVerdictStatus::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldVerdictStatus where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::FieldVerdictStatus::into_shared(self) -> Shared
+pub struct routectl_router::router::LearnedLaneProjection
+impl routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::from_config(&routectl_router::config::Config) -> Self
+pub fn routectl_router::LearnedLaneProjection::lane_for(&self, &str, &str) -> core::option::Option<&routectl_router::ResolvedLearnedLane>
+pub fn routectl_router::LearnedLaneProjection::lanes(&self) -> &[routectl_router::ResolvedLearnedLane]
+impl core::clone::Clone for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::clone(&self) -> routectl_router::LearnedLaneProjection
+impl core::cmp::Eq for routectl_router::LearnedLaneProjection
+impl core::cmp::PartialEq for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::eq(&self, &routectl_router::LearnedLaneProjection) -> bool
+impl core::default::Default for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::default() -> routectl_router::LearnedLaneProjection
+impl core::fmt::Debug for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::LearnedLaneProjection
+impl core::marker::Freeze for routectl_router::LearnedLaneProjection
+impl core::marker::Send for routectl_router::LearnedLaneProjection
+impl core::marker::Sync for routectl_router::LearnedLaneProjection
+impl core::marker::Unpin for routectl_router::LearnedLaneProjection
+impl core::marker::UnsafeUnpin for routectl_router::LearnedLaneProjection
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::LearnedLaneProjection
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::LearnedLaneProjection
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::LearnedLaneProjection where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::LearnedLaneProjection where U: core::convert::From<T>
+pub fn routectl_router::LearnedLaneProjection::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::LearnedLaneProjection where U: core::convert::Into<T>
+pub type routectl_router::LearnedLaneProjection::Error = core::convert::Infallible
+pub fn routectl_router::LearnedLaneProjection::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::LearnedLaneProjection where U: core::convert::TryFrom<T>
+pub type routectl_router::LearnedLaneProjection::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::LearnedLaneProjection::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::LearnedLaneProjection where T: core::clone::Clone
+pub type routectl_router::LearnedLaneProjection::Owned = T
+pub fn routectl_router::LearnedLaneProjection::clone_into(&self, &mut T)
+pub fn routectl_router::LearnedLaneProjection::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::LearnedLaneProjection where T: core::clone::Clone
+pub fn routectl_router::LearnedLaneProjection::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::LearnedLaneProjection where T: 'static + ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::LearnedLaneProjection where T: ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::LearnedLaneProjection where T: ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::LearnedLaneProjection where T: core::clone::Clone
+pub unsafe fn routectl_router::LearnedLaneProjection::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::LearnedLaneProjection where T: core::clone::Clone
+pub fn routectl_router::LearnedLaneProjection::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::LearnedLaneProjection
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::LearnedLaneProjection where T: ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::LearnedLaneProjection::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::LearnedLaneProjection
+impl<T> tracing::instrument::WithSubscriber for routectl_router::LearnedLaneProjection
+impl<T> typenum::type_operators::Same for routectl_router::LearnedLaneProjection
+pub type routectl_router::LearnedLaneProjection::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::LearnedLaneProjection where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::LearnedLaneProjection::into_shared(self) -> Shared
 pub struct routectl_router::router::OpeningLane
 pub routectl_router::router::OpeningLane::generation: u64
 pub routectl_router::router::OpeningLane::nickname: alloc::string::String
@@ -4705,8 +4765,69 @@ impl<T> typenum::type_operators::Same for routectl_router::router::ReservedPurge
 pub type routectl_router::router::ReservedPurge::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::ReservedPurge where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::ReservedPurge::into_shared(self) -> Shared
+pub struct routectl_router::router::ResolvedLearnedLane
+pub routectl_router::router::ResolvedLearnedLane::lane: routectl_router::StateKey
+pub routectl_router::router::ResolvedLearnedLane::nicknames: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::router::ResolvedLearnedLane::provider_kind: &'static str
+pub routectl_router::router::ResolvedLearnedLane::routed: bool
+impl routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::maps(&self, &str, &str) -> bool
+impl core::clone::Clone for routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::clone(&self) -> routectl_router::ResolvedLearnedLane
+impl core::cmp::Eq for routectl_router::ResolvedLearnedLane
+impl core::cmp::PartialEq for routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::eq(&self, &routectl_router::ResolvedLearnedLane) -> bool
+impl core::fmt::Debug for routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::ResolvedLearnedLane
+impl core::marker::Freeze for routectl_router::ResolvedLearnedLane
+impl core::marker::Send for routectl_router::ResolvedLearnedLane
+impl core::marker::Sync for routectl_router::ResolvedLearnedLane
+impl core::marker::Unpin for routectl_router::ResolvedLearnedLane
+impl core::marker::UnsafeUnpin for routectl_router::ResolvedLearnedLane
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::ResolvedLearnedLane
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::ResolvedLearnedLane
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::ResolvedLearnedLane where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::ResolvedLearnedLane where U: core::convert::From<T>
+pub fn routectl_router::ResolvedLearnedLane::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ResolvedLearnedLane where U: core::convert::Into<T>
+pub type routectl_router::ResolvedLearnedLane::Error = core::convert::Infallible
+pub fn routectl_router::ResolvedLearnedLane::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ResolvedLearnedLane where U: core::convert::TryFrom<T>
+pub type routectl_router::ResolvedLearnedLane::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ResolvedLearnedLane::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::ResolvedLearnedLane where T: core::clone::Clone
+pub type routectl_router::ResolvedLearnedLane::Owned = T
+pub fn routectl_router::ResolvedLearnedLane::clone_into(&self, &mut T)
+pub fn routectl_router::ResolvedLearnedLane::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::ResolvedLearnedLane where T: core::clone::Clone
+pub fn routectl_router::ResolvedLearnedLane::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::ResolvedLearnedLane where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ResolvedLearnedLane where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ResolvedLearnedLane where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::ResolvedLearnedLane where T: core::clone::Clone
+pub unsafe fn routectl_router::ResolvedLearnedLane::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::ResolvedLearnedLane where T: core::clone::Clone
+pub fn routectl_router::ResolvedLearnedLane::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::ResolvedLearnedLane
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ResolvedLearnedLane where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ResolvedLearnedLane::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ResolvedLearnedLane
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ResolvedLearnedLane
+impl<T> typenum::type_operators::Same for routectl_router::ResolvedLearnedLane
+pub type routectl_router::ResolvedLearnedLane::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ResolvedLearnedLane where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ResolvedLearnedLane::into_shared(self) -> Shared
 pub struct routectl_router::router::RouteTargetStatus
 pub routectl_router::router::RouteTargetStatus::gate: routectl_router::runtime_state::ProviderGateStatus
+pub routectl_router::router::RouteTargetStatus::learned_lane: core::option::Option<routectl_router::StateKey>
 pub routectl_router::router::RouteTargetStatus::nickname: alloc::string::String
 pub routectl_router::router::RouteTargetStatus::provider_name: alloc::string::String
 pub routectl_router::router::RouteTargetStatus::seat_label: core::option::Option<alloc::string::String>
@@ -4832,6 +4953,8 @@ pub fn routectl_router::router::Router::fidelity_snapshot(&self) -> routectl_rou
 pub fn routectl_router::router::Router::field_verdict_status(&self) -> alloc::vec::Vec<routectl_router::FieldVerdictStatus>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::learned_lane_projection(&self) -> routectl_router::LearnedLaneProjection
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
 pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize
@@ -12287,6 +12410,66 @@ impl<T> typenum::type_operators::Same for routectl_router::LearnedCapabilityRegi
 pub type routectl_router::LearnedCapabilityRegistry::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::LearnedCapabilityRegistry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::LearnedCapabilityRegistry::into_shared(self) -> Shared
+pub struct routectl_router::LearnedLaneProjection
+impl routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::from_config(&routectl_router::config::Config) -> Self
+pub fn routectl_router::LearnedLaneProjection::lane_for(&self, &str, &str) -> core::option::Option<&routectl_router::ResolvedLearnedLane>
+pub fn routectl_router::LearnedLaneProjection::lanes(&self) -> &[routectl_router::ResolvedLearnedLane]
+impl core::clone::Clone for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::clone(&self) -> routectl_router::LearnedLaneProjection
+impl core::cmp::Eq for routectl_router::LearnedLaneProjection
+impl core::cmp::PartialEq for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::eq(&self, &routectl_router::LearnedLaneProjection) -> bool
+impl core::default::Default for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::default() -> routectl_router::LearnedLaneProjection
+impl core::fmt::Debug for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::LearnedLaneProjection
+impl core::marker::Freeze for routectl_router::LearnedLaneProjection
+impl core::marker::Send for routectl_router::LearnedLaneProjection
+impl core::marker::Sync for routectl_router::LearnedLaneProjection
+impl core::marker::Unpin for routectl_router::LearnedLaneProjection
+impl core::marker::UnsafeUnpin for routectl_router::LearnedLaneProjection
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::LearnedLaneProjection
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::LearnedLaneProjection
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::LearnedLaneProjection where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::LearnedLaneProjection where U: core::convert::From<T>
+pub fn routectl_router::LearnedLaneProjection::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::LearnedLaneProjection where U: core::convert::Into<T>
+pub type routectl_router::LearnedLaneProjection::Error = core::convert::Infallible
+pub fn routectl_router::LearnedLaneProjection::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::LearnedLaneProjection where U: core::convert::TryFrom<T>
+pub type routectl_router::LearnedLaneProjection::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::LearnedLaneProjection::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::LearnedLaneProjection where T: core::clone::Clone
+pub type routectl_router::LearnedLaneProjection::Owned = T
+pub fn routectl_router::LearnedLaneProjection::clone_into(&self, &mut T)
+pub fn routectl_router::LearnedLaneProjection::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::LearnedLaneProjection where T: core::clone::Clone
+pub fn routectl_router::LearnedLaneProjection::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::LearnedLaneProjection where T: 'static + ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::LearnedLaneProjection where T: ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::LearnedLaneProjection where T: ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::LearnedLaneProjection where T: core::clone::Clone
+pub unsafe fn routectl_router::LearnedLaneProjection::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::LearnedLaneProjection
+pub fn routectl_router::LearnedLaneProjection::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::LearnedLaneProjection where T: core::clone::Clone
+pub fn routectl_router::LearnedLaneProjection::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::LearnedLaneProjection
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::LearnedLaneProjection where T: ?core::marker::Sized
+pub fn routectl_router::LearnedLaneProjection::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::LearnedLaneProjection::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::LearnedLaneProjection
+impl<T> tracing::instrument::WithSubscriber for routectl_router::LearnedLaneProjection
+impl<T> typenum::type_operators::Same for routectl_router::LearnedLaneProjection
+pub type routectl_router::LearnedLaneProjection::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::LearnedLaneProjection where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::LearnedLaneProjection::into_shared(self) -> Shared
 pub struct routectl_router::LearnedRegistryEntry
 pub routectl_router::LearnedRegistryEntry::evidence_class: core::option::Option<alloc::string::String>
 pub routectl_router::LearnedRegistryEntry::expires_at: std::time::Instant
@@ -12583,6 +12766,7 @@ pub routectl_router::MatrixCell::expires_at_ms: core::option::Option<i64>
 pub routectl_router::MatrixCell::first_seen_ms: core::option::Option<i64>
 pub routectl_router::MatrixCell::last_seen_ms: core::option::Option<i64>
 pub routectl_router::MatrixCell::layer: core::option::Option<&'static str>
+pub routectl_router::MatrixCell::nickname_actions: alloc::vec::Vec<routectl_router::MatrixNicknameAction>
 pub routectl_router::MatrixCell::source: core::option::Option<&'static str>
 pub routectl_router::MatrixCell::stale: bool
 pub routectl_router::MatrixCell::supported: core::option::Option<bool>
@@ -12703,6 +12887,64 @@ impl<T> typenum::type_operators::Same for routectl_router::MatrixLane
 pub type routectl_router::MatrixLane::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixLane where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::MatrixLane::into_shared(self) -> Shared
+pub struct routectl_router::MatrixNicknameAction
+pub routectl_router::MatrixNicknameAction::action: &'static str
+pub routectl_router::MatrixNicknameAction::nickname: alloc::string::String
+impl core::clone::Clone for routectl_router::MatrixNicknameAction
+pub fn routectl_router::MatrixNicknameAction::clone(&self) -> routectl_router::MatrixNicknameAction
+impl core::cmp::Eq for routectl_router::MatrixNicknameAction
+impl core::cmp::PartialEq for routectl_router::MatrixNicknameAction
+pub fn routectl_router::MatrixNicknameAction::eq(&self, &routectl_router::MatrixNicknameAction) -> bool
+impl core::fmt::Debug for routectl_router::MatrixNicknameAction
+pub fn routectl_router::MatrixNicknameAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::MatrixNicknameAction
+impl serde_core::ser::Serialize for routectl_router::MatrixNicknameAction
+pub fn routectl_router::MatrixNicknameAction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_router::MatrixNicknameAction
+impl core::marker::Send for routectl_router::MatrixNicknameAction
+impl core::marker::Sync for routectl_router::MatrixNicknameAction
+impl core::marker::Unpin for routectl_router::MatrixNicknameAction
+impl core::marker::UnsafeUnpin for routectl_router::MatrixNicknameAction
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::MatrixNicknameAction
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::MatrixNicknameAction
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::MatrixNicknameAction where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::MatrixNicknameAction::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::MatrixNicknameAction where U: core::convert::From<T>
+pub fn routectl_router::MatrixNicknameAction::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::MatrixNicknameAction where U: core::convert::Into<T>
+pub type routectl_router::MatrixNicknameAction::Error = core::convert::Infallible
+pub fn routectl_router::MatrixNicknameAction::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::MatrixNicknameAction where U: core::convert::TryFrom<T>
+pub type routectl_router::MatrixNicknameAction::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::MatrixNicknameAction::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::MatrixNicknameAction where T: core::clone::Clone
+pub type routectl_router::MatrixNicknameAction::Owned = T
+pub fn routectl_router::MatrixNicknameAction::clone_into(&self, &mut T)
+pub fn routectl_router::MatrixNicknameAction::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::MatrixNicknameAction where T: core::clone::Clone
+pub fn routectl_router::MatrixNicknameAction::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::MatrixNicknameAction where T: 'static + ?core::marker::Sized
+pub fn routectl_router::MatrixNicknameAction::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::MatrixNicknameAction where T: ?core::marker::Sized
+pub fn routectl_router::MatrixNicknameAction::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::MatrixNicknameAction where T: ?core::marker::Sized
+pub fn routectl_router::MatrixNicknameAction::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::MatrixNicknameAction where T: core::clone::Clone
+pub unsafe fn routectl_router::MatrixNicknameAction::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::MatrixNicknameAction
+pub fn routectl_router::MatrixNicknameAction::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::MatrixNicknameAction where T: core::clone::Clone
+pub fn routectl_router::MatrixNicknameAction::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::MatrixNicknameAction
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::MatrixNicknameAction where T: ?core::marker::Sized
+pub fn routectl_router::MatrixNicknameAction::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::MatrixNicknameAction::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::MatrixNicknameAction
+impl<T> tracing::instrument::WithSubscriber for routectl_router::MatrixNicknameAction
+impl<T> typenum::type_operators::Same for routectl_router::MatrixNicknameAction
+pub type routectl_router::MatrixNicknameAction::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixNicknameAction where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::MatrixNicknameAction::into_shared(self) -> Shared
 pub struct routectl_router::MatrixReplaySummary
 pub routectl_router::MatrixReplaySummary::loaded_rows: usize
 pub routectl_router::MatrixReplaySummary::replayed: usize
@@ -14355,6 +14597,66 @@ impl<T> typenum::type_operators::Same for routectl_router::RequestEstimate
 pub type routectl_router::RequestEstimate::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::RequestEstimate where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::RequestEstimate::into_shared(self) -> Shared
+pub struct routectl_router::ResolvedLearnedLane
+pub routectl_router::ResolvedLearnedLane::lane: routectl_router::StateKey
+pub routectl_router::ResolvedLearnedLane::nicknames: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::ResolvedLearnedLane::provider_kind: &'static str
+pub routectl_router::ResolvedLearnedLane::routed: bool
+impl routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::maps(&self, &str, &str) -> bool
+impl core::clone::Clone for routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::clone(&self) -> routectl_router::ResolvedLearnedLane
+impl core::cmp::Eq for routectl_router::ResolvedLearnedLane
+impl core::cmp::PartialEq for routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::eq(&self, &routectl_router::ResolvedLearnedLane) -> bool
+impl core::fmt::Debug for routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::ResolvedLearnedLane
+impl core::marker::Freeze for routectl_router::ResolvedLearnedLane
+impl core::marker::Send for routectl_router::ResolvedLearnedLane
+impl core::marker::Sync for routectl_router::ResolvedLearnedLane
+impl core::marker::Unpin for routectl_router::ResolvedLearnedLane
+impl core::marker::UnsafeUnpin for routectl_router::ResolvedLearnedLane
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::ResolvedLearnedLane
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::ResolvedLearnedLane
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::ResolvedLearnedLane where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::ResolvedLearnedLane where U: core::convert::From<T>
+pub fn routectl_router::ResolvedLearnedLane::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ResolvedLearnedLane where U: core::convert::Into<T>
+pub type routectl_router::ResolvedLearnedLane::Error = core::convert::Infallible
+pub fn routectl_router::ResolvedLearnedLane::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ResolvedLearnedLane where U: core::convert::TryFrom<T>
+pub type routectl_router::ResolvedLearnedLane::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ResolvedLearnedLane::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::ResolvedLearnedLane where T: core::clone::Clone
+pub type routectl_router::ResolvedLearnedLane::Owned = T
+pub fn routectl_router::ResolvedLearnedLane::clone_into(&self, &mut T)
+pub fn routectl_router::ResolvedLearnedLane::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::ResolvedLearnedLane where T: core::clone::Clone
+pub fn routectl_router::ResolvedLearnedLane::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::ResolvedLearnedLane where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ResolvedLearnedLane where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ResolvedLearnedLane where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::ResolvedLearnedLane where T: core::clone::Clone
+pub unsafe fn routectl_router::ResolvedLearnedLane::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::ResolvedLearnedLane
+pub fn routectl_router::ResolvedLearnedLane::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::ResolvedLearnedLane where T: core::clone::Clone
+pub fn routectl_router::ResolvedLearnedLane::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::ResolvedLearnedLane
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ResolvedLearnedLane where T: ?core::marker::Sized
+pub fn routectl_router::ResolvedLearnedLane::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ResolvedLearnedLane::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ResolvedLearnedLane
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ResolvedLearnedLane
+impl<T> typenum::type_operators::Same for routectl_router::ResolvedLearnedLane
+pub type routectl_router::ResolvedLearnedLane::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ResolvedLearnedLane where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ResolvedLearnedLane::into_shared(self) -> Shared
 pub struct routectl_router::ResolvedModel
 pub routectl_router::ResolvedModel::auth_secret_ref: core::option::Option<routectl_auth::secret_ref::SecretRef>
 pub routectl_router::ResolvedModel::effective_row: routectl_router::catalog::EffectiveRow
@@ -14623,6 +14925,8 @@ pub fn routectl_router::router::Router::fidelity_snapshot(&self) -> routectl_rou
 pub fn routectl_router::router::Router::field_verdict_status(&self) -> alloc::vec::Vec<routectl_router::FieldVerdictStatus>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::learned_lane_projection(&self) -> routectl_router::LearnedLaneProjection
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
 pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize
@@ -15431,7 +15735,6 @@ pub struct routectl_router::StateKey
 impl routectl_router::StateKey
 pub fn routectl_router::StateKey::as_lane_key(&self) -> &str
 pub fn routectl_router::StateKey::for_log(&self) -> alloc::string::String
-pub fn routectl_router::StateKey::new(&str, &str) -> core::option::Option<Self>
 pub fn routectl_router::StateKey::parse(&str) -> core::option::Option<Self>
 pub fn routectl_router::StateKey::provider_entry(&self) -> &str
 pub fn routectl_router::StateKey::upstream(&self) -> &str
@@ -16010,6 +16313,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::WouldTrimPanel::into_shared(self) -> Shared
 pub const routectl_router::ACTION_ALLOW: &str
 pub const routectl_router::ACTION_DROP: &str
+pub const routectl_router::ACTION_MIXED: &str
 pub const routectl_router::ACTION_NONE: &str
 pub const routectl_router::ACTION_REPROBE: &str
 pub const routectl_router::ACTION_ROUTE_AWAY: &str

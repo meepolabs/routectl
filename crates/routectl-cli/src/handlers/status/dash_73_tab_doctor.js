@@ -327,16 +327,30 @@
       num0(r.skipped_lane) + ', unknown ' + num0(r.skipped_unknown);
   }
 
+  // A `mixed` cell is one whose nicknames resolve to different routing
+  // actions; it names no single verdict, and its tooltip lists each
+  // nickname's action.
   function matrixCell(cell, nowMs) {
-    if (!cell || !cell.source) { return '-'; }
+    if (!cell) { return '-'; }
+    var mixed = cell.action === 'mixed';
+    if (!mixed && !cell.source) { return '-'; }
     var span = document.createElement('span');
-    span.textContent = cell.verdict + ' (' + cell.layer + ')' + (cell.stale ? ' stale' : '');
+    span.textContent = mixed ? 'mixed'
+      : cell.verdict + ' (' + cell.layer + ')' + (cell.stale ? ' stale' : '');
     span.title = matrixCellTitle(cell, nowMs);
     return span;
   }
 
   function matrixCellTitle(cell, nowMs) {
-    var parts = ['source ' + cell.source, 'action ' + cell.action];
+    var parts = [];
+    if (cell.source) { parts.push('source ' + cell.source); }
+    if (cell.action === 'mixed') {
+      parts.push('action mixed: ' + (cell.nickname_actions || []).map(function (n) {
+        return n.nickname + ' ' + n.action;
+      }).join(', '));
+    } else {
+      parts.push('action ' + cell.action);
+    }
     if (cell.first_seen_ms !== null && cell.first_seen_ms !== undefined) {
       parts.push('first seen ' + fmtTs(cell.first_seen_ms));
     }

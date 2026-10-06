@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use super::Router;
 use crate::runtime_state::{CircuitPhase, ProviderGateStatus};
+use crate::state_key::StateKey;
 
 /// One dispatch target's read-only health for the status surface: a
 /// non-pooled model (one entry keyed by nickname) or a single seat of a
@@ -25,6 +26,10 @@ pub struct RouteTargetStatus {
     /// member seat of a pool-backed model (the member's `[providers]` table
     /// key).
     pub seat_label: Option<String>,
+    /// The learned lane this target's capability facts key on, taken from the
+    /// dispatch target chain expansion builds. `None` only for a provider
+    /// entry carrying the reserved separator, which config validation refuses.
+    pub learned_lane: Option<StateKey>,
     /// Non-mutating gate health for this target.
     pub gate: ProviderGateStatus,
 }
@@ -76,36 +81,24 @@ impl Router {
     /// Read-only health of every dispatch target, for the status surface.
     /// Iterates the resolved-model table and emits one [`RouteTargetStatus`]
     /// per dispatch target: one entry per seat for a pooled (seat-backed)
-    /// model, one entry keyed by the nickname for a non-pooled model. Each
-    /// entry's gate is read via the `&self`-borrow `gate_status_for`, which
+    /// model, one entry keyed by the nickname for a non-pooled model. The
+    /// targets are the ones chain expansion builds, so each entry's
+    /// `state_key` and `learned_lane` are dispatch's own. Each entry's gate is read via the `&self`-borrow `gate_status_for`, which
     /// never claims a half-open probe slot; a target with no state slot
     /// fails safe to circuit-Open rather than panicking.
     pub fn status_targets(&self, now: Instant) -> Vec<RouteTargetStatus> {
         let mut out = Vec::new();
         for model in self.resolved_models.values() {
-            match model.seats.as_ref() {
-                Some(seats) => {
-                    for seat in seats.iter() {
-                        out.push(RouteTargetStatus {
-                            state_key: seat.state_key_for(&model.nickname),
-                            nickname: model.nickname.clone(),
-                            provider_name: seat.provider_name.clone(),
-                            upstream: model.upstream.clone(),
-                            seat_label: Some(seat.provider_name.clone()),
-                            gate: self.gate_status_for(&seat.state_key_for(&model.nickname), now),
-                        });
-                    }
-                }
-                None => {
-                    out.push(RouteTargetStatus {
-                        state_key: model.nickname.clone(),
-                        nickname: model.nickname.clone(),
-                        provider_name: model.provider_name.clone(),
-                        upstream: model.upstream.clone(),
-                        seat_label: None,
-                        gate: self.gate_status_for(&model.nickname, now),
-                    });
-                }
+            for target in self.projection_targets(model) {
+                out.push(RouteTargetStatus {
+                    gate: self.gate_status_for(&target.state_key, now),
+                    nickname: model.nickname.clone(),
+                    seat_label: model.seats.as_ref().map(|_| target.provider_name.clone()),
+                    provider_name: target.provider_name,
+                    upstream: target.upstream,
+                    learned_lane: target.learned_lane,
+                    state_key: target.state_key,
+                });
             }
         }
         out

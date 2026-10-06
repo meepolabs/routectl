@@ -652,3 +652,43 @@ fn capabilities_load_error_redacts_literal_secret() {
         "triage info lost; redacted: {redacted}"
     );
 }
+
+/// The lane a probe records under is the projection's lane for the resolved
+/// nickname on its provider entry: `provider#upstream`, the key live traffic
+/// on that model learns under, never the nickname the target resolved
+/// through.
+#[test]
+fn a_probe_records_under_the_projected_lane_of_its_target() {
+    let mut config = routectl_router::Config::default();
+    config.providers.insert(
+        "p".to_string(),
+        routectl_router::ProviderEntry::openai_compat("https://example.invalid/v1", "env://K"),
+    );
+    config.models.insert(
+        "opus".to_string(),
+        routectl_router::ModelEntry::new("p", "vendor-opus"),
+    );
+    let target = super::super::resolve::resolve_probe_target(&config, None, Some("opus"))
+        .expect("the alias resolves");
+
+    let lane = learned_lane_for(&config, &target);
+
+    assert_eq!(target.state_key, "opus", "the target's runtime identity");
+    assert_eq!(lane.as_deref(), Some("p#vendor-opus"));
+}
+
+/// A target whose provider names no `[providers]` entry has no lane, so the
+/// probe refuses rather than minting one dispatch would never learn under.
+#[test]
+fn a_probe_target_on_an_unconfigured_provider_has_no_lane() {
+    let target = crate::commands::probe::resolve::ResolvedProbeTarget {
+        state_key: "opus".to_string(),
+        provider: "absent".to_string(),
+        model_id: "vendor-opus".to_string(),
+    };
+
+    assert_eq!(
+        learned_lane_for(&routectl_router::Config::default(), &target),
+        None
+    );
+}

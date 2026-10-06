@@ -662,12 +662,12 @@ async fn dispatch_and_persist(
         }
     };
 
-    let Some(lane) = routectl_router::StateKey::new(&target.provider, &target.model_id) else {
+    let Some(lane) = learned_lane_for(&loaded.config, target) else {
         eprintln!("error: provider `{}` has no learned lane", target.provider);
         return 1;
     };
     let plan = CapabilityProbePlan {
-        state_key: lane.as_lane_key().to_string(),
+        state_key: lane,
         provider_kind: entry.kind_str().to_string(),
         model: target.model_id.clone(),
         catalog_version: i64::from(CATALOG_VERSION),
@@ -703,6 +703,18 @@ async fn dispatch_and_persist(
         }
     }
     i32::from(write_failed)
+}
+
+/// The learned lane a probe of `target` records under: the lane the router's
+/// projection gives the target's model on its provider entry, so a probe
+/// writes exactly where live traffic on that model learns.
+fn learned_lane_for(
+    config: &routectl_router::Config,
+    target: &super::resolve::ResolvedProbeTarget,
+) -> Option<String> {
+    routectl_router::LearnedLaneProjection::from_config(config)
+        .lane_for(&target.state_key, &target.provider)
+        .map(|lane| lane.lane.as_lane_key().to_string())
 }
 
 /// Offer a scoped capability probe for a provider that was JUST added, driven

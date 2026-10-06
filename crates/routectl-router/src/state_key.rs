@@ -12,8 +12,11 @@
 //!
 //! # Serialization
 //!
-//! One constructor ([`StateKey::new`]) and one parser ([`StateKey::parse`]).
-//! The serialized form is `provider_entry#upstream`, split at the FIRST `#`.
+//! One constructor (`StateKey::new`, crate-private: dispatch mints every
+//! lane, and operator surfaces read lanes through the router's learned-lane
+//! projection) and one public parser ([`StateKey::parse`], for operator
+//! input). The serialized form is `provider_entry#upstream`, split at the
+//! FIRST `#`.
 //! That is injective because `#` is reserved in every provider name
 //! (`seat_pool::check_state_key_name`), and the constructor refuses one that
 //! carries it; an upstream may contain `#` and still round-trips. The usage
@@ -33,7 +36,7 @@ use crate::seat_pool::SEAT_KEY_SEPARATOR;
 /// A raw render does not compile; log through [`StateKey::for_log`]:
 ///
 /// ```compile_fail,E0277
-/// let key = routectl_router::StateKey::new("provider", "upstream").unwrap();
+/// let key = routectl_router::StateKey::parse("provider#upstream").unwrap();
 /// let _ = format!("{key}");
 /// ```
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -50,7 +53,7 @@ impl StateKey {
     /// path can reach this, and keying it would make the serialized form
     /// ambiguous.
     #[must_use]
-    pub fn new(provider_entry: &str, upstream: &str) -> Option<Self> {
+    pub(crate) fn new(provider_entry: &str, upstream: &str) -> Option<Self> {
         if provider_entry.contains(SEAT_KEY_SEPARATOR) {
             return None;
         }

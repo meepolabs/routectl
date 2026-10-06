@@ -82,9 +82,9 @@ pub use activation::{
 pub use calibration::{CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary};
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};
 pub use capability_display::{
-    ACTION_ALLOW, ACTION_DROP, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY, ACTION_STRIP,
-    ActionInputs, DisplayVerdict, LearnedActing, lane_strips_capability, resolve_display_action,
-    resolve_display_verdict,
+    ACTION_ALLOW, ACTION_DROP, ACTION_MIXED, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY,
+    ACTION_STRIP, ActionInputs, DisplayVerdict, LearnedActing, lane_strips_capability,
+    resolve_display_action, resolve_display_verdict,
 };
 pub use capability_matcher::resolve_requested_capability;
 pub use capability_rebuild::{
@@ -157,7 +157,8 @@ pub use context_trim::{
 pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, evaluate};
 pub use doctor::{
     CapabilityMatrixPanel, DoctorPanels, DoctorReport, Finding, MatrixAvailability, MatrixCell,
-    MatrixLane, MatrixReplaySummary, ProbeOutcome, Status, WouldTrimPanel, overall_exit,
+    MatrixLane, MatrixNicknameAction, MatrixReplaySummary, ProbeOutcome, Status, WouldTrimPanel,
+    overall_exit,
 };
 #[cfg(feature = "bedrock")]
 pub use factory::validate_aws_regions;
@@ -206,8 +207,9 @@ pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CanaryPosture, CapabilityPersistenceHealth,
     CatalogIndependentSurvivor, DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot,
     FieldPreflight, FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
-    OpeningLane, PaidProbeLedger, PaidProbeReservation, PreflightBlockedReason, Router,
-    RouterOptions, acting_field_verdicts, class_debits,
+    LearnedLaneProjection, OpeningLane, PaidProbeLedger, PaidProbeReservation,
+    PreflightBlockedReason, ResolvedLearnedLane, Router, RouterOptions, acting_field_verdicts,
+    class_debits,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{

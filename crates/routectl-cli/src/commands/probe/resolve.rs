@@ -18,9 +18,10 @@ use routectl_router::Config;
 /// A resolved probe target: the routing state key plus the provider and
 /// upstream model id the dispatch needs.
 ///
-/// `state_key` is the `[models]` nickname, the operator's handle for the
-/// target. The learned lane a probe records under is minted from `provider`
-/// and `model_id`, exactly as chain expansion mints it for live traffic.
+/// `state_key` is the `[models]` nickname -- the runtime identity of the
+/// target, not its learned lane. The lane a probe records under comes from
+/// the router's learned-lane projection for that nickname on `provider`, the
+/// same lane chain expansion gives live traffic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProbeTarget {
     /// The `[models]` nickname the target was resolved through.

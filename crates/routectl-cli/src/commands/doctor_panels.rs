@@ -10,7 +10,7 @@
 use chrono::{DateTime, Local};
 
 use routectl_router::{
-    ACTION_NONE, CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell,
+    ACTION_MIXED, ACTION_NONE, CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell,
     MatrixReplaySummary, WouldTrimPanel,
 };
 use routectl_usage::{OpenError, WouldTrimSummary, open_readonly, would_trim_summary};
@@ -198,9 +198,25 @@ fn matrix_state_line(availability: &MatrixAvailability) -> String {
 
 /// One cell as a compact token: `verdict[source]`, then `->action` when the
 /// cell acts on routing, then a trailing `(stale)` marker when stale, or `-`
-/// for an unknown (no-signal) cell. The precise age and timestamps live on
-/// the serialized DTO, not the compact human grid.
+/// for an unknown (no-signal) cell. A cell whose nicknames disagree on the
+/// action renders `mixed(nickname=action,...)` instead, because no single
+/// verdict describes it. The precise age and timestamps live on the
+/// serialized DTO, not the compact human grid.
 fn cell_token(cell: &MatrixCell) -> String {
+    if cell.action == ACTION_MIXED {
+        let actions: Vec<String> = cell
+            .nickname_actions
+            .iter()
+            .map(|n| {
+                format!(
+                    "{}={}",
+                    routectl_core::sanitize_for_log(&n.nickname),
+                    n.action
+                )
+            })
+            .collect();
+        return format!("{ACTION_MIXED}({})", actions.join(","));
+    }
     match cell.source {
         None => "-".to_string(),
         Some(source) => {

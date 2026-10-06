@@ -390,6 +390,12 @@ list with more narrative.
 
 - **`routectl capability purge` takes a learned lane, not a nickname.** Learned capability facts, envelope-field verdicts included, are keyed on the provider entry that egresses a request and the upstream model id it sends, so the command's first argument is now that lane exactly as doctor and `routectl probe` print it: `routectl capability purge anthropic#claude-sonnet-4-5 web_search`. One purge clears the fact for every nickname that shares the lane. A value that is not of the `<provider>#<upstream>` form, such as a bare nickname, is refused locally with an error and a non-zero exit instead of being reported as "nothing to purge"; the daemon's control route refuses it the same way. A field verdict learned through one nickname now applies to every nickname on the same lane. Field rows in the usage ledger keyed any other way are skipped on warm rebuild and counted in the new `skipped_lane` field of the rebuild log line.
 
+- **`/status/health` keys learned rows by lane, and each target names its lane.** `learned_negatives[].state_key` is now the learned lane `<provider>#<upstream>` the row is recorded under, not a model nickname, and every entry in `targets[]` gains a `learned_lane` field carrying the same lane as dispatch mints it for that target (`null` only for a provider entry the config would refuse). Join learned rows to targets on `learned_lane`; a target's own `state_key` stays its runtime breaker key and never matches a lane. The dashboard's Health tab joins this way, so a learned negative shows on the card of every nickname that maps to its lane. The health panel schema moves to 6.
+
+- **`routectl probe --capabilities` prints and records the learned lane.** The report header and the `--json` `lane` field are now `<provider>#<upstream>`, the lane live traffic on the probed model learns under, rather than the model nickname. Doctor, the probe, and the status health panel now all read their lanes from one router-side projection of the configuration.
+
+- **A doctor matrix cell whose nicknames disagree reads `mixed`.** When two nicknames on one lane resolve a capability to different routing actions -- one carries a model-scoped override or a pinned beta the other does not -- the cell's action is `mixed` and the new `nickname_actions` list carries each nickname's own action, in `doctor --json` and the Doctor tab's tooltip; the human grid renders `mixed(alpha=allow,beta=drop)`. Previously the cell showed the first nickname's override and folded the beta-pin check across all of them. When the nicknames agree the list is empty and the cell is unchanged.
+
 - **Bedrock Converse now forwards `thinking.display` verbatim instead of stripping it.** The caller's value rides the `additionalModelRequestFields` `thinking` object unchanged on both the legacy `enabled` and the `adaptive` shape, and an absent `display` stays absent; Converse was measured accepting and honoring `"summarized"` and `"omitted"` on both shapes. `"updates"` additionally gains its `thinking-display-updates-2026-08-18` beta on the bag's `anthropic_beta`, even when `[bedrock] allowed_betas` omits it, never duplicated, and not when a forcing `tool_choice` has stripped thinking. Any other value forwards unchanged with no beta. The `dropping thinking.display` WARN is gone.
 
 - **The OAuth cloak surface now identifies as Claude Code 2.1.287** (Stainless SDK 0.127.0, runtime v26.3.0, request timeout header 600, the stock client default); operators pinning `user_agent` are unaffected.
@@ -509,6 +515,12 @@ list with more narrative.
   schema version is unchanged -- no behavior change.
 
 ### Fixed
+
+- **`[capability] essential = ["forced_tool_choice"]` now loads.** The key was known only to the router, so an essential list naming it was refused at config load as an unknown capability. It is now a well-known capability key: the config loads, and the key renders as a leading doctor matrix column.
+
+- **A boot after a catalog or overlay bump keeps learned envelope-field verdicts.** A revision change at startup wrote a fresh replay boundary and replayed nothing, so wire-shape verdicts that are meant to survive a revision change were lost until relearned, while a hot reload already restated them. Boot now restates them through the same boundary batch reload uses, and installs them only once that batch has committed.
+
+- **Positive capability observations no longer fill the rebuild window.** Every successful request wrote a `verified` ledger row, so routine traffic filled the bounded warm-rebuild window within days and pushed older learned negatives out of restart replay. A positive is now written only on a verdict transition -- a first observation, or a positive replacing a cleared negative; a repeat of the same verdict refreshes the resident entry without a row.
 
 - **A SIGHUP during daemon startup no longer terminates the daemon.** The
   SIGHUP reload handler was installed by a background task after startup had

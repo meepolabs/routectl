@@ -326,18 +326,50 @@ fn a_shape_refusal_message_carries_no_schema_content() {
     let err = downgrade_to_v16(&path).expect_err("a defaulted column is refused");
 
     // Assert
-    let DowngradeError::NotAdditive { found } = &err else {
-        panic!("expected a shape refusal, got {err:?}");
-    };
     assert!(
-        found
-            .iter()
-            .any(|column| column.default.as_deref() == Some("'sensitive-value'")),
-        "the programmatic shape keeps the default: {found:?}"
+        matches!(
+            err,
+            DowngradeError::NotAdditive {
+                reason: NotAdditiveReason::ColumnShape
+            }
+        ),
+        "{err:?}"
     );
     let message = err.to_string();
     assert!(!message.contains("sensitive-value"), "{message}");
+    assert!(!format!("{err:?}").contains("sensitive-value"), "{err:?}");
     assert!(message.contains("a column's shape differs"), "{message}");
+}
+
+#[test]
+fn a_shape_refusal_names_whether_the_count_or_a_column_differs() {
+    let cases: &[(&str, &[&str], NotAdditiveReason)] = &[
+        ("only the v16 columns", &[], NotAdditiveReason::ColumnCount),
+        (
+            "an extra trailing column",
+            &["provider_kind TEXT", "vocab_version INTEGER", "extra TEXT"],
+            NotAdditiveReason::ColumnCount,
+        ),
+        (
+            "the pair in the wrong order",
+            &["vocab_version INTEGER", "provider_kind TEXT"],
+            NotAdditiveReason::ColumnShape,
+        ),
+    ];
+    for (name, added, expected) in cases {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        drop(v17_file_with(&path, added));
+
+        // Act
+        let result = downgrade_to_v16(&path);
+
+        // Assert
+        assert!(
+            matches!(result, Err(DowngradeError::NotAdditive { reason }) if reason == *expected),
+            "{name}: {result:?}"
+        );
+    }
 }
 
 #[test]

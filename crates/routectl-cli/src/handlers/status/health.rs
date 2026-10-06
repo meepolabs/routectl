@@ -30,7 +30,7 @@ use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the health panel payload.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Per-target health plus learned negatives for the routing surface.
 #[derive(Debug, Clone, Serialize)]
@@ -41,9 +41,18 @@ pub(super) struct HealthPanel {
 
 /// One dispatch target's non-mutating gate health. Field names mirror the
 /// event surface (`state_key`, `provider_name`, `upstream`, ...).
+///
+/// `state_key` is the runtime breaker / RPM key (`nickname[#member]`);
+/// `learned_lane` is the `provider_entry#upstream` lane the target's
+/// learned capability rows key on, so a client joins
+/// `learned_negatives[].state_key` on it, never on `state_key`.
 #[derive(Debug, Clone, Serialize)]
 struct TargetHealth {
     state_key: String,
+    /// The target's learned lane as dispatch mints it, or `None` for a
+    /// provider entry carrying the reserved separator (refused by config
+    /// validation), which learns nothing.
+    learned_lane: Option<String>,
     nickname: String,
     provider_name: String,
     upstream: String,
@@ -72,10 +81,12 @@ struct TargetHealth {
 /// One resident learned-capability row. Field names are the
 /// `docs/LOGGING.md` contract tokens: `state_key`, `capability_key`
 /// (the internal `feature_key`, RENAMED to the contract token),
-/// `signal_tier`. The registry is verdict-discriminated, so a row is
-/// EITHER a learned negative OR a VerifiedWorking positive; `verdict`
-/// distinguishes them, so a positive is never mistaken for a negative
-/// that merely carries `phase=f3`.
+/// `signal_tier`. `state_key` is the learned lane
+/// (`provider_entry#upstream`) the row is keyed on -- the value a target's
+/// `learned_lane` carries -- not a runtime target key. The registry is
+/// verdict-discriminated, so a row is EITHER a learned negative OR a
+/// VerifiedWorking positive; `verdict` distinguishes them, so a positive is
+/// never mistaken for a negative that merely carries `phase=f3`.
 #[derive(Debug, Clone, Serialize)]
 struct LearnedNegative {
     state_key: String,
@@ -144,6 +155,10 @@ fn epoch_ms_of(now_ms: i64, elapsed: Duration) -> i64 {
 fn map_target(target: RouteTargetStatus, now_ms: i64) -> TargetHealth {
     TargetHealth {
         state_key: target.state_key,
+        learned_lane: target
+            .learned_lane
+            .as_ref()
+            .map(|lane| lane.as_lane_key().to_string()),
         nickname: target.nickname,
         provider_name: target.provider_name,
         upstream: target.upstream,
@@ -277,6 +292,10 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 }
 
 #[cfg(test)]
+#[path = "health_lane_tests.rs"]
+mod lane_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::vocabulary;
 
@@ -296,7 +315,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
     use routectl_router::runtime_state::ProviderGateStatus;
-    use routectl_router::{Config, Router};
+    use routectl_router::{Config, Router, StateKey};
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -313,6 +332,7 @@ mod tests {
             provider_name: "anthropic".into(),
             upstream: "claude-opus-wire".into(),
             seat_label: Some("seat-a".into()),
+            learned_lane: StateKey::parse("anthropic#claude-opus-wire"),
             gate: ProviderGateStatus {
                 rpm_available: Some(12.0),
                 circuit,
@@ -338,6 +358,7 @@ mod tests {
             provider_name: "anthropic".into(),
             upstream: "claude-opus-wire".into(),
             seat_label: Some("seat-a".into()),
+            learned_lane: StateKey::parse("anthropic#claude-opus-wire"),
             gate: ProviderGateStatus {
                 rpm_available: Some(12.0),
                 circuit,
@@ -480,6 +501,10 @@ mod tests {
         assert_eq!(mapped.provider_name, "anthropic");
         assert_eq!(mapped.upstream, "claude-opus-wire");
         assert_eq!(mapped.seat_label.as_deref(), Some("seat-a"));
+        assert_eq!(
+            mapped.learned_lane.as_deref(),
+            Some("anthropic#claude-opus-wire")
+        );
         assert_eq!(mapped.circuit, "half_open_ready");
         assert_eq!(mapped.rpm_available, Some(12.0));
         assert!(mapped.half_open_probe_in_flight);
@@ -488,7 +513,7 @@ mod tests {
     #[test]
     fn map_learned_renames_feature_key_to_capability_key() {
         let entry = LearnedRegistryEntry {
-            state_key: "opus".into(),
+            state_key: "anthropic#claude-opus-wire".into(),
             feature_key: "structured_output".into(),
             verdict: Verdict::LearnedBroken(FailurePhase::F2),
             signal_tier: SignalTier::SelfIdentifying,
@@ -501,7 +526,7 @@ mod tests {
             source: EvidenceSource::Live,
         };
         let mapped = map_learned(entry, Instant::now(), 10_000);
-        assert_eq!(mapped.state_key, "opus");
+        assert_eq!(mapped.state_key, "anthropic#claude-opus-wire");
         assert_eq!(mapped.capability_key, "structured_output");
         assert_eq!(mapped.verdict, "broken");
         assert_eq!(mapped.signal_tier, "self-identifying");
@@ -516,7 +541,7 @@ mod tests {
     #[test]
     fn map_learned_surfaces_verified_verdict() {
         let entry = LearnedRegistryEntry {
-            state_key: "opus".into(),
+            state_key: "anthropic#claude-opus-wire".into(),
             feature_key: "web_search".into(),
             verdict: Verdict::VerifiedWorking,
             signal_tier: SignalTier::SelfIdentifying,
@@ -535,7 +560,7 @@ mod tests {
 
     fn learned_entry(last_seen: Instant) -> LearnedRegistryEntry {
         LearnedRegistryEntry {
-            state_key: "opus".into(),
+            state_key: "anthropic#claude-opus-wire".into(),
             feature_key: "web_search".into(),
             verdict: Verdict::LearnedBroken(FailurePhase::F1),
             signal_tier: SignalTier::Inferred,
@@ -743,7 +768,7 @@ mod tests {
             targets: vec![map_target(sample_target(CircuitPhase::Open), 1_000)],
             learned_negatives: vec![map_learned(
                 LearnedRegistryEntry {
-                    state_key: "opus".into(),
+                    state_key: "anthropic#claude-opus-wire".into(),
                     feature_key: "web_search".into(),
                     verdict: Verdict::LearnedBroken(FailurePhase::F1),
                     signal_tier: SignalTier::Inferred,

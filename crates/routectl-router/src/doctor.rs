@@ -94,7 +94,9 @@ pub enum MatrixAvailability {
 /// (`override` / `live` / `probe` / `prior`) and `layer` the layer itself
 /// (`override` / `learned` / `prior`), both `None` for `unknown`. `action` is
 /// what the dispatch filter does with the cell (`drop` / `route_away` /
-/// `strip` / `reprobe` / `allow` / `none`).
+/// `strip` / `reprobe` / `allow` / `none`), or `mixed` when the nicknames on
+/// the lane resolve it to different actions -- `nickname_actions` then
+/// carries each nickname's own, and is empty otherwise.
 ///
 /// The timestamps are epoch milliseconds and describe the resident learned
 /// entry, so they are present only when one exists -- including when an
@@ -125,6 +127,18 @@ pub struct MatrixCell {
     pub last_seen_ms: Option<i64>,
     /// When a resident learned negative's decay window lapses (epoch ms).
     pub expires_at_ms: Option<i64>,
+    /// Each nickname's own action, sorted by nickname, when `action` is
+    /// `mixed`; empty when every nickname on the lane agrees.
+    pub nickname_actions: Vec<MatrixNicknameAction>,
+}
+
+/// One nickname's resolved action on a `mixed` matrix cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MatrixNicknameAction {
+    /// The model nickname.
+    pub nickname: String,
+    /// The action the dispatch filter takes for this nickname's target.
+    pub action: &'static str,
 }
 
 /// One matrix row: a learned lane and its cells aligned 1:1 with the panel's

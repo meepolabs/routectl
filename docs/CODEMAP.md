@@ -3050,6 +3050,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `dispatch_chain` (no metrics or rotation perturbation) -- and its sibling
   `first_target_oauth_id`, backing the discovery-time credential check in
   `handlers/models.rs`
+- `src/router/learned_lanes.rs` -- the ONE projection of resolved learned
+  lanes for operator surfaces: `LearnedLaneProjection` of
+  `ResolvedLearnedLane { lane: StateKey, nicknames, provider_kind, routed }`,
+  built by `Router::learned_lane_projection` (read off the dispatch targets
+  the chain-expansion constructors build) or
+  `LearnedLaneProjection::from_config` (the factory's static resolution
+  walk, for doctor and `probe --capabilities`, which hold no router);
+  `Router::projection_targets` also feeds `status_targets`
 - `src/router/status.rs` -- route-target status facade for the /status
   surface: `RouteTargetStatus` (re-exported from `router` for the crate-root
   path `routectl_router::router::RouteTargetStatus`), `Router::status_targets`
@@ -6472,12 +6480,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   deadline inside the blocking closure and `collect` installs a single
   `DeadlineGuard` on the per-request connection, so all four reads share one
   budget and an overrun sheds `query_timeout` instead of starving a worker
-- `src/handlers/status/health.rs` -- `/status/health` (schema_version 5).
+- `src/handlers/status/health.rs` -- `/status/health` (schema_version 6).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
   reads `route_targets` + `learned_capabilities` from that single view,
   mapping to `HealthPanel` (per-target
-  `state_key`/`nickname`/`provider_name`/`upstream`/`seat_label`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`
-  + learned rows
+  `state_key`/`learned_lane`/`nickname`/`provider_name`/`upstream`/`seat_label`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`
+  + learned rows keyed by lane, joined to targets on `learned_lane`
   `state_key`/`capability_key`/`verdict`/`signal_tier`/`observations`/`phase`/`source`/`last_seen_ms`
   (epoch-ms of the last observation from the single pinned snapshot clock,
   future-dated clamps to a zero age), where the `verdict` token -- `verified`
@@ -7899,12 +7907,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/probe/resolve.rs` -- shared config resolution for the CLI
   probe surfaces. `resolve_probe_target(config, provider, alias) ->
   ResolvedProbeTarget { state_key, provider, model_id }` maps a scoped
-  `--alias` (a `[models]` nickname, which is itself the routing `state_key`)
-  or a bare `--provider` (resolved from the single selectable model
-  referencing it; errors on zero or many) to the routing state key plus the
-  provider name and upstream model id -- the `state_key` is the `[models]`
-  nickname the learned-capability ledger keys on, so a capability probe emits
-  on the SAME lane live traffic would. `resolve_provider_and_model(config,
+  `--alias` (a `[models]` nickname) or a bare `--provider` (resolved from the
+  single selectable model referencing it; errors on zero or many) to the
+  target's runtime identity plus the provider name and upstream model id.
+  `state_key` is that runtime identity (the `[models]` nickname), NOT the
+  learned lane: `probe --capabilities` takes the lane from the router's
+  `LearnedLaneProjection` for that nickname on `provider`, so a capability
+  probe emits on the SAME lane live traffic would. `resolve_provider_and_model(config,
   provider, alias) -> (provider, model_id)` is the thinner pair view consumed
   by the envelope-capture harness
 - `src/commands/probe/capabilities.rs` -- `routectl probe --capabilities`: a

@@ -5,25 +5,29 @@
 //! store, `capability purge`, and `provider probe` all share -- not a model
 //! nickname: two nicknames for one upstream on one provider entry share
 //! their learned history, so the matrix shows that history once and lists
-//! the nicknames that map to it. Rows are every lane the config dispatches
-//! to (a pooled model contributes one lane per member entry), then every
-//! learned key the config no longer maps, surfaced unrouted rather than
-//! dropped.
+//! the nicknames that map to it. Rows are the router's learned-lane
+//! projection of the config (a pooled model contributes one lane per member
+//! entry), then every learned key the config no longer maps, surfaced
+//! unrouted rather than dropped.
 //!
 //! Each cell merges the three capability signal layers -- operator
 //! overrides, the learned ledger-replay registry, and catalog priors --
 //! through the shared pure resolvers (`resolve_display_verdict`,
 //! `resolve_display_action`), so the panel cannot drift from the router's
-//! precedence order. Ages, timestamps, and stale flags are layered on top
-//! here (a display concern the pure resolvers deliberately omit).
+//! precedence order. The action is resolved per nickname, because an
+//! override or a pinned beta can be nickname-scoped; when the nicknames on a
+//! lane disagree the cell reads `mixed` and carries each nickname's action.
+//! Ages, timestamps, and stale flags are layered on top here (a display
+//! concern the pure resolvers deliberately omit).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS;
 use routectl_router::{
-    ActionInputs, CapabilityMatrixPanel, LearnedActing, LearnedRegistryEntry, MatrixAvailability,
-    MatrixCell, MatrixLane, ModelEntry, OverrideProvenance, OverrideRegistry, OverrideVerdict,
+    ACTION_MIXED, ActionInputs, CapabilityMatrixPanel, DisplayVerdict, LearnedActing,
+    LearnedLaneProjection, LearnedRegistryEntry, MatrixAvailability, MatrixCell, MatrixLane,
+    MatrixNicknameAction, ModelEntry, OverrideProvenance, OverrideRegistry, OverrideVerdict,
     ProviderEntry, StateKey, is_stale_days, lane_strips_capability, resolve_display_action,
     resolve_display_verdict,
 };
@@ -58,12 +62,7 @@ struct LaneMeta<'a> {
     provider_entry: Option<String>,
     provider_kind: &'static str,
     models: Vec<LaneModel<'a>>,
-}
-
-impl LaneMeta<'_> {
-    const fn routed(&self) -> bool {
-        !self.models.is_empty()
-    }
+    routed: bool,
 }
 
 /// The learned source as the cells read it: the snapshot plus its pinned
@@ -139,7 +138,7 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
             lane: meta.lane.clone(),
             nicknames: meta.models.iter().map(|m| m.nickname.to_string()).collect(),
             provider_kind: meta.provider_kind,
-            routed: meta.routed(),
+            routed: meta.routed,
             cells: columns
                 .iter()
                 .map(|cap| build_cell(meta, cap, &inputs))
@@ -156,37 +155,37 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
     }
 }
 
-/// The lane rows, sorted by lane key: every lane a configured model
-/// dispatches to, then every learned key with no configured model on it.
+/// The lane rows, sorted by lane key: the router's learned-lane projection
+/// of the config, then every learned key with no configured model on it.
 fn lane_metas<'a>(ctx: &'a DoctorContext, entries: &[LearnedRegistryEntry]) -> Vec<LaneMeta<'a>> {
-    let mut routed: BTreeMap<String, LaneMeta<'a>> = BTreeMap::new();
-    for (nickname, model) in &ctx.config.models {
-        for provider_entry in lane_entries_for(ctx, model) {
-            let Some(key) = StateKey::new(provider_entry, &model.upstream) else {
-                continue;
-            };
-            routed
-                .entry(key.as_lane_key().to_string())
-                .or_insert_with(|| LaneMeta {
-                    lane: key.as_lane_key().to_string(),
-                    provider_entry: Some(provider_entry.to_string()),
-                    provider_kind: provider_kind_for(ctx, provider_entry),
-                    models: Vec::new(),
-                })
-                .models
-                .push(LaneModel {
-                    nickname,
-                    entry: model,
-                });
-        }
-    }
+    let projection = LearnedLaneProjection::from_config(&ctx.config);
+    let mut metas: Vec<LaneMeta<'a>> = projection
+        .lanes()
+        .iter()
+        .map(|projected| LaneMeta {
+            lane: projected.lane.as_lane_key().to_string(),
+            provider_entry: Some(projected.lane.provider_entry().to_string()),
+            provider_kind: projected.provider_kind,
+            models: projected
+                .nicknames
+                .iter()
+                .filter_map(|nickname| ctx.config.models.get_key_value(nickname))
+                .map(|(nickname, entry)| LaneModel { nickname, entry })
+                .collect(),
+            routed: projected.routed,
+        })
+        .collect();
 
+    let projected: BTreeSet<&str> = projection
+        .lanes()
+        .iter()
+        .map(|lane| lane.lane.as_lane_key())
+        .collect();
     let unrouted: BTreeSet<&str> = entries
         .iter()
         .map(|entry| entry.state_key.as_str())
-        .filter(|key| !routed.contains_key(*key))
+        .filter(|key| !projected.contains(key))
         .collect();
-    let mut metas: Vec<LaneMeta<'a>> = routed.into_values().collect();
     metas.extend(unrouted.into_iter().map(|key| {
         let provider_entry = StateKey::parse(key).map(|lane| lane.provider_entry().to_string());
         let provider_kind = provider_entry
@@ -197,19 +196,10 @@ fn lane_metas<'a>(ctx: &'a DoctorContext, entries: &[LearnedRegistryEntry]) -> V
             provider_entry,
             provider_kind,
             models: Vec::new(),
+            routed: false,
         }
     }));
     metas
-}
-
-/// The provider entries a model egresses through: its own provider entry,
-/// or every member entry of the pool it names. A pool member's lane keys on
-/// the member, exactly as the router mints a seat target's lane.
-fn lane_entries_for<'a>(ctx: &'a DoctorContext, model: &'a ModelEntry) -> Vec<&'a str> {
-    ctx.config.pools.get(&model.provider).map_or_else(
-        || vec![model.provider.as_str()],
-        |pool| pool.members.iter().map(String::as_str).collect(),
-    )
 }
 
 /// The column keys: the well-known keys, then the observed keys outside that
@@ -267,15 +257,20 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
         learned_entry.map(|e| (e.verdict, e.source)),
         prior,
     );
-    let action = resolve_display_action(ActionInputs {
-        display,
-        learned: learned_entry
-            .zip(inputs.learned.now)
-            .map(|(entry, (now, _))| LearnedActing::from_entry(entry, now)),
-        prior,
-        strip_applies: lane_strips(meta, capability, inputs),
-        capability_enabled: inputs.ctx.config.capability.enabled,
-    });
+    let learned_acting = learned_entry
+        .zip(inputs.learned.now)
+        .map(|(entry, (now, _))| LearnedActing::from_entry(entry, now));
+    let (action, nickname_actions) = cell_action(
+        meta,
+        capability,
+        inputs,
+        CellSignals {
+            display,
+            learned: learned_entry.map(|e| (e.verdict, e.source)),
+            learned_acting,
+            prior,
+        },
+    );
 
     let layer = display.source.map(|source| match source {
         "override" => LAYER_OVERRIDE,
@@ -309,7 +304,81 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
         first_seen_ms: stamps.map(|s| s.first_seen),
         last_seen_ms: stamps.map(|s| s.last_seen),
         expires_at_ms: stamps.and_then(|s| s.expires_at),
+        nickname_actions,
     }
+}
+
+/// The learned and prior signals one cell resolves against, shared by every
+/// nickname on the lane.
+#[derive(Clone, Copy)]
+struct CellSignals {
+    display: DisplayVerdict,
+    learned: Option<(
+        routectl_core::capability::Verdict,
+        routectl_core::capability::EvidenceSource,
+    )>,
+    learned_acting: Option<LearnedActing>,
+    prior: Option<bool>,
+}
+
+/// The cell's action, resolved for each nickname on the lane through its own
+/// override and its own beta pins. Agreement yields that action and no
+/// per-nickname list; disagreement yields [`ACTION_MIXED`] and every
+/// nickname's action. A lane no model maps resolves once, against the bare
+/// provider-entry override.
+fn cell_action(
+    meta: &LaneMeta,
+    capability: &str,
+    inputs: &CellInputs,
+    signals: CellSignals,
+) -> (&'static str, Vec<MatrixNicknameAction>) {
+    let (Some(provider), false) = (meta.provider_entry.as_deref(), meta.models.is_empty()) else {
+        let action = action_for(
+            signals.display,
+            signals,
+            lane_strips(meta, capability, inputs),
+            inputs,
+        );
+        return (action, Vec::new());
+    };
+    let per_nickname: Vec<MatrixNicknameAction> = meta
+        .models
+        .iter()
+        .map(|model| {
+            let override_cell =
+                inputs
+                    .overrides
+                    .resolve(provider, model.nickname, capability, meta.provider_kind);
+            let display = resolve_display_verdict(override_cell, signals.learned, signals.prior);
+            let strips =
+                lane_strips_capability(&inputs.ctx.config, provider, &[model.entry], capability);
+            MatrixNicknameAction {
+                nickname: model.nickname.to_string(),
+                action: action_for(display, signals, strips, inputs),
+            }
+        })
+        .collect();
+    let first = per_nickname[0].action;
+    if per_nickname.iter().all(|n| n.action == first) {
+        (first, Vec::new())
+    } else {
+        (ACTION_MIXED, per_nickname)
+    }
+}
+
+fn action_for(
+    display: DisplayVerdict,
+    signals: CellSignals,
+    strip_applies: bool,
+    inputs: &CellInputs,
+) -> &'static str {
+    resolve_display_action(ActionInputs {
+        display,
+        learned: signals.learned_acting,
+        prior: signals.prior,
+        strip_applies,
+        capability_enabled: inputs.ctx.config.capability.enabled,
+    })
 }
 
 /// The override resolution for a lane: the first model on it whose

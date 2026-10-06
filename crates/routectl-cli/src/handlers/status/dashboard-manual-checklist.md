@@ -128,3 +128,16 @@ banner, no retry signal -- silently mislabeled data.
   matrix state line must say UNAVAILABLE with its code, never "empty".
 - The capability-writes card shows three separate counters, all faint at
   zero on a healthy daemon.
+
+## 6. Health tab learned negatives
+
+- Serve a config with two nicknames on ONE upstream of one provider entry and
+  a third nickname on a different upstream, against a ledger holding a
+  `broken` row for the shared `<provider>#<upstream>` lane and nothing for the
+  other. On the Health tab, the learned-negatives chip for that capability
+  must appear on the card of EVERY nickname that maps to the shared lane, and
+  the third nickname's card must read `none`. A card reading `none` for a
+  nickname on a lane the ledger holds a negative for means the client joined
+  learned rows on the runtime `state_key` instead of the target's
+  `learned_lane`.
+- A `verified` row on the same lane must not render as a chip.

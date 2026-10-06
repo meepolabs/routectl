@@ -153,6 +153,10 @@ pub const ACTION_REPROBE: &str = "reprobe";
 pub const ACTION_ALLOW: &str = "allow";
 /// Action token: no signal acts on routing for this cell.
 pub const ACTION_NONE: &str = "none";
+/// Action token: the nicknames sharing a lane resolve the cell to different
+/// actions (one carries an override or a pinned beta the other does not), so
+/// no single action describes it; the per-nickname actions ride alongside.
+pub const ACTION_MIXED: &str = "mixed";
 
 /// The learned-entry facts the display action needs beyond its verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

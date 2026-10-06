@@ -55,7 +55,7 @@
         ['current state']);
     }
     var nowMs = panelNowMs(rec);
-    var negatives = learnedByStateKey(rec.data.learned_negatives);
+    var negatives = learnedByLane(rec.data.learned_negatives);
     var attention = groups.filter(function (g) { return targetPhase(g) === 'attention'; });
     var healthy = groups.filter(function (g) { return targetPhase(g) === 'healthy'; });
     var unknown = groups.filter(function (g) { return targetPhase(g) === 'unknown'; });
@@ -114,11 +114,13 @@
     return order;
   }
 
-  // Learned rows keyed by the state key they were recorded against, so a
-  // card lists the negatives of ITS OWN seats and nothing else. Only `broken`
-  // verdicts are negatives -- a `verified` positive shares the list and must
-  // not be read as one.
-  function learnedByStateKey(rows) {
+  // Learned rows keyed by the lane they were recorded against
+  // (`provider#upstream`). A target joins them through its `learned_lane`,
+  // never its runtime `state_key`: every nickname on one lane shares the
+  // lane's negatives, and a card lists those of ITS OWN seats' lanes and
+  // nothing else. Only `broken` verdicts are negatives -- a `verified`
+  // positive shares the list and must not be read as one.
+  function learnedByLane(rows) {
     var map = Object.create(null);
     (rows || []).forEach(function (row) {
       if (!row || !row.state_key || row.verdict !== 'broken') { return; }
@@ -320,7 +322,7 @@
     wrap.className = 'hchips';
     var seen = Object.create(null);
     group.members.forEach(function (t) {
-      (negatives[t.state_key] || []).forEach(function (row) {
+      ((t.learned_lane && negatives[t.learned_lane]) || []).forEach(function (row) {
         if (seen[row.capability_key]) { return; }
         seen[row.capability_key] = true;
         wrap.appendChild(negativeChip(row, nowMs));
