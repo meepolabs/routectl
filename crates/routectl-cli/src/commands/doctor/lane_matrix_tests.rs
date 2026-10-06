@@ -436,6 +436,67 @@ fn nicknames_on_one_lane_with_different_overrides_render_a_mixed_cell() {
     );
 }
 
+fn prior(nickname: &str, cap: &str, supported: bool) -> PriorCell {
+    PriorCell {
+        nickname: nickname.to_string(),
+        verified_at: "2026-01-01".to_string(),
+        capabilities: vec![(cap.to_string(), supported)],
+    }
+}
+
+#[test]
+fn nicknames_on_one_lane_with_opposing_priors_render_a_mixed_cell() {
+    // Arrange: alpha's catalog row supports structured_output, beta's does not.
+    let mut ctx = context(lane_config(), available(Vec::new(), Instant::now(), 0));
+    ctx.capability
+        .config
+        .as_mut()
+        .expect("config parsed")
+        .priors = vec![
+        prior("alpha", "structured_output", true),
+        prior("beta", "structured_output", false),
+    ];
+
+    // Act
+    let panel = build_capability_matrix_panel(&ctx);
+
+    // Assert
+    let mixed = cell(&panel, "p#up", "structured_output");
+    assert_eq!(mixed.verdict, "mixed");
+    assert_eq!(mixed.supported, None);
+    assert_eq!(mixed.action, "mixed");
+    assert_eq!(
+        nickname_resolutions(mixed),
+        [
+            ("alpha", "assumed", Some("prior"), "none"),
+            ("beta", "assumed", Some("prior"), "route_away"),
+        ]
+    );
+
+    let json = serde_json::to_value(&panel).expect("panel serializes");
+    let lane = json["lanes"]
+        .as_array()
+        .and_then(|lanes| lanes.iter().find(|l| l["lane"] == "p#up"))
+        .expect("p#up lane in json");
+    let column = panel
+        .columns
+        .iter()
+        .position(|c| c == "structured_output")
+        .expect("structured_output column");
+    assert_eq!(
+        lane["cells"][column]["nickname_actions"],
+        serde_json::json!([
+            {"nickname": "alpha", "verdict": "assumed", "layer": "prior", "action": "none"},
+            {"nickname": "beta", "verdict": "assumed", "layer": "prior", "action": "route_away"},
+        ])
+    );
+    let human = render_capability_matrix_panel(&panel);
+    assert!(
+        human.contains("mixed(alpha=none[assumed],beta=route_away[assumed])"),
+        "the human grid names each nickname's own prior resolution: {human}"
+    );
+}
+
 #[test]
 fn nicknames_that_agree_on_a_lane_carry_no_per_nickname_actions() {
     let mut config = lane_config();

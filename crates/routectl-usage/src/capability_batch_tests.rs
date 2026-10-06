@@ -632,8 +632,64 @@ fn a_purge_floor_is_keyed_on_both_halves_of_the_registry_key() {
     };
     assert!(
         lanes.contains(&"other-nick".to_string()),
-        "the floor is keyed on (state_key, capability): a different lane is a different key; \
+        "the floor is keyed on (state_key, provider_kind, capability): a different lane is a \
+         different key; \
          lanes were {lanes:?}",
+    );
+}
+
+fn under_kind(kind: &str, event: CapabilityEvent) -> CapabilityEvent {
+    CapabilityEvent {
+        provider_kind: Some(kind.to_string()),
+        ..event
+    }
+}
+
+/// The floor is PER PROVIDER KIND: a purge clears only the owning kind's entry.
+///
+/// Two kinds can each hold a version of one lane and capability. Purging kind B
+/// leaves kind A's version resident, so a delayed A event at an incarnation at or
+/// below B's floor still describes live state and must persist; a delayed B event
+/// at or below the floor is what the purge superseded and is still dropped.
+#[test]
+fn a_purge_floor_on_one_provider_kind_does_not_suppress_another_kind() {
+    // Arrange
+    let (_dir, path) = temp_path();
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let key = wire_shape_key("thinking.enabled.display");
+    let cleared_b = CapabilityEvent {
+        verdict: "cleared".to_string(),
+        ..under_kind("kind-b", negative("nick", &key))
+    };
+    let outcome = handle.commit_capability_events_blocking_at(vec![cleared_b], 1, 7);
+    assert!(
+        matches!(outcome, BatchCommit::Committed { .. }),
+        "premise: kind B's clear must commit, since only a committed clear sets a floor",
+    );
+
+    // Act
+    handle.try_send_capability_event_at(under_kind("kind-a", negative("nick", &key)), 1, 5);
+    handle.try_send_capability_event_at(under_kind("kind-b", negative("nick", &key)), 1, 7);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    let conn = rusqlite::Connection::open(&path).expect("read open");
+    let mut stmt = conn
+        .prepare("SELECT verdict, provider_kind FROM capability_events ORDER BY rowid")
+        .expect("prepare");
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows");
+    assert_eq!(
+        rows,
+        vec![
+            ("cleared".to_string(), Some("kind-b".to_string())),
+            ("broken".to_string(), Some("kind-a".to_string())),
+        ],
+        "a purge of kind B must not drop kind A's delayed event, and must still drop kind B's",
     );
 }
 

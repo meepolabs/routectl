@@ -276,10 +276,10 @@ async fn a_restated_survivor_keeps_its_original_observation_age() {
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let survivor = before
-        .catalog_independent_survivors()
+        .learned_capability_snapshot()
         .into_iter()
-        .next()
-        .expect("one survivor");
+        .find(|entry| entry.feature_key == field_key())
+        .expect("the wire-shape survivor is resident");
 
     let mut reloaded = Router::new(config.clone());
     reloaded.install_catalog_overlay(overlay_at_revision(2));

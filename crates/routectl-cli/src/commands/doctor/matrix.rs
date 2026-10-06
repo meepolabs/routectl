@@ -305,8 +305,9 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
     }
 }
 
-/// The learned and prior signals one cell resolves against, shared by every
-/// nickname on the lane.
+/// The learned and prior signals one cell resolves against. The learned half is
+/// the lane's and shared by every nickname; the prior is per nickname, because
+/// the catalog records priors by nickname.
 #[derive(Clone, Copy)]
 struct CellSignals {
     learned: Option<(
@@ -372,6 +373,11 @@ fn resolve_per_nickname(
                 inputs
                     .overrides
                     .resolve(provider, model.nickname, capability, meta.provider_kind);
+            let signals = CellSignals {
+                prior: nickname_prior(model.nickname, capability, inputs.priors)
+                    .map(|(supported, _)| supported),
+                ..signals
+            };
             let display = resolve_display_verdict(override_cell, signals.learned, signals.prior);
             let strips =
                 lane_strips_capability(&inputs.ctx.config, provider, &[model.entry], capability);
@@ -408,24 +414,33 @@ fn action_for(
     })
 }
 
-/// The catalog prior for a lane: the first mapped nickname whose prior cell
-/// carries the capability, with its `verified_at` stamp.
+/// The catalog prior stamp for a lane: the first mapped nickname whose prior
+/// cell carries the capability, with its `verified_at` stamp.
 fn lane_prior<'a>(
     meta: &LaneMeta,
     capability: &str,
     priors: &'a [PriorCell],
 ) -> Option<(bool, &'a str)> {
-    meta.models.iter().find_map(|m| {
-        priors
-            .iter()
-            .find(|p| p.nickname == m.nickname)
-            .and_then(|p| {
-                p.capabilities
-                    .iter()
-                    .find(|(key, _)| key == capability)
-                    .map(|(_, supported)| (*supported, p.verified_at.as_str()))
-            })
-    })
+    meta.models
+        .iter()
+        .find_map(|m| nickname_prior(m.nickname, capability, priors))
+}
+
+/// One nickname's catalog prior for a capability, with its `verified_at` stamp.
+fn nickname_prior<'a>(
+    nickname: &str,
+    capability: &str,
+    priors: &'a [PriorCell],
+) -> Option<(bool, &'a str)> {
+    priors
+        .iter()
+        .find(|p| p.nickname == nickname)
+        .and_then(|p| {
+            p.capabilities
+                .iter()
+                .find(|(key, _)| key == capability)
+                .map(|(_, supported)| (*supported, p.verified_at.as_str()))
+        })
 }
 
 /// Whether an F1 negative on this lane would be stripped in place.

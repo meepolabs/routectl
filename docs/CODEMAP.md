@@ -2485,11 +2485,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   itself refuses any ride-along EVENT stamped generation 0: loud via
   `debug_assert`, fail-closed in release, because per-event silent discards are
   the loss the barrier exists to prevent),
-  `apply_capability_tuning` (called at publication), `learned_registry`,
-  `catalog_independent_survivors` (those same entries in the shape a persisted
-  restatement needs, carrying each one's observation time, evidence tokens and
-  `evidence_class` verbatim -- the class is load-bearing, since the rebuild
-  skips a `verified` / `suspect` row that cannot state one) and `provider_kind_for_state_key` (THE single owner of
+  `apply_capability_tuning` (called at publication), `learned_registry` and
+  `provider_kind_for_state_key` (THE single owner of
   state_key -> provider-kind resolution, shared by restatement and the operator
   purge surface so the two cannot compute different registry keys; resolves
   through `override_identity_for` and yields an empty, inert kind for an

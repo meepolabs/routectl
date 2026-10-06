@@ -3872,71 +3872,6 @@ impl<T> typenum::type_operators::Same for routectl_router::router::CapabilityObs
 pub type routectl_router::router::CapabilityObserveEvent::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::CapabilityObserveEvent where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::CapabilityObserveEvent::into_shared(self) -> Shared
-pub struct routectl_router::router::CatalogIndependentSurvivor
-pub routectl_router::router::CatalogIndependentSurvivor::capability: alloc::string::String
-pub routectl_router::router::CatalogIndependentSurvivor::evidence_class: core::option::Option<alloc::string::String>
-pub routectl_router::router::CatalogIndependentSurvivor::first_seen: std::time::Instant
-pub routectl_router::router::CatalogIndependentSurvivor::last_seen: std::time::Instant
-pub routectl_router::router::CatalogIndependentSurvivor::observations: u32
-pub routectl_router::router::CatalogIndependentSurvivor::phase: alloc::string::String
-pub routectl_router::router::CatalogIndependentSurvivor::provider_kind: alloc::string::String
-pub routectl_router::router::CatalogIndependentSurvivor::source: alloc::string::String
-pub routectl_router::router::CatalogIndependentSurvivor::state_key: alloc::string::String
-pub routectl_router::router::CatalogIndependentSurvivor::tier: alloc::string::String
-pub routectl_router::router::CatalogIndependentSurvivor::verdict: alloc::string::String
-impl core::clone::Clone for routectl_router::CatalogIndependentSurvivor
-pub fn routectl_router::CatalogIndependentSurvivor::clone(&self) -> routectl_router::CatalogIndependentSurvivor
-impl core::cmp::Eq for routectl_router::CatalogIndependentSurvivor
-impl core::cmp::PartialEq for routectl_router::CatalogIndependentSurvivor
-pub fn routectl_router::CatalogIndependentSurvivor::eq(&self, &routectl_router::CatalogIndependentSurvivor) -> bool
-impl core::fmt::Debug for routectl_router::CatalogIndependentSurvivor
-pub fn routectl_router::CatalogIndependentSurvivor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for routectl_router::CatalogIndependentSurvivor
-impl core::marker::Freeze for routectl_router::CatalogIndependentSurvivor
-impl core::marker::Send for routectl_router::CatalogIndependentSurvivor
-impl core::marker::Sync for routectl_router::CatalogIndependentSurvivor
-impl core::marker::Unpin for routectl_router::CatalogIndependentSurvivor
-impl core::marker::UnsafeUnpin for routectl_router::CatalogIndependentSurvivor
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CatalogIndependentSurvivor
-impl core::panic::unwind_safe::UnwindSafe for routectl_router::CatalogIndependentSurvivor
-impl<Q, K> equivalent::Equivalent<K> for routectl_router::CatalogIndependentSurvivor where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for routectl_router::CatalogIndependentSurvivor where U: core::convert::From<T>
-pub fn routectl_router::CatalogIndependentSurvivor::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_router::CatalogIndependentSurvivor where U: core::convert::Into<T>
-pub type routectl_router::CatalogIndependentSurvivor::Error = core::convert::Infallible
-pub fn routectl_router::CatalogIndependentSurvivor::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_router::CatalogIndependentSurvivor where U: core::convert::TryFrom<T>
-pub type routectl_router::CatalogIndependentSurvivor::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_router::CatalogIndependentSurvivor::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_router::CatalogIndependentSurvivor where T: core::clone::Clone
-pub type routectl_router::CatalogIndependentSurvivor::Owned = T
-pub fn routectl_router::CatalogIndependentSurvivor::clone_into(&self, &mut T)
-pub fn routectl_router::CatalogIndependentSurvivor::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CatalogIndependentSurvivor where T: core::clone::Clone
-pub fn routectl_router::CatalogIndependentSurvivor::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_router::CatalogIndependentSurvivor where T: 'static + ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_router::CatalogIndependentSurvivor where T: ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_router::CatalogIndependentSurvivor where T: ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_router::CatalogIndependentSurvivor where T: core::clone::Clone
-pub unsafe fn routectl_router::CatalogIndependentSurvivor::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_router::CatalogIndependentSurvivor
-pub fn routectl_router::CatalogIndependentSurvivor::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_router::CatalogIndependentSurvivor where T: core::clone::Clone
-pub fn routectl_router::CatalogIndependentSurvivor::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_router::CatalogIndependentSurvivor
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CatalogIndependentSurvivor where T: ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_router::CatalogIndependentSurvivor::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_router::CatalogIndependentSurvivor
-impl<T> tracing::instrument::WithSubscriber for routectl_router::CatalogIndependentSurvivor
-impl<T> typenum::type_operators::Same for routectl_router::CatalogIndependentSurvivor
-pub type routectl_router::CatalogIndependentSurvivor::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CatalogIndependentSurvivor where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_router::CatalogIndependentSurvivor::into_shared(self) -> Shared
 pub struct routectl_router::router::CountedTokens
 pub routectl_router::router::CountedTokens::meta: routectl_router::router::DispatchMeta
 pub routectl_router::router::CountedTokens::result: routectl_core::error::Result<routectl_core::schema::TokenCount>
@@ -4893,7 +4828,6 @@ pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self,
 pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &routectl_router::StateKey, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
-pub fn routectl_router::router::Router::catalog_independent_survivors(&self) -> alloc::vec::Vec<routectl_router::CatalogIndependentSurvivor>
 pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
 pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
 pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
@@ -10457,71 +10391,6 @@ impl<T> typenum::type_operators::Same for routectl_router::CatalogImportState
 pub type routectl_router::CatalogImportState::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CatalogImportState where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::CatalogImportState::into_shared(self) -> Shared
-pub struct routectl_router::CatalogIndependentSurvivor
-pub routectl_router::CatalogIndependentSurvivor::capability: alloc::string::String
-pub routectl_router::CatalogIndependentSurvivor::evidence_class: core::option::Option<alloc::string::String>
-pub routectl_router::CatalogIndependentSurvivor::first_seen: std::time::Instant
-pub routectl_router::CatalogIndependentSurvivor::last_seen: std::time::Instant
-pub routectl_router::CatalogIndependentSurvivor::observations: u32
-pub routectl_router::CatalogIndependentSurvivor::phase: alloc::string::String
-pub routectl_router::CatalogIndependentSurvivor::provider_kind: alloc::string::String
-pub routectl_router::CatalogIndependentSurvivor::source: alloc::string::String
-pub routectl_router::CatalogIndependentSurvivor::state_key: alloc::string::String
-pub routectl_router::CatalogIndependentSurvivor::tier: alloc::string::String
-pub routectl_router::CatalogIndependentSurvivor::verdict: alloc::string::String
-impl core::clone::Clone for routectl_router::CatalogIndependentSurvivor
-pub fn routectl_router::CatalogIndependentSurvivor::clone(&self) -> routectl_router::CatalogIndependentSurvivor
-impl core::cmp::Eq for routectl_router::CatalogIndependentSurvivor
-impl core::cmp::PartialEq for routectl_router::CatalogIndependentSurvivor
-pub fn routectl_router::CatalogIndependentSurvivor::eq(&self, &routectl_router::CatalogIndependentSurvivor) -> bool
-impl core::fmt::Debug for routectl_router::CatalogIndependentSurvivor
-pub fn routectl_router::CatalogIndependentSurvivor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for routectl_router::CatalogIndependentSurvivor
-impl core::marker::Freeze for routectl_router::CatalogIndependentSurvivor
-impl core::marker::Send for routectl_router::CatalogIndependentSurvivor
-impl core::marker::Sync for routectl_router::CatalogIndependentSurvivor
-impl core::marker::Unpin for routectl_router::CatalogIndependentSurvivor
-impl core::marker::UnsafeUnpin for routectl_router::CatalogIndependentSurvivor
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CatalogIndependentSurvivor
-impl core::panic::unwind_safe::UnwindSafe for routectl_router::CatalogIndependentSurvivor
-impl<Q, K> equivalent::Equivalent<K> for routectl_router::CatalogIndependentSurvivor where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for routectl_router::CatalogIndependentSurvivor where U: core::convert::From<T>
-pub fn routectl_router::CatalogIndependentSurvivor::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_router::CatalogIndependentSurvivor where U: core::convert::Into<T>
-pub type routectl_router::CatalogIndependentSurvivor::Error = core::convert::Infallible
-pub fn routectl_router::CatalogIndependentSurvivor::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_router::CatalogIndependentSurvivor where U: core::convert::TryFrom<T>
-pub type routectl_router::CatalogIndependentSurvivor::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_router::CatalogIndependentSurvivor::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_router::CatalogIndependentSurvivor where T: core::clone::Clone
-pub type routectl_router::CatalogIndependentSurvivor::Owned = T
-pub fn routectl_router::CatalogIndependentSurvivor::clone_into(&self, &mut T)
-pub fn routectl_router::CatalogIndependentSurvivor::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CatalogIndependentSurvivor where T: core::clone::Clone
-pub fn routectl_router::CatalogIndependentSurvivor::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_router::CatalogIndependentSurvivor where T: 'static + ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_router::CatalogIndependentSurvivor where T: ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_router::CatalogIndependentSurvivor where T: ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_router::CatalogIndependentSurvivor where T: core::clone::Clone
-pub unsafe fn routectl_router::CatalogIndependentSurvivor::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_router::CatalogIndependentSurvivor
-pub fn routectl_router::CatalogIndependentSurvivor::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_router::CatalogIndependentSurvivor where T: core::clone::Clone
-pub fn routectl_router::CatalogIndependentSurvivor::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_router::CatalogIndependentSurvivor
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CatalogIndependentSurvivor where T: ?core::marker::Sized
-pub fn routectl_router::CatalogIndependentSurvivor::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_router::CatalogIndependentSurvivor::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_router::CatalogIndependentSurvivor
-impl<T> tracing::instrument::WithSubscriber for routectl_router::CatalogIndependentSurvivor
-impl<T> typenum::type_operators::Same for routectl_router::CatalogIndependentSurvivor
-pub type routectl_router::CatalogIndependentSurvivor::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CatalogIndependentSurvivor where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_router::CatalogIndependentSurvivor::into_shared(self) -> Shared
 pub struct routectl_router::CatalogOverlay
 pub routectl_router::CatalogOverlay::cells: alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<routectl_router::OverlayCell>>
 pub routectl_router::CatalogOverlay::revision: u64
@@ -14868,7 +14737,6 @@ pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self,
 pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &routectl_router::StateKey, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
-pub fn routectl_router::router::Router::catalog_independent_survivors(&self) -> alloc::vec::Vec<routectl_router::CatalogIndependentSurvivor>
 pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
 pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
 pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>

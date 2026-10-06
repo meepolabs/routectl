@@ -14,59 +14,6 @@ use crate::capability_matcher::resolve_requested_capability;
 /// `ValidationException` envelope the drift observer inspects.
 const BEDROCK_PROVIDER_KIND: &str = "bedrock";
 
-/// One resident learned entry whose truth is independent of the catalog
-/// revision, in the shape a persisted restatement needs.
-///
-/// Produced by [`Router::catalog_independent_survivors`] when a reload moves
-/// the replay boundary: each survivor must be re-appended past the new
-/// boundary or the next boot cannot see it (the ledger read starts at the
-/// newest tombstone). Every field is carried VERBATIM from the resident
-/// entry -- a restatement re-states an existing fact, so refreshing its
-/// evidence or its decay age would silently extend a verdict's life every
-/// time an operator reloads config.
-///
-/// Plain owned strings: the consumer builds a leaf-crate ledger row that
-/// depends on none of this crate's types.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogIndependentSurvivor {
-    /// Breaker state key (nickname-or-provider) the entry applies to.
-    pub state_key: String,
-    /// Normalized capability key.
-    pub capability: String,
-    /// Persisted verdict token.
-    pub verdict: String,
-    /// Persisted phase token.
-    pub phase: String,
-    /// Persisted evidence-source token.
-    pub source: String,
-    /// Persisted signal-tier token.
-    pub tier: String,
-    /// How many observations the entry had accrued.
-    ///
-    /// Load-bearing for an INFERRED negative: it acts only once corroborated
-    /// (two observations), so restating one row would replay a corroborated entry
-    /// as a single pending observation -- resident but NOT acting, silently
-    /// downgrading a verdict that was routing traffic. A self-identifying entry
-    /// acts on one observation and needs no second row.
-    pub observations: u32,
-    /// The pinned observation-evidence token, when this verdict carries one.
-    ///
-    /// Load-bearing, not forensic: the warm rebuild fails closed on a
-    /// `verified` / `suspect` row whose class is absent or unrecognized, so a
-    /// restatement that dropped it would be SKIPPED at the next boot and the
-    /// verdict would be evicted -- the exact outcome the restatement exists to
-    /// prevent. `None` for a `broken` verdict, which carries none.
-    pub evidence_class: Option<String>,
-    /// The provider kind the entry was written under.
-    pub provider_kind: String,
-    /// When the entry was first observed. Carried so a restatement preserves
-    /// the original observation time.
-    pub first_seen: Instant,
-    /// When the entry was most recently observed -- the age a restatement
-    /// must preserve rather than reset.
-    pub last_seen: Instant,
-}
-
 /// Per-request dedupe key for the learn path. The capability arm dedupes on
 /// `(learned_key, feature_key)`; the drift signals dedupe on `state_key` alone;
 /// the F1-seen marker keys on `feature_key` alone (cross-lane -- it records
@@ -601,42 +548,6 @@ impl Router {
                 self.registry_generation(),
             ),
         }
-    }
-
-    /// Every resident learned entry whose truth does NOT depend on the catalog
-    /// revision, in the shape a persisted restatement needs.
-    ///
-    /// Membership is the shared catalog-scope predicate's call, so a
-    /// catalog-scoped entry is absent by construction -- restating one would
-    /// resurrect exactly what a revision change must evict. Each survivor
-    /// carries its observation time and evidence fields verbatim so a
-    /// restatement preserves them rather than minting a fresh observation:
-    /// a survivor is the SAME fact re-appended past a new boundary, not new
-    /// evidence, so its decay age must not be refreshed.
-    pub fn catalog_independent_survivors(&self) -> Vec<CatalogIndependentSurvivor> {
-        self.learned_capabilities
-            .recorded_snapshot()
-            .into_iter()
-            .filter(|recorded| {
-                !crate::field_capability::capability_key_is_catalog_scoped(
-                    &recorded.entry.feature_key,
-                )
-            })
-            .map(|recorded| (recorded.entry, recorded.provider_kind))
-            .map(|(entry, provider_kind)| CatalogIndependentSurvivor {
-                provider_kind,
-                state_key: entry.state_key,
-                capability: entry.feature_key,
-                verdict: entry.verdict.as_str().to_string(),
-                phase: entry.phase.as_str().to_string(),
-                source: entry.source.as_str().to_string(),
-                tier: entry.signal_tier.as_str().to_string(),
-                observations: entry.observations,
-                evidence_class: entry.evidence_class.clone(),
-                first_seen: entry.first_seen,
-                last_seen: entry.last_seen,
-            })
-            .collect()
     }
 
     /// Read-only snapshot of the learned-capability registry in the fixed

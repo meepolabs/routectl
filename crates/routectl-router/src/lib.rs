@@ -205,8 +205,8 @@ pub use probe_scheduler::ProbeSchedulerSnapshot;
 pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CanaryPosture, CapabilityPersistenceHealth,
-    CatalogIndependentSurvivor, DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot,
-    FieldPreflight, FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
+    DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot, FieldPreflight,
+    FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
     LearnedLaneProjection, OpeningLane, PaidProbeLedger, PaidProbeReservation,
     PreflightBlockedReason, ResolvedLearnedLane, Router, RouterOptions, acting_field_verdicts,
     class_debits,

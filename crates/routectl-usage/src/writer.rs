@@ -564,8 +564,24 @@ const CLEARED_VERDICT: &str = "cleared";
 /// of the process. A daemon nobody purges holds none, and an operator would have
 /// to purge distinct keys by the million to make this a memory question -- at
 /// which point the purge rate, not the map, is the fault.
-fn fresh_purge_floors() -> std::collections::HashMap<(String, String), u64> {
+fn fresh_purge_floors() -> std::collections::HashMap<PurgeFloorKey, u64> {
     std::collections::HashMap::new()
+}
+
+/// `(lane_key, provider_kind, capability)`: the resident identity a purge clears.
+///
+/// The kind is part of the key because a purge clears only the entry its current
+/// owner kind wrote; another kind's version of the same lane and capability is
+/// untouched, so its delayed events must not fall under that floor. A `None`
+/// kind is its own key, never a wildcard.
+type PurgeFloorKey = (String, Option<String>, String);
+
+fn purge_floor_key(event: &CapabilityEvent) -> PurgeFloorKey {
+    (
+        event.lane_key.clone(),
+        event.provider_kind.clone(),
+        event.capability.clone(),
+    )
 }
 
 /// Per-thread mutable state: the (optional) connection plus the
@@ -582,7 +598,7 @@ pub(crate) struct WriterState {
     /// NEVER evicted (see `fresh_purge_floors`) and updated ONLY after a
     /// `cleared` purge row has committed -- a floor recorded for a clear that
     /// failed would suppress events describing state that is still live.
-    purge_floors: std::collections::HashMap<(String, String), u64>,
+    purge_floors: std::collections::HashMap<PurgeFloorKey, u64>,
     /// The newest registry generation whose boundary batch has COMMITTED.
     ///
     /// The writer is the one place that sees every capability write in append
@@ -747,7 +763,7 @@ impl WriterState {
         // `<=` because the floor IS the cleared incarnation: an event describing
         // that same version is exactly what the purge superseded. A genuine
         // post-purge relearn allocated a strictly greater incarnation and passes.
-        let key = (event.lane_key.clone(), event.capability.clone());
+        let key = purge_floor_key(event);
         if let Some(&floor) = self.purge_floors.get(&key)
             && stamp.incarnation <= floor
         {
@@ -826,7 +842,7 @@ impl WriterState {
                 // the very events the boundary exists to preserve.
                 for event in &batch.events {
                     if event.verdict == CLEARED_VERDICT {
-                        let key = (event.lane_key.clone(), event.capability.clone());
+                        let key = purge_floor_key(event);
                         // MAX, never overwrite: a later purge of the same key at
                         // a lower incarnation must not lower the floor, or events
                         // the earlier purge superseded would be admitted again.

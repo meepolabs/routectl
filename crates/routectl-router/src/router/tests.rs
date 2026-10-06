@@ -2428,49 +2428,6 @@ fn emit_class_observability_bumps_context_window_overflow_on_context_window_clas
     );
 }
 
-/// The survivor set a revision-changing reload must restate: every carried
-/// catalog-independent entry, with the provider kind each needs to reconstruct
-/// its persisted row.
-///
-/// The predicate decides membership, so a catalog-scoped sibling under the
-/// same target must be absent -- restating it would resurrect exactly the
-/// entry the revision change is meant to evict.
-#[test]
-fn catalog_independent_survivors_carry_the_fields_needed_to_restate_them() {
-    use routectl_core::capability::{FailurePhase, SignalTier};
-    use std::time::Instant;
-
-    // Arrange
-    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
-        .expect("mints a key");
-    let router = Router::new(Arc::new(Config::default()));
-    for capability in [field_key.as_str(), "web_search"] {
-        router.learned_capabilities.observe(
-            "nick",
-            capability,
-            "anthropic-api",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
-            Instant::now(),
-        );
-    }
-
-    // Act
-    let survivors = router.catalog_independent_survivors();
-
-    // Assert: exactly the field entry, carrying its evidence fields.
-    assert_eq!(survivors.len(), 1, "only the field entry survives");
-    let survivor = &survivors[0];
-    assert_eq!(survivor.state_key, "nick");
-    assert_eq!(survivor.capability, field_key);
-    assert_eq!(survivor.verdict, "broken");
-    assert_eq!(survivor.phase, "f1");
-    assert_eq!(survivor.source, "live");
-    assert_eq!(survivor.tier, "self-identifying");
-}
-
 /// The state_key-to-provider-kind resolution is centralized and reused, not
 /// re-derived per call site. An unknown key degrades to an empty kind rather
 /// than guessing -- an empty kind is inert in the registry's normalization, so
