@@ -1669,8 +1669,15 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
         .expect("a qualified dotted path mints a key");
     let at = Instant::now();
 
-    // Arrange + Act, phase one: the hot reload, with the catalog bumped.
-    let config = Arc::new(Config::default());
+    // Arrange + Act, phase one: the hot reload, with the catalog bumped. The
+    // replayed rows' lane names the `anthropic` entry, so the config must own
+    // it under the recorded kind for the restart to replay them.
+    let mut config = Config::default();
+    config.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+    );
+    let config = Arc::new(config);
     let before = Router::new(config.clone());
     for capability in [field_key.as_str(), "web_search"] {
         before.learned_capabilities.observe(

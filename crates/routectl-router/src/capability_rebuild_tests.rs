@@ -92,6 +92,14 @@ fn probe_cleared(rowid: i64, at: Instant, capability: &str) -> CapabilityEventRo
     row(rowid, at, "cleared", None, "probe", None, None, capability)
 }
 
+/// The `[providers]` table that owns [`LANE`] under the fixture rows' kind.
+fn providers() -> BTreeMap<String, crate::config::ProviderEntry> {
+    BTreeMap::from([(
+        "nn".to_string(),
+        crate::config::ProviderEntry::openai_compat("https://nn.example.test/v1", "literal:k"),
+    )])
+}
+
 fn registry() -> LearnedCapabilityRegistry {
     // A large decay keeps every replayed negative acting at query time so the
     // ordering assertions read the replayed state, not a lapse.
@@ -234,7 +242,7 @@ fn rebuild_counts_revision_skips_apart_from_boundary_and_unknown_skips() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     assert_eq!(
         summary.skipped_revision, 2,
@@ -269,7 +277,7 @@ fn negative_then_cleared_ts_ordered_clears_the_negative() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.replayed_cleared, 1);
@@ -296,7 +304,7 @@ fn cleared_then_negative_ts_ordered_leaves_the_negative_acting() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     // The cleared event finds nothing resident (a no-op); the later negative
     // then acts -- deterministic under ts ordering.
@@ -327,7 +335,7 @@ fn same_instant_rows_tie_break_by_rowid() {
         rows: vec![cleared(2, at, "web_search"), broken(1, at, "web_search")],
     };
     let reg = registry();
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.replayed_cleared, 1);
     assert_eq!(
@@ -342,7 +350,7 @@ fn same_instant_rows_tie_break_by_rowid() {
         rows: vec![broken(2, at, "web_search"), cleared(1, at, "web_search")],
     };
     let reg = registry();
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
     assert_eq!(summary.cleared_noop, 1);
     assert_eq!(summary.replayed_negative, 1);
     assert!(matches!(
@@ -369,7 +377,7 @@ fn verified_row_replays_as_a_positive() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     assert_eq!(summary.replayed_verified, 1);
     assert!(reg.is_verified_working(
@@ -398,7 +406,7 @@ fn suspect_row_with_f3_phase_replays_as_a_negative() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.skipped_unknown, 0);
@@ -422,7 +430,7 @@ fn suspect_row_with_non_f3_phase_skips() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     // The live path always mints suspect at F3; a suspect row carrying any
     // other phase is malformed -- skip, fail closed.
@@ -448,7 +456,7 @@ fn probe_source_rows_replay_through_the_shared_arms() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     // A probe negative replays through the same admission the live path uses:
     // the by-verdict counter and the by-source probe tally both bump, and the
@@ -481,7 +489,7 @@ fn probe_cleared_row_removes_a_resident_negative() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.replayed_cleared, 1);
@@ -516,7 +524,7 @@ fn equal_ts_live_and_probe_rows_tie_break_by_rowid() {
         ],
     };
     let reg = registry();
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.replayed_cleared, 1);
     assert_eq!(summary.replayed_probe, 1);
@@ -536,7 +544,7 @@ fn equal_ts_live_and_probe_rows_tie_break_by_rowid() {
         ],
     };
     let reg = registry();
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
     assert_eq!(summary.cleared_noop, 1);
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.replayed_probe, 1);
@@ -616,7 +624,7 @@ fn unknown_tokens_skip_without_panic() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     // Every malformed token -- verdict, source, tier, phase, evidence class --
     // skips its row, none replay, and nothing panics.
@@ -647,7 +655,7 @@ fn rebuild_maps_vocab_versions_and_counts_unmappable_rows() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(summary.skipped_vocab, 3);
@@ -678,7 +686,7 @@ fn no_tombstone_replays_nothing() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     assert_eq!(summary, CapabilityRebuildSummary::default());
     assert_eq!(
@@ -717,7 +725,7 @@ fn replay_precedence_follows_rowid_when_mapped_instants_disagree() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     // Append order wins: the clear ran last and removed the negative.
     assert_eq!(summary.replayed_negative, 1);
@@ -771,7 +779,7 @@ fn one_replayed_inferred_row_stays_pending_while_two_act() {
         rows: vec![inferred(1, base, "web_search")],
     };
     let reg = registry();
-    let summary = rebuild_capabilities_into(&one, &reg);
+    let summary = rebuild_capabilities_into(&one, &reg, &providers());
     assert_eq!(summary.replayed_negative, 1);
     assert_eq!(
         reg.acting_negative_for(LANE, "web_search", "openai-compat", query),
@@ -788,7 +796,7 @@ fn one_replayed_inferred_row_stays_pending_while_two_act() {
         ],
     };
     let reg = registry();
-    let summary = rebuild_capabilities_into(&two, &reg);
+    let summary = rebuild_capabilities_into(&two, &reg, &providers());
     assert_eq!(summary.replayed_negative, 2);
     assert!(
         matches!(
@@ -820,7 +828,7 @@ fn a_field_row_whose_lane_does_not_parse_is_skipped_and_counted() {
     };
     let reg = registry();
 
-    let summary = rebuild_capabilities_into(&reader, &reg);
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
     assert_eq!(summary.skipped_lane, 1, "only the nickname-keyed field row");
     assert_eq!(summary.replayed_negative, 2);
@@ -834,4 +842,35 @@ fn a_field_row_whose_lane_does_not_parse_is_skipped_and_counted() {
         "the unparseable field row must not become resident: {resident:?}",
     );
     assert!(resident.contains(&(LANE.to_string(), field_key)));
+}
+
+/// A lane-keyed row is replayed only while the provider entry its lane names
+/// still exists under the kind the row recorded. A row with no recorded kind
+/// is skipped rather than attached to whatever the entry is now.
+#[test]
+fn a_row_its_provider_entry_no_longer_owns_is_skipped_and_counted() {
+    let base = Instant::now();
+    let owned = broken(2, base, "web_search");
+    let mut flipped = broken(3, base, "computer_use");
+    flipped.provider_kind = "anthropic-api".to_string();
+    let mut unrecorded = broken(4, base, "prompt_caching");
+    unrecorded.provider_kind = String::new();
+    let mut removed = broken(5, base, "web_search");
+    removed.state_key = "gone#upstream".to_string();
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(1, CV, OV)),
+        rows: vec![owned, flipped, unrecorded, removed],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    assert_eq!(summary.skipped_owner, 3);
+    assert_eq!(summary.replayed_negative, 1);
+    let resident: Vec<(String, String)> = reg
+        .snapshot()
+        .into_iter()
+        .map(|e| (e.state_key, e.feature_key))
+        .collect();
+    assert_eq!(resident, vec![(LANE.to_string(), "web_search".to_string())]);
 }

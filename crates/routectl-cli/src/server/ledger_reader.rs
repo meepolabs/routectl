@@ -37,10 +37,10 @@
 //! The ledger stores `lane_key` + normalized `capability`; the router's
 //! registry key is `(state_key, normalized_feature_key)`. `lane_key` IS the
 //! `state_key`, and the persisted `capability` is already the normalized
-//! feature key, so the map is direct. `provider_kind` only feeds the router's
-//! idempotent capability normalization on replay; because the persisted key
-//! is already normalized, an empty provider is inert and reconstructs the
-//! identical registry key.
+//! feature key, so the map is direct. The persisted `provider_kind` is carried
+//! through (empty when the column is NULL): the replay's owner check compares
+//! it against the kind the lane's provider entry has today, and the router's
+//! capability normalization is idempotent on the already-normalized key.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -216,10 +216,7 @@ impl LedgerCapabilityReader {
                 row.evidence_class,
                 capability,
                 state_key,
-                // Inert on replay: the persisted capability is already normalized
-                // and the registry key carries no provider dimension (see the
-                // lane-key contract in the module docs).
-                String::new(),
+                row.provider_kind.unwrap_or_default(),
                 catalog_version,
                 overlay_revision,
             )

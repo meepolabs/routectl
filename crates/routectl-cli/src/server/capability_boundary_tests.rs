@@ -67,6 +67,20 @@ fn warm_off_runtime(db_path: &std::path::Path, router: &Router, usage: &UsageHan
 
 const FIELD_PATH: &str = "thinking.enabled.display";
 
+/// The kind of the `nick` provider entry every fixture lane egresses through.
+const NICK_KIND: &str = "anthropic-api";
+
+/// A default config that configures the `nick` provider entry, so replay
+/// treats the fixture lane `nick#upstream` as owned.
+fn owning_config() -> Config {
+    let mut config = Config::default();
+    config.providers.insert(
+        "nick".to_string(),
+        routectl_router::ProviderEntry::anthropic_api("literal:k"),
+    );
+    config
+}
+
 /// The wire-shape capability key the tests plant and then track.
 ///
 /// The namespace prefix is owned by a single module in `routectl-router`, and
@@ -98,7 +112,7 @@ fn broken(ts: i64, capability: &str, revision: i64, catalog: i64) -> CapabilityE
         upstream_token: None,
         catalog_version: catalog,
         overlay_revision: revision,
-        provider_kind: None,
+        provider_kind: Some(NICK_KIND.to_string()),
         vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }
@@ -179,7 +193,7 @@ fn restart_from_ledger(config: &Arc<Config>, revision: u64, usage: &UsageHandle)
 #[tokio::test]
 async fn a_wire_shape_verdict_survives_a_revision_reload_and_two_restarts() {
     // Arrange: a real ledger and writer.
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -250,7 +264,7 @@ async fn a_wire_shape_verdict_survives_a_revision_reload_and_two_restarts() {
 /// daemon that reloads regularly.
 #[tokio::test]
 async fn a_restated_survivor_keeps_its_original_observation_age() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -316,7 +330,7 @@ async fn a_restated_survivor_keeps_its_original_observation_age() {
 /// tombstone is what keeps this session's later events replayable.
 #[tokio::test]
 async fn a_reload_with_no_survivors_still_commits_the_boundary() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -361,7 +375,7 @@ async fn a_reload_with_no_survivors_still_commits_the_boundary() {
 /// wrong reason.
 #[tokio::test]
 async fn an_unavailable_writer_reports_a_failed_boundary() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
 
@@ -388,7 +402,7 @@ async fn an_unavailable_writer_reports_a_failed_boundary() {
 /// verdict the batch was preserving.
 #[tokio::test]
 async fn a_write_failure_commits_no_row_and_reports_a_failed_boundary() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -467,7 +481,7 @@ fn ledger_capability_rows(path: &std::path::Path) -> Vec<(i64, String, String)> 
 /// silently lossy.
 #[tokio::test]
 async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -593,7 +607,7 @@ fn ledger_capability_rows_full(path: &std::path::Path) -> Vec<FullRow> {
 /// The sequence below is that exact path, end to end on a real ledger.
 #[tokio::test]
 async fn a_stale_boundary_boot_makes_its_own_boundary_durable_while_capture_is_disabled() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     // Capture DISABLED for the boot, as the operator left it.
     config.usage.enabled = false;
@@ -677,7 +691,7 @@ fn latest_tombstone_revision(path: &std::path::Path) -> Option<(i64, i64)> {
 /// or may not commit, so nothing may be published on the strength of them.
 #[tokio::test]
 async fn shutdown_during_an_admitted_wait_abandons_without_publishing() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     // A writer whose channel accepts but whose consumer never answers, so the
@@ -723,7 +737,7 @@ async fn shutdown_during_an_admitted_wait_abandons_without_publishing() {
 /// while other handle clones live.
 #[tokio::test]
 async fn cloned_handles_cannot_wedge_an_abandoned_boundary() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (tx, _rx_held) = tokio::sync::mpsc::channel(8);
@@ -753,7 +767,7 @@ async fn cloned_handles_cannot_wedge_an_abandoned_boundary() {
 /// nothing, and leaves the previous Router pointer-identical.
 #[tokio::test]
 async fn a_refused_admission_leaves_the_live_state_pointer_identical() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -810,7 +824,7 @@ async fn a_refused_admission_leaves_the_live_state_pointer_identical() {
 async fn the_startup_warm_runs_off_the_tokio_worker() {
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -875,7 +889,7 @@ async fn the_startup_warm_runs_off_the_tokio_worker() {
 /// replays it.
 #[tokio::test]
 async fn a_delayed_pre_boundary_event_is_dropped_while_a_post_admission_field_event_persists() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -949,7 +963,7 @@ async fn a_delayed_pre_boundary_event_is_dropped_while_a_post_admission_field_ev
 /// would replay entries the running process had already discarded.
 #[tokio::test]
 async fn a_write_failure_runs_no_boundary_transition() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -1036,7 +1050,7 @@ fn the_production_startup_site_dispatches_the_warm_off_the_runtime() {
 /// effect.
 #[tokio::test]
 async fn a_failed_boundary_leaves_the_shared_tuning_unchanged() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -1068,7 +1082,7 @@ async fn a_failed_boundary_leaves_the_shared_tuning_unchanged() {
     let retuned = Arc::new(Config {
         capability,
         usage: config.usage.clone(),
-        ..Config::default()
+        ..owning_config()
     });
     let mut reloaded = Router::new(retuned);
     reloaded.install_catalog_overlay(overlay_at_revision(2));
@@ -1106,7 +1120,7 @@ async fn a_failed_boundary_leaves_the_shared_tuning_unchanged() {
 /// because nothing was installed.
 #[tokio::test]
 async fn a_refused_admission_leaves_the_shared_tuning_unchanged() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let before = Router::new(config.clone());
@@ -1118,7 +1132,7 @@ async fn a_refused_admission_leaves_the_shared_tuning_unchanged() {
     let retuned = Arc::new(Config {
         capability,
         usage: config.usage.clone(),
-        ..Config::default()
+        ..owning_config()
     });
     let mut reloaded = Router::new(retuned);
     reloaded.install_catalog_overlay(overlay_at_revision(2));
@@ -1147,7 +1161,7 @@ async fn a_refused_admission_leaves_the_shared_tuning_unchanged() {
 /// retune had been dropped entirely.
 #[tokio::test]
 async fn a_committed_boundary_applies_the_reloads_tuning() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -1164,7 +1178,7 @@ async fn a_committed_boundary_applies_the_reloads_tuning() {
     let retuned = Arc::new(Config {
         capability,
         usage: config.usage.clone(),
-        ..Config::default()
+        ..owning_config()
     });
     let mut reloaded = Router::new(retuned);
     reloaded.install_catalog_overlay(overlay_at_revision(2));
@@ -1198,7 +1212,7 @@ async fn a_committed_boundary_applies_the_reloads_tuning() {
 async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_restart() {
     use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -1294,7 +1308,7 @@ async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_
 /// resurrecting a verdict a successful probe had settled.
 #[tokio::test]
 async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -1411,7 +1425,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
 /// boundary committed and a stamp for one that never landed would be dropped.
 #[tokio::test]
 async fn a_settlement_after_shutdown_abandonment_uses_the_rolled_back_generation() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     // A writer whose consumer never answers, so the wait is outstanding when
@@ -1464,7 +1478,7 @@ async fn a_settlement_after_shutdown_abandonment_uses_the_rolled_back_generation
 async fn an_inferred_survivors_corroboration_survives_a_reload_and_restart() {
     use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -1557,7 +1571,7 @@ fn observations_of(router: &Router, capability: &str) -> u32 {
 async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart() {
     use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     // A one-hour inferred window, so the third observation below is far outside it.
     config.capability.inferred_window_hours = 1;
@@ -1662,7 +1676,7 @@ async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart()
 /// boundary -- one dropping events the other considers live.
 #[tokio::test]
 async fn the_committed_ledger_generation_equals_the_registry_generation() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -1714,7 +1728,7 @@ async fn the_committed_ledger_generation_equals_the_registry_generation() {
 /// a failed admission rather than proceeding with a boundary it does not own.
 #[tokio::test]
 async fn a_second_boundary_admission_is_refused_while_the_first_is_in_flight() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     // A channel whose consumer never answers, so the first boundary stays
@@ -1754,7 +1768,7 @@ async fn a_second_boundary_admission_is_refused_while_the_first_is_in_flight() {
 /// `purge_leases`, so a lease opened first must still be visible to it.
 #[tokio::test]
 async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(
@@ -1875,7 +1889,7 @@ async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit
 /// a real ledger, across two restarts.
 #[tokio::test]
 async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried_successfully() {
-    let mut config = Config::default();
+    let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = UsageWriter::start(

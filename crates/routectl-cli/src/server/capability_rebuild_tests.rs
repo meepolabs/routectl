@@ -15,6 +15,11 @@ use crate::server::build_router_from_config;
 async fn default_router(tmp: &TempDir) -> Router {
     let mut config = Config::default();
     config.usage.db_path = tmp.path().join("router-usage.db");
+    // Owns the fixture lane `gpt-nick#upstream` under the kind its rows record.
+    config.providers.insert(
+        "gpt-nick".to_string(),
+        routectl_router::ProviderEntry::openai_compat("https://gpt.example.test/v1", "literal:k"),
+    );
     let config = Arc::new(config);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
     build_router_from_config(config, secrets)
@@ -72,8 +77,8 @@ fn seed_event(
     conn.execute(
         "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
          tier, evidence_class, upstream_token, catalog_version, overlay_revision, \
-         vocab_version) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10)",
+         provider_kind, vocab_version) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, 'openai-compat', ?10)",
         params![
             ts,
             lane_key,

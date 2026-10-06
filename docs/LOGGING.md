@@ -1574,6 +1574,19 @@ WARN routectl_router::router event=invalidation catalog_changed=true
   "catalog/overlay changed across reload; clearing catalog-scoped learned capabilities"
 ```
 
+### `owner_sweep` (INFO)
+
+Emitted on a hot reload when learned capabilities were dropped because the
+provider entry their lane names was removed from `[providers]` or changed
+`kind`. A same-kind `base_url` change drops nothing. Each dropped entry also
+emits a DEBUG `owner_sweep` line carrying `reason` (`owner_entry_removed` or
+`owner_kind_changed`), the sanitized `state_key`, and `capability_key`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `owner_sweep`. |
+| `dropped_owner` | integer | Learned entries removed because their provider entry no longer owns their lane. |
+
 ### Capability warm rebuild (INFO)
 
 Emitted once at serve bootstrap after the learned-capability registry is
@@ -1593,6 +1606,7 @@ history from a fully evicted one:
 | `skipped_revision` | integer | Catalog-scoped rows skipped because their stamped catalog / overlay revision is not the replay boundary's -- an eviction. Envelope-field rows are never counted here: their truth is catalog-independent, so they replay under a superseded revision. |
 | `skipped_vocab` | integer | Rows skipped whole before decoding because their stored vocabulary version is unknown to this build (for example a row a newer build wrote) or a vocabulary step retires one of their tokens. Stored rows are never rewritten; a known older vocabulary is mapped forward on read. Each skip also emits a `rebuild_skip` WARN with `reason` `unknown_vocab_version` or `retired_vocab_token`. |
 | `skipped_lane` | integer | Envelope-field rows skipped because their lane key does not parse as a learned lane (`provider_entry#upstream`), so no identity can be attributed to them. Each skip also emits a `rebuild_skip` WARN with `reason` `unparseable_lane`. |
+| `skipped_owner` | integer | Lane-keyed rows skipped because the provider entry their lane names no longer owns them: the entry is absent from the current config, it now has a different `kind` than the row recorded, or the row recorded no kind. Each skip also emits a `rebuild_skip` WARN with `reason` `owner_entry_removed`, `owner_kind_changed`, or `owner_kind_unrecorded`. A same-kind `base_url` change keeps ownership. |
 
 ### `strip` (WARN)
 

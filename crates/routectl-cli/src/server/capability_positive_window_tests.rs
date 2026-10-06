@@ -151,7 +151,7 @@ fn broken(
         upstream_token: None,
         catalog_version,
         overlay_revision,
-        provider_kind: None,
+        provider_kind: Some("openai-compat".to_string()),
         vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }

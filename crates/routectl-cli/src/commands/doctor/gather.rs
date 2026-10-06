@@ -286,7 +286,7 @@ pub(super) fn gather_capability_matrix(
         BoundaryOutcome::Replay(tombstone) => {
             let reader = LedgerCapabilityReader::new(config.usage.db_path.clone(), tombstone);
             let registry = LearnedCapabilityRegistry::from_capability_config(&config.capability);
-            let _ = rebuild_capabilities_into(&reader, &registry);
+            let _ = rebuild_capabilities_into(&reader, &registry, &config.providers);
             let entries = registry.snapshot();
             if entries.is_empty() {
                 CapabilityMatrixSource::Empty

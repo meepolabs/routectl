@@ -20,6 +20,11 @@ fn router_with_negative(capability: &str) -> Arc<Router> {
         "anthropic".to_string(),
         routectl_router::ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
     );
+    // The provider entry the fixture lane `nick#upstream` names.
+    config.providers.insert(
+        "nick".to_string(),
+        routectl_router::ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+    );
     config.models.insert(
         "nick#upstream".to_string(),
         routectl_router::ModelEntry::new("anthropic", "claude-sonnet-4-5"),
@@ -39,6 +44,11 @@ fn router_with_no_entries() -> Arc<Router> {
     let mut config = routectl_router::Config::default();
     config.providers.insert(
         "anthropic".to_string(),
+        routectl_router::ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+    );
+    // The provider entry the fixture lane `nick#upstream` names.
+    config.providers.insert(
+        "nick".to_string(),
         routectl_router::ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
     );
     config.models.insert(

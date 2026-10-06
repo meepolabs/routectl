@@ -31,6 +31,7 @@ mod capability_cleared;
 mod capability_health;
 mod capability_learn;
 mod capability_observe;
+mod capability_owner_sweep;
 mod capability_purge;
 mod chain;
 mod class_observe;
@@ -2679,6 +2680,7 @@ impl Router {
         let summary = crate::capability_rebuild::rebuild_capabilities_into(
             reader,
             &self.learned_capabilities,
+            &self.config.providers,
         );
         self.seed_field_canaries_from_ledger();
         summary
@@ -2776,11 +2778,12 @@ impl Router {
         // reads. An import into a fresh registry would satisfy every
         // value-equality check and silently drop those writes.
         //
-        // Nothing is copied and nothing is cleared here. On a revision change
-        // the catalog-scoped eviction belongs to the boundary transition
-        // (`advance_generation` + `prune_catalog_scoped`), which runs only
-        // after the boundary batch is durable -- pruning now would discard
-        // entries that a failed boundary must leave untouched.
+        // Nothing is copied here, and the only removal is the owner sweep
+        // below. On a revision change the catalog-scoped eviction belongs to
+        // the boundary transition (`advance_generation` +
+        // `prune_catalog_scoped`), which runs only after the boundary batch is
+        // durable -- pruning now would discard entries that a failed boundary
+        // must leave untouched.
         self.learned_capabilities = Arc::clone(&previous.learned_capabilities);
         // The facade holds its own Arc; rebuilt on the shared registry, with
         // the in-flight single-flight admissions carried across so an
@@ -2820,6 +2823,19 @@ impl Router {
         self.capability_health = previous.capability_persistence_health().cloned();
         self.registry_generation =
             std::sync::atomic::AtomicU64::new(self.learned_capabilities.generation());
+        // Ahead of any boundary cut, which restates surviving entries stamped
+        // with this Router's provider kind: an entry left resident under a
+        // kind-flipped name would be restated as owned by the new kind. A
+        // boundary that then fails leaves the previous Router without these
+        // entries; they relearn from traffic.
+        let dropped_owner = self.drop_unowned_learned_entries(previous);
+        if dropped_owner > 0 {
+            tracing::info!(
+                event = "owner_sweep",
+                dropped_owner,
+                "dropped learned capabilities whose provider entry was removed or changed kind",
+            );
+        }
 
         if catalog_changed || overlay_changed {
             // Retuning is DEFERRED to the boundary commit. A revision-changing

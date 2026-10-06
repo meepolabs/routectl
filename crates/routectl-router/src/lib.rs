@@ -25,6 +25,7 @@ pub(crate) mod calibration;
 pub(crate) mod capability_detect;
 pub(crate) mod capability_display;
 pub(crate) mod capability_matcher;
+pub(crate) mod capability_owner;
 pub(crate) mod capability_rebuild;
 pub(crate) mod capability_strip;
 pub(crate) mod capability_vocab;

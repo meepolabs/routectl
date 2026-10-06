@@ -52,6 +52,11 @@ const MS_PER_DAY: i64 = 86_400_000;
 async fn default_router(tmp: &TempDir) -> Router {
     let mut config = Config::default();
     config.usage.db_path = tmp.path().join("router-usage.db");
+    // Owns the fixture lane `gpt-nick#upstream` under the kind its rows record.
+    config.providers.insert(
+        "gpt-nick".to_string(),
+        routectl_router::ProviderEntry::openai_compat("https://gpt.example.test/v1", "literal:k"),
+    );
     let config = Arc::new(config);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
     build_router_from_config(config, secrets)
@@ -119,7 +124,7 @@ fn cap_event(
         upstream_token: None,
         catalog_version,
         overlay_revision,
-        provider_kind: None,
+        provider_kind: Some("openai-compat".to_string()),
         vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
     }
 }
@@ -395,7 +400,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
                     evidence.map(str::to_string),
                     (*capability).to_string(),
                     (*lane).to_string(),
-                    String::new(),
+                    "openai-compat".to_string(),
                     cat_u32,
                     overlay_u64,
                 )

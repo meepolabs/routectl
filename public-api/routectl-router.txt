@@ -10140,6 +10140,7 @@ pub routectl_router::CapabilityRebuildSummary::replayed_negative: usize
 pub routectl_router::CapabilityRebuildSummary::replayed_probe: usize
 pub routectl_router::CapabilityRebuildSummary::replayed_verified: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_lane: usize
+pub routectl_router::CapabilityRebuildSummary::skipped_owner: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_revision: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_unknown: usize
 pub routectl_router::CapabilityRebuildSummary::skipped_vocab: usize
@@ -15840,7 +15841,7 @@ pub fn routectl_router::preflight_config_version(&str) -> core::result::Result<u
 pub fn routectl_router::preflight_legacy_mitm_credential_source(&str) -> core::result::Result<(), routectl_router::LegacyMitmCredentialSourceError>
 pub fn routectl_router::propose_steady_state_trim(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimParams) -> core::option::Option<routectl_router::SteadyStateTrimPlan>
 pub fn routectl_router::provider_kind_for_oauth_id(&str) -> core::option::Option<&'static str>
-pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::LearnedCapabilityRegistry) -> routectl_router::CapabilityRebuildSummary
+pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::LearnedCapabilityRegistry, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ProviderEntry>) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::rebuild_into(&dyn routectl_router::LedgerReader, &routectl_router::KSessionStore, std::time::SystemTime, usize)
 pub const fn routectl_router::resolve_display_verdict(core::option::Option<(routectl_router::OverrideVerdict, routectl_router::OverrideProvenance)>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
 pub fn routectl_router::resolve_effective_row(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &routectl_router::CatalogOverlay) -> routectl_router::catalog::EffectiveRow

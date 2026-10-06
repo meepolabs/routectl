@@ -24,12 +24,15 @@
 //! (insertion order), so the negative-then-cleared ordering is
 //! deterministic.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use routectl_core::capability::{
     EvidenceSource, FailurePhase, SignalTier, is_known_evidence_class,
 };
 
+use crate::capability_owner::{OwnerDecision, owner_decision};
+use crate::config::ProviderEntry;
 use crate::learned_capability::LearnedCapabilityRegistry;
 
 /// The replay boundary: the latest tombstone's ledger `rowid` plus the
@@ -90,9 +93,11 @@ pub struct CapabilityEventRow {
     pub evidence_class: Option<String>,
     /// Normalized capability key.
     pub capability: String,
-    /// Breaker state key (nickname-or-provider) the event was recorded for.
+    /// Learned lane (`provider_entry#upstream`) the event was recorded for.
     pub state_key: String,
-    /// Provider-kind token, used to normalize the capability key on replay.
+    /// Kind of the provider entry the event was recorded under, empty when
+    /// the row carries none. Normalizes the capability key on replay and is
+    /// the recorded half of the owner check.
     pub provider_kind: String,
     /// Baked catalog version in force when the event was written.
     pub catalog_version: u32,
@@ -249,12 +254,21 @@ pub struct CapabilityRebuildSummary {
     /// lane, so a row keyed any other way names no identity this build can
     /// attribute it to.
     pub skipped_lane: usize,
+    /// Lane-keyed events skipped because the provider entry their lane names
+    /// is absent from the current config, carries a different kind than the
+    /// row recorded, or the row recorded no kind: the fact belongs to an
+    /// owner the current config no longer egresses to.
+    pub skipped_owner: usize,
 }
 
 /// Replay a ledger slice into `registry` through the live stage-2 admission
 /// calls. Reads the boundary and rows via `reader`, keeps the survivors,
 /// replays them in APPEND order (ascending `rowid`), and returns the tally. A
 /// missing tombstone replays nothing (fail-closed).
+///
+/// `providers` is the current `[providers]` table: a lane-keyed row whose
+/// provider entry it no longer configures under the recorded kind is skipped
+/// (`skipped_owner`), the same owner check the hot-reload carry-over applies.
 ///
 /// Precedence is `rowid` alone, never the mapped `observed_at`. The instant is
 /// derived from a persisted wall-clock stamp, so a clock rollback between two
@@ -265,6 +279,7 @@ pub struct CapabilityRebuildSummary {
 pub fn rebuild_capabilities_into(
     reader: &dyn CapabilityLedgerReader,
     registry: &LearnedCapabilityRegistry,
+    providers: &BTreeMap<String, ProviderEntry>,
 ) -> CapabilityRebuildSummary {
     let mut summary = CapabilityRebuildSummary::default();
     let Some(tombstone) = reader.tombstone() else {
@@ -300,6 +315,15 @@ pub fn rebuild_capabilities_into(
             summary.skipped_lane += 1;
             continue;
         }
+        if let Some(reason) = row_owner(&row, providers).skip_reason() {
+            tracing::warn!(
+                event = "rebuild_skip",
+                reason,
+                "capability rebuild skipped a row whose provider entry no longer owns its lane",
+            );
+            summary.skipped_owner += 1;
+            continue;
+        }
         match should_replay(&row, &tombstone) {
             ReplayDecision::Replay => rows.push(row),
             ReplayDecision::SkipRevision => summary.skipped_revision += 1,
@@ -319,6 +343,17 @@ pub fn rebuild_capabilities_into(
 fn field_row_names_a_lane(row: &CapabilityEventRow) -> bool {
     crate::field_capability::capability_key_is_catalog_scoped(&row.capability)
         || crate::state_key::StateKey::parse(&row.state_key).is_some()
+}
+
+/// The owner check for one row. A row whose key is not a lane names no
+/// provider entry to check; the namespace check above already decided it.
+fn row_owner(
+    row: &CapabilityEventRow,
+    providers: &BTreeMap<String, ProviderEntry>,
+) -> OwnerDecision {
+    crate::state_key::StateKey::parse(&row.state_key).map_or(OwnerDecision::Owned, |lane| {
+        owner_decision(&lane, &row.provider_kind, providers)
+    })
 }
 
 /// Replay one surviving row through the matching admission call. The parsed

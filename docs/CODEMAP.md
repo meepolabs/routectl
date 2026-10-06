@@ -2452,9 +2452,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   IS the publication. A revision-changing reload defers it to
   `apply_capability_tuning` at publication, after the boundary has committed,
   because a failed or abandoned boundary leaves the previous Router live and it
-  must keep the settings it was serving under. Evicts NOTHING either way: the
-  catalog-scoped eviction is the boundary transition's job, so a failed boundary
-  leaves the store untouched. The invalidation WARN + counter still fire),
+  must keep the settings it was serving under. Evicts no catalog-scoped entry
+  either way: that eviction is the boundary transition's job, so a failed
+  boundary leaves the store untouched. The one removal is the owner sweep
+  (`capability_owner_sweep.rs`), which runs before any boundary cut. The
+  invalidation WARN + counter still fire),
   `registry_generation` / `set_pending_registry_generation` (the generation token
   submitted with every registry operation; the reload coordinator stamps the
   PENDING generation between admitting a boundary batch and learning its
@@ -3770,6 +3772,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `output_config.format.schema` or a strict tool's `input_schema`),
   `forces_web_search` (bounded `tool_choice` directive read),
   `reasoning_requested`, `cache_requested`
+- `src/router/capability_owner_sweep.rs` -- `drop_unowned_learned_entries`,
+  run by `carry_over_learned_from` after the attach: removes (through the
+  generation barrier) every lane-keyed entry whose provider entry the new
+  config dropped or now configures under a different kind than the outgoing
+  config had, resetting a dropped field verdict's canary state; same rule as
+  boot replay via `capability_owner::owner_decision`
 - `src/router/capability_purge.rs` -- operator-initiated purge of ONE
   `(StateKey, capability)` learned entry, as a TWO-PHASE protocol whose ORDER is the contract (a purge is
   a memory mutation plus a SQLite transaction, and the transaction must not be
@@ -4501,8 +4509,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   current vocabulary (`capability_vocab::map_to_current`, the row carrying
   `vocab_version` via `with_vocab_version`); an unmappable row bumps
   `skipped_vocab` and never reaches an arm; a field row whose lane key does
-  not parse as a `StateKey` bumps `skipped_lane`. A missing tombstone replays nothing
+  not parse as a `StateKey` bumps `skipped_lane`; a lane-keyed row that fails
+  `capability_owner::owner_decision` against the `providers` table the caller
+  passes bumps `skipped_owner`. A missing tombstone replays nothing
   (fail-closed; the caller writes the fresh boot tombstone)
+- `src/capability_owner.rs` -- the one pure owner predicate
+  `owner_decision(lane, recorded_kind, providers) -> OwnerDecision`
+  (`Owned | EntryRemoved | KindChanged | KindUnrecorded`): a learned fact
+  belongs to its lane's `[providers]` entry only while that entry exists under
+  the recorded kind; an empty recorded kind is unowned. Shared by boot replay
+  (`skipped_owner`) and the hot-reload owner sweep; a same-kind `base_url`
+  repoint stays owned
 - `src/capability_matcher.rs` -- the single shared closed-set resolver mapping
   a use-time upstream rejection to the CANONICAL capability it names, in the
   request-capability namespace (`derive_feature_keys` vocabulary) so learn
@@ -5743,8 +5760,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   token (a new variant is a compile error; reused by `doctor_panels.rs`; see
   the function's own doc comment for the `version_too_old` / `expected` split).
   Lane-key contract: the persisted `lane_key` IS the registry `state_key` and
-  the persisted `capability` is already normalized, so `provider_kind` is
-  inert on replay. Tests in the `#[path]`-included `ledger_reader_tests.rs`
+  the persisted `capability` is already normalized; the persisted
+  `provider_kind` (empty for NULL) is carried into the replay row for the
+  owner check. Tests in the `#[path]`-included `ledger_reader_tests.rs`
 - `src/server/router_build.rs` -- Router construction from a parsed config +
   catalog overlay: `build_router_from_config_with_overlay` (the shared build
   path reused by boot and every hot-reload -- runs the whole shared

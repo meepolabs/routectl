@@ -180,7 +180,7 @@ fn restate_survivors_past_new_boundary(
     let live = router.learned_registry();
     let scratch =
         LearnedCapabilityRegistry::new(live.decay(), live.inferred_window(), live.max_entries());
-    let _ = rebuild_capabilities_into(&slice, &scratch);
+    let _ = rebuild_capabilities_into(&slice, &scratch, &router.config.providers);
     let survivors = scratch.snapshot();
     let batch = boundary_batch(
         &survivors,
@@ -295,6 +295,7 @@ fn emit_rebuild_log(summary: &CapabilityRebuildSummary, loaded_rows: usize) {
         skipped_revision = summary.skipped_revision,
         skipped_vocab = summary.skipped_vocab,
         skipped_lane = summary.skipped_lane,
+        skipped_owner = summary.skipped_owner,
         loaded_rows,
         row_cap = REBUILD_ROW_LIMIT,
         "warmed learned-capability registry from usage ledger"
