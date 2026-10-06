@@ -286,6 +286,32 @@ impl ReadFailure {
     }
 }
 
+/// An already-read post-boundary slice served as a replay source. A caller
+/// that must tell a failed read from an empty one reads through
+/// [`LedgerCapabilityReader::try_read_events`] first and replays only a slice
+/// that was actually read, so no failure can reach the replay disguised as
+/// zero rows.
+pub(crate) struct SliceReader {
+    tombstone: ReplayTombstone,
+    rows: Vec<ReplayRow>,
+}
+
+impl SliceReader {
+    pub(crate) const fn new(tombstone: ReplayTombstone, rows: Vec<ReplayRow>) -> Self {
+        Self { tombstone, rows }
+    }
+}
+
+impl CapabilityLedgerReader for SliceReader {
+    fn tombstone(&self) -> Option<ReplayTombstone> {
+        Some(self.tombstone)
+    }
+
+    fn read_events(&self) -> Vec<ReplayRow> {
+        self.rows.clone()
+    }
+}
+
 /// Map an epoch-millisecond event timestamp onto the monotonic clock relative
 /// to `now`. The age is clamped to zero (a future-dated row lands at `now`,
 /// never underflowing the duration); an older event maps into the past (an

@@ -288,7 +288,7 @@ fn seed_capability_ledger(xdg: &Path) -> PathBuf {
             upstream_token: None,
             catalog_version: cat,
             overlay_revision: 0,
-            provider_kind: None,
+            provider_kind: Some("openai-compat".to_string()),
             vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
         }
     };
@@ -298,7 +298,7 @@ fn seed_capability_ledger(xdg: &Path) -> PathBuf {
 
     insert(&routectl_usage::CapabilityEvent::tombstone(ts, cat, 0));
     insert(&event(
-        "laneA",
+        "local#m-a",
         "web_search",
         "verified",
         "f3",
@@ -306,7 +306,7 @@ fn seed_capability_ledger(xdg: &Path) -> PathBuf {
         Some("schema_parse".to_string()),
     ));
     insert(&event(
-        "laneA",
+        "local#m-a",
         "computer_use",
         "broken",
         "f1",
@@ -314,7 +314,7 @@ fn seed_capability_ledger(xdg: &Path) -> PathBuf {
         None,
     ));
     insert(&event(
-        "laneA",
+        "local#m-a",
         "prompt_caching",
         "broken",
         "f1",
@@ -657,10 +657,10 @@ fn doctor_binary_renders_seeded_capability_matrix_and_freshness() {
             .unwrap_or_else(|| panic!("lane {lane} missing"));
         lane_obj["cells"][ci].clone()
     };
-    let verified = cell("laneA", "web_search");
+    let verified = cell("local#m-a", "web_search");
     assert_eq!(verified["verdict"], serde_json::json!("verified"));
     assert_eq!(verified["source"], serde_json::json!("live"));
-    let overridden = cell("laneA", "prompt_caching");
+    let overridden = cell("local#m-a", "prompt_caching");
     assert_eq!(
         overridden["verdict"],
         serde_json::json!("forced_supported"),

@@ -730,8 +730,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_twelve() {
-    assert_eq!(SCHEMA_VERSION, 12);
+fn schema_version_is_thirteen() {
+    assert_eq!(SCHEMA_VERSION, 13);
 
     let context = ctx(
         config_with_overrides(),
@@ -740,7 +740,7 @@ fn schema_version_is_twelve() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 12);
+    assert_eq!(report.schema_version, 13);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2606,7 +2606,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 12);
+    assert_eq!(no_net.schema_version, 13);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -2798,7 +2798,7 @@ mod capability_matrix {
         assert!(
             matches!(
                 gather_capability_matrix(&config, false, 0),
-                CapabilityMatrixSource::Empty
+                CapabilityMatrixSource::Empty { .. }
             ),
             "a readable, matched, zero-row ledger is honest-empty"
         );
@@ -2848,6 +2848,7 @@ mod capability_matrix {
             entries,
             now,
             now_ms,
+            ..
         } = gather_capability_matrix(&config, false, 0)
         else {
             panic!("a matching tombstone with a post-boundary row must be Available");
@@ -3529,6 +3530,10 @@ mod matrix_panel {
         CapabilityMatrixPanel, LearnedRegistryEntry, MatrixAvailability, MatrixCell,
     };
 
+    /// The learned lanes `matrix_config`'s two models dispatch to.
+    const LANE_A: &str = "p#m-a";
+    const LANE_B: &str = "p#m-b";
+
     /// A config with one provider `p` and two routed model lanes.
     fn matrix_config() -> Config {
         toml::from_str(
@@ -3608,21 +3613,21 @@ mod matrix_panel {
         let now = Instant::now();
         let entries = vec![
             entry(
-                "laneA",
+                LANE_A,
                 "web_search",
                 Verdict::VerifiedWorking,
                 EvidenceSource::Live,
                 now,
             ),
             entry(
-                "laneA",
+                LANE_A,
                 "thinking",
                 Verdict::LearnedBroken(FailurePhase::F1),
                 EvidenceSource::Probe,
                 now,
             ),
             entry(
-                "laneB",
+                LANE_B,
                 "custom_tool",
                 Verdict::VerifiedWorking,
                 EvidenceSource::Live,
@@ -3639,6 +3644,7 @@ mod matrix_panel {
                 entries,
                 now,
                 now_ms: 0,
+                replay: MatrixReplaySummary::default(),
             },
             priors,
         );
@@ -3656,32 +3662,32 @@ mod matrix_panel {
         assert!(panel.columns.iter().any(|c| c == "custom_tool"));
 
         // Verified live cell.
-        let verified = find_cell(&panel, "laneA", "web_search");
+        let verified = find_cell(&panel, LANE_A, "web_search");
         assert_eq!(verified.verdict, "verified");
         assert_eq!(verified.source, Some("live"));
         assert_eq!(verified.supported, Some(true));
         assert!(verified.age_ms.is_some());
 
         // Learned-broken probe cell.
-        let broken = find_cell(&panel, "laneA", "thinking");
+        let broken = find_cell(&panel, LANE_A, "thinking");
         assert_eq!(broken.verdict, "broken");
         assert_eq!(broken.source, Some("probe"));
         assert_eq!(broken.supported, Some(false));
 
         // Prior cell (assumed unsupported).
-        let prior = find_cell(&panel, "laneA", "structured_output");
+        let prior = find_cell(&panel, LANE_A, "structured_output");
         assert_eq!(prior.verdict, "assumed");
         assert_eq!(prior.source, Some("prior"));
         assert_eq!(prior.supported, Some(false));
         assert_eq!(prior.age_ms, None);
 
         // Other-column cell on laneB.
-        let other = find_cell(&panel, "laneB", "custom_tool");
+        let other = find_cell(&panel, LANE_B, "custom_tool");
         assert_eq!(other.verdict, "verified");
         assert_eq!(other.source, Some("live"));
 
         // A column with no signal for a lane resolves unknown.
-        let unknown = find_cell(&panel, "laneB", "web_search");
+        let unknown = find_cell(&panel, LANE_B, "web_search");
         assert_eq!(unknown.verdict, "unknown");
         assert_eq!(unknown.source, None);
     }
@@ -3693,7 +3699,7 @@ mod matrix_panel {
         let entries: Vec<LearnedRegistryEntry> = (0..12)
             .map(|i| {
                 entry(
-                    "laneA",
+                    LANE_A,
                     &format!("other_{i:02}"),
                     Verdict::VerifiedWorking,
                     EvidenceSource::Live,
@@ -3706,6 +3712,7 @@ mod matrix_panel {
                 entries,
                 now,
                 now_ms: 0,
+                replay: MatrixReplaySummary::default(),
             },
             Vec::new(),
         );
@@ -3718,8 +3725,12 @@ mod matrix_panel {
 
     #[test]
     fn availability_empty_and_unavailable_render_distinctly() {
-        let empty =
-            build_capability_matrix_panel(&matrix_ctx(CapabilityMatrixSource::Empty, Vec::new()));
+        let empty = build_capability_matrix_panel(&matrix_ctx(
+            CapabilityMatrixSource::Empty {
+                replay: MatrixReplaySummary::default(),
+            },
+            Vec::new(),
+        ));
         assert_eq!(empty.availability, MatrixAvailability::Empty);
 
         let unavailable = build_capability_matrix_panel(&matrix_ctx(
@@ -3747,7 +3758,7 @@ mod matrix_panel {
         let base = Instant::now();
         let now = base + Duration::from_secs(30 * 86_400);
         let entries = vec![entry(
-            "laneA",
+            LANE_A,
             "web_search",
             Verdict::VerifiedWorking,
             EvidenceSource::Live,
@@ -3765,17 +3776,18 @@ mod matrix_panel {
                 entries,
                 now,
                 now_ms: 0,
+                replay: MatrixReplaySummary::default(),
             },
             priors,
         );
 
         let panel = build_capability_matrix_panel(&ctx);
         assert!(
-            find_cell(&panel, "laneA", "web_search").stale,
+            find_cell(&panel, LANE_A, "web_search").stale,
             "a verified cell older than the hint is stale"
         );
         assert!(
-            find_cell(&panel, "laneA", "structured_output").stale,
+            find_cell(&panel, LANE_A, "structured_output").stale,
             "a prior stamp past the hint is stale"
         );
     }
@@ -3795,6 +3807,7 @@ mod matrix_panel {
                 entries,
                 now,
                 now_ms: 0,
+                replay: MatrixReplaySummary::default(),
             },
             Vec::new(),
         );
@@ -3824,6 +3837,10 @@ mod seeded_matrix_surfaces {
     use routectl_usage::{CapabilityEvent, insert_capability_event, open};
     use serde_json::Value;
     use tempfile::TempDir;
+
+    /// The learned lanes `config_at`'s two models dispatch to.
+    const LANE_A: &str = "p#m-a";
+    const LANE_B: &str = "p#m-b";
 
     /// Current epoch milliseconds, so seeded rows sit just behind the reader's
     /// pinned `now` and their ages stay small (never stale-flagged).
@@ -3885,7 +3902,7 @@ mod seeded_matrix_surfaces {
             upstream_token: None,
             catalog_version: i64::from(CATALOG_VERSION),
             overlay_revision: 0,
-            provider_kind: None,
+            provider_kind: Some("openai-compat".to_string()),
             vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
         }
     }
@@ -3922,7 +3939,7 @@ mod seeded_matrix_surfaces {
         insert(&CapabilityEvent::tombstone(ts, cat, 0));
         insert(&event(
             ts,
-            "laneA",
+            LANE_A,
             "web_search",
             "verified",
             "f3",
@@ -3932,7 +3949,7 @@ mod seeded_matrix_surfaces {
         ));
         insert(&event(
             ts,
-            "laneA",
+            LANE_A,
             "computer_use",
             "broken",
             "f1",
@@ -3942,7 +3959,7 @@ mod seeded_matrix_surfaces {
         ));
         insert(&event(
             ts,
-            "laneA",
+            LANE_A,
             "prompt_caching",
             "broken",
             "f1",
@@ -4015,7 +4032,7 @@ mod seeded_matrix_surfaces {
         let panel = &json["panels"]["capability_matrix"];
         assert_eq!(panel["availability"]["state"], Value::from("available"));
 
-        let verified = json_cell(panel, "laneA", "web_search");
+        let verified = json_cell(panel, LANE_A, "web_search");
         assert_eq!(verified["verdict"], Value::from("verified"));
         assert_eq!(verified["source"], Value::from("live"));
         assert_eq!(verified["supported"], Value::from(true));
@@ -4025,14 +4042,14 @@ mod seeded_matrix_surfaces {
         );
         assert_eq!(verified["stale"], Value::from(false));
 
-        let broken = json_cell(panel, "laneA", "computer_use");
+        let broken = json_cell(panel, LANE_A, "computer_use");
         assert_eq!(broken["verdict"], Value::from("broken"));
         assert_eq!(broken["source"], Value::from("probe"));
         assert_eq!(broken["supported"], Value::from(false));
 
         // Override-won: the operator override overrules the seeded live
         // negative for the same cell.
-        let overridden = json_cell(panel, "laneA", "prompt_caching");
+        let overridden = json_cell(panel, LANE_A, "prompt_caching");
         assert_eq!(overridden["verdict"], Value::from("forced_supported"));
         assert_eq!(overridden["source"], Value::from("override"));
         assert!(
@@ -4040,7 +4057,7 @@ mod seeded_matrix_surfaces {
             "an override cell carries no learned age: {overridden}"
         );
 
-        let prior = json_cell(panel, "laneB", "structured_output");
+        let prior = json_cell(panel, LANE_B, "structured_output");
         assert_eq!(prior["verdict"], Value::from("assumed"));
         assert_eq!(prior["source"], Value::from("prior"));
         assert_eq!(prior["supported"], Value::from(false));
@@ -4049,7 +4066,7 @@ mod seeded_matrix_surfaces {
             "a prior cell has no age: {prior}"
         );
 
-        let unknown = json_cell(panel, "laneB", "web_search");
+        let unknown = json_cell(panel, LANE_B, "web_search");
         assert_eq!(unknown["verdict"], Value::from("unknown"));
         assert!(
             unknown["source"].is_null() && unknown["supported"].is_null(),
@@ -4065,7 +4082,9 @@ mod seeded_matrix_surfaces {
         let ledger = Path::new("/nonexistent/usage.db");
 
         let empty = build_report(&DoctorContext {
-            capability_matrix: CapabilityMatrixSource::Empty,
+            capability_matrix: CapabilityMatrixSource::Empty {
+                replay: MatrixReplaySummary::default(),
+            },
             ..ctx(
                 config_at(ledger),
                 Some(&current_version_stamp()),

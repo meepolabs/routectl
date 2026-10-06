@@ -21,6 +21,10 @@ mod sections;
 #[path = "doctor_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "lane_matrix_tests.rs"]
+mod lane_matrix_tests;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -29,7 +33,7 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
     CatalogImportState, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry,
-    PricingSource, Status, WouldTrimPanel, overall_exit,
+    MatrixReplaySummary, PricingSource, Status, WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -98,7 +102,15 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// too-old ledger schema as `version_too_old` instead of folding it into the
 /// same `expected` code a cold ledger renders -- the two states have
 /// different remedies and were previously indistinguishable in the report.
-const SCHEMA_VERSION: u32 = 12;
+///
+/// v12 -> v13: the capability matrix panel's rows are learned lanes
+/// (`provider_entry#upstream`) rather than model nicknames, each carrying
+/// the nicknames that map to it and its provider kind; every cell gains its
+/// winning layer, the routing action, and the resident learned entry's
+/// first-seen / last-seen / expiry timestamps; the panel gains the replay
+/// tally (`replay`); and a post-boundary slice read that fails renders
+/// `Unavailable` (`open_failed` / `query_failed`) instead of an empty matrix.
+const SCHEMA_VERSION: u32 = 13;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -368,33 +380,36 @@ struct PriorCell {
 /// The read-only ledger-replay source the capability matrix panel renders
 /// from, with availability as a first-class tri-state. The matrix is
 /// honest-`Empty` ONLY when the ledger was readable, its tombstone matched
-/// this run's revision, and the post-boundary slice held zero rows. Every
-/// other outcome -- unreadable ledger, version-too-new, absent or foreign
-/// tombstone, a config that would not parse -- is `Unavailable` with a
-/// path-free class token, NEVER a silent empty: boot's fail-closed-to-empty
-/// is correct for serving but would mislead a diagnostic into reporting
-/// "nothing learned" when the truth is "could not read".
+/// this run's revision, its post-boundary slice was actually read, and the
+/// replay left nothing resident. Every other outcome -- unreadable ledger,
+/// version-too-new, absent or foreign tombstone, a slice read that failed
+/// after the boundary classified, a config that would not parse -- is
+/// `Unavailable` with a path-free class token, NEVER a silent empty: boot's
+/// fail-closed-to-empty is correct for serving but would mislead a
+/// diagnostic into reporting "nothing learned" when the truth is "could not
+/// read".
 enum CapabilityMatrixSource {
     /// The ledger replayed at least one learned entry. `now` / `now_ms` are
     /// the single pinned clock anchors the mapped instants were taken
-    /// against, so every derived cell age shares one skew-free basis.
+    /// against, so every derived cell age and timestamp shares one
+    /// skew-free basis.
     Available {
         entries: Vec<LearnedRegistryEntry>,
         now: Instant,
-        /// The pinned wall-clock anchor the ledger replay read once. The
-        /// matrix panel derives cell ages from the monotonic `now`
-        /// (skew-free relative deltas), so this absolute anchor is reserved
-        /// for a future consumer that needs epoch-ms timestamps.
-        #[cfg_attr(not(test), allow(dead_code))]
+        /// The wall-clock anchor paired with `now`: a cell's epoch-ms
+        /// timestamps are `now_ms` offset by the instant's distance from
+        /// `now`.
         now_ms: i64,
+        replay: MatrixReplaySummary,
     },
-    /// Readable ledger, matched tombstone, zero post-boundary rows: an honest,
-    /// non-degraded empty.
-    Empty,
+    /// Readable ledger, matched tombstone, slice read, nothing resident after
+    /// the replay: an honest, non-degraded empty. The tally still says how
+    /// many rows were read and why each was skipped.
+    Empty { replay: MatrixReplaySummary },
     /// The source could not be read at this run's revision; the token is a
     /// path-free class (`config_unavailable` / `no_data` / `no_tombstone` /
-    /// `revision_mismatch` / `tombstone_read` / an open-error class such as
-    /// `version_too_new`).
+    /// `revision_mismatch` / `tombstone_read` / `open_failed` /
+    /// `query_failed` / an open-error class such as `version_too_new`).
     Unavailable(&'static str),
 }
 

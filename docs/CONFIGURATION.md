@@ -4290,16 +4290,27 @@ The battery sections, in render order:
 Two structured panels render after the sections:
 
 - **`panels.capability_matrix`** -- the learned-capability truth matrix:
-  lanes (config model nicknames, plus any stale learned lane, marked
-  `(unrouted)` when the loaded config no longer maps it) by capability
-  keys, one resolved display cell each. Every cell merges the three signal
-  layers -- operator overrides, the learned ledger-replay registry, and
-  catalog priors -- through the same resolver the router uses, so the panel
-  cannot drift from dispatch precedence; each cell carries its winning
-  layer, its age, and a staleness flag. The ledger source reports a
-  first-class tri-state (available / an honest empty / unavailable with a
-  path-free class code) so "could not read" is never collapsed into
-  "nothing learned".
+  learned lanes by capability keys, one resolved display cell each. A lane
+  is `<provider>#<upstream>` -- the `[providers]` entry that egresses and
+  the upstream model id -- printed exactly as `routectl capability purge`
+  accepts it; each row also names its provider kind and the model nicknames
+  that map to it (two nicknames on one upstream of one provider entry share
+  a lane, and a pooled model has one lane per member entry). A learned lane
+  the loaded config no longer maps is marked `(unrouted)`. Every cell merges
+  the three signal layers -- operator overrides, the learned ledger-replay
+  registry, and catalog priors -- through the same resolver the router uses,
+  so the panel cannot drift from dispatch precedence; each cell carries its
+  winning layer (`override` / `learned` / `prior`) and evidence source, the
+  routing action the dispatch filter takes (`drop` / `route_away` / `strip`
+  / `reprobe` / `allow` / `none`), the learned entry's first-seen /
+  last-seen / expiry times, its age, and a staleness flag. The ledger source
+  reports a first-class tri-state (available / an honest empty / unavailable
+  with a path-free class code, including `open_failed` / `query_failed`
+  when the slice after the replay boundary could not be read) so "could not
+  read" is never collapsed into "nothing learned"; whenever the replay ran,
+  `replay` reports the rows read, replayed, and skipped by reason
+  (`skipped_vocab`, `skipped_owner`, `skipped_revision`, `skipped_lane`,
+  `skipped_unknown`).
 - **`panels.would_trim`** -- the steady-state would-trim opportunity,
   read-only over all recorded history. Its fields are documented under
   [Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)

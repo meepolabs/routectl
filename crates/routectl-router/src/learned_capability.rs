@@ -153,12 +153,19 @@ struct LearnedEntry {
     provider_kind: String,
 }
 
+/// Whether an entry with this signal tier and observation count acts: a
+/// self-identifying signal on one observation, an inferred one only once
+/// corroborated.
+pub const fn signal_acts(signal: SignalTier, observations: u32) -> bool {
+    matches!(signal, SignalTier::SelfIdentifying) || observations >= 2
+}
+
 impl LearnedEntry {
     /// A self-identifying signal acts on one observation; an inferred
     /// signal needs corroboration (two observations). A `Verified` positive
     /// is always self-identifying, so it acts on its single observation.
     const fn is_acting(&self) -> bool {
-        matches!(self.signal, SignalTier::SelfIdentifying) || self.observations >= 2
+        signal_acts(self.signal, self.observations)
     }
 
     /// The decay window has lapsed and the negative is due for a re-probe.

@@ -90,12 +90,19 @@ pub enum MatrixAvailability {
 /// `Verdict::as_str` vocabulary plus the panel-only `forced_supported` /
 /// `forced_unsupported` override tokens); `supported` carries the polarity
 /// the token alone omits for a prior `assumed` cell (`None` only for an
-/// `unknown` cell); `source` is the winning layer's tag
-/// (`override` / `live` / `probe` / `prior`), `None` for `unknown`.
-/// `age_ms` is the learned/verified cell's age since last seen (`None` for
-/// prior / override / unknown cells); `stale` flags a verified cell older
-/// than the operator staleness hint or a prior stamp past the same
-/// threshold.
+/// `unknown` cell); `source` is the winning layer's evidence tag
+/// (`override` / `live` / `probe` / `prior`) and `layer` the layer itself
+/// (`override` / `learned` / `prior`), both `None` for `unknown`. `action` is
+/// what the dispatch filter does with the cell (`drop` / `route_away` /
+/// `strip` / `reprobe` / `allow` / `none`).
+///
+/// The timestamps are epoch milliseconds and describe the resident learned
+/// entry, so they are present only when one exists -- including when an
+/// override or prior wins the cell, since the learned entry still exists
+/// underneath. `expires_at_ms` is a negative's decay deadline and is `None`
+/// for a positive, which never decays. `age_ms` is the winning learned
+/// cell's age since last seen; `stale` flags a verified cell older than the
+/// operator staleness hint or a prior stamp past the same threshold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixCell {
     /// The display verdict token.
@@ -104,43 +111,88 @@ pub struct MatrixCell {
     pub supported: Option<bool>,
     /// The winning layer's source tag; `None` only for an `unknown` cell.
     pub source: Option<&'static str>,
+    /// The winning layer; `None` only for an `unknown` cell.
+    pub layer: Option<&'static str>,
+    /// The routing action the dispatch filter takes for this cell.
+    pub action: &'static str,
     /// Age since last seen in ms for a learned/verified cell; else `None`.
     pub age_ms: Option<i64>,
     /// Whether the cell is stale past the operator staleness hint.
     pub stale: bool,
+    /// When the resident learned entry was first observed (epoch ms).
+    pub first_seen_ms: Option<i64>,
+    /// When the resident learned entry was last observed (epoch ms).
+    pub last_seen_ms: Option<i64>,
+    /// When a resident learned negative's decay window lapses (epoch ms).
+    pub expires_at_ms: Option<i64>,
 }
 
-/// One matrix row: a lane (a config model nickname, or a learned state key
-/// with no config entry) and its cells aligned 1:1 with the panel's
-/// `columns`. `routed` is false for a lane the loaded config no longer maps
-/// -- a stale ledger row for a removed model, surfaced honestly rather than
-/// silently dropped.
+/// One matrix row: a learned lane and its cells aligned 1:1 with the panel's
+/// `columns`. `lane` is the serialized `provider_entry#upstream` form the
+/// learned store keys on and `capability purge` accepts; a legacy ledger key
+/// that is not a lane is shown verbatim. `nicknames` are the config models
+/// that dispatch to the lane (two nicknames for one upstream on one provider
+/// entry share it). `routed` is false for a lane the loaded config no longer
+/// maps -- a stale ledger row for a removed model or provider entry, surfaced
+/// honestly rather than silently dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixLane {
-    /// The lane key (config model nickname or learned state key).
+    /// The lane key (`provider_entry#upstream`, or a legacy key verbatim).
     pub lane: String,
+    /// The config model nicknames that map to this lane, sorted.
+    pub nicknames: Vec<String>,
+    /// The lane's provider kind (`kind_str`), empty when its provider entry
+    /// is not configured.
+    pub provider_kind: &'static str,
     /// Whether the loaded config still maps this lane to a provider.
     pub routed: bool,
     /// Cells aligned 1:1 with the panel's `columns`.
     pub cells: Vec<MatrixCell>,
 }
 
+/// What the read-only ledger replay behind the matrix did with the rows it
+/// read: how many replayed, and how many it skipped by reason. A skip is not
+/// an error; it is a row this build cannot attribute to a current lane or
+/// vocabulary, which the operator should be able to see rather than infer
+/// from a thin matrix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct MatrixReplaySummary {
+    /// Ledger rows read past the replay boundary.
+    pub loaded_rows: usize,
+    /// Rows replayed into the registry (positives, negatives, and clears).
+    pub replayed: usize,
+    /// Rows skipped for a vocabulary version or token this build retires.
+    pub skipped_vocab: usize,
+    /// Rows skipped because their provider entry no longer owns the lane.
+    pub skipped_owner: usize,
+    /// Catalog-scoped rows skipped for a catalog / overlay revision change.
+    pub skipped_revision: usize,
+    /// Field rows skipped because their key is not a learned lane.
+    pub skipped_lane: usize,
+    /// Rows skipped for a token the current vocabulary does not recognize.
+    pub skipped_unknown: usize,
+}
+
 /// The learned-capability truth matrix panel: lanes (rows) by capability
-/// keys (columns). `columns` is the five well-known capability keys
-/// followed by any observed keys outside that set, capped at a fixed
-/// render width; `other_overflow` is the count of observed keys beyond the
-/// cap (rendered as `(+N more)`). `lanes` is empty when `availability` is
-/// not `Available` and no config-derived cell exists.
+/// keys (columns). `columns` is the well-known capability keys followed by
+/// any observed keys outside that set, capped at a fixed render width;
+/// `other_overflow` is the count of observed keys beyond the cap (rendered
+/// as `(+N more)`). `lanes` is empty when `availability` is not `Available`
+/// and no config-derived cell exists. `replay` is present whenever the
+/// ledger replay ran (`Available` or `Empty`), `None` when the source was
+/// unavailable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CapabilityMatrixPanel {
     /// The learned ledger-replay source availability tri-state.
     pub availability: MatrixAvailability,
-    /// Column keys: the five well-known keys, then capped observed others.
+    /// Column keys: the well-known keys, then capped observed others.
     pub columns: Vec<String>,
     /// Count of observed other-column keys beyond the render cap.
     pub other_overflow: u32,
     /// Matrix rows.
     pub lanes: Vec<MatrixLane>,
+    /// The replay tally, when the replay ran.
+    pub replay: Option<MatrixReplaySummary>,
 }
 
 /// The full doctor report: a flat findings list plus the structured panels.

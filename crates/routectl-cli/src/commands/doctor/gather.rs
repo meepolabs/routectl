@@ -10,9 +10,10 @@ use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    CATALOG_VERSION, CatalogOverlay, Config, EffectiveRow, LearnedCapabilityRegistry,
-    PricingSource, Source, catalog_import_state_default_path, derive_effective_view,
-    effective_pricing, load_last_import, rebuild_capabilities_into, today_epoch_day,
+    CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay, Config,
+    EffectiveRow, LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource, ReplayTombstone,
+    Source, catalog_import_state_default_path, derive_effective_view, effective_pricing,
+    load_last_import, rebuild_capabilities_into, today_epoch_day,
 };
 
 use crate::commands::capability_legacy::present_legacy_capability_keys;
@@ -21,7 +22,9 @@ use crate::commands::parse_error_redaction::redact_config_load_error;
 use crate::commands::pricing::{is_subscription, missing_equivalence_dimensions};
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
 use crate::server::CompositeStore;
-use crate::server::ledger_reader::{BoundaryOutcome, LedgerCapabilityReader, classify_boundary};
+use crate::server::ledger_reader::{
+    BoundaryOutcome, LedgerCapabilityReader, SliceReader, classify_boundary,
+};
 
 use super::{
     CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, EquivalenceBasis,
@@ -268,11 +271,14 @@ fn equivalence_basis(
 /// A config that would not parse yields `Unavailable("config_unavailable")`:
 /// the usage db path and the revision knobs cannot be trusted, so an
 /// empty-from-default read would misreport. Otherwise the replay boundary is
-/// resolved against this run's baked catalog version + overlay revision and
-/// either replayed into a bare, config-sized registry (`Available`, or honest
-/// `Empty` on a matched-but-zero-row slice) or reported `Unavailable` with a
-/// path-free class token. Read-only: the ledger is only ever opened
-/// read-only, so the db is byte-identical afterward.
+/// resolved against this run's baked catalog version + overlay revision; on a
+/// match the post-boundary slice is read through the typed
+/// [`LedgerCapabilityReader::try_read_events`], so a slice that cannot be
+/// read is `Unavailable` with its path-free failure class rather than an
+/// empty registry. A slice that was read replays into a bare, config-sized
+/// registry (`Available`, or honest `Empty` when nothing stays resident).
+/// Read-only: the ledger is only ever opened read-only, so the db is
+/// byte-identical afterward.
 pub(super) fn gather_capability_matrix(
     config: &Config,
     config_parse_failed: bool,
@@ -285,17 +291,9 @@ pub(super) fn gather_capability_matrix(
     match classify_boundary(&config.usage.db_path, CATALOG_VERSION, overlay_revision) {
         BoundaryOutcome::Replay(tombstone) => {
             let reader = LedgerCapabilityReader::new(config.usage.db_path.clone(), tombstone);
-            let registry = LearnedCapabilityRegistry::from_capability_config(&config.capability);
-            let _ = rebuild_capabilities_into(&reader, &registry, &config.providers);
-            let entries = registry.snapshot();
-            if entries.is_empty() {
-                CapabilityMatrixSource::Empty
-            } else {
-                CapabilityMatrixSource::Available {
-                    entries,
-                    now: reader.now(),
-                    now_ms: reader.now_ms(),
-                }
+            match reader.try_read_events() {
+                Ok(rows) => replay_matrix_slice(config, &reader, tombstone, rows),
+                Err(failure) => CapabilityMatrixSource::Unavailable(failure.as_str()),
             }
         }
         BoundaryOutcome::Cold => CapabilityMatrixSource::Unavailable("no_data"),
@@ -304,6 +302,51 @@ pub(super) fn gather_capability_matrix(
             CapabilityMatrixSource::Unavailable("revision_mismatch")
         }
         BoundaryOutcome::Unreadable(code) => CapabilityMatrixSource::Unavailable(code),
+    }
+}
+
+/// Replay an already-read post-boundary slice into a bare registry and
+/// classify what stayed resident, carrying the replay tally either way.
+fn replay_matrix_slice(
+    config: &Config,
+    reader: &LedgerCapabilityReader,
+    tombstone: ReplayTombstone,
+    rows: Vec<CapabilityEventRow>,
+) -> CapabilityMatrixSource {
+    let slice = SliceReader::new(tombstone, rows);
+    let registry = LearnedCapabilityRegistry::from_capability_config(&config.capability);
+    let summary = rebuild_capabilities_into(&slice, &registry, &config.providers);
+    let replay = replay_summary(&summary, reader.loaded_rows());
+    let entries = registry.snapshot();
+    if entries.is_empty() {
+        CapabilityMatrixSource::Empty { replay }
+    } else {
+        CapabilityMatrixSource::Available {
+            entries,
+            now: reader.now(),
+            now_ms: reader.now_ms(),
+            replay,
+        }
+    }
+}
+
+/// Fold the router's rebuild tally into the panel's replay summary.
+/// `replayed` counts every row that reached an admission arm.
+const fn replay_summary(
+    summary: &CapabilityRebuildSummary,
+    loaded_rows: usize,
+) -> MatrixReplaySummary {
+    MatrixReplaySummary {
+        loaded_rows,
+        replayed: summary.replayed_verified
+            + summary.replayed_negative
+            + summary.replayed_cleared
+            + summary.cleared_noop,
+        skipped_vocab: summary.skipped_vocab,
+        skipped_owner: summary.skipped_owner,
+        skipped_revision: summary.skipped_revision,
+        skipped_lane: summary.skipped_lane,
+        skipped_unknown: summary.skipped_unknown,
     }
 }
 

@@ -18,10 +18,12 @@
   // source, so the tab-wide `safeSection` IS that posture -- the whole payload
   // is validated below before any section is built.
   //
-  // The report also carries structured panels (steady-state trim, capability
-  // matrix). Neither is a check with a verdict, so neither belongs among the
-  // findings; the capability cells the config resolves already have their home
-  // on the Config tab.
+  // The report also carries structured panels. The steady-state trim panel is
+  // not a check with a verdict and has no home here. The capability matrix
+  // does: it is the one place an operator reads what each learned lane has
+  // learned, so it renders below the checks, together with the daemon's live
+  // capability-write failure counters, which say whether what it learns can
+  // survive a restart.
   function buildDoctor(rec) {
     return safeSection(rec, buildDoctorLive);
   }
@@ -39,6 +41,9 @@
     else if (passes.length) { stack.appendChild(doctorAllClear(passes.length)); }
     else { stack.appendChild(doctorNoChecks()); }
     if (passes.length) { stack.appendChild(doctorPasses(passes)); }
+    stack.appendChild(doctorCapWrites(rec.data.capability_writes));
+    var matrix = (report.panels || {}).capability_matrix;
+    if (matrix) { stack.appendChild(doctorMatrix(matrix, panelNowMs(rec))); }
     return stack;
   }
 
@@ -238,6 +243,110 @@
       'The report came back without a single check. Nothing is known to be wrong here, ' +
       'and nothing has been confirmed healthy either.',
       ['current state']);
+  }
+
+  // ---- doctor: capability-write counters -------------------------------
+
+  // Three counters, never summed: a full channel is load, a write error is a
+  // store fault, an unavailable writer is teardown -- each sends an operator
+  // somewhere different. A zero reads faint; a nonzero one carries the
+  // attention tone, because any of them means a learned verdict may not
+  // survive a restart.
+  var CAP_WRITE_COUNTERS = [
+    ['capability_events_dropped_full', 'dropped (channel full)'],
+    ['write_errors', 'write errors'],
+    ['capability_writer_unavailable', 'writer unavailable']
+  ];
+
+  function doctorCapWrites(writes) {
+    var w = writes || {};
+    var row = document.createElement('div');
+    row.className = 'doccounts';
+    CAP_WRITE_COUNTERS.forEach(function (c) {
+      row.appendChild(doctorCount(c[1], num0(w[c[0]]), 'bad'));
+    });
+    return card('Capability writes',
+      'since this daemon started - nonzero means a learned verdict may not survive a restart',
+      row);
+  }
+
+  // ---- doctor: capability matrix ---------------------------------------
+
+  // One row per learned lane, keyed exactly as `routectl capability purge`
+  // accepts it, with the nicknames that map to it. A cell is the winning
+  // verdict and its layer; the routing action, the learned timestamps and the
+  // age sit in its tooltip so the grid stays readable.
+  function doctorMatrix(panel, nowMs) {
+    var wrap = document.createElement('div');
+    wrap.className = 'ovsection';
+    var lanes = Array.isArray(panel.lanes) ? panel.lanes : [];
+    var columns = Array.isArray(panel.columns) ? panel.columns : [];
+    wrap.appendChild(sectionHead('Capability matrix', matrixStateText(panel.availability)));
+    if (panel.replay) { wrap.appendChild(docText('docmatrix-replay', replayText(panel.replay))); }
+    if (!lanes.length) {
+      wrap.appendChild(docText('docmatrix-empty', 'no capability lanes observed'));
+      return wrap;
+    }
+    var cols = [R('lane'), C('kind'), C('nicknames')].concat(columns.map(function (c) {
+      return C(c);
+    }));
+    var tbl = mkTable('Capability matrix', cols, false);
+    lanes.forEach(function (lane) {
+      var cells = Array.isArray(lane.cells) ? lane.cells : [];
+      trow(tbl, [
+        lane.routed ? lane.lane : lane.lane + ' (unrouted)',
+        lane.provider_kind || '-',
+        (lane.nicknames || []).join(', ') || '-'
+      ].concat(cells.map(function (cell) { return matrixCell(cell, nowMs); })));
+    });
+    wrap.appendChild(buildExpander(
+      countText(lanes.length, ' lane', ' lanes') + ' by ' +
+        countText(columns.length, ' capability', ' capabilities'),
+      tableScroll(tbl)));
+    if (panel.other_overflow) {
+      wrap.appendChild(docText('docmatrix-more',
+        '+' + panel.other_overflow + ' more capability columns'));
+    }
+    return wrap;
+  }
+
+  function matrixStateText(availability) {
+    var a = availability || {};
+    if (a.state === 'available') { return 'learned registry replayed'; }
+    if (a.state === 'empty') { return 'learned registry empty - nothing learned yet'; }
+    if (a.state === 'unavailable') {
+      return 'learned registry unavailable (' + (a.code || 'unknown') + ') - prior and override cells only';
+    }
+    return 'learned registry state unknown';
+  }
+
+  function replayText(r) {
+    return 'replay: ' + num0(r.loaded_rows) + ' rows read, ' + num0(r.replayed) +
+      ' replayed - skipped vocab ' + num0(r.skipped_vocab) + ', owner ' +
+      num0(r.skipped_owner) + ', revision ' + num0(r.skipped_revision) + ', lane ' +
+      num0(r.skipped_lane) + ', unknown ' + num0(r.skipped_unknown);
+  }
+
+  function matrixCell(cell, nowMs) {
+    if (!cell || !cell.source) { return '-'; }
+    var span = document.createElement('span');
+    span.textContent = cell.verdict + ' (' + cell.layer + ')' + (cell.stale ? ' stale' : '');
+    span.title = matrixCellTitle(cell, nowMs);
+    return span;
+  }
+
+  function matrixCellTitle(cell, nowMs) {
+    var parts = ['source ' + cell.source, 'action ' + cell.action];
+    if (cell.first_seen_ms !== null && cell.first_seen_ms !== undefined) {
+      parts.push('first seen ' + fmtTs(cell.first_seen_ms));
+    }
+    if (cell.last_seen_ms !== null && cell.last_seen_ms !== undefined) {
+      parts.push('last seen ' + ageSince(cell.last_seen_ms, nowMs) + ' ago');
+    }
+    if (cell.expires_at_ms !== null && cell.expires_at_ms !== undefined) {
+      parts.push('expires ' + fmtTs(cell.expires_at_ms));
+    }
+    return parts.join(' - ');
   }
 
   function docText(cls, value) {

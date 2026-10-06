@@ -1420,11 +1420,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `DoctorPanels` (extensible `Option`-field panel bag; router-local mirror of
   the usage crate's would-trim summary since router does not depend on usage),
   and the capability truth-matrix panel types
-  `CapabilityMatrixPanel`/`MatrixLane`/`MatrixCell`/`MatrixAvailability`
-  (rows=lanes, cells=verdict+source+age resolved through
-  `capability_display::resolve_display_verdict`, availability tri-state
-  available/empty/unavailable so a read failure can never render as an empty
-  registry), and `DoctorReport { schema_version, findings, panels }`.
+  `CapabilityMatrixPanel`/`MatrixLane`/`MatrixCell`/`MatrixAvailability`/
+  `MatrixReplaySummary` (rows = learned lanes `provider_entry#upstream` with
+  their mapped nicknames and provider kind; cells = verdict + source + layer +
+  routing action + age + the resident learned entry's epoch-ms first-seen /
+  last-seen / expiry, resolved through `capability_display`; availability
+  tri-state available/empty/unavailable so a read failure can never render as
+  an empty registry; the replay tally of rows read / replayed / skipped by
+  reason), and `DoctorReport { schema_version, findings, panels }`.
   `overall_exit(&[Finding]) -> i32` is the STABLE exit-code contract shared by
   both diagnostics surfaces: nonzero iff any finding is `Fail`
   (`Pass`/`Warn`/empty -> 0), pure in the slice and order-independent.
@@ -4636,7 +4639,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   PANEL-ONLY override tokens `FORCED_SUPPORTED` / `FORCED_UNSUPPORTED`), a
   support polarity (`None` only for `unknown`), and a source tag (`override` /
   `live` / `probe` / `prior`, `None` for `unknown`). A sibling drift test
-  asserts the order agrees with `router::capability_precedence_matrix_tests`
+  asserts the order agrees with `router::capability_precedence_matrix_tests`.
+  `resolve_display_action(ActionInputs) -> &'static str` is the matching
+  read-only extraction of the filter's ACTION for a cell (`ACTION_DROP` /
+  `ROUTE_AWAY` / `STRIP` / `REPROBE` / `ALLOW` / `NONE`): an override acts
+  regardless of the `[capability] enabled` kill switch, a learned or prior
+  cell only while it is on, and a learned entry that does not act on routing
+  (uncorroborated inferred, advisory live F3) falls through to the prior;
+  `LearnedActing::from_entry` reads a snapshot entry's acting facts through
+  the registry's own `signal_acts` predicate, and
+  `lane_strips_capability(config, provider_entry, models, capability)`
+  mirrors the filter's strip-vs-route policy (essential list + operator beta
+  floor via `router::operator_betas`)
 - `src/capability_vocab.rs` -- map-on-read for the persisted capability-event
   vocabulary: stored rows are never rewritten; replay maps each row's tokens
   forward from its `vocab_version` (NULL = `LEGACY_VOCAB_VERSION` 1) to
@@ -5760,6 +5774,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `try_read_events` is the fallible slice read (`ReadFailure::{OpenFailed,
   QueryFailed}`, path-free `as_str` tokens); the infallible `read_events`
   trait method degrades a failure to no rows for the matching-boundary replay.
+  `SliceReader` serves an already-read slice as a replay source, so a caller
+  that must tell a failed read from an empty one (the doctor gather, the boot
+  survivor restatement) replays only rows it actually read.
   `open_error_class` maps a usage-DB `OpenError` to a fixed path-free class
   token (a new variant is a compile error; reused by `doctor_panels.rs`; see
   the function's own doc comment for the `version_too_old` / `expected` split).
@@ -6602,14 +6619,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   The synchronous fold from the gathered report plus the pinned router
   snapshot into `DoctorPanel` -- including the shared
   `field_verdict_log::log_field_verdict_snapshot` call -- is split into
-  `build_panel_data(report, view)`, called once the gather resolves, so the
-  log wiring is testable without going through `spawn_blocking`. Embeds the
-  resulting `DoctorReport` (its own `schema_version`, reused
-  verbatim; the panel re-exports it as `DOCTOR_SCHEMA_VERSION`) and
+  `build_panel_data(report, view, ...)`, called once the gather resolves, so
+  the log wiring is testable without going through `spawn_blocking`. Embeds
+  the resulting `DoctorReport` (its own `schema_version`, reused
+  verbatim; the panel re-exports it as `DOCTOR_SCHEMA_VERSION`),
   a reachability summary DERIVED from one live `route_targets(...)` read of
   each target's last settled outcome (`ok` -> `reachable`, none-yet ->
   `unknown`, any failure family / gate refusal -> `degraded`) -- never a
-  re-dial. Config-load errors are already redacted inside the gather (no
+  re-dial -- and `capability_writes`, the three live capability-persistence
+  failure counters (`capability_events_dropped_full` / `write_errors` /
+  `capability_writer_unavailable`) read once through
+  `UsageHealthView::capability_writes`. Config-load errors are already redacted inside the gather (no
   second copy). `config_path: None` -> `no_config_path` unavailable; a gather
   failure -> `doctor_unavailable`
 - `src/handlers/status/doctor_tests.rs` -- `#[path]` sidecar coverage of the
@@ -6870,7 +6890,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   section, detail, and the remediation only when the finding carries one), and
   the passing checks behind a default-closed `buildExpander`; a report with
   findings but none needing attention reads as a welcoming all-clear, and a
-  report with no check at all says so rather than claiming health. Also carries
+  report with no check at all says so rather than claiming health. Below the
+  checks: a capability-writes card (the three counters, never summed) and the
+  capability matrix -- a state line, the replay tally, and a default-closed
+  lane-by-capability table (lane, kind, nicknames, then `verdict (layer)`
+  cells whose tooltip carries the source, action, and learned timestamps).
+  Also carries
   `BUILDERS`, the per-tab `buildX` registry the render dispatch reads
 - `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 13 of 13:
   the page chrome and the load-time wiring. The 1s age ticker, the four inline
@@ -7956,17 +7981,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `render.rs`
 - `src/commands/doctor/matrix.rs` -- capability matrix panel builder:
   `build_capability_matrix_panel(&DoctorContext) -> CapabilityMatrixPanel`.
-  Merges the three capability signal layers onto CONFIG MODEL NICKNAMES as the
-  lane identity -- learned entries join on `state_key == nickname`, priors on
-  nickname, overrides consulted per lane for BOTH `provider:nickname` and bare
-  `provider` specs (model beats provider, via `OverrideRegistry::resolve`); a
-  learned state key with no config entry renders as an extra `routed: false`
-  lane rather than being dropped. Columns are the five well-known keys then
-  observed others capped at 10 (`(+N more)` overflow). Each cell runs the
-  shared `resolve_display_verdict`, then layers on the display-only age (`now
-  - last_seen` for a learned/verified cell) and stale flag (a verified cell
-  past the operator staleness hint, or a prior stamp past the same threshold
-  via `is_stale_days`)
+  Rows are LEARNED LANES (`StateKey` serialized `provider_entry#upstream`):
+  every lane a configured model dispatches to (a pooled model one lane per
+  member entry), each carrying the nicknames that map to it and its provider
+  kind, then every learned key the config no longer maps as a `routed: false`
+  row. Learned entries join on `state_key == lane`; priors and overrides
+  resolve through the lane's nicknames (`provider:nickname` before bare
+  `provider`, via `OverrideRegistry::resolve`). Columns are the well-known
+  keys then observed others capped at 10 (`(+N more)` overflow). Each cell
+  runs the shared `resolve_display_verdict` + `resolve_display_action`, then
+  layers on the winning layer, the display-only age and stale flag, and the
+  learned entry's epoch-ms timestamps mapped through the reader's pinned
+  `now`/`now_ms` anchor pair. Lane-keyed coverage lives in the
+  `#[path]`-included `lane_matrix_tests.rs`
 - `src/commands/doctor/gather.rs` -- doctor data collection.
   `derive_knob_rows(config, overlay)` resolves one `KnobRow` per `[models.X]`
   entry: config `max_output_tokens` checked FIRST (an operator value wins
@@ -8020,11 +8047,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `gather_capability_matrix` builds the `CapabilityMatrixSource` tri-state: an
   unparseable config -> `Unavailable("config_unavailable")`, else it resolves
   this run's replay boundary (baked `CATALOG_VERSION` + the loaded overlay
-  revision) via `server::ledger_reader::classify_boundary` and either rebuilds
-  a bare, config-sized `LearnedCapabilityRegistry` through
-  `rebuild_capabilities_into` + `snapshot` (`Available`, or honest `Empty` on
-  a matched-but-zero-row slice) or reports `Unavailable(class)` --
-  honest-empty ONLY on a readable, revision-matched, zero-row ledger, never a
+  revision) via `server::ledger_reader::classify_boundary`, reads the slice
+  through the typed `try_read_events` (a failed read ->
+  `Unavailable("open_failed" | "query_failed")`), and replays only a slice
+  that was read, through `SliceReader` into a bare, config-sized
+  `LearnedCapabilityRegistry` (`Available`, or honest `Empty` when nothing
+  stays resident), both carrying the `MatrixReplaySummary` tally -- never a
   silent empty. Read-only throughout (usage DB byte-identical).
   `freshest_overlay_verified_at` walks the same `derive_effective_view` path
   for the freshest OVERLAY-sourced (import/user, never baked) `verified_at`;
@@ -8110,9 +8138,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`include_str!` also makes a moved docs file a compile error). Also
   `render_capability_matrix_panel` renders the `CapabilityMatrixPanel` as a
   lane-by-capability grid: a distinct honest state line for the learned
-  availability tri-state (Available / Empty / Unavailable(code)),
-  `render_table` alignment, compact `verdict[source]` cells with a `(stale)`
-  marker, an `(unrouted)` lane tag, and a `(+N more)` column-overflow note
+  availability tri-state (Available / Empty / Unavailable(code)), the replay
+  tally line, `render_table` alignment, lane / kind / nicknames leading
+  columns (the lane printed exactly as `capability purge` accepts it),
+  compact `verdict[source]->action` cells with a `(stale)` marker, an
+  `(unrouted)` lane tag, and a `(+N more)` column-overflow note
 - `src/commands/capability_legacy.rs` -- shared detection of the deprecated
   capability-list keys (`unsupported_features`, `allowed_betas`,
   `allowed_body_fields`) superseded by `[capability.overrides]`.

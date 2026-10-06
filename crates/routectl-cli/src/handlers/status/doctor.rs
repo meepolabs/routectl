@@ -1,5 +1,6 @@
 //! `/status/doctor` panel: the no-network doctor report plus a reachability
-//! summary derived from the live circuit breaker.
+//! summary derived from the live circuit breaker and the live
+//! capability-write failure counters.
 //!
 //! A `/status` request NEVER dials an upstream. The panel runs only the
 //! no-network doctor sections (inventory / version / config / auth / secrets /
@@ -30,7 +31,8 @@ use routectl_router::router::RouteTargetStatus;
 
 use super::field_verdict_log::{FidelityEmission, log_field_verdict_snapshot};
 use super::paid_probe_budget::{
-    AccountingGlobals, PaidProbeBudget, accounting_globals, paid_probe_budgets,
+    AccountingGlobals, CapabilityWriteCounters, PaidProbeBudget, accounting_globals,
+    paid_probe_budgets,
 };
 use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
@@ -38,11 +40,14 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::commands::doctor::{build_report_no_network, gather_context_no_network};
 
 /// Wire-shape version of the doctor panel payload. Reuses the no-network
-/// [`DoctorReport`]'s own `schema_version` (12): the panel embeds that report
-/// verbatim, so it must not invent a parallel number.
-pub const DOCTOR_SCHEMA_VERSION: u32 = 12;
+/// [`DoctorReport`]'s own `schema_version` (13): the panel embeds that report
+/// verbatim, so it must not invent a parallel number. The panel's own
+/// `capability_writes` block joined at 13 alongside the report's matrix
+/// change.
+pub const DOCTOR_SCHEMA_VERSION: u32 = 13;
 
-/// The no-network doctor report plus the circuit-derived reachability summary.
+/// The no-network doctor report plus the circuit-derived reachability summary
+/// and the live capability-write counters.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct DoctorPanel {
     /// The full no-network report (findings + panels), embedded verbatim.
@@ -50,6 +55,9 @@ pub(super) struct DoctorPanel {
     /// One reachability verdict per dispatch target, folded from its live
     /// circuit phase. Never a fresh dial.
     reachability: Vec<TargetReachability>,
+    /// The daemon's capability-persistence failure counters, read once per
+    /// build from the writer's own shared counters.
+    capability_writes: CapabilityWriteCounters,
 }
 
 /// One dispatch target's reachability, derived from its last settled outcome.
@@ -90,6 +98,7 @@ fn build_panel_data(
     view: &StatusRouterView,
     budgets: &[PaidProbeBudget],
     globals: AccountingGlobals,
+    capability_writes: CapabilityWriteCounters,
     emission: FidelityEmission,
 ) -> DoctorPanel {
     log_field_verdict_snapshot(view, budgets, globals, emission);
@@ -101,6 +110,7 @@ fn build_panel_data(
     DoctorPanel {
         report,
         reachability,
+        capability_writes,
     }
 }
 
@@ -122,6 +132,7 @@ async fn build_from_path(
     let db_path = state.usage_db_path.clone();
     // Counter reads, not I/O, so these stay out here beside the router snapshot.
     let globals = accounting_globals(&state.usage_health);
+    let capability_writes = state.usage_health.capability_writes();
     let handle = tokio::runtime::Handle::current();
     // The snapshot is pinned now, so request time IS the read time.
     let as_of = now_utc_rfc3339();
@@ -139,7 +150,14 @@ async fn build_from_path(
             let schema_version = report.schema_version;
             let budgets =
                 paid_probe_budgets(&caps, &db_path, chrono::Utc::now().timestamp_millis());
-            let data = build_panel_data(report, &view, &budgets, globals, emission);
+            let data = build_panel_data(
+                report,
+                &view,
+                &budgets,
+                globals,
+                capability_writes,
+                emission,
+            );
             Panel::available(schema_version, as_of, data)
         },
     )

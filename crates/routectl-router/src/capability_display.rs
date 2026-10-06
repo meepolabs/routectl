@@ -11,8 +11,12 @@
 //! verdict; a sibling drift test asserts its order agrees with the
 //! router's consolidated precedence matrix.
 
-use routectl_core::capability::{EvidenceSource, Verdict};
+use std::time::Instant;
 
+use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
+
+use crate::config::{Config, ModelEntry, ProviderEntry};
+use crate::learned_capability::LearnedRegistryEntry;
 use crate::override_registry::{OverrideProvenance, OverrideVerdict};
 
 /// Display verdict token for an operator route-away override cell. A
@@ -133,6 +137,166 @@ pub const fn resolve_display_verdict(
             source: None,
         },
     }
+}
+
+/// Action token: an operator route-away override hard-drops the target.
+pub const ACTION_DROP: &str = "drop";
+/// Action token: the target is demoted to the tail of its chain (an acting
+/// learned negative, or a catalog `prior=false`).
+pub const ACTION_ROUTE_AWAY: &str = "route_away";
+/// Action token: the capability is stripped from the request in place.
+pub const ACTION_STRIP: &str = "strip";
+/// Action token: the negative's decay window has lapsed, so the next request
+/// carrying the capability re-verifies it on this target.
+pub const ACTION_REPROBE: &str = "reprobe";
+/// Action token: a positive signal; the target serves the capability.
+pub const ACTION_ALLOW: &str = "allow";
+/// Action token: no signal acts on routing for this cell.
+pub const ACTION_NONE: &str = "none";
+
+/// The learned-entry facts the display action needs beyond its verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LearnedActing {
+    /// Whether the entry is a verified-working positive rather than a
+    /// negative.
+    pub verified: bool,
+    /// Whether the entry acts at all (a self-identifying signal, or a
+    /// corroborated inferred one).
+    pub acting: bool,
+    /// Whether a negative's decay window has lapsed.
+    pub lapsed: bool,
+    /// The detection phase of the entry.
+    pub phase: FailurePhase,
+    /// Whether the evidence came from live traffic or a probe.
+    pub source: EvidenceSource,
+}
+
+impl LearnedActing {
+    /// The acting facts of one snapshot entry, read against `now`.
+    pub fn from_entry(entry: &LearnedRegistryEntry, now: Instant) -> Self {
+        let verified = matches!(entry.verdict, Verdict::VerifiedWorking);
+        Self {
+            verified,
+            acting: crate::learned_capability::signal_acts(entry.signal_tier, entry.observations),
+            lapsed: !verified && now >= entry.expires_at,
+            phase: entry.phase,
+            source: entry.source,
+        }
+    }
+}
+
+/// The inputs [`resolve_display_action`] reads for one cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionInputs {
+    /// The resolved display verdict for the cell.
+    pub display: DisplayVerdict,
+    /// The resident learned entry's acting facts, when one exists.
+    pub learned: Option<LearnedActing>,
+    /// The catalog prior for the cell, when the catalog carries one.
+    pub prior: Option<bool>,
+    /// Whether an F1 negative on this capability would be stripped in place
+    /// rather than routed away (a droppable the operator neither marks
+    /// essential nor pins to the wire).
+    pub strip_applies: bool,
+    /// The `[capability] enabled` kill switch: off, neither the learned nor
+    /// the prior layer acts on routing.
+    pub capability_enabled: bool,
+}
+
+/// The routing action the dispatch filter takes for a cell, as a stable
+/// token, mirroring `Router::unsupported_feature_for_target` without its side
+/// effects. An override acts regardless of the kill switch; a learned or
+/// prior cell acts only while it is on. A learned entry that does not act on
+/// routing (an uncorroborated inferred negative, or an advisory live F3
+/// negative) leaves the cell to the prior, exactly as the filter does.
+pub fn resolve_display_action(inputs: ActionInputs) -> &'static str {
+    let display = inputs.display;
+    if display.source == Some(SOURCE_OVERRIDE) {
+        return match display.supported {
+            Some(false) => ACTION_DROP,
+            _ => ACTION_ALLOW,
+        };
+    }
+    if !inputs.capability_enabled {
+        return ACTION_NONE;
+    }
+    if let Some(action) = inputs
+        .learned
+        .and_then(|learned| learned_action(learned, inputs.strip_applies))
+    {
+        return action;
+    }
+    match inputs.prior {
+        Some(false) => ACTION_ROUTE_AWAY,
+        _ => ACTION_NONE,
+    }
+}
+
+/// The action a resident learned entry takes, or `None` when it does not
+/// act on routing and the cell falls through to the prior.
+const fn learned_action(learned: LearnedActing, strip_applies: bool) -> Option<&'static str> {
+    if !learned.acting {
+        return None;
+    }
+    if learned.verified {
+        return Some(ACTION_ALLOW);
+    }
+    if matches!(
+        (learned.phase, learned.source),
+        (FailurePhase::F3, EvidenceSource::Live)
+    ) {
+        return None;
+    }
+    if learned.lapsed {
+        return Some(ACTION_REPROBE);
+    }
+    if matches!(learned.phase, FailurePhase::F1) && strip_applies {
+        Some(ACTION_STRIP)
+    } else {
+        Some(ACTION_ROUTE_AWAY)
+    }
+}
+
+/// Whether an acting F1 negative on `capability` is stripped in place for a
+/// lane rather than routed away: the capability is a droppable the operator
+/// has not marked essential, and no operator beta floor -- the provider
+/// entry's own or any mapped model's `header_extras` -- pins its beta token
+/// to the wire (a pinned token is re-added after the strip, so the filter
+/// routes away instead).
+pub fn lane_strips_capability(
+    config: &Config,
+    provider_entry: &str,
+    models: &[&ModelEntry],
+    capability: &str,
+) -> bool {
+    if !matches!(
+        crate::capability_strip::effective_action_for(capability, &config.capability.essential),
+        crate::capability_strip::CapabilityAction::Strip(_)
+    ) {
+        return false;
+    }
+    let tokens = crate::capability_strip::strip_beta_tokens(capability);
+    if tokens.is_empty() {
+        return true;
+    }
+    let entry = config.providers.get(provider_entry);
+    let provider_floor = entry.map_or(&[][..], ProviderEntry::anthropic_beta_floor);
+    let provider_headers = entry.map(ProviderEntry::header_extras);
+    let empty = std::collections::BTreeMap::new();
+    let header_floors: Vec<Vec<String>> = if models.is_empty() {
+        vec![crate::router::operator_betas(provider_headers, &empty)]
+    } else {
+        models
+            .iter()
+            .map(|model| crate::router::operator_betas(provider_headers, &model.header_extras))
+            .collect()
+    };
+    !tokens.iter().any(|token| {
+        provider_floor.iter().any(|pinned| pinned == token)
+            || header_floors
+                .iter()
+                .any(|floor| floor.iter().any(|pinned| pinned == token))
+    })
 }
 
 #[cfg(test)]

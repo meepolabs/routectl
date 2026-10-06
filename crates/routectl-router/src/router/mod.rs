@@ -86,7 +86,8 @@ pub use field_verdict_observability::{
     ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,
 };
 pub use opening_lookup::OpeningLane;
-use overlays::{apply_layered_overlays, operator_betas};
+use overlays::apply_layered_overlays;
+pub(crate) use overlays::operator_betas;
 pub use overlays::{merge_header_extras, merge_payload_extras};
 pub use paid_probe_ledger::{PaidProbeLedger, PaidProbeReservation};
 pub use probe_pass::ProbePassSummary;

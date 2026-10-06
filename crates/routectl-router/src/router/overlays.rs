@@ -178,7 +178,7 @@ fn operator_payload_extras(
 /// ingress betas are deliberately excluded -- those ride on
 /// `req.anthropic_beta` and stay subject to the per-provider
 /// `allowed_betas` allowlist.
-pub(super) fn operator_betas(
+pub fn operator_betas(
     provider_extras: Option<&BTreeMap<String, String>>,
     model_extras: &BTreeMap<String, String>,
 ) -> Vec<String> {

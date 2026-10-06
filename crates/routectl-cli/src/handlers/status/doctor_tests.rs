@@ -166,6 +166,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
                 writer_degraded: false,
                 consumed_unauthorized_total: 0,
             },
+            state.usage_health.capability_writes(),
             FidelityEmission::always(),
         );
     });
@@ -181,7 +182,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 12);
+    assert_eq!(panel.schema_version, 13);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -237,12 +238,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 12);
+    assert_eq!(json["schema_version"], 13);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 12);
+    assert_eq!(json["data"]["report"]["schema_version"], 13);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),
@@ -313,4 +314,75 @@ async fn doctor_panel_embeds_catalog_freshness_rows() {
             .any(|f| { f["section"] == "freshness" && f["name"] == "baked catalog" }),
         "the baked-catalog freshness row must be present unconditionally"
     );
+}
+
+/// The `/status/doctor` payload carries the three capability-write counters,
+/// read from the daemon's own writer counters on every build. A refused write
+/// on the shared handle moves exactly the counter its refusal class names, in
+/// the rendered panel.
+///
+/// Mutation check: read `capability_events_dropped_full` from any other
+/// counter in `UsageHealthView::capability_writes` -> red here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forced_capability_drop_increments_the_rendered_counter() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+    )
+    .unwrap();
+    // A one-slot channel nobody drains: the first write fills it and the
+    // second is refused as FULL.
+    let (tx, _rx) = tokio::sync::mpsc::channel::<routectl_usage::WriterMessage>(1);
+    let counters = Arc::new(routectl_usage::UsageCounters::default());
+    let usage = routectl_usage::handle_over_channel_with(tx, Arc::clone(&counters));
+    let router = Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
+        Config::default(),
+    ))));
+    let app = AppState::for_test_with_usage(router, usage.clone());
+    let state = Arc::new(StatusState::from_app(
+        &app,
+        Some(config_path),
+        DaemonMeta::for_test(),
+    ));
+
+    let writes = |json: &Value| json["data"]["capability_writes"].clone();
+    let before = writes(&doctor_json(&state).await);
+    assert_eq!(
+        before,
+        serde_json::json!({
+            "capability_events_dropped_full": 0,
+            "write_errors": 0,
+            "capability_writer_unavailable": 0,
+        }),
+        "control: nothing refused yet"
+    );
+
+    let event = routectl_usage::CapabilityEvent::tombstone(1_000, 1, 0);
+    usage.try_send_capability_event_in_generation(event.clone(), 1);
+    usage.try_send_capability_event_in_generation(event, 1);
+    assert_eq!(counters.capability_events_dropped_full(), 1, "premise");
+
+    let after = writes(&doctor_json(&state).await);
+    assert_eq!(after["capability_events_dropped_full"], 1);
+    assert_eq!(after["write_errors"], 0);
+    assert_eq!(after["capability_writer_unavailable"], 0);
+}
+
+async fn doctor_json(state: &Arc<StatusState>) -> Value {
+    let resp = super::super::status_router()
+        .with_state(Arc::clone(state))
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/status/doctor")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }

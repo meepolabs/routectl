@@ -8,7 +8,7 @@ running it is part of shipping any change to the transport, render, DOM, or
 chrome parts.
 
 Serve the page from a local daemon (`routectl serve`, then open the status
-port) and work through the four sections in order. A run that skips section 2
+port) and work through the sections in order. A run that skips section 2
 has not verified the failure that matters most.
 
 ## What is NOT covered by any test
@@ -110,3 +110,21 @@ banner, no retry signal -- silently mislabeled data.
   card IS present. Each operator-authored surface added to this tab has to
   join that card's suppression condition, or the tab tells an operator their
   configuration is not in effect while displaying it.
+
+## 5. Doctor tab capability surface
+
+- Serve a config with two nicknames on ONE upstream of one provider entry,
+  plus a model on a pool of two member entries, against a ledger holding
+  learned rows for those lanes. The Doctor tab's capability matrix must list
+  one row per `<provider>#<upstream>` lane -- the shared lane naming BOTH
+  nicknames, the pooled model on one row per member -- and each row's lane
+  text must be exactly what `routectl capability purge` accepts.
+- Hover a learned cell: the tooltip names its source, its routing action,
+  and its first-seen / last-seen / expiry times. An unknown cell reads `-`.
+- The replay line names rows read, replayed, and every skip reason. Seed a
+  row whose provider entry the config no longer has and confirm the owner
+  skip count moves.
+- Point the daemon at a ledger whose post-boundary slice cannot be read. The
+  matrix state line must say UNAVAILABLE with its code, never "empty".
+- The capability-writes card shows three separate counters, all faint at
+  zero on a healthy daemon.

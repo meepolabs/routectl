@@ -1,4 +1,5 @@
-//! Doctor structured panels: the read-only would-trim opportunity panel.
+//! Doctor structured panels: the read-only would-trim opportunity panel and
+//! the capability matrix human render.
 //!
 //! Computes the steady-state would-trim panel from the usage DB WITHOUT
 //! writing it, and renders it as a human block. The doctor command attaches
@@ -9,7 +10,8 @@
 use chrono::{DateTime, Local};
 
 use routectl_router::{
-    CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell, WouldTrimPanel,
+    ACTION_NONE, CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell,
+    MatrixReplaySummary, WouldTrimPanel,
 };
 use routectl_usage::{OpenError, WouldTrimSummary, open_readonly, would_trim_summary};
 
@@ -95,35 +97,54 @@ pub(crate) fn render_would_trim_panel(panel: &WouldTrimPanel) -> String {
 }
 
 /// Render the capability matrix panel as a human block: a state line for
-/// the learned ledger-replay source, then an aligned lane-by-capability
-/// grid. Empty and Unavailable render a distinct honest state line and still
-/// show any config-derived (prior / override) cells. A lane the loaded
-/// config no longer maps is marked `(unrouted)`.
+/// the learned ledger-replay source, the replay tally when the replay ran,
+/// then an aligned lane-by-capability grid. Each lane renders as its
+/// `provider_entry#upstream` key -- the exact string `capability purge`
+/// accepts -- followed by its provider kind and the nicknames that map to
+/// it. Empty and Unavailable render a distinct honest state line and still
+/// show any config-derived (prior / override) cells. A lane the loaded config
+/// no longer maps is marked `(unrouted)`.
 pub(crate) fn render_capability_matrix_panel(panel: &CapabilityMatrixPanel) -> String {
     let mut out = String::new();
     out.push_str("capability matrix: ");
     out.push_str(&matrix_state_line(&panel.availability));
     out.push('\n');
+    if let Some(replay) = &panel.replay {
+        out.push_str(&replay_line(replay));
+        out.push('\n');
+    }
 
     if panel.lanes.is_empty() {
         out.push_str("  no capability lanes observed\n");
         return out;
     }
 
-    let mut header: Vec<String> = Vec::with_capacity(panel.columns.len() + 1);
+    let mut header: Vec<String> = Vec::with_capacity(panel.columns.len() + 3);
     header.push("lane".to_string());
+    header.push("kind".to_string());
+    header.push("nicknames".to_string());
     header.extend(panel.columns.iter().cloned());
 
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(panel.lanes.len() + 1);
     rows.push(header);
     for lane in &panel.lanes {
-        let mut row: Vec<String> = Vec::with_capacity(panel.columns.len() + 1);
-        let label = if lane.routed {
-            lane.lane.clone()
+        let mut row: Vec<String> = Vec::with_capacity(panel.columns.len() + 3);
+        let label = routectl_core::sanitize_for_log(&lane.lane);
+        row.push(if lane.routed {
+            label
         } else {
-            format!("{} (unrouted)", lane.lane)
-        };
-        row.push(label);
+            format!("{label} (unrouted)")
+        });
+        row.push(if lane.provider_kind.is_empty() {
+            "-".to_string()
+        } else {
+            lane.provider_kind.to_string()
+        });
+        row.push(if lane.nicknames.is_empty() {
+            "-".to_string()
+        } else {
+            routectl_core::sanitize_for_log(&lane.nicknames.join(","))
+        });
         row.extend(lane.cells.iter().map(cell_token));
         rows.push(row);
     }
@@ -143,6 +164,21 @@ pub(crate) fn render_capability_matrix_panel(panel: &CapabilityMatrixPanel) -> S
     out
 }
 
+/// The replay tally line: rows read, rows replayed, and every skip reason.
+fn replay_line(replay: &MatrixReplaySummary) -> String {
+    format!(
+        "  replay: {} rows read, {} replayed; skipped: vocab={} owner={} revision={} \
+         lane={} unknown={}",
+        replay.loaded_rows,
+        replay.replayed,
+        replay.skipped_vocab,
+        replay.skipped_owner,
+        replay.skipped_revision,
+        replay.skipped_lane,
+        replay.skipped_unknown,
+    )
+}
+
 /// The honest state line for the learned ledger-replay source. Empty and
 /// Unavailable are distinct: an empty source is readable-with-no-rows, an
 /// unavailable one could not be read (its class code is surfaced).
@@ -160,14 +196,19 @@ fn matrix_state_line(availability: &MatrixAvailability) -> String {
     }
 }
 
-/// One cell as a compact token: `verdict[source]` with a trailing `(stale)`
-/// marker when stale, or `-` for an unknown (no-signal) cell. The precise
-/// age in ms lives on the serialized DTO, not the compact human grid.
+/// One cell as a compact token: `verdict[source]`, then `->action` when the
+/// cell acts on routing, then a trailing `(stale)` marker when stale, or `-`
+/// for an unknown (no-signal) cell. The precise age and timestamps live on
+/// the serialized DTO, not the compact human grid.
 fn cell_token(cell: &MatrixCell) -> String {
     match cell.source {
         None => "-".to_string(),
         Some(source) => {
             let mut token = format!("{}[{source}]", cell.verdict);
+            if cell.action != ACTION_NONE {
+                token.push_str("->");
+                token.push_str(cell.action);
+            }
             if cell.stale {
                 token.push_str(" (stale)");
             }

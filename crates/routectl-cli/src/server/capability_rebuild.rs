@@ -36,14 +36,15 @@
 use std::path::Path;
 
 use routectl_router::{
-    CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary,
-    LearnedCapabilityRegistry, ReplayTombstone, Router, rebuild_capabilities_into,
+    CapabilityRebuildSummary, LearnedCapabilityRegistry, ReplayTombstone, Router,
+    rebuild_capabilities_into,
 };
 use routectl_usage::{BatchCommit, CapabilityEvent, UsageHandle};
 
 use super::capability_boundary::boundary_batch;
 use super::ledger_reader::{
-    BoundaryOutcome, LedgerCapabilityReader, REBUILD_ROW_LIMIT, classify_boundary, epoch_ms_now,
+    BoundaryOutcome, LedgerCapabilityReader, REBUILD_ROW_LIMIT, SliceReader, classify_boundary,
+    epoch_ms_now,
 };
 
 /// One-shot warm of the router's learned-capability registry from the usage
@@ -172,10 +173,9 @@ fn restate_survivors_past_new_boundary(
             return;
         }
     };
-    let slice = SliceReader {
-        tombstone: boundary,
-        rows,
-    };
+    // Read once and served to both replays, so the scratch replay that decides
+    // the restatement and the live replay after it consume identical rows.
+    let slice = SliceReader::new(boundary, rows);
 
     let live = router.learned_registry();
     let scratch =
@@ -209,24 +209,6 @@ fn restate_survivors_past_new_boundary(
             "capability boot boundary NOT committed; registry left empty and the stale \
              tombstone kept so the next boot retries the restatement"
         ),
-    }
-}
-
-/// The stale-boundary slice, read from the ledger once and served to both
-/// replays, so the scratch replay that decides the restatement and the live
-/// replay after it consume identical rows.
-struct SliceReader {
-    tombstone: ReplayTombstone,
-    rows: Vec<CapabilityEventRow>,
-}
-
-impl CapabilityLedgerReader for SliceReader {
-    fn tombstone(&self) -> Option<ReplayTombstone> {
-        Some(self.tombstone)
-    }
-
-    fn read_events(&self) -> Vec<CapabilityEventRow> {
-        self.rows.clone()
     }
 }
 

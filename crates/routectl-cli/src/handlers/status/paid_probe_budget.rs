@@ -81,6 +81,32 @@ impl UsageHealthView {
     fn consumed_unauthorized(&self) -> u64 {
         self.counters.paid_probe_consumed_unauthorized()
     }
+
+    /// The three capability-persistence failure counters, read once.
+    pub(super) fn capability_writes(&self) -> CapabilityWriteCounters {
+        CapabilityWriteCounters {
+            capability_events_dropped_full: self.counters.capability_events_dropped_full(),
+            write_errors: self.counters.write_errors(),
+            capability_writer_unavailable: self.counters.capability_writer_unavailable(),
+        }
+    }
+}
+
+/// The live capability-write failure counters, process-lifetime and
+/// monotonic (they reset only on restart). Each names a different operator
+/// situation, so they are reported apart rather than summed: a full channel
+/// is load (the writer is alive but behind), a write error is a store fault
+/// (the row reached the writer and did not land), and an unavailable writer
+/// is teardown (the channel is closed). Any nonzero value means some learned
+/// verdict this process formed may not survive a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(super) struct CapabilityWriteCounters {
+    /// Capability writes the full writer channel refused.
+    pub capability_events_dropped_full: u64,
+    /// Writes the writer thread failed to persist (shared with usage rows).
+    pub write_errors: u64,
+    /// Capability writes refused because the writer channel was closed.
+    pub capability_writer_unavailable: u64,
 }
 
 /// How the accounting for one provider-day reads.
