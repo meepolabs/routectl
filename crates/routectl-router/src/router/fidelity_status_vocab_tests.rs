@@ -160,6 +160,7 @@ fn a_hostile_state_key_reaches_the_row_sanitized_and_capped() {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: router.provider_kind_for_state_key(&hostile).to_string(),
             state_key: hostile.clone(),
             feature_key: grounded_key(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
@@ -343,6 +344,7 @@ fn a_pooled_seat_resolves_member_for_provider_and_base_for_model() {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: router.provider_kind_for_state_key(&pooled_key).to_string(),
             state_key: pooled_key.clone(),
             feature_key: cap_key,
             verdict: crate::learned_capability::EntryVerdict::Negative,

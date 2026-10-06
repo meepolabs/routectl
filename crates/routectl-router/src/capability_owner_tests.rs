@@ -88,3 +88,55 @@ fn only_owned_has_no_skip_reason() {
         assert!(decision.skip_reason().is_some(), "{decision:?}");
     }
 }
+
+#[test]
+fn recorded_kind_decision_matches_owner_decision_for_a_present_entry() {
+    let lane = StateKey::new("p", "model-x").expect("a separator-free entry name");
+    for recorded in ["openai-compat", "anthropic-api", ""] {
+        for (current, entry) in [("openai-compat", compat()), ("anthropic-api", anthropic())] {
+            assert_eq!(
+                recorded_kind_decision(recorded, current),
+                owner_decision(&lane, recorded, &providers(&[("p", entry)])),
+                "recorded={recorded:?} current={current:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn recorded_kind_decision_compares_the_writer_and_reader_kinds() {
+    let cases: &[(&str, &str, &str, OwnerDecision)] = &[
+        (
+            "same kind",
+            "openai-compat",
+            "openai-compat",
+            OwnerDecision::Owned,
+        ),
+        (
+            "kind flipped",
+            "openai-compat",
+            "anthropic-api",
+            OwnerDecision::KindChanged,
+        ),
+        (
+            "reader has no kind",
+            "openai-compat",
+            "",
+            OwnerDecision::KindChanged,
+        ),
+        (
+            "writer had no kind",
+            "",
+            "anthropic-api",
+            OwnerDecision::KindUnrecorded,
+        ),
+        ("neither has a kind", "", "", OwnerDecision::Owned),
+    ];
+    for (name, recorded, current, expected) in cases {
+        assert_eq!(
+            recorded_kind_decision(recorded, current),
+            *expected,
+            "{name}"
+        );
+    }
+}

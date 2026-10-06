@@ -120,6 +120,7 @@ fn plant_verdict_on(router: &Router, state_key: &str, capability_key: String) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: router.provider_kind_for_state_key(state_key).to_string(),
             state_key: state_key.to_string(),
             feature_key: capability_key,
             verdict: crate::learned_capability::EntryVerdict::Negative,

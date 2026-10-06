@@ -136,6 +136,7 @@ fn the_coherent_snapshot_reconciles_even_when_every_read_would_answer_differentl
     // two reads see the same registry.
     let stamped = Instant::now();
     let seed = crate::learned_capability::ExportedEntry {
+        provider_kind: router.provider_kind_for_state_key(STATE_KEY).to_string(),
         state_key: STATE_KEY.to_string(),
         feature_key: grounded_key(),
         verdict: crate::learned_capability::EntryVerdict::Negative,

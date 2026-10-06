@@ -3990,7 +3990,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a value from here
 - `src/learned_capability.rs` -- ONE instance is shared across Router
   generations (a reload attaches, never copies), which the generation barrier and
-  the retunable tuning both follow from: `generation` / `advance_generation` /
+  the retunable tuning both follow from. Each entry records the provider kind
+  of the write that created it; the guarded acting reads and every write drop
+  an entry whose kind is not the caller's (`drop_other_owner`), so an
+  outgoing Router's in-flight write never acts after a kind-flip reload: `generation` / `advance_generation` /
   `commit_boundary_transition` (promotes the pending generation, or advances,
   plus the catalog-scoped prune under one acquisition), the `*_in_generation`
   entry points returning `GenerationOutcome::{Applied{value,generation}, Stale}`
@@ -4519,7 +4522,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   belongs to its lane's `[providers]` entry only while that entry exists under
   the recorded kind; an empty recorded kind is unowned. Shared by boot replay
   (`skipped_owner`) and the hot-reload owner sweep; a same-kind `base_url`
-  repoint stays owned
+  repoint stays owned. `recorded_kind_decision(recorded, current)` is the
+  kind-only half the registry's acting lookups apply to each resident entry
 - `src/capability_matcher.rs` -- the single shared closed-set resolver mapping
   a use-time upstream rejection to the CANONICAL capability it names, in the
   request-capability namespace (`derive_feature_keys` vocabulary) so learn

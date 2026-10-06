@@ -693,6 +693,7 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
     let acting_key = normalize_capability_key("web_search", "openai-compat");
     router.learned_capabilities.import_entries(vec![
         ExportedEntry {
+            provider_kind: "openai-compat".into(),
             state_key: "prov#upstream".into(),
             feature_key: probe_due_key.clone(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
@@ -708,6 +709,7 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
             consecutive_failed_probes: 0,
         },
         ExportedEntry {
+            provider_kind: "openai-compat".into(),
             state_key: "prov#upstream".into(),
             feature_key: acting_key,
             verdict: crate::learned_capability::EntryVerdict::Negative,
@@ -805,6 +807,7 @@ fn acting_negative(
     base: Instant,
 ) -> crate::learned_capability::ExportedEntry {
     crate::learned_capability::ExportedEntry {
+        provider_kind: "openai-compat".into(),
         state_key: lane_of(state_key),
         feature_key: normalize_capability_key(feature, "openai-compat"),
         verdict: crate::learned_capability::EntryVerdict::Negative,

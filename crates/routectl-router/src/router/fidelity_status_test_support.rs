@@ -307,11 +307,13 @@ pub fn plant_acting_field_verdict_for_tests(
     let capability_key = crate::field_capability::field_capability_key(field_path)
         .expect("the fixture's field path must be a well-formed qualified path");
     let stamped = Instant::now();
+    let provider_kind = router.provider_kind_for_state_key(state_key).to_string();
     router
         .learned_registry()
         .import_entries(vec![crate::learned_capability::ExportedEntry {
             state_key: state_key.to_string(),
             feature_key: capability_key.clone(),
+            provider_kind: provider_kind.clone(),
             verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: routectl_core::capability::SignalTier::SelfIdentifying,
             observations: 1,
@@ -325,7 +327,6 @@ pub fn plant_acting_field_verdict_for_tests(
             consecutive_failed_probes: 0,
             evidence_class: None,
         }]);
-    let provider_kind = router.provider_kind_for_state_key(state_key).to_string();
     let key =
         FieldVerdictKey::from_capability_key(lane_of(state_key), capability_key, provider_kind);
     // The confirmation count's only production writer is the cold-rebuild seed, so

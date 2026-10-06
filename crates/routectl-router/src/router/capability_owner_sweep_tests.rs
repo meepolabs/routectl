@@ -328,3 +328,70 @@ fn the_owner_sweep_resets_a_dropped_field_verdict_canary() {
         "a dropped field verdict must not leave canary state for a relearn to inherit",
     );
 }
+
+#[test]
+fn an_old_router_write_after_a_kind_flip_does_not_act_on_the_new_router() {
+    let before = router(ALPHA_COMPAT);
+    let old_target = target(&before, "opus", "alpha");
+    learn_on(&before, &old_target, COMPAT);
+
+    let mut reloaded = router(ALPHA_ANTHROPIC);
+    reloaded.carry_over_learned_from(&before);
+    assert!(resident_lanes(&reloaded).is_empty());
+
+    learn_on(&before, &old_target, COMPAT);
+    assert_eq!(
+        resident_lanes(&reloaded),
+        vec![LANE.to_string()],
+        "the in-flight write through the old router lands in the shared registry",
+    );
+
+    assert!(
+        !routes_away(&reloaded, &target(&reloaded, "opus", "alpha"), ANTHROPIC),
+        "an entry recorded under the old kind must not act for the new kind",
+    );
+    assert!(
+        resident_lanes(&reloaded).is_empty(),
+        "the acting lookup removes the entry its owner no longer matches",
+    );
+}
+
+#[test]
+fn an_old_router_write_after_a_same_kind_reload_still_acts_on_the_new_router() {
+    let before = router(ALPHA_COMPAT);
+    let old_target = target(&before, "opus", "alpha");
+    learn_on(&before, &old_target, COMPAT);
+
+    let mut reloaded = router(ALPHA_REPOINTED);
+    reloaded.carry_over_learned_from(&before);
+    learn_on(&before, &old_target, COMPAT);
+
+    assert!(
+        routes_away(&reloaded, &target(&reloaded, "opus", "alpha"), COMPAT),
+        "a same-kind owner keeps acting on what the old router learned",
+    );
+    assert_eq!(resident_lanes(&reloaded), vec![LANE.to_string()]);
+}
+
+#[test]
+fn a_write_under_the_new_kind_replaces_an_entry_recorded_under_the_old_kind() {
+    let before = router(ALPHA_COMPAT);
+    let old_target = target(&before, "opus", "alpha");
+    let mut reloaded = router(ALPHA_ANTHROPIC);
+    reloaded.carry_over_learned_from(&before);
+    learn_on(&before, &old_target, COMPAT);
+
+    let new_target = target(&reloaded, "opus", "alpha");
+    learn_on(&reloaded, &new_target, ANTHROPIC);
+
+    let snapshot = reloaded.learned_capability_snapshot();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(
+        snapshot[0].observations, 1,
+        "the old owner's entry was replaced, not refreshed",
+    );
+    assert!(
+        routes_away(&reloaded, &new_target, ANTHROPIC),
+        "the new owner's own observation acts",
+    );
+}

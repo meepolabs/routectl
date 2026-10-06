@@ -59,6 +59,7 @@ fn key(state_key: &str) -> FieldVerdictKey {
 /// by parsing a rejection envelope.
 fn plant_acting_negative(learned: &LearnedCapabilityRegistry, k: &FieldVerdictKey, now: Instant) {
     learned.import_entries(vec![ExportedEntry {
+        provider_kind: k.provider_kind().to_string(),
         state_key: k.state_key().to_string(),
         feature_key: k.capability_key().to_string(),
         verdict: EntryVerdict::Negative,
@@ -143,8 +144,8 @@ fn the_identity_carries_the_provider_kind_the_key_was_normalized_under() {
     // provider kind is part of the guard's single-flight identity, and it is
     // the input the shared registry normalizes the capability key with; it is
     // NOT a third component of the registry's own row key. So two kinds whose
-    // normalization agrees deliberately share ONE persisted row -- this
-    // lifecycle rides the existing storage contract rather than redefining it.
+    // normalization agrees share ONE row slot, and the kind the row was
+    // written under decides which reader it acts for.
     let reg = registry();
     let t0 = Instant::now();
     let anthropic = FieldVerdictKey::new(
@@ -173,11 +174,13 @@ fn the_identity_carries_the_provider_kind_the_key_was_normalized_under() {
         .commit(400, vec![], t0)
         .expect("a live commit emits its row");
 
-    // Assert -- one row, and the single-flight slot is still per-identity: the
-    // second kind is refused because the verdict now ACTS, not because it
-    // shares a slot.
+    // Assert -- one row, acting for the kind that wrote it. A reader under the
+    // other kind does not act on it and drops it, because it was learned about
+    // a different upstream protocol.
     assert_eq!(reg.snapshot_len(), 1);
-    assert!(reg.is_negative_acting(&compat, t0));
+    assert!(reg.is_negative_acting(&anthropic, t0));
+    assert!(!reg.is_negative_acting(&compat, t0));
+    assert_eq!(reg.snapshot_len(), 0);
 }
 
 #[test]

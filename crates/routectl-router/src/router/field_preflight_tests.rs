@@ -260,6 +260,11 @@ fn plant_verdict(router: &Router, state_key: &str, lapsed: bool) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: router
+                .provider_kind_for_state_key(
+                    crate::router::probe_test_support::seat_chain_lane(state_key).as_lane_key(),
+                )
+                .to_string(),
             state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
                 .as_lane_key()
                 .to_string(),
@@ -2165,6 +2170,11 @@ fn plant_prefix_verdict(router: &Router, state_key: &str, confirmations: u32) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: router
+                .provider_kind_for_state_key(
+                    crate::router::probe_test_support::seat_chain_lane(state_key).as_lane_key(),
+                )
+                .to_string(),
             state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
                 .as_lane_key()
                 .to_string(),
@@ -3507,6 +3517,11 @@ fn plant_lapsed(router: &Router, state_key: &str, path: &str) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: router
+                .provider_kind_for_state_key(
+                    crate::router::probe_test_support::seat_chain_lane(state_key).as_lane_key(),
+                )
+                .to_string(),
             state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
                 .as_lane_key()
                 .to_string(),

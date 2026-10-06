@@ -118,6 +118,7 @@ impl Provider for ScriptedProvider {
 fn lapsed_negative(lane: &str, feature_key: &str) -> ExportedEntry {
     let base = Instant::now();
     ExportedEntry {
+        provider_kind: PROVIDER_KIND.into(),
         state_key: lane.into(),
         feature_key: feature_key.into(),
         verdict: crate::learned_capability::EntryVerdict::Negative,

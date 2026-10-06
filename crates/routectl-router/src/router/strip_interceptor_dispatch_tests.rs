@@ -112,6 +112,7 @@ fn advisor_request() -> ChatRequest {
 fn acting_advisor_negative(state_key: &str) -> crate::learned_capability::ExportedEntry {
     let base = Instant::now();
     crate::learned_capability::ExportedEntry {
+        provider_kind: "anthropic-api".into(),
         state_key: state_key.into(),
         feature_key: "advisor".into(),
         verdict: crate::learned_capability::EntryVerdict::Negative,

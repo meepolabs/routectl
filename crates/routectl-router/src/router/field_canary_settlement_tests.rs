@@ -169,6 +169,11 @@ fn plant_verdict(router: &Router, state_key: &str) {
     router
         .learned_capabilities
         .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: router
+                .provider_kind_for_state_key(
+                    crate::router::probe_test_support::seat_chain_lane(state_key).as_lane_key(),
+                )
+                .to_string(),
             state_key: crate::router::probe_test_support::seat_chain_lane(state_key)
                 .as_lane_key()
                 .to_string(),

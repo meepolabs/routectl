@@ -1587,6 +1587,12 @@ emits a DEBUG `owner_sweep` line carrying `reason` (`owner_entry_removed` or
 | `event` | string | Always `owner_sweep`. |
 | `dropped_owner` | integer | Learned entries removed because their provider entry no longer owns their lane. |
 
+A request still holding the pre-reload router can write a lane after the sweep.
+Such an entry records the old `kind`, never acts for the current one, and is
+removed on the next lookup with a DEBUG `owner_lookup_drop` line carrying
+`reason` (`owner_kind_changed` or `owner_kind_unrecorded`), the sanitized
+`state_key`, and `capability_key`.
+
 ### Capability warm rebuild (INFO)
 
 Emitted once at serve bootstrap after the learned-capability registry is
