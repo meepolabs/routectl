@@ -5,18 +5,25 @@
 //! request skips that lane; a rejection that names nothing the request
 //! carries is never learned and the lane keeps being dialed. A declared
 //! `unsupported_features` entry still skips the Bedrock lanes before any
-//! dispatch.
+//! dispatch. The learned negatives survive a restart through their persisted
+//! rows, are learned on the stream arm before the first chunk, and are never
+//! learned from an error that follows streamed content.
 
 use super::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::stream::BoxStream;
+use std::time::Instant;
+
+use futures::stream::{BoxStream, StreamExt};
 use routectl_core::capability::{FailurePhase, SignalTier};
-use routectl_core::{ChatChunk, ChatResponse, Provider, Result, ToolDef};
+use routectl_core::{ChatChunk, ChatResponse, ChunkChoice, ChunkDelta, Provider, Result, ToolDef};
 use serde_json::{Value, json};
 
+use crate::capability_rebuild::{CapabilityEventRow, CapabilityLedgerReader, ReplayTombstone};
+use crate::capability_vocab::CURRENT_VOCAB_VERSION;
+use crate::catalog_baked::CATALOG_VERSION;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::RouterOptions;
@@ -88,10 +95,13 @@ fn rejection_body(fx: &Value, name: &str) -> String {
 }
 
 /// A lane that counts its calls and either rejects every request with a
-/// fixed Bedrock validation 400 or succeeds.
+/// fixed Bedrock validation 400 or succeeds. On the stream arm the rejection
+/// arrives before any chunk, or after one content chunk when
+/// `rejects_after_content` is set.
 struct CountingLane {
     id: &'static str,
     rejection: Option<(String, String)>,
+    rejects_after_content: bool,
     calls: AtomicUsize,
 }
 
@@ -104,6 +114,18 @@ impl CountingLane {
         Arc::new(Self {
             id,
             rejection,
+            rejects_after_content: false,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// Streams one content chunk and then the fixture rejection.
+    fn rejecting_after_content(id: &'static str, fx: &Value, name: &str) -> Arc<Self> {
+        let lifted = fx["lifted_type"].as_str().expect("fixture lifted_type");
+        Arc::new(Self {
+            id,
+            rejection: Some((rejection_body(fx, name), lifted.to_string())),
+            rejects_after_content: true,
             calls: AtomicUsize::new(0),
         })
     }
@@ -112,6 +134,7 @@ impl CountingLane {
         Arc::new(Self {
             id,
             rejection: None,
+            rejects_after_content: false,
             calls: AtomicUsize::new(0),
         })
     }
@@ -122,6 +145,34 @@ impl CountingLane {
 
     const fn rejects(&self) -> bool {
         self.rejection.is_some()
+    }
+
+    fn rejection_error(&self) -> Option<Error> {
+        self.rejection.as_ref().map(|(body, upstream_type)| {
+            Error::upstream_full(
+                self.id,
+                400,
+                body.clone(),
+                None,
+                Some(upstream_type.clone()),
+                None,
+            )
+        })
+    }
+}
+
+fn text_chunk(text: &str) -> ChatChunk {
+    ChatChunk {
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                content: Some(text.into()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        ..Default::default()
     }
 }
 
@@ -138,15 +189,8 @@ impl Provider for CountingLane {
     }
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        match &self.rejection {
-            Some((body, upstream_type)) => Err(Error::upstream_full(
-                self.id,
-                400,
-                body.clone(),
-                None,
-                Some(upstream_type.clone()),
-                None,
-            )),
+        match self.rejection_error() {
+            Some(err) => Err(err),
             None => Ok(ChatResponse {
                 model: req.model,
                 ..Default::default()
@@ -154,7 +198,13 @@ impl Provider for CountingLane {
         }
     }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        Err(Error::upstream(self.id, 500, "unused"))
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let items = match self.rejection_error() {
+            Some(err) if self.rejects_after_content => vec![Ok(text_chunk("partial")), Err(err)],
+            Some(err) => return Err(err),
+            None => vec![Ok(text_chunk("served"))],
+        };
+        Ok(futures::stream::iter(items).boxed())
     }
 }
 
@@ -390,4 +440,186 @@ async fn declared_unsupported_feature_skips_bedrock_lanes_before_dispatch() {
     assert_eq!(lanes.a.calls(), 0);
     assert_eq!(lanes.b.calls(), 0);
     assert!(outcome.meta.learned_capabilities.is_empty());
+}
+
+/// The first fixture row: a web_search request both Bedrock lanes refuse.
+fn web_search_row(fx: &Value) -> ReplayRow {
+    let row = replay_rows(fx)
+        .into_iter()
+        .next()
+        .expect("first replay row");
+    assert_eq!(row.request, "web_search", "first replay row shape");
+    assert_eq!(row.lane_a, "web-search-pydantic-sonnet-4-6");
+    assert_eq!(row.lane_b, "web-search-template-sonnet-5");
+    row
+}
+
+/// A restart's view of the ledger: one boundary and the rows after it.
+struct Ledger(Vec<CapabilityEventRow>);
+
+impl CapabilityLedgerReader for Ledger {
+    fn tombstone(&self) -> Option<ReplayTombstone> {
+        Some(ReplayTombstone::new(0, CATALOG_VERSION, 0))
+    }
+
+    fn read_events(&self) -> Vec<CapabilityEventRow> {
+        self.0.clone()
+    }
+}
+
+/// The persisted rows of the learned events one request carried.
+fn persisted_rows(meta: &DispatchMeta) -> Vec<CapabilityEventRow> {
+    meta.learned_capabilities
+        .iter()
+        .zip(1_i64..)
+        .map(|(event, rowid)| {
+            CapabilityEventRow::new(
+                rowid,
+                Instant::now(),
+                "broken".to_string(),
+                Some(event.phase.as_str().to_string()),
+                event.source.as_str().to_string(),
+                Some(event.signal_tier.as_str().to_string()),
+                None,
+                event.capability_key.clone(),
+                event.state_key.clone(),
+                event.provider_kind.clone(),
+                CATALOG_VERSION,
+                0,
+            )
+            .with_vocab_version(Some(CURRENT_VOCAB_VERSION))
+        })
+        .collect()
+}
+
+async fn open_stream(router: &Router, shape: &str) -> DispatchedStream {
+    router
+        .stream_with_options(replay_request(shape), RouterOptions::default())
+        .await
+}
+
+/// Drains a stream, returning its content texts and whether it ended on an
+/// error frame.
+async fn drain(stream: BoxStream<'static, Result<ChatChunk>>) -> (Vec<String>, bool) {
+    let frames: Vec<Result<ChatChunk>> = stream.collect().await;
+    let errored = frames.iter().any(std::result::Result::is_err);
+    let texts = frames
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .flat_map(|chunk| chunk.choices)
+        .filter_map(|choice| choice.delta.content)
+        .collect();
+    (texts, errored)
+}
+
+fn assert_stream_served_m3(outcome: &DispatchedStream, context: &str) {
+    assert!(outcome.result.is_ok(), "{context}: stream opened");
+    assert_eq!(
+        outcome.meta.served_model.as_deref(),
+        Some("m3"),
+        "{context}: seat"
+    );
+    assert_eq!(
+        outcome.meta.served_upstream.as_deref(),
+        Some(WIRE_C),
+        "{context}: wire id"
+    );
+}
+
+#[tokio::test]
+async fn learned_negatives_survive_a_restart_through_their_persisted_rows() {
+    // Arrange: request 1 learns both lanes on the first router.
+    let fx = fixture();
+    let row = web_search_row(&fx);
+    let first_lanes = Lanes::for_row(&fx, &row);
+    let first_router = three_lane_router("", &first_lanes);
+    let first = dispatch(&first_router, &row.request).await;
+    assert_served(&first, "m3", "request 1");
+    let rows = persisted_rows(&first.meta);
+    assert_eq!(rows.len(), 2, "one persisted negative per Bedrock lane");
+
+    // Act: a fresh router with fresh lanes, rebuilt only from those rows.
+    let lanes = Lanes::for_row(&fx, &row);
+    let router = three_lane_router("", &lanes);
+    let summary = router.rebuild_learned_from_ledger(&Ledger(rows));
+    let outcome = dispatch(&router, &row.request).await;
+
+    // Assert
+    assert_eq!(summary.replayed_negative, 2, "replayed negatives");
+    assert_served(&outcome, "m3", "after restart");
+    assert_eq!(lanes.a.calls(), 0, "wire-a skipped after restart");
+    assert_eq!(lanes.b.calls(), 0, "wire-b skipped after restart");
+    assert_eq!(lanes.fallback.calls(), 1);
+}
+
+#[tokio::test]
+async fn stream_rejection_before_the_first_chunk_is_learned_per_lane() {
+    // Arrange
+    let fx = fixture();
+    let row = web_search_row(&fx);
+    let lanes = Lanes::for_row(&fx, &row);
+    let router = three_lane_router("", &lanes);
+
+    // Act
+    let first = open_stream(&router, &row.request).await;
+
+    // Assert
+    assert_stream_served_m3(&first, "first stream");
+    let learned: Vec<(&str, &str)> = first
+        .meta
+        .learned_capabilities
+        .iter()
+        .map(|event| (event.capability_key.as_str(), event.state_key.as_str()))
+        .collect();
+    assert_eq!(
+        learned,
+        vec![("web_search", "p1#wire-a"), ("web_search", "p1#wire-b")],
+        "one learned web_search negative per Bedrock lane"
+    );
+    assert_eq!(lanes.a.calls(), 1);
+    assert_eq!(lanes.b.calls(), 1);
+
+    // Act: the next streamed request of the same shape.
+    let second = open_stream(&router, &row.request).await;
+
+    // Assert
+    assert_stream_served_m3(&second, "second stream");
+    assert_eq!(lanes.a.calls(), 1, "wire-a skipped after learning");
+    assert_eq!(lanes.b.calls(), 1, "wire-b skipped after learning");
+}
+
+#[tokio::test]
+async fn stream_rejection_after_content_is_not_learned() {
+    // Arrange: lane a streams content and then the same canary rejection
+    // that the pre-content test learns from.
+    let fx = fixture();
+    let row = web_search_row(&fx);
+    let lanes = Lanes {
+        a: CountingLane::rejecting_after_content("p1", &fx, &row.lane_a),
+        ..Lanes::for_row(&fx, &row)
+    };
+    let router = three_lane_router("", &lanes);
+
+    // Act
+    let first = open_stream(&router, &row.request).await;
+    let first_learned = first.meta.learned_capabilities.len();
+    let (texts, errored) = drain(first.result.expect("content committed lane a")).await;
+
+    // Assert: lane a committed, then failed in-stream.
+    assert_eq!(first.meta.served_upstream.as_deref(), Some(WIRE_A));
+    assert_eq!(texts, vec!["partial".to_string()]);
+    assert!(errored, "the post-content rejection ends the stream");
+    assert_eq!(first_learned, 0, "nothing learned on the first request");
+    assert!(
+        router.learned_capability_snapshot().is_empty(),
+        "nothing resident after the stream drained"
+    );
+
+    // Act
+    let second = open_stream(&router, &row.request).await;
+
+    // Assert
+    assert_eq!(lanes.a.calls(), 2, "wire-a dialed again");
+    assert_eq!(second.meta.served_upstream.as_deref(), Some(WIRE_A));
+    assert!(second.meta.learned_capabilities.is_empty());
 }
