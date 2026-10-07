@@ -105,7 +105,8 @@ pub enum PurgeOutcome {
     Reserved(Box<ReservedPurge>),
     /// No resident entry under this key -- a clean no-op.
     Absent,
-    /// Another purge holds this key's lease.
+    /// Another purge, an admitted re-probe, or an unsettled configuration
+    /// boundary owns this key. Retry after that owner finishes.
     Busy,
     /// The request arrived through a superseded Router, whose registry the
     /// published Router no longer reads.

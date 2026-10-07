@@ -25,21 +25,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use http::{HeaderMap, Method, Response, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, StreamBody};
-use hyper::body::Frame;
 use reqwest::{Client, Url};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::metrics::{Leg, PathClass, ProxyMetrics, ResultClass};
 
+mod watchdog;
+use watchdog::watchdog_stream;
+
 /// Connect (TCP + TLS handshake) timeout for both forward clients.
 /// Caps only the initial connection, never a per-read gap: the
 /// clients carry long-polls and SSE, so staleness is bounded by the
-/// per-forward idle watchdog ([`STREAM_IDLE_WINDOW`]) instead.
+/// upload/header deadline ([`RESPONSE_HEAD_TIMEOUT`]) and the per-forward
+/// body idle watchdog ([`STREAM_IDLE_WINDOW`]) instead.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Deadline for uploading a request and obtaining response headers. This is
+/// NOT a total response deadline: after headers, healthy SSE can run forever
+/// provided each read gap stays below the independent idle window.
+pub const RESPONSE_HEAD_TIMEOUT: Duration = Duration::from_mins(10);
 
 /// Idle silence window before the stream watchdog gives up on a
 /// forwarded stream and aborts it. Deliberately its own, longer,
@@ -48,7 +56,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// constant caps a single provider's inference read gap, but this
 /// proxy also carries the control-plane's long-polls, which can sit
 /// idle for longer than any inference SSE gap without being dead. This
-/// is purely a leak safety net for a truly wedged upstream, not a
+/// is purely a leak safety net for a truly wedged forwarding leg, not a
 /// tuning knob for latency -- a healthy stream, inference or
 /// control-plane, never approaches it.
 pub const STREAM_IDLE_WINDOW: Duration = Duration::from_mins(10);
@@ -91,8 +99,9 @@ const RECOMPUTED_HEADER_NAMES: &[&str] = &["host", "content-length"];
 /// sit quiet for a while between bytes. `routectl-providers`'
 /// `STREAM_READ_TIMEOUT` (300s) is exactly the inherited default we
 /// must NOT pick up here -- staleness protection instead comes from
-/// the per-forward idle watchdog ([`STREAM_IDLE_WINDOW`]), which is
-/// injectable per call and not baked into the client. Auto
+/// the upload/header deadline ([`RESPONSE_HEAD_TIMEOUT`]) and per-forward
+/// body idle watchdog ([`STREAM_IDLE_WINDOW`]), both injectable on the state
+/// and not baked into the client. Auto
 /// decompression is disabled on all four codecs: this is a byte
 /// proxy, bodies must stream out byte-identical to what the upstream
 /// sent, and `Content-Encoding` must stay truthful for the downstream
@@ -151,6 +160,7 @@ pub struct ForwardState {
     reinject_client: Client,
     limiter: StreamLimiter,
     idle_window: Duration,
+    response_head_timeout: Duration,
 }
 
 impl ForwardState {
@@ -159,7 +169,18 @@ impl ForwardState {
     /// inject a short window against a fake/paused clock. Fails only
     /// if a client cannot be built (no working TLS backend).
     pub fn new(max_concurrent_streams: usize, idle_window: Duration) -> reqwest::Result<Self> {
+        Self::with_response_head_timeout(max_concurrent_streams, idle_window, RESPONSE_HEAD_TIMEOUT)
+    }
+
+    /// Like new, with an injectable upload/response-head deadline. The response
+    /// body is never governed by this deadline.
+    pub fn with_response_head_timeout(
+        max_concurrent_streams: usize,
+        idle_window: Duration,
+        response_head_timeout: Duration,
+    ) -> reqwest::Result<Self> {
         Ok(Self {
+            response_head_timeout,
             external_client: common_client_builder().build()?,
             reinject_client: common_client_builder().no_proxy().build()?,
             limiter: StreamLimiter::new(max_concurrent_streams),
@@ -192,8 +213,8 @@ pub struct ForwardRequest {
 /// Error carried by a [`ForwardBody`] frame once the response status
 /// and headers have already been committed to the downstream client:
 /// either the upstream connection failed mid-stream, or the idle
-/// watchdog gave up on a stream that went silent for the configured
-/// window.
+/// watchdog gave up on a body that stopped making progress for the
+/// configured window (including downstream backpressure).
 #[derive(Debug)]
 pub enum ForwardBodyError {
     Upstream(reqwest::Error),
@@ -327,58 +348,6 @@ impl Drop for StreamGuard {
     }
 }
 
-/// Wraps `inner` with an idle watchdog: each item must arrive within
-/// `idle_window` of the previous one (or of stream start), else the
-/// stream ends with one [`ForwardBodyError::IdleTimeout`] frame and an
-/// `incr_stream_idle_aborts` bump. `guard` is carried inside the
-/// stream's own state so it drops -- releasing the semaphore permit
-/// and closing the `streams_open` gauge -- the instant the stream ends
-/// or is dropped, without waiting on the caller to drop the outer
-/// `Response`.
-fn watchdog_stream<S>(
-    inner: S,
-    idle_window: Duration,
-    metrics: Arc<ProxyMetrics>,
-    guard: StreamGuard,
-) -> impl Stream<Item = Result<Frame<Bytes>, ForwardBodyError>>
-where
-    S: Stream<Item = reqwest::Result<Bytes>> + Unpin + Send + 'static,
-{
-    struct State<S> {
-        inner: S,
-        // Held only for its `Drop` side effect (permit release +
-        // `stream_closed`); never read.
-        _guard: StreamGuard,
-    }
-
-    futures::stream::unfold(
-        Some(State {
-            inner,
-            _guard: guard,
-        }),
-        move |state| {
-            let metrics = Arc::clone(&metrics);
-            async move {
-                let mut state = state?;
-                match tokio::time::timeout(idle_window, state.inner.next()).await {
-                    Ok(Some(Ok(bytes))) => Some((Ok(Frame::data(bytes)), Some(state))),
-                    Ok(Some(Err(error))) => Some((Err(ForwardBodyError::Upstream(error)), None)),
-                    Ok(None) => None,
-                    Err(_elapsed) => {
-                        metrics.incr_stream_idle_aborts();
-                        tracing::warn!(
-                            target: "routectl_cli::proxy::forward",
-                            idle_window_secs = idle_window.as_secs(),
-                            "forwarded stream idle watchdog aborted stream"
-                        );
-                        Some((Err(ForwardBodyError::IdleTimeout), None))
-                    }
-                }
-            }
-        },
-    )
-}
-
 fn build_streaming_response(
     upstream: reqwest::Response,
     guard: StreamGuard,
@@ -455,17 +424,17 @@ pub async fn forward(
     let mut headers = request.headers;
     strip_hop_by_hop_headers(&mut headers);
 
-    let send_result = state
+    let send = state
         .client_for(leg)
         .request(request.method, url)
         .headers(headers)
         .body(request.body)
-        .send()
-        .await;
+        .send();
+    let send_result = tokio::time::timeout(state.response_head_timeout, send).await;
 
     let upstream_response = match send_result {
-        Ok(response) => response,
-        Err(error) => {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
             metrics.incr_request(leg, ResultClass::Unreachable, path_class);
             tracing::warn!(
                 target: "routectl_cli::proxy::forward",
@@ -474,6 +443,15 @@ pub async fn forward(
                 "upstream unreachable"
             );
             return empty_response(StatusCode::BAD_GATEWAY);
+        }
+        Err(_) => {
+            metrics.incr_request(leg, ResultClass::Unreachable, path_class);
+            tracing::warn!(
+                target: "routectl_cli::proxy::forward",
+                %method,
+                "upstream upload/response-head deadline expired"
+            );
+            return empty_response(StatusCode::GATEWAY_TIMEOUT);
         }
     };
 
@@ -491,6 +469,7 @@ pub async fn forward(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use http::header::{CONNECTION, HOST};
 
     #[test]

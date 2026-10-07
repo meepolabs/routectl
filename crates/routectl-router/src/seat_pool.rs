@@ -292,6 +292,9 @@ pub struct StickyPins {
     /// lands on, never a pin -- so persistence needs no defense, only this
     /// note for the next reader expecting the old reset.
     tiebreak: AtomicUsize,
+    /// Deterministic contention seam; invoked outside every production lock.
+    #[cfg(test)]
+    before_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Default for StickyPins {
@@ -307,6 +310,8 @@ impl StickyPins {
         Self {
             pins: Mutex::new(LruCache::new(cap)),
             tiebreak: AtomicUsize::new(0),
+            #[cfg(test)]
+            before_commit: Mutex::new(None),
         }
     }
 
@@ -324,9 +329,55 @@ impl StickyPins {
         self.tiebreak.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Insert or update the pin for `session_key`, marking it most-recently
-    /// used. Single setter: a birth pick passes `repinned: false`, a one-time
-    /// overflow-repin passes `repinned: true`.
+    /// Install a birth or migration only if the observed pin still owns the
+    /// key. A loser receives the authoritative pin and must reselect from it,
+    /// never dispatch its rejected candidate. Selection, capacity and quota
+    /// reads happen OUTSIDE this lock; no pins -> runtime/quota lock edge is
+    /// introduced. This also coordinates requests across shared reload maps.
+    pub(crate) fn compare_and_put(
+        &self,
+        session_key: &str,
+        expected: Option<&SeatPin>,
+        pin: SeatPin,
+    ) -> Result<(), Option<SeatPin>> {
+        #[cfg(test)]
+        {
+            let hook = self.before_commit.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut pins = self.pins.lock();
+        let current = pins.get(session_key).cloned();
+        if current.as_ref() != expected {
+            return Err(current);
+        }
+        pins.put(session_key.to_string(), pin);
+        Ok(())
+    }
+
+    /// Bounded-contention fallback. The selector may only use precomputed
+    /// inputs: it must not acquire runtime or quota locks under the pin lock.
+    pub(crate) fn select_and_put<T>(
+        &self,
+        session_key: &str,
+        select: impl FnOnce(Option<&SeatPin>) -> (T, Option<SeatPin>),
+    ) -> T {
+        let mut pins = self.pins.lock();
+        let (selected, candidate) = select(pins.get(session_key));
+        if let Some(candidate) = candidate {
+            pins.put(session_key.to_string(), candidate);
+        }
+        selected
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_commit(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.before_commit.lock() = hook;
+    }
+
+    /// Test planting seam. Production uses conditional writes exclusively.
+    #[cfg(test)]
     pub(crate) fn put(&self, session_key: &str, pin: SeatPin) {
         self.pins.lock().put(session_key.to_string(), pin);
     }

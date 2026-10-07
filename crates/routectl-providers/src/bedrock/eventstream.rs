@@ -49,6 +49,16 @@ impl FrameHandler for InvokeFrameHandler {
         handle_invoke_frame(provider_id, message, &mut self.sse_state)
             .map(|maybe| maybe.into_iter().collect())
     }
+
+    fn on_eof(&mut self, provider_id: &str) -> Result<Vec<ChatChunk>> {
+        let mut completion = crate::stream_completion::StreamCompletion::new(
+            "bedrock invoke (message_stop)",
+            |terminal: &bool| *terminal,
+        );
+        completion.observe(&self.sse_state.saw_message_stop);
+        completion.end_of_stream(provider_id)?;
+        Ok(Vec::new())
+    }
 }
 
 /// Decode Bedrock InvokeModel-stream frames into routectl `ChatChunk`s.
@@ -281,6 +291,15 @@ mod tests {
             ))
     }
 
+    fn terminal_bytes() -> Bytes {
+        let payload =
+            serde_json::json!({"bytes": B64_STANDARD.encode(r#"{"type":"message_stop"}"#)});
+        let frame = make_frame("chunk", &payload.to_string());
+        let mut buf = Vec::new();
+        aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf).unwrap();
+        Bytes::from(buf)
+    }
+
     /// A frame in the shape AWS actually uses for a modeled exception:
     /// `:message-type: "exception"` with the member name in
     /// `:exception-type` and NO `:event-type` header.
@@ -508,7 +527,7 @@ mod tests {
         let head = Bytes::copy_from_slice(head);
         let tail = Bytes::copy_from_slice(tail);
 
-        let byte_stream = futures::stream::iter(vec![Ok(head), Ok(tail)]);
+        let byte_stream = futures::stream::iter(vec![Ok(head), Ok(tail), Ok(terminal_bytes())]);
         let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
 
         // The `ping` event maps to no ChatChunk (sse_state returns
@@ -594,10 +613,11 @@ mod tests {
         let byte_stream = futures::stream::iter(vec![
             Ok(Bytes::copy_from_slice(head1)),
             Ok(Bytes::from(combined_tail)),
+            Ok(terminal_bytes()),
         ]);
         let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
 
-        // Both frames are pings -> sse_state yields no ChatChunks.
+        // Pings followed by message_stop yield no ChatChunks.
         // The test passes if the stream completes without error.
         while let Some(item) = chunks.next().await {
             if let Err(e) = item {
@@ -627,7 +647,7 @@ mod tests {
         let mut buf = Vec::new();
         aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf).unwrap();
 
-        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(buf))]);
+        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(buf)), Ok(terminal_bytes())]);
         let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
 
         // The lossy decode replaces 0xFE with U+FFFD; the resulting
@@ -692,7 +712,8 @@ mod tests {
         // Sequence: bad frame, good frame.
         let mut combined = buf_bad;
         combined.extend_from_slice(&buf_good);
-        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(combined))]);
+        let byte_stream =
+            futures::stream::iter(vec![Ok(Bytes::from(combined)), Ok(terminal_bytes())]);
         let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
 
         // We should NOT see an Err from the stream -- the bad frame

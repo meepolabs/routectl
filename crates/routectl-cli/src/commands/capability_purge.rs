@@ -148,9 +148,12 @@ pub async fn run(config: &Config, target: &str, capability: &str) -> i32 {
             }
             PURGE_BUSY_CODE => {
                 eprintln!(
-                    "       another purge of this same key is in flight; nothing was changed."
+                    "       another purge or an admitted re-probe owns this key, or a configuration \
+                     boundary is awaiting settlement; nothing was changed."
                 );
-                eprintln!("       wait for it to finish, then run this again if still needed.");
+                eprintln!(
+                    "       wait for that work to finish, then run this again if still needed."
+                );
             }
             PURGE_SUPERSEDED_CODE => {
                 eprintln!(

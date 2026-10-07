@@ -159,9 +159,27 @@ impl Provider for OpenAiResponsesProvider {
     }
 
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
+        let output = raw
+            .get("output")
+            .and_then(Value::as_array)
+            .filter(|items| {
+                items.iter().any(|item| {
+                    !matches!(
+                        item.get("type").and_then(Value::as_str),
+                        Some("message" | "reasoning" | "function_call")
+                    )
+                })
+            })
+            .cloned();
         let typed: response_types::ResponsesResponse = serde_json::from_value(raw)
             .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
-        response::translate(&self.cfg.id, self.cfg.auth_kind, typed)
+        let mut response = response::translate(&self.cfg.id, self.cfg.auth_kind, typed)?;
+        if let Some(output) = output {
+            let mut meta = routectl_core::UpstreamMeta::default();
+            meta.responses_output = Some(std::sync::Arc::new(output));
+            response.upstream_meta = Some(meta);
+        }
+        Ok(response)
     }
 
     fn replay_lane(&self) -> ReplayScheme {
@@ -389,7 +407,10 @@ impl Provider for OpenAiResponsesProvider {
 
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
-        chat_resp.upstream_meta = upstream_meta;
+        chat_resp.upstream_meta = match (chat_resp.upstream_meta.take(), upstream_meta) {
+            (Some(body), Some(head)) => Some(body.merge(head)),
+            (body, head) => body.or(head),
+        };
         Ok(chat_resp)
     }
 

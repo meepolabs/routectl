@@ -64,6 +64,7 @@ fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
             routectl_cli::server::confirmation_advance::ConfirmationTracker::new(),
         ),
         context_anchors: std::sync::Arc::default(),
+        responses_store: std::sync::Arc::default(),
     });
     (state, dir)
 }

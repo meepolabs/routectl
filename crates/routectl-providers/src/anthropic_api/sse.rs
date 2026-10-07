@@ -118,6 +118,8 @@ pub struct SseState {
     pub id: String,
     /// Model name carried onto every emitted chunk.
     pub model: String,
+    /// Semantic terminal observed, including for the Bedrock Invoke wrapper.
+    pub(crate) saw_message_stop: bool,
     /// Next index to assign in the reasoning_details array.
     pub next_detail_index: u32,
     /// Next index to assign in the tool_calls array.
@@ -184,9 +186,8 @@ pub struct SseState {
     /// original client name) from the cloak forward pass. Used to restore
     /// the client's original tool names on streamed `tool_use` blocks.
     /// The name is reversed ONCE when the block opens
-    /// (`ContentBlockStart::ToolUse`); every `input_json_delta` chunk
-    /// re-emits the stored name and so inherits the reversal. Empty map =
-    /// no-op.
+    /// (`ContentBlockStart::ToolUse`), emitted once before argument deltas.
+    /// An empty map is a no-op.
     pub tool_reverse: std::collections::HashMap<String, String>,
     /// Wire label stamped on the opening usage carrier. `None` reads as
     /// the Anthropic Messages wire; a wrapping transport that feeds this
@@ -297,6 +298,11 @@ impl SseState {
     fn dispatch_event(&mut self, provider_id: &str, event: SseEvent) -> Result<Option<ChatChunk>> {
         match event {
             SseEvent::MessageStart { message } => {
+                if self.saw_message_stop {
+                    return Err(Error::Streaming(
+                        "anthropic: message start after message stop".into(),
+                    ));
+                }
                 self.id = message.id;
                 self.model = message.model;
                 if let Some(u) = message.usage {
@@ -329,6 +335,15 @@ impl SseState {
                 content_block,
             } => {
                 use super::types::SseContentBlockStart;
+                if self
+                    .open_block
+                    .as_ref()
+                    .is_some_and(|block| block.upstream_index() == index)
+                {
+                    return Err(Error::Streaming(
+                        "anthropic: repeated content block start".into(),
+                    ));
+                }
                 match content_block {
                     SseContentBlockStart::Text { .. } => {
                         self.open_block = Some(OpenBlockKind::Text {
@@ -350,11 +365,10 @@ impl SseState {
                         let ci = self.next_call_index;
                         self.next_call_index += 1;
                         // Reverse the tool name to the client's original
-                        // once, here at block open. make_tool_delta_chunk
-                        // re-emits this stored name on every
-                        // input_json_delta chunk, so all deltas inherit
-                        // the reversal. Names absent from the map (or a
-                        // bare name with no mcp__ shape) pass through.
+                        // once, here at block open, before argument deltas.
+                        // Metadata is emitted only on this opening chunk.
+                        // Names absent from the map (or a bare name with no
+                        // mcp__ shape) pass through.
                         let name = self.reverse_tool_name(name, provider_id);
                         // Snapshot thinking preceding this tool_use for
                         // context_management emulation. Non-cumulative:
@@ -373,6 +387,7 @@ impl SseState {
                             name,
                             call_index: ci,
                         });
+                        return Ok(Some(self.make_tool_delta_chunk(String::new(), true)));
                     }
                     SseContentBlockStart::RedactedThinking { data } => {
                         // No per-token deltas follow a redacted_thinking
@@ -456,7 +471,7 @@ impl SseState {
                         Ok(None)
                     }
                     SseDelta::InputJsonDelta { partial_json } => {
-                        Ok(Some(self.make_tool_delta_chunk(partial_json)))
+                        Ok(Some(self.make_tool_delta_chunk(partial_json, false)))
                     }
                     // Unknown delta inside a typed block is upstream-
                     // malformed; drop without canonical emission. The
@@ -727,6 +742,7 @@ impl SseState {
             }
 
             SseEvent::MessageStop => {
+                self.saw_message_stop = true;
                 // Reset the per-turn thinking accumulator. pending_cache_writes
                 // is intentionally NOT cleared here -- it is drained by the
                 // stream() caller after the SSE pipeline finishes so the
@@ -903,7 +919,7 @@ impl SseState {
         name
     }
 
-    fn make_tool_delta_chunk(&self, partial_json: String) -> ChatChunk {
+    fn make_tool_delta_chunk(&self, partial_json: String, metadata: bool) -> ChatChunk {
         let (tool_id, tool_name, call_index) = match &self.open_block {
             Some(OpenBlockKind::ToolUse {
                 id,
@@ -914,12 +930,15 @@ impl SseState {
             _ => (String::new(), String::new(), 0),
         };
 
-        let tool_call_delta: Value = json!({
+        let mut tool_call_delta: Value = json!({
             "index": call_index,
-            "id": tool_id,
-            "type": "function",
-            "function": {"name": tool_name, "arguments": partial_json}
+            "function": {"arguments": partial_json}
         });
+        if metadata {
+            tool_call_delta["id"] = json!(tool_id);
+            tool_call_delta["type"] = json!("function");
+            tool_call_delta["function"]["name"] = json!(tool_name);
+        }
 
         ChatChunk {
             id: self.id.clone(),

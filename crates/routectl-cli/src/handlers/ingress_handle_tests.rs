@@ -21,6 +21,7 @@
 //! mapping without needing a server.
 
 use super::*;
+use crate::handlers::usage_capture::build_usage_draft;
 use axum::body::to_bytes;
 use routectl_core::Error;
 use routectl_router::config::CredentialSource;
@@ -3040,6 +3041,7 @@ async fn stream_gate_fast_ok_renders_message_start_with_estimate_no_early_frame(
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 42,
         model: "m".into(),
+        req: Default::default(),
     };
 
     // Act
@@ -3159,6 +3161,7 @@ async fn warm_render_first_byte_is_message_start_with_estimate_no_duplicate() {
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 77,
         model: "m".into(),
+        req: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3222,6 +3225,7 @@ async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row()
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 10,
         model: "m".into(),
+        req: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3347,6 +3351,7 @@ async fn warm_render_cancels_pending_dispatch_on_client_disconnect_before_conten
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 5,
         model: "m".into(),
+        req: Default::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3414,6 +3419,7 @@ async fn stream_gate_grace_expiry_commits_sse_response() {
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 5,
         model: "m".into(),
+        req: Default::default(),
     };
 
     // Act: with paused time + a pending dispatch, the runtime auto-advances to
@@ -3464,6 +3470,7 @@ async fn warm_render_ok_then_mid_stream_error_marks_mid_stream_stage() {
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 10,
         model: "m".into(),
+        req: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3549,6 +3556,7 @@ async fn warm_render_post_content_anthropic_error_is_terminal_with_preserved_typ
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 10,
         model: "m".into(),
+        req: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3631,6 +3639,7 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 10,
         model: "m".into(),
+        req: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
     drop(rx);
@@ -3695,6 +3704,7 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 5,
         model: "m".into(),
+        req: Default::default(),
     };
 
     // Act
@@ -3725,6 +3735,9 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
     // directly with a resolvable dispatch so the mpsc channel can be drained
     // to completion -- a `pending_dispatch`'s body never reaches EOS, so this
     // part cannot be checked at the HTTP body level.
+    // The remaining fixture performs real loopback I/O. Resume the clock so
+    // idle auto-advance cannot race its HTTP deadline against the accept task.
+    tokio::time::resume();
     let (router2, meta2) = k_recording_router_and_meta().await;
     let stream: futures::stream::BoxStream<'static, routectl_core::Result<_>> = Box::pin(
         futures::stream::iter(vec![Ok(streaming_text_chunk("hello"))]),
@@ -3745,6 +3758,7 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
             StreamRequestContext {
                 input_tokens_estimate: 5,
                 model: "m".into(),
+                req: Default::default(),
             },
         ),
     )
@@ -4570,7 +4584,7 @@ fn adapter_envelope_shapes_are_dialect_correct() {
         "OpenAI chat-completions ingress is a non-Anthropic dialect"
     );
     assert_eq!(
-        ResponsesIngress.error_envelope_shape(),
+        ResponsesIngress::default().error_envelope_shape(),
         ErrorEnvelopeShape::OpenAi,
         "OpenAI Responses ingress is a non-Anthropic dialect"
     );
@@ -5256,7 +5270,7 @@ mod pre_change_ingress_contract {
             "input": "hi",
             "future_unknown_knob": "keep-me"
         });
-        let req = ResponsesIngress
+        let req = ResponsesIngress::default()
             .parse_request_value(&HeaderMap::new(), body)
             .expect("valid Responses body parses");
         let extras = req
@@ -5467,3 +5481,6 @@ mod cc_pin_drift_observation {
         );
     }
 }
+
+#[path = "usage_execution_http_tests.rs"]
+mod execution_http;

@@ -16,6 +16,58 @@ list with more narrative.
 
 ### Added
 
+- **Responses stream events now carry item ids end to end.** The
+  reasoning delta events (`response.reasoning_summary_text.delta` /
+  `response.reasoning_text.delta`) omitted `item_id`, and message
+  items (`response.output_item.added` / every delta / `output_item.done`
+  / the completed body) carried no id at all. A client building its
+  transcript from stream events -- the OpenAI SDK, codex -- could not
+  associate a reasoning item's eventual `encrypted_content` signature
+  with the id the upstream bound it to, so it minted its own id and
+  replayed the signature under it; the ChatGPT backend verifies the
+  pair and rejects with "Encrypted content item_id did not match the
+  target item id". Message items now mint a stable `msg_N` id at open
+  time carried on every event for the item AND patched into the
+  completed body (the official API names message items end to end);
+  reasoning deltas carry the upstream's own item id. Stream-vs-non-
+  stream output parity keeps holding (id-stripped comparison pinned in
+  tests, with the id consistency pinned separately).
+
+- **Responses `previous_response_id` chaining + `GET /v1/responses/{id}`
+  retrieval.** The Responses ingress kept the stateless contract (a
+  chained request 400'd, `store: true` warned it was ignored), so a
+  client built on the official API's server-side conversation mode --
+  the OpenAI SDK's `previous_response_id=` shape, or any client that
+  trusts the spec's `store` default of `true` -- could not route
+  through routectl without restructuring every call. The ingress now
+  ships an optional bounded response store: `ResponsesIngress::with_store`
+  (server wiring) persists every `store: true` turn and resolves a
+  chained request against it, replaying the FULL stored conversation
+  context plus the prior response's own output items -- matching the
+  official API's semantics rather than last-output-only. The store is
+  process-local and FIFO-bounded (512 by default); a restart starts
+  cold, and a chain to an unknown / evicted / pre-restart id fails with
+  a clear 400 naming the cause, never a silent wrong answer. A storeless
+  build (`ResponsesIngress::default()` -- library consumers, unit
+  tests) keeps the historical stateless contract unchanged. `GET
+  /v1/responses/{id}` serves a stored response object (404 with the
+  OpenAI error envelope otherwise); the route rides the same auth gate
+  as the inference routes and is classified non-MITM and
+  non-version-observing with reasons in the serve inventories. The
+  `store` flag itself never forwards upstream (it stays stripped, as
+  before) -- it rides `routectl_internal.responses_store` (inbound data,
+  spec default `true`) so the render and stream paths can honor it.
+
+- **Responses response objects now echo the request's parameters.** The
+  official API's response is a log of the request that produced it
+  (`instructions`, `tools`, `tool_choice`, `temperature`, `top_p`,
+  `reasoning`, `store` all come back), and strict clients read those
+  fields. Both render paths -- the non-stream renderer and the
+  streaming `response.created` / `response.completed` skeleton -- now
+  echo the canonical request's values (tools translated back to the
+  flat Responses wire shape; absent fields echo null / empty, matching
+  the official always-present envelope).
+
 - **The envelope-field pre-flight surface is now readable at INFO** -- a
   status or doctor poll emits one structured line carrying what an
   operator needs to explain, audit, or distrust every resident wire-shape

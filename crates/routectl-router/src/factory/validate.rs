@@ -596,6 +596,7 @@ pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()
     // key). Cycle detection is a separate pass below; it walks the
     // graph structure rather than per-entry semantics.
     for (alias, value) in &config.aliases {
+        let alias = routectl_core::sanitize_for_log(alias);
         if value.is_empty() {
             errors.push(format!(
                 "alias `{alias}`: chain is empty -- an alias with no targets \
@@ -611,16 +612,17 @@ pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()
             if config.aliases.contains_key(nickname) {
                 continue;
             }
+            let nickname_display = routectl_core::sanitize_for_log(nickname);
             match config.models.get(nickname) {
                 None => {
                     errors.push(format!(
-                        "alias `{alias}`: target `{nickname}` is not a known \
+                        "alias `{alias}`: target `{nickname_display}` is not a known \
                          model nickname in [models] and is not an alias key"
                     ));
                 }
                 Some(model) if !model.selectable => {
                     errors.push(format!(
-                        "alias `{alias}`: target `{nickname}` is declared but \
+                        "alias `{alias}`: target `{nickname_display}` is declared but \
                          `selectable = false`; alias chains must reference \
                          selectable models"
                     ));
@@ -653,6 +655,9 @@ pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()
         );
     }
 
+    if errors.is_empty() {
+        crate::alias_limits::validate_expanded_sizes(config, &mut errors);
+    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -692,9 +697,12 @@ fn detect_alias_cycles_dfs(
             .iter()
             .position(|p| p == current)
             .expect("path_set/path invariant: current must be present in path");
-        let mut cycle_path: Vec<&str> = path[idx..].iter().map(String::as_str).collect();
-        cycle_path.push(current);
-        let entry_alias = path[idx].clone();
+        let mut cycle_path: Vec<String> = path[idx..]
+            .iter()
+            .map(|alias| routectl_core::sanitize_for_log(alias))
+            .collect();
+        cycle_path.push(routectl_core::sanitize_for_log(current));
+        let entry_alias = routectl_core::sanitize_for_log(&path[idx]);
         errors.push(format!(
             "alias `{entry_alias}`: cycle detected: {}",
             cycle_path.join(" -> ")
@@ -710,6 +718,14 @@ fn detect_alias_cycles_dfs(
         // Either way, no cycle can pass through a non-alias leaf.
         return;
     };
+    if path.len() > crate::router::ALIAS_MAX_RECURSION_DEPTH {
+        errors.push(format!(
+            "alias `{}`: chain recursion exceeds depth {}; shorten the nested alias chain",
+            routectl_core::sanitize_for_log(&path[0]),
+            crate::router::ALIAS_MAX_RECURSION_DEPTH,
+        ));
+        return;
+    }
     path.push(current.to_string());
     path_set.insert(current.to_string());
     for entry in value.nicknames() {

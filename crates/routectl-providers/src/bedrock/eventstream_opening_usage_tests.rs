@@ -27,7 +27,8 @@ fn chunk_frame_bytes(inner_event: &str) -> Vec<u8> {
 }
 
 async fn decode(events: &[&str]) -> Vec<ChatChunk> {
-    let wire: Vec<u8> = events.iter().flat_map(|e| chunk_frame_bytes(e)).collect();
+    let mut wire: Vec<u8> = events.iter().flat_map(|e| chunk_frame_bytes(e)).collect();
+    wire.extend(chunk_frame_bytes(r#"{"type":"message_stop"}"#));
     let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(wire))]);
     invoke_stream("test-bedrock".to_string(), byte_stream)
         .map(|item| item.expect("no stream error"))

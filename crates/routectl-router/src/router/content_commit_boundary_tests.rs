@@ -719,6 +719,17 @@ fn is_content_bearing_classifies_every_variant() {
         "reasoning_details"
     );
     assert!(is_content_bearing(&opaque_chunk("x")), "opaque_events");
+    let mut native = routectl_core::UpstreamMeta::default();
+    native.responses_output = Some(Arc::new(vec![serde_json::json!({
+        "type": "local_shell_call", "id": "native"
+    })]));
+    assert!(
+        is_content_bearing(&ChatChunk {
+            upstream_meta: Some(native),
+            ..Default::default()
+        }),
+        "native Responses output without canonical choices",
+    );
     assert!(
         is_content_bearing(&delta_chunk(ChunkDelta {
             reasoning: Some("thinking".into()),
@@ -730,6 +741,17 @@ fn is_content_bearing_classifies_every_variant() {
     // Content-free: metadata, terminal-only, and empty-value chunks.
     assert!(!is_content_bearing(&role_chunk("x")), "role-only");
     assert!(!is_content_bearing(&meta_chunk("x")), "id/model metadata");
+    for responses_output in [None, Some(Arc::new(Vec::new()))] {
+        let mut meta = routectl_core::UpstreamMeta::default();
+        meta.responses_output = responses_output;
+        assert!(
+            !is_content_bearing(&ChatChunk {
+                upstream_meta: Some(meta),
+                ..Default::default()
+            }),
+            "absent or empty native output must not commit metadata",
+        );
+    }
     assert!(
         !is_content_bearing(&ChatChunk {
             usage: Some(UsageDelta {

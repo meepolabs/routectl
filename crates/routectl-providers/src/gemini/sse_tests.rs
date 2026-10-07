@@ -6,7 +6,7 @@ use crate::gemini::types::{
     ResponsePart, UsageMetadata,
 };
 use routectl_core::Role;
-use routectl_testkit::{CapturedEvent, capture_events};
+use routectl_testkit::capture_events;
 use tracing::Level;
 
 const PID: &str = "gemini:test";
@@ -551,33 +551,25 @@ fn terminal_event_own_usage_wins_no_double_count() {
 }
 
 #[test]
-fn eos_with_cached_usage_and_no_finish_reason_warns() {
-    // If the stream reaches EOS having observed usage but no finishReason
-    // ever, termination was never proven -- a WARN must fire so silent
-    // truncation cannot masquerade as success.
-    let events = capture_events(|| {
-        let mut state = GeminiStreamState::default();
-        let _ = state
-            .parse_event(
-                PID,
-                event(
-                    vec![text_part("hi")],
-                    None,
-                    Some(UsageMetadata {
-                        prompt_token_count: 5,
-                        candidates_token_count: 2,
-                        total_token_count: 7,
-                        ..Default::default()
-                    }),
-                ),
-            )
-            .expect("parse usage event");
-        state.on_eos(PID);
-    });
-    let warns: Vec<&CapturedEvent> = events.iter().filter(|e| e.level == Level::WARN).collect();
-    assert_eq!(warns.len(), 1, "exactly one WARN must fire; got {warns:?}");
-    assert_eq!(warns[0].field("provider"), Some(PID));
-    assert_eq!(warns[0].field("had_cached_usage"), Some("true"));
+fn eos_with_cached_usage_and_no_finish_reason_errors() {
+    let mut state = GeminiStreamState::default();
+    state
+        .parse_event(
+            PID,
+            event(
+                vec![text_part("hi")],
+                None,
+                Some(UsageMetadata {
+                    total_token_count: 7,
+                    ..Default::default()
+                }),
+            ),
+        )
+        .unwrap();
+    assert!(matches!(
+        state.on_eos(PID),
+        Err(Error::Upstream { status: 0, .. })
+    ));
 }
 
 #[test]
@@ -599,7 +591,7 @@ fn eos_after_finish_reason_does_not_warn() {
                 ),
             )
             .expect("parse terminal");
-        state.on_eos(PID);
+        state.on_eos(PID).expect("semantic terminal observed");
     });
     assert!(
         events.iter().all(|e| e.level != Level::WARN),
@@ -676,7 +668,7 @@ fn prompt_block_event_emits_single_content_filter_terminal_and_no_eos_warn() {
             state.saw_finish_reason,
             "prompt block sets saw_finish_reason"
         );
-        state.on_eos(PID);
+        state.on_eos(PID).expect("semantic terminal observed");
     });
     assert!(
         events.iter().all(|e| e.level != Level::WARN),

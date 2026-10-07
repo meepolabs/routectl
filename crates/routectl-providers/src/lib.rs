@@ -156,7 +156,11 @@ pub(crate) mod upstream_log;
 
 // Shared end-of-stream verdict for the egress lanes whose wire closes each
 // turn with an explicit terminal event; each lane injects its own predicate.
-#[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
 pub(crate) mod stream_completion;
 
 // Shared parser for the standard HTTP `Retry-After` response header.
@@ -296,3 +300,6 @@ pub mod gemini;
     feature = "bedrock"
 ))]
 mod streaming_role_parity_tests;
+
+#[cfg(test)]
+mod provider_audit_tests;

@@ -454,7 +454,9 @@ mod tests {
         let _handle =
             spawn_watcher(vec![WatchTarget::Config(target.clone())], tx, shutdown_rx).unwrap();
 
-        tokio::time::sleep(StdDuration::from_millis(SETTLE_MS)).await;
+        // FSEvents can deliver the fixture's pre-watch creation after install.
+        // Drain ONLY the setup phase, then keep the post-mutation assertions strict.
+        let _setup_events = drain_quiet_window(&mut rx, StdDuration::from_millis(800)).await;
 
         // Act: write only to the sibling.
         std::fs::write(&sibling, b"hello\n").unwrap();
@@ -521,7 +523,7 @@ mod tests {
         )
         .unwrap();
 
-        tokio::time::sleep(StdDuration::from_millis(SETTLE_MS)).await;
+        let _setup_events = drain_quiet_window(&mut rx, StdDuration::from_millis(800)).await;
 
         // Act: tempfile + persist (atomic rename). NamedTempFile
         // in the same parent dir mirrors `write_to_temp` /
@@ -608,7 +610,7 @@ mod tests {
         )
         .unwrap();
 
-        tokio::time::sleep(StdDuration::from_millis(SETTLE_MS)).await;
+        let _setup_events = drain_quiet_window(&mut rx, StdDuration::from_millis(800)).await;
 
         // Act: tempfile + persist (atomic rename).
         let tmp = tempfile::Builder::new()

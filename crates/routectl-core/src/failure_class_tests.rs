@@ -1083,3 +1083,80 @@ fn classify_with_attempt_is_total_across_statuses_and_attempts() {
         }
     }
 }
+
+#[test]
+fn the_chatgpt_id_verification_rejection_classifies_as_replay() {
+    // The chatgpt.com codex lane's ID-VERIFICATION shape: the blob is
+    // well-formed but the id the client replayed it under does not match
+    // the id embedded in the blob. Real captured envelope (2026-10,
+    // chatgpt-oauth lane, rs_1 = a client-minted id). Grounds the second
+    // PROVEN_REJECTIONS row.
+    let body = "{\"error\":{\"message\":\"The encrypted content for item rs_1 could not be verified. Reason: Encrypted content item_id did not match the target item id.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_encrypted_content\"}}";
+    let err = Error::upstream_full(
+        "p",
+        400,
+        body,
+        None,
+        Some("invalid_request_error".to_string()),
+        Some("invalid_encrypted_content".to_string()),
+    );
+
+    let got = classify_with_attempt(
+        &err,
+        Some(REPLAY_KIND),
+        ReplayAttempt::with_gray_artifacts(1),
+    );
+    assert_eq!(got.class, replay_class());
+    assert!(
+        replay::is_replay_rejection(
+            400,
+            Some("invalid_request_error"),
+            Some("invalid_encrypted_content"),
+            body,
+            Some(REPLAY_KIND),
+            ReplayAttempt::with_gray_artifacts(1),
+        ),
+        "the id-verification rejection must classify as a replay repair"
+    );
+
+    // The same shape with NO structured tokens (a raw first-party body):
+    // the envelope reader supplies code + type.
+    let raw = Error::upstream_full("p", 400, body, None, None, None);
+    let got = classify_with_attempt(
+        &raw,
+        Some(REPLAY_KIND),
+        ReplayAttempt::with_gray_artifacts(1),
+    );
+    assert_eq!(got.class, replay_class());
+    assert!(
+        replay::is_replay_rejection(
+            400,
+            None,
+            None,
+            body,
+            Some(REPLAY_KIND),
+            ReplayAttempt::with_gray_artifacts(1)
+        ),
+        "envelope-read tokens must match without canonical fields"
+    );
+
+    // Without a carried artifact the shape stays an ordinary bad request.
+    let got = classify_with_attempt(&err, Some(REPLAY_KIND), ReplayAttempt::none());
+    assert_eq!(got.class, FailureClass::BadRequest);
+
+    // A different code on the same message never matches.
+    let other = Error::upstream_full(
+        "p",
+        400,
+        body.replace("invalid_encrypted_content", "some_other_code"),
+        None,
+        Some("invalid_request_error".to_string()),
+        Some("some_other_code".to_string()),
+    );
+    let got = classify_with_attempt(
+        &other,
+        Some(REPLAY_KIND),
+        ReplayAttempt::with_gray_artifacts(1),
+    );
+    assert_eq!(got.class, FailureClass::BadRequest);
+}

@@ -3377,9 +3377,10 @@ What it does and does not do:
   because they need different responses from you:
   - **could not persist** -- check the daemon's usage database, then run
     the command again. Nothing changed.
-  - **busy** -- another purge of the same key is in flight. Wait for it,
-    then run the command again if the entry is still there. Nothing
-    changed.
+  - **busy** -- another purge or an admitted re-probe owns the same key,
+    or a configuration boundary is awaiting settlement. Wait for that
+    work to finish, then run the command again if the entry is still
+    there. Nothing changed.
   - **configuration reloaded** -- the daemon reloaded while the command
     ran, so it acted on configuration that is no longer live. Run it
     again. Nothing changed.

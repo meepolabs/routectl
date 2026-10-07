@@ -116,6 +116,24 @@ pub(crate) fn build_usage_draft(
     }
 }
 
+/// Mint a ledger identity for one HTTP execution, not a caller correlation
+/// identity. SQLite deduplicates request_id; callers may intentionally reuse
+/// x-request-id across retries or independent requests. Retain that ID in the
+/// existing extra object, while each execution (including a cancelled one)
+/// owns a fresh key. The ordinary draft builder also serves synthetic callers
+/// that already own a ledger identity.
+pub(crate) fn build_execution_usage_draft(
+    ingress_dialect: &str,
+    req: &routectl_core::ChatRequest,
+    correlation_id: String,
+) -> UsageRecord {
+    let mut draft = build_usage_draft(ingress_dialect, req, uuid::Uuid::now_v7().to_string());
+    if !correlation_id.is_empty() {
+        draft.extra = Some(serde_json::json!({"correlation_request_id": correlation_id}));
+    }
+    draft
+}
+
 /// Derive the `(thinking_req, thinking_req_kind)` columns from the
 /// request's reasoning config. A budget request (`max_tokens` set) records
 /// the budget value under `"budget_tokens"`; an effort request records
@@ -388,6 +406,15 @@ impl UsageCapture {
         }
     }
 
+    fn correlation_request_id(&self) -> &str {
+        self.record
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("correlation_request_id"))
+            .and_then(Value::as_str)
+            .unwrap_or(&self.record.request_id)
+    }
+
     /// Record the first-byte marker (first stream chunk, or the
     /// non-streaming response becoming ready). Idempotent: only the first
     /// call sticks, so ttfb measures time-to-first-byte.
@@ -434,7 +461,7 @@ impl UsageCapture {
         if meta.served_forwarded_credential {
             self.stamp_extra("credential_source", "forwarded");
             tracing::debug!(
-                request_id = %self.record.request_id,
+                request_id = %self.correlation_request_id(),
                 provider = self.record.provider.as_deref().unwrap_or(""),
                 served_model = self.record.model.as_deref().unwrap_or(""),
                 served_upstream = self.record.upstream.as_deref().unwrap_or(""),
@@ -1166,7 +1193,7 @@ impl UsageCapture {
         let strategy = self.cache_strategy.unwrap_or("");
         let provider = self.record.provider.as_deref().unwrap_or("");
         let model = self.record.model.as_deref().unwrap_or("");
-        let request_id = self.record.request_id.as_str();
+        let request_id = self.correlation_request_id();
         let cache_active = cache_read > 0 || cache_creation > 0 || strategy == "auto_emitted";
         if cache_active {
             tracing::info!(

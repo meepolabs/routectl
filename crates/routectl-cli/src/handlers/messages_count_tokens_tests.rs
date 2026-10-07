@@ -213,3 +213,6 @@ async fn count_tokens_does_not_observe_when_the_body_never_parsed() {
 /// above test drift rather than coincidence with the compiled pin.
 const DRIFTED_VERSION: &str = "99.9.9";
 const DRIFTED_CLIENT_UA: &str = "claude-cli/99.9.9 (external, sdk-cli)";
+
+#[path = "messages_count_tokens_forwarded_tests.rs"]
+mod forwarded;

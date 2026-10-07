@@ -238,7 +238,7 @@ async fn run_blind_tunnel(
     metrics.incr_request(Leg::BlindTunnel, result_class, PathClass::Unknown);
 }
 
-/// Handles one accepted TCP connection end-to-end: acquires a connection
+/// Handles one admitted TCP connection end-to-end: holds its connection
 /// slot, reads the CONNECT request (bounded by [`CONNECT_READ_TIMEOUT`]),
 /// then either hands the raw stream to [`handle_mitm_connection`] (target
 /// host matches `mitm_host`, case-insensitively -- DNS hostnames are not
@@ -255,7 +255,8 @@ async fn run_blind_tunnel(
 /// answers `200` immediately. Never panics; every failure path logs and
 /// returns, dropping the connection.
 ///
-/// The [`MAX_CONCURRENT_CONNECTIONS`] permit is acquired FIRST, before
+/// The [`MAX_CONCURRENT_CONNECTIONS`] permit is acquired by the accept loop
+/// with try_acquire (no spawned FD-holding waiters), before
 /// the CONNECT header is even read, and is held all the way through
 /// whichever leg the connection dispatches to (moved into the spawned
 /// blind-tunnel or MITM task rather than dropped at handoff) -- see that
@@ -266,24 +267,10 @@ async fn handle_connection(
     acceptor: TlsAcceptor,
     ctx: Arc<MitmCtx>,
     mitm_host: Arc<str>,
-    connection_semaphore: Arc<Semaphore>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    connect_deadline: tokio::time::Instant,
 ) {
-    let permit = match connection_semaphore.acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            // The semaphore is never explicitly closed anywhere in this
-            // module; unreachable in practice, kept fail-safe rather than
-            // panicking the accept loop's spawned task.
-            tracing::error!(
-                target: "routectl_cli::proxy::listener",
-                peer = %peer,
-                "MITM proxy connection concurrency semaphore unexpectedly closed"
-            );
-            return;
-        }
-    };
-
-    let target = match tokio::time::timeout(CONNECT_READ_TIMEOUT, read_connect_target(&mut stream))
+    let target = match tokio::time::timeout_at(connect_deadline, read_connect_target(&mut stream))
         .await
     {
         Ok(Ok(Some(ConnectRequest::Target(target)))) => target,
@@ -339,7 +326,17 @@ async fn handle_connection(
         return;
     }
 
-    let upstream = match TcpStream::connect((target.host.as_str(), target.port)).await {
+    let upstream = match tokio::time::timeout(
+        super::forward::CONNECT_TIMEOUT,
+        TcpStream::connect((target.host.as_str(), target.port)),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "blind tunnel dial timed out",
+        ))
+    }) {
         Ok(upstream) => upstream,
         Err(error) => {
             tracing::warn!(
@@ -390,9 +387,27 @@ async fn run_listener(
     acceptor: TlsAcceptor,
     ctx: Arc<MitmCtx>,
     mitm_host: Arc<str>,
-    mut shutdown: watch::Receiver<()>,
+    shutdown: watch::Receiver<()>,
 ) {
-    let connection_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    run_listener_bounded(
+        listener,
+        acceptor,
+        ctx,
+        mitm_host,
+        shutdown,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
+    )
+    .await;
+}
+
+async fn run_listener_bounded(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    ctx: Arc<MitmCtx>,
+    mitm_host: Arc<str>,
+    mut shutdown: watch::Receiver<()>,
+    connection_semaphore: Arc<Semaphore>,
+) {
     // Skip the immediate first tick `interval` would otherwise fire at
     // t=0 (an all-zero snapshot at startup carries no signal).
     let mut snapshot_tick = tokio::time::interval_at(
@@ -418,14 +433,20 @@ async fn run_listener(
                         let acceptor = acceptor.clone();
                         let ctx = Arc::clone(&ctx);
                         let mitm_host = Arc::clone(&mitm_host);
-                        let connection_semaphore = Arc::clone(&connection_semaphore);
+                        // Never spawn a semaphore waiter holding an accepted FD.
+                        // At most the cap plus this transient socket exists.
+                        let Ok(permit) = Arc::clone(&connection_semaphore).try_acquire_owned() else {
+                            drop(stream);
+                            continue;
+                        };
                         tokio::spawn(handle_connection(
                             stream,
                             peer,
                             acceptor,
                             ctx,
                             mitm_host,
-                            connection_semaphore,
+                            permit,
+                            tokio::time::Instant::now() + CONNECT_READ_TIMEOUT,
                         ));
                     }
                     Err(error) => {
@@ -556,7 +577,6 @@ mod tests {
     use std::time::Duration;
 
     use rustls_pki_types::pem::PemObject;
-    use tokio::net::TcpSocket;
     use tokio::sync::watch;
     use wiremock::MockServer;
 
@@ -822,17 +842,10 @@ mod tests {
     /// successful dial would be a false positive).
     #[tokio::test]
     async fn connect_to_an_unreachable_blind_tunnel_target_gets_502_not_200() {
-        // Unreachability comes from PRESENCE, not absence: the socket is
-        // bound (so the port is never handed back out as another test's
-        // ephemeral pick, even one asking for SO_REUSEADDR) but never
-        // listens, so every dial is refused. Reserving a port by binding
-        // and DROPPING a listener leaves it free for a sibling to claim in
-        // the window before the dial, at which point the target is
-        // reachable and this test sees the very false 200 it exists to
-        // forbid.
-        let dead = TcpSocket::new_v4().unwrap();
-        dead.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let dead_port = dead.local_addr().unwrap().port();
+        // Port zero cannot name a listening TCP endpoint. A bind-only
+        // socket is NOT a portable refusal double: macOS can blackhole that
+        // dial until the TCP retransmission timeout instead of refusing it.
+        let dead_port = 0;
 
         let dir = tempfile::tempdir().unwrap();
         let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
@@ -890,9 +903,6 @@ mod tests {
             1
         );
         assert_eq!(metrics.requests_total(), 1);
-
-        // The bind must outlive the dial -- it IS the unreachability.
-        drop(dead);
     }
 
     /// A CONNECT to `mitm_host` must hand the raw stream to
@@ -1290,44 +1300,54 @@ mod tests {
     /// terminator forever must have its connection closed once
     /// [`CONNECT_READ_TIMEOUT`] elapses, cleanly (no panic in the
     /// spawned `handle_connection` task) rather than held open forever.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_stalled_connect_client_is_dropped_cleanly_after_the_read_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
-        let reinject_server = MockServer::start().await;
-        let upstream_server = MockServer::start().await;
         let ctx = test_ctx(
-            Url::parse(&reinject_server.uri()).unwrap(),
-            Url::parse(&upstream_server.uri()).unwrap(),
+            Url::parse("http://127.0.0.1:1").unwrap(),
+            Url::parse("http://127.0.0.1:1").unwrap(),
         );
-
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
-        let (_shutdown_tx, shutdown_rx) = watch::channel(());
-        tokio::spawn(run_listener(
+        let capacity = Arc::new(Semaphore::new(1));
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let task = tokio::spawn(run_listener_bounded(
             proxy_listener,
             acceptor,
             ctx,
             Arc::from("api.anthropic.com"),
             shutdown_rx,
+            Arc::clone(&capacity),
         ));
-
         let mut stalled = TcpStream::connect(proxy_addr).await.unwrap();
         stalled.write_all(b"CONNECT api.anthropic").await.unwrap();
-        // Never send the CRLFCRLF terminator.
-
+        // Wait on real OS readiness BEFORE freezing time. Admission also
+        // establishes the handler's fixed read deadline in the accept loop.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while capacity.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stalled socket must be accepted");
+        tokio::time::pause();
+        tokio::time::advance(CONNECT_READ_TIMEOUT + Duration::from_secs(1)).await;
+        // EOF readiness is an OS event; do not let virtual time leap past it.
+        tokio::time::resume();
         let mut buf = [0u8; 1];
-        let n = tokio::time::timeout(Duration::from_secs(30), stalled.read(&mut buf))
+        let n = tokio::time::timeout(Duration::from_secs(1), stalled.read(&mut buf))
             .await
-            .expect(
-                "the stalled connection must be closed once the read timeout elapses, not held \
-                 open forever",
-            )
+            .expect("the stalled connection must close after the CONNECT deadline")
             .unwrap();
+        assert_eq!(n, 0, "expected clean EOF, not data");
         assert_eq!(
-            n, 0,
-            "expected a clean EOF (the listener dropped the connection), not data"
+            capacity.available_permits(),
+            1,
+            "timeout must release the connection slot"
         );
+        shutdown_tx.send(()).unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -1367,5 +1387,76 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         assert!(addr.ip().is_loopback());
         assert_ne!(addr.port(), 0, "the OS must have assigned a real port");
+    }
+    #[tokio::test]
+    async fn saturation_drops_accepted_overflow_without_waiters_and_shutdown_is_responsive() {
+        let dir = tempfile::tempdir().unwrap();
+        let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
+        let ctx = test_ctx(
+            Url::parse("http://127.0.0.1:1").unwrap(),
+            Url::parse("http://127.0.0.1:1").unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let capacity = Arc::new(Semaphore::new(2));
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let task = tokio::spawn(run_listener_bounded(
+            listener,
+            acceptor,
+            ctx,
+            Arc::from("api.anthropic.com"),
+            shutdown_rx,
+            Arc::clone(&capacity),
+        ));
+        // Admit two slowloris sockets: no CONNECT bytes are sent.
+        let first = TcpStream::connect(addr).await.unwrap();
+        let second = TcpStream::connect(addr).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while capacity.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both admitted connections must occupy slots");
+        for _ in 0..12 {
+            let mut excess = TcpStream::connect(addr).await.unwrap();
+            let mut byte = [0; 1];
+            let read = tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte))
+                .await
+                .expect("overflow must close immediately, not queue behind stalled sockets");
+            assert!(matches!(read, Ok(0)) || read.is_err());
+            assert_eq!(capacity.available_permits(), 0);
+        }
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while capacity.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closing an admitted socket must free its permit");
+        let mut next = TcpStream::connect(addr).await.unwrap();
+        next.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        assert!(
+            read_to_close(
+                &mut next,
+                "new capacity must be usable without accepted waiters ahead"
+            )
+            .await
+            .starts_with("HTTP/1.1 400")
+        );
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("saturation must never block the accept loop's shutdown branch")
+            .unwrap();
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while capacity.available_permits() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all connection permits must return");
     }
 }

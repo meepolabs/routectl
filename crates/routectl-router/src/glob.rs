@@ -127,12 +127,16 @@ impl<V: Clone> PrefixIndex<V> {
     /// Find the longest-prefix match for `wire`. Returns the stored
     /// value clone; lookup is O(N) over the prefix list.
     pub fn longest_match(&self, wire: &str) -> Option<V> {
-        for (pat, v) in &self.entries {
-            if pat.matches(wire) {
-                return Some(v.clone());
-            }
-        }
-        None
+        self.longest_match_ref(wire).cloned()
+    }
+
+    /// Borrow the indexed value so bounded dispatch expansion does not clone
+    /// an entire alias chain before checking its output ceiling.
+    pub(crate) fn longest_match_ref(&self, wire: &str) -> Option<&V> {
+        self.entries
+            .iter()
+            .find(|(pat, _)| pat.matches(wire))
+            .map(|(_, value)| value)
     }
 
     /// True when no prefix patterns are registered (most operators

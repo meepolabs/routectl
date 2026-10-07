@@ -54,8 +54,16 @@ use routectl_core::{
     ReasoningDetailKind, Result, is_responses_family,
 };
 
-/// Render a canonical `ChatResponse` into a Responses `response` object.
-pub(super) fn render_responses_response(resp: ChatResponse) -> Result<Value> {
+/// Render a canonical `ChatResponse` into a Responses `response` object
+/// with the OFFICIAL request-parameter echo: the response object carries
+/// the request's instructions, tools, tool_choice, sampling params, and
+/// reasoning config, mirroring what api.openai.com returns (a Responses
+/// response is a log of the request that produced it, not just its
+/// output).
+pub(super) fn render_responses_response(
+    req: &routectl_core::ChatRequest,
+    resp: ChatResponse,
+) -> Result<Value> {
     let mut body = Map::new();
     body.insert("object".into(), Value::String("response".into()));
     body.insert("id".into(), Value::String(resp.id));
@@ -71,14 +79,75 @@ pub(super) fn render_responses_response(resp: ChatResponse) -> Result<Value> {
         body.insert("incomplete_details".into(), details);
     }
 
-    let output = first.map(|c| build_output(&c.message)).unwrap_or_default();
+    let output = resp
+        .upstream_meta
+        .as_ref()
+        .and_then(|meta| meta.responses_output.as_deref().cloned())
+        .unwrap_or_else(|| first.map(|c| build_output(&c.message)).unwrap_or_default());
     body.insert("output".into(), Value::Array(output));
 
     if let Some(usage) = resp.usage.as_ref().map(render_usage) {
         body.insert("usage".into(), usage);
     }
 
+    // Request-parameter echo. The store flag is the spec default (`true`)
+    // unless the request stated otherwise; the other fields are the
+    // request's own values (absent request fields echo null / empty,
+    // matching the official envelope's always-present shape for these).
+    body.insert("store".into(), json!(req.routectl_internal.responses_store));
+    body.insert("parallel_tool_calls".into(), json!(true));
+    body.insert(
+        "tool_choice".into(),
+        req.tool_choice.clone().unwrap_or_else(|| json!("auto")),
+    );
+    body.insert(
+        "tools".into(),
+        Value::Array(
+            req.tools
+                .as_ref()
+                .map(|tools| tools.iter().map(echo_tool_def).collect())
+                .unwrap_or_default(),
+        ),
+    );
+    body.insert("temperature".into(), json!(req.temperature));
+    body.insert("top_p".into(), json!(req.top_p));
+    body.insert(
+        "instructions".into(),
+        json!(req.system.as_ref().map(|s| s.flatten()).unwrap_or_default()),
+    );
+    if let Some(r) = req.reasoning.as_ref()
+        && let Some(effort) = r.effort.as_ref()
+    {
+        body.insert(
+            "reasoning".into(),
+            json!({"effort": effort, "summary": "auto"}),
+        );
+    }
+
     Ok(Value::Object(body))
+}
+
+/// Echo one canonical tool back into the flat Responses wire shape
+/// (inverse of the parse-time lift). `ToolDef::Other` values pass
+/// through verbatim.
+pub(super) fn echo_tool_def(td: &routectl_core::ToolDef) -> Value {
+    match td {
+        routectl_core::ToolDef::Custom(c) => {
+            let mut t = json!({
+                "type": "function",
+                "name": c.name,
+                "parameters": c.input_schema,
+            });
+            if let Some(d) = c.description.as_ref() {
+                t["description"] = json!(d);
+            }
+            if let Some(st) = c.strict {
+                t["strict"] = json!(st);
+            }
+            t
+        }
+        routectl_core::ToolDef::Other(v) => v.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------

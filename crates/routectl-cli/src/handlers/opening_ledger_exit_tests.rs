@@ -49,7 +49,10 @@ async fn a_pre_opening_http_error_is_recorded_as_no_opening() {
     // Assert
     assert_eq!(turn.status.as_u16(), 529, "{}", turn.raw);
     assert_eq!(row.outcome, "upstream_error");
-    assert_eq!(row.extra, json!({"opening_present": false}));
+    assert_eq!(
+        row.extra,
+        json!({"opening_present": false, "correlation_request_id": "http-error"})
+    );
 }
 
 #[tokio::test]

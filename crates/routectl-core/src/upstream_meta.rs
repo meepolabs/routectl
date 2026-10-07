@@ -70,6 +70,11 @@ pub struct UpstreamMeta {
     /// say, which a consumer must treat as not established. Not a quota
     /// family.
     pub usage_from_vendor_endpoint: Option<bool>,
+    /// Same-dialect Responses output that has no canonical item representation.
+    /// A complete response carries its full output array when native items are
+    /// present; a stream chunk carries completed native items only. Only the
+    /// Responses ingress reads this skip-serialized transport carrier.
+    pub responses_output: Option<std::sync::Arc<Vec<serde_json::Value>>>,
 }
 
 impl UpstreamMeta {
@@ -83,6 +88,7 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
+            responses_output: None,
         }
     }
 
@@ -94,6 +100,7 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
+            responses_output: None,
         }
     }
 
@@ -105,6 +112,7 @@ impl UpstreamMeta {
             opening_usage: Some(opening),
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
+            responses_output: None,
         }
     }
 
@@ -116,6 +124,7 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: Some(source),
             usage_from_vendor_endpoint: None,
+            responses_output: None,
         }
     }
 
@@ -147,6 +156,7 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: self
                 .usage_from_vendor_endpoint
                 .or(other.usage_from_vendor_endpoint),
+            responses_output: self.responses_output.or(other.responses_output),
         }
     }
 }
@@ -489,6 +499,64 @@ mod tests {
             merged.usage_input_source,
             Some(UsageInputSource::ExplicitFinal)
         );
+    }
+
+    #[test]
+    fn native_responses_output_survives_quota_merge_without_serializing_the_carrier() {
+        let item = serde_json::json!({"type":"future_native_item", "payload":"transport-only"});
+        let body = UpstreamMeta {
+            responses_output: Some(std::sync::Arc::new(vec![item.clone()])),
+            ..Default::default()
+        };
+        let native = body.responses_output.as_ref().unwrap().clone();
+        let head = UpstreamMeta::from_codex(CodexQuota::default());
+        let merged = body.clone().merge(head.clone());
+        assert_eq!(merged, head.merge(body));
+        assert_eq!(merged.responses_output.as_deref(), Some(&vec![item]));
+        assert!(std::sync::Arc::ptr_eq(
+            &native,
+            merged.responses_output.as_ref().unwrap()
+        ));
+        assert!(merged.has_quota_family());
+        let chunk = crate::ChatChunk {
+            id: String::new(),
+            model: String::new(),
+            choices: Vec::new(),
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: Some(merged),
+        };
+        let wire = serde_json::to_string(&chunk).unwrap();
+        assert!(!wire.contains("transport-only"));
+        assert!(!wire.contains("responses_output"));
+    }
+
+    #[test]
+    fn responses_system_history_is_optional_shared_and_not_serialized() {
+        let mut request = crate::ChatRequest::default();
+        assert!(request.routectl_internal.responses_system_history.is_none());
+        let message = serde_json::from_value(
+            serde_json::json!({"role":"system", "content":"history-only-marker"}),
+        )
+        .unwrap();
+        request.routectl_internal.responses_system_history =
+            Some(std::sync::Arc::new(vec![message]));
+        let cloned = request.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            request
+                .routectl_internal
+                .responses_system_history
+                .as_ref()
+                .unwrap(),
+            cloned
+                .routectl_internal
+                .responses_system_history
+                .as_ref()
+                .unwrap(),
+        ));
+        let wire = serde_json::to_string(&cloned).unwrap();
+        assert!(!wire.contains("history-only-marker"));
+        assert!(!wire.contains("responses_system_history"));
     }
 
     #[test]

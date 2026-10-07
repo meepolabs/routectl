@@ -693,6 +693,7 @@ async fn serve_inner(
         purge_settlements: Arc::clone(&purge_settlements),
         confirmation_advances: Arc::clone(&confirmation_advances),
         context_anchors: Arc::default(),
+        responses_store: Arc::default(),
     });
 
     // Wire the file-watch + SIGHUP reload coordinator. Shutdown is
@@ -1141,6 +1142,10 @@ pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
     "/v1/messages",
     "/v1/messages/count_tokens",
     "/v1/responses",
+    // Responses retrieval: same gate as the inference route -- the
+    // stored responses are user-scoped request traffic, not a public
+    // status surface.
+    "/v1/responses/{response_id}",
     "/control/capability/purge",
     "/",
     "/status",
@@ -1180,6 +1185,10 @@ pub(super) const NON_MITM_INFERENCE_ROUTES: &[&str] = &[
     "/health",
     "/v1/chat/completions",
     "/v1/responses",
+    // Responses retrieval: a GET for a previously stored response, not
+    // inference -- no body ever arrives, and the MITM channel never
+    // re-injects it.
+    "/v1/responses/{response_id}",
     "/control/capability/purge",
     "/",
     "/status",
@@ -1233,6 +1242,10 @@ pub(super) const VERSION_OBSERVING_ROUTES: &[&str] = &[
 pub(super) const NON_OBSERVING_ROUTES: &[&str] = &[
     "/health",
     "/v1/models",
+    // Responses retrieval (GET): no client body arrives -- the version
+    // observed would describe whatever tool curled the endpoint, not
+    // the traffic routectl proxies. Same exemption as /v1/models.
+    "/v1/responses/{response_id}",
     "/control/capability/purge",
     "/",
     "/status",
@@ -1297,6 +1310,10 @@ fn build_axum_router(
             post(handlers::messages_count_tokens::count_tokens),
         )
         .route("/v1/responses", post(handlers::responses::responses))
+        .route(
+            "/v1/responses/{response_id}",
+            get(handlers::responses::retrieve),
+        )
         // The one MUTATING route on this server: it removes a single resident
         // learned-capability entry. It rides the SAME auth layer as `/v1/*`
         // (no bespoke scheme -- see `handlers::control`'s module docs) and adds

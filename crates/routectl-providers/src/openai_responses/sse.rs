@@ -159,7 +159,17 @@ impl ResponsesStreamState {
         match kind.as_str() {
             "response.created" => Ok(self.handle_created(&event)),
             "response.in_progress" => Ok(Vec::new()),
-            "response.output_item.added" => Ok(self.handle_item_added(provider_id, &event)),
+            "response.output_item.added" => {
+                if event
+                    .output_index
+                    .is_some_and(|idx| self.blocks.contains_key(&idx))
+                {
+                    return Err(Error::Streaming(
+                        "responses: repeated output item start".into(),
+                    ));
+                }
+                Ok(self.handle_item_added(provider_id, &event))
+            }
             "response.output_text.delta" => Ok(self.handle_text_delta(provider_id, &event)),
             "response.output_text.done" => Ok(Vec::new()),
             "response.reasoning_summary_text.delta" => {
@@ -318,14 +328,15 @@ impl ResponsesStreamState {
                     idx,
                     BlockState::ToolUse {
                         item_id,
-                        call_id,
-                        name,
+                        call_id: call_id.clone(),
+                        name: name.clone(),
                         call_index,
                         arguments: String::new(),
                     },
                 );
                 // The sticky `saw_function_call` flag was already set
                 // above (pre-cap) so this branch does not duplicate it.
+                return vec![self.tool_delta_chunk(call_id, name, call_index, String::new(), true)];
             }
             _ => {
                 tracing::debug!(
@@ -443,7 +454,7 @@ impl ResponsesStreamState {
             }
             _ => return Vec::new(),
         };
-        vec![self.tool_delta_chunk(call_id, name, call_index, delta.to_string())]
+        vec![self.tool_delta_chunk(call_id, name, call_index, delta.to_string(), false)]
     }
 
     fn handle_item_done(&mut self, event: &ResponsesStreamEvent) -> Vec<ChatChunk> {
@@ -451,6 +462,23 @@ impl ResponsesStreamState {
             return Vec::new();
         };
         let mut chunks = Vec::new();
+        if let Some(item) = event.item.as_ref()
+            && !matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("message" | "reasoning" | "function_call")
+            )
+        {
+            let mut meta = routectl_core::UpstreamMeta::default();
+            meta.responses_output = Some(std::sync::Arc::new(vec![item.clone()]));
+            chunks.push(ChatChunk {
+                id: self.response_id.clone(),
+                model: self.model.clone(),
+                choices: Vec::new(),
+                usage: None,
+                opaque_events: Vec::new(),
+                upstream_meta: Some(meta),
+            });
+        }
         // The final item shape may include the `encrypted_content`
         // signature even when item.added didn't carry it (typical
         // shape: signature is computed server-side after reasoning
@@ -745,13 +773,17 @@ impl ResponsesStreamState {
         name: String,
         call_index: u32,
         partial_json: String,
+        metadata: bool,
     ) -> ChatChunk {
-        let tool_call_delta: Value = json!({
+        let mut tool_call_delta: Value = json!({
             "index": call_index,
-            "id": call_id,
-            "type": "function",
-            "function": {"name": name, "arguments": partial_json}
+            "function": {"arguments": partial_json}
         });
+        if metadata {
+            tool_call_delta["id"] = json!(call_id);
+            tool_call_delta["type"] = json!("function");
+            tool_call_delta["function"]["name"] = json!(name);
+        }
         ChatChunk {
             id: self.response_id.clone(),
             model: self.model.clone(),

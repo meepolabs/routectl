@@ -24,7 +24,7 @@ use super::util::build_reasoning_detail;
 
 /// Per-stream synthesizer for missing streamed tool-call ids.
 ///
-/// INVARIANT: every streamed OpenAI-shape `tool_call` must carry a
+/// INVARIANT: the first delta of every indexed tool call must carry a
 /// non-empty `id` so the downstream openai->anthropic pairing (which
 /// keys the follow-up `tool_result` on the emitted id) is not orphaned.
 /// Some upstreams stream an indexed tool_call with no id at all; this
@@ -35,9 +35,9 @@ use super::util::build_reasoning_detail;
 /// `(choice.index, tool_call.index)` key that arrives id-less mints
 /// `call_{tool_call_index}` (choice 0) or `call_{choice}_{tool_call_index}`
 /// (choice > 0, so cross-choice ids never collide when `n > 1`); every
-/// later delta of that key reuses it. A key whose first delta already
-/// carried a non-empty id is left untouched (its later id-less argument
-/// deltas keep the verbatim passthrough shape).
+/// later delta of that key omits the id (SDKs concatenate strings). A key
+/// whose first delta already carried a non-empty id keeps that first id;
+/// later argument deltas omit it too.
 ///
 /// Every id that reaches the wire -- real upstream ids and minted ids
 /// alike -- is RESERVED. A real id keyed by a usable `(choice, index)`
@@ -69,17 +69,16 @@ pub(crate) struct StreamedToolCallIds {
 
 #[derive(Debug)]
 enum IdSlot {
-    /// The first delta for this key carried a non-empty upstream id,
-    /// stored so a late delta carrying a DIFFERENT id is overwritten back
-    /// to the value the client already saw.
-    Upstream(String),
-    /// No upstream id arrived first; this id was minted and is reused.
-    Minted(String),
+    /// The first delta carried an upstream id, reserved by value above.
+    /// Later deltas omit IDs, including a late differing upstream id.
+    Upstream,
+    /// No upstream id arrived first; an ID was minted, emitted and reserved.
+    Minted,
 }
 
 impl StreamedToolCallIds {
-    /// Fill in a stable id on every id-less streamed `tool_call` in
-    /// `chunk`, mutating the chunk in place before it is yielded.
+    /// Emit a stable id on the first indexed delta, then omit it from
+    /// subsequent deltas so SDK string concatenation preserves the ID.
     ///
     /// Returns `Err(Error::Streaming)` when a tool_call cannot be paired
     /// safely: an id-less call whose `index` is not a valid `u32`, or a
@@ -149,9 +148,11 @@ impl StreamedToolCallIds {
         match self.slots.get(&key) {
             // The slot already established an id (real or minted) that the
             // client saw; a late delta carrying a DIFFERENT id must NOT
-            // replace it, so overwrite this delta back to the established id.
-            Some(IdSlot::Upstream(established) | IdSlot::Minted(established)) => {
-                set_tool_call_id(tc, established);
+            // replace it or repeat it, so omit the ID from this delta.
+            Some(IdSlot::Upstream | IdSlot::Minted) => {
+                if let Some(obj) = tc.as_object_mut() {
+                    obj.remove("id");
+                }
                 Ok(())
             }
             // First delta for this slot. Reserve the real id, failing the
@@ -164,7 +165,7 @@ impl StreamedToolCallIds {
                     )));
                 }
                 self.reserved.insert(id.clone(), Some(key));
-                self.slots.insert(key, IdSlot::Upstream(id));
+                self.slots.insert(key, IdSlot::Upstream);
                 Ok(())
             }
         }
@@ -204,8 +205,12 @@ impl StreamedToolCallIds {
         match self.slots.get(&key) {
             // First delta established an upstream id; the client already has
             // it, so later id-less deltas pass through untouched.
-            Some(IdSlot::Upstream(_)) => {}
-            Some(IdSlot::Minted(id)) => set_tool_call_id(tc, id),
+            Some(IdSlot::Upstream) => {}
+            Some(IdSlot::Minted) => {
+                if let Some(obj) = tc.as_object_mut() {
+                    obj.remove("id");
+                }
+            }
             None => {
                 let id = self.mint_unique_id(choice_index, tc_index, key);
                 tracing::debug!(
@@ -217,7 +222,7 @@ impl StreamedToolCallIds {
                 );
                 set_tool_call_id(tc, &id);
                 self.reserved.insert(id.clone(), Some(key));
-                self.slots.insert(key, IdSlot::Minted(id));
+                self.slots.insert(key, IdSlot::Minted);
             }
         }
     }
@@ -817,11 +822,10 @@ mod tests {
     }
 
     /// An id-less indexed streamed tool_call gets a stable synthesized
-    /// id on its first delta, and every later delta of the same key
-    /// reuses that exact id (so the openai->anthropic pairing keys on
-    /// one stable value across the whole tool call).
+    /// id on its first delta, and later fragments omit it so SDK string
+    /// concatenation retains exactly one complete ID.
     #[test]
-    fn streamed_tool_call_without_id_gets_synthesized_id_reused_across_deltas() {
+    fn streamed_tool_call_without_id_gets_synthesized_id_only_on_first_delta() {
         let mut ids = StreamedToolCallIds::default();
 
         let mut first = tool_call_chunk(vec![(
@@ -833,13 +837,13 @@ mod tests {
         assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_0"));
 
         // A later argument-only delta for the same key carries no id and
-        // must be backfilled with the SAME synthesized id.
+        // must omit the already emitted synthesized id.
         let mut second = tool_call_chunk(vec![(
             0,
             vec![json!({"index": 0, "function": {"arguments": "{\"x\":1}"}})],
         )]);
         ids.fill_missing_ids("p", &mut second).unwrap();
-        assert_eq!(tool_call_id(&second, 0, 0).as_deref(), Some("call_0"));
+        assert_eq!(tool_call_id(&second, 0, 0), None);
     }
 
     /// A streamed tool_call whose first delta already carries an id is
@@ -975,8 +979,7 @@ mod tests {
 
     /// A slot whose first delta is id-less mints an id the client sees; a
     /// LATER delta for the SAME slot that carries a real upstream id must
-    /// NOT replace the minted id -- the call keeps emitting one stable id
-    /// across all its deltas.
+    /// NOT replace or repeat the minted id -- only the first delta emits it.
     #[test]
     fn late_real_id_for_a_minted_slot_keeps_the_established_id() {
         let mut ids = StreamedToolCallIds::default();
@@ -991,14 +994,14 @@ mod tests {
         assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_0"));
 
         // Later delta for the same slot now carries a real id; it must be
-        // overwritten back to the established minted id.
+        // omitted: the client already received the established minted id.
         let mut second = tool_call_chunk(vec![(
             0,
             vec![json!({"index": 0, "id": "call_real_late",
                         "function": {"arguments": "{}"}})],
         )]);
         ids.fill_missing_ids("p", &mut second).unwrap();
-        assert_eq!(tool_call_id(&second, 0, 0).as_deref(), Some("call_0"));
+        assert_eq!(tool_call_id(&second, 0, 0), None);
     }
 
     /// A real upstream id that collides with an id ALREADY minted for a
@@ -1036,8 +1039,8 @@ mod tests {
 
     /// A slot whose first delta carried a real upstream id keeps that id
     /// stable: a LATER delta for the SAME slot that carries a DIFFERENT
-    /// real id must be overwritten back to the established id, so the call
-    /// never emits two different ids across its deltas.
+    /// real id must be omitted, so the call never emits its ID twice or
+    /// emits two different IDs across its deltas.
     #[test]
     fn real_id_slot_keeps_its_id_against_a_late_differing_real_id() {
         let mut ids = StreamedToolCallIds::default();
@@ -1052,14 +1055,14 @@ mod tests {
         assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_first"));
 
         // A later delta for the same slot carries a different real id; it
-        // must be overwritten back to the established id.
+        // must be omitted: the established ID was already emitted.
         let mut second = tool_call_chunk(vec![(
             0,
             vec![json!({"index": 0, "id": "call_changed",
                         "function": {"arguments": "{}"}})],
         )]);
         ids.fill_missing_ids("p", &mut second).unwrap();
-        assert_eq!(tool_call_id(&second, 0, 0).as_deref(), Some("call_first"));
+        assert_eq!(tool_call_id(&second, 0, 0), None);
     }
 
     /// Two DIFFERENT slots that both carry the same real upstream id are

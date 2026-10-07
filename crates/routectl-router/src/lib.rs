@@ -18,6 +18,7 @@
 static ALLOC_PROBE: alloc_probe::ProbeAllocator = alloc_probe::ProbeAllocator;
 
 pub(crate) mod activation;
+mod alias_limits;
 #[cfg(test)]
 pub(crate) mod alloc_probe;
 pub(crate) mod anthropic_family;

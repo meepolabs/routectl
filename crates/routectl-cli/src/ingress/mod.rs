@@ -13,6 +13,8 @@
 //! The trait is small on purpose: anything beyond translation belongs in
 //! the router (alias resolution, retry, fallback) or core.
 
+use std::sync::Arc;
+
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -538,6 +540,11 @@ pub enum ErrorEnvelopeShape {
 pub struct StreamRequestContext {
     pub input_tokens_estimate: u64,
     pub model: String,
+    /// The canonical request being streamed, for adapters whose stream
+    /// state echoes request parameters or persists the response (the
+    /// Responses adapter). `Arc` so seeding the state is a refcount
+    /// bump. Adapters that need neither ignore it.
+    pub req: Arc<routectl_core::ChatRequest>,
 }
 
 /// Finish a non-streaming render: emit the direction-4 egress-body trace
@@ -595,6 +602,21 @@ pub trait IngressAdapter: Send + Sync {
     /// `render_value_to_bytes` to emit the egress-body trace and perform
     /// that final serialization uniformly across adapters.
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes>;
+
+    /// Render with the ORIGINAL canonical request in hand, for dialects
+    /// that echo request parameters back on the response object (the
+    /// Responses API's response embeds the request's instructions,
+    /// tools, sampling params) and that persist a `store: true` turn
+    /// (the store write needs the producing context). Default ignores
+    /// the request and delegates to `render_response`; only the
+    /// Responses adapter overrides.
+    fn render_response_with_request(
+        &self,
+        _req: &routectl_core::ChatRequest,
+        resp: ChatResponse,
+    ) -> Result<bytes::Bytes> {
+        self.render_response(resp)
+    }
 
     /// Test-only convenience: render a `ChatResponse` and decode the wire
     /// bytes back into a `serde_json::Value` so the large existing suite of

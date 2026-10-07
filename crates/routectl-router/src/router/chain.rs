@@ -33,14 +33,13 @@ impl Router {
         let aliases = &self.config.aliases;
         let value = match aliases
             .get(wire_model)
-            .cloned()
-            .or_else(|| self.alias_glob_index.longest_match(wire_model))
+            .or_else(|| self.alias_glob_index.longest_match_ref(wire_model))
         {
             Some(v) => v,
             None => return Ok(None),
         };
         let mut chain: Vec<Arc<ResolvedModel>> = Vec::new();
-        self.expand_alias_value(&value, &mut chain, 0)?;
+        self.expand_alias_value(value, &mut chain, 0, &mut 0, &mut 0)?;
         if chain.is_empty() {
             // Alias key matched but every target was disabled or
             // unresolvable. Without this WARN the request silently
@@ -151,12 +150,12 @@ impl Router {
     /// chain, or `None` if no `default` key is configured. Recurses
     /// through nested alias keys identically to `resolve_v6_alias`.
     pub(super) fn resolve_default_alias(&self) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
-        let value = match self.config.aliases.get("default").cloned() {
+        let value = match self.config.aliases.get("default") {
             Some(v) => v,
             None => return Ok(None),
         };
         let mut chain: Vec<Arc<ResolvedModel>> = Vec::new();
-        self.expand_alias_value(&value, &mut chain, 0)?;
+        self.expand_alias_value(value, &mut chain, 0, &mut 0, &mut 0)?;
         if chain.is_empty() {
             Ok(None)
         } else {
@@ -184,6 +183,8 @@ impl Router {
         value: &AliasValue,
         out: &mut Vec<Arc<ResolvedModel>>,
         depth: usize,
+        leaves: &mut usize,
+        visits: &mut usize,
     ) -> Result<()> {
         if depth > ALIAS_MAX_RECURSION_DEPTH {
             return Err(Error::Config(format!(
@@ -193,6 +194,14 @@ impl Router {
             )));
         }
         for entry in value.nicknames() {
+            // Nonempty validated graphs need at most (depth + 1) visits per
+            // leaf. Also bound invalid empty-branch graphs that emit no leaves.
+            if *visits
+                >= crate::alias_limits::MAX_EXPANDED_TARGETS * (ALIAS_MAX_RECURSION_DEPTH + 1)
+            {
+                return Err(crate::alias_limits::expansion_limit_error());
+            }
+            *visits += 1;
             // Alias keys win over model nicknames by the same shadowing
             // rule the top-level dispatch uses.
             //
@@ -205,9 +214,17 @@ impl Router {
             // `config.aliases`), recursive expansion of glob-targeted
             // chain entries breaks here.
             if let Some(nested) = self.config.aliases.get(entry) {
-                self.expand_alias_value(nested, out, depth + 1)?;
-            } else if let Some(m) = self.resolve_nickname(entry) {
-                out.push(m);
+                self.expand_alias_value(nested, out, depth + 1, leaves, visits)?;
+            } else {
+                // Count even missing leaves: an unvalidated branching DAG of
+                // unavailable models must not spend unbounded CPU on expansion.
+                if *leaves >= crate::alias_limits::MAX_EXPANDED_TARGETS {
+                    return Err(crate::alias_limits::expansion_limit_error());
+                }
+                *leaves += 1;
+                if let Some(m) = self.resolve_nickname(entry) {
+                    out.push(m);
+                }
             }
             // Else silently drop -- caught by `validate_alias_chain_targets`
             // at startup.
@@ -272,6 +289,13 @@ impl Router {
         chain: Vec<Arc<ResolvedModel>>,
         session_key: Option<&str>,
     ) -> Result<Vec<DispatchTarget>> {
+        // Preflight before building targets or mutating pool placement state.
+        let size = chain.iter().fold(0usize, |size, m| {
+            size.saturating_add(m.seats.as_ref().map_or(1, |seats| seats.len()))
+        });
+        if size > crate::alias_limits::MAX_EXPANDED_TARGETS {
+            return Err(crate::alias_limits::expansion_limit_error());
+        }
         let targets = self.expand_chain_to_targets(chain, session_key);
         if targets.is_empty() {
             return Err(empty_pool_error(model));

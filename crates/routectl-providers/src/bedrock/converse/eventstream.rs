@@ -96,6 +96,8 @@ pub struct ConverseStreamState {
     /// so a malformed upstream repeating `messageStart` cannot emit a
     /// second role chunk.
     role_emitted: bool,
+    /// `messageStop` is terminal even when metadata is omitted.
+    saw_message_stop: bool,
     /// Captured at messageStop; emitted on the closing chunk. AWS
     /// emits messageStop before metadata, so we hold onto the value
     /// until metadata flushes (or until end-of-stream if metadata
@@ -129,7 +131,13 @@ impl FrameHandler for ConverseFrameHandler {
         handle_converse_frame(provider_id, message, &mut self.state)
     }
 
-    fn on_eof(&mut self, provider_id: &str) -> Vec<ChatChunk> {
+    fn on_eof(&mut self, provider_id: &str) -> Result<Vec<ChatChunk>> {
+        let mut completion = crate::stream_completion::StreamCompletion::new(
+            "bedrock converse (messageStop)",
+            |terminal: &bool| *terminal,
+        );
+        completion.observe(&self.state.saw_message_stop);
+        completion.end_of_stream(provider_id)?;
         // messageStop arrived but metadata never did. AWS docs put
         // metadata last, but a network truncation or middleware quirk can
         // drop it silently. Without this flush, finish_reason (and any
@@ -142,9 +150,9 @@ impl FrameHandler for ConverseFrameHandler {
                 "stream ended after messageStop without metadata; \
                  emitting closing chunk with no usage info"
             );
-            vec![build_closing_chunk(&mut self.state, None)]
+            Ok(vec![build_closing_chunk(&mut self.state, None)])
         } else {
-            Vec::new()
+            Ok(Vec::new())
         }
     }
 }
@@ -208,6 +216,11 @@ pub fn handle_converse_frame(
 
     match event_type.as_str() {
         "messageStart" => {
+            if state.saw_message_stop {
+                return Err(Error::Streaming(
+                    "converse: message start after message stop".into(),
+                ));
+            }
             // Parse the payload so a malformed start surfaces as a
             // streaming error rather than a silent skip.
             let _: StreamMessageStart = parse_payload(provider_id, payload, "messageStart")?;
@@ -226,8 +239,27 @@ pub fn handle_converse_frame(
         "contentBlockStart" => {
             let ev: StreamContentBlockStart =
                 parse_payload(provider_id, payload, "contentBlockStart")?;
+            let index = ev.content_block_index;
+            if state.blocks.contains_key(&index) {
+                return Err(Error::Streaming(
+                    "converse: repeated content block start".into(),
+                ));
+            }
             handle_block_start(provider_id, state, ev);
-            Ok(vec![])
+            match state.blocks.get(&index) {
+                Some(BlockState::ToolUse {
+                    id,
+                    name,
+                    call_index,
+                }) => Ok(vec![tool_delta_chunk(
+                    id.clone(),
+                    name.clone(),
+                    *call_index,
+                    String::new(),
+                    true,
+                )]),
+                _ => Ok(vec![]),
+            }
         }
         "contentBlockDelta" => {
             let ev: StreamContentBlockDelta =
@@ -278,6 +310,7 @@ pub fn handle_converse_frame(
                 ev.additional_model_response_fields.as_ref(),
             );
             state.pending_stop_reason = ev.stop_reason;
+            state.saw_message_stop = true;
             Ok(vec![])
         }
         "metadata" => {
@@ -437,7 +470,13 @@ fn handle_block_delta(
                     return vec![];
                 }
             };
-            vec![tool_delta_chunk(id, name, call_index, tool_use.input)]
+            vec![tool_delta_chunk(
+                id,
+                name,
+                call_index,
+                tool_use.input,
+                false,
+            )]
         }
         StreamDelta::ReasoningContent { reasoning_content } => {
             // Self-starting, same as the text arm: AWS sends no
@@ -612,13 +651,22 @@ fn text_chunk(text: String) -> ChatChunk {
     }
 }
 
-fn tool_delta_chunk(id: String, name: String, call_index: u32, partial_json: String) -> ChatChunk {
-    let tool_call_delta: Value = json!({
+fn tool_delta_chunk(
+    id: String,
+    name: String,
+    call_index: u32,
+    partial_json: String,
+    metadata: bool,
+) -> ChatChunk {
+    let mut tool_call_delta: Value = json!({
         "index": call_index,
-        "id": id,
-        "type": "function",
-        "function": {"name": name, "arguments": partial_json}
+        "function": {"arguments": partial_json}
     });
+    if metadata {
+        tool_call_delta["id"] = json!(id);
+        tool_call_delta["type"] = json!("function");
+        tool_call_delta["function"]["name"] = json!(name);
+    }
     ChatChunk {
         id: String::new(),
         model: String::new(),

@@ -399,13 +399,13 @@ async fn read_turn(base: &str, session: &str, body: &Value) -> NetTurn {
     }
 }
 
-/// The `extra` of the ledger row with `request_id`, once it lands.
+/// The `extra` of the ledger row with the inbound correlation id, once it lands.
 async fn ledger_extra(ledger: &std::path::Path, request_id: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(db) = routectl_usage::open_readonly(ledger)
             && let Ok(extra) = db.conn().query_row(
-                "SELECT extra FROM requests WHERE request_id = ?1",
+                "SELECT extra FROM requests WHERE json_extract(extra, '$.correlation_request_id') = ?1",
                 [request_id],
                 |r| r.get::<_, Option<String>>(0),
             )
@@ -458,6 +458,7 @@ async fn a_served_daemon_persists_the_opening_its_network_client_received() {
     .iter()
     .map(|field| usage[field].as_u64().expect("field"))
     .sum();
+    assert_eq!(extra["correlation_request_id"], "net-ledger-1");
     assert_eq!(extra["opening_input"], rendered, "{extra}");
     assert_eq!(extra["opening_source"], "upstream_wire_unverified");
     assert_eq!(extra["terminal_source"], "explicit_final");

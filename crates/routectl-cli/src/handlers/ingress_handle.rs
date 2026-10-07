@@ -29,7 +29,7 @@ use tracing::Instrument;
 use crate::handlers::opening_meter::{OpeningMeter, StreamTurn};
 use crate::handlers::pure_proxy_admission::enforce_pure_proxy_admission;
 use crate::handlers::usage_capture::{
-    StreamStage, UsageCapture, build_usage_draft, outcome_for_dispatch_err,
+    StreamStage, UsageCapture, build_execution_usage_draft, outcome_for_dispatch_err,
 };
 use crate::ingress::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamRequestContext,
@@ -127,16 +127,10 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // inbound bearer for opt-in relay to the upstream ONLY when the MITM
     // seam header is present (header-is-a-hint) AND a forwarded provider
     // is configured (config-is-the-capability). Every path with no
-    // configured forwarded provider leaves `forwarded_bearer` None, so
-    // the carrier state is byte-identical to the pre-passthrough path.
-    capture_forwarded_bearer(&headers, &router, &state.mitm_seam_nonce, &mut req);
-
-    // Same forwarded-mode gate: capture the client's inbound `x-stainless-*`
-    // SDK fingerprint headers so the Anthropic-API egress can present the
-    // client's real identity on the forwarded leg (overriding the minted
-    // cloak fingerprint). No configured forwarded provider leaves
-    // `stainless_headers` empty.
-    capture_stainless_headers(&headers, &router, &state.mitm_seam_nonce, &mut req);
+    // configured forwarded provider leaves `forwarded_bearer` None and
+    // `stainless_headers` empty. The same gate captures the client's SDK
+    // fingerprint for its real identity on the forwarded leg.
+    capture_forwarded_context(&headers, &router, &state.mitm_seam_nonce, &mut req);
 
     // Compiled-pin drift observation, once per inbound request, AFTER the
     // body parsed and BEFORE dispatch: a request that never parsed is not
@@ -172,7 +166,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // fields exist yet). The dispatch + token + outcome fields are
     // stamped later by the capture guard.
     let request_id = request_id.map(|r| r.0).unwrap_or_default();
-    let draft = build_usage_draft(adapter.id(), &req, request_id);
+    let draft = build_execution_usage_draft(adapter.id(), &req, request_id);
 
     let streaming = req.stream == Some(true);
     // Admission of a metered stream: the turn's anchor order is reserved
@@ -219,6 +213,18 @@ pub(crate) fn session_id_of(headers: &HeaderMap) -> Option<String> {
         .get(SESSION_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
+}
+
+/// Capture the trusted forwarded credential and SDK identity together. Both
+/// inference handlers (including count_tokens) use the same two-key gate.
+pub(crate) fn capture_forwarded_context(
+    headers: &HeaderMap,
+    router: &routectl_router::Router,
+    seam_nonce: &crate::ingress::MitmSeamNonce,
+    req: &mut routectl_core::ChatRequest,
+) {
+    capture_forwarded_bearer(headers, router, seam_nonce, req);
+    capture_stainless_headers(headers, router, seam_nonce, req);
 }
 
 /// Populate `req.routectl_internal.forwarded_bearer` with the inbound
@@ -500,6 +506,10 @@ async fn complete_response<A: IngressAdapter>(
     // this same value the usage ledger's `session_id` column was seeded
     // from (`build_usage_draft`) -- one derivation, read twice.
     let session_key = req.routectl_internal.inbound_session_key.clone();
+    // Capture the canonical request BEFORE dispatch moves `req`: the
+    // Responses adapter's request-echo render + store insert need the
+    // producing context at render time.
+    let req_ctx = Arc::new(req.clone());
     let dispatched = router.complete_with_options(req, opts).await;
     capture.observe_meta(
         &dispatched.meta,
@@ -529,7 +539,7 @@ async fn complete_response<A: IngressAdapter>(
             // Non-streaming first byte == the response being ready.
             capture.mark_first_byte();
             capture.observe_response(&resp);
-            match adapter.render_response(resp) {
+            match adapter.render_response_with_request(&req_ctx, resp) {
                 Ok(body) => {
                     // Upstream delivered AND we serialized it: this is the
                     // only path where the client receives 200 + body, so
@@ -611,6 +621,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
             OpeningMeter::raw_tokens,
         ),
         model: req.model.clone(),
+        req: Arc::new(req.clone()),
     };
     let turn = StreamTurn {
         session_key,

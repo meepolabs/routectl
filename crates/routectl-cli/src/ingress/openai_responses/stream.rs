@@ -66,6 +66,8 @@ use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 /// adversarial upstream could stream thousands of distinct indices to
 /// drive the buffer toward OOM. 4096 mirrors the anthropic ingress cap.
 const MAX_TOOL_CALL_INDEX: usize = 4096;
+/// Bound the extra completed-item replay ledger, including native barriers.
+const MAX_REPLAY_ITEMS: usize = 4096;
 
 /// Downcast the boxed stream state to the concrete Responses state.
 /// Panics on a mismatched concrete type -- a wiring bug (the handler
@@ -108,6 +110,50 @@ pub(super) fn render_chunk_internal(
 
     capture_identity(&chunk, state);
     ensure_created(state, &mut events);
+
+    let native_items = chunk
+        .upstream_meta
+        .as_ref()
+        .and_then(|meta| meta.responses_output.as_deref());
+    if state.native_output_seen || native_items.is_some() {
+        // Reserve a conservative ceiling BEFORE emitting. Pending calls can
+        // allocate at EOS, so include them too rather than truncate the terminal
+        // body silently after its item ledger filled.
+        let choices = chunk.choices.first();
+        let possible_new = native_items
+            .map_or(0, Vec::len)
+            .saturating_add(state.tool_buffers.len())
+            .saturating_add(choices.map_or(0, |c| c.delta.reasoning_details.len()))
+            .saturating_add(choices.map_or(0, |c| c.delta.tool_calls.as_ref().map_or(0, Vec::len)))
+            .saturating_add(usize::from(
+                choices.is_some_and(|c| c.delta.content.is_some()),
+            ));
+        if state.next_output_index.saturating_add(possible_new as u64) > MAX_REPLAY_ITEMS as u64 {
+            return Err(routectl_core::Error::Streaming(
+                "Responses output replay item limit exceeded".into(),
+            ));
+        }
+    }
+    if let Some(items) = native_items {
+        for item in items {
+            state.native_output_seen = true;
+            close_open_item(state, &mut events);
+            flush_tool_calls(state, &mut events);
+            let index = alloc_output_index(state);
+            push_event(
+                state,
+                &mut events,
+                "response.output_item.added",
+                json!({"output_index":index, "item":item}),
+            );
+            push_event(
+                state,
+                &mut events,
+                "response.output_item.done",
+                json!({"output_index":index, "item":item}),
+            );
+        }
+    }
 
     if let Some(choice) = chunk.choices.first() {
         emit_delta_events(&choice.delta, state, &mut events);
@@ -180,6 +226,10 @@ fn emit_delta_events(
 
 fn emit_text_delta(text: &str, state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) {
     let output_index = ensure_text_item(state, events);
+    let item_id = match state.open.as_ref() {
+        Some(OpenOutputItem::Text { message_id, .. }) => message_id.clone(),
+        _ => String::new(),
+    };
     state.text_accumulator.push_str(text);
     state.current_text.push_str(text);
     push_event(
@@ -188,6 +238,7 @@ fn emit_text_delta(text: &str, state: &mut ResponsesStreamState, events: &mut Ve
         "response.output_text.delta",
         json!({
             "output_index": output_index,
+            "item_id": item_id,
             "content_index": 0,
             "delta": text,
         }),
@@ -198,12 +249,21 @@ fn emit_text_delta(text: &str, state: &mut ResponsesStreamState, events: &mut Ve
 /// not already open, closing any superseded item first. Returns the
 /// message item's `output_index`.
 fn ensure_text_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) -> u64 {
-    if let Some(OpenOutputItem::Text { output_index }) = state.open {
+    if let Some(OpenOutputItem::Text { output_index, .. }) = state.open {
         return output_index;
     }
     close_open_item(state, events);
     let output_index = alloc_output_index(state);
-    state.open = Some(OpenOutputItem::Text { output_index });
+    // Mint the message item id once; every event for this item carries
+    // it, so a client building its transcript from stream events (the
+    // OpenAI SDK, codex) replays the SAME id the completed body names.
+    state.next_item_id += 1;
+    let message_id = format!("msg_{}", state.next_item_id);
+    state.last_message_id = Some(message_id.clone());
+    state.open = Some(OpenOutputItem::Text {
+        output_index,
+        message_id: message_id.clone(),
+    });
     state.current_text.clear();
     push_event(
         state,
@@ -213,6 +273,7 @@ fn ensure_text_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>
             "output_index": output_index,
             "item": {
                 "type": "message",
+                "id": message_id,
                 "role": "assistant",
                 "status": "in_progress",
                 "content": [],
@@ -225,6 +286,7 @@ fn ensure_text_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>
         "response.content_part.added",
         json!({
             "output_index": output_index,
+            "item_id": message_id,
             "content_index": 0,
             "part": output_text_block(""),
         }),
@@ -273,7 +335,18 @@ fn emit_reasoning_detail(
     // Advance the per-item part counter only for a detail that actually
     // streams, so the streamed part indices match the completed body's
     // `summary[]` / `content[]` positions one-for-one.
-    let data = match d.kind {
+    // The official wire carries `item_id` on every reasoning delta so a
+    // client building its transcript from stream events can associate
+    // the item's eventual `encrypted_content` signature with the id the
+    // upstream bound it to. A delta missing item_id forces the client
+    // to mint its own, and a replay under a minted id fails the
+    // backend's encrypted-content verification
+    // ("Encrypted content item_id did not match the target item id").
+    let item_id = match state.open.as_ref() {
+        Some(OpenOutputItem::Reasoning { detail_id, .. }) => detail_id.clone(),
+        _ => None,
+    };
+    let mut data = match d.kind {
         ReasoningDetailKind::Summary => json!({
             "output_index": output_index,
             "summary_index": next_reasoning_summary_index(state),
@@ -285,6 +358,9 @@ fn emit_reasoning_detail(
             "delta": text,
         }),
     };
+    if let Some(id) = item_id {
+        data["item_id"] = json!(id);
+    }
     push_event(state, events, event_name, data);
 }
 
@@ -451,7 +527,10 @@ fn tool_call_value(buf: &ToolCallBuffer) -> Value {
 
 fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) {
     match state.open.take() {
-        Some(OpenOutputItem::Text { output_index }) => {
+        Some(OpenOutputItem::Text {
+            output_index,
+            message_id,
+        }) => {
             let text = std::mem::take(&mut state.current_text);
             push_event(
                 state,
@@ -459,6 +538,7 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
                 "response.output_text.done",
                 json!({
                     "output_index": output_index,
+                    "item_id": message_id,
                     "content_index": 0,
                     "text": text,
                 }),
@@ -469,6 +549,7 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
                 "response.content_part.done",
                 json!({
                     "output_index": output_index,
+                    "item_id": message_id,
                     "content_index": 0,
                     "part": output_text_block(&text),
                 }),
@@ -481,6 +562,7 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
                     "output_index": output_index,
                     "item": {
                         "type": "message",
+                        "id": message_id,
                         "role": "assistant",
                         "status": "completed",
                         "content": [output_text_block(&text)],
@@ -595,12 +677,36 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
     close_open_item(state, &mut events);
     let finished_output = completed_output(state);
     flush_tool_calls(state, &mut events);
+    let finished_output = if state.native_output_seen {
+        state.completed_items.clone()
+    } else {
+        finished_output
+    };
 
     let finish_reason = state.pending_finish_reason.clone();
     let (status, incomplete_details) = status_from_finish_reason(finish_reason.as_deref());
     let mut body = response_skeleton(state, &status, finished_output, state.pending_usage.clone());
     if let (Some(obj), Some(details)) = (body.as_object_mut(), incomplete_details) {
         obj.insert("incomplete_details".into(), details);
+    }
+    // Patch the minted message-item id into the completed body so the
+    // completed output matches the stream events item-for-item (the
+    // official API's message items carry ids end to end).
+    if (status == "completed" || status == "incomplete")
+        && let Some(msg_id) = state.last_message_id.as_ref()
+        && let Some(obj) = body.as_object_mut()
+        && let Some(output) = obj.get_mut("output").and_then(Value::as_array_mut)
+    {
+        for item in output.iter_mut() {
+            if item.get("type").and_then(Value::as_str) == Some("message")
+                && item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                item["id"] = json!(msg_id);
+            }
+        }
     }
     // A "failed" status is delivered via the distinct `response.failed`
     // event -- real Responses SDKs and the egress reader key off the event
@@ -612,6 +718,17 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
     } else {
         "response.completed"
     };
+    // Persist a `store: true` turn into the bounded store so a later
+    // `previous_response_id` chain (or GET retrieve) resolves against
+    // the full conversation. The context is the seeded request's own
+    // canonical messages (prior turns + this turn's input, no output).
+    if status != "failed"
+        && let Some(req) = state.req.as_deref()
+        && req.routectl_internal.responses_store
+        && let Some(store) = state.store.as_ref()
+    {
+        store.insert(response_id(state), body.clone(), req);
+    }
     push_response_event(state, &mut events, event_name, body);
     state.finished = true;
     events
@@ -622,7 +739,14 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
 /// matches the non-stream render byte-for-byte.
 fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
     let resp = accumulated_response(state);
-    let rendered = render_responses_response(resp).unwrap_or_else(|_| json!({"output": []}));
+    let rendered = render_responses_response(
+        state
+            .req
+            .as_deref()
+            .unwrap_or(&routectl_core::ChatRequest::default()),
+        resp,
+    )
+    .unwrap_or_else(|_| json!({"output": []}));
     rendered
         .get("output")
         .and_then(Value::as_array)
@@ -759,6 +883,40 @@ fn response_skeleton(
             super::render::render_usage(&usage_from_delta(&u)),
         );
     }
+    // Request-parameter echo (same fields the non-stream render echoes):
+    // the skeleton reads the seeded request so every event's embedded
+    // response object matches the official envelope's shape.
+    if let Some(req) = state.req.as_deref() {
+        obj.insert("store".into(), json!(req.routectl_internal.responses_store));
+        obj.insert("parallel_tool_calls".into(), json!(true));
+        obj.insert(
+            "tool_choice".into(),
+            req.tool_choice.clone().unwrap_or_else(|| json!("auto")),
+        );
+        obj.insert(
+            "tools".into(),
+            Value::Array(
+                req.tools
+                    .as_ref()
+                    .map(|tools| tools.iter().map(super::render::echo_tool_def).collect())
+                    .unwrap_or_default(),
+            ),
+        );
+        obj.insert("temperature".into(), json!(req.temperature));
+        obj.insert("top_p".into(), json!(req.top_p));
+        obj.insert(
+            "instructions".into(),
+            json!(req.system.as_ref().map(|s| s.flatten()).unwrap_or_default()),
+        );
+        if let Some(r) = req.reasoning.as_ref()
+            && let Some(effort) = r.effort.as_ref()
+        {
+            obj.insert(
+                "reasoning".into(),
+                json!({"effort": effort, "summary": "auto"}),
+            );
+        }
+    }
     Value::Object(obj)
 }
 
@@ -786,6 +944,12 @@ fn push_event(
     event_name: &str,
     mut extras: Value,
 ) {
+    if event_name == "response.output_item.done"
+        && state.completed_items.len() < MAX_REPLAY_ITEMS
+        && let Some(item) = extras.get("item")
+    {
+        state.completed_items.push(item.clone());
+    }
     let seq = next_seq(state);
     let obj = extras
         .as_object_mut()
