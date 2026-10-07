@@ -267,3 +267,17 @@ fn is_beta_key(value: &str) -> bool {
         .strip_prefix(BETA_CAPABILITY_PREFIX)
         .is_some_and(|flag| flag.is_empty() || is_beta_flag(flag))
 }
+
+#[test]
+fn a_seed_scope_lists_the_keys_of_its_well_formed_flags_in_order() {
+    let scope = BetaSeedScope::new("kind-x", &["fx-a", "bad.flag", "fx-b"]);
+
+    let keys = scope.seeded_keys();
+
+    let want: Vec<String> = ["fx-a", "fx-b"]
+        .iter()
+        .map(|flag| beta_capability_key(flag).expect("a well-formed flag"))
+        .collect();
+    assert_eq!(keys, want);
+    assert_eq!(scope.provider_kind(), "kind-x");
+}

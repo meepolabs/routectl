@@ -4184,7 +4184,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   decay settlements: lapse -> one carry, success -> clear, same rejection ->
   refresh, unrelated error -> release unchanged
 - `src/beta_capability.rs` -- sole owner of the beta-flag capability namespace
-  (crate-internal): `beta_capability_key`, `beta_flag_of`, `capability_key_is_beta`
+  (crate-internal): `beta_capability_key`, `beta_flag_of`, `capability_key_is_beta`;
+  `BetaSeedScope` (`covers`, `provider_kind`, `seeded_keys`) names a seed's
+  provider kind and flags
 - `src/beta_seed.rs` -- `BEDROCK_BETA_SEED`, the shipped prior of client beta
   flags a `bedrock` target withholds absent a stronger verdict
 - `src/field_capability.rs` -- sole owner of the envelope-field capability
@@ -4722,7 +4724,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/capability_display.rs` -- ONE pure read-only display resolver
   `resolve_display_verdict(override_cell, learned, prior) -> DisplayVerdict`
   pinning the within-target precedence `override > learned > verified-working
-  > prior > unknown` for the doctor capability matrix panel. An EXTRACTION of
+  > seed > prior > unknown` for the doctor capability matrix panel (a
+  `SeedCell` input: `Withhold` renders `broken`, `Cleared` renders `cleared`,
+  both source `SOURCE_SEED`). An EXTRACTION of
   the order `Router::unsupported_feature_for_target` enforces (that seam is
   side-effecting -- probe admission, `in_flight`, metrics -- so it cannot run
   from a read-only diagnostic). `DisplayVerdict { verdict, supported, source
@@ -4734,10 +4738,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   asserts the order agrees with `router::capability_precedence_matrix_tests`.
   `resolve_display_action(ActionInputs) -> &'static str` is the matching
   read-only extraction of the filter's ACTION for a cell (`ACTION_DROP` /
-  `ROUTE_AWAY` / `STRIP` / `REPROBE` / `ALLOW` / `NONE`): an override acts
-  regardless of the `[capability] enabled` kill switch, a learned or prior
-  cell only while it is on, and a learned entry that does not act on routing
-  (uncorroborated inferred, advisory live F3) falls through to the prior;
+  `ROUTE_AWAY` / `STRIP` / `WITHHOLD` / `REPROBE` / `ALLOW` / `NONE`): an
+  override and the seed act regardless of the `[capability] enabled` kill
+  switch, a learned or prior cell only while it is on, a negative or
+  route-away override on a `beta:` key withholds the flag, and a learned
+  entry that does not act on routing (uncorroborated inferred, advisory live
+  F3) falls through to the seed, then the prior;
   `LearnedActing::from_entry` reads a snapshot entry's acting facts through
   the registry's own `signal_acts` predicate, and
   `lane_strips_capability(config, provider_entry, models, capability)`
@@ -8105,8 +8111,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   nickname's verdict, layer and action. It then layers on the winning layer,
   the display-only age and stale flag, and the
   learned entry's epoch-ms timestamps mapped through the reader's pinned
-  `now`/`now_ms` anchor pair. Lane-keyed coverage lives in the
-  `#[path]`-included `lane_matrix_tests.rs`
+  `now`/`now_ms` anchor pair. The shipped beta seed is its own layer: its
+  flags become `beta:<flag>` columns (inside the 10-column cap) whenever a lane
+  of the seed's kind exists, and a covered cell resolves `seed` (withhold) or,
+  under a replayed seed-clear marker, cleared (allow). Lane-keyed coverage
+  lives in the `#[path]`-included `lane_matrix_tests.rs`, the seed layer's in
+  `seed_matrix_tests.rs`
 - `src/commands/doctor/gather.rs` -- doctor data collection.
   `derive_knob_rows(config, overlay)` resolves one `KnobRow` per `[models.X]`
   entry: config `max_output_tokens` checked FIRST (an operator value wins
@@ -8164,9 +8174,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   through the typed `try_read_events` (a failed read ->
   `Unavailable("open_failed" | "query_failed")`), and replays only a slice
   that was read, through `SliceReader` into a bare, config-sized
-  `LearnedCapabilityRegistry` (`Available`, or honest `Empty` when nothing
-  stays resident), both carrying the `MatrixReplaySummary` tally -- never a
-  silent empty. Read-only throughout (usage DB byte-identical).
+  `LearnedCapabilityRegistry` bounded by the doctor's `beta_seed` input
+  (`Available`, or honest `Empty` when nothing stays resident), both carrying
+  the `MatrixReplaySummary` tally and the replay's seed-clear markers -- never
+  a silent empty. Read-only throughout (usage DB byte-identical).
   `freshest_overlay_verified_at` walks the same `derive_effective_view` path
   for the freshest OVERLAY-sourced (import/user, never baked) `verified_at`;
   the freshness inputs also pin `today_epoch_day` and load the last successful

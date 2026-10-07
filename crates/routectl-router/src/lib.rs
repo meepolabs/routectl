@@ -84,16 +84,16 @@ pub use activation::{
     DeactivatedChange, UnresolvedReason, compute_activation, diff as diff_activation,
     provider_kind_for_oauth_id,
 };
-pub use beta_capability::BetaSeedScope;
 #[cfg(any(test, feature = "test-utils"))]
 pub use beta_capability::beta_capability_key;
+pub use beta_capability::{BetaSeedScope, capability_key_is_beta};
 pub use beta_seed::shipped_scope as shipped_beta_seed_scope;
 pub use calibration::{CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary};
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};
 pub use capability_display::{
     ACTION_ALLOW, ACTION_DROP, ACTION_MIXED, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY,
-    ACTION_STRIP, ActionInputs, DisplayVerdict, LearnedActing, VERDICT_MIXED,
-    lane_strips_capability, resolve_display_action, resolve_display_verdict,
+    ACTION_STRIP, ACTION_WITHHOLD, ActionInputs, DisplayVerdict, LearnedActing, SeedCell,
+    VERDICT_MIXED, lane_strips_capability, resolve_display_action, resolve_display_verdict,
 };
 pub use capability_matcher::resolve_requested_capability;
 pub use capability_rebuild::{

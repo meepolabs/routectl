@@ -183,7 +183,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 13);
+    assert_eq!(panel.schema_version, 14);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -239,12 +239,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 13);
+    assert_eq!(json["schema_version"], 14);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 13);
+    assert_eq!(json["data"]["report"]["schema_version"], 14);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),

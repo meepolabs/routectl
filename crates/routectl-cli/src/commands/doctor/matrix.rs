@@ -10,9 +10,9 @@
 //! entry), then every learned key the config no longer maps, surfaced
 //! unrouted rather than dropped.
 //!
-//! Each cell merges the three capability signal layers -- operator
-//! overrides, the learned ledger-replay registry, and catalog priors --
-//! through the shared pure resolvers (`resolve_display_verdict`,
+//! Each cell merges the capability signal layers -- operator overrides, the
+//! learned ledger-replay registry, the shipped beta seed, and catalog priors
+//! -- through the shared pure resolvers (`resolve_display_verdict`,
 //! `resolve_display_action`), so the panel cannot drift from the router's
 //! precedence order. Both the verdict and the action are resolved per
 //! nickname, because an override or a pinned beta can be nickname-scoped.
@@ -22,16 +22,22 @@
 //! nickname's own verdict, layer and action.
 //! Ages, timestamps, and stale flags are layered on top here (a display
 //! concern the pure resolvers deliberately omit).
+//!
+//! The beta seed is lane-wide: it covers a cell when the lane's provider kind
+//! is the seed's and the column is a seeded flag's key, whether or not the
+//! replay left an entry there, and a seed-clear marker the replay recorded for
+//! the cell turns it into a cleared seed.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
 
 use routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS;
 use routectl_router::{
-    ACTION_MIXED, ActionInputs, CapabilityMatrixPanel, DisplayVerdict, LearnedActing,
-    LearnedLaneProjection, LearnedRegistryEntry, MatrixAvailability, MatrixCell, MatrixLane,
-    MatrixNicknameAction, ModelEntry, OverrideRegistry, ProviderEntry, StateKey, VERDICT_MIXED,
-    is_stale_days, lane_strips_capability, resolve_display_action, resolve_display_verdict,
+    ACTION_MIXED, ActionInputs, BetaSeedScope, CapabilityMatrixPanel, DisplayVerdict,
+    LearnedActing, LearnedLaneProjection, LearnedRegistryEntry, MatrixAvailability, MatrixCell,
+    MatrixLane, MatrixNicknameAction, ModelEntry, OverrideRegistry, ProviderEntry, SeedCell,
+    SeedClearMarker, StateKey, VERDICT_MIXED, capability_key_is_beta, is_stale_days,
+    lane_strips_capability, resolve_display_action, resolve_display_verdict,
 };
 
 use super::sections::staleness_threshold_days;
@@ -50,6 +56,7 @@ const MS_PER_DAY: i64 = 86_400_000;
 const LAYER_OVERRIDE: &str = "override";
 const LAYER_LEARNED: &str = "learned";
 const LAYER_PRIOR: &str = "prior";
+const LAYER_SEED: &str = "seed";
 
 /// One configured model that dispatches to a lane.
 struct LaneModel<'a> {
@@ -68,10 +75,11 @@ struct LaneMeta<'a> {
 }
 
 /// The learned source as the cells read it: the snapshot plus its pinned
-/// clock anchors.
+/// clock anchors and the seed-clear markers the replay recorded.
 struct Learned<'a> {
     entries: &'a [LearnedRegistryEntry],
     now: Option<(Instant, i64)>,
+    seed_clears: &'a [SeedClearMarker],
 }
 
 /// The config-derived inputs every cell reads.
@@ -80,6 +88,7 @@ struct CellInputs<'a> {
     overrides: &'a OverrideRegistry,
     priors: &'a [PriorCell],
     learned: Learned<'a>,
+    beta_seed: BetaSeedScope,
     today: i64,
     threshold: i64,
 }
@@ -95,19 +104,25 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
             now,
             now_ms,
             replay,
+            seed_clears,
         } => (
             MatrixAvailability::Available,
             Learned {
                 entries: entries.as_slice(),
                 now: Some((*now, *now_ms)),
+                seed_clears: seed_clears.as_slice(),
             },
             Some(*replay),
         ),
-        CapabilityMatrixSource::Empty { replay } => (
+        CapabilityMatrixSource::Empty {
+            replay,
+            seed_clears,
+        } => (
             MatrixAvailability::Empty,
             Learned {
                 entries: &[],
                 now: None,
+                seed_clears: seed_clears.as_slice(),
             },
             Some(*replay),
         ),
@@ -116,6 +131,7 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
             Learned {
                 entries: &[],
                 now: None,
+                seed_clears: &[],
             },
             None,
         ),
@@ -123,13 +139,15 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
 
     let overrides = OverrideRegistry::build(&ctx.config);
     let priors: &[PriorCell] = ctx.capability.config.as_ref().map_or(&[], |c| &c.priors);
-    let (columns, other_overflow) = columns_for(learned.entries, priors, &overrides);
     let lanes_meta = lane_metas(ctx, learned.entries);
+    let seeded = seeded_columns(ctx.beta_seed, &lanes_meta);
+    let (columns, other_overflow) = columns_for(learned.entries, priors, &overrides, &seeded);
     let inputs = CellInputs {
         ctx,
         overrides: &overrides,
         priors,
         learned,
+        beta_seed: ctx.beta_seed,
         today: ctx.freshness.today_epoch_day,
         threshold: staleness_threshold_days(ctx.freshness.staleness_hint_days),
     };
@@ -204,16 +222,33 @@ fn lane_metas<'a>(ctx: &'a DoctorContext, entries: &[LearnedRegistryEntry]) -> V
     metas
 }
 
+/// The seeded flags' keys when any lane is of the kind the seed applies to,
+/// else none: a seed column on a matrix with no such lane would be all blank.
+fn seeded_columns(seed: BetaSeedScope, lanes: &[LaneMeta]) -> Vec<String> {
+    if lanes
+        .iter()
+        .any(|lane| lane.provider_kind == seed.provider_kind())
+    {
+        seed.seeded_keys()
+    } else {
+        Vec::new()
+    }
+}
+
 /// The column keys: the well-known keys, then the observed keys outside that
-/// set (from learned entries, priors, and overrides), sorted and capped at
-/// [`OTHER_COLUMN_CAP`]. The second return value is the count of observed
-/// other keys beyond the cap.
+/// set (from learned entries, priors, overrides, and the seed), sorted and
+/// capped at [`OTHER_COLUMN_CAP`]. The second return value is the count of
+/// observed other keys beyond the cap.
 fn columns_for(
     entries: &[LearnedRegistryEntry],
     priors: &[PriorCell],
     overrides: &OverrideRegistry,
+    seeded: &[String],
 ) -> (Vec<String>, u32) {
     let mut others: BTreeSet<String> = BTreeSet::new();
+    for key in seeded {
+        insert_other(&mut others, key);
+    }
     for entry in entries {
         insert_other(&mut others, &entry.feature_key);
     }
@@ -256,6 +291,7 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
         learned_acting: learned_entry
             .zip(inputs.learned.now)
             .map(|(entry, (now, _))| LearnedActing::from_entry(entry, now)),
+        seed: seed_cell(meta, capability, inputs),
         prior: prior_stamp.map(|(supported, _)| supported),
     };
     let resolved = resolve_per_nickname(meta, capability, inputs, signals);
@@ -305,9 +341,9 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
     }
 }
 
-/// The learned and prior signals one cell resolves against. The learned half is
-/// the lane's and shared by every nickname; the prior is per nickname, because
-/// the catalog records priors by nickname.
+/// The learned, seed and prior signals one cell resolves against. The learned
+/// and seed halves are the lane's and shared by every nickname; the prior is
+/// per nickname, because the catalog records priors by nickname.
 #[derive(Clone, Copy)]
 struct CellSignals {
     learned: Option<(
@@ -315,7 +351,27 @@ struct CellSignals {
         routectl_core::capability::EvidenceSource,
     )>,
     learned_acting: Option<LearnedActing>,
+    seed: Option<SeedCell>,
     prior: Option<bool>,
+}
+
+/// The seed's state on a cell: `None` when the seed does not cover the lane's
+/// kind and the column, otherwise cleared when the replay recorded a marker
+/// for the cell under the lane's kind, else withheld.
+fn seed_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> Option<SeedCell> {
+    if !inputs.beta_seed.covers(meta.provider_kind, capability) {
+        return None;
+    }
+    let cleared = inputs.learned.seed_clears.iter().any(|marker| {
+        marker.state_key == meta.lane
+            && marker.feature_key == capability
+            && marker.provider_kind == meta.provider_kind
+    });
+    Some(if cleared {
+        SeedCell::Cleared
+    } else {
+        SeedCell::Withhold
+    })
 }
 
 /// One nickname's resolution of a cell, or the lane's own for a lane no model
@@ -358,12 +414,13 @@ fn resolve_per_nickname(
                 .overrides
                 .resolve(provider, "", capability, meta.provider_kind)
         });
-        let display = resolve_display_verdict(override_cell, signals.learned, signals.prior);
+        let display =
+            resolve_display_verdict(override_cell, signals.learned, signals.seed, signals.prior);
         let strips = lane_strips(meta, capability, inputs);
         return vec![Resolved {
             nickname: None,
             display,
-            action: action_for(display, signals, strips, inputs),
+            action: action_for(display, signals, strips, capability, inputs),
         }];
     };
     meta.models
@@ -378,13 +435,18 @@ fn resolve_per_nickname(
                     .map(|(supported, _)| supported),
                 ..signals
             };
-            let display = resolve_display_verdict(override_cell, signals.learned, signals.prior);
+            let display = resolve_display_verdict(
+                override_cell,
+                signals.learned,
+                signals.seed,
+                signals.prior,
+            );
             let strips =
                 lane_strips_capability(&inputs.ctx.config, provider, &[model.entry], capability);
             Resolved {
                 nickname: Some(model.nickname.to_string()),
                 display,
-                action: action_for(display, signals, strips, inputs),
+                action: action_for(display, signals, strips, capability, inputs),
             }
         })
         .collect()
@@ -395,6 +457,7 @@ fn layer_of(display: DisplayVerdict) -> Option<&'static str> {
     display.source.map(|source| match source {
         "override" => LAYER_OVERRIDE,
         "prior" => LAYER_PRIOR,
+        "seed" => LAYER_SEED,
         _ => LAYER_LEARNED,
     })
 }
@@ -403,6 +466,7 @@ fn action_for(
     display: DisplayVerdict,
     signals: CellSignals,
     strip_applies: bool,
+    capability: &str,
     inputs: &CellInputs,
 ) -> &'static str {
     resolve_display_action(ActionInputs {
@@ -411,6 +475,8 @@ fn action_for(
         prior: signals.prior,
         strip_applies,
         capability_enabled: inputs.ctx.config.capability.enabled,
+        beta_flag: capability_key_is_beta(capability),
+        seed: signals.seed,
     })
 }
 

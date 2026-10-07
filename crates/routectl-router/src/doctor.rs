@@ -92,11 +92,13 @@ pub enum MatrixAvailability {
 /// lane resolve different verdicts); `supported` carries the polarity
 /// the token alone omits for a prior `assumed` cell (`None` for an
 /// `unknown` or `mixed` cell); `source` is the winning layer's evidence tag
-/// (`override` / `live` / `probe` / `prior`) and `layer` the layer itself
-/// (`override` / `learned` / `prior`), both `None` for `unknown` or `mixed`.
+/// (`override` / `live` / `probe` / `seed` / `prior`) and `layer` the layer
+/// itself (`override` / `learned` / `seed` / `prior`), both `None` for
+/// `unknown` or `mixed`. A `seed` cell is the shipped beta seed: `broken`
+/// while it withholds the flag, `cleared` once a seed-clear marker lifts it.
 /// `action` is what the dispatch filter does with the cell (`drop` /
-/// `route_away` / `strip` / `reprobe` / `allow` / `none`), or `mixed` when
-/// the nicknames on the lane resolve it to different actions.
+/// `route_away` / `strip` / `withhold` / `reprobe` / `allow` / `none`), or
+/// `mixed` when the nicknames on the lane resolve it to different actions.
 /// `nickname_actions` carries each nickname's own verdict, layer and action
 /// whenever the verdict or the action is `mixed`, and is empty otherwise.
 ///

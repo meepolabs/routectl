@@ -74,6 +74,7 @@ fn ctx(
         binary_version: "test",
         capability,
         capability_matrix: CapabilityMatrixSource::Unavailable("no_data"),
+        beta_seed: routectl_router::BetaSeedScope::EMPTY,
         freshness: sample_freshness(),
         pricing,
         knobs,
@@ -730,8 +731,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_thirteen() {
-    assert_eq!(SCHEMA_VERSION, 13);
+fn schema_version_is_fourteen() {
+    assert_eq!(SCHEMA_VERSION, 14);
 
     let context = ctx(
         config_with_overrides(),
@@ -740,7 +741,7 @@ fn schema_version_is_thirteen() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 13);
+    assert_eq!(report.schema_version, 14);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2440,6 +2441,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
             None,
         ),
         capability_matrix: CapabilityMatrixSource::Unavailable("config_unavailable"),
+        beta_seed: routectl_router::BetaSeedScope::EMPTY,
         freshness: sample_freshness(),
         pricing: Some(Vec::new()),
         knobs: Some(Vec::new()),
@@ -2606,7 +2608,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 13);
+    assert_eq!(no_net.schema_version, 14);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -2721,7 +2723,8 @@ mod capability_matrix {
         let tmp = TempDir::new().expect("tempdir");
         let config = config_at(&tmp.path().join("usage.db"));
 
-        let source = gather_capability_matrix(&config, true, 0);
+        let source =
+            gather_capability_matrix(&config, true, 0, routectl_router::BetaSeedScope::EMPTY);
         assert!(
             matches!(
                 source,
@@ -2738,7 +2741,8 @@ mod capability_matrix {
         let tmp = TempDir::new().expect("tempdir");
         let config = config_at(&tmp.path().join("absent.db"));
 
-        let source = gather_capability_matrix(&config, false, 0);
+        let source =
+            gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY);
         assert!(
             matches!(source, CapabilityMatrixSource::Unavailable("no_data")),
             "an absent ledger is unavailable, never a silent empty"
@@ -2752,7 +2756,8 @@ mod capability_matrix {
         std::fs::write(&ledger, b"this is not a sqlite database").expect("write junk");
         let config = config_at(&ledger);
 
-        let CapabilityMatrixSource::Unavailable(code) = gather_capability_matrix(&config, false, 0)
+        let CapabilityMatrixSource::Unavailable(code) =
+            gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY)
         else {
             panic!("an unreadable ledger must be unavailable");
         };
@@ -2772,7 +2777,8 @@ mod capability_matrix {
         rusqlite::Connection::open(&ledger).expect("create never-migrated sqlite file");
         let config = config_at(&ledger);
 
-        let source = gather_capability_matrix(&config, false, 0);
+        let source =
+            gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY);
         assert!(
             matches!(
                 source,
@@ -2785,7 +2791,12 @@ mod capability_matrix {
         // DIFFERENT code from the same function -- proving the two states
         // were, and without the split would remain, distinguishable only by
         // accident rather than by design.
-        let cold = gather_capability_matrix(&config_at(&tmp.path().join("absent.db")), false, 0);
+        let cold = gather_capability_matrix(
+            &config_at(&tmp.path().join("absent.db")),
+            false,
+            0,
+            routectl_router::BetaSeedScope::EMPTY,
+        );
         assert!(
             matches!(cold, CapabilityMatrixSource::Unavailable("no_data")),
             "the cold-ledger sibling case renders its own distinct code"
@@ -2805,7 +2816,7 @@ mod capability_matrix {
 
         assert!(
             matches!(
-                gather_capability_matrix(&config, false, 0),
+                gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY),
                 CapabilityMatrixSource::Empty { .. }
             ),
             "a readable, matched, zero-row ledger is honest-empty"
@@ -2824,7 +2835,7 @@ mod capability_matrix {
 
         assert!(
             matches!(
-                gather_capability_matrix(&config, false, 99),
+                gather_capability_matrix(&config, false, 99, routectl_router::BetaSeedScope::EMPTY),
                 CapabilityMatrixSource::Unavailable("revision_mismatch")
             ),
             "a foreign-revision tombstone is unavailable, not empty"
@@ -2857,7 +2868,7 @@ mod capability_matrix {
             now,
             now_ms,
             ..
-        } = gather_capability_matrix(&config, false, 0)
+        } = gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY)
         else {
             panic!("a matching tombstone with a post-boundary row must be Available");
         };
@@ -2897,7 +2908,12 @@ mod capability_matrix {
         drop(db);
         let before = std::fs::read(&ledger).expect("read ledger before");
 
-        let _ = gather_capability_matrix(&config_at(&ledger), false, 0);
+        let _ = gather_capability_matrix(
+            &config_at(&ledger),
+            false,
+            0,
+            routectl_router::BetaSeedScope::EMPTY,
+        );
 
         let after = std::fs::read(&ledger).expect("read ledger after");
         assert_eq!(
@@ -3653,6 +3669,7 @@ mod matrix_panel {
                 now,
                 now_ms: 0,
                 replay: MatrixReplaySummary::default(),
+                seed_clears: Vec::new(),
             },
             priors,
         );
@@ -3721,6 +3738,7 @@ mod matrix_panel {
                 now,
                 now_ms: 0,
                 replay: MatrixReplaySummary::default(),
+                seed_clears: Vec::new(),
             },
             Vec::new(),
         );
@@ -3736,6 +3754,7 @@ mod matrix_panel {
         let empty = build_capability_matrix_panel(&matrix_ctx(
             CapabilityMatrixSource::Empty {
                 replay: MatrixReplaySummary::default(),
+                seed_clears: Vec::new(),
             },
             Vec::new(),
         ));
@@ -3785,6 +3804,7 @@ mod matrix_panel {
                 now,
                 now_ms: 0,
                 replay: MatrixReplaySummary::default(),
+                seed_clears: Vec::new(),
             },
             priors,
         );
@@ -3816,6 +3836,7 @@ mod matrix_panel {
                 now,
                 now_ms: 0,
                 replay: MatrixReplaySummary::default(),
+                seed_clears: Vec::new(),
             },
             Vec::new(),
         );
@@ -3980,7 +4001,8 @@ mod seeded_matrix_surfaces {
         let config = config_at(&ledger);
 
         // Act 1: the real read-only gather replays the seeded ledger.
-        let source = gather_capability_matrix(&config, false, 0);
+        let source =
+            gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY);
         assert!(
             matches!(source, CapabilityMatrixSource::Available { .. }),
             "a matched tombstone with post-boundary rows must be Available"
@@ -4092,6 +4114,7 @@ mod seeded_matrix_surfaces {
         let empty = build_report(&DoctorContext {
             capability_matrix: CapabilityMatrixSource::Empty {
                 replay: MatrixReplaySummary::default(),
+                seed_clears: Vec::new(),
             },
             ..ctx(
                 config_at(ledger),

@@ -25,6 +25,10 @@ mod tests;
 #[path = "lane_matrix_tests.rs"]
 mod lane_matrix_tests;
 
+#[cfg(test)]
+#[path = "seed_matrix_tests.rs"]
+mod seed_matrix_tests;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -32,8 +36,9 @@ use routectl_auth::LocalProbe;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    CatalogImportState, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry,
-    MatrixReplaySummary, PricingSource, Status, WouldTrimPanel, overall_exit,
+    BetaSeedScope, CatalogImportState, Config, DoctorPanels, DoctorReport, Finding,
+    LearnedRegistryEntry, MatrixReplaySummary, PricingSource, SeedClearMarker, Status,
+    WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -110,7 +115,14 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// first-seen / last-seen / expiry timestamps; the panel gains the replay
 /// tally (`replay`); and a post-boundary slice read that fails renders
 /// `Unavailable` (`open_failed` / `query_failed`) instead of an empty matrix.
-const SCHEMA_VERSION: u32 = 13;
+///
+/// v13 -> v14: the shipped beta seed renders as its own matrix layer. Its
+/// flags appear as `beta:<flag>` columns on lanes of the kind it applies to,
+/// a seed cell carries source and layer `seed` with the new `withhold`
+/// action (or verdict `cleared` and action `allow` once a seed-clear marker
+/// lifts it), and a learned negative on a `beta:` key acts as `withhold`
+/// rather than `strip` / `route_away`.
+const SCHEMA_VERSION: u32 = 14;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -213,6 +225,10 @@ pub(crate) struct DoctorContext {
     /// first-class tri-state. Populated in the single gather pass and
     /// consumed by the capability matrix panel builder.
     capability_matrix: CapabilityMatrixSource,
+    /// The shipped beta seed the matrix renders as its own layer: the same
+    /// scope the router withholds by and the replay registry bounds its
+    /// seed-clear markers with.
+    beta_seed: BetaSeedScope,
     /// The freshness section's read-only inputs: baked catalog stamp, the
     /// freshest overlay verification, and the last SUCCESSFUL import. Purely
     /// additive to the context; gathered once like every other input.
@@ -401,11 +417,17 @@ enum CapabilityMatrixSource {
         /// `now`.
         now_ms: i64,
         replay: MatrixReplaySummary,
+        /// Every seed-clear marker the replay recorded.
+        seed_clears: Vec<SeedClearMarker>,
     },
     /// Readable ledger, matched tombstone, slice read, nothing resident after
     /// the replay: an honest, non-degraded empty. The tally still says how
-    /// many rows were read and why each was skipped.
-    Empty { replay: MatrixReplaySummary },
+    /// many rows were read and why each was skipped; a seed-clear marker
+    /// leaves no resident entry, so an empty replay may still carry some.
+    Empty {
+        replay: MatrixReplaySummary,
+        seed_clears: Vec<SeedClearMarker>,
+    },
     /// The source could not be read at this run's revision; the token is a
     /// path-free class (`config_unavailable` / `no_data` / `no_tombstone` /
     /// `revision_mismatch` / `tombstone_read` / `open_failed` /

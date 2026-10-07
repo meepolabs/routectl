@@ -1,15 +1,16 @@
 //! Read-only display resolver for a single capability matrix cell.
 //!
 //! ONE pure function that pins the within-target precedence order
-//! `override > learned > verified-working > prior > unknown` for a
+//! `override > learned > verified-working > seed > prior > unknown` for a
 //! DISPLAY surface (the doctor capability matrix panel). It is an
 //! EXTRACTION of the order the dispatch-path
 //! `Router::unsupported_feature_for_target` enforces, NOT a reuse: that
 //! seam is side-effecting (it claims probe slots, flips `in_flight`, and
 //! bumps metrics), so it can never run from a read-only diagnostic. This
-//! resolver reads three already-gathered inputs and returns a display
-//! verdict; a sibling drift test asserts its order agrees with the
-//! router's consolidated precedence matrix.
+//! resolver reads already-gathered inputs and returns a display verdict; a
+//! sibling drift test asserts its order agrees with the router's
+//! consolidated precedence matrix. The seed layer mirrors the withheld-beta
+//! pass instead: the shipped beta seed sits below every learned verdict.
 
 use std::time::Instant;
 
@@ -44,12 +45,24 @@ pub const SOURCE_LIVE: &str = "live";
 pub const SOURCE_PROBE: &str = "probe";
 /// Source tag: a catalog capability prior.
 pub const SOURCE_PRIOR: &str = "prior";
+/// Source tag: the shipped beta seed.
+pub const SOURCE_SEED: &str = "seed";
+
+/// The shipped beta seed's state on one cell it covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedCell {
+    /// The seed withholds the flag on the lane.
+    Withhold,
+    /// A seed-clear marker lifts the seed on the lane, so the flag is sent.
+    Cleared,
+}
 
 /// The resolved display verdict for one capability matrix cell.
 ///
 /// `verdict` is a stable token: the core [`Verdict::as_str`] vocabulary
 /// (`verified` / `broken` / `assumed` / `unknown`) for the learned,
-/// verified, prior, and no-signal cases, plus the two PANEL-ONLY override
+/// verified, prior, and no-signal cases, `broken` / `cleared` for a seed
+/// cell, plus the two PANEL-ONLY override
 /// tokens (`FORCED_SUPPORTED` / `FORCED_UNSUPPORTED`). `supported`
 /// carries the polarity the token alone does not for a prior `assumed`
 /// cell (the catalog can assert either direction); it is `None` only for
@@ -66,8 +79,8 @@ pub struct DisplayVerdict {
 }
 
 /// Resolve the display verdict for one `(lane, capability)` cell from the
-/// three already-gathered signal layers, applying
-/// `override > learned > verified-working > prior > unknown`.
+/// already-gathered signal layers, applying
+/// `override > learned > verified-working > seed > prior > unknown`.
 ///
 /// READ-ONLY: it admits no probe, flips no `in_flight` flag, and touches
 /// no metric -- the exact contrast with the side-effecting dispatch seam
@@ -81,12 +94,15 @@ pub struct DisplayVerdict {
 ///   entry per cell, so "learned" (a broken negative) and
 ///   "verified-working" (a positive) are mutually exclusive here; their
 ///   relative precedence is honored by returning as soon as either is
-///   seen, ahead of the prior.
+///   seen, ahead of the seed and the prior.
+/// - `seed`: the shipped beta seed's state on the cell, or `None` when the
+///   seed does not cover it.
 /// - `prior`: the catalog capability prior's truthiness, or `None` when
 ///   the catalog carries no prior for the cell.
 pub const fn resolve_display_verdict(
     override_cell: Option<(OverrideVerdict, OverrideProvenance)>,
     learned: Option<(Verdict, EvidenceSource)>,
+    seed: Option<SeedCell>,
     prior: Option<bool>,
 ) -> DisplayVerdict {
     if let Some((verdict, _provenance)) = override_cell {
@@ -126,9 +142,13 @@ pub const fn resolve_display_verdict(
             }
             // A resident snapshot entry is only ever a negative or a
             // positive; any other verdict carries no acting signal, so it
-            // falls through to the prior rather than masking it.
+            // falls through to the seed and the prior rather than masking it.
             _ => {}
         }
+    }
+
+    if let Some(seed) = seed {
+        return seed_display(seed);
     }
 
     match prior {
@@ -145,6 +165,22 @@ pub const fn resolve_display_verdict(
     }
 }
 
+/// The display verdict of a cell the shipped beta seed decides.
+const fn seed_display(seed: SeedCell) -> DisplayVerdict {
+    match seed {
+        SeedCell::Withhold => DisplayVerdict {
+            verdict: Verdict::LearnedBroken(FailurePhase::F1).as_str(),
+            supported: Some(false),
+            source: Some(SOURCE_SEED),
+        },
+        SeedCell::Cleared => DisplayVerdict {
+            verdict: Verdict::Cleared.as_str(),
+            supported: Some(true),
+            source: Some(SOURCE_SEED),
+        },
+    }
+}
+
 /// Action token: an operator route-away override hard-drops the target.
 pub const ACTION_DROP: &str = "drop";
 /// Action token: the target is demoted to the tail of its chain (an acting
@@ -157,6 +193,9 @@ pub const ACTION_STRIP: &str = "strip";
 pub const ACTION_REPROBE: &str = "reprobe";
 /// Action token: a positive signal; the target serves the capability.
 pub const ACTION_ALLOW: &str = "allow";
+/// Action token: the target stays in the chain but does not send the beta
+/// flag (a beta-key negative, a beta-key override, or the shipped seed).
+pub const ACTION_WITHHOLD: &str = "withhold";
 /// Action token: no signal acts on routing for this cell.
 pub const ACTION_NONE: &str = "none";
 /// Action token: the nicknames sharing a lane resolve the cell to different
@@ -209,32 +248,45 @@ pub struct ActionInputs {
     /// essential nor pins to the wire).
     pub strip_applies: bool,
     /// The `[capability] enabled` kill switch: off, neither the learned nor
-    /// the prior layer acts on routing.
+    /// the prior layer acts on routing. The seed acts either way.
     pub capability_enabled: bool,
+    /// Whether the capability is a beta-flag key: a negative on it withholds
+    /// the flag rather than stripping it or routing the target away.
+    pub beta_flag: bool,
+    /// The shipped beta seed's state on the cell, when the seed covers it.
+    pub seed: Option<SeedCell>,
 }
 
 /// The routing action the dispatch filter takes for a cell, as a stable
 /// token, mirroring `Router::unsupported_feature_for_target` without its side
-/// effects. An override acts regardless of the kill switch; a learned or
-/// prior cell acts only while it is on. A learned entry that does not act on
-/// routing (an uncorroborated inferred negative, or an advisory live F3
-/// negative) leaves the cell to the prior, exactly as the filter does.
+/// effects. An override and the seed act regardless of the kill switch; a
+/// learned or prior cell acts only while it is on. A learned entry that does
+/// not act on routing (an uncorroborated inferred negative, or an advisory
+/// live F3 negative) leaves the cell to the seed and then the prior, exactly
+/// as the filter and the withheld-beta pass do.
 pub fn resolve_display_action(inputs: ActionInputs) -> &'static str {
     let display = inputs.display;
     if display.source == Some(SOURCE_OVERRIDE) {
         return match display.supported {
+            Some(false) if inputs.beta_flag => ACTION_WITHHOLD,
             Some(false) => ACTION_DROP,
             _ => ACTION_ALLOW,
         };
     }
-    if !inputs.capability_enabled {
-        return ACTION_NONE;
-    }
-    if let Some(action) = inputs
-        .learned
-        .and_then(|learned| learned_action(learned, inputs.strip_applies))
+    if inputs.capability_enabled
+        && let Some(action) = inputs
+            .learned
+            .and_then(|learned| learned_action(learned, inputs.strip_applies, inputs.beta_flag))
     {
         return action;
+    }
+    match inputs.seed {
+        Some(SeedCell::Withhold) => return ACTION_WITHHOLD,
+        Some(SeedCell::Cleared) => return ACTION_ALLOW,
+        None => {}
+    }
+    if !inputs.capability_enabled {
+        return ACTION_NONE;
     }
     match inputs.prior {
         Some(false) => ACTION_ROUTE_AWAY,
@@ -244,7 +296,11 @@ pub fn resolve_display_action(inputs: ActionInputs) -> &'static str {
 
 /// The action a resident learned entry takes, or `None` when it does not
 /// act on routing and the cell falls through to the prior.
-const fn learned_action(learned: LearnedActing, strip_applies: bool) -> Option<&'static str> {
+const fn learned_action(
+    learned: LearnedActing,
+    strip_applies: bool,
+    beta_flag: bool,
+) -> Option<&'static str> {
     if !learned.acting {
         return None;
     }
@@ -259,6 +315,9 @@ const fn learned_action(learned: LearnedActing, strip_applies: bool) -> Option<&
     }
     if learned.lapsed {
         return Some(ACTION_REPROBE);
+    }
+    if beta_flag {
+        return Some(ACTION_WITHHOLD);
     }
     if matches!(learned.phase, FailurePhase::F1) && strip_applies {
         Some(ACTION_STRIP)

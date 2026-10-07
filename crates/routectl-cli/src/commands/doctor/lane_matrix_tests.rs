@@ -51,7 +51,7 @@ fn lane_config() -> Config {
     config
 }
 
-fn context(config: Config, source: CapabilityMatrixSource) -> DoctorContext {
+pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorContext {
     let capability = build_capability_inputs(
         &config,
         None,
@@ -73,6 +73,7 @@ fn context(config: Config, source: CapabilityMatrixSource) -> DoctorContext {
         binary_version: "test",
         capability,
         capability_matrix: source,
+        beta_seed: routectl_router::BetaSeedScope::EMPTY,
         freshness: FreshnessInputs {
             catalog_version: CATALOG_VERSION,
             snapshot_date: routectl_router::CATALOG_SNAPSHOT_DATE,
@@ -87,7 +88,7 @@ fn context(config: Config, source: CapabilityMatrixSource) -> DoctorContext {
     }
 }
 
-fn negative(
+pub(super) fn negative(
     lane: &str,
     cap: &str,
     phase: FailurePhase,
@@ -109,12 +110,12 @@ fn negative(
     }
 }
 
-fn ago(now: Instant, by: Duration) -> Instant {
+pub(super) fn ago(now: Instant, by: Duration) -> Instant {
     now.checked_sub(by)
         .expect("the monotonic clock reaches back this far")
 }
 
-fn available(
+pub(super) fn available(
     entries: Vec<LearnedRegistryEntry>,
     now: Instant,
     now_ms: i64,
@@ -124,6 +125,7 @@ fn available(
         now,
         now_ms,
         replay: MatrixReplaySummary::default(),
+        seed_clears: Vec::new(),
     }
 }
 
@@ -140,7 +142,7 @@ fn lane<'a>(panel: &'a CapabilityMatrixPanel, key: &str) -> &'a MatrixLane {
         })
 }
 
-fn cell<'a>(panel: &'a CapabilityMatrixPanel, key: &str, cap: &str) -> &'a MatrixCell {
+pub(super) fn cell<'a>(panel: &'a CapabilityMatrixPanel, key: &str, cap: &str) -> &'a MatrixCell {
     let ci = panel
         .columns
         .iter()
@@ -555,7 +557,7 @@ fn the_human_lane_label_is_the_exact_purge_argument() {
 // The typed read outcome and the replay tally, through a real ledger.
 // ---------------------------------------------------------------------------
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -591,7 +593,7 @@ fn event(lane: &str, kind: Option<&str>, vocab: Option<i64>) -> CapabilityEvent 
 
 /// A ledger whose boundary classifies as a matching replay, holding the
 /// given post-boundary events.
-fn seeded_ledger(events: &[CapabilityEvent]) -> (TempDir, std::path::PathBuf) {
+pub(super) fn seeded_ledger(events: &[CapabilityEvent]) -> (TempDir, std::path::PathBuf) {
     let tmp = TempDir::new().expect("tempdir");
     let path = tmp.path().join("usage.db");
     let db = open(&path).expect("open ledger");
@@ -612,7 +614,12 @@ fn a_failed_slice_read_renders_unavailable_while_a_clean_empty_slice_renders_emp
     // Positive control: a matched boundary with ZERO post-boundary rows is the
     // honest empty -- the same fixture shape, minus the poisoned row.
     let (_clean_dir, clean) = seeded_ledger(&[]);
-    let clean_source = gather_capability_matrix(&ledger_config(&clean), false, 0);
+    let clean_source = gather_capability_matrix(
+        &ledger_config(&clean),
+        false,
+        0,
+        routectl_router::BetaSeedScope::EMPTY,
+    );
     let clean_panel = build_capability_matrix_panel(&context(ledger_config(&clean), clean_source));
     assert_eq!(clean_panel.availability, MatrixAvailability::Empty);
     assert!(
@@ -631,7 +638,12 @@ fn a_failed_slice_read_renders_unavailable_while_a_clean_empty_slice_renders_emp
         )
         .expect("plant undecodable row");
 
-    let source = gather_capability_matrix(&ledger_config(&poisoned), false, 0);
+    let source = gather_capability_matrix(
+        &ledger_config(&poisoned),
+        false,
+        0,
+        routectl_router::BetaSeedScope::EMPTY,
+    );
     let panel = build_capability_matrix_panel(&context(ledger_config(&poisoned), source));
     assert_eq!(
         panel.availability,
@@ -663,7 +675,12 @@ fn the_replay_tally_counts_replayed_and_each_skip_reason() {
         event("p#up", Some(OPENAI_COMPAT), Some(i64::MAX)),
     ]);
 
-    let source = gather_capability_matrix(&ledger_config(&path), false, 0);
+    let source = gather_capability_matrix(
+        &ledger_config(&path),
+        false,
+        0,
+        routectl_router::BetaSeedScope::EMPTY,
+    );
     let panel = build_capability_matrix_panel(&context(ledger_config(&path), source));
 
     assert_eq!(panel.availability, MatrixAvailability::Available);

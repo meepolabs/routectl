@@ -4302,12 +4302,13 @@ Two structured panels render after the sections:
   that map to it (two nicknames on one upstream of one provider entry share
   a lane, and a pooled model has one lane per member entry). A learned lane
   the loaded config no longer maps is marked `(unrouted)`. Every cell merges
-  the three signal layers -- operator overrides, the learned ledger-replay
-  registry, and catalog priors -- through the same resolver the router uses,
-  so the panel cannot drift from dispatch precedence; each cell carries its
-  winning layer (`override` / `learned` / `prior`) and evidence source, the
-  routing action the dispatch filter takes (`drop` / `route_away` / `strip`
-  / `reprobe` / `allow` / `none`), the learned entry's first-seen /
+  the signal layers -- operator overrides, the learned ledger-replay
+  registry, the shipped beta seed, and catalog priors -- through the same
+  resolver the router uses, so the panel cannot drift from dispatch
+  precedence; each cell carries its winning layer (`override` / `learned` /
+  `seed` / `prior`) and evidence source, the routing action the dispatch
+  filter takes (`drop` / `route_away` / `strip` / `withhold` / `reprobe` /
+  `allow` / `none`), the learned entry's first-seen /
   last-seen / expiry times, its age, and a staleness flag. The ledger source
   reports a first-class tri-state (available / an honest empty / unavailable
   with a path-free class code, including `open_failed` / `query_failed`
@@ -4315,7 +4316,14 @@ Two structured panels render after the sections:
   read" is never collapsed into "nothing learned"; whenever the replay ran,
   `replay` reports the rows read, replayed, and skipped by reason
   (`skipped_vocab`, `skipped_owner`, `skipped_revision`, `skipped_lane`,
-  `skipped_unknown`).
+  `skipped_unknown`). On a `bedrock` lane every flag the shipped beta seed
+  withholds appears as a `beta:<flag>` column even with no learned row: the
+  cell reads `broken` from layer `seed` with action `withhold` (the seed acts
+  even with `[capability] enabled = false`), or `cleared` with action
+  `allow` once a successful re-probe or `routectl capability purge` lifted
+  it for that lane. A learned verdict on the flag outranks the seed, and a
+  learned `beta:` negative shows action `withhold` rather than `strip` or
+  `route_away`.
 - **`panels.would_trim`** -- the steady-state would-trim opportunity,
   read-only over all recorded history. Its fields are documented under
   [Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)

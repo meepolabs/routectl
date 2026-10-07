@@ -10,10 +10,11 @@ use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay, Config,
-    EffectiveRow, LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource, ProviderEntry,
-    ReplayTombstone, Source, StateKey, catalog_import_state_default_path, derive_effective_view,
-    effective_pricing, load_last_import, rebuild_capabilities_into, today_epoch_day,
+    BetaSeedScope, CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay,
+    Config, EffectiveRow, LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource,
+    ProviderEntry, ReplayTombstone, Source, StateKey, catalog_import_state_default_path,
+    derive_effective_view, effective_pricing, load_last_import, rebuild_capabilities_into,
+    today_epoch_day,
 };
 
 use crate::commands::capability_legacy::present_legacy_capability_keys;
@@ -112,8 +113,9 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         .as_ref()
         .map(|overlay| derive_knob_rows(&config, overlay));
     let capability = build_capability_inputs(&config, config_parse_error, overlay);
+    let beta_seed = routectl_router::shipped_beta_seed_scope();
     let capability_matrix =
-        gather_capability_matrix(&config, config_parse_failed, overlay_revision);
+        gather_capability_matrix(&config, config_parse_failed, overlay_revision, beta_seed);
 
     let (probes, seats, auth_store_error) = gather_auth().await;
     let secret_checks = gather_secret_checks(&config, &probes);
@@ -137,6 +139,7 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         binary_version: env!("CARGO_PKG_VERSION"),
         capability,
         capability_matrix,
+        beta_seed,
         freshness,
         pricing,
         knobs,
@@ -283,6 +286,7 @@ pub(super) fn gather_capability_matrix(
     config: &Config,
     config_parse_failed: bool,
     overlay_revision: u64,
+    beta_seed: BetaSeedScope,
 ) -> CapabilityMatrixSource {
     if config_parse_failed {
         return CapabilityMatrixSource::Unavailable("config_unavailable");
@@ -292,7 +296,7 @@ pub(super) fn gather_capability_matrix(
         BoundaryOutcome::Replay(tombstone) => {
             let reader = LedgerCapabilityReader::new(config.usage.db_path.clone(), tombstone);
             match reader.try_read_events() {
-                Ok(rows) => replay_matrix_slice(config, &reader, tombstone, rows),
+                Ok(rows) => replay_matrix_slice(config, &reader, tombstone, rows, beta_seed),
                 Err(failure) => CapabilityMatrixSource::Unavailable(failure.as_str()),
             }
         }
@@ -305,28 +309,35 @@ pub(super) fn gather_capability_matrix(
     }
 }
 
-/// Replay an already-read post-boundary slice into a bare registry and
-/// classify what stayed resident, carrying the replay tally either way.
+/// Replay an already-read post-boundary slice into a bare registry bounded by
+/// `beta_seed` and classify what stayed resident, carrying the replay tally
+/// and the seed-clear markers the replay recorded either way.
 fn replay_matrix_slice(
     config: &Config,
     reader: &LedgerCapabilityReader,
     tombstone: ReplayTombstone,
     rows: Vec<CapabilityEventRow>,
+    beta_seed: BetaSeedScope,
 ) -> CapabilityMatrixSource {
     let slice = SliceReader::new(tombstone, rows);
     let registry = LearnedCapabilityRegistry::from_capability_config(&config.capability);
-    registry.set_seed_scope(routectl_router::shipped_beta_seed_scope());
+    registry.set_seed_scope(beta_seed);
     let summary = rebuild_capabilities_into(&slice, &registry, &config.providers);
     let replay = replay_summary(&summary, reader.loaded_rows());
     let entries = registry.owned_snapshot(|lane| lane_provider_kind(config, lane));
+    let seed_clears = registry.seed_clear_snapshot();
     if entries.is_empty() {
-        CapabilityMatrixSource::Empty { replay }
+        CapabilityMatrixSource::Empty {
+            replay,
+            seed_clears,
+        }
     } else {
         CapabilityMatrixSource::Available {
             entries,
             now: reader.now(),
             now_ms: reader.now_ms(),
             replay,
+            seed_clears,
         }
     }
 }

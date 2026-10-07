@@ -90,6 +90,19 @@ impl BetaSeedScope {
         }
     }
 
+    /// The provider kind the seed applies to.
+    pub const fn provider_kind(&self) -> &'static str {
+        self.provider_kind
+    }
+
+    /// The capability key of every well-formed seeded flag, in seed order.
+    pub fn seeded_keys(&self) -> Vec<String> {
+        self.flags
+            .iter()
+            .filter_map(|flag| beta_capability_key(flag))
+            .collect()
+    }
+
     /// True when `feature_key` is the beta key of a seeded flag and
     /// `provider_kind` is the kind the seed applies to.
     pub fn covers(&self, provider_kind: &str, feature_key: &str) -> bool {

@@ -8455,6 +8455,65 @@ impl<T> typenum::type_operators::Same for routectl_router::RefusalSource
 pub type routectl_router::RefusalSource::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::RefusalSource where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::RefusalSource::into_shared(self) -> Shared
+pub enum routectl_router::SeedCell
+pub routectl_router::SeedCell::Cleared
+pub routectl_router::SeedCell::Withhold
+impl core::clone::Clone for routectl_router::SeedCell
+pub fn routectl_router::SeedCell::clone(&self) -> routectl_router::SeedCell
+impl core::cmp::Eq for routectl_router::SeedCell
+impl core::cmp::PartialEq for routectl_router::SeedCell
+pub fn routectl_router::SeedCell::eq(&self, &routectl_router::SeedCell) -> bool
+impl core::fmt::Debug for routectl_router::SeedCell
+pub fn routectl_router::SeedCell::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::SeedCell
+impl core::marker::StructuralPartialEq for routectl_router::SeedCell
+impl core::marker::Freeze for routectl_router::SeedCell
+impl core::marker::Send for routectl_router::SeedCell
+impl core::marker::Sync for routectl_router::SeedCell
+impl core::marker::Unpin for routectl_router::SeedCell
+impl core::marker::UnsafeUnpin for routectl_router::SeedCell
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::SeedCell
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::SeedCell
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::SeedCell where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::SeedCell::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::SeedCell where U: core::convert::From<T>
+pub fn routectl_router::SeedCell::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::SeedCell where U: core::convert::Into<T>
+pub type routectl_router::SeedCell::Error = core::convert::Infallible
+pub fn routectl_router::SeedCell::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::SeedCell where U: core::convert::TryFrom<T>
+pub type routectl_router::SeedCell::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::SeedCell::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::SeedCell where T: core::clone::Clone
+pub type routectl_router::SeedCell::Owned = T
+pub fn routectl_router::SeedCell::clone_into(&self, &mut T)
+pub fn routectl_router::SeedCell::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::SeedCell where T: core::clone::Clone
+pub fn routectl_router::SeedCell::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::SeedCell where T: 'static + ?core::marker::Sized
+pub fn routectl_router::SeedCell::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::SeedCell where T: ?core::marker::Sized
+pub fn routectl_router::SeedCell::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::SeedCell where T: ?core::marker::Sized
+pub fn routectl_router::SeedCell::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::SeedCell where T: core::clone::Clone
+pub unsafe fn routectl_router::SeedCell::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::SeedCell
+pub fn routectl_router::SeedCell::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::SeedCell where T: core::clone::Clone
+pub fn routectl_router::SeedCell::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::SeedCell
+impl<T> outref::AsOut<T> for routectl_router::SeedCell where T: core::marker::Copy
+pub fn routectl_router::SeedCell::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::SeedCell where T: ?core::marker::Sized
+pub fn routectl_router::SeedCell::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::SeedCell::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::SeedCell
+impl<T> tracing::instrument::WithSubscriber for routectl_router::SeedCell
+impl<T> typenum::type_operators::Same for routectl_router::SeedCell
+pub type routectl_router::SeedCell::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::SeedCell where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::SeedCell::into_shared(self) -> Shared
 pub enum routectl_router::ShadowOutcome
 pub routectl_router::ShadowOutcome::FirstSeen
 pub routectl_router::ShadowOutcome::Misfire
@@ -8881,10 +8940,12 @@ pub type routectl_router::ActingFieldVerdict::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ActingFieldVerdict where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ActingFieldVerdict::into_shared(self) -> Shared
 pub struct routectl_router::ActionInputs
+pub routectl_router::ActionInputs::beta_flag: bool
 pub routectl_router::ActionInputs::capability_enabled: bool
 pub routectl_router::ActionInputs::display: routectl_router::DisplayVerdict
 pub routectl_router::ActionInputs::learned: core::option::Option<routectl_router::LearnedActing>
 pub routectl_router::ActionInputs::prior: core::option::Option<bool>
+pub routectl_router::ActionInputs::seed: core::option::Option<routectl_router::SeedCell>
 pub routectl_router::ActionInputs::strip_applies: bool
 impl core::clone::Clone for routectl_router::ActionInputs
 pub fn routectl_router::ActionInputs::clone(&self) -> routectl_router::ActionInputs
@@ -9453,6 +9514,8 @@ impl routectl_router::BetaSeedScope
 pub const routectl_router::BetaSeedScope::EMPTY: Self
 pub fn routectl_router::BetaSeedScope::covers(&self, &str, &str) -> bool
 pub const fn routectl_router::BetaSeedScope::new(&'static str, &'static [&'static str]) -> Self
+pub const fn routectl_router::BetaSeedScope::provider_kind(&self) -> &'static str
+pub fn routectl_router::BetaSeedScope::seeded_keys(&self) -> alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::BetaSeedScope
 pub fn routectl_router::BetaSeedScope::clone(&self) -> routectl_router::BetaSeedScope
 impl core::cmp::Eq for routectl_router::BetaSeedScope
@@ -16367,6 +16430,7 @@ pub const routectl_router::ACTION_NONE: &str
 pub const routectl_router::ACTION_REPROBE: &str
 pub const routectl_router::ACTION_ROUTE_AWAY: &str
 pub const routectl_router::ACTION_STRIP: &str
+pub const routectl_router::ACTION_WITHHOLD: &str
 pub const routectl_router::ALIAS_MAX_RECURSION_DEPTH: usize
 pub const routectl_router::BYTES_PER_TOKEN_ESTIMATE: u64
 pub const routectl_router::CATALOG_OVERLAY_SCHEMA_VERSION: u32
@@ -16408,6 +16472,7 @@ pub async fn routectl_router::build_provider_with_options(&str, &routectl_router
 pub async fn routectl_router::build_resolved_models(&routectl_router::config::Config, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<(alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>)>
 pub async fn routectl_router::build_resolved_models_reported(&routectl_router::config::Config, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<routectl_router::ResolvedModelBuild>
 pub fn routectl_router::candidate_shrink_counts(&routectl_router::ImportCandidate) -> routectl_router::ShrinkCounts
+pub fn routectl_router::capability_key_is_beta(&str) -> bool
 pub fn routectl_router::capability_key_is_field_verdict(&str) -> bool
 pub fn routectl_router::catalog_import_state_default_path() -> std::path::PathBuf
 pub fn routectl_router::catalog_state_default_path() -> std::path::PathBuf
@@ -16470,7 +16535,7 @@ pub fn routectl_router::provider_kind_for_oauth_id(&str) -> core::option::Option
 pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::LearnedCapabilityRegistry, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ProviderEntry>) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::rebuild_into(&dyn routectl_router::LedgerReader, &routectl_router::KSessionStore, std::time::SystemTime, usize)
 pub fn routectl_router::resolve_display_action(routectl_router::ActionInputs) -> &'static str
-pub const fn routectl_router::resolve_display_verdict(core::option::Option<(routectl_router::OverrideVerdict, routectl_router::OverrideProvenance)>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
+pub const fn routectl_router::resolve_display_verdict(core::option::Option<(routectl_router::OverrideVerdict, routectl_router::OverrideProvenance)>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<routectl_router::SeedCell>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
 pub fn routectl_router::resolve_effective_row(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &routectl_router::CatalogOverlay) -> routectl_router::catalog::EffectiveRow
 pub fn routectl_router::resolve_requested_capability(&str, &routectl_core::error::Error, &routectl_core::failure_class::ClassifiedFailure) -> core::option::Option<(alloc::string::String, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase)>
 pub fn routectl_router::resolved_codex_version(&routectl_router::config::Config) -> core::option::Option<alloc::string::String>
