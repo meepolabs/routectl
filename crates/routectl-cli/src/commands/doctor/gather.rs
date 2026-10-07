@@ -315,6 +315,7 @@ fn replay_matrix_slice(
 ) -> CapabilityMatrixSource {
     let slice = SliceReader::new(tombstone, rows);
     let registry = LearnedCapabilityRegistry::from_capability_config(&config.capability);
+    registry.set_seed_scope(routectl_router::shipped_beta_seed_scope());
     let summary = rebuild_capabilities_into(&slice, &registry, &config.providers);
     let replay = replay_summary(&summary, reader.loaded_rows());
     let entries = registry.owned_snapshot(|lane| lane_provider_kind(config, lane));

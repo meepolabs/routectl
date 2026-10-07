@@ -2090,6 +2090,7 @@ impl Router {
                 &config.capability,
             ),
         );
+        learned_capabilities.set_seed_scope(crate::beta_seed::shipped_scope());
         let learned_replay = Arc::new(crate::learned_replay::ReplayLearnRegistry::new(Arc::clone(
             &learned_capabilities,
         )));

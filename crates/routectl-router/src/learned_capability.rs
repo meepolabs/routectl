@@ -60,7 +60,7 @@ use routectl_core::capability::{
     EvidenceSource, FailurePhase, SignalTier, Verdict, normalize_capability_key,
 };
 
-use crate::beta_capability::capability_key_is_beta;
+use crate::beta_capability::{BetaSeedScope, capability_key_is_beta};
 
 /// Default resident-entry ceiling. A safety valve, not a cache policy:
 /// eviction should never fire at solo-local volume.
@@ -529,11 +529,17 @@ pub struct LearnedCapabilityRegistry {
     ///
     /// Kept apart from `entries` so a marker neither counts toward nor can be
     /// evicted by either capacity bound: evicting one would silently re-seed a
-    /// flag an operator lifted.
+    /// flag an operator lifted. Bounded instead by `seed_scope`: only a seeded
+    /// cell is ever marked, so the set holds at most one marker per seeded flag
+    /// per lane and kind.
     ///
     /// A leaf in the documented order: held only for the insert, remove or read
     /// itself, never while acquiring another lock.
     seed_clears: RwLock<BTreeSet<RegistryKey>>,
+    /// The seed whose cells may carry a marker. Empty until the owner installs
+    /// one, so a bare registry records none. A leaf, like `seed_clears`, and
+    /// never held while taking it.
+    seed_scope: RwLock<BetaSeedScope>,
     /// Monotonic incarnation sequence, shared by every key.
     ///
     /// ONE sequence rather than a per-key counter: a consumer comparing two
@@ -990,6 +996,7 @@ impl LearnedCapabilityRegistry {
             next_receipt_id: RwLock::new(1),
             purge_leases: Arc::new(RwLock::new(std::collections::HashSet::new())),
             seed_clears: RwLock::new(BTreeSet::new()),
+            seed_scope: RwLock::new(BetaSeedScope::EMPTY),
             next_incarnation: RwLock::new(0),
             exhausted_incarnations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -1637,8 +1644,8 @@ impl LearnedCapabilityRegistry {
     }
 
     /// Replay a persisted `cleared` row: remove the resident entry, and record
-    /// the seed-clear marker when the key is a beta key, whether or not an
-    /// entry was resident. Returns whether an entry was removed.
+    /// the seed-clear marker when the installed seed covers the key, whether or
+    /// not an entry was resident. Returns whether an entry was removed.
     pub fn replay_cleared(
         &self,
         state_key: &str,
@@ -1676,9 +1683,37 @@ impl LearnedCapabilityRegistry {
             .collect()
     }
 
-    /// Record the seed-clear marker for `key` when it is a beta key.
+    /// Install the seed whose cells may carry a marker. Markers already
+    /// recorded are left alone; the scope bounds only new ones.
+    pub fn set_seed_scope(&self, scope: BetaSeedScope) {
+        *self.seed_scope.write() = scope;
+    }
+
+    /// The installed seed scope.
+    pub fn seed_scope(&self) -> BetaSeedScope {
+        *self.seed_scope.read()
+    }
+
+    /// Drop the marker recorded under `recorded_kind` for
+    /// `(state_key, feature_key)`, returning whether one was present. For the
+    /// owner sweep, which decides from [`Self::seed_clear_snapshot`].
+    pub(crate) fn remove_seed_clear(
+        &self,
+        state_key: &str,
+        feature_key: &str,
+        recorded_kind: &str,
+    ) -> bool {
+        let key = Self::make_key(state_key, feature_key, recorded_kind);
+        self.seed_clears.write().remove(&key)
+    }
+
+    /// Record the seed-clear marker for `key` when the installed seed covers
+    /// its cell: a marker anywhere else changes no withholding decision.
     fn mark_seed_cleared(&self, key: &RegistryKey) {
-        if capability_key_is_beta(&key.feature_key) {
+        if self
+            .seed_scope()
+            .covers(&key.provider_kind, &key.feature_key)
+        {
             self.seed_clears.write().insert(key.clone());
         }
     }

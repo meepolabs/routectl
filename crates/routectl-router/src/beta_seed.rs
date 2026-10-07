@@ -17,3 +17,9 @@ pub const BEDROCK_BETA_SEED: &[&str] = &[
     "advisor-tool-2026-03-01",
     "prompt-caching-scope-2026-01-05",
 ];
+
+/// The shipped seed as the scope the learned registry bounds its seed-clear
+/// markers by.
+pub const fn shipped_scope() -> crate::beta_capability::BetaSeedScope {
+    crate::beta_capability::BetaSeedScope::new(BEDROCK_SEED_PROVIDER_KIND, BEDROCK_BETA_SEED)
+}

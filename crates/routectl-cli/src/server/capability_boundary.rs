@@ -50,7 +50,7 @@
 
 use std::sync::Arc;
 
-use routectl_router::{LearnedCapabilityRegistry, RecordedLearnedEntry, Router};
+use routectl_router::{LearnedCapabilityRegistry, RecordedLearnedEntry, Router, SeedClearMarker};
 use routectl_usage::{BatchCommit, BatchReceipt, CapabilityEvent, UsageHandle};
 
 /// The outcome of committing a reload's replay boundary.
@@ -127,7 +127,9 @@ pub(crate) fn admit_capability_boundary(
                 .filter(|survivor| router.owns_learned_entry(survivor))
                 .cloned()
                 .collect();
-            let batch = boundary_batch(&owned, now_ms, catalog_version, overlay_revision);
+            // No markers: the transition this batch settles prunes every one,
+            // since a beta key is catalog-scoped.
+            let batch = boundary_batch(&owned, &[], now_ms, catalog_version, overlay_revision);
             // Admission only -- non-blocking, so no lock is held across I/O. The
             // registry installs the pending generation itself, inside this same
             // ordered acquisition, when the admission below reports success.
@@ -188,7 +190,12 @@ pub(crate) fn admit_capability_boundary(
 }
 
 /// The atomic boundary batch: one tombstone stamped `catalog_version` /
-/// `overlay_revision`, then a restatement of every entry in `survivors`.
+/// `overlay_revision`, then a `cleared` row per marker in `seed_clears`, then a
+/// restatement of every entry in `survivors`.
+///
+/// The clears come first so replay records each marker before any entry row
+/// lands: a `cleared` row replayed after an entry's restatement would remove
+/// that entry.
 ///
 /// The single owner of how a surviving verdict is re-appended past a new
 /// boundary, for every caller that moves one. `now_ms` is the wall-clock
@@ -197,18 +204,40 @@ pub(crate) fn admit_capability_boundary(
 /// recorded.
 pub(crate) fn boundary_batch(
     survivors: &[RecordedLearnedEntry],
+    seed_clears: &[SeedClearMarker],
     now_ms: i64,
     catalog_version: u32,
     overlay_revision: u64,
 ) -> Vec<CapabilityEvent> {
     let signed_catalog = i64::from(catalog_version);
     let signed_overlay = i64::try_from(overlay_revision).unwrap_or(i64::MAX);
-    let mut batch = Vec::with_capacity(survivors.len() + 1);
+    let mut batch = Vec::with_capacity(survivors.len() + seed_clears.len() + 1);
     batch.push(CapabilityEvent::tombstone(
         now_ms,
         signed_catalog,
         signed_overlay,
     ));
+    batch.extend(seed_clears.iter().map(|marker| {
+        CapabilityEvent {
+            ts: now_ms,
+            lane_key: marker.state_key.clone(),
+            capability: marker.feature_key.clone(),
+            verdict: "cleared".to_string(),
+            phase: String::new(),
+            source: routectl_core::capability::EvidenceSource::Live
+                .as_str()
+                .to_string(),
+            tier: String::new(),
+            evidence_class: None,
+            upstream_token: None,
+            catalog_version: signed_catalog,
+            overlay_revision: signed_overlay,
+            provider_kind: crate::handlers::usage_capture::persisted_provider_kind(
+                &marker.provider_kind,
+            ),
+            vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
+        }
+    }));
     for recorded in survivors {
         let survivor = &recorded.entry;
         let provider_kind =

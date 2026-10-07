@@ -4078,10 +4078,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   everywhere: `generation` -> `pending_generation` -> `entries` ->
   `purge_leases` -> `seed_clears` -> `tuning`. Seed-clear markers
   (`seed_cleared`, `seed_clear_snapshot` / `SeedClearMarker`) sit beside
-  `entries`, outside both caps: a `beta:` key's replayed `cleared` row
-  (`replay_cleared`), probe-success clear or finalized purge records one, an
-  acting learned negative lifts it, and `commit_boundary_transition` prunes them
-  with the catalog-scoped entries. A path needing
+  `entries`, outside both caps, bounded instead by the installed
+  `BetaSeedScope` (`set_seed_scope`; only a seeded cell is marked): a seeded
+  `beta:` key's replayed `cleared` row (`replay_cleared`), probe-success clear
+  or finalized purge records one, an acting learned negative lifts it,
+  `commit_boundary_transition` prunes them with the catalog-scoped entries, and
+  the reload owner sweep drops unowned ones. A revision-bump boot restates the
+  surviving ones as `cleared` rows past its fresh tombstone. A path needing
   only a subset still takes what it needs in that sequence, including
   `effective_persistence_generation`, the hand-rolled `Debug` (which SNAPSHOTS all
   four values in order and drops every guard before formatting -- reading them

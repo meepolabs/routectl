@@ -196,8 +196,13 @@ impl Router {
 
     /// Replace the Bedrock beta seed with a fixture list.
     #[cfg(any(test, feature = "test-utils"))]
-    pub const fn set_beta_seed_for_tests(&mut self, seed: &'static [&'static str]) {
+    pub fn set_beta_seed_for_tests(&mut self, seed: &'static [&'static str]) {
         self.beta_seed = seed;
+        self.learned_capabilities
+            .set_seed_scope(crate::beta_capability::BetaSeedScope::new(
+                crate::beta_seed::BEDROCK_SEED_PROVIDER_KIND,
+                seed,
+            ));
     }
 }
 

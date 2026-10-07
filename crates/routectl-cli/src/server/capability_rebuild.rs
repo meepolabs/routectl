@@ -180,10 +180,17 @@ fn restate_survivors_past_new_boundary(
     let live = router.learned_registry();
     let scratch =
         LearnedCapabilityRegistry::new(live.decay(), live.inferred_window(), live.max_entries());
+    scratch.set_seed_scope(live.seed_scope());
     let _ = rebuild_capabilities_into(&slice, &scratch, &router.config.providers);
     let survivors = scratch.recorded_snapshot();
+    // Seed clears stamped with this boot's revision survive the replay like any
+    // entry of that revision, so they are restated too: otherwise the live
+    // replay below honors them now and the next boot, starting past the fresh
+    // tombstone, has nothing to replay them from.
+    let seed_clears = scratch.seed_clear_snapshot();
     let batch = boundary_batch(
         &survivors,
+        &seed_clears,
         epoch_ms_now(),
         catalog_version,
         overlay_revision,

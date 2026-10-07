@@ -983,6 +983,16 @@ fn beta_key(flag: &str) -> String {
     crate::beta_capability::beta_capability_key(flag).expect("well formed")
 }
 
+/// A registry whose seed scope covers every flag the marker tests clear.
+fn seeded_registry() -> LearnedCapabilityRegistry {
+    let reg = registry();
+    reg.set_seed_scope(crate::beta_capability::BetaSeedScope::new(
+        "openai-compat",
+        &["zz-flag-a", "zz-relearned", "zz-lifted"],
+    ));
+    reg
+}
+
 fn seed_cleared(reg: &LearnedCapabilityRegistry, key: &str) -> bool {
     reg.seed_cleared(LANE, key, "openai-compat")
 }
@@ -996,7 +1006,7 @@ fn a_cleared_beta_row_with_no_entry_marks_the_seed_and_counts_a_noop() {
         tombstone: Some(ReplayTombstone::new(0, CV, OV)),
         rows: vec![cleared(1, base, &beta), cleared(2, base, "web_search")],
     };
-    let reg = registry();
+    let reg = seeded_registry();
 
     // Act
     let summary = rebuild_capabilities_into(&reader, &reg, &providers());
@@ -1027,7 +1037,7 @@ fn replayed_beta_clear_and_negative_resolve_by_rowid() {
             cleared(4, base, &lifted),
         ],
     };
-    let reg = registry();
+    let reg = seeded_registry();
 
     // Act
     let summary = rebuild_capabilities_into(&reader, &reg, &providers());
@@ -1061,7 +1071,7 @@ fn a_cleared_beta_row_from_another_revision_marks_nothing() {
         tombstone: Some(ReplayTombstone::new(0, CV, OV)),
         rows: vec![stale],
     };
-    let reg = registry();
+    let reg = seeded_registry();
 
     let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 

@@ -734,3 +734,148 @@ fn rebuild_log_no_warn_under_cap() {
         "the info rebuild log still fires"
     );
 }
+
+/// Records the withheld beta set of every request it is handed.
+struct BetaRecorder {
+    withheld: parking_lot::Mutex<Vec<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl routectl_core::Provider for BetaRecorder {
+    fn id(&self) -> &'static str {
+        "beta-recorder"
+    }
+    fn normalize_request(
+        &self,
+        _: &routectl_core::ChatRequest,
+    ) -> routectl_core::Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(
+        &self,
+        _: serde_json::Value,
+    ) -> routectl_core::Result<routectl_core::ChatResponse> {
+        Err(routectl_core::Error::normalize_response(
+            "beta-recorder",
+            "unused",
+        ))
+    }
+    async fn complete(
+        &self,
+        req: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<routectl_core::ChatResponse> {
+        self.withheld
+            .lock()
+            .push(req.routectl_internal.withheld_betas.to_vec());
+        Ok(routectl_core::ChatResponse {
+            model: "wire".to_string(),
+            usage: Some(routectl_core::Usage::default()),
+            ..Default::default()
+        })
+    }
+    async fn stream(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<
+        futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+    > {
+        Err(routectl_core::Error::upstream(
+            "beta-recorder",
+            500,
+            "unused",
+        ))
+    }
+}
+
+const SEED_UPSTREAM: &str = "anthropic.claude-test-v1:0";
+const SEED_LANE: &str = "aws#anthropic.claude-test-v1:0";
+const FIXTURE_SEED: &[&str] = &["fx-current", "fx-stale"];
+
+/// A bedrock router at overlay revision 99 under [`FIXTURE_SEED`], with one
+/// model `m` on lane [`SEED_LANE`] whose provider records the withheld set.
+fn seeded_bedrock_router() -> (Router, Arc<BetaRecorder>) {
+    let config: Config = toml::from_str(
+        "[providers.aws]\n\
+         kind = \"bedrock\"\n\
+         region = \"us-east-1\"\n\
+         creds = { kind = \"default-chain\" }\n\
+         [aliases]\n\
+         default = \"m\"\n",
+    )
+    .expect("fixture config parses");
+    let mut router = Router::new(Arc::new(config));
+    router.set_beta_seed_for_tests(FIXTURE_SEED);
+    router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(99));
+    let provider = Arc::new(BetaRecorder {
+        withheld: parking_lot::Mutex::new(Vec::new()),
+    });
+    let model = routectl_router::ResolvedModel::new("m", "aws", provider.clone(), SEED_UPSTREAM);
+    router.install_resolved_models(std::iter::once(("m".to_string(), Arc::new(model))).collect());
+    (router, provider)
+}
+
+/// Append a `cleared` beta row for [`SEED_LANE`] at `overlay_revision`.
+fn seed_cleared_beta(conn: &rusqlite::Connection, ts: i64, flag: &str, cat: i64, overlay: i64) {
+    conn.execute(
+        "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
+         tier, evidence_class, upstream_token, catalog_version, overlay_revision, \
+         provider_kind, vocab_version) \
+         VALUES (?1, ?2, ?3, 'cleared', '', 'live', '', NULL, NULL, ?4, ?5, 'bedrock', ?6)",
+        params![
+            ts,
+            SEED_LANE,
+            format!("{}{}{flag}", "be", "ta:"),
+            cat,
+            overlay,
+            routectl_router::CURRENT_VOCAB_VERSION,
+        ],
+    )
+    .expect("seed cleared beta row");
+}
+
+/// Boot a fresh seeded router against `ledger` and report the withheld set
+/// one request carrying every fixture flag gets.
+async fn withheld_after_boot(ledger: &Path, handle: &UsageHandle) -> Vec<String> {
+    let (router, provider) = seeded_bedrock_router();
+    warm_off_runtime(ledger, &router, handle);
+    let req = routectl_core::ChatRequest {
+        model: "m".into(),
+        anthropic_beta: FIXTURE_SEED.iter().map(ToString::to_string).collect(),
+        ..Default::default()
+    };
+    Box::pin(router.complete(req))
+        .await
+        .expect("complete succeeds");
+    let mut seen = provider.withheld.lock().clone();
+    assert_eq!(seen.len(), 1, "one attempt reached the provider");
+    seen.remove(0)
+}
+
+/// A seed clear stamped with the boot's revision is restated past the fresh
+/// boundary, so the restart after it decides the same; a clear stamped with
+/// the superseded revision lapses on both boots.
+#[tokio::test]
+async fn a_seed_clear_decides_the_same_across_a_revision_bump_boot_and_the_next_one() {
+    // Arrange -- a stale tombstone, a clear at the superseded revision and a
+    // clear at the revision this daemon now boots at.
+    let tmp = TempDir::new().expect("tempdir");
+    let ledger = tmp.path().join("usage.db");
+    let cat = i64::from(seeded_bedrock_router().0.catalog_version());
+    {
+        let db = open(&ledger).expect("open ledger");
+        seed_tombstone(db.conn(), 100, cat, 0);
+        seed_cleared_beta(db.conn(), 200, "fx-stale", cat, 0);
+        seed_cleared_beta(db.conn(), 300, "fx-current", cat, 99);
+    }
+    let (handle, writer) = writer_at(&ledger);
+
+    // Act -- restart 1 crosses the revision change; restart 2 does not.
+    let first = withheld_after_boot(&ledger, &handle).await;
+    let second = withheld_after_boot(&ledger, &handle).await;
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(first, vec!["fx-stale".to_string()]);
+    assert_eq!(second, first, "the restart after the bump decides the same");
+}

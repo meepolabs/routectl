@@ -10,8 +10,21 @@ const WINDOW: Duration = Duration::from_hours(1);
 const LANE: &str = "bed#upstream";
 const KIND: &str = "bedrock";
 
+/// Every flag a test here marks. `zz-flag-*` fill flags stay unseeded.
+const SEED: &[&str] = &[
+    "fx-a",
+    "fx-kept",
+    "fx-purged",
+    "fx-acting",
+    "fx-pending",
+    "fx-positive",
+    "fx-lifted",
+];
+
 fn registry() -> LearnedCapabilityRegistry {
-    LearnedCapabilityRegistry::new(DECAY, WINDOW, DEFAULT_MAX_ENTRIES)
+    let reg = LearnedCapabilityRegistry::new(DECAY, WINDOW, DEFAULT_MAX_ENTRIES);
+    reg.set_seed_scope(BetaSeedScope::new(KIND, SEED));
+    reg
 }
 
 fn beta(flag: &str) -> String {
@@ -202,4 +215,31 @@ fn a_marker_is_scoped_to_its_lane_and_kind_and_normalized_like_an_entry() {
 
 fn secs(n: usize) -> Duration {
     Duration::from_secs(u64::try_from(n).expect("small test index"))
+}
+
+#[test]
+fn only_a_seeded_cell_is_marked() {
+    // Arrange
+    let reg = registry();
+
+    // Act -- a thousand distinct unseeded flags, one seeded flag, and the
+    // seeded flag under another kind.
+    for n in 0..1000 {
+        let _ = reg.replay_cleared(LANE, &beta(&format!("zz-unseeded-{n}")), KIND);
+    }
+    let _ = reg.replay_cleared(LANE, &beta("fx-a"), KIND);
+    let _ = reg.replay_cleared(LANE, &beta("fx-a"), "anthropic-api");
+
+    // Assert
+    assert_eq!(reg.seed_clear_snapshot().len(), 1);
+    assert!(marked(&reg, &beta("fx-a")));
+}
+
+#[test]
+fn a_registry_with_no_seed_scope_marks_nothing() {
+    let reg = LearnedCapabilityRegistry::new(DECAY, WINDOW, DEFAULT_MAX_ENTRIES);
+
+    let _ = reg.replay_cleared(LANE, &beta("fx-a"), KIND);
+
+    assert!(reg.seed_clear_snapshot().is_empty());
 }

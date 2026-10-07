@@ -35,8 +35,8 @@ impl Router {
         Some((lane, decision))
     }
 
-    /// Remove every resident lane-keyed entry this Router's config does not
-    /// own, and return how many were removed.
+    /// Remove every resident lane-keyed entry and seed-clear marker this
+    /// Router's config does not own, and return how many were removed.
     ///
     /// Destructive, so it runs only where this Router is the one being
     /// published: directly in a config-only carry-over, and after a
@@ -50,7 +50,8 @@ impl Router {
             .recorded_snapshot()
             .iter()
             .filter(|recorded| self.remove_if_unowned(generation, recorded))
-            .count();
+            .count()
+            + self.sweep_unowned_seed_clears();
         if removed > 0 {
             tracing::info!(
                 event = "owner_sweep",
@@ -59,6 +60,29 @@ impl Router {
             );
         }
         removed
+    }
+
+    /// Remove every seed-clear marker whose lane this Router's config does not
+    /// own under the kind the marker was recorded under -- the same rule boot
+    /// replay applies to the `cleared` row behind it.
+    fn sweep_unowned_seed_clears(&self) -> usize {
+        self.learned_capabilities
+            .seed_clear_snapshot()
+            .iter()
+            .filter(|marker| {
+                StateKey::parse(&marker.state_key).is_some_and(|lane| {
+                    owner_decision(&lane, &marker.provider_kind, &self.config.providers)
+                        != OwnerDecision::Owned
+                })
+            })
+            .filter(|marker| {
+                self.learned_capabilities.remove_seed_clear(
+                    &marker.state_key,
+                    &marker.feature_key,
+                    &marker.provider_kind,
+                )
+            })
+            .count()
     }
 
     fn remove_if_unowned(&self, generation: u64, recorded: &RecordedLearnedEntry) -> bool {

@@ -2219,7 +2219,7 @@ fn a_restatement_is_stamped_with_the_entrys_recorded_kind() {
         provider_kind: "openai-compat".to_string(),
     };
 
-    let batch = boundary_batch(&[survivor], 1_000, 7, 2);
+    let batch = boundary_batch(&[survivor], &[], 1_000, 7, 2);
 
     let kinds: Vec<Option<&str>> = batch[1..]
         .iter()

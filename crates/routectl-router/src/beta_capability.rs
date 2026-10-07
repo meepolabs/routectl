@@ -67,6 +67,37 @@ pub fn capability_key_is_beta(key: &str) -> bool {
     beta_flag_of(key).is_some()
 }
 
+/// The beta flags a shipped seed withholds on one provider kind.
+///
+/// Only a cell this scope covers can carry a seed-clear marker: a marker on any
+/// other cell changes no withholding decision, so storing it would only grow
+/// the marker set with flags no seed names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BetaSeedScope {
+    provider_kind: &'static str,
+    flags: &'static [&'static str],
+}
+
+impl BetaSeedScope {
+    /// A scope covering no cell.
+    pub const EMPTY: Self = Self::new("", &[]);
+
+    /// The scope of `flags` on `provider_kind` lanes.
+    pub const fn new(provider_kind: &'static str, flags: &'static [&'static str]) -> Self {
+        Self {
+            provider_kind,
+            flags,
+        }
+    }
+
+    /// True when `feature_key` is the beta key of a seeded flag and
+    /// `provider_kind` is the kind the seed applies to.
+    pub fn covers(&self, provider_kind: &str, feature_key: &str) -> bool {
+        provider_kind == self.provider_kind
+            && beta_flag_of(feature_key).is_some_and(|flag| self.flags.contains(&flag))
+    }
+}
+
 #[cfg(test)]
 #[path = "beta_capability_tests.rs"]
 mod tests;

@@ -555,3 +555,132 @@ fn a_config_only_reload_keeps_a_cleared_seed() {
     let target = target_on(&after, "bed");
     assert!(withheld(&after, &target, &["fx-seed-only"]).is_empty());
 }
+
+/// A learned positive keeps the marker beside it: a seed-withheld flag is
+/// never sent, so never re-tested, and losing the marker with the positive
+/// would withhold the flag for good once the lane cap evicts that positive.
+#[test]
+fn a_cleared_seed_stays_sent_after_its_accepted_positive_is_evicted() {
+    // Arrange -- marker, then an accepted positive on the same seeded cell.
+    let router = router(&capability(true));
+    let target = target_on(&router, "bed");
+    let lane = lane_of(&target);
+    let base = Instant::now();
+    mark_seed_cleared(&router, &target, "fx-seed-only");
+    let accepted = router
+        .learned_capabilities
+        .observe_accepted_beta_in_generation(
+            router.learned_capabilities.generation(),
+            &lane,
+            &key("fx-seed-only"),
+            BEDROCK,
+            base,
+        );
+    assert!(accepted.value().is_some(), "premise: the positive lands");
+
+    // Act -- newer beta negatives fill the lane past its bound.
+    for n in 0..crate::learned_capability::MAX_BETA_ENTRIES_PER_LANE {
+        router.learned_capabilities.observe(
+            &lane,
+            &key(&format!("zz-fill-{n}")),
+            BEDROCK,
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            base + std::time::Duration::from_secs(1 + u64::try_from(n).expect("small")),
+        );
+    }
+
+    // Assert
+    assert!(
+        !router
+            .learned_capabilities
+            .snapshot()
+            .iter()
+            .any(|e| e.feature_key == key("fx-seed-only")),
+        "premise: the lane cap evicted the positive",
+    );
+    assert!(withheld(&router, &target, &["fx-seed-only"]).is_empty());
+}
+
+fn markers_on(router: &Router) -> Vec<(String, String)> {
+    router
+        .learned_capabilities
+        .seed_clear_snapshot()
+        .into_iter()
+        .map(|m| (m.state_key, m.provider_kind))
+        .collect()
+}
+
+#[test]
+fn the_owner_sweep_drops_a_marker_whose_entry_was_removed_and_a_re_add_does_not_restore_it() {
+    // Arrange
+    let before = router(&capability(true));
+    let target = target_on(&before, "bed");
+    mark_seed_cleared(&before, &target, "fx-seed-only");
+    let without_bed: Config = toml::from_str(
+        "version = 3\n\
+         [providers.oc]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"https://example.test/v1\"\n\
+         api_key_ref = \"literal:k\"\n",
+    )
+    .expect("fixture config parses");
+    let mut removed = Router::new(Arc::new(without_bed));
+    removed.set_beta_seed_for_tests(FIXTURE_SEED);
+
+    // Act -- remove the entry, then add it back.
+    removed.carry_over_learned_from(&before);
+    let swept = markers_on(&removed);
+    let mut re_added = router(&capability(true));
+    re_added.carry_over_learned_from(&removed);
+
+    // Assert
+    assert!(swept.is_empty(), "the removal sweeps the marker: {swept:?}");
+    let target = target_on(&re_added, "bed");
+    assert_eq!(
+        withheld(&re_added, &target, &["fx-seed-only"]),
+        vec!["fx-seed-only"],
+        "the re-added entry starts from the seed",
+    );
+}
+
+#[test]
+fn the_owner_sweep_drops_a_marker_after_a_kind_flip() {
+    // Arrange
+    let before = router(&capability(true));
+    let target = target_on(&before, "bed");
+    mark_seed_cleared(&before, &target, "fx-seed-only");
+    let flipped: Config = toml::from_str(
+        "version = 3\n\
+         [providers.bed]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"literal:k\"\n",
+    )
+    .expect("fixture config parses");
+    let mut reloaded = Router::new(Arc::new(flipped));
+    reloaded.set_beta_seed_for_tests(FIXTURE_SEED);
+    assert_eq!(markers_on(&before).len(), 1, "premise: one marker");
+
+    // Act
+    reloaded.carry_over_learned_from(&before);
+
+    // Assert
+    assert!(markers_on(&reloaded).is_empty());
+}
+
+#[test]
+fn the_owner_sweep_keeps_an_owned_marker() {
+    let before = router(&capability(true));
+    let target = target_on(&before, "bed");
+    mark_seed_cleared(&before, &target, "fx-seed-only");
+    let mut reloaded = router(&capability(true));
+
+    reloaded.carry_over_learned_from(&before);
+
+    assert_eq!(
+        markers_on(&reloaded),
+        vec![(lane_of(&target), BEDROCK.to_string())]
+    );
+}
