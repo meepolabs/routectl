@@ -11,20 +11,19 @@
 //!
 //! Converse wraps the same text in `The model returned the following errors: `.
 //! A never-issued flag gets the same message, so this is the only signal for a
-//! flag that appears after [`super::betas::BEDROCK_REJECTED_BETAS`] was cut.
+//! flag the request's withheld set does not already name.
 //!
 //! The provider strips exactly the named flags and retries once. Only a
-//! successful inference retry records them in the lane's [`RejectedBetaMemo`],
-//! which later requests consult before egress; a CountTokens retry is never
-//! recorded. The floor is [`super::betas::operator_floor`]. A flag is repairable only when the
+//! successful inference retry records them, into the request's
+//! `routectl_internal.beta_repair_report` slot when the caller installed one,
+//! so the caller can withhold them from later requests; a CountTokens retry
+//! and a failed retry record nothing. The floor is
+//! [`super::betas::operator_floor`]. A flag is repairable only when the
 //! message is the exact envelope, every token is token-shaped, every token was
 //! lifted from the client, and none is an operator-floor flag: the floor is the
 //! operator's explicit override and is never second-guessed here. Nor is a
 //! flag repaired when the body built without it would still carry it, because
 //! the request's own features re-add it.
-
-use std::collections::VecDeque;
-use std::sync::{Mutex, PoisonError};
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -39,12 +38,6 @@ use crate::aws_error::{VALIDATION_EXCEPTION_TYPE, aws_exception_type_is};
 const ENVELOPE_HEAD: &str = "Unexpected value(s) ";
 const ENVELOPE_TAIL: &str = " for the `anthropic-beta` header. Please consult our documentation at platform.claude.com/docs or try again without the header.";
 const LIST_SEPARATOR: &str = ", ";
-
-/// Most distinct flags one lane remembers. Every entry is a client-sent flag
-/// AWS named, so a real lane holds a handful; the cap bounds memory against an
-/// upstream that keeps naming new ones, and the oldest entry is evicted so a
-/// full set still learns.
-pub(super) const MAX_REMEMBERED_REJECTED_BETAS: usize = 32;
 
 /// Parse the flags out of an exact beta-rejection envelope, bare or with the
 /// Converse prefix. `None` when the message deviates from the envelope in any
@@ -122,72 +115,12 @@ pub(super) fn without_client_betas(mut req: ChatRequest, flags: &[String]) -> Ch
     req
 }
 
-/// The per-lane set of flags a successful retry proved AWS rejects, oldest
-/// first.
-#[derive(Debug, Default)]
-pub(super) struct RejectedBetaMemo {
-    flags: Mutex<VecDeque<String>>,
-}
-
-impl RejectedBetaMemo {
-    /// Record `flags`; returns how many were newly added. Past
-    /// [`MAX_REMEMBERED_REJECTED_BETAS`] the oldest entry is evicted.
-    pub(super) fn remember(&self, flags: &[String]) -> usize {
-        let mut remembered = self.flags.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut added = 0;
-        for flag in flags {
-            if remembered.contains(flag) {
-                continue;
-            }
-            if remembered.len() >= MAX_REMEMBERED_REJECTED_BETAS {
-                remembered.pop_front();
-            }
-            remembered.push_back(flag.clone());
-            added += 1;
-        }
-        added
-    }
-
-    /// `req` with every remembered flag removed from its client-lifted betas.
-    /// Operator-floor flags are never stripped.
-    pub(super) fn strip_remembered(
-        &self,
-        provider_id: &str,
-        carrier: &str,
-        req: ChatRequest,
-        floor_betas: &[String],
-    ) -> ChatRequest {
-        if req.anthropic_beta.is_empty() {
-            return req;
-        }
-        let strip: Vec<String> = {
-            let remembered = self.flags.lock().unwrap_or_else(PoisonError::into_inner);
-            req.anthropic_beta
-                .iter()
-                .filter(|beta| remembered.contains(*beta) && !floor_betas.contains(beta))
-                .cloned()
-                .collect()
-        };
-        if strip.is_empty() {
-            return req;
-        }
-        tracing::debug!(
-            provider = %provider_id,
-            carrier,
-            count = strip.len(),
-            flags = %sanitize_for_log(&strip.join(",")),
-            "withholding beta flags this lane previously confirmed Bedrock rejects",
-        );
-        without_client_betas(req, &strip)
-    }
-}
-
 impl BedrockProvider {
-    /// Run `send` with this lane's remembered rejected betas withheld, and
-    /// repair one named beta rejection: when the upstream 400 names client
-    /// flags it rejects, retry once without exactly those flags. With
-    /// `remember_on_success`, a successful retry records them for the lane.
-    /// A retry failure is returned as is.
+    /// Run `send` and repair one named beta rejection: when the upstream 400
+    /// names client flags it rejects, retry once without exactly those flags.
+    /// With `record`, a successful retry records them into the request's
+    /// repair report, when one is installed. A retry failure is returned as
+    /// is and records nothing.
     ///
     /// Each attempt is normalized exactly once, here, and `send` ships that
     /// body: normalization records translation telemetry, so a body that is
@@ -195,16 +128,13 @@ impl BedrockProvider {
     pub(super) async fn with_beta_repair<T>(
         &self,
         req: ChatRequest,
-        remember_on_success: bool,
+        record: bool,
         send: for<'a> fn(&'a Self, &'a ChatRequest, Value) -> BoxFuture<'a, Result<T>>,
     ) -> Result<T> {
         use routectl_core::Provider;
         let carrier = self.cfg.api_shape.provider_kind_str();
         let floor = super::betas::operator_floor(&self.cfg, &req);
         let floor = floor.as_slice();
-        let req = self
-            .rejected_betas
-            .strip_remembered(&self.cfg.id, carrier, req, floor);
         let body = self.normalize_request(&req)?;
         let implied = feature_implied_betas_of(self.cfg.api_shape, &body);
         let err = match send(self, &req, body).await {
@@ -232,27 +162,31 @@ impl BedrockProvider {
             flags = %sanitize_for_log(&flags.join(",")),
             "bedrock rejected named beta flags; retrying once without them",
         );
+        let report = record
+            .then(|| req.routectl_internal.beta_repair_report.clone())
+            .flatten();
         let retry = without_client_betas(req, &flags);
         let outcome = match self.normalize_request(&retry) {
             Ok(body) => send(self, &retry, body).await,
             Err(e) => Err(e),
         };
-        if outcome.is_ok() && remember_on_success {
-            let added = self.rejected_betas.remember(&flags);
-            tracing::debug!(
+        match (&outcome, report) {
+            (Ok(_), Some(report)) => {
+                report.record(&flags);
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    carrier,
+                    count = flags.len(),
+                    "bedrock beta retry succeeded; stripped flags reported",
+                );
+            }
+            (Ok(_), None) => {}
+            (Err(_), _) => tracing::warn!(
                 provider = %self.cfg.id,
                 carrier,
                 count = flags.len(),
-                added,
-                "bedrock beta retry succeeded; flags withheld on this lane from now on",
-            );
-        } else if outcome.is_err() {
-            tracing::warn!(
-                provider = %self.cfg.id,
-                carrier,
-                count = flags.len(),
-                "bedrock beta retry failed; nothing remembered",
-            );
+                "bedrock beta retry failed; nothing reported",
+            ),
         }
         outcome
     }

@@ -3,7 +3,8 @@
 //! `anthropic_beta` carries a trigger flag with a 400 `ValidationException`
 //! (flat `{"message"}` body, discriminator in `x-amzn-errortype`) and serving
 //! a success otherwise. Every request body the mock received is recorded, so
-//! each test asserts the exact flags that reached the wire.
+//! each test asserts the exact flags that reached the wire. Every request
+//! carries a repair-report slot, the way the router installs one per attempt.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -17,7 +18,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate, matchers::m
 
 use super::tests::{INVOKE_MIXED, INVOKE_NEVER_ISSUED, NON_NAMING};
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth};
-use routectl_core::{ChatRequest, Error, Provider};
+use routectl_core::{BetaRepairReport, ChatRequest, Error, Provider};
 
 const NEVER_ISSUED: &str = "zz-probe-2099-01-01";
 const KEPT_BETA: &str = "context-management-2025-06-27";
@@ -169,6 +170,7 @@ fn stream_bytes(shape: BedrockApiShape) -> Vec<u8> {
 struct Lane {
     provider: BedrockProvider,
     bodies: Arc<Mutex<Vec<Value>>>,
+    report: BetaRepairReport,
     _server: MockServer,
 }
 
@@ -218,8 +220,14 @@ impl Lane {
         Self {
             provider,
             bodies,
+            report: BetaRepairReport::default(),
             _server: server,
         }
+    }
+
+    /// Every flag the provider reported stripping, in first-seen order.
+    fn reported(&self) -> Vec<String> {
+        self.report.take()
     }
 
     /// The `anthropic_beta` array of every request the upstream received.
@@ -236,7 +244,8 @@ impl Lane {
         self.send_request(call, request(client_betas)).await
     }
 
-    async fn send_request(&self, call: Call, req: ChatRequest) -> Result<(), Error> {
+    async fn send_request(&self, call: Call, mut req: ChatRequest) -> Result<(), Error> {
+        req.routectl_internal.beta_repair_report = Some(self.report.clone());
         match call {
             Call::Complete => self.provider.complete(req).await.map(drop),
             Call::CountTokens => self.provider.count_tokens(req).await.map(drop),
@@ -273,6 +282,12 @@ fn header_pinned_request(client_betas: &[&str], pinned: &[&str]) -> ChatRequest 
     req
 }
 
+/// `req` with `withheld` as the caller-decided withheld set.
+fn withholding(mut req: ChatRequest, withheld: &[&str]) -> ChatRequest {
+    req.routectl_internal.withheld_betas = withheld.iter().map(|b| (*b).to_string()).collect();
+    req
+}
+
 fn betas(flags: &[&str]) -> Vec<String> {
     flags.iter().map(|f| (*f).to_string()).collect()
 }
@@ -286,18 +301,15 @@ fn upstream_message(err: &Error) -> String {
     parsed["message"].as_str().expect("message").to_string()
 }
 
-/// The rejection reaches the caller unrepaired, and the lane did not remember
-/// anything: a second request still ships the named flag.
-async fn assert_unrepaired_and_unremembered(lane: &Lane, call: Call, client: &[&str]) {
-    let first = lane.send(call, client).await.expect_err("no repair");
-    let second = lane.send(call, client).await.expect_err("still no repair");
+/// The rejection reaches the caller unrepaired after one request, and nothing
+/// is reported.
+async fn assert_unrepaired_and_unreported(lane: &Lane, call: Call, client: &[&str]) {
+    lane.send(call, client).await.expect_err("no repair");
 
-    assert_eq!(upstream_message(&first), upstream_message(&second));
-    let sent = lane.wire_betas();
-    assert_eq!(sent.len(), 2, "exactly one request per call: no retry");
+    assert_eq!(lane.wire_betas().len(), 1, "exactly one request: no retry");
     assert!(
-        sent[1].iter().any(|b| b == NEVER_ISSUED),
-        "nothing may be remembered from an unrepaired rejection"
+        lane.reported().is_empty(),
+        "an unrepaired rejection must report nothing"
     );
 }
 
@@ -359,56 +371,36 @@ async fn converse_count_tokens_retries_once_without_the_named_flag() {
     assert_repairs_once(BedrockApiShape::Converse, Call::CountTokens, &message).await;
 }
 
-#[tokio::test]
-async fn a_later_request_on_the_lane_withholds_the_confirmed_flag_without_a_400() {
-    // Arrange: one repaired request teaches the lane.
-    let lane = Lane::start(
-        BedrockApiShape::Invoke,
-        Call::Complete,
-        &[],
-        &[(NEVER_ISSUED, INVOKE_NEVER_ISSUED)],
-    )
-    .await;
-    lane.send(Call::Complete, &[KEPT_BETA, NEVER_ISSUED])
-        .await
-        .expect("repaired");
-
-    // Act
-    let later = lane.send(Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
-
-    // Assert: the later call is a single request that never carried the flag.
-    later.expect("served first time");
-    let sent = lane.wire_betas();
-    assert_eq!(sent.len(), 3, "the later call must not need a retry");
-    assert_eq!(sent[2], betas(&[KEPT_BETA]));
-}
-
-#[tokio::test]
-async fn a_converse_stream_repair_is_remembered_for_later_requests() {
+/// A successful inference repair reports exactly the stripped flag.
+async fn assert_success_records_the_stripped_flag(shape: BedrockApiShape, call: Call) {
     // Arrange
-    let lane = Lane::start(
-        BedrockApiShape::Converse,
-        Call::Stream,
-        &[],
-        &[(NEVER_ISSUED, &converse_wrapped(INVOKE_NEVER_ISSUED))],
-    )
-    .await;
-    lane.send(Call::Stream, &[KEPT_BETA, NEVER_ISSUED])
-        .await
-        .expect("repaired");
+    let message = match shape {
+        BedrockApiShape::Invoke => INVOKE_NEVER_ISSUED.to_string(),
+        BedrockApiShape::Converse => converse_wrapped(INVOKE_NEVER_ISSUED),
+    };
+    let lane = Lane::start(shape, call, &[], &[(NEVER_ISSUED, &message)]).await;
 
     // Act
-    let later = lane.send(Call::Stream, &[KEPT_BETA, NEVER_ISSUED]).await;
+    let outcome = lane.send(call, &[KEPT_BETA, NEVER_ISSUED]).await;
 
     // Assert
-    later.expect("served first time");
-    let sent = lane.wire_betas();
-    assert_eq!(sent.len(), 3, "the later call must not need a retry");
-    assert_eq!(sent[2], betas(&[KEPT_BETA]));
+    outcome.expect("repaired");
+    assert_eq!(lane.wire_betas().len(), 2, "precondition: one retry");
+    assert_eq!(lane.reported(), betas(&[NEVER_ISSUED]));
 }
 
 #[tokio::test]
-async fn a_count_tokens_repair_retries_but_is_not_remembered() {
+async fn invoke_complete_success_records_the_stripped_flag() {
+    assert_success_records_the_stripped_flag(BedrockApiShape::Invoke, Call::Complete).await;
+}
+
+#[tokio::test]
+async fn converse_stream_success_records_the_stripped_flag() {
+    assert_success_records_the_stripped_flag(BedrockApiShape::Converse, Call::Stream).await;
+}
+
+#[tokio::test]
+async fn a_count_tokens_repair_retries_but_records_nothing() {
     // Arrange: a token-count rejection says nothing about inference.
     let lane = Lane::start(
         BedrockApiShape::Invoke,
@@ -417,31 +409,27 @@ async fn a_count_tokens_repair_retries_but_is_not_remembered() {
         &[(NEVER_ISSUED, INVOKE_NEVER_ISSUED)],
     )
     .await;
-    lane.send(Call::CountTokens, &[KEPT_BETA, NEVER_ISSUED])
-        .await
-        .expect("repaired");
 
     // Act
-    let later = lane
+    let outcome = lane
         .send(Call::CountTokens, &[KEPT_BETA, NEVER_ISSUED])
         .await;
 
-    // Assert: the later call ships the flag again and repairs again.
-    later.expect("repaired again");
+    // Assert: repaired on the wire, yet the slot stays empty.
+    outcome.expect("repaired");
     assert_eq!(
         lane.wire_betas(),
-        vec![
-            betas(&[KEPT_BETA, NEVER_ISSUED]),
-            betas(&[KEPT_BETA]),
-            betas(&[KEPT_BETA, NEVER_ISSUED]),
-            betas(&[KEPT_BETA]),
-        ]
+        vec![betas(&[KEPT_BETA, NEVER_ISSUED]), betas(&[KEPT_BETA])]
+    );
+    assert!(
+        lane.reported().is_empty(),
+        "count_tokens must record nothing"
     );
 }
 
 #[tokio::test]
-async fn a_remembered_flag_pinned_by_header_extras_is_not_pre_stripped() {
-    // Arrange: an unpinned request teaches the lane the flag.
+async fn a_withheld_flag_pinned_by_header_extras_is_sent() {
+    // Arrange
     let lane = Lane::start(
         BedrockApiShape::Invoke,
         Call::Complete,
@@ -449,28 +437,24 @@ async fn a_remembered_flag_pinned_by_header_extras_is_not_pre_stripped() {
         &[(NEVER_ISSUED, INVOKE_NEVER_ISSUED)],
     )
     .await;
-    lane.send(Call::Complete, &[KEPT_BETA, NEVER_ISSUED])
-        .await
-        .expect("repaired");
+    let req = withholding(
+        header_pinned_request(&[KEPT_BETA], &[NEVER_ISSUED]),
+        &[NEVER_ISSUED],
+    );
 
-    // Act: a later request on a model that pins the same flag.
-    let pinned = lane
-        .send_request(
-            Call::Complete,
-            header_pinned_request(&[KEPT_BETA], &[NEVER_ISSUED]),
-        )
-        .await;
+    // Act
+    let pinned = lane.send_request(Call::Complete, req).await;
 
     // Assert: the pin reaches the wire; the upstream's answer is surfaced.
     let err = pinned.expect_err("the pinned flag ships and is rejected");
     assert_eq!(upstream_message(&err), INVOKE_NEVER_ISSUED);
-    assert_eq!(lane.wire_betas()[2], betas(&[KEPT_BETA, NEVER_ISSUED]));
+    assert_eq!(lane.wire_betas(), vec![betas(&[KEPT_BETA, NEVER_ISSUED])]);
 }
 
 #[tokio::test]
 async fn a_multi_flag_envelope_strips_every_named_flag_in_one_retry() {
     // Arrange: the captured three-flag envelope, triggered by the one named
-    // flag the built-in deny set does not already withhold.
+    // flag the request's withheld set does not already name.
     let lane = Lane::start(
         BedrockApiShape::Invoke,
         Call::Complete,
@@ -478,15 +462,16 @@ async fn a_multi_flag_envelope_strips_every_named_flag_in_one_retry() {
         &[(NEVER_ISSUED, INVOKE_MIXED)],
     )
     .await;
-    let client = [
-        KEPT_BETA,
+    let withheld = [
         "advanced-tool-use-2025-11-20",
         "prompt-caching-scope-2026-01-05",
-        NEVER_ISSUED,
     ];
+    let client = [KEPT_BETA, withheld[0], withheld[1], NEVER_ISSUED];
 
     // Act
-    let outcome = lane.send(Call::Complete, &client).await;
+    let outcome = lane
+        .send_request(Call::Complete, withholding(request(&client), &withheld))
+        .await;
 
     // Assert
     outcome.expect("repaired");
@@ -497,7 +482,7 @@ async fn a_multi_flag_envelope_strips_every_named_flag_in_one_retry() {
 }
 
 // ---------------------------------------------------------------------------
-// Refusals: no retry, no memo
+// Refusals: no retry, nothing reported
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -511,7 +496,7 @@ async fn an_unanchored_envelope_is_not_repaired() {
     )
     .await;
 
-    assert_unrepaired_and_unremembered(&lane, Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
+    assert_unrepaired_and_unreported(&lane, Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
 }
 
 #[tokio::test]
@@ -525,7 +510,7 @@ async fn an_envelope_naming_a_flag_the_client_did_not_send_is_not_repaired() {
     )
     .await;
 
-    assert_unrepaired_and_unremembered(&lane, Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
+    assert_unrepaired_and_unreported(&lane, Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
 }
 
 #[tokio::test]
@@ -538,7 +523,7 @@ async fn an_envelope_naming_an_operator_floor_flag_is_not_repaired() {
     )
     .await;
 
-    assert_unrepaired_and_unremembered(&lane, Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
+    assert_unrepaired_and_unreported(&lane, Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
 }
 
 #[tokio::test]
@@ -554,19 +539,12 @@ async fn an_envelope_naming_a_header_extras_pinned_flag_is_not_repaired() {
     let pinned = || header_pinned_request(&[KEPT_BETA], &[NEVER_ISSUED]);
 
     // Act
-    let first = lane.send_request(Call::Complete, pinned()).await;
-    let second = lane.send_request(Call::Complete, pinned()).await;
+    let outcome = lane.send_request(Call::Complete, pinned()).await;
 
-    // Assert: one request per call, the pin never stripped or remembered.
-    first.expect_err("no repair");
-    second.expect_err("still no repair");
-    assert_eq!(
-        lane.wire_betas(),
-        vec![
-            betas(&[KEPT_BETA, NEVER_ISSUED]),
-            betas(&[KEPT_BETA, NEVER_ISSUED])
-        ]
-    );
+    // Assert: one request, the pin never stripped or reported.
+    outcome.expect_err("no repair");
+    assert_eq!(lane.wire_betas(), vec![betas(&[KEPT_BETA, NEVER_ISSUED])]);
+    assert!(lane.reported().is_empty());
 }
 
 #[tokio::test]
@@ -579,7 +557,7 @@ async fn the_non_naming_envelope_is_not_repaired() {
     )
     .await;
 
-    assert_unrepaired_and_unremembered(&lane, Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
+    assert_unrepaired_and_unreported(&lane, Call::Complete, &[KEPT_BETA, NEVER_ISSUED]).await;
 }
 
 #[tokio::test]
@@ -604,20 +582,17 @@ async fn a_retry_that_draws_another_beta_rejection_is_not_repaired_again() {
         .send(Call::Complete, &client)
         .await
         .expect_err("a second rejection is surfaced");
-    let _ = lane.send(Call::Complete, &client).await;
 
-    // Assert: one retry, the retry's own error surfaced, nothing remembered.
+    // Assert: one retry, the retry's own error surfaced, nothing reported.
     assert_eq!(upstream_message(&err), second_message);
-    let sent = lane.wire_betas();
     assert_eq!(
-        sent[..2],
-        [betas(&client), betas(&[KEPT_BETA, SECOND])],
+        lane.wire_betas(),
+        vec![betas(&client), betas(&[KEPT_BETA, SECOND])],
         "exactly one retry"
     );
-    assert_eq!(
-        sent[2],
-        betas(&client),
-        "a failed retry must not teach the lane"
+    assert!(
+        lane.reported().is_empty(),
+        "a failed retry must report nothing"
     );
 }
 
@@ -658,18 +633,7 @@ fn structured_output_request(client_betas: &[&str]) -> ChatRequest {
     req
 }
 
-fn remembered(lane: &Lane) -> Vec<String> {
-    lane.provider
-        .rejected_betas
-        .flags
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .cloned()
-        .collect()
-}
-
-/// One upstream call, the original rejection surfaced, nothing remembered.
+/// One upstream call, the original rejection surfaced, nothing reported.
 async fn assert_refused_without_retry(lane: &Lane, req: ChatRequest, message: &str) {
     // Act
     let outcome = lane.send_request(Call::Complete, req).await;
@@ -682,7 +646,7 @@ async fn assert_refused_without_retry(lane: &Lane, req: ChatRequest, message: &s
         1,
         "a retry that would re-send the named flag must not be made"
     );
-    assert!(remembered(lane).is_empty(), "nothing may be remembered");
+    assert!(lane.reported().is_empty(), "nothing may be reported");
 }
 
 #[tokio::test]
@@ -741,20 +705,20 @@ async fn a_feature_carrying_request_still_repairs_an_unrelated_named_flag() {
     assert_eq!(sent.len(), 2, "exactly one retry");
     assert!(sent[1].iter().any(|b| b == DISPLAY_UPDATES_BETA));
     assert!(!sent[1].iter().any(|b| b == NEVER_ISSUED));
-    assert_eq!(remembered(&lane), betas(&[NEVER_ISSUED]));
+    assert_eq!(lane.reported(), betas(&[NEVER_ISSUED]));
 }
 
 // ---------------------------------------------------------------------------
 // Translation telemetry counts only dispatched bodies
 // ---------------------------------------------------------------------------
 //
-// A Converse normalization of a request carrying a built-in rejected client
-// beta records the `anthropic_beta_rejected_by_bedrock` drop exactly once, so
+// A Converse normalization of a request carrying a withheld client beta
+// records the `anthropic_beta_rejected_by_bedrock` drop exactly once, so
 // that counter's delta is the number of bodies built. The registry is
 // process-global: every test reaching this class shares the serial guard, and
 // only deltas are read.
 
-const REJECTED_CLIENT_BETA: &str = "advisor-tool-2026-03-01";
+const WITHHELD_CLIENT_BETA: &str = "zz-withheld-2099-01-01";
 
 fn converse_rejected_beta_drops() -> u64 {
     crate::translation_drop_metrics::translation_drop_snapshot()
@@ -777,7 +741,10 @@ async fn a_refused_repair_counts_one_translation_for_its_one_upstream_call() {
         &[(DISPLAY_UPDATES_BETA, &message)],
     )
     .await;
-    let req = display_updates_request(&[KEPT_BETA, DISPLAY_UPDATES_BETA, REJECTED_CLIENT_BETA]);
+    let req = withholding(
+        display_updates_request(&[KEPT_BETA, DISPLAY_UPDATES_BETA, WITHHELD_CLIENT_BETA]),
+        &[WITHHELD_CLIENT_BETA],
+    );
     let before = converse_rejected_beta_drops();
 
     // Act
@@ -804,7 +771,10 @@ async fn a_successful_repair_counts_one_translation_per_upstream_call() {
         &[(NEVER_ISSUED, &converse_wrapped(INVOKE_NEVER_ISSUED))],
     )
     .await;
-    let req = display_updates_request(&[KEPT_BETA, NEVER_ISSUED, REJECTED_CLIENT_BETA]);
+    let req = withholding(
+        display_updates_request(&[KEPT_BETA, NEVER_ISSUED, WITHHELD_CLIENT_BETA]),
+        &[WITHHELD_CLIENT_BETA],
+    );
     let before = converse_rejected_beta_drops();
 
     // Act
@@ -818,4 +788,50 @@ async fn a_successful_repair_counts_one_translation_per_upstream_call() {
         2,
         "two bodies were sent, so exactly two translations may be counted"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The withheld set at egress
+// ---------------------------------------------------------------------------
+
+/// A withheld flag never reaches the wire, while an unrelated client flag in
+/// the same header still ships and the call needs no retry.
+async fn assert_withheld_flag_absent_at_egress(shape: BedrockApiShape, call: Call) {
+    // Arrange: the upstream would reject the withheld flag if it arrived.
+    let message = converse_wrapped(INVOKE_NEVER_ISSUED);
+    let lane = Lane::start(shape, call, &[], &[(NEVER_ISSUED, &message)]).await;
+    let req = withholding(request(&[KEPT_BETA, NEVER_ISSUED]), &[NEVER_ISSUED]);
+
+    // Act
+    let outcome = lane.send_request(call, req).await;
+
+    // Assert
+    outcome.expect("served without a rejection");
+    assert_eq!(lane.wire_betas(), vec![betas(&[KEPT_BETA])]);
+    assert!(
+        lane.reported().is_empty(),
+        "a pre-egress withhold is no repair"
+    );
+}
+
+#[tokio::test]
+async fn invoke_complete_never_sends_a_withheld_flag() {
+    assert_withheld_flag_absent_at_egress(BedrockApiShape::Invoke, Call::Complete).await;
+}
+
+#[tokio::test]
+async fn invoke_stream_never_sends_a_withheld_flag() {
+    assert_withheld_flag_absent_at_egress(BedrockApiShape::Invoke, Call::Stream).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
+async fn converse_complete_never_sends_a_withheld_flag() {
+    assert_withheld_flag_absent_at_egress(BedrockApiShape::Converse, Call::Complete).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
+async fn converse_stream_never_sends_a_withheld_flag() {
+    assert_withheld_flag_absent_at_egress(BedrockApiShape::Converse, Call::Stream).await;
 }

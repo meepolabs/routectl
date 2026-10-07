@@ -245,8 +245,8 @@ pub struct BedrockConfig {
     /// provider. routectl ships no const default -- AWS schema drift
     /// is operator-tracked. See `examples/bedrock.toml` for the
     /// empirical 2026-05-12 baseline. Empty list = pass-through, the
-    /// discovery default; the built-in Bedrock-rejected flags are withheld
-    /// in either mode.
+    /// discovery default; the request's `routectl_internal.withheld_betas`
+    /// are withheld in either mode.
     pub allowed_betas: Vec<String>,
     /// Bedrock-accepted top-level body fields. On Invoke this filters
     /// the Anthropic-shape body before send; on Converse it filters
@@ -284,7 +284,6 @@ pub struct BedrockProvider {
     /// `bedrock-runtime` origin derived from the admitted region; every
     /// request URL is this plus an [`endpoint`] path.
     runtime_origin: String,
-    rejected_betas: beta_repair::RejectedBetaMemo,
 }
 
 impl BedrockProvider {
@@ -312,7 +311,6 @@ impl BedrockProvider {
             resolved,
             client,
             runtime_origin: base_url,
-            rejected_betas: beta_repair::RejectedBetaMemo::default(),
         })
     }
 
@@ -759,7 +757,7 @@ impl Provider for BedrockProvider {
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
         // A CountTokens-only rejection says nothing about inference, so its
-        // repair is never remembered for the lane.
+        // repair is never reported.
         self.with_beta_repair(req, false, |lane, req, body| {
             Box::pin(lane.count_tokens_once(req, body))
         })

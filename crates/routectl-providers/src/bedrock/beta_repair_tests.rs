@@ -1,5 +1,5 @@
-//! Unit tests for the named beta-rejection parser, repair gate, and per-lane
-//! memo. The envelope strings are the captured bedrock-runtime 400 messages,
+//! Unit tests for the named beta-rejection parser, repair gate, and the
+//! withheld-set filter's floor exemption. The envelope strings are the captured bedrock-runtime 400 messages,
 //! byte for byte.
 
 use super::*;
@@ -296,76 +296,34 @@ fn stripping_removes_exactly_the_named_flags_and_keeps_order() {
 }
 
 // ---------------------------------------------------------------------------
-// RejectedBetaMemo
+// Withheld set vs the operator floor
 // ---------------------------------------------------------------------------
 
-#[test]
-fn an_empty_memo_leaves_the_request_unchanged() {
-    let memo = RejectedBetaMemo::default();
-    let req = request_with_betas(&["keep-1", "zz-a"]);
-
-    let out = memo.strip_remembered(PROVIDER, CARRIER, req, &[]);
-
-    assert_eq!(out.anthropic_beta, strings(&["keep-1", "zz-a"]));
-}
-
-#[test]
-fn remembered_flags_are_stripped_from_later_requests() {
-    let memo = RejectedBetaMemo::default();
-    let added = memo.remember(&strings(&["zz-a"]));
-    let req = request_with_betas(&["keep-1", "zz-a", "keep-2"]);
-
-    let out = memo.strip_remembered(PROVIDER, CARRIER, req, &[]);
-
-    assert_eq!(added, 1);
-    assert_eq!(out.anthropic_beta, strings(&["keep-1", "keep-2"]));
-}
-
-#[test]
-fn a_remembered_flag_the_operator_floor_asserts_is_kept() {
-    let memo = RejectedBetaMemo::default();
-    let _ = memo.remember(&strings(&["zz-a"]));
-    let req = request_with_betas(&["zz-a"]);
-
-    let out = memo.strip_remembered(PROVIDER, CARRIER, req, &strings(&["zz-a"]));
-
-    assert_eq!(out.anthropic_beta, strings(&["zz-a"]));
-}
-
-#[test]
-fn remembering_a_flag_twice_adds_it_once() {
-    let memo = RejectedBetaMemo::default();
-
-    let first = memo.remember(&strings(&["zz-a"]));
-    let second = memo.remember(&strings(&["zz-a"]));
-
-    assert_eq!((first, second), (1, 0));
-}
-
-#[test]
-fn a_full_memo_evicts_its_oldest_flag_to_remember_a_new_one() {
-    // Arrange: the memo holds its cap of junk flags.
-    let memo = RejectedBetaMemo::default();
-    let junk: Vec<String> = (0..MAX_REMEMBERED_REJECTED_BETAS)
-        .map(|i| format!("zz-junk-{i:02}"))
-        .collect();
-    let _ = memo.remember(&junk);
-
-    // Act
-    let added = memo.remember(&strings(&["zz-real"]));
-    let mut betas = junk.clone();
-    betas.push("zz-real".into());
-    let out = memo.strip_remembered(
+/// The bag's `anthropic_beta` after the shared filter in pass-through mode.
+fn filtered(client: &[&str], withheld: &[&str], floor: &[&str]) -> (Option<Value>, bool) {
+    let mut bag = serde_json::Map::new();
+    bag.insert("anthropic_beta".into(), json!(client));
+    let dropped = super::super::betas::filter_bedrock_betas(
         PROVIDER,
-        CARRIER,
-        ChatRequest {
-            anthropic_beta: betas,
-            ..Default::default()
-        },
+        &mut bag,
+        &[],
+        &strings(floor),
+        &strings(withheld),
         &[],
     );
+    (bag.remove("anthropic_beta"), dropped)
+}
 
-    // Assert: the new flag is withheld; only the oldest junk entry ships.
-    assert_eq!(added, 1);
-    assert_eq!(out.anthropic_beta, vec![junk[0].clone()]);
+#[test]
+fn a_withheld_flag_is_dropped_and_signalled() {
+    let out = filtered(&["keep-1", "zz-a", "keep-2"], &["zz-a"], &[]);
+
+    assert_eq!(out, (Some(json!(["keep-1", "keep-2"])), true));
+}
+
+#[test]
+fn a_withheld_flag_the_operator_floor_asserts_is_kept() {
+    let out = filtered(&["keep-1", "zz-a"], &["zz-a"], &["zz-a"]);
+
+    assert_eq!(out, (Some(json!(["keep-1", "zz-a"])), false));
 }

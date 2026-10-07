@@ -1159,16 +1159,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `output_config.format` never egresses without its gating flag), then
   `drop_unrepresentable_body_fields` as the last mutation
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke
-  body + Converse `additionalModelRequestFields`), plus the built-in
-  `BEDROCK_REJECTED_BETAS` set withheld in both allowlist modes unless the
-  provider floor asserts it, and `feature_implied_betas` /
+  body + Converse `additionalModelRequestFields`), plus the request's
+  `routectl_internal.withheld_betas` withheld in both allowlist modes unless
+  the operator floor asserts it, and `feature_implied_betas` /
   `union_feature_implied_betas`: the single source for the betas both
   carriers add from body fields (structured-outputs; Converse
   display-updates)
-- `src/bedrock/beta_repair.rs` -- `with_beta_repair` / `RejectedBetaMemo`:
-  one strip-and-retry for a 400 naming rejected `anthropic-beta` flags
-  (normalizing each attempt once; refused when a named flag is
-  feature-implied), plus the per-lane in-memory set of confirmed flags
+- `src/bedrock/beta_repair.rs` -- `with_beta_repair`: one strip-and-retry
+  for a 400 naming rejected `anthropic-beta` flags (normalizing each attempt
+  once; refused when a named flag is feature-implied); a successful inference
+  retry records the stripped flags into the request's `BetaRepairReport`
 - `src/bedrock/count_tokens.rs` -- CountTokens lane body assembly: the
   `invokeModel` union member (invoke body verbatim, base64) and the
   `converse` member (four-key allowlist), and the `inputTokens` response
@@ -1222,7 +1222,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
   (thinking, anthropic_beta, cache_control, output_config); `thinking.display`
   rides verbatim, and display `updates` gains its beta through the shared
-  `union_feature_implied_betas`; a withheld built-in rejected beta counts once
+  `union_feature_implied_betas`; a withheld client beta counts once
   per request as `anthropic_beta_rejected_by_bedrock` on the drop counter;
   `ProviderExtrasPolicyActions` and `OperatorExtrasPolicyActions` count the
   managed-key override refusals once per request each, on the POLICY-ACTION
@@ -1291,8 +1291,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   values, never a panic while the chain builds; isolated because the chain
   reads process-global env
 - `tests/bedrock_rejected_betas.rs` -- Invoke + Converse egress pins for the
-  built-in rejected-beta withhold (both allowlist modes, floor escape hatch,
-  Converse drop counter)
+  `withheld_betas` withhold (both allowlist modes, floor escape hatch,
+  Converse drop counter, empty set withholds nothing)
 - `tests/bedrock_streaming.rs` -- scoped Bedrock integration tests over the
   public credential-resolution / auth-dispatch API (`bedrock::auth::resolve`
   Bearer vs SigV4 variants across regions)

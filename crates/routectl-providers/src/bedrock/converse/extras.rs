@@ -375,17 +375,17 @@ fn insert_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<S
 }
 
 /// Apply the shared Bedrock beta filter to the bag and count a withheld
-/// built-in rejected flag once per request, not once per flag.
+/// client flag once per request, not once per flag.
 fn filter_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
-    // The built-in rejected set is withheld even in pass-through mode: AWS
-    // 400s the whole request on any one of them, so the upstream compels the
-    // loss.
+    // The withheld set is dropped even in pass-through mode: each flag in it
+    // is one this lane's upstream rejects, so the upstream compels the loss.
     // TRANSLATION-DROP: lane=bedrock-converse class=anthropic_beta_rejected_by_bedrock test=bedrock_rejected_beta_withhold_bumps_the_drop_counter_once
     if filter_bedrock_betas(
         &cfg.id,
         bag,
         &cfg.anthropic_beta,
         &operator_floor(cfg, req),
+        &req.routectl_internal.withheld_betas,
         &cfg.allowed_betas,
     ) {
         crate::translation_drop_metrics::record_translation_drop(
