@@ -234,8 +234,8 @@ models on Sonnet/Haiku/Opus. Set `supports_adaptive_thinking = true` on Opus
 
 **Bedrock allowlist (optional, recommended in production).** AWS
 strict-schema validation 400s any unrecognized `anthropic_beta` flag
-or top-level body field. routectl ships no built-in default; populate
-the operator-supplied lists in TOML to gate which entries reach AWS:
+or top-level body field. Neither list has a default; populate the
+operator-supplied lists in TOML to gate which entries reach AWS:
 
 ```toml
 [bedrock]
@@ -245,13 +245,23 @@ allowed_betas       = ["context-1m-2025-08-07"]
 allowed_body_fields = ["anthropic_version", "messages"]
 ```
 
-An empty or omitted list is not a bare pass-through. An empty
-`allowed_betas` passes every client beta except the built-in
-Bedrock-rejected set; the operator floor (provider `anthropic_beta`
-plus `header_extras`-pinned betas) is the way to send one of those. A
-rejection that names its client betas is repaired with one retry per
-lane. `mcp_servers` never ships to Bedrock, whatever
-`allowed_body_fields` says. Use
+An empty or omitted list is not a bare pass-through. The router
+withholds, per lane and in either mode, a small shipped seed of betas
+Bedrock rejects (`advanced-tool-use-2025-11-20`,
+`advisor-tool-2026-03-01`, `prompt-caching-scope-2026-01-05`; applied
+even with `[capability] enabled = false`) plus every beta flag it
+learned that lane rejects. A rejection that names its client betas is
+repaired with one retry, and the stripped flags become learned
+`beta:<flag>` negatives: persisted across restarts, decaying after 48
+hours into one re-probe, visible in `routectl doctor`, and removable
+with `routectl capability purge <provider#upstream> beta:<flag>`. The
+same purge lifts a seeded flag on a routed lane until the next catalog
+or overlay revision change; a `force_supported` override on
+`beta:<flag>`, or the operator floor (provider `anthropic_beta` plus
+`header_extras`-pinned betas), sends a flag regardless. Code that calls
+the Bedrock provider directly, without the router, gets no seed.
+`mcp_servers` never ships to Bedrock, whatever `allowed_body_fields`
+says. Use
 `ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture sent
 flags/fields when building the lists. See `examples/bedrock.toml` for
 the empirical 2026-05-12 baseline and

@@ -78,7 +78,8 @@ pub(super) fn build_additional_fields(
     operator_actions.flush();
 
     // Filter anthropic_beta against the operator-supplied
-    // `[bedrock] allowed_betas` list (routectl ships no const default).
+    // `[bedrock] allowed_betas` list (no default) and drop the request's
+    // router-withheld flags.
     // Operator-supplied flags from cfg.anthropic_beta pass through
     // unconditionally; flags lifted from the inbound `anthropic-beta`
     // HTTP header that are not on the operator's accepted list drop
@@ -377,8 +378,9 @@ fn insert_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<S
 /// Apply the shared Bedrock beta filter to the bag and count a withheld
 /// client flag once per request, not once per flag.
 fn filter_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
-    // The withheld set is dropped even in pass-through mode: each flag in it
-    // is one this lane's upstream rejects, so the upstream compels the loss.
+    // The withheld set is dropped even in pass-through mode: the router put
+    // each flag in it because its seed or a learned verdict says this lane's
+    // upstream rejects it, so the upstream compels the loss.
     // TRANSLATION-DROP: lane=bedrock-converse class=anthropic_beta_rejected_by_bedrock test=bedrock_rejected_beta_withhold_bumps_the_drop_counter_once
     if filter_bedrock_betas(
         &cfg.id,

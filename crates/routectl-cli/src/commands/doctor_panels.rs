@@ -188,10 +188,10 @@ fn matrix_state_line(availability: &MatrixAvailability) -> String {
             "learned registry replayed; live/probe cells are current".to_string()
         }
         MatrixAvailability::Empty => {
-            "learned registry empty (no learned rows); prior/override cells only".to_string()
+            "learned registry empty (no learned rows); prior/seed/override cells only".to_string()
         }
         MatrixAvailability::Unavailable { code } => {
-            format!("learned registry unavailable ({code}); prior/override cells only")
+            format!("learned registry unavailable ({code}); prior/seed/override cells only")
         }
     }
 }

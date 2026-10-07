@@ -1228,19 +1228,20 @@ impl<'a> Iterator for NicknameIter<'a> {
 }
 
 /// Bedrock-wide configuration shared by every `[providers.X]` entry of
-/// `kind = "bedrock"`. Both allowlists below are operator-owned; the
-/// routectl binary ships no defaults so AWS schema drift (Anthropic
-/// adds a beta, Bedrock gates a body field) does not require a
-/// routectl release. See `examples/bedrock.toml` for the empirical
-/// 2026-05-12 baseline; copy and tune as your account's gating
-/// evolves.
+/// `kind = "bedrock"`. Both allowlists below are operator-owned and have
+/// no default, so AWS schema drift (Anthropic adds a beta, Bedrock gates a
+/// body field) does not require a routectl release. See
+/// `examples/bedrock.toml` for the empirical 2026-05-12 baseline; copy and
+/// tune as your account's gating evolves.
 ///
 /// **Empty list = pass-through.** Either field, when empty (or the
 /// entire `[bedrock]` section omitted), disables that filter -- the
-/// upstream sees the assembled value unchanged, except that the
-/// built-in Bedrock-rejected betas are always withheld from client
-/// flags (only the operator floor sends one) and `mcp_servers` is never
-/// forwarded. This
+/// upstream sees the assembled value unchanged, except that the router
+/// withholds the client beta flags it decided this lane must not send
+/// (a small shipped seed of betas Bedrock rejects, plus flags it learned
+/// the lane rejects) and `mcp_servers` is never forwarded. A
+/// `force_supported` override on `beta:<flag>` sends a withheld flag, and
+/// `routectl capability purge` lifts a seeded one on one lane. This
 /// is the discovery-mode default: bring up routectl, observe actual traffic
 /// via `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then
 /// populate the list with what you observe.
@@ -1254,15 +1255,17 @@ impl<'a> Iterator for NicknameIter<'a> {
 pub struct BedrockGlobalConfig {
     /// Bedrock-accepted `anthropic_beta` flags. AWS validates each
     /// entry independently and 400s the request on the first
-    /// unsupported flag. **Empty list = pass-through** for every
-    /// client flag except the built-in Bedrock-rejected set
+    /// unsupported flag. No default. **Empty list = pass-through** for
+    /// every client flag the router does not withhold from the lane:
+    /// a shipped seed of betas Bedrock rejects
     /// (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
-    /// `prompt-caching-scope-2026-01-05`), which is withheld in either
-    /// mode and even when listed; the operator floor (`[providers.X]
-    /// anthropic_beta` plus `header_extras`-pinned betas) is the only way
-    /// to send one of those. Populate via TOML to
-    /// enable filtering. `examples/bedrock.toml` ships the empirical
-    /// 2026-05-12 baseline.
+    /// `prompt-caching-scope-2026-01-05`) plus flags learned as rejected
+    /// on that lane are withheld in either mode and even when listed. The
+    /// operator floor (`[providers.X] anthropic_beta` plus
+    /// `header_extras`-pinned betas) or a `force_supported` override on
+    /// `beta:<flag>` sends one anyway; `routectl capability purge` lifts
+    /// a seeded flag on one lane. Populate via TOML to enable filtering.
+    /// `examples/bedrock.toml` ships the empirical 2026-05-12 baseline.
     ///
     /// Per-provider `[providers.X] anthropic_beta` is unrelated and
     /// keeps its existing semantics (operator-asserted floor that is

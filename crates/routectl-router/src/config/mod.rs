@@ -101,8 +101,10 @@ pub struct Config {
 
     /// Bedrock-wide settings that apply to every Bedrock provider.
     /// Carries the operator-supplied `allowed_betas` and
-    /// `allowed_body_fields` lists -- routectl ships no defaults so
-    /// AWS schema drift does not require a routectl release. See
+    /// `allowed_body_fields` lists -- neither list has a default, so
+    /// AWS schema drift does not require a routectl release. Separately,
+    /// the router withholds a small seed of betas Bedrock rejects plus
+    /// any beta flag it learned a lane rejects. See
     /// `examples/bedrock.toml` for the empirical baseline. Future
     /// shared knobs (e.g. region-default, retry-default) land here too.
     #[serde(default)]

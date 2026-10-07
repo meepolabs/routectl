@@ -315,7 +315,7 @@
     if (a.state === 'available') { return 'learned registry replayed'; }
     if (a.state === 'empty') { return 'learned registry empty - nothing learned yet'; }
     if (a.state === 'unavailable') {
-      return 'learned registry unavailable (' + (a.code || 'unknown') + ') - prior and override cells only';
+      return 'learned registry unavailable (' + (a.code || 'unknown') + ') - prior, seed and override cells only';
     }
     return 'learned registry state unknown';
   }

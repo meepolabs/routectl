@@ -242,11 +242,13 @@ pub struct BedrockConfig {
     pub anthropic_beta: Vec<String>,
     /// Bedrock-accepted `anthropic_beta` flags. Sourced from
     /// `[bedrock] allowed_betas` TOML and cloned onto every Bedrock
-    /// provider. routectl ships no const default -- AWS schema drift
-    /// is operator-tracked. See `examples/bedrock.toml` for the
-    /// empirical 2026-05-12 baseline. Empty list = pass-through, the
-    /// discovery default; the request's `routectl_internal.withheld_betas`
-    /// are withheld in either mode.
+    /// provider. No default -- AWS schema drift is operator-tracked. See
+    /// `examples/bedrock.toml` for the empirical 2026-05-12 baseline.
+    /// Empty list = pass-through, the discovery default; the request's
+    /// `routectl_internal.withheld_betas` (the router's seed of betas
+    /// Bedrock rejects plus flags learned as rejected on the lane) are
+    /// withheld in either mode. The provider holds no seed of its own: a
+    /// caller that does not fill that set withholds nothing.
     pub allowed_betas: Vec<String>,
     /// Bedrock-accepted top-level body fields. On Invoke this filters
     /// the Anthropic-shape body before send; on Converse it filters

@@ -683,12 +683,12 @@ Applied as a post-filter to every Bedrock-destined request: any flag
 NOT in the list is silently dropped before the request goes on the
 wire. Omitting the list (empty = default) puts the filter in
 pass-through mode -- every client flag reaches AWS as-is except the
-built-in Bedrock-rejected set below.
+flags the router withholds from that lane (the shipped seed and learned
+beta verdicts, below).
 
 Use this to prevent unknown flags (new Anthropic betas not yet
 supported by Bedrock) from causing upstream 400 errors fleet-wide.
-routectl ships no built-in default; AWS schema drift is
-operator-tracked.
+The list has no default; AWS schema drift is operator-tracked.
 
 ```toml
 [bedrock]
@@ -699,36 +699,79 @@ allowed_betas        = ["computer-use-2025-01-24", "files-api-2025-04-14"]
 Two flags bypass this filter unconditionally: see
 [the capability-beta carve-out](#allowed_betas-carve-out-the-capability-betas).
 
-Independently of this list, routectl always withholds three client-sent
-flags that AWS rejects on every request (`advanced-tool-use-2025-11-20`,
-`advisor-tool-2026-03-01`, `prompt-caching-scope-2026-01-05`) -- in
-pass-through mode too, and even when `allowed_betas` names them. The
-operator floor is the only way to send one of them: the provider's
-[`[providers.X] anthropic_beta`](#providersx-anthropic_beta----per-provider-bedrock-floor)
-plus any flag pinned through provider or model
-`header_extras["anthropic-beta"]`. Each withheld flag is logged at
+Independently of this list, the router decides per dispatch target which
+client-sent flags that lane must not send, and the Bedrock egress drops
+them -- in pass-through mode too, and even when `allowed_betas` names
+them. Per lane and flag, strongest first:
+
+1. **The operator floor sends.** The provider's
+   [`[providers.X] anthropic_beta`](#providersx-anthropic_beta----per-provider-bedrock-floor)
+   plus any flag pinned through provider or model
+   `header_extras["anthropic-beta"]` is always sent and never withheld.
+2. **A capability override decides.** An entry on the flag's
+   `beta:<flag>` key under
+   [`[capability.overrides]`](#capabilityoverrides-is-the-durable-decision-surface)
+   sends it (`force_supported`) or withholds it (`unsupported`). A beta
+   flag never routes a target away; it is only withheld.
+3. **A learned beta verdict decides** (only with `[capability] enabled`).
+   A flag the lane rejected is withheld; once its negative lapses it is
+   sent once as a re-probe, and an accepted re-probe records a positive
+   that sends it from then on.
+4. **The shipped seed withholds.** Three flags AWS rejects on every
+   request (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
+   `prompt-caching-scope-2026-01-05`) are withheld on every `bedrock`
+   lane, even with `[capability] enabled = false`, unless an operator
+   lifted the seed for that lane (below).
+
+A request on a forwarded credential withholds nothing: the client owns
+that credential and its beta choices. Each withheld flag is logged at
 `debug` on both `api_shape = "invoke"` and `"converse"`; Converse also
 counts the withhold once per request in the translation-drop metrics.
 
-For a client flag outside that set, routectl repairs AWS's rejection
-itself, on both carriers and for streaming, non-streaming, and
+For a client flag the router let through, routectl repairs AWS's
+rejection itself, on both carriers and for streaming, non-streaming, and
 token-count calls. Bedrock answers with a `ValidationException` naming
 the flags (``Unexpected value(s) `<flag>`, ... for the `anthropic-beta`
 header. ...``, which Converse prefixes with `The model returned the
 following errors: `). When it does, routectl retries the same request
-once without exactly those flags. If an inference retry succeeds, the
-provider remembers the flags in memory (the 32 most recent per provider,
-cleared on restart) and withholds them from later requests without
-another 400. A token-count call retries the same way but is never
-remembered, so it cannot remove a flag from inference. The repair
-applies only to the exact message and only when every named flag came
-from the client; it never removes or withholds an operator-floor flag
-(including a `header_extras`-pinned one). It
-skips a rejection that names no flags (`invalid beta flag`), skips one
+once without exactly those flags. The repair applies only to the exact
+message and only when every named flag came from the client; it never
+removes an operator-floor flag (including a `header_extras`-pinned one).
+It skips a rejection that names no flags (`invalid beta flag`), skips one
 naming a flag routectl itself would re-add to the retry (the
 structured-outputs or `thinking.display` `"updates"` beta, which the
-request's own body implies), and never retries a second time. The retry is logged at `warn`, with flag names
-only.
+request's own body implies), and never retries a second time. The retry
+is logged at `warn`, with flag names only.
+
+**Learned beta verdicts.** When an inference retry succeeds, the router
+records each stripped flag as a learned negative on that lane
+(`<provider>#<upstream>`, capability `beta:<flag>`), so later requests
+withhold it without another 400. These are ordinary learned capability
+facts: they are written to the capability ledger and survive a restart,
+decay on the `[capability] decay_hours` window (48 hours by default) and
+then revalidate with one re-probe, show in `routectl doctor` as
+`beta:<flag>` cells with action `withhold`, and are dropped with
+`routectl capability purge <provider#upstream> beta:<flag>`. A lane
+holds at most 32 learned beta entries; a new one past that evicts the
+lane's oldest. Nothing is learned from a token-count retry, a
+forwarded-credential request, a flag under a `force_supported` override,
+or with `[capability] enabled = false`.
+
+**Lifting the seed on one lane.** If your account accepts a seeded flag,
+`routectl capability purge <provider#upstream> beta:<flag>` lifts the
+seed for that lane: the daemon commits a `cleared` row to its capability
+ledger, and the flag is sent from then on, across restarts. The lift is
+accepted only for a lane some configured model routes to, and it lasts
+until the next catalog or overlay revision change, which restores the
+seed. A rejection the upstream later names is learned again as usual.
+To send a flag permanently, use a `force_supported` override on
+`beta:<flag>` instead.
+
+**Library consumers.** The seed and the learned verdicts live in the
+router, which hands each request its withheld set. Code that calls the
+Bedrock provider directly, without the router, gets no withheld set and
+so no longer has the seed applied: it must drop rejected flags itself
+(or route through the router).
 
 ### `[bedrock] allowed_body_fields` -- global Bedrock body-field allowlist
 
@@ -1402,6 +1445,11 @@ circuit_cooldown_ms    = 60000
 request_timeout_ms     = 120000
 unsupported_features   = ["web_search"]
 ```
+
+`unsupported_features` is optional here: without it the router learns a
+Bedrock lane's `web_search` rejection after the first miss on that lane
+(see [Per-provider capability filter](#per-provider-capability-filter-unsupported_features)).
+Declaring it skips even that first miss.
 
 ## Retry and fallback defaults
 

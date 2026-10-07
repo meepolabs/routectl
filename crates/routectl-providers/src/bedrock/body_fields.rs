@@ -18,8 +18,8 @@
 //! Filter shape mirrors `super::betas`:
 //!
 //! - `allowed_body_fields` is operator-supplied via
-//!   `[bedrock] allowed_body_fields` TOML. routectl ships no const
-//!   default. **Empty list = pass-through** (no filtering); the
+//!   `[bedrock] allowed_body_fields` TOML, with no default.
+//!   **Empty list = pass-through** (no filtering); the
 //!   assembled body / bag is forwarded as-is. This is the discovery-
 //!   mode default: operators bring up routectl, observe what fields
 //!   are sent via `ROUTECTL_LOG=routectl_providers::bedrock=trace`,
@@ -72,8 +72,8 @@ impl FilterContext {
 ///
 /// `allowed` is sourced from `[bedrock] allowed_body_fields` TOML.
 /// **Empty list = pass-through**: no filtering, the bag is forwarded
-/// as-is. routectl ships no const default; operators populate the
-/// list after observing their actual traffic via trace logs.
+/// as-is. The list has no default; operators populate it after
+/// observing their actual traffic via trace logs.
 pub(super) fn filter_bedrock_body_fields(
     provider_id: &str,
     bag: &mut Map<String, Value>,

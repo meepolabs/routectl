@@ -461,8 +461,9 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   a fresh AWS account; use
   `ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture sent
   fields/flags, then populate the lists. Empty still filters a few
-  entries: the built-in Bedrock-rejected client betas are withheld,
-  a rejection naming its client betas is repaired once per lane, and
+  entries: the router withholds its shipped seed of Bedrock-rejected
+  client betas and any beta flag it learned the lane rejects, a
+  rejection naming its client betas is repaired with one retry, and
   `mcp_servers` never ships (see
   [CONFIGURATION.md](CONFIGURATION.md#bedrock-allowed_betas----global-bedrock-post-filter)).
 
@@ -475,8 +476,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   Per-provider escape hatch -- `[providers.X] anthropic_beta = [...]`
   is unchanged: those flags are always sent and bypass the filter
   (operator-asserted), independent of the global allowlist. Together
-  with `header_extras`-pinned betas it is the only way to send a
-  built-in Bedrock-rejected flag, and the beta repair never strips it.
+  with `header_extras`-pinned betas it always sends a seeded or
+  learned-rejected flag, and the beta repair never strips it.
 
 - **`ValidationException` 400s are header-discriminated, not
   `__type`-bodied.** AWS docs show request-validation errors as a flat

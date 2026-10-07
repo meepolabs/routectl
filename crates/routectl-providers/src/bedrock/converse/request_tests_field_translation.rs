@@ -510,7 +510,7 @@ fn anthropic_beta_provider_config_floor_bypasses_filter_on_converse() {
 fn anthropic_beta_global_allowed_betas_filters_against_operator_list_on_converse() {
     // Arrange: `cfg.allowed_betas` (sourced from
     // `[bedrock] allowed_betas` global TOML) is the FULL operator-
-    // supplied allowlist -- routectl ships no const default. Same
+    // supplied allowlist -- the list has no default. Same
     // hook, same precedence as Invoke.
     let mut cfg = fake_cfg();
     cfg.allowed_betas = vec!["my-override".into()];

@@ -118,7 +118,8 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // `super::betas`.
     //
     // Empty `cfg.allowed_betas` puts the filter in pass-through mode
-    // (every flag except the request's withheld set survives) -- the
+    // (every flag except the request's withheld set survives; the router
+    // fills that set from its seed and learned beta verdicts) -- the
     // discovery default for operators bringing up routectl against a fresh
     // AWS account. The withheld-rejected signal is discarded: this lane
     // carries no translation counters (see the fingerprint tally above).

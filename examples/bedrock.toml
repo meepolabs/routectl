@@ -2,17 +2,29 @@
 # want to gate which `anthropic_beta` flags and top-level body fields
 # routectl forwards to AWS Bedrock.
 #
-# Both lists below are OPTIONAL. routectl ships no built-in default;
-# AWS schema drift on the gated set is operator-tracked, not release-
-# bound. If you omit either list (or omit the entire [bedrock] section)
-# the corresponding filter runs in PASS-THROUGH mode -- routectl
-# forwards every flag/field as-is, with two exceptions that hold in
-# every mode: the built-in Bedrock-rejected betas
-# (advanced-tool-use-2025-11-20, advisor-tool-2026-03-01,
-# prompt-caching-scope-2026-01-05) are withheld unless the operator
-# floor (`[providers.X] anthropic_beta` or a `header_extras`-pinned
-# beta) sends them, and `mcp_servers` is never forwarded. This is the
-# discovery-mode default:
+# Both lists below are OPTIONAL and have no default; AWS schema drift
+# on the gated set is operator-tracked, not release-bound. If you omit
+# either list (or omit the entire [bedrock] section) the corresponding
+# filter runs in PASS-THROUGH mode -- routectl forwards every flag/field
+# as-is, with two exceptions that hold in every mode:
+#
+# - The router withholds the client betas it decided a lane must not
+#   send: a shipped seed of betas Bedrock rejects
+#   (advanced-tool-use-2025-11-20, advisor-tool-2026-03-01,
+#   prompt-caching-scope-2026-01-05), applied even with
+#   `[capability] enabled = false`, plus every beta flag it learned that
+#   lane rejects. A learned rejection is persisted across restarts,
+#   decays after 48h into one re-probe, shows in `routectl doctor`, and
+#   is dropped by `routectl capability purge <provider#upstream>
+#   beta:<flag>`. The same purge lifts a seeded flag on a lane a
+#   configured model routes to, until the next catalog or overlay
+#   revision change. A `force_supported` override on `beta:<flag>` or
+#   the operator floor (`[providers.X] anthropic_beta` or a
+#   `header_extras`-pinned beta) sends a flag regardless. Code calling
+#   the Bedrock provider directly, without the router, gets no seed.
+# - `mcp_servers` is never forwarded.
+#
+# This is the discovery-mode default:
 # bring up routectl, capture observed traffic via
 #
 #   ROUTECTL_LOG=routectl_providers::bedrock=trace ./routectl serve
@@ -40,10 +52,10 @@
 # entire request on the first unsupported flag. claude-code's TS SDK
 # ships up to ten betas via the `anthropic-beta` HTTP header; those
 # that are not on this list drop at DEBUG before send. Empty list (or
-# omitted field) = pass-through, except the built-in Bedrock-rejected
-# betas (advanced-tool-use-2025-11-20, advisor-tool-2026-03-01,
-# prompt-caching-scope-2026-01-05), which are withheld in either mode
-# and even when listed here, unless the operator floor sends them.
+# omitted field) = pass-through, except the flags the router withholds
+# from the lane (the seed and learned rejections above), which are
+# withheld in either mode and even when listed here, unless the operator
+# floor or a `force_supported` override sends them.
 #
 # CARVE-OUT: "structured-outputs-2025-12-15" is force-added whenever a
 # request's assembled body carries `output_config.format`, whether or not
