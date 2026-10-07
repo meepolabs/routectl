@@ -217,6 +217,14 @@ impl Router {
                 lane: lane.clone(),
                 lease,
             })),
+            // A lift is only for a lane dispatch actually reaches: the lane
+            // parser accepts any upstream on a configured entry, and lifting on
+            // an invented one would grow the marker set and the ledger with
+            // cells no request can ever use.
+            PurgePreparation::SeedLift(lease) if !self.lane_is_routed(lane) => {
+                self.learned_capabilities.restore_purge(lease);
+                PurgeOutcome::Absent
+            }
             PurgePreparation::SeedLift(lease) => {
                 PurgeOutcome::SeedLift(Box::new(ReservedSeedLift {
                     state_key: state_key.to_string(),
@@ -229,6 +237,14 @@ impl Router {
             PurgePreparation::Busy => PurgeOutcome::Busy,
             PurgePreparation::Stale => PurgeOutcome::Stale,
         }
+    }
+
+    /// Whether one of the installed models dispatches to `lane`.
+    fn lane_is_routed(&self, lane: &StateKey) -> bool {
+        self.learned_lane_projection()
+            .lanes()
+            .iter()
+            .any(|resolved| resolved.routed && resolved.lane == *lane)
     }
 
     /// Finalize a reserved purge: remove the entry and release the lease.

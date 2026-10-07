@@ -364,3 +364,76 @@ fn an_admitted_unsettled_boundary_refuses_a_seed_lift_as_busy() {
     assert!(matches!(prepared, PurgePreparation::Busy), "{prepared:?}");
     let _ = reg.rollback_pending_generation(&receipt);
 }
+
+/// While a seed lift finalizes, no instant exposes the marker with the lease
+/// still held and `entries` free.
+///
+/// That combination is the lost-negative window: the withheld pass reads the
+/// marker and sends the flag, the upstream rejects it, and the live negative
+/// mint (which needs `entries`) is lease-refused and dropped -- leaving the
+/// marker standing with no acting negative behind it. The acquire hook probes
+/// the three states without blocking at every lock the finalize takes; a
+/// lease lock this thread holds counts as a held lease.
+#[test]
+fn a_finalizing_seed_lift_never_exposes_its_marker_while_the_lease_is_held() {
+    // Arrange
+    let reg = Arc::new(registry());
+    let key = LearnedCapabilityRegistry::make_key(LANE, &beta("fx-a"), KIND);
+    let PurgePreparation::SeedLift(lease) = prepare(&reg, &beta("fx-a")) else {
+        panic!("premise: the lift reserves");
+    };
+    let windows = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let reg_inner = Arc::clone(&reg);
+        let windows = Arc::clone(&windows);
+        let probes = Arc::clone(&probes);
+        let key = key.clone();
+        reg.set_lock_acquire_hook(Box::new(move |_lock| {
+            probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let entries_free = reg_inner.entries.try_write().is_some();
+            let marker_visible = reg_inner
+                .seed_clears
+                .try_read()
+                .is_some_and(|set| set.contains(&key));
+            let lease_held = reg_inner
+                .purge_leases
+                .try_read()
+                .is_none_or(|set| set.contains(&key));
+            if entries_free && marker_visible && lease_held {
+                windows.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }));
+    }
+
+    // Act
+    reg.finalize_seed_lift(lease);
+
+    // Assert
+    assert!(
+        probes.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "premise: the hook observed the finalize",
+    );
+    assert_eq!(
+        windows.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a request must never see the marker while its negative would be lease-refused",
+    );
+    assert!(marked(&reg, &beta("fx-a")));
+    assert!(
+        reg.observe_in_generation(
+            reg.generation(),
+            LANE,
+            &beta("fx-a"),
+            KIND,
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            Instant::now(),
+        )
+        .applied()
+        .is_some(),
+        "once the marker is visible a rejected send's negative lands",
+    );
+}

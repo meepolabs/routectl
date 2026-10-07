@@ -541,34 +541,69 @@ fn an_event_at_exactly_the_cleared_incarnation_is_superseded() {
 /// daemon made after the purge, it carries a newly allocated greater incarnation,
 /// and it must persist -- otherwise a purge would permanently blind the daemon to
 /// a capability that really is broken.
+///
+/// The zero row is a seed lift: nothing was resident, so its clear carries
+/// incarnation zero, and the first negative minted after it carries one. That
+/// negative must land and must be what a restart reads back after the clear.
 #[test]
 fn a_post_purge_relearn_with_a_greater_incarnation_is_accepted() {
-    let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
-    let key = wire_shape_key("thinking.enabled.display");
+    let rows = [
+        ("learned purge", 7, 9),
+        ("seed lift at incarnation zero", 0, 1),
+    ];
 
-    let cleared = CapabilityEvent {
-        verdict: "cleared".to_string(),
-        ..negative("nick", &key)
-    };
-    let _ = handle.commit_capability_events_blocking_at(vec![cleared], 1, 7);
+    for (name, cleared_at, relearned_at) in rows {
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let key = wire_shape_key("thinking.enabled.display");
 
-    // A relearn AFTER the purge: a greater incarnation, because the registry
-    // allocated it from the same monotonic sequence after the clear.
-    handle.try_send_capability_event_at(negative("nick", &key), 1, 9);
-    drop(handle);
-    writer.shutdown();
+        let cleared = CapabilityEvent {
+            verdict: "cleared".to_string(),
+            ..negative("nick", &key)
+        };
+        let outcome = handle.commit_capability_events_blocking_at(vec![cleared], 1, cleared_at);
+        assert!(
+            matches!(outcome, BatchCommit::Committed { .. }),
+            "{name}: premise: the clear commits",
+        );
 
-    let verdicts: Vec<String> = ledger_rows(&path)
-        .into_iter()
-        .map(|(_, verdict, _)| verdict)
-        .collect();
-    assert_eq!(
-        verdicts,
-        vec!["cleared".to_string(), "broken".to_string()],
-        "a genuine post-purge relearn must persist: dropping it would make one purge blind \
-         the daemon to that capability for the rest of the process",
-    );
+        // A relearn AFTER the purge: a greater incarnation, because the registry
+        // allocated it from the same monotonic sequence after the clear.
+        handle.try_send_capability_event_at(negative("nick", &key), 1, relearned_at);
+        drop(handle);
+        writer.shutdown();
+
+        let verdicts: Vec<String> = ledger_rows(&path)
+            .into_iter()
+            .map(|(_, verdict, _)| verdict)
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec!["cleared".to_string(), "broken".to_string()],
+            "{name}: a genuine post-purge relearn must persist: dropping it would make one \
+             purge blind the daemon to that capability for the rest of the process",
+        );
+
+        // Restart: a fresh writer over the same file, then the boot read.
+        let (restarted, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        drop(restarted);
+        writer.shutdown();
+        let db = crate::open(&path).expect("reopen the ledger");
+        let replayed: Vec<(String, String)> =
+            crate::query::read_capability_events_after(db.conn(), 0, 100)
+                .expect("boot read")
+                .into_iter()
+                .filter_map(|row| Some((row.verdict?, row.capability?)))
+                .collect();
+        assert_eq!(
+            replayed,
+            vec![
+                ("cleared".to_string(), key.clone()),
+                ("broken".to_string(), key)
+            ],
+            "{name}: the restart replays the negative after the clear",
+        );
+    }
 }
 
 /// The floor is PER KEY: purging one key does not suppress another's events.

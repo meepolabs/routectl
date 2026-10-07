@@ -2490,16 +2490,20 @@ impl LearnedCapabilityRegistry {
     /// Settle a seed-lift lease whose `cleared` row has committed: record the
     /// marker and release the lease.
     ///
-    /// `entries` is held across the mark, as at [`Self::finalize_purge`], so
-    /// the mark cannot interleave with a boundary transition's marker prune.
+    /// Both happen under one `entries` write guard. A marker visible while the
+    /// lease is still held would let a request send the flag and then have its
+    /// rejection's negative lease-refused, leaving the marker with nothing
+    /// acting behind it. Holding `entries` also keeps the mark from
+    /// interleaving with a boundary transition's marker prune.
     pub fn finalize_seed_lift(&self, mut lease: PurgeLease) {
         let entries = self.entries.write();
         self.note_acquired("entries");
-        self.mark_seed_cleared(&lease.key);
-        drop(entries);
         let mut leases = self.purge_leases.write();
         self.note_acquired("purge_leases");
+        self.mark_seed_cleared(&lease.key);
         leases.remove(&lease.key);
+        drop(leases);
+        drop(entries);
         lease.settled = true;
     }
 

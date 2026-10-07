@@ -685,6 +685,20 @@ fn the_owner_sweep_keeps_an_owned_marker() {
     );
 }
 
+/// The fixture router with model `m` installed on `bed`, so the lane
+/// `target_on(.., "bed")` names is one dispatch reaches.
+fn routed_router() -> Router {
+    let mut router = router(&capability(true));
+    let model = ResolvedModel::new(
+        "m",
+        "bed",
+        RecordingProvider::new(),
+        "anthropic.claude-test-v1:0",
+    );
+    router.install_resolved_models(std::iter::once(("m".to_string(), Arc::new(model))).collect());
+    router
+}
+
 fn purge_on(router: &Router, target: &DispatchTarget, flag: &str) -> super::super::PurgeOutcome {
     let lane = crate::state_key::StateKey::parse(&lane_of(target)).expect("fixture lane parses");
     router.reserve_learned_capability_purge(&lane, &key(flag))
@@ -693,7 +707,7 @@ fn purge_on(router: &Router, target: &DispatchTarget, flag: &str) -> super::supe
 #[test]
 fn a_finalized_seed_lift_sends_the_flag_and_carries_a_zero_incarnation_clear() {
     // Arrange
-    let router = router(&capability(true));
+    let router = routed_router();
     let target = target_on(&router, "bed");
     let generation = router.registry_generation();
 
@@ -732,7 +746,7 @@ fn a_finalized_seed_lift_sends_the_flag_and_carries_a_zero_incarnation_clear() {
 
 #[test]
 fn an_abandoned_seed_lift_keeps_the_seed_withholding() {
-    let router = router(&capability(true));
+    let router = routed_router();
     let target = target_on(&router, "bed");
     let super::super::PurgeOutcome::SeedLift(lift) = purge_on(&router, &target, "fx-seed-only")
     else {
@@ -750,7 +764,7 @@ fn an_abandoned_seed_lift_keeps_the_seed_withholding() {
 
 #[test]
 fn purging_an_unseeded_or_non_bedrock_beta_with_nothing_resident_stays_absent() {
-    let router = router(&capability(true));
+    let router = routed_router();
     let rows = [
         ("unseeded flag on bedrock", "bed", "fx-unknown"),
         ("seeded flag on another kind", "oc", "fx-seed-only"),
@@ -789,4 +803,28 @@ fn purging_a_resident_seeded_negative_stays_a_learned_purge_and_lifts_the_seed()
         markers_on(&router),
         vec![(lane_of(&target), BEDROCK.to_string())]
     );
+}
+
+#[test]
+fn a_seed_lift_on_an_upstream_no_model_routes_is_absent() {
+    // Arrange -- `bed` is configured and routes `m`, but nothing routes this
+    // upstream on it.
+    let router = routed_router();
+    let unrouted =
+        crate::state_key::StateKey::parse("bed#not-a-routed-upstream").expect("the lane parses");
+    let routed = target_on(&router, "bed");
+    assert!(
+        matches!(
+            purge_on(&router, &routed, "fx-seed-only"),
+            super::super::PurgeOutcome::SeedLift(_)
+        ),
+        "premise: the routed lane on the same entry lifts",
+    );
+
+    // Act
+    let outcome = router.reserve_learned_capability_purge(&unrouted, &key("fx-seed-only"));
+
+    // Assert
+    assert!(matches!(outcome, super::super::PurgeOutcome::Absent));
+    assert!(markers_on(&router).is_empty());
 }

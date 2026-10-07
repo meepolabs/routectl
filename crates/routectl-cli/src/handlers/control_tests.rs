@@ -2244,7 +2244,45 @@ fn beta(flag: &str) -> String {
     routectl_router::beta_capability_key(flag).expect("fixture flags are well formed")
 }
 
-/// A router with one `bedrock` entry `bed`, running under [`FIXTURE_SEED`].
+/// A provider the seed-lift fixture installs only so its lane is routed; no
+/// case here dispatches through it.
+struct NeverDispatched;
+
+#[async_trait::async_trait]
+impl routectl_core::Provider for NeverDispatched {
+    fn id(&self) -> &'static str {
+        "never-dispatched"
+    }
+    fn normalize_request(
+        &self,
+        _: &routectl_core::ChatRequest,
+    ) -> routectl_core::Result<serde_json::Value> {
+        unimplemented!("seed-lift cases never dispatch")
+    }
+    fn normalize_response(
+        &self,
+        _: serde_json::Value,
+    ) -> routectl_core::Result<routectl_core::ChatResponse> {
+        unimplemented!("seed-lift cases never dispatch")
+    }
+    async fn complete(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<routectl_core::ChatResponse> {
+        unimplemented!("seed-lift cases never dispatch")
+    }
+    async fn stream(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<
+        futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+    > {
+        unimplemented!("seed-lift cases never dispatch")
+    }
+}
+
+/// A router with one `bedrock` entry `bed` routing model `m` on
+/// [`BEDROCK_LANE`], running under [`FIXTURE_SEED`].
 fn bedrock_router() -> Router {
     let config: Config = toml::from_str(
         "version = 3\n\
@@ -2256,6 +2294,12 @@ fn bedrock_router() -> Router {
     .expect("fixture config parses");
     let mut router = Router::new(Arc::new(config));
     router.set_beta_seed_for_tests(FIXTURE_SEED);
+    let (_, upstream) = BEDROCK_LANE
+        .split_once('#')
+        .expect("the fixture lane has two halves");
+    let model =
+        routectl_router::ResolvedModel::new("m", "bed", Arc::new(NeverDispatched), upstream);
+    router.install_resolved_models(std::iter::once(("m".to_string(), Arc::new(model))).collect());
     router
 }
 
@@ -2426,6 +2470,27 @@ async fn an_unseeded_beta_with_nothing_resident_is_absent_and_writes_nothing() {
 /// Builds a fixture whose writer cannot commit, plus the channel capacity to
 /// fill first when the refusal is a full channel.
 type RefusingFixture = fn() -> (Fixture, Option<usize>);
+
+#[tokio::test]
+async fn a_seed_lift_on_an_unrouted_upstream_is_absent_and_writes_nothing() {
+    let fixture = bedrock_fixture();
+
+    let (status, body) = fixture
+        .call(loopback_peer(), &body_for("bed#x1", &beta("fx-seeded")))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["purged"].as_bool(), Some(false), "body was {body}");
+    assert!(
+        fixture
+            .router
+            .load()
+            .learned_registry()
+            .seed_clear_snapshot()
+            .is_empty()
+    );
+    assert!(fixture.cleared_rows().is_empty());
+}
 
 #[tokio::test]
 async fn a_seed_lift_that_cannot_commit_refuses_and_records_no_marker() {
