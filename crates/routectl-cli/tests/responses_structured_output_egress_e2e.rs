@@ -104,7 +104,7 @@ fn flat_responses_body(model: &str) -> Value {
 /// The canonical request the REAL Responses ingress produces from that
 /// body -- the same adapter the `POST /v1/responses` route drives.
 fn canonical_from_real_ingress() -> ChatRequest {
-    ResponsesIngress
+    ResponsesIngress::default()
         .parse_request(
             &HeaderMap::new(),
             &serde_json::to_vec(&flat_responses_body("mock-model")).expect("fixture serializes"),

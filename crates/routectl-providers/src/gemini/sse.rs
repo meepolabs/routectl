@@ -53,6 +53,8 @@ pub struct GeminiStreamState {
     role_emitted: bool,
     /// Dense counter for OpenAI-shape `tool_calls[].index`.
     next_call_index: u32,
+    /// Lazily minted once per stream; never reuse call IDs on later turns.
+    tool_turn_id: Option<uuid::Uuid>,
     /// Dense counter for `reasoning_details[].index`.
     next_detail_index: u32,
     /// Sticky: set once any functionCall part is seen, so the terminal
@@ -71,7 +73,7 @@ pub struct GeminiStreamState {
     /// Set once termination is proven: any event carried a `finishReason`,
     /// or a prompt-level block arrived (empty candidates + blockReason).
     /// Distinguishes a proven-terminal stream from one that ends at EOS
-    /// without proof, which is the only case `on_eos` WARNs on.
+    /// without proof, which `on_eos` reports as a transport failure.
     saw_finish_reason: bool,
 }
 
@@ -109,13 +111,16 @@ impl GeminiStreamState {
         }
 
         let candidate = event.candidates.into_iter().next();
-        let finish_reason_raw = candidate.as_ref().and_then(|c| c.finish_reason.clone());
+        let finish_reason_raw = candidate
+            .as_ref()
+            .and_then(|c| c.finish_reason.clone())
+            .filter(|reason| !reason.is_empty() && reason != "FINISH_REASON_UNSPECIFIED");
         let has_candidate = candidate.is_some();
         let prompt_block = event
             .prompt_feedback
             .as_ref()
             .and_then(|pf| pf.block_reason.as_deref())
-            .filter(|r| !r.is_empty())
+            .filter(|r| !r.is_empty() && *r != "BLOCK_REASON_UNSPECIFIED")
             .map(str::to_string);
 
         if let Some(cand) = candidate {
@@ -158,7 +163,7 @@ impl GeminiStreamState {
             // Prompt-level block: no finishReason and no candidate, but
             // promptFeedback.blockReason is present. This is PROVEN
             // terminality, so mark saw_finish_reason too -- on_eos must not
-            // WARN about a stream that ended without a finishReason.
+            // reject a prompt block for lacking a candidate finishReason.
             self.saw_finish_reason = true;
             self.terminal_emitted = true;
             let usage = self.cached_usage.take();
@@ -179,19 +184,14 @@ impl GeminiStreamState {
         Ok(chunks)
     }
 
-    /// Called once the SSE stream reaches end-of-stream. Emits the
-    /// anomaly WARN when usage was observed but no `finishReason` ever
-    /// arrived: the stream ended without proven terminality, so silent
-    /// truncation must not masquerade as success. Usage still settles via
-    /// the ingress capture path; this WARN is the only signal.
-    pub(crate) fn on_eos(&self, provider_id: &str) {
-        if !self.saw_finish_reason && self.cached_usage.is_some() {
-            tracing::warn!(
-                provider = %provider_id,
-                had_cached_usage = true,
-                "gemini: stream ended with usage but no finishReason"
-            );
-        }
+    /// A transport-clean EOF is successful only after semantic termination.
+    pub(crate) fn on_eos(&self, provider_id: &str) -> Result<()> {
+        let mut completion = crate::stream_completion::StreamCompletion::new(
+            "gemini (finishReason or prompt block)",
+            |terminal: &bool| *terminal,
+        );
+        completion.observe(&self.saw_finish_reason);
+        completion.end_of_stream(provider_id)
     }
 
     fn part_chunks(&mut self, provider_id: &str, part: &ResponsePart) -> Vec<ChatChunk> {
@@ -216,6 +216,7 @@ impl GeminiStreamState {
                 );
                 return out;
             }
+            self.tool_turn_id.get_or_insert_with(uuid::Uuid::new_v4);
             let call_index = self.next_call_index;
             self.next_call_index += 1;
             let args_str = serde_json::to_string(&fc.args).unwrap_or_else(|_| "{}".to_string());
@@ -274,7 +275,7 @@ impl GeminiStreamState {
     ) -> ChatChunk {
         let mut tool_call_delta: Value = json!({
             "index": call_index,
-            "id": format!("call_{call_index}"),
+            "id": format!("call_{}_{call_index}", self.tool_turn_id.expect("tool turn initialized")),
             "type": "function",
             "function": {"name": name, "arguments": args}
         });

@@ -3072,16 +3072,22 @@ const MAX_PRECONTENT_CHUNKS: usize = 8;
 
 /// True when `chunk` carries client-visible generated content: non-empty
 /// text or reasoning text, typed reasoning blocks, tool-call requests, or
-/// opaque SSE blocks. Content-free metadata -- a leading role delta,
-/// id/model/upstream_meta stamps, a usage-only tail, a bare finish_reason,
-/// or empty choices -- returns false: those are not the content-commit
+/// opaque SSE blocks or native Responses output items. Content-free metadata --
+/// a leading role delta, id/model/ordinary upstream_meta stamps, a usage-only tail,
+/// a bare finish_reason, or empty choices -- returns false: those are not the content-commit
 /// boundary and may still be followed by a fallback to a sibling provider.
 ///
 /// Opaque carriers count as content: they are client-visible unknown block
 /// data that cannot be mixed with a different provider's output, so once one
 /// arrives the provider is committed exactly as a text chunk commits it.
 fn is_content_bearing(chunk: &ChatChunk) -> bool {
-    if !chunk.opaque_events.is_empty() {
+    if !chunk.opaque_events.is_empty()
+        || chunk
+            .upstream_meta
+            .as_ref()
+            .and_then(|meta| meta.responses_output.as_deref())
+            .is_some_and(|items| !items.is_empty())
+    {
         return true;
     }
     chunk.choices.iter().any(|choice| {

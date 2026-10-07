@@ -2435,3 +2435,54 @@ fn observe_chunk_ignores_an_opening_usage_only_carrier() {
     assert!(cap.record.quota_utilization.is_none());
     assert_eq!(cap.observed_prompt_total, 0);
 }
+
+#[tokio::test]
+async fn execution_drafts_are_unique_even_without_middleware_and_finalize_drop_is_once_only() {
+    let (handle, writer, dir) = dummy_handle();
+    let req = minimal_request();
+    let first = build_execution_usage_draft("openai", &req, "shared".into());
+    let second = build_execution_usage_draft("openai", &req, "shared".into());
+    let key_one = first.request_id.clone();
+    let key_two = second.request_id.clone();
+    assert_ne!(key_one, key_two);
+    assert_ne!(
+        build_execution_usage_draft("openai", &req, String::new()).request_id,
+        ""
+    );
+    let mut cap = UsageCapture::new(first, handle.clone(), "openai".into());
+    cap.mark_stream_stage(StreamStage::MidStream);
+    cap.finalize(Outcome::Ok);
+    cap.finalize(Outcome::UpstreamError); // must be a no-op
+    drop(cap);
+    drop(UsageCapture::new(second, handle.clone(), "openai".into()));
+    assert!(wait_persisted(&handle, 2));
+    drop(handle);
+    tokio::task::spawn_blocking(move || writer.shutdown())
+        .await
+        .unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("usage.db")).unwrap();
+    let mut stmt = db
+        .prepare("SELECT request_id, outcome, extra FROM requests ORDER BY rowid")
+        .unwrap();
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!((&rows[0].0, rows[0].1.as_str()), (&key_one, "ok"));
+    assert_eq!(
+        (&rows[1].0, rows[1].1.as_str()),
+        (&key_two, "client_disconnect")
+    );
+    for row in &rows {
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.2).unwrap()["correlation_request_id"],
+            "shared"
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(&rows[0].2).unwrap()["stream_stage"],
+        "mid_stream"
+    );
+}

@@ -496,7 +496,7 @@ fn build_contents(
     tally: &mut GeminiDropTally,
 ) -> Result<Vec<Content>> {
     let mut contents: Vec<Content> = Vec::new();
-    let tool_name_by_id = build_tool_call_name_index(req);
+    let mut tool_name_by_id = HashMap::new();
 
     for msg in &*req.messages {
         match &msg.role {
@@ -597,59 +597,55 @@ fn build_contents(
                 }
             }
         }
+        record_tool_call_names(msg, &mut tool_name_by_id);
     }
 
     Ok(contents)
 }
 
-/// Build a `correlation-id -> tool-name` index over every tool call in the
-/// request. Gemini keys `functionResponse` on the tool NAME, but cross-dialect
+/// Record calls from one preceding assistant turn. Later turns overwrite
+/// duplicate IDs so results resolve against the nearest preceding call.
+/// Gemini keys `functionResponse` on the tool NAME, but cross-dialect
 /// tool loops (OpenAI tool-role, Anthropic tool_result) carry only the
 /// correlation id on the result message. Both assistant tool-call shapes are
 /// indexed: the OpenAI `tool_calls` array (`{id, function:{name}}`) and
 /// Anthropic `tool_use` content blocks (`{id, name}`).
-fn build_tool_call_name_index(req: &ChatRequest) -> HashMap<String, String> {
-    let mut index: HashMap<String, String> = HashMap::new();
-    for msg in &*req.messages {
-        // TRANSLATION-DROP: structural -- only an assistant turn can carry a tool call to index; this builds a lookup and emits no wire content
-        if !matches!(msg.role, Role::Assistant) {
-            continue;
-        }
-        if let Some(tool_calls) = &msg.tool_calls {
-            for tc in tool_calls {
-                let id = tc.get("id").and_then(Value::as_str);
-                let name = tc
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(Value::as_str);
-                if let (Some(id), Some(name)) = (id, name)
-                    && !id.is_empty()
-                    && !name.is_empty()
-                {
-                    index
-                        .entry(id.to_string())
-                        .or_insert_with(|| name.to_string());
-                }
-            }
-        }
-        if let MessageContent::Parts(parts) = &msg.content {
-            for part in parts {
-                if let ContentPart::Known(KnownContentPart::ToolUse { id, name, .. }) = part
-                    && !id.is_empty()
-                    && !name.is_empty()
-                {
-                    index.entry(id.clone()).or_insert_with(|| name.clone());
-                }
+fn record_tool_call_names(msg: &routectl_core::Message, index: &mut HashMap<String, String>) {
+    // TRANSLATION-DROP: structural -- only an assistant turn can carry a tool call to index; this builds a lookup and emits no wire content
+    if !matches!(msg.role, Role::Assistant) {
+        return;
+    }
+    if let Some(tool_calls) = &msg.tool_calls {
+        for tc in tool_calls {
+            let id = tc.get("id").and_then(Value::as_str);
+            let name = tc
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str);
+            if let (Some(id), Some(name)) = (id, name)
+                && !id.is_empty()
+                && !name.is_empty()
+            {
+                index.insert(id.to_string(), name.to_string());
             }
         }
     }
-    index
+    if let MessageContent::Parts(parts) = &msg.content {
+        for part in parts {
+            if let ContentPart::Known(KnownContentPart::ToolUse { id, name, .. }) = part
+                && !id.is_empty()
+                && !name.is_empty()
+            {
+                index.insert(id.clone(), name.clone());
+            }
+        }
+    }
 }
 
 /// Resolve the Gemini `functionResponse.name` for a tool-result message.
-/// Prefer a name recovered from the prior tool call keyed on the correlation
-/// id; fall back to any name the ingress carried; last, an empty name with a
-/// WARN (Gemini cannot correlate a nameless functionResponse).
+/// Prefer the nearest preceding call keyed on the correlation id, then a
+/// carried name; last, an empty name with a WARN (Gemini cannot correlate a
+/// nameless functionResponse).
 fn recover_tool_name(
     provider_id: &str,
     correlation_id: Option<&str>,
@@ -779,7 +775,11 @@ fn content_part_to_part(
                 // lowercase spelling would send a legal mixed-case data URI
                 // down the text fall-through -- the exact billed-as-prose
                 // failure this guard exists to prevent.
-                if url.len() >= 5 && url[..5].eq_ignore_ascii_case("data:") {
+                if url
+                    .as_bytes()
+                    .get(..5)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data:"))
+                {
                     // A data: URI must never reach the text fall-through:
                     // the whole base64 payload would ship upstream as prose,
                     // billed as input text, with no image and no diagnostic.

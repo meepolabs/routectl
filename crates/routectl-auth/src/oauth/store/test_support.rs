@@ -254,7 +254,6 @@ pub(super) async fn open_with_flow<P: Into<PathBuf>>(
             load_error: std::sync::RwLock::new(None),
             http,
             refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
-            reload_gen: std::sync::atomic::AtomicU64::new(0),
             refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
             refresh_flow: Some(flow),
             now_override: std::sync::atomic::AtomicU64::new(0),

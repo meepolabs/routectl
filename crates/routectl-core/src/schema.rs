@@ -222,15 +222,13 @@ pub enum RequestProvenance {
     OpenaiIngress,
 }
 
-/// One preserved Responses `input[]` item plus the number of MODELED
-/// (non-passthrough) input items that preceded it in the inbound array.
-/// The Responses egress splices each entry back in after that many
-/// modeled egress items so a preserved codex-only item keeps its
-/// original conversation position instead of being shoved to the tail.
+/// One preserved Responses `input[]` item plus its canonical message boundary.
+/// Grouping never crosses this boundary. Egress splices the item before the
+/// message at `modeled_prefix`, regardless of how many wire items prior messages
+/// translate to (or whether their content is dropped on this lane).
 #[derive(Debug, Clone)]
 pub struct ResponsesPassthroughItem {
-    /// Count of modeled input items that appeared before this one in the
-    /// inbound `input[]` array (the "modeled-prefix index").
+    /// Number of preceding non-system canonical messages.
     pub modeled_prefix: usize,
     /// The unmodeled Responses item, forwarded verbatim.
     pub item: Value,
@@ -453,13 +451,18 @@ pub struct RoutectlInternal {
     /// this, and it forwards the raw JSON verbatim -- no cross-dialect
     /// translation. Every other egress ignores the field, so a
     /// codex-only kind never corrupts a non-Responses upstream body.
-    /// Each entry carries the count of MODELED input items that preceded
-    /// it inbound (`modeled_prefix`), so the egress splices it back into
-    /// its original conversation position instead of appending every
-    /// preserved item to the tail. Like `claude_code_headers` this is
+    /// Each entry carries its canonical message boundary (`modeled_prefix`),
+    /// so wire expansion or lane-specific content drops cannot move it across
+    /// later conversation items. Like `claude_code_headers` this is
     /// inbound-request data, not a per-model knob; empty for library
     /// consumers and for every non-Responses ingress.
     pub responses_input_passthrough: Vec<ResponsesPassthroughItem>,
+
+    /// System/developer input history before ingress lifting. Unlike top-level
+    /// instructions, these conversation items survive previous_response_id.
+    /// Optional and shared so non-Responses requests allocate nothing here and
+    /// dispatch clones do not deep-copy the system history.
+    pub responses_system_history: Option<Arc<Vec<Message>>>,
 
     /// INBOUND per-conversation key captured by EVERY ingress dialect from
     /// a HEADER candidate first, a BODY candidate second. The Anthropic

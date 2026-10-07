@@ -149,17 +149,6 @@ struct Inner {
     /// is guarded by a sync `std::sync::Mutex` because get-or-insert is
     /// a tiny CPU-only critical section.
     refresh_locks: std::sync::Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
-    /// Monotonic counter bumped by every successful `reload_from_disk`
-    /// call (under the file `RwLock` write guard). `refresh_under_lock`
-    /// snapshots this before the network POST and re-reads it under the
-    /// file write lock before committing the refresh result; if the
-    /// counter changed, a reload ran while the POST was in-flight and
-    /// brought in a newer on-disk state -- the refresh result is
-    /// discarded rather than clobbering the reload. `AtomicU64` so
-    /// the snapshot read in `refresh_under_lock` does not need to
-    /// acquire the file lock twice (once for the double-check and
-    /// once for the final write).
-    reload_gen: std::sync::atomic::AtomicU64,
     /// Per-seat transient-failure cooldown. During an IdP outage the
     /// per-seat single-flight gate collapses each request wave to one
     /// refresh POST, but nothing damps successive waves -- every wave
@@ -240,7 +229,6 @@ impl OAuthStore {
                 load_error: std::sync::RwLock::new(None),
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
-                reload_gen: std::sync::atomic::AtomicU64::new(0),
                 refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 refresh_flow: None,
@@ -272,7 +260,6 @@ impl OAuthStore {
                 load_error: std::sync::RwLock::new(load_error),
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
-                reload_gen: std::sync::atomic::AtomicU64::new(0),
                 refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 refresh_flow: None,

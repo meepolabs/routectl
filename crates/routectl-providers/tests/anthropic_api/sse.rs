@@ -165,11 +165,18 @@ fn sse_tool_use_delta_emits_tool_calls() {
         }
     }
 
-    // Tool delta chunk (chunks[0] is the opening role chunk).
-    let tool_chunk = &chunks[1];
-    let tool_calls = tool_chunk.choices[0].delta.tool_calls.as_ref().unwrap();
-    assert_eq!(tool_calls[0]["function"]["name"], "search");
-    assert_eq!(tool_calls[0]["function"]["arguments"], "{\"q\":\"rust\"}");
+    let tool_chunks: Vec<_> = chunks
+        .iter()
+        .filter_map(|c| c.choices[0].delta.tool_calls.as_ref())
+        .map(|calls| &calls[0])
+        .collect();
+    assert_eq!(tool_chunks.len(), 2);
+    assert_eq!(tool_chunks[0]["function"]["name"], "search");
+    assert_eq!(tool_chunks[0]["id"], "toolu_01");
+    assert_eq!(tool_chunks[0]["function"]["arguments"], "");
+    assert!(tool_chunks[1].get("id").is_none());
+    assert!(tool_chunks[1]["function"].get("name").is_none());
+    assert_eq!(tool_chunks[1]["function"]["arguments"], "{\"q\":\"rust\"}");
 
     // Finish reason chunk
     let finish = chunks.last().unwrap();
@@ -181,9 +188,8 @@ fn sse_tool_use_delta_emits_tool_calls() {
 
 /// Stream reversal: a tool_use block whose upstream name is the
 /// doubled-prefix `mcp__linear_get_issue` is reversed ONCE at
-/// content_block_start via the per-request reverse map; every
-/// input_json_delta chunk inherits the client's original
-/// single-underscore name.
+/// content_block_start via the per-request reverse map. Only the opening
+/// chunk carries the original name; argument deltas never repeat it.
 #[test]
 fn sse_tool_use_name_reversed_via_reverse_map() {
     use routectl_providers::anthropic_api::sse::SseState;
@@ -210,29 +216,30 @@ fn sse_tool_use_name_reversed_via_reverse_map() {
         }
     }
 
-    // Every emitted tool-call chunk reads the client's original name.
     let tool_chunks: Vec<_> = chunks
         .iter()
-        .filter(|c| c.choices[0].delta.tool_calls.is_some())
+        .filter_map(|c| c.choices[0].delta.tool_calls.as_ref())
+        .map(|calls| &calls[0])
         .collect();
-    assert!(
-        tool_chunks.len() >= 2,
-        "expected a tool-call chunk per input_json_delta"
-    );
-    for c in &tool_chunks {
-        let tc = c.choices[0].delta.tool_calls.as_ref().unwrap();
-        assert_eq!(
-            tc[0]["function"]["name"], "mcp_linear_get_issue",
-            "reversed name must ride on the start AND every delta chunk"
-        );
+    assert_eq!(tool_chunks.len(), 3);
+    assert_eq!(tool_chunks[0]["function"]["name"], "mcp_linear_get_issue");
+    assert_eq!(tool_chunks[0]["id"], "toolu_01");
+    for chunk in &tool_chunks[1..] {
+        assert!(chunk.get("id").is_none());
+        assert!(chunk["function"].get("name").is_none());
+        assert_eq!(chunk["index"], 0);
     }
+    let arguments: String = tool_chunks
+        .iter()
+        .map(|chunk| chunk["function"]["arguments"].as_str().unwrap())
+        .collect();
+    assert_eq!(arguments, "{\"id\":1}more");
 }
 
 /// Stream reversal for a BARE tool name: a tool_use block whose upstream
 /// name is the prefixed `mcp__read_file` (the cloak's forward form for a
 /// bare `read_file`) is reversed ONCE at content_block_start via the
-/// per-request reverse map; every input_json_delta chunk inherits the
-/// client's original bare name.
+/// per-request reverse map; argument deltas carry no additional name.
 #[test]
 fn sse_bare_tool_use_name_reversed_via_reverse_map() {
     use routectl_providers::anthropic_api::sse::SseState;
@@ -260,19 +267,22 @@ fn sse_bare_tool_use_name_reversed_via_reverse_map() {
 
     let tool_chunks: Vec<_> = chunks
         .iter()
-        .filter(|c| c.choices[0].delta.tool_calls.is_some())
+        .filter_map(|c| c.choices[0].delta.tool_calls.as_ref())
+        .map(|calls| &calls[0])
         .collect();
-    assert!(
-        tool_chunks.len() >= 2,
-        "expected a tool-call chunk per input_json_delta"
-    );
-    for c in &tool_chunks {
-        let tc = c.choices[0].delta.tool_calls.as_ref().unwrap();
-        assert_eq!(
-            tc[0]["function"]["name"], "read_file",
-            "reversed bare name must ride on the start AND every delta chunk"
-        );
+    assert_eq!(tool_chunks.len(), 3);
+    assert_eq!(tool_chunks[0]["function"]["name"], "read_file");
+    assert_eq!(tool_chunks[0]["id"], "toolu_01");
+    for chunk in &tool_chunks[1..] {
+        assert!(chunk.get("id").is_none());
+        assert!(chunk["function"].get("name").is_none());
+        assert_eq!(chunk["index"], 0);
     }
+    let arguments: String = tool_chunks
+        .iter()
+        .map(|chunk| chunk["function"]["arguments"].as_str().unwrap())
+        .collect();
+    assert_eq!(arguments, "{\"path\":\"/x\"}");
 }
 
 /// Stream contract: `server_tool_use` on the closing

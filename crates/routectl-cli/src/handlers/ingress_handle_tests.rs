@@ -21,6 +21,7 @@
 //! mapping without needing a server.
 
 use super::*;
+use crate::handlers::usage_capture::build_usage_draft;
 use axum::body::to_bytes;
 use routectl_core::Error;
 use routectl_router::config::CredentialSource;
@@ -3734,6 +3735,9 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
     // directly with a resolvable dispatch so the mpsc channel can be drained
     // to completion -- a `pending_dispatch`'s body never reaches EOS, so this
     // part cannot be checked at the HTTP body level.
+    // The remaining fixture performs real loopback I/O. Resume the clock so
+    // idle auto-advance cannot race its HTTP deadline against the accept task.
+    tokio::time::resume();
     let (router2, meta2) = k_recording_router_and_meta().await;
     let stream: futures::stream::BoxStream<'static, routectl_core::Result<_>> = Box::pin(
         futures::stream::iter(vec![Ok(streaming_text_chunk("hello"))]),
@@ -3755,7 +3759,7 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
                 input_tokens_estimate: 5,
                 model: "m".into(),
                 req: Default::default(),
-    },
+            },
         ),
     )
     .await;
@@ -5477,3 +5481,6 @@ mod cc_pin_drift_observation {
         );
     }
 }
+
+#[path = "usage_execution_http_tests.rs"]
+mod execution_http;

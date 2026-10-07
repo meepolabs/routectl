@@ -2963,17 +2963,16 @@ async fn count_tokens_endpoint_listed_in_route_table_under_auth_layer() {
 /// status code on both /v1/messages and /v1/messages/count_tokens.
 #[tokio::test]
 async fn count_tokens_rejects_payload_too_large_with_413_anthropic_envelope() {
-    // Configure a small body cap so we test the limit without shipping
-    // a 33+ MiB payload to defeat the default 32 MiB.
+    // A tiny cap exercises the same rejection without racing an early 413
+    // against a multi-megabyte upload still blocked on the TCP send buffer.
     let mut config_owned =
         (*anthropic_proxy_config("http://127.0.0.1:1", None, BTreeMap::new())).clone();
-    config_owned.server.max_body_bytes = 1024 * 1024;
+    config_owned.server.max_body_bytes = 1024;
     let config = std::sync::Arc::new(config_owned);
     let base = helpers::spawn(config).await;
 
-    // Build a >1 MiB body (server-side cap is 1 MiB). 2 MiB of `a`s
-    // overflows the cap so axum's DefaultBodyLimit fires.
-    let huge = "a".repeat(2 * 1024 * 1024);
+    // A real, valid JSON body still exceeds the configured limit by >2x.
+    let huge = "a".repeat(2 * 1024);
     let body = json!({
         "model": "heavy",
         "messages": [{"role": "user", "content": huge}]

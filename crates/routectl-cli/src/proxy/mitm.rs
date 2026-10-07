@@ -329,7 +329,7 @@ mod tests {
     /// without waiting on the wall clock. On a pre-fix build (accept not
     /// wrapped in a timeout) the server task never returns and the
     /// bounded outer timeout below fails the test instead of hanging.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_stalled_client_hello_times_out_and_releases_the_permit() {
         let dir = tempfile::tempdir().unwrap();
         let acceptor = load_or_create(dir.path(), HOST).unwrap();
@@ -350,24 +350,25 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let server_task = tokio::spawn({
-            let ctx = Arc::clone(&ctx);
-            async move {
-                let (tcp, _) = listener.accept().await.unwrap();
-                handle_mitm_connection(tcp, acceptor, ctx, permit).await;
-            }
-        });
-
-        // Complete the TCP connect but send nothing: the accept sits
-        // waiting on a ClientHello that never arrives. Hold the client
-        // socket open (a named binding, not `_`) so the server observes a
-        // stall rather than an immediate EOF.
+        // Establish and accept TCP on real time first. Paused-time runtimes
+        // can auto-advance the outer deadline before OS accept readiness is
+        // delivered, making a correct handshake timeout appear broken.
         let _client = TcpStream::connect(addr).await.unwrap();
-
-        tokio::time::timeout(Duration::from_secs(30), server_task)
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio::time::pause();
+        let mut handshake = Box::pin(handle_mitm_connection(
+            tcp,
+            acceptor,
+            Arc::clone(&ctx),
+            permit,
+        ));
+        // Poll synchronously once: the handler's own deadline is now installed
+        // before the test clock advances, independent of task scheduling.
+        assert!(futures::poll!(&mut handshake).is_pending());
+        tokio::time::advance(TLS_HANDSHAKE_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::timeout(Duration::from_secs(1), handshake)
             .await
-            .expect("handle_mitm_connection must return once the handshake times out")
-            .unwrap();
+            .expect("handle_mitm_connection must return once the handshake times out");
 
         assert_eq!(ctx.metrics.tls_handshake_timeouts_total(), 1);
         assert_eq!(ctx.metrics.tls_handshake_failures_total(), 1);

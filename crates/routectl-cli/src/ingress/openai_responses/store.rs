@@ -15,7 +15,7 @@
 //!   leaves first; an evicted id fails the same clear 400.
 //! - **Full-context entries.** Each stored entry keeps the wire
 //!   `response` object (what `GET /v1/responses/{id}` serves) AND the
-//!   canonical request context that produced it (`Vec<Message>`: prior
+//!   canonical request context that produced it (messages + passthrough items: prior
 //!   turns + this turn's input, no output). Chaining replays the
 //!   context, then the prior response's own output items -- matching
 //!   the official API's server-side conversation semantics rather than
@@ -28,7 +28,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use routectl_core::Message;
+use routectl_core::{ChatRequest, Message, ResponsesPassthroughItem};
 use serde_json::Value;
 
 /// Default store capacity (responses held). Bounded so a long-running
@@ -42,7 +42,42 @@ pub const DEFAULT_STORE_CAPACITY: usize = 512;
 #[derive(Debug, Clone)]
 pub(super) struct StoredResponse {
     pub(super) response: Value,
-    pub(super) context: Vec<Message>,
+    pub(super) context: ResponseContext,
+}
+
+/// Full canonical conversation context, including same-dialect input items
+/// that have no Message representation. Their positions are canonical message
+/// boundaries, independent of lane-specific wire expansion or content drops.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseContext {
+    pub messages: Vec<Message>,
+    pub passthrough: Vec<ResponsesPassthroughItem>,
+    pub system_history: Vec<Message>,
+}
+
+impl From<Vec<Message>> for ResponseContext {
+    fn from(messages: Vec<Message>) -> Self {
+        Self {
+            messages,
+            passthrough: Vec::new(),
+            system_history: Vec::new(),
+        }
+    }
+}
+
+impl From<&ChatRequest> for ResponseContext {
+    fn from(req: &ChatRequest) -> Self {
+        Self {
+            messages: req.messages.to_vec(),
+            passthrough: req.routectl_internal.responses_input_passthrough.clone(),
+            system_history: req
+                .routectl_internal
+                .responses_system_history
+                .as_deref()
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Bounded FIFO response store. Shared as `Arc` from `AppState` into
@@ -79,7 +114,8 @@ impl ResponsesStore {
     /// Insert (or overwrite) one response with its producing context.
     /// Overwriting an existing id keeps its original eviction position
     /// (it was already queued) rather than re-queueing it at the tail.
-    pub fn insert(&self, id: String, response: Value, context: Vec<Message>) {
+    pub fn insert(&self, id: String, response: Value, context: impl Into<ResponseContext>) {
+        let context = context.into();
         let mut inner = self.inner.lock().expect("responses store poisoned");
         if inner
             .map
@@ -110,7 +146,7 @@ impl ResponsesStore {
     }
 
     /// The full entry (chaining): wire response + request context.
-    pub fn get_full(&self, id: &str) -> Option<(Value, Vec<Message>)> {
+    pub fn get_full(&self, id: &str) -> Option<(Value, ResponseContext)> {
         self.inner
             .lock()
             .expect("responses store poisoned")
@@ -122,12 +158,20 @@ impl ResponsesStore {
     /// Count of stored entries (tests + diagnostics).
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("responses store poisoned").map.len()
+        self.inner
+            .lock()
+            .expect("responses store poisoned")
+            .map
+            .len()
     }
 
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().expect("responses store poisoned").map.is_empty()
+        self.inner
+            .lock()
+            .expect("responses store poisoned")
+            .map
+            .is_empty()
     }
 }
 

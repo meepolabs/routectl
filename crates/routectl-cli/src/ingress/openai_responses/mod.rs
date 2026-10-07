@@ -44,13 +44,13 @@ mod parse;
 #[path = "parse_tests.rs"]
 mod parse_tests;
 mod render;
+mod store;
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod store_tests;
-mod store;
 mod stream;
 
-pub use store::ResponsesStore;
+pub use store::{ResponseContext, ResponsesStore};
 
 use std::sync::Arc;
 
@@ -71,9 +71,7 @@ pub struct ResponsesIngress {
 
 impl ResponsesIngress {
     pub fn with_store(store: Arc<ResponsesStore>) -> Self {
-        Self {
-            store: Some(store),
-        }
+        Self { store: Some(store) }
     }
 }
 
@@ -165,6 +163,11 @@ pub struct ResponsesStreamState {
     /// Accumulated reasoning details (summary / text / encrypted),
     /// replayed into the completed body's `reasoning` items.
     reasoning_accumulator: Vec<routectl_core::ReasoningDetail>,
+    /// Completed item bodies in emitted order. Native items form grouping
+    /// barriers, so their completed body must use this sequence, not collapsed
+    /// text/reasoning accumulators.
+    completed_items: Vec<Value>,
+    native_output_seen: bool,
     /// The canonical request this stream serves, seeded by the adapter's
     /// `new_stream_state`. Drives the request-parameter echo on the
     /// `response.created` / `response.completed` bodies and the
@@ -197,6 +200,8 @@ impl Default for ResponsesStreamState {
             text_accumulator: String::new(),
             current_text: String::new(),
             reasoning_accumulator: Vec::new(),
+            completed_items: Vec::new(),
+            native_output_seen: false,
             req: None,
             store: None,
         }
@@ -299,7 +304,7 @@ impl IngressAdapter for ResponsesIngress {
             && let Some(store) = self.store.as_ref()
             && let Some(id) = wire.get("id").and_then(Value::as_str)
         {
-            store.insert(id.to_string(), wire.clone(), req.messages.to_vec());
+            store.insert(id.to_string(), wire.clone(), req);
         }
         crate::ingress::render_value_to_bytes(self.id(), wire)
     }

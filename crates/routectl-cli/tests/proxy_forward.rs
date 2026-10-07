@@ -397,3 +397,5 @@ async fn collect_body(
 ) -> Bytes {
     response.into_body().collect().await.unwrap().to_bytes()
 }
+
+include!("common/proxy_forward_deadline_tests.rs");

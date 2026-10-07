@@ -125,7 +125,10 @@ fn sse_output_item_added_opens_tool_use_block_state() {
     let chunks = drive(&mut state, ev);
 
     // Assert
-    assert!(chunks.is_empty());
+    assert_eq!(chunks.len(), 1);
+    let opening = &chunks[0].choices[0].delta.tool_calls.as_ref().unwrap()[0];
+    assert_eq!(opening["id"], "call_xy");
+    assert_eq!(opening["function"]["name"], "calc");
     let delta_chunks = drive(
         &mut state,
         json!({
@@ -140,8 +143,8 @@ fn sse_output_item_added_opens_tool_use_block_state() {
         .tool_calls
         .as_ref()
         .unwrap();
-    assert_eq!(tcs[0]["id"], "call_xy");
-    assert_eq!(tcs[0]["function"]["name"], "calc");
+    assert!(tcs[0].get("id").is_none());
+    assert!(tcs[0]["function"].get("name").is_none());
     assert_eq!(tcs[0]["function"]["arguments"], "{\"a\":1}");
 }
 
@@ -264,7 +267,7 @@ fn sse_function_call_arguments_delta_emits_tool_call_partial() {
     let tcs = chunks[0].choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tcs.len(), 1);
     assert_eq!(tcs[0]["index"], 0);
-    assert_eq!(tcs[0]["id"], "c1");
+    assert!(tcs[0].get("id").is_none());
     assert_eq!(tcs[0]["function"]["arguments"], "{\"a\":");
 }
 
@@ -621,7 +624,7 @@ fn sse_full_session_reasoning_then_tool_call_round_trip() {
         .iter()
         .filter(|c| c.choices[0].delta.tool_calls.is_some())
         .collect();
-    assert_eq!(tool_chunks.len(), 2);
+    assert_eq!(tool_chunks.len(), 3);
     let concat: String = tool_chunks
         .iter()
         .map(|c| {

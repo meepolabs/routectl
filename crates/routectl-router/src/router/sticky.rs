@@ -187,50 +187,96 @@ impl Router {
         }
     }
 
-    /// Resolve the sticky least-loaded seat walk order for `key` over a
-    /// multi-seat pool. Resolves the pin (with its one-time overflow marker)
-    /// FIRST, gathers the per-seat capacity snapshots (one lock each; N is
-    /// small and locks are uncontended), then asks the pure selector for the
-    /// walk order and a
-    /// [`SelectionOutcome`](crate::seat_pool::SelectionOutcome). On a birth it
-    /// pins the chosen home (`repinned: false`); on a one-time overflow-repin
-    /// it pins the new home (`repinned: true`). A healthy home, an
-    /// already-repinned home, or a no-healthy-sibling case stays put with no
-    /// pin write -- the one-time cap + hysteresis. Never logs the raw session
-    /// key.
-    ///
-    /// Subscription-quota tiers are gathered for the BIRTH candidate set only
-    /// (the pure selector ignores them on every other path), and only while
-    /// the kill switch is on. A healthy pin therefore never reads quota state
-    /// at all, so no soft cap can move a warm session.
-    ///
-    /// Returns the walk order paired with a fixed-vocabulary
-    /// `selection_decision` token mapped from the `SelectionOutcome`
-    /// (observability only -- the pin writes, logs, and returned order are
-    /// byte-for-byte unchanged from before the token was added). The quota
-    /// partition changes WHICH seat a birth picks and never that vocabulary.
+    /// Resolve and conditionally commit a birth or one-time overflow migration.
+    /// A concurrent winner owns the key: a losing caller reselects using that
+    /// authoritative home, including its overflow marker and dispatchability.
+    /// Capacity/quota locks are never held together with the pin-map lock.
     pub(super) fn sticky_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         key: &str,
         nickname: &str,
     ) -> (Vec<usize>, &'static str) {
-        // A pinned member no longer present in this pool resolves to None
-        // -> treated as a miss (re-pick), and `repinned` resets to false on
-        // the fresh birth -- correct.
-        let pin: Option<(usize, bool)> = self.sticky_pins.get(key).and_then(|p| {
+        use crate::seat_pool::{SeatPin, SelectionOutcome};
+        let mut observed = self.sticky_pins.get(key);
+        for _ in 0..8 {
+            let (order, outcome, quota_decision) =
+                self.select_sticky_order(seats, observed.as_ref(), nickname);
+            let candidate = match outcome {
+                SelectionOutcome::Birth { home } => Some(SeatPin {
+                    member: seats[home].provider_name.clone(),
+                    repinned: false,
+                }),
+                SelectionOutcome::OverflowRepin { home } => Some(SeatPin {
+                    member: seats[home].provider_name.clone(),
+                    repinned: true,
+                }),
+                _ => None,
+            };
+            if let Some(candidate) = candidate
+                && let Err(winner) =
+                    self.sticky_pins
+                        .compare_and_put(key, observed.as_ref(), candidate)
+            {
+                observed = winner;
+                continue;
+            }
+            self.record_quota_placement(quota_decision, nickname);
+            return (order, self.log_sticky_outcome(nickname, seats, outcome));
+        }
+        // Under repeated eviction or overlapping membership changes, serialize
+        // selection itself instead of spinning indefinitely. No capacity/quota
+        // locks are acquired under the pin lock: the pure selector uses snapshots.
+        let snapshots = self.gather_capacity_snapshots(seats, nickname, Instant::now());
+        let quota = self.quota_tiers_for_birth(seats);
+        let tiebreak = self.sticky_pins.next_tiebreak();
+        let (order, outcome, decision) = self.sticky_pins.select_and_put(key, |pin| {
+            let home = pin.and_then(|p| seats.iter().position(|s| s.provider_name == p.member));
+            let selected = crate::seat_pool::sticky_least_loaded_order(
+                seats.len(),
+                home,
+                home.is_some() && pin.is_some_and(|p| p.repinned),
+                &snapshots,
+                tiebreak,
+                &quota,
+            );
+            let candidate = match selected.1 {
+                SelectionOutcome::Birth { home } => Some(SeatPin {
+                    member: seats[home].provider_name.clone(),
+                    repinned: false,
+                }),
+                SelectionOutcome::OverflowRepin { home } => Some(SeatPin {
+                    member: seats[home].provider_name.clone(),
+                    repinned: true,
+                }),
+                _ => None,
+            };
+            (selected, candidate)
+        });
+        self.record_quota_placement(decision, nickname);
+        (order, self.log_sticky_outcome(nickname, seats, outcome))
+    }
+
+    /// Pure selector inputs are gathered without holding the pin lock. A
+    /// removed member is a fresh birth; hits never consult subscription quota,
+    /// so a soft cap cannot move an established warm session.
+    fn select_sticky_order(
+        &self,
+        seats: &[crate::seat_pool::SeatTarget],
+        observed: Option<&crate::seat_pool::SeatPin>,
+        nickname: &str,
+    ) -> (
+        Vec<usize>,
+        crate::seat_pool::SelectionOutcome,
+        QuotaDecision,
+    ) {
+        let pin = observed.and_then(|p| {
             seats
                 .iter()
                 .position(|s| s.provider_name == p.member)
                 .map(|i| (i, p.repinned))
         });
-
-        let now = Instant::now();
-        let snapshots = self.gather_capacity_snapshots(seats, nickname, now);
-
-        // Advance the anti-herd counter only when a pick is actually
-        // attempted: a miss, or a hit whose home is non-dispatchable and not
-        // yet repinned. A sticky-stay does not consume tiebreak.
+        let snapshots = self.gather_capacity_snapshots(seats, nickname, Instant::now());
         let will_attempt_pick = match pin {
             None => true,
             Some((home, repinned)) => !snapshots[home].is_dispatchable() && !repinned,
@@ -240,26 +286,19 @@ impl Router {
         } else {
             0
         };
-
-        // Read quota ONLY for a genuine birth. A hit -- healthy or migrating
-        // -- never consults it, so the store is not even touched.
         let quota = if pin.is_none() {
             self.quota_tiers_for_birth(seats)
         } else {
             Vec::new()
         };
-
-        let (order, outcome, quota_decision) = crate::seat_pool::sticky_least_loaded_order(
+        crate::seat_pool::sticky_least_loaded_order(
             seats.len(),
             pin.map(|(i, _)| i),
             pin.is_some_and(|(_, r)| r),
             &snapshots,
             tiebreak,
             &quota,
-        );
-        self.record_quota_placement(quota_decision, nickname);
-        let token = self.apply_sticky_outcome(key, nickname, seats, outcome);
-        (order, token)
+        )
     }
 
     /// Gather the per-seat capacity snapshots for sticky least-loaded
@@ -292,14 +331,11 @@ impl Router {
             .collect()
     }
 
-    /// Apply the pin write implied by `outcome` and return the fixed-vocabulary
-    /// `selection_decision` token. A birth pins the chosen home
-    /// (`repinned: false`); a one-time overflow-repin pins the new home
-    /// (`repinned: true`); a stay or no-healthy case writes nothing. Never
-    /// logs the raw session key.
-    pub(super) fn apply_sticky_outcome(
+    /// Log ONLY a committed pick and return its fixed-vocabulary decision.
+    /// A losing conditional write emits nothing and adopts the winning pin.
+    /// Never logs the raw session key.
+    fn log_sticky_outcome(
         &self,
-        key: &str,
         nickname: &str,
         seats: &[crate::seat_pool::SeatTarget],
         outcome: crate::seat_pool::SelectionOutcome,
@@ -312,13 +348,6 @@ impl Router {
                     member = %member,
                     "sticky least-loaded birth pick: pinned session to seat"
                 );
-                self.sticky_pins.put(
-                    key,
-                    crate::seat_pool::SeatPin {
-                        member,
-                        repinned: false,
-                    },
-                );
                 "birth_pick"
             }
             crate::seat_pool::SelectionOutcome::OverflowRepin { home } => {
@@ -327,13 +356,6 @@ impl Router {
                     state_key = %seats[home].state_key_for(nickname),
                     member = %member,
                     "sticky least-loaded overflow-repin: migrated session to healthy sibling"
-                );
-                self.sticky_pins.put(
-                    key,
-                    crate::seat_pool::SeatPin {
-                        member,
-                        repinned: true,
-                    },
                 );
                 "overflow_repin"
             }

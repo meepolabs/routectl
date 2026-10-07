@@ -3187,3 +3187,6 @@ mod field_canary_settlement_tests;
 #[cfg(test)]
 #[path = "probe_pass_tests.rs"]
 mod probe_pass_tests;
+
+#[cfg(test)]
+mod chain_limit_tests;

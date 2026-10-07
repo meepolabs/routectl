@@ -344,3 +344,6 @@ fn a_rejection_for_an_unheld_capability_reports_no_match() {
         SameCapabilitySettlement::NoMatch,
     );
 }
+
+#[path = "probe_purge_ownership_tests.rs"]
+mod probe_purge_ownership_tests;

@@ -8,7 +8,7 @@ use routectl_core::{Error, Result};
 
 use crate::oauth::file_io;
 use crate::oauth::providers;
-use crate::oauth::types::{TokenRecord, seat_key, unix_now};
+use crate::oauth::types::{CredentialsFile, TokenRecord, seat_key, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
 use super::{OAuthStore, REFRESH_LEAD_SECS};
@@ -76,19 +76,23 @@ impl OAuthStore {
     /// missing parent dir during a rename) does not destroy the
     /// previously-loaded credentials.
     ///
-    /// Concurrency: the per-provider single-flight refresh mutex is
-    /// independent of this lock; a concurrent `get()` that crossed
-    /// `near_expiry` may rotate a token while a reload is in flight.
-    /// The reload acquires the file `RwLock` exclusively and overwrites
-    /// the cache wholesale, so the worst case is "the swap-in cache
-    /// briefly forgets a freshly-rotated token". The next `get()` will
-    /// re-rotate through the same single-flight gate; the only cost is
-    /// at most one extra refresh per reload race, which is bounded by
-    /// the operator-driven reload cadence (minutes-to-hours).
+    /// Concurrency: take the cache write lock BEFORE reading disk, just
+    /// like mutation commits. A reload cannot capture an old disk snapshot,
+    /// wait behind a refresh commit, then overwrite the rotated cache.
+    /// Refresh POSTs still run outside this lock; their conditional commit
+    /// checks THIS seat's credential, not whether any reload occurred.
     pub async fn reload_from_disk(&self) -> OAuthResult<()> {
-        let cf = file_io::load(&self.inner.path).await?;
+        self.reload_from(file_io::load(&self.inner.path)).await
+    }
+
+    /// Keep lock acquisition ahead of polling the disk-read future. Besides
+    /// sharing the reload path, this permits a deterministic ordering test.
+    async fn reload_from(
+        &self,
+        load: impl std::future::Future<Output = OAuthResult<CredentialsFile>>,
+    ) -> OAuthResult<()> {
         let mut guard = self.inner.file.write().await;
-        *guard = cf;
+        *guard = load.await?;
         // A successful load clears any degrade marker: the file is
         // readable again, so the next request resolves normally instead of
         // surfacing the stale cause. This is the ENTIRE recovery mechanism
@@ -101,15 +105,6 @@ impl OAuthStore {
             .load_error
             .write()
             .expect("load_error lock poisoned") = None;
-        // Bump the reload generation counter while the write lock is held.
-        // Any concurrent `refresh_under_lock` that snapshots the counter
-        // before this line and then checks it again (under its own write
-        // lock acquisition, which must come after we release here) will
-        // see the mismatch and discard its stale refresh result rather
-        // than clobbering the freshly-loaded cache.
-        self.inner
-            .reload_gen
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
         // Reset trigger: clear the WHOLE cooldown map. A reload is the
         // file-watch recovery escape hatch (an operator may have fixed
         // a revoked credential out-of-band); a stale per-seat cooldown
@@ -341,19 +336,6 @@ impl OAuthStore {
             )));
         }
 
-        // Snapshot the reload generation before the network round-trip.
-        // If `reload_from_disk` completes while this POST is in-flight,
-        // it bumps this counter (under the file write lock). We re-check
-        // it under our own file write lock acquisition in step 4 so the
-        // comparison and the cache write are atomic with respect to any
-        // concurrent reload: either we see the old counter (no reload
-        // happened yet, we proceed normally) or the new counter (reload
-        // already committed a fresher state, we discard our result).
-        let gen_before = self
-            .inner
-            .reload_gen
-            .load(std::sync::atomic::Ordering::Acquire);
-
         // Step 3: actually refresh. Inspect the `OAuthError` variant
         // BEFORE the blanket `Error::Auth` wrap so a transient failure
         // (network / 5xx / malformed body) arms the per-seat cooldown,
@@ -361,7 +343,7 @@ impl OAuthStore {
         // cooldown mechanism (never enters it, never suppressed by it --
         // re-login semantics preserved).
         let flow = self.resolve_flow(provider)?;
-        let mut new_rec = match flow
+        let new_rec = match flow
             .refresh_token(self.http(), rec.refresh_token.expose())
             .await
         {
@@ -377,92 +359,50 @@ impl OAuthStore {
             }
         };
 
-        // Preserve the per-credential `session_id` across token
-        // rotation. The OAuthFlow trait has no slot for the prior
-        // record, so the codex flow always returns a record whose
-        // `session_id` is None on refresh; upstream expects one stable
-        // session-id across the credential's lifetime, so refresh
-        // preserves the prior value. Backfilling here also covers the
-        // v0.7.0 -> v0.7.1
-        // migration: pre-existing records have None; the next refresh
-        // (lazy or forced) does NOT mint a fresh session_id, leaving
-        // the per-provider factory path to fill it on first use.
-        if new_rec.session_id.is_none() {
-            new_rec.session_id = rec.session_id.clone();
-        }
+        // Step 4: conditionally commit against the credential used for the
+        // POST. No-op reloads and unrelated-seat changes cannot discard a
+        // rotating refresh token; a same-seat replacement or logout wins.
+        self.commit_refresh(provider, seat, rec, new_rec).await
+    }
 
-        // Step 4: persist atomically. Acquire the file write lock and
-        // re-check the reload generation counter BEFORE committing. If
-        // `reload_from_disk` ran while we were on the network (indicated
-        // by a changed counter), the cache already holds a fresher
-        // on-disk state; return that rather than clobbering it with our
-        // refresh result (which was derived from the pre-reload token).
-        {
-            let mut wguard = self.inner.file.write().await;
-            let gen_now = self
-                .inner
-                .reload_gen
-                .load(std::sync::atomic::Ordering::Acquire);
-            if gen_now != gen_before {
-                // A reload committed between our double-check and now.
-                // Return the current in-memory record. If it is still
-                // near-expiry the next `get()` will re-trigger a refresh
-                // through the same gate; cost is at most one extra POST
-                // per reload race (bounded by the operator-driven reload
-                // cadence of minutes to hours).
-                let reloaded = wguard
-                    .get(seat)
-                    .cloned()
-                    .ok_or_else(|| Error::from(OAuthError::NotLoggedIn(seat.to_string())))?;
-                return Ok(reloaded);
-            }
-            // No intra-process reload raced us: commit under the
-            // cross-process advisory lock, merging the one-seat rotation
-            // onto the disk-fresh state so a sibling seat survives (the
-            // `reload_gen` guard above covers the intra-process reload race;
-            // this lock covers the cross-process merge -- they are
-            // complementary). NO-RESURRECT: if the seat is absent from the
-            // disk-fresh state (a sibling logged it out mid-refresh), that
-            // logout is authoritative -- discard the refresh result rather
-            // than re-adding the seat. Only login (`write_record`) upserts
-            // unconditionally.
-            // A degraded store must never commit over a file it could not
-            // read. Defensive: every refresh enters through `read_record`
-            // (which already gates a degraded store out before the network
-            // POST), and `load_error` is only ever set at open and cleared
-            // at reload -- so this guard is a belt-and-braces boundary at
-            // the actual write site rather than a reachable path today.
-            if let Some(cause) = self.load_error_cause() {
-                return Err(Error::from(OAuthError::Degraded(cause)));
-            }
-            let seat_owned = seat.to_string();
-            let new_rec_for_commit = new_rec.clone();
-            let (merged, seat_present) = file_io::update_under_lock(&self.inner.path, move |cf| {
-                if cf.get(&seat_owned).is_some() {
-                    cf.upsert(&seat_owned, new_rec_for_commit);
-                    file_io::Mutation {
-                        directive: file_io::WriteDirective::Write,
-                        report: true,
-                    }
-                } else {
-                    file_io::Mutation {
-                        directive: file_io::WriteDirective::Skip,
-                        report: false,
-                    }
-                }
-            })
-            .await
-            .map_err(Error::from)?;
-            *wguard = merged;
-            if !seat_present {
-                return Err(Error::from(OAuthError::NotLoggedIn(seat.to_string())));
-            }
+    async fn commit_refresh(
+        &self,
+        provider: &str,
+        seat: &str,
+        prior: TokenRecord,
+        refreshed: TokenRecord,
+    ) -> Result<TokenRecord> {
+        let mut guard = self.inner.file.write().await;
+        let cached = guard
+            .get(seat)
+            .ok_or_else(|| Error::from(OAuthError::NotLoggedIn(seat.to_string())))?;
+        if !same_credential(cached, &prior) {
+            return Ok(cached.clone());
         }
-        // Ok-clear on the commit path: the refresh committed to disk, so
-        // any prior cooldown for this seat is cleared here (after the
-        // write), not on the network return. Recovery is logged once.
-        self.clear_cooldown_on_success(provider, seat);
-        Ok(new_rec)
+        // Defensive boundary: a degraded store must never write over a
+        // file it could not read, even if a caller bypassed read_record.
+        if let Some(cause) = self.load_error_cause() {
+            return Err(Error::from(OAuthError::Degraded(cause)));
+        }
+        let seat_owned = seat.to_string();
+        let (merged, committed) = file_io::update_under_lock(&self.inner.path, move |cf| {
+            conditional_refresh(cf, &seat_owned, &prior, refreshed)
+        })
+        .await
+        .map_err(Error::from)?;
+        // Even a skipped write adopts the disk-fresh state: a sibling
+        // login/logout wins immediately, without waiting for the watcher.
+        *guard = merged;
+        let result = guard
+            .get(seat)
+            .cloned()
+            .ok_or_else(|| Error::from(OAuthError::NotLoggedIn(seat.to_string())))?;
+        if committed {
+            self.clear_cooldown_on_success(provider, seat);
+        }
+        // Return the actual winning record, including disk-fresh metadata,
+        // not the unmerged response from the token endpoint.
+        Ok(result)
     }
 
     /// Resolve the `OAuthFlow` for `provider`. Production lookup goes
@@ -476,6 +416,46 @@ impl OAuthStore {
         let flow: &'static dyn providers::OAuthFlow =
             providers::lookup(provider).map_err(Error::from)?;
         Ok(flow)
+    }
+}
+
+/// Compare credential incarnations, excluding only locally mutable metadata.
+/// Tokens alone are insufficient: a login can keep a refresh token (or even
+/// an access token) while changing the other grant/account fields. Comparing
+/// all endpoint-owned fields also avoids treating project discovery or session
+/// backfill as a replacement. No schema change or global generation needed.
+fn same_credential(a: &TokenRecord, b: &TokenRecord) -> bool {
+    a.access_token == b.access_token
+        && a.refresh_token == b.refresh_token
+        && a.token_type == b.token_type
+        && a.expires_at_unix == b.expires_at_unix
+        && a.scopes == b.scopes
+        && a.account == b.account
+        && a.obtained_at_unix == b.obtained_at_unix
+}
+
+/// Runs only inside the advisory lock, against the disk-fresh seat. Login is
+/// the only unconditional upsert; refresh must not replace another login or
+/// resurrect logout. Preserve local metadata from THIS unchanged incarnation,
+/// including concurrent updates/clears, never from the pre-POST snapshot.
+fn conditional_refresh(
+    cf: &mut CredentialsFile,
+    seat: &str,
+    prior: &TokenRecord,
+    mut refreshed: TokenRecord,
+) -> file_io::Mutation<bool> {
+    let Some(fresh) = cf.get(seat).filter(|fresh| same_credential(fresh, prior)) else {
+        return file_io::Mutation {
+            directive: file_io::WriteDirective::Skip,
+            report: false,
+        };
+    };
+    refreshed.session_id = fresh.session_id.clone();
+    refreshed.cloud_project_id = fresh.cloud_project_id.clone();
+    cf.upsert(seat, refreshed);
+    file_io::Mutation {
+        directive: file_io::WriteDirective::Write,
+        report: true,
     }
 }
 
@@ -547,3 +527,11 @@ fn cooldown_reason(err: &OAuthError) -> String {
 #[cfg(test)]
 #[path = "refresh_tests.rs"]
 mod refresh_tests;
+
+#[cfg(test)]
+#[path = "refresh_race_tests.rs"]
+mod refresh_race_tests;
+
+#[cfg(test)]
+#[path = "refresh_cooldown_tests.rs"]
+mod refresh_cooldown_tests;

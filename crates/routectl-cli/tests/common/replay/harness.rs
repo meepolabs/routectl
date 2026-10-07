@@ -227,7 +227,8 @@ pub fn with_replay_enrichment(model: &ResolvedModel, mut req: ChatRequest) -> Ch
 
 static ANTHROPIC_INGRESS: AnthropicIngress = AnthropicIngress;
 static OPENAI_INGRESS: OpenAiIngress = OpenAiIngress;
-static OPENAI_RESPONSES_INGRESS: ResponsesIngress = ResponsesIngress;
+static OPENAI_RESPONSES_INGRESS: std::sync::LazyLock<ResponsesIngress> =
+    std::sync::LazyLock::new(ResponsesIngress::default);
 
 /// Resolve `meta.ingress_kind` to the adapter that parsed the captured
 /// inbound body. The rig writes the `IngressAdapter::id()` vocabulary
@@ -248,7 +249,7 @@ pub fn ingress_for_kind(kind: &str) -> Result<Option<&'static dyn IngressAdapter
         "" => Ok(None),
         "anthropic" => Ok(Some(&ANTHROPIC_INGRESS)),
         "openai" => Ok(Some(&OPENAI_INGRESS)),
-        "openai-responses" => Ok(Some(&OPENAI_RESPONSES_INGRESS)),
+        "openai-responses" => Ok(Some(&*OPENAI_RESPONSES_INGRESS)),
         other => Err(format!("unknown ingress_kind `{other}`")),
     }
 }

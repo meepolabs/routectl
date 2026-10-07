@@ -681,7 +681,9 @@ impl GeminiProvider {
                     }
                 }
             }
-            state.on_eos(&provider_id);
+            if let Err(e) = state.on_eos(&provider_id) {
+                yield Err(e);
+            }
         };
 
         routectl_core::wrap_stream_with_summary(
@@ -2156,3 +2158,7 @@ mod e2e_tests {
 
     include!("cloud_project_id_tests.rs");
 }
+
+#[cfg(test)]
+#[path = "provider_audit_tests.rs"]
+mod provider_audit_tests;

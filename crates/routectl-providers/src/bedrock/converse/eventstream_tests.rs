@@ -280,7 +280,7 @@ fn tool_use_lifecycle_emits_tool_call_deltas() {
     let mut state = ConverseStreamState::default();
 
     // Act: start with tool_use payload, two arg deltas, stop.
-    let _ = run(
+    let opening = run(
         "contentBlockStart",
         r#"{"contentBlockIndex":1,
             "start":{"toolUse":{"toolUseId":"tu_42","name":"calc"}}}"#,
@@ -302,8 +302,11 @@ fn tool_use_lifecycle_emits_tool_call_deltas() {
     assert_eq!(c1.len(), 1);
     let tcs1 = c1[0].choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tcs1[0]["index"], 0);
-    assert_eq!(tcs1[0]["id"], "tu_42");
-    assert_eq!(tcs1[0]["function"]["name"], "calc");
+    let metadata = &opening[0].choices[0].delta.tool_calls.as_ref().unwrap()[0];
+    assert_eq!(metadata["id"], "tu_42");
+    assert_eq!(metadata["function"]["name"], "calc");
+    assert!(tcs1[0].get("id").is_none());
+    assert!(tcs1[0]["function"].get("name").is_none());
     assert_eq!(tcs1[0]["function"]["arguments"], "{\"a\":");
     let tcs2 = c2[0].choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tcs2[0]["index"], 0);

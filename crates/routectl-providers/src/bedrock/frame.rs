@@ -111,16 +111,17 @@ impl FrameLabel {
 /// Per-frame payload interpretation. The framing driver calls `on_frame`
 /// for each decoded, validated `Message` and yields whatever chunks it
 /// returns; `on_eof` runs once at graceful end-of-stream so a handler can
-/// flush any state it held across frames.
+/// validate semantic completion and flush any state it held across frames.
 pub trait FrameHandler {
     /// Interpret one decoded, validated frame. Returns zero-or-more
     /// chunks to yield. `Err` is stream-fatal.
     fn on_frame(&mut self, provider_id: &str, message: Message) -> Result<Vec<ChatChunk>>;
 
     /// Called once at graceful EOF (empty buffer, no prelude pending).
-    /// Returned chunks are the last items yielded. Default: none.
-    fn on_eof(&mut self, _provider_id: &str) -> Vec<ChatChunk> {
-        Vec::new()
+    /// Returned chunks are the last items yielded; an error makes EOF fatal.
+    /// Default: none.
+    fn on_eof(&mut self, _provider_id: &str) -> Result<Vec<ChatChunk>> {
+        Ok(Vec::new())
     }
 }
 
@@ -490,8 +491,9 @@ where
                         // it held across frames (e.g. a captured
                         // stop_reason awaiting a metadata frame that never
                         // arrived).
-                        for c in handler.on_eof(&provider_id) {
-                            yield Ok(c);
+                        match handler.on_eof(&provider_id) {
+                            Ok(chunks) => for c in chunks { yield Ok(c); },
+                            Err(e) => yield Err(e),
                         }
                     }
                     return;
@@ -783,8 +785,8 @@ mod tests {
             ) -> Result<Vec<ChatChunk>> {
                 Ok(Vec::new())
             }
-            fn on_eof(&mut self, _provider_id: &str) -> Vec<ChatChunk> {
-                vec![ChatChunk::default()]
+            fn on_eof(&mut self, _provider_id: &str) -> Result<Vec<ChatChunk>> {
+                Ok(vec![ChatChunk::default()])
             }
         }
 

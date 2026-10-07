@@ -31,15 +31,10 @@
 //! - `model`                            -> `model` (alias-header override)
 //! - everything else                    -> `provider_extras` (forward-compat)
 //!
-//! Statefulness contract (deterministic, never a silent wrong answer):
-//! - `previous_response_id` present -> 400 (`Error::Validation`). The
-//!   client omitted prior context expecting the server to resolve it;
-//!   routectl is stateless and cannot, so answering would be wrong.
-//! - `store: true` (no previous_response_id) -> accepted, persistence
-//!   ignored with a WARN. The full turn is present, so the answer is
-//!   correct; retrieval-by-id later just won't work because routectl
-//!   never stores.
-//! - `store: false` / absent -> normal stateless path.
+//! Statefulness: a store-backed adapter replays the full stored conversation
+//! (canonical messages AND positioned passthrough items), prior output, then
+//! fresh input. A storeless adapter refuses previous_response_id rather than
+//! silently answering without history.
 
 use axum::http::HeaderMap;
 use serde_json::{Map, Value};
@@ -100,8 +95,7 @@ pub(super) fn translate_request(
     // input -- matching the official API's server-side semantics.
     // Storeless (library) builds keep the historical contract: a clear
     // 400 instead of a silent wrong answer.
-    let mut prev_entry: Option<(Value, Vec<routectl_core::Message>)> = None;
-    if let Some(prev_id) = obj
+    let prev_entry = if let Some(prev_id) = obj
         .get("previous_response_id")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -121,8 +115,10 @@ pub(super) fn translate_request(
                  (unknown id, evicted from the bounded store, or the daemon restarted)"
             ))
         })?;
-        prev_entry = Some(entry);
-    }
+        Some(entry)
+    } else {
+        None
+    };
     // store: spec default true. Honored when the store is wired;
     // storeless builds warn that nothing was kept.
     if obj.get("store").and_then(Value::as_bool) == Some(true) && store.is_none() {
@@ -169,11 +165,31 @@ pub(super) fn translate_request(
     // walked the input into `req.messages` above; the stored replay
     // PREPENDS to it so canonical message order is conversation order.
     if let Some((stored_response, stored_context)) = prev_entry {
-        let mut replayed = stored_context;
-        append_stored_output_items(&mut replayed, &stored_response);
-        let mut full = replayed;
-        full.extend(req.messages.iter().cloned());
-        req.messages = full.into();
+        let mut replayed = stored_context.messages;
+        req.routectl_internal.responses_system_history =
+            (!stored_context.system_history.is_empty())
+                .then(|| std::sync::Arc::new(stored_context.system_history));
+        let mut passthrough = stored_context.passthrough;
+        let output = build_messages(stored_response.get("output").cloned().unwrap_or_default());
+        let context_len = message_prefix_len(&replayed);
+        passthrough.extend(output.passthrough.into_iter().map(|mut p| {
+            p.modeled_prefix += context_len;
+            p
+        }));
+        replayed.extend(output.messages);
+        let history_len = message_prefix_len(&replayed);
+        passthrough.extend(
+            req.routectl_internal
+                .responses_input_passthrough
+                .drain(..)
+                .map(|mut p| {
+                    p.modeled_prefix += history_len;
+                    p
+                }),
+        );
+        replayed.extend(req.messages.iter().cloned());
+        req.messages = replayed.into();
+        req.routectl_internal.responses_input_passthrough = passthrough;
     }
 
     // The Responses `store` flag: spec default is `true`. Read BEFORE the
@@ -181,13 +197,33 @@ pub(super) fn translate_request(
     // Rides `routectl_internal` (transport-internal, skip-serialized) so
     // the render/stream paths can honor it without forwarding the flag
     // to any upstream.
-    req.routectl_internal.responses_store = obj
-        .get("store")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    req.routectl_internal.responses_store =
+        obj.get("store").and_then(Value::as_bool).unwrap_or(true);
 
-    // Lift in-array system/developer messages into req.system so loose
-    // Role::System entries do not reach mutual-exclusion egresses.
+    // Keep only in-array system provenance for chaining. Prior top-level
+    // instructions deliberately do not carry across previous_response_id.
+    let mut history = req
+        .routectl_internal
+        .responses_system_history
+        .take()
+        .map(std::sync::Arc::unwrap_or_clone)
+        .unwrap_or_default();
+    history.extend(
+        req.messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::System))
+            .cloned(),
+    );
+    let mut messages = history.clone();
+    messages.extend(
+        req.messages
+            .iter()
+            .filter(|m| !matches!(m.role, Role::System))
+            .cloned(),
+    );
+    req.messages = messages.into();
+    req.routectl_internal.responses_system_history =
+        (!history.is_empty()).then(|| std::sync::Arc::new(history));
     crate::ingress::lift_system_messages(&mut req);
 
     // tools -> ToolDef[].
@@ -384,39 +420,24 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
     let mut messages: Vec<Message> = Vec::with_capacity(items.len());
     let mut passthrough: Vec<ResponsesPassthroughItem> = Vec::new();
     let mut additional_tools: Vec<Value> = Vec::new();
-    // Count of modeled (non-passthrough) input items seen so far. Recorded
-    // on each preserved item as its "modeled-prefix index" so the Responses
-    // egress can splice the item back at its original conversation position
-    // instead of appending it after every modeled item.
-    let mut modeled_prefix: usize = 0;
+    // Passthrough positions are canonical message boundaries, not estimated
+    // wire-item counts: a lane may expand or discard a modeled message.
+    let mut modeled = Vec::new();
+    let mut modeled_prefix = 0;
     for item in items {
         let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+        // A passthrough item is a grouping barrier. Never attach a later
+        // call/reasoning item to an assistant turn before that barrier:
+        // egress would then move the native item across the preserved one.
         match kind {
-            // A `message` item that omits `type` is tolerated: the
-            // Responses API treats a `{role, content}` object as an
-            // implicit message. Handle the empty-kind case as a message
-            // when it carries a role.
-            "message" => {
-                push_message_item(&mut messages, &item);
-                modeled_prefix += 1;
-            }
-            "" if item.get("role").is_some() => {
-                push_message_item(&mut messages, &item);
-                modeled_prefix += 1;
-            }
-            "function_call" => {
-                attach_function_call(&mut messages, &item);
-                modeled_prefix += 1;
-            }
-            "function_call_output" => {
-                messages.push(function_call_output_message(&item));
-                modeled_prefix += 1;
-            }
-            "reasoning" => {
-                attach_reasoning(&mut messages, &item);
-                modeled_prefix += 1;
-            }
+            "message" => push_message_item(&mut modeled, &item),
+            "" if item.get("role").is_some() => push_message_item(&mut modeled, &item),
+            "function_call" => attach_function_call(&mut modeled, &item),
+            "function_call_output" => modeled.push(function_call_output_message(&item)),
+            "reasoning" => attach_reasoning(&mut modeled, &item),
             other => {
+                modeled_prefix += message_prefix_len(&modeled);
+                messages.append(&mut modeled);
                 if other == ADDITIONAL_TOOLS_ITEM
                     && let Some(declared) = item.get("tools").and_then(Value::as_array)
                 {
@@ -445,6 +466,7 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
             }
         }
     }
+    messages.extend(modeled);
     ParsedInput {
         messages,
         passthrough,
@@ -1008,39 +1030,17 @@ fn text_without_format(text: Value) -> Option<Map<String, Value>> {
 // forward-compat sweep
 // ---------------------------------------------------------------------------
 
-/// Move every key NOT handled above out of the request object into a
-/// provider_extras map. `store` and `previous_response_id` are dropped
-/// (not forwarded): previous_response_id already 400'd, and store is a
-/// persistence intent routectl never honors. Mirrors the openai /
-/// anthropic ingress forward-compat sweep so a new Responses field
-/// reaches the egress without a code edit.
-/// Append the prior response's own `output[]` items onto canonical
-/// messages during `previous_response_id` chain resolution. Stored
-/// outputs carry the same shapes the ingress parses for input items
-/// (message / reasoning / function_call); function_call_output can
-/// never appear in an output. Uses the same per-item builders the input
-/// walk uses so replay cannot drift from a fresh client replay of the
-/// same shapes.
-fn append_stored_output_items(messages: &mut Vec<routectl_core::Message>, stored: &Value) {
-    let Some(items) = stored.get("output").and_then(Value::as_array) else {
-        return;
-    };
-    for item in items {
-        match item.get("type").and_then(Value::as_str).unwrap_or("") {
-            "message" => push_message_item(messages, item),
-            "" if item.get("role").is_some() => push_message_item(messages, item),
-            "function_call" => attach_function_call(messages, item),
-            "reasoning" => attach_reasoning(messages, item),
-            other => {
-                tracing::debug!(
-                    item_kind = %routectl_core::sanitize_for_log(other),
-                    "openai-responses ingress: skipping unmodeled stored output item on chain replay"
-                );
-            }
-        }
-    }
+/// Canonical message boundaries survive system lifting and lane-specific
+/// wire expansion. A preserved item is never grouped with later input.
+fn message_prefix_len(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .count()
 }
 
+/// Move unhandled top-level keys into provider_extras. The local store and
+/// previous_response_id controls were already consumed, never forwarded.
 fn sweep_extras(obj: Map<String, Value>) -> Map<String, Value> {
     let mut extras = Map::new();
     for (k, v) in obj {

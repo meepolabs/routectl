@@ -763,7 +763,8 @@ pub enum PurgePreparation {
     /// No such entry is resident. Nothing reserved, nothing to commit, and the
     /// caller answers a clean no-op.
     Absent,
-    /// Another purge holds the lease for this key.
+    /// Another purge or an admitted re-probe owns this key, or a generation
+    /// boundary is awaiting settlement. Retry after that owner finishes.
     Busy,
     /// The submitting generation is stale for a catalog-scoped key: this purge
     /// arrived through a superseded Router, whose registry the published Router
@@ -839,6 +840,9 @@ enum Intent {
     Mutate,
     /// Produces no new version: reports the resident incarnation, consuming none.
     Read,
+    /// Claims a probe on resident truth. Ownership follows the active revision,
+    /// independently of the pending generation used to stamp persistence events.
+    ProbeRead,
 }
 
 /// An applied mutation's result plus the metadata every consumer of it needs.
@@ -1118,6 +1122,15 @@ impl LearnedCapabilityRegistry {
         // Slow path: claim the single re-probe slot, re-checking under the
         // exclusive lock (the entry may have changed since the read).
         let mut entries = self.entries.write();
+        // The ungated admission path must also respect an existing purge.
+        // Keep entries -> leases ordering and do not claim a slot a lease
+        // would prevent its guard from settling.
+        let leases = self.purge_leases.read();
+        if leases.contains(&key) {
+            return entries
+                .get(&key)
+                .map_or(RoutingDecision::Allow, LearnedEntry::acting_decision);
+        }
         self.acting_negative_for_in(&mut entries, &key, now)
     }
 
@@ -1703,9 +1716,14 @@ impl LearnedCapabilityRegistry {
             // the key holds nothing.
             _ => key.map_or(0, |key| entries.get(key).map_or(0, |e| e.incarnation)),
         };
-        // The effective generation, chosen while the guard still holds: pending
-        // when a boundary is admitted-but-uncommitted, otherwise active.
-        let generation = pending.map_or(*active, |r| r.generation);
+        // Probe ownership belongs to resident truth, not an uncommitted boundary.
+        // If the boundary rolls back, this admission must still release its slot;
+        // if it commits, catalog-scoped entries are pruned and settlement is stale.
+        let generation = if matches!(intent, Intent::ProbeRead) {
+            *active
+        } else {
+            pending.map_or(*active, |r| r.generation)
+        };
         drop(leases);
         drop(entries);
         drop(pending);
@@ -2019,15 +2037,13 @@ impl LearnedCapabilityRegistry {
         provider_kind: &str,
         now: Instant,
     ) -> Option<(RoutingDecision, u64)> {
-        match self.guarded_read(
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        match self.guarded_keyed(
             generation,
-            state_key,
+            Some(&key),
+            Intent::ProbeRead,
             feature_key_raw,
-            provider_kind,
-            |entries, _leased| {
-                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                self.acting_negative_for_in(entries, &key, now)
-            },
+            |entries, _leased| self.acting_negative_for_in(entries, &key, now),
         ) {
             // A read reports the resident entry's own metadata; `Reserved` and
             // `Stale` are both refusals and answer `None`, so a caller cannot act
@@ -2063,7 +2079,8 @@ impl LearnedCapabilityRegistry {
     /// so a boundary transition cannot land between the generation check and the
     /// capture. Returns while still holding nothing: the caller awaits SQLite with
     /// no registry lock held, which is the whole point of splitting prepare from
-    /// finalize.
+    /// finalize. A key whose re-probe is still in flight returns `Busy`: the
+    /// purge must not prevent its owner from settling or releasing that slot.
     pub fn prepare_purge(
         &self,
         generation: u64,
@@ -2103,6 +2120,14 @@ impl LearnedCapabilityRegistry {
         let Some(entry) = entries.get(&key) else {
             return PurgePreparation::Absent;
         };
+        // A re-probe owns this entry until settlement (including cancellation
+        // and unreached-admission drops). Leasing it now would refuse that
+        // settlement; if persistence then failed, releasing only the lease
+        // would strand in_flight forever. Refuse instead, under the same entries
+        // guard as admission, without touching the probe's ownership or state.
+        if entry.in_flight {
+            return PurgePreparation::Busy;
+        }
         let captured = entry.clone();
         let mut leases = self.purge_leases.write();
         self.note_acquired("purge_leases");

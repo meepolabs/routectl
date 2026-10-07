@@ -13,7 +13,7 @@
 //! `true`, matching codex's `ResponsesApiRequest` default.
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
-use routectl_core::{ChatRequest, ResponsesPassthroughItem, Result};
+use routectl_core::{ChatRequest, Result};
 
 use super::messages::build_input;
 use super::system::{flush_fingerprint_tally, translate_system};
@@ -106,11 +106,10 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
 /// codex-only kinds (`local_shell_call`, `custom_tool_call(_output)`,
 /// `tool_search_call`, `agent_message`, ...) that no canonical field
 /// models; replaying them keeps a codex multi-turn conversation whole
-/// instead of dropping them. Each carries a `modeled_prefix` (the count
-/// of modeled INPUT items that preceded it inbound), so it is re-emitted
-/// after that many modeled EGRESS items -- preserving original source
-/// order rather than appending everything to the tail. Preserve-and-
-/// passthrough only: the raw JSON is forwarded unchanged, no cross-
+/// instead of dropping them. Each carries a `modeled_prefix` naming a
+/// canonical message boundary, so lane-specific expansion or drops cannot
+/// move it across later conversation items.
+/// Preserve-and-passthrough only: the raw JSON is forwarded unchanged, no cross-
 /// dialect translation. Empty for every request that did not enter
 /// through the Responses ingress.
 fn build_input_with_passthrough(
@@ -118,57 +117,34 @@ fn build_input_with_passthrough(
     auth_kind: AuthKind,
     req: &ChatRequest,
 ) -> Result<Vec<ResponseInput>> {
-    let items = build_input(id, auth_kind, &req.messages)?;
-    let modeled: Vec<ResponseInput> = items.into_iter().map(ResponseInput::Item).collect();
-    Ok(merge_passthrough(
-        modeled,
-        &req.routectl_internal.responses_input_passthrough,
-    ))
-}
-
-/// Splice preserved passthrough items back into the modeled egress
-/// `input[]` so each sits at its original inbound position instead of
-/// being appended after every modeled item. Each passthrough carries
-/// `modeled_prefix` = the count of modeled INPUT items that preceded it
-/// inbound; it is emitted after that many modeled EGRESS items.
-/// Passthroughs keep their mutual inbound order.
-///
-/// Residual limitation: the prefix counts INBOUND modeled items, while
-/// the splice indexes EGRESS modeled items. These match 1:1 for plain
-/// messages (the regression-tested case), but a single modeled inbound
-/// item can expand to a different egress-item count -- an assistant turn
-/// with tool_calls emits a message item PLUS one `function_call` item per
-/// call, and a `function_call` input item attaches to a prior turn rather
-/// than emitting its own message. When the counts diverge a passthrough
-/// lands at the best stable position (prefix-count splice, clamped to the
-/// tail) rather than its exact original slot -- still order-stable, never
-/// dropped.
-fn merge_passthrough(
-    modeled: Vec<ResponseInput>,
-    passthrough: &[ResponsesPassthroughItem],
-) -> Vec<ResponseInput> {
+    let passthrough = &req.routectl_internal.responses_input_passthrough;
     if passthrough.is_empty() {
-        return modeled;
+        return Ok(build_input(id, auth_kind, &req.messages)?
+            .into_iter()
+            .map(ResponseInput::Item)
+            .collect());
     }
-    let mut out: Vec<ResponseInput> = Vec::with_capacity(modeled.len() + passthrough.len());
+    let mut out = Vec::new();
     let mut next = passthrough.iter().peekable();
-    for (i, item) in modeled.into_iter().enumerate() {
-        while let Some(p) = next.peek() {
-            if p.modeled_prefix > i {
-                break;
-            }
+    for (i, message) in req
+        .messages
+        .iter()
+        .filter(|m| !matches!(m.role, routectl_core::Role::System))
+        .enumerate()
+    {
+        while next.peek().is_some_and(|p| p.modeled_prefix <= i) {
             out.push(ResponseInput::Passthrough(
                 next.next().expect("peeked").item.clone(),
             ));
         }
-        out.push(item);
+        out.extend(
+            build_input(id, auth_kind, std::slice::from_ref(message))?
+                .into_iter()
+                .map(ResponseInput::Item),
+        );
     }
-    // Trailing passthroughs whose prefix exceeds the modeled egress count
-    // (or that follow the last modeled item) land at the tail, in order.
-    for p in next {
-        out.push(ResponseInput::Passthrough(p.item.clone()));
-    }
-    out
+    out.extend(next.map(|p| ResponseInput::Passthrough(p.item.clone())));
+    Ok(out)
 }
 
 /// Cache-prefix surfaces (other than `system`) that carry a caller

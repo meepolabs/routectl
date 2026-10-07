@@ -21,6 +21,31 @@ use crate::ingress::openai_responses::ResponsesStreamState;
 // Builders
 // ---------------------------------------------------------------------------
 
+#[test]
+fn native_output_replay_is_bounded_and_never_silently_truncates_the_completed_body() {
+    let mut state = fresh();
+    let mut chunk = text_chunk("");
+    chunk.choices.clear();
+    let mut meta = routectl_core::UpstreamMeta::default();
+    meta.responses_output = Some(std::sync::Arc::new(vec![
+        json!({"type":"future_native_item", "id":"native"}),
+    ]));
+    chunk.upstream_meta = Some(meta);
+    for _ in 0..MAX_REPLAY_ITEMS {
+        render_chunk_internal(chunk.clone(), &mut state).unwrap();
+    }
+    assert_eq!(state.completed_items.len(), MAX_REPLAY_ITEMS);
+    assert!(render_chunk_internal(chunk, &mut state).is_err());
+    assert_eq!(state.completed_items.len(), MAX_REPLAY_ITEMS);
+    render_chunk_internal(finish_chunk("stop", None), &mut state).unwrap();
+    let events = render_eos_internal(&mut state);
+    let last: Value = serde_json::from_str(&events.last().unwrap().data).unwrap();
+    assert_eq!(
+        last["response"]["output"].as_array().unwrap().len(),
+        MAX_REPLAY_ITEMS
+    );
+}
+
 fn fresh() -> ResponsesStreamState {
     ResponsesStreamState::default()
 }
@@ -425,8 +450,7 @@ fn reasoning_summary_stream_emits_summary_delta_with_format_and_id() {
     // the backend's verification ("Encrypted content item_id did not
     // match the target item id").
     assert_eq!(
-        delta["item_id"],
-        "rs_1",
+        delta["item_id"], "rs_1",
         "reasoning delta must carry the item id the signature was bound to"
     );
 }
@@ -733,7 +757,8 @@ fn completed_body_output_matches_non_stream_render_for_text() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let non_stream_output = render_responses_response(&Default::default(), resp).unwrap()["output"].clone();
+    let non_stream_output =
+        render_responses_response(&Default::default(), resp).unwrap()["output"].clone();
 
     // Assert: identical output[] apart from the minted message-item id.
     // The stream path (and the official API) names message items with an
@@ -743,11 +768,8 @@ fn completed_body_output_matches_non_stream_render_for_text() {
     // sides so the test pins CONTENT parity; id consistency across the
     // stream events is pinned by completed_body_message_item_carries_minted_id.
     let strip_ids = |arr: &Value| -> Value {
-        let mut items = arr
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        for item in items.iter_mut() {
+        let mut items = arr.as_array().cloned().unwrap_or_default();
+        for item in &mut items {
             if let Some(obj) = item.as_object_mut() {
                 obj.remove("id");
             }

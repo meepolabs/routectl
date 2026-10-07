@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use routectl_providers::anthropic_api::sse::SseState;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::opening_ledger_rig::*;
 use super::opening_rig::*;
@@ -430,7 +430,7 @@ async fn an_openai_stream_row_carries_no_opening_keys() {
     // Assert: positive control -- the Anthropic row on the same lane has them.
     assert_eq!(openai.status, StatusCode::OK, "{}", openai.raw);
     assert_eq!(rows[0].ingress, "openai");
-    assert_eq!(rows[0].extra, Value::Null);
+    assert_eq!(rows[0].extra, json!({"correlation_request_id": "openai"}));
     assert_eq!(rows[1].ingress, "anthropic");
     assert_eq!(rows[1].extra["opening_present"], true);
 }

@@ -222,35 +222,7 @@ impl Router {
         // filter admitted here settles OtherError: release the in_flight slot
         // and leave the entry expired for the next real request to re-probe,
         // never latching it in flight.
-        let now = Instant::now();
-        for admission in probe_admissions {
-            if matches!(
-                self.learned_capabilities
-                    .record_probe_outcome_in_generation(
-                        // The generation the FILTER granted this admission
-                        // under. Sampling here instead would read after
-                        // `dispatch_chain_for_request`, which a boundary can
-                        // span.
-                        admission.generation,
-                        &admission.state_key,
-                        &admission.feature,
-                        admission.provider_kind,
-                        crate::learned_capability::ProbeOutcome::OtherError,
-                        now,
-                    ),
-                crate::learned_capability::GenerationOutcome::Stale
-            ) {
-                tracing::debug!(
-                    event = "probe_settlement_stale",
-                    surface = "count_tokens",
-                    state_key = %admission.state_key,
-                    capability_key = %admission.feature,
-                    attempted_outcome = "other_error",
-                    "probe settlement refused: its admission predates the live \
-                     capability generation"
-                );
-            }
-        }
+        self.settle_count_probe_admissions(probe_admissions);
         let mut saw_capable = false;
         // Reactive-repair ceiling for THIS client request, declared above the
         // per-seat walk exactly as `complete_inner` declares it above its
@@ -285,6 +257,43 @@ impl Router {
             "count_tokens: no count_tokens-capable provider in chain"
         };
         Err(Error::NotImplemented(req.model.clone(), detail.into()))
+    }
+
+    /// Counts cannot establish a messages capability: release every learned
+    /// admission immediately as OtherError, before any counting-seat await.
+    pub(super) fn settle_count_probe_admissions(
+        &self,
+        probe_admissions: Vec<super::ProbeAdmission>,
+    ) {
+        let now = Instant::now();
+        for admission in probe_admissions {
+            if matches!(
+                self.learned_capabilities
+                    .record_probe_outcome_in_generation(
+                        // The generation the FILTER granted this admission
+                        // under. Sampling here instead would read after
+                        // `dispatch_chain_for_request`, which a boundary can
+                        // span.
+                        admission.generation,
+                        &admission.state_key,
+                        &admission.feature,
+                        admission.provider_kind,
+                        crate::learned_capability::ProbeOutcome::OtherError,
+                        now,
+                    ),
+                crate::learned_capability::GenerationOutcome::Stale
+            ) {
+                tracing::debug!(
+                    event = "probe_settlement_stale",
+                    surface = "count_tokens",
+                    state_key = %admission.state_key,
+                    capability_key = %admission.feature,
+                    attempted_outcome = "other_error",
+                    "probe settlement refused: its admission predates the live \
+                     capability generation"
+                );
+            }
+        }
     }
 
     /// The per-seat walk itself: `Some(result)` when a seat settled the

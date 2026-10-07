@@ -26,7 +26,7 @@ fn insert_and_get_round_trips() {
     assert_eq!(s.get("resp_a").unwrap()["status"], json!("completed"));
     let (response, context) = s.get_full("resp_a").expect("full entry");
     assert_eq!(response["status"], json!("completed"));
-    assert_eq!(context.len(), 1);
+    assert_eq!(context.messages.len(), 1);
 }
 
 #[test]

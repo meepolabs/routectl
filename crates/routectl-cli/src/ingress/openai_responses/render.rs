@@ -79,7 +79,11 @@ pub(super) fn render_responses_response(
         body.insert("incomplete_details".into(), details);
     }
 
-    let output = first.map(|c| build_output(&c.message)).unwrap_or_default();
+    let output = resp
+        .upstream_meta
+        .as_ref()
+        .and_then(|meta| meta.responses_output.as_deref().cloned())
+        .unwrap_or_else(|| first.map(|c| build_output(&c.message)).unwrap_or_default());
     body.insert("output".into(), Value::Array(output));
 
     if let Some(usage) = resp.usage.as_ref().map(render_usage) {
@@ -90,10 +94,7 @@ pub(super) fn render_responses_response(
     // unless the request stated otherwise; the other fields are the
     // request's own values (absent request fields echo null / empty,
     // matching the official envelope's always-present shape for these).
-    body.insert(
-        "store".into(),
-        json!(req.routectl_internal.responses_store),
-    );
+    body.insert("store".into(), json!(req.routectl_internal.responses_store));
     body.insert("parallel_tool_calls".into(), json!(true));
     body.insert(
         "tool_choice".into(),
@@ -117,7 +118,10 @@ pub(super) fn render_responses_response(
     if let Some(r) = req.reasoning.as_ref()
         && let Some(effort) = r.effort.as_ref()
     {
-        body.insert("reasoning".into(), json!({"effort": effort, "summary": "auto"}));
+        body.insert(
+            "reasoning".into(),
+            json!({"effort": effort, "summary": "auto"}),
+        );
     }
 
     Ok(Value::Object(body))

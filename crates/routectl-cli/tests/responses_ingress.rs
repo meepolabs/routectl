@@ -800,3 +800,6 @@ fn anthropic_response_body() -> Value {
         "usage": {"input_tokens": 5, "output_tokens": 1}
     })
 }
+
+#[path = "common/responses_chaining_egress_tests.rs"]
+mod chaining_egress;

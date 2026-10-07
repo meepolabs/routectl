@@ -538,3 +538,6 @@ fn circuit_phase(router: &Router, state_key: &str) -> crate::runtime_state::Circ
 
 include!("count_tokens_breaker_tests.rs");
 include!("count_tokens_seat_capability_tests.rs");
+
+#[path = "count_tokens_probe_purge_tests.rs"]
+mod count_tokens_probe_purge_tests;

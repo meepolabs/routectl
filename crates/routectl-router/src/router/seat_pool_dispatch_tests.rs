@@ -1479,3 +1479,6 @@ async fn an_in_flight_request_finishes_on_the_old_router_after_a_pool_reload() {
         "the retired seat must not appear on the new router: {fresh:?}"
     );
 }
+
+#[path = "sticky_concurrency_tests.rs"]
+mod sticky_concurrency_tests;

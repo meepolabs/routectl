@@ -66,6 +66,8 @@ use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 /// adversarial upstream could stream thousands of distinct indices to
 /// drive the buffer toward OOM. 4096 mirrors the anthropic ingress cap.
 const MAX_TOOL_CALL_INDEX: usize = 4096;
+/// Bound the extra completed-item replay ledger, including native barriers.
+const MAX_REPLAY_ITEMS: usize = 4096;
 
 /// Downcast the boxed stream state to the concrete Responses state.
 /// Panics on a mismatched concrete type -- a wiring bug (the handler
@@ -108,6 +110,50 @@ pub(super) fn render_chunk_internal(
 
     capture_identity(&chunk, state);
     ensure_created(state, &mut events);
+
+    let native_items = chunk
+        .upstream_meta
+        .as_ref()
+        .and_then(|meta| meta.responses_output.as_deref());
+    if state.native_output_seen || native_items.is_some() {
+        // Reserve a conservative ceiling BEFORE emitting. Pending calls can
+        // allocate at EOS, so include them too rather than truncate the terminal
+        // body silently after its item ledger filled.
+        let choices = chunk.choices.first();
+        let possible_new = native_items
+            .map_or(0, Vec::len)
+            .saturating_add(state.tool_buffers.len())
+            .saturating_add(choices.map_or(0, |c| c.delta.reasoning_details.len()))
+            .saturating_add(choices.map_or(0, |c| c.delta.tool_calls.as_ref().map_or(0, Vec::len)))
+            .saturating_add(usize::from(
+                choices.is_some_and(|c| c.delta.content.is_some()),
+            ));
+        if state.next_output_index.saturating_add(possible_new as u64) > MAX_REPLAY_ITEMS as u64 {
+            return Err(routectl_core::Error::Streaming(
+                "Responses output replay item limit exceeded".into(),
+            ));
+        }
+    }
+    if let Some(items) = native_items {
+        for item in items {
+            state.native_output_seen = true;
+            close_open_item(state, &mut events);
+            flush_tool_calls(state, &mut events);
+            let index = alloc_output_index(state);
+            push_event(
+                state,
+                &mut events,
+                "response.output_item.added",
+                json!({"output_index":index, "item":item}),
+            );
+            push_event(
+                state,
+                &mut events,
+                "response.output_item.done",
+                json!({"output_index":index, "item":item}),
+            );
+        }
+    }
 
     if let Some(choice) = chunk.choices.first() {
         emit_delta_events(&choice.delta, state, &mut events);
@@ -631,6 +677,11 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
     close_open_item(state, &mut events);
     let finished_output = completed_output(state);
     flush_tool_calls(state, &mut events);
+    let finished_output = if state.native_output_seen {
+        state.completed_items.clone()
+    } else {
+        finished_output
+    };
 
     let finish_reason = state.pending_finish_reason.clone();
     let (status, incomplete_details) = status_from_finish_reason(finish_reason.as_deref());
@@ -648,7 +699,10 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
     {
         for item in output.iter_mut() {
             if item.get("type").and_then(Value::as_str) == Some("message")
-                && item.get("id").and_then(Value::as_str).is_none_or(str::is_empty)
+                && item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
             {
                 item["id"] = json!(msg_id);
             }
@@ -673,11 +727,7 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
         && req.routectl_internal.responses_store
         && let Some(store) = state.store.as_ref()
     {
-        store.insert(
-            response_id(state),
-            body.clone(),
-            req.messages.to_vec(),
-        );
+        store.insert(response_id(state), body.clone(), req);
     }
     push_response_event(state, &mut events, event_name, body);
     state.finished = true;
@@ -690,7 +740,10 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
 fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
     let resp = accumulated_response(state);
     let rendered = render_responses_response(
-        state.req.as_deref().unwrap_or(&routectl_core::ChatRequest::default()),
+        state
+            .req
+            .as_deref()
+            .unwrap_or(&routectl_core::ChatRequest::default()),
         resp,
     )
     .unwrap_or_else(|_| json!({"output": []}));
@@ -834,10 +887,7 @@ fn response_skeleton(
     // the skeleton reads the seeded request so every event's embedded
     // response object matches the official envelope's shape.
     if let Some(req) = state.req.as_deref() {
-        obj.insert(
-            "store".into(),
-            json!(req.routectl_internal.responses_store),
-        );
+        obj.insert("store".into(), json!(req.routectl_internal.responses_store));
         obj.insert("parallel_tool_calls".into(), json!(true));
         obj.insert(
             "tool_choice".into(),
@@ -861,7 +911,10 @@ fn response_skeleton(
         if let Some(r) = req.reasoning.as_ref()
             && let Some(effort) = r.effort.as_ref()
         {
-            obj.insert("reasoning".into(), json!({"effort": effort, "summary": "auto"}));
+            obj.insert(
+                "reasoning".into(),
+                json!({"effort": effort, "summary": "auto"}),
+            );
         }
     }
     Value::Object(obj)
@@ -891,6 +944,12 @@ fn push_event(
     event_name: &str,
     mut extras: Value,
 ) {
+    if event_name == "response.output_item.done"
+        && state.completed_items.len() < MAX_REPLAY_ITEMS
+        && let Some(item) = extras.get("item")
+    {
+        state.completed_items.push(item.clone());
+    }
     let seq = next_seq(state);
     let obj = extras
         .as_object_mut()
