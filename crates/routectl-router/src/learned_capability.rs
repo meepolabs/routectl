@@ -849,6 +849,11 @@ pub enum PurgePreparation {
     /// No such entry is resident. Nothing reserved, nothing to commit, and the
     /// caller answers a clean no-op.
     Absent,
+    /// No entry is resident, but the key is a seeded beta cell the seed still
+    /// withholds: the key is leased and the caller commits a `cleared` row
+    /// before [`LearnedCapabilityRegistry::finalize_seed_lift`] records the
+    /// marker. The lease captures no entry and carries incarnation zero.
+    SeedLift(PurgeLease),
     /// Another purge holds the lease for this key.
     Busy,
     /// The submitting generation is stale for a catalog-scoped key: this purge
@@ -2432,7 +2437,7 @@ impl LearnedCapabilityRegistry {
         let entries = self.entries.read();
         self.note_acquired("entries");
         let Some(entry) = entries.get(&key) else {
-            return PurgePreparation::Absent;
+            return self.prepare_seed_lift(key, effective);
         };
         let captured = entry.clone();
         let mut leases = self.purge_leases.write();
@@ -2448,6 +2453,54 @@ impl LearnedCapabilityRegistry {
             leases: Arc::clone(&self.purge_leases),
             settled: false,
         })
+    }
+
+    /// The no-resident-entry half of [`Self::prepare_purge`], called with
+    /// `entries` still held: lease a seeded beta cell whose seed is not yet
+    /// cleared, or answer `Absent`.
+    ///
+    /// Only a covered cell can carry a marker, so any other absent key has
+    /// nothing to lift; an already-cleared cell has nothing left to lift, and
+    /// leasing it would commit a second `cleared` row for no change.
+    fn prepare_seed_lift(&self, key: RegistryKey, generation: u64) -> PurgePreparation {
+        if !self
+            .seed_scope()
+            .covers(&key.provider_kind, &key.feature_key)
+        {
+            return PurgePreparation::Absent;
+        }
+        let mut leases = self.purge_leases.write();
+        self.note_acquired("purge_leases");
+        if self.seed_clears.read().contains(&key) {
+            return PurgePreparation::Absent;
+        }
+        if !leases.insert(key.clone()) {
+            return PurgePreparation::Busy;
+        }
+        PurgePreparation::SeedLift(PurgeLease {
+            incarnation: 0,
+            key,
+            captured: None,
+            generation,
+            leases: Arc::clone(&self.purge_leases),
+            settled: false,
+        })
+    }
+
+    /// Settle a seed-lift lease whose `cleared` row has committed: record the
+    /// marker and release the lease.
+    ///
+    /// `entries` is held across the mark, as at [`Self::finalize_purge`], so
+    /// the mark cannot interleave with a boundary transition's marker prune.
+    pub fn finalize_seed_lift(&self, mut lease: PurgeLease) {
+        let entries = self.entries.write();
+        self.note_acquired("entries");
+        self.mark_seed_cleared(&lease.key);
+        drop(entries);
+        let mut leases = self.purge_leases.write();
+        self.note_acquired("purge_leases");
+        leases.remove(&lease.key);
+        lease.settled = true;
     }
 
     /// Whether the purge-lease set is write-lockable right now. Test-only.

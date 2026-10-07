@@ -1949,6 +1949,7 @@ async fn a_durably_purged_field_verdict_stops_tailing_its_target() {
             "premise: a resident entry under a live generation must reserve; got {}",
             match other {
                 PurgeOutcome::Absent => "absent",
+                PurgeOutcome::SeedLift(_) => "seed lift",
                 PurgeOutcome::Busy => "busy",
                 PurgeOutcome::Stale => "stale",
                 PurgeOutcome::Reserved(_) => unreachable!(),

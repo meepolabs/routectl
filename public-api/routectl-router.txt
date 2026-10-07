@@ -3609,6 +3609,7 @@ pub enum routectl_router::router::PurgeOutcome
 pub routectl_router::router::PurgeOutcome::Absent
 pub routectl_router::router::PurgeOutcome::Busy
 pub routectl_router::router::PurgeOutcome::Reserved(alloc::boxed::Box<routectl_router::router::ReservedPurge>)
+pub routectl_router::router::PurgeOutcome::SeedLift(alloc::boxed::Box<routectl_router::router::ReservedSeedLift>)
 pub routectl_router::router::PurgeOutcome::Stale
 impl core::marker::Freeze for routectl_router::router::PurgeOutcome
 impl core::marker::Send for routectl_router::router::PurgeOutcome
@@ -4700,6 +4701,47 @@ impl<T> typenum::type_operators::Same for routectl_router::router::ReservedPurge
 pub type routectl_router::router::ReservedPurge::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::ReservedPurge where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::ReservedPurge::into_shared(self) -> Shared
+pub struct routectl_router::router::ReservedSeedLift
+pub routectl_router::router::ReservedSeedLift::capability_key: alloc::string::String
+pub routectl_router::router::ReservedSeedLift::provider_kind: alloc::string::String
+pub routectl_router::router::ReservedSeedLift::state_key: alloc::string::String
+impl routectl_router::router::ReservedSeedLift
+pub const fn routectl_router::router::ReservedSeedLift::generation(&self) -> u64
+pub const fn routectl_router::router::ReservedSeedLift::generation_incarnation(&self) -> u64
+pub fn routectl_router::router::ReservedSeedLift::settlement(&self) -> routectl_router::router::CapabilityClearedEvent
+impl core::marker::Freeze for routectl_router::router::ReservedSeedLift
+impl core::marker::Send for routectl_router::router::ReservedSeedLift
+impl core::marker::Sync for routectl_router::router::ReservedSeedLift
+impl core::marker::Unpin for routectl_router::router::ReservedSeedLift
+impl core::marker::UnsafeUnpin for routectl_router::router::ReservedSeedLift
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::ReservedSeedLift
+impl !core::panic::unwind_safe::UnwindSafe for routectl_router::router::ReservedSeedLift
+impl<T, U> core::convert::Into<U> for routectl_router::router::ReservedSeedLift where U: core::convert::From<T>
+pub fn routectl_router::router::ReservedSeedLift::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::ReservedSeedLift where U: core::convert::Into<T>
+pub type routectl_router::router::ReservedSeedLift::Error = core::convert::Infallible
+pub fn routectl_router::router::ReservedSeedLift::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::ReservedSeedLift where U: core::convert::TryFrom<T>
+pub type routectl_router::router::ReservedSeedLift::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::ReservedSeedLift::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_router::router::ReservedSeedLift where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::ReservedSeedLift::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::ReservedSeedLift where T: ?core::marker::Sized
+pub fn routectl_router::router::ReservedSeedLift::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::ReservedSeedLift where T: ?core::marker::Sized
+pub fn routectl_router::router::ReservedSeedLift::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_router::router::ReservedSeedLift
+pub fn routectl_router::router::ReservedSeedLift::from(T) -> T
+impl<T> either::into_either::IntoEither for routectl_router::router::ReservedSeedLift
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::ReservedSeedLift where T: ?core::marker::Sized
+pub fn routectl_router::router::ReservedSeedLift::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::ReservedSeedLift::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::ReservedSeedLift
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::ReservedSeedLift
+impl<T> typenum::type_operators::Same for routectl_router::router::ReservedSeedLift
+pub type routectl_router::router::ReservedSeedLift::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::ReservedSeedLift where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::ReservedSeedLift::into_shared(self) -> Shared
 pub struct routectl_router::router::ResolvedLearnedLane
 pub routectl_router::router::ResolvedLearnedLane::lane: routectl_router::StateKey
 pub routectl_router::router::ResolvedLearnedLane::nicknames: alloc::vec::Vec<alloc::string::String>
@@ -4823,8 +4865,10 @@ pub routectl_router::router::Router::config: alloc::sync::Arc<routectl_router::c
 pub routectl_router::router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::abandon_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>)
+pub fn routectl_router::router::Router::abandon_seed_lift(&self, alloc::boxed::Box<routectl_router::router::ReservedSeedLift>)
 pub fn routectl_router::router::Router::audit_absent_purge(&self, &routectl_router::StateKey, &str)
 pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>) -> bool
+pub fn routectl_router::router::Router::finalize_seed_lift(&self, alloc::boxed::Box<routectl_router::router::ReservedSeedLift>)
 pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &routectl_router::StateKey, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
@@ -12281,6 +12325,7 @@ pub fn routectl_router::LearnedCapabilityRegistry::expire_keyed(&self, &str, &st
 pub fn routectl_router::LearnedCapabilityRegistry::expire_keyed_in_generation(&self, u64, &str, &str, &str, std::time::Instant) -> routectl_router::GenerationOutcome<bool>
 pub fn routectl_router::LearnedCapabilityRegistry::export_entries(&self) -> alloc::vec::Vec<routectl_router::learned_capability::ExportedEntry>
 pub fn routectl_router::LearnedCapabilityRegistry::finalize_purge(&self, routectl_router::learned_capability::PurgeLease) -> bool
+pub fn routectl_router::LearnedCapabilityRegistry::finalize_seed_lift(&self, routectl_router::learned_capability::PurgeLease)
 pub fn routectl_router::LearnedCapabilityRegistry::from_capability_config(&routectl_router::CapabilityConfig) -> Self
 pub fn routectl_router::LearnedCapabilityRegistry::generation(&self) -> u64
 pub fn routectl_router::LearnedCapabilityRegistry::import_entries(&self, alloc::vec::Vec<routectl_router::learned_capability::ExportedEntry>)
@@ -14800,8 +14845,10 @@ pub routectl_router::Router::config: alloc::sync::Arc<routectl_router::config::C
 pub routectl_router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::abandon_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>)
+pub fn routectl_router::router::Router::abandon_seed_lift(&self, alloc::boxed::Box<routectl_router::router::ReservedSeedLift>)
 pub fn routectl_router::router::Router::audit_absent_purge(&self, &routectl_router::StateKey, &str)
 pub fn routectl_router::router::Router::finalize_learned_capability_purge(&self, alloc::boxed::Box<routectl_router::router::ReservedPurge>) -> bool
+pub fn routectl_router::router::Router::finalize_seed_lift(&self, alloc::boxed::Box<routectl_router::router::ReservedSeedLift>)
 pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, &routectl_router::StateKey, &str) -> routectl_router::router::PurgeOutcome
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool

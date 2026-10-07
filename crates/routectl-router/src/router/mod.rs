@@ -71,7 +71,7 @@ pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_health::CapabilityPersistenceHealth;
 pub use capability_learn::CapabilityLearnEvent;
 pub use capability_observe::CapabilityObserveEvent;
-pub use capability_purge::{PurgeOutcome, ReservedPurge};
+pub use capability_purge::{PurgeOutcome, ReservedPurge, ReservedSeedLift};
 pub use dispatch::class_debits;
 use dispatch::k_query_key;
 #[cfg(test)]

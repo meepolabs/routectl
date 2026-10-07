@@ -3831,9 +3831,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   awaited under a registry lock, so it cannot be one step):
   `Router::reserve_learned_capability_purge` validates the generation, captures
   the entry and LEASES the key while LEAVING it resident and acting, returning a
-  `PurgeOutcome` (`Reserved(ReservedPurge)` / `Absent` / `Busy` / `Stale` -- four
-  answers, because "already gone" is not "ask the current router" and neither is
-  "someone else is purging this"); the caller commits `ReservedPurge::settlement`
+  `PurgeOutcome` (`Reserved(ReservedPurge)` / `SeedLift(ReservedSeedLift)` /
+  `Absent` / `Busy` / `Stale`, because "already gone" is not "ask the current
+  router" and neither is "someone else is purging this"; `SeedLift` is a seeded
+  `beta:` cell with nothing resident and no marker yet, whose incarnation-0
+  `cleared` row commits before `Router::finalize_seed_lift` records the marker,
+  and `Router::abandon_seed_lift` records nothing); the caller commits `ReservedPurge::settlement`
   durably (`UsageHandle::admit_capability_batch` + `BatchReceipt::await_outcome`,
   never a best-effort send) holding NO lock; and only on a committed
   acknowledgement does `Router::finalize_learned_capability_purge` remove the
@@ -5997,8 +6000,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   coalesces tempfile + rename bursts
 - `src/server/purge_settlement.rs` -- DAEMON-OWNED settlement of admitted
   capability purges: `SettlementTracker` (in-flight count + `Notify` +
-  closed flag + an unaccounted-settlement channel), `SettlementOutcome`
-  (`Purged` / `Superseded` / `Failed(BatchCommit)` -- three answers, because a
+  closed flag + an unaccounted-settlement channel), `SettlingPurge` (a learned
+  purge or a seed lift, one settlement order for both), `SettlementOutcome`
+  (`Purged` / `SeedLifted` / `Superseded` / `Failed(BatchCommit)`, because a
   committed clear whose finalize found a changed entry removed nothing and is
   neither a success nor a durability failure), and the private `settle_owned`
   that awaits the receipt then finalizes or abandons. `settle` takes ownership of
@@ -6090,7 +6094,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   answers a non-2xx `durability_failed`; a leased key answers `purge_busy` and a
   superseded Router answers `purge_stale` after ONE bounded retry against the
   current `ArcSwap` (safe because a stale reservation took no lease and committed
-  nothing, so there is no partial state to collide with). `generation` rides the
+  nothing, so there is no partial state to collide with). A seeded beta flag with
+  nothing resident runs the same path as a seed lift and answers with an added
+  `seed_lifted: true`. `generation` rides the
   success envelope only -- absent, busy and failed answers carry no sampled
   value. Carries NO credential scheme of
   its own -- same socket, same `[server.auth]` layer as `/v1/*` -- and adds three

@@ -64,7 +64,7 @@ use axum::response::{IntoResponse, Response};
 use routectl_core::capability::Verdict;
 use routectl_router::router::PurgeOutcome;
 
-use crate::server::purge_settlement::SettlementOutcome;
+use crate::server::purge_settlement::{SettlementOutcome, SettlingPurge};
 use routectl_usage::{BatchCommit, CapabilityEvent};
 use serde::Deserialize;
 use serde_json::json;
@@ -313,7 +313,10 @@ async fn purge_durably(state: &AppState, purge: &ValidPurge) -> Response {
         let router = state.router.load_full();
         match router.reserve_learned_capability_purge(&purge.lane, &purge.capability_key) {
             PurgeOutcome::Reserved(reserved) => {
-                return settle(state, &router, reserved).await;
+                return settle(state, &router, reserved.into()).await;
+            }
+            PurgeOutcome::SeedLift(reserved) => {
+                return settle(state, &router, reserved.into()).await;
             }
             // A clean no-op, and a 2xx: the key holds nothing, which is exactly
             // what the operator wanted to be true. `generation` is ABSENT rather
@@ -390,10 +393,13 @@ async fn purge_durably(state: &AppState, purge: &ValidPurge) -> Response {
 ///
 /// Nothing is awaited while a registry lock is held: the reservation returned
 /// holding none.
+///
+/// A seed lift runs the same path: its clear is the only record that the
+/// operator lifted the seed, so the marker is recorded only once it commits.
 async fn settle(
     state: &AppState,
     router: &Arc<routectl_router::Router>,
-    reserved: Box<routectl_router::router::ReservedPurge>,
+    reserved: SettlingPurge,
 ) -> Response {
     let event = cleared_event(&reserved.settlement(), router);
     // Stamped with the generation the REMOVAL will run under, carried out of the
@@ -405,13 +411,13 @@ async fn settle(
     // Submitted with the CAPTURED incarnation: on commit the writer records it as
     // this key's purge floor, which is what makes a pre-purge event delayed past
     // the clear drop while a genuine post-purge relearn still lands.
-    let incarnation = reserved.generation_incarnation();
+    let incarnation = reserved.incarnation();
     // Keys read BEFORE the transfer: the settlement consumes the reservation, and
     // echoing what the registry keyed on (the normalized capability key, not the
     // caller's raw value) is what lets an operator confirm the purge addressed
     // what they meant.
-    let state_key = reserved.state_key.clone();
-    let capability_key = reserved.capability_key.clone();
+    let state_key = reserved.state_key().to_string();
+    let capability_key = reserved.capability_key().to_string();
     // CLAIM FIRST, before the durable batch is admitted. The ordering is the
     // contract: if the claim succeeds, shutdown is already waiting for this
     // settlement, so it cannot drain the writer out from under the commit. If it
@@ -422,7 +428,7 @@ async fn settle(
     // and then find the tracker closed, leaving a commit in flight with nothing
     // owning its settlement.
     let Some(claim) = state.purge_settlements.claim() else {
-        router.abandon_learned_capability_purge(reserved);
+        reserved.abandon(router);
         tracing::warn!("capability purge refused: the daemon is shutting down");
         return refused(StatusCode::SERVICE_UNAVAILABLE, DURABILITY_FAILED);
     };
@@ -435,7 +441,7 @@ async fn settle(
         // reservation is released here, leaving the entry untouched.
         Err(failure) => {
             drop(claim);
-            router.abandon_learned_capability_purge(reserved);
+            reserved.abandon(router);
             return durability_refusal(failure);
         }
     };
@@ -451,6 +457,20 @@ async fn settle(
             Json(json!({
                 "schema_version": SCHEMA_VERSION,
                 "purged": true,
+                "state_key": state_key,
+                "capability_key": capability_key,
+                "generation": generation,
+            })),
+        )
+            .into_response(),
+        // `seed_lifted` is the one field a lift adds: nothing resident was
+        // removed, but the seed no longer withholds the flag on this lane.
+        Ok(SettlementOutcome::SeedLifted) => (
+            StatusCode::OK,
+            Json(json!({
+                "schema_version": SCHEMA_VERSION,
+                "purged": true,
+                "seed_lifted": true,
                 "state_key": state_key,
                 "capability_key": capability_key,
                 "generation": generation,

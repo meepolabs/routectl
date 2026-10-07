@@ -86,9 +86,22 @@ impl Fixture {
         writer: UsageWriter,
         ledger: std::path::PathBuf,
     ) -> Self {
-        let router = Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
-            config_with_model(),
-        ))));
+        Self::with_router(
+            Router::new(Arc::new(config_with_model())),
+            usage,
+            writer,
+            ledger,
+        )
+    }
+
+    /// [`Self::with_usage`] over a caller-built router.
+    fn with_router(
+        router: Router,
+        usage: routectl_usage::UsageHandle,
+        writer: UsageWriter,
+        ledger: std::path::PathBuf,
+    ) -> Self {
+        let router = Arc::new(ArcSwap::from_pointee(router));
         let state = Arc::new(AppState {
             router: Arc::clone(&router),
             usage: usage.clone(),
@@ -526,6 +539,7 @@ async fn a_cancelled_client_leaves_the_settlement_to_the_daemon() {
 fn outcome_name(outcome: &routectl_router::router::PurgeOutcome) -> &'static str {
     match outcome {
         routectl_router::router::PurgeOutcome::Reserved(_) => "reserved",
+        routectl_router::router::PurgeOutcome::SeedLift(_) => "seed lift",
         routectl_router::router::PurgeOutcome::Absent => "absent",
         routectl_router::router::PurgeOutcome::Busy => "busy",
         routectl_router::router::PurgeOutcome::Stale => "stale",
@@ -2211,4 +2225,304 @@ async fn repeated_staleness_exhausts_the_bound_and_reports_it_distinguishably() 
         None,
         "a refusal carries no purge verdict at all",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Seed lift: purging a seeded beta flag with nothing resident
+// ---------------------------------------------------------------------------
+
+/// The fixture seed the seed-lift cases run under.
+const FIXTURE_SEED: &[&str] = &["fx-seeded"];
+
+/// The learned lane on the fixture's `bedrock` entry.
+const BEDROCK_LANE: &str = "bed#anthropic.claude-test-v1:0";
+
+/// The fixture's `bedrock` provider kind token.
+const BEDROCK: &str = "bedrock";
+
+fn beta(flag: &str) -> String {
+    routectl_router::beta_capability_key(flag).expect("fixture flags are well formed")
+}
+
+/// A router with one `bedrock` entry `bed`, running under [`FIXTURE_SEED`].
+fn bedrock_router() -> Router {
+    let config: Config = toml::from_str(
+        "version = 3\n\
+         [providers.bed]\n\
+         kind = \"bedrock\"\n\
+         region = \"us-east-1\"\n\
+         creds = { kind = \"default-chain\" }\n",
+    )
+    .expect("fixture config parses");
+    let mut router = Router::new(Arc::new(config));
+    router.set_beta_seed_for_tests(FIXTURE_SEED);
+    router
+}
+
+fn bedrock_fixture() -> Fixture {
+    let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
+    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+    Fixture::with_router(bedrock_router(), usage, writer, ledger)
+}
+
+/// Every persisted `cleared` row, as
+/// `(lane_key, capability, phase, source, tier, evidence_class, provider_kind,
+/// vocab_version, catalog_version, overlay_revision)`.
+type ClearedRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    i64,
+    i64,
+);
+
+impl Fixture {
+    fn seed_cleared(&self, flag: &str) -> bool {
+        self.router
+            .load()
+            .learned_registry()
+            .seed_cleared(BEDROCK_LANE, &beta(flag), BEDROCK)
+    }
+
+    /// Stop the writer and read back every `cleared` row. Every handle clone
+    /// is dropped first so the shutdown drains rather than waiting on a live
+    /// sender.
+    fn cleared_rows(self) -> Vec<ClearedRow> {
+        drop(self.app);
+        drop(self.usage);
+        drop(self.router);
+        self.writer.shutdown();
+        let db = routectl_usage::open(&self.ledger).expect("open ledger for read");
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT lane_key, capability, phase, source, tier, evidence_class, \
+                 provider_kind, vocab_version, catalog_version, overlay_revision \
+                 FROM capability_events WHERE verdict = 'cleared' ORDER BY id",
+            )
+            .expect("prepare");
+        stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+            ))
+        })
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows")
+    }
+}
+
+#[tokio::test]
+async fn a_seed_lift_commits_one_cleared_row_and_survives_a_restart() {
+    // Arrange
+    let fixture = bedrock_fixture();
+    let live = fixture.router.load_full();
+    let (catalog, overlay) = (live.catalog_version(), live.overlay_revision());
+    let generation = live.registry_generation();
+    drop(live);
+    let ledger = fixture.ledger.clone();
+
+    // Act
+    let (status, body) = fixture
+        .call(loopback_peer(), &body_for(BEDROCK_LANE, &beta("fx-seeded")))
+        .await;
+
+    // Assert -- the response, the live marker, the one durable row.
+    assert_eq!(status, StatusCode::OK, "body was {body}");
+    assert_eq!(body["purged"].as_bool(), Some(true));
+    assert_eq!(body["seed_lifted"].as_bool(), Some(true));
+    assert_eq!(body["generation"].as_u64(), Some(generation));
+    assert!(fixture.seed_cleared("fx-seeded"));
+    assert!(!fixture.resident(BEDROCK_LANE, &beta("fx-seeded")));
+    let rows = fixture.cleared_rows();
+    assert_eq!(
+        rows,
+        vec![(
+            BEDROCK_LANE.to_string(),
+            beta("fx-seeded"),
+            String::new(),
+            "live".to_string(),
+            String::new(),
+            None,
+            Some(BEDROCK.to_string()),
+            Some(routectl_router::CURRENT_VOCAB_VERSION),
+            i64::from(catalog),
+            i64::try_from(overlay).expect("small revision"),
+        )],
+    );
+    let rebooted = bedrock_router();
+    let reader = crate::server::ledger_reader::LedgerCapabilityReader::new(
+        ledger,
+        ReplayTombstone::new(0, rebooted.catalog_version(), rebooted.overlay_revision()),
+    );
+    let _ = rebooted.rebuild_learned_from_ledger(&reader);
+    assert!(
+        rebooted
+            .learned_registry()
+            .seed_cleared(BEDROCK_LANE, &beta("fx-seeded"), BEDROCK),
+        "the committed row restores the marker on the next boot",
+    );
+}
+
+#[tokio::test]
+async fn a_repeat_seed_lift_is_absent_and_writes_nothing() {
+    // Arrange
+    let fixture = bedrock_fixture();
+    let (first, _) = fixture
+        .call(loopback_peer(), &body_for(BEDROCK_LANE, &beta("fx-seeded")))
+        .await;
+    assert_eq!(first, StatusCode::OK);
+
+    // Act
+    let (second, body) = fixture
+        .call(loopback_peer(), &body_for(BEDROCK_LANE, &beta("fx-seeded")))
+        .await;
+
+    // Assert
+    assert_eq!(second, StatusCode::OK);
+    assert_eq!(body["purged"].as_bool(), Some(false));
+    assert!(body.get("seed_lifted").is_none(), "body was {body}");
+    assert_eq!(fixture.cleared_rows().len(), 1);
+}
+
+#[tokio::test]
+async fn an_unseeded_beta_with_nothing_resident_is_absent_and_writes_nothing() {
+    let fixture = bedrock_fixture();
+
+    let (status, body) = fixture
+        .call(
+            loopback_peer(),
+            &body_for(BEDROCK_LANE, &beta("fx-unseeded")),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["purged"].as_bool(), Some(false));
+    assert!(
+        fixture
+            .router
+            .load()
+            .learned_registry()
+            .seed_clear_snapshot()
+            .is_empty()
+    );
+    assert!(fixture.cleared_rows().is_empty());
+}
+
+/// Builds a fixture whose writer cannot commit, plus the channel capacity to
+/// fill first when the refusal is a full channel.
+type RefusingFixture = fn() -> (Fixture, Option<usize>);
+
+#[tokio::test]
+async fn a_seed_lift_that_cannot_commit_refuses_and_records_no_marker() {
+    let rows: [(&str, RefusingFixture); 3] = [
+        ("unavailable writer", || {
+            let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
+            let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+            let usage = routectl_usage::handle_with_closed_channel();
+            (
+                Fixture::with_router(bedrock_router(), usage, writer, ledger),
+                None,
+            )
+        }),
+        ("full channel", || {
+            let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
+            let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+            let (tx, rx) = tokio::sync::mpsc::channel::<routectl_usage::WriterMessage>(1);
+            std::mem::forget(rx);
+            let usage = routectl_usage::handle_over_channel(tx);
+            (
+                Fixture::with_router(bedrock_router(), usage, writer, ledger),
+                Some(1),
+            )
+        }),
+        ("write failure", || {
+            let ledger = crate::test_usage_dir::usage_dir().join("not-a-db");
+            std::fs::create_dir(&ledger).expect("create the blocking directory");
+            let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+            (
+                Fixture::with_router(bedrock_router(), usage, writer, ledger),
+                None,
+            )
+        }),
+    ];
+
+    for (name, build) in rows {
+        // Arrange
+        let (fixture, fill) = build();
+        if let Some(capacity) = fill {
+            fixture.fill_channel(capacity);
+        }
+
+        // Act
+        let (status, body) = fixture
+            .call(loopback_peer(), &body_for(BEDROCK_LANE, &beta("fx-seeded")))
+            .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{name}: {body}");
+        assert_eq!(
+            body["error"]["code"].as_str(),
+            Some(DURABILITY_FAILED),
+            "{name}"
+        );
+        assert!(
+            !fixture.seed_cleared("fx-seeded"),
+            "{name}: no marker without a commit"
+        );
+        assert!(
+            matches!(
+                fixture.router.load().reserve_learned_capability_purge(
+                    &routectl_router::StateKey::parse(BEDROCK_LANE).expect("lane"),
+                    &beta("fx-seeded"),
+                ),
+                routectl_router::router::PurgeOutcome::SeedLift(_)
+            ),
+            "{name}: the refusal released the lease and the seed is still liftable",
+        );
+    }
+}
+
+#[tokio::test]
+async fn purging_a_resident_seeded_negative_is_a_learned_purge_that_also_marks() {
+    // Arrange
+    let fixture = bedrock_fixture();
+    let _ = fixture.router.load().learned_registry().observe(
+        BEDROCK_LANE,
+        &beta("fx-seeded"),
+        BEDROCK,
+        routectl_core::capability::SignalTier::SelfIdentifying,
+        routectl_core::capability::FailurePhase::F1,
+        routectl_core::capability::EvidenceSource::Live,
+        None,
+        Instant::now(),
+    );
+    assert!(fixture.resident(BEDROCK_LANE, &beta("fx-seeded")));
+
+    // Act
+    let (status, body) = fixture
+        .call(loopback_peer(), &body_for(BEDROCK_LANE, &beta("fx-seeded")))
+        .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["purged"].as_bool(), Some(true));
+    assert!(body.get("seed_lifted").is_none(), "a learned purge: {body}");
+    assert!(!fixture.resident(BEDROCK_LANE, &beta("fx-seeded")));
+    assert!(fixture.seed_cleared("fx-seeded"));
+    assert_eq!(fixture.cleared_rows().len(), 1);
 }

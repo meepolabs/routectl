@@ -8,6 +8,12 @@
 //! who wants the decision to persist across relearning writes it in the
 //! capability override configuration, which this path never touches.
 //!
+//! One case reaches past learned entries: a seeded beta flag with nothing
+//! resident. The seed withholds it until an operator purge lifts it, so that
+//! purge commits a `cleared` row and records the seed-clear marker
+//! ([`PurgeOutcome::SeedLift`]) under the same reserve / commit / finalize
+//! order below.
+//!
 //! # Why this is two calls and not one
 //!
 //! A purge is a memory mutation plus a SQLite transaction, and they cannot be
@@ -92,6 +98,49 @@ impl ReservedPurge {
     }
 }
 
+/// A reserved seed lift: a purge of a seeded beta key with no resident entry,
+/// whose seed still withholds the flag on this lane. The key is leased and the
+/// caller owes exactly one settlement, as for [`ReservedPurge`].
+///
+/// Nothing is resident, so nothing is removed: the committed `cleared` row is
+/// the durable record that the operator lifted the seed for this cell, and
+/// finalizing records the in-memory marker the withheld pass honors.
+#[must_use = "a reserved seed lift must be finalized or abandoned"]
+pub struct ReservedSeedLift {
+    /// Serialized learned lane (`provider_entry#upstream`) the lift is keyed on.
+    pub state_key: String,
+    /// Normalized capability key the lift is keyed on.
+    pub capability_key: String,
+    /// Stable provider-kind token that normalized the capability key.
+    pub provider_kind: String,
+    lease: PurgeLease,
+}
+
+impl ReservedSeedLift {
+    /// The effective generation captured under the reservation's own guard.
+    /// See [`ReservedPurge::generation`].
+    pub const fn generation(&self) -> u64 {
+        self.lease.generation()
+    }
+
+    /// The incarnation the lift's clear is submitted at: zero, because no
+    /// version of the key is resident to supersede.
+    pub const fn generation_incarnation(&self) -> u64 {
+        self.lease.incarnation()
+    }
+
+    /// The `cleared` settlement to commit durably before finalizing.
+    pub fn settlement(&self) -> CapabilityClearedEvent {
+        CapabilityClearedEvent {
+            incarnation: self.lease.incarnation(),
+            state_key: self.state_key.clone(),
+            capability_key: self.capability_key.clone(),
+            provider_kind: self.provider_kind.clone(),
+            persistence_generation: self.lease.generation(),
+        }
+    }
+}
+
 /// What a purge request resolved to. Every variant needs its own answer on the
 /// wire, and collapsing any two loses something the operator needs: "already
 /// gone" is not "ask the current router", and neither is "someone else is
@@ -101,12 +150,16 @@ impl ReservedPurge {
 pub enum PurgeOutcome {
     /// Reserved: the caller commits the settlement and then finalizes.
     ///
-    /// BOXED because the other three variants carry nothing: the reservation
+    /// BOXED because the refusals carry nothing: the reservation
     /// holds a captured entry plus a lease, and leaving it inline would make
     /// every refusal pay its size. The refusals are also the common answers on a
     /// healthy daemon.
     Reserved(Box<ReservedPurge>),
-    /// No resident entry under this key -- a clean no-op.
+    /// No resident entry, but the key is a seeded beta flag the seed still
+    /// withholds on this lane: the caller commits the settlement and then
+    /// finalizes, which lifts the seed for this cell.
+    SeedLift(Box<ReservedSeedLift>),
+    /// No resident entry under this key and no seed to lift -- a clean no-op.
     Absent,
     /// Another purge holds this key's lease.
     Busy,
@@ -154,17 +207,24 @@ impl Router {
             capability_key,
             &provider_kind,
         );
+        let normalized =
+            routectl_core::capability::normalize_capability_key(capability_key, &provider_kind);
         match prepared {
             PurgePreparation::Reserved(lease) => PurgeOutcome::Reserved(Box::new(ReservedPurge {
                 state_key: state_key.to_string(),
-                capability_key: routectl_core::capability::normalize_capability_key(
-                    capability_key,
-                    &provider_kind,
-                ),
+                capability_key: normalized,
                 provider_kind,
                 lane: lane.clone(),
                 lease,
             })),
+            PurgePreparation::SeedLift(lease) => {
+                PurgeOutcome::SeedLift(Box::new(ReservedSeedLift {
+                    state_key: state_key.to_string(),
+                    capability_key: normalized,
+                    provider_kind,
+                    lease,
+                }))
+            }
             PurgePreparation::Absent => PurgeOutcome::Absent,
             PurgePreparation::Busy => PurgeOutcome::Busy,
             PurgePreparation::Stale => PurgeOutcome::Stale,
@@ -205,6 +265,37 @@ impl Router {
             "operator purged a learned-capability entry",
         );
         removed
+    }
+
+    /// Finalize a reserved seed lift: record the seed-clear marker and release
+    /// the lease.
+    ///
+    /// Called ONLY after the lift's settlement has durably committed, so the
+    /// marker and the ledger agree from this instant on. Emits the same
+    /// content-free `purge` audit record as a learned purge, with
+    /// `removed = false` (nothing was resident) and `seed_lifted = true`.
+    pub fn finalize_seed_lift(&self, reserved: Box<ReservedSeedLift>) {
+        self.learned_capabilities.finalize_seed_lift(reserved.lease);
+        tracing::info!(
+            event = "purge",
+            state_key = %routectl_core::sanitize_for_log(&reserved.state_key),
+            capability_key = %routectl_core::sanitize_for_log(&reserved.capability_key),
+            removed = false,
+            seed_lifted = true,
+            "operator purged a learned-capability entry",
+        );
+    }
+
+    /// Release a reserved seed lift WITHOUT recording a marker: the durable
+    /// clear did not commit, so the seed keeps withholding the flag.
+    pub fn abandon_seed_lift(&self, reserved: Box<ReservedSeedLift>) {
+        self.learned_capabilities.restore_purge(reserved.lease);
+        tracing::warn!(
+            event = "purge_abandoned",
+            state_key = %routectl_core::sanitize_for_log(&reserved.state_key),
+            capability_key = %routectl_core::sanitize_for_log(&reserved.capability_key),
+            "operator seed lift did not persist its clear; the seed still withholds the flag",
+        );
     }
 
     /// Emit the audit record for a purge that found nothing resident.

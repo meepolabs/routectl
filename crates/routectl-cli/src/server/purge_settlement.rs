@@ -37,7 +37,102 @@
 use std::sync::Arc;
 
 use routectl_router::Router;
+use routectl_router::router::{CapabilityClearedEvent, ReservedPurge, ReservedSeedLift};
 use routectl_usage::{BatchCommit, BatchReceipt};
+
+/// A reservation awaiting its durable clear: a resident learned entry to
+/// remove, or a seeded beta cell to lift. Both owe the same settlement order
+/// (commit, then finalize; anything else, abandon), so one type carries either.
+pub enum SettlingPurge {
+    /// A resident learned entry.
+    Learned(Box<ReservedPurge>),
+    /// A seeded beta cell with nothing resident.
+    SeedLift(Box<ReservedSeedLift>),
+}
+
+impl From<Box<ReservedPurge>> for SettlingPurge {
+    fn from(reserved: Box<ReservedPurge>) -> Self {
+        Self::Learned(reserved)
+    }
+}
+
+impl From<Box<ReservedSeedLift>> for SettlingPurge {
+    fn from(reserved: Box<ReservedSeedLift>) -> Self {
+        Self::SeedLift(reserved)
+    }
+}
+
+impl SettlingPurge {
+    /// The `cleared` settlement to commit.
+    pub fn settlement(&self) -> CapabilityClearedEvent {
+        match self {
+            Self::Learned(reserved) => reserved.settlement(),
+            Self::SeedLift(reserved) => reserved.settlement(),
+        }
+    }
+
+    /// The effective generation captured with the reservation.
+    pub const fn generation(&self) -> u64 {
+        match self {
+            Self::Learned(reserved) => reserved.generation(),
+            Self::SeedLift(reserved) => reserved.generation(),
+        }
+    }
+
+    /// The incarnation the clear is submitted at.
+    pub const fn incarnation(&self) -> u64 {
+        match self {
+            Self::Learned(reserved) => reserved.generation_incarnation(),
+            Self::SeedLift(reserved) => reserved.generation_incarnation(),
+        }
+    }
+
+    /// Serialized lane the reservation is keyed on.
+    pub fn state_key(&self) -> &str {
+        match self {
+            Self::Learned(reserved) => &reserved.state_key,
+            Self::SeedLift(reserved) => &reserved.state_key,
+        }
+    }
+
+    /// Normalized capability key the reservation is keyed on.
+    pub fn capability_key(&self) -> &str {
+        match self {
+            Self::Learned(reserved) => &reserved.capability_key,
+            Self::SeedLift(reserved) => &reserved.capability_key,
+        }
+    }
+
+    /// Release the reservation without changing anything.
+    pub fn abandon(self, router: &Router) {
+        match self {
+            Self::Learned(reserved) => router.abandon_learned_capability_purge(reserved),
+            Self::SeedLift(reserved) => router.abandon_seed_lift(reserved),
+        }
+    }
+
+    /// Finalize after a committed clear.
+    fn finalize(self, router: &Router) -> SettlementOutcome {
+        match self {
+            Self::Learned(reserved) => {
+                if router.finalize_learned_capability_purge(reserved) {
+                    SettlementOutcome::Purged
+                } else {
+                    // Committed but nothing removed: the resident entry no
+                    // longer matched what the reservation captured. The ledger
+                    // has the clear, so this is not a durability failure -- it
+                    // is a superseded purge, and the caller is told so
+                    // distinctly.
+                    SettlementOutcome::Superseded
+                }
+            }
+            Self::SeedLift(reserved) => {
+                router.finalize_seed_lift(reserved);
+                SettlementOutcome::SeedLifted
+            }
+        }
+    }
+}
 
 /// The outcome the HTTP handler waits for.
 ///
@@ -49,6 +144,9 @@ use routectl_usage::{BatchCommit, BatchReceipt};
 pub enum SettlementOutcome {
     /// The clear committed and the entry was removed.
     Purged,
+    /// The clear committed and the seed was lifted for a cell with nothing
+    /// resident.
+    SeedLifted,
     /// The clear did not commit, or the finalize refused: the entry is unchanged
     /// and still acting, and the lease is released.
     Failed(BatchCommit),
@@ -203,9 +301,10 @@ impl SettlementTracker {
         &self,
         mut claim: SettlementClaim,
         router: Arc<Router>,
-        reserved: Box<routectl_router::router::ReservedPurge>,
+        reserved: impl Into<SettlingPurge>,
         receipt: BatchReceipt,
     ) -> tokio::sync::oneshot::Receiver<SettlementOutcome> {
+        let reserved = reserved.into();
         let (tx, rx) = tokio::sync::oneshot::channel();
         claim.spent = true;
         let guard = AccountingGuard {
@@ -338,23 +437,13 @@ impl Drop for AccountingGuard {
 /// client can cancel it.
 async fn settle_owned(
     router: &Router,
-    reserved: Box<routectl_router::router::ReservedPurge>,
+    reserved: SettlingPurge,
     receipt: BatchReceipt,
 ) -> SettlementOutcome {
     match receipt.await_outcome().await {
-        BatchCommit::Committed { .. } => {
-            if router.finalize_learned_capability_purge(reserved) {
-                SettlementOutcome::Purged
-            } else {
-                // Committed but nothing removed: the resident entry no longer
-                // matched what the reservation captured. The ledger has the
-                // clear, so this is not a durability failure -- it is a
-                // superseded purge, and the caller is told so distinctly.
-                SettlementOutcome::Superseded
-            }
-        }
+        BatchCommit::Committed { .. } => reserved.finalize(router),
         failure => {
-            router.abandon_learned_capability_purge(reserved);
+            reserved.abandon(router);
             SettlementOutcome::Failed(failure)
         }
     }

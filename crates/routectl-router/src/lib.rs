@@ -85,6 +85,8 @@ pub use activation::{
     provider_kind_for_oauth_id,
 };
 pub use beta_capability::BetaSeedScope;
+#[cfg(any(test, feature = "test-utils"))]
+pub use beta_capability::beta_capability_key;
 pub use beta_seed::shipped_scope as shipped_beta_seed_scope;
 pub use calibration::{CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary};
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};

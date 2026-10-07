@@ -965,3 +965,47 @@ async fn a_parseable_lane_reaches_the_daemon() {
 
     assert_eq!(code, 0);
 }
+
+#[test]
+fn each_success_envelope_renders_its_own_first_line() {
+    let rows = [
+        (
+            "learned purge",
+            json!({"purged": true}),
+            "purged learned capability",
+        ),
+        (
+            "seed lift",
+            json!({"purged": true, "seed_lifted": true}),
+            "lifted the shipped seed",
+        ),
+        ("clean no-op", json!({"purged": false}), "nothing to purge"),
+    ];
+
+    for (name, body, expected) in rows {
+        let lines = success_lines(&body, "cap", LANE).expect("a purged verdict renders");
+
+        assert!(lines[0].starts_with(expected), "{name}: {lines:?}");
+    }
+    assert!(success_lines(&json!({"seed_lifted": true}), "cap", LANE).is_none());
+}
+
+#[tokio::test]
+async fn a_seed_lift_reported_by_the_daemon_exits_zero() {
+    // Arrange
+    let daemon = MockServer::start().await;
+    let mut body = purge_response(true);
+    body["seed_lifted"] = json!(true);
+    Mock::given(method("POST"))
+        .and(path(PURGE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(1)
+        .mount(&daemon)
+        .await;
+
+    // Act
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
+
+    // Assert
+    assert_eq!(code, 0);
+}

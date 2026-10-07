@@ -190,34 +190,51 @@ pub async fn run(config: &Config, lane: &str, capability: &str) -> i32 {
         return 1;
     }
 
-    match body["purged"].as_bool() {
-        Some(true) => {
-            println!(
-                "purged learned capability `{capability}` on `{}`",
-                parsed.for_log()
-            );
-            println!(
-                "note: live traffic can teach this again. To make the decision \
-                 durable, set it under {OVERRIDE_TABLE} in your config."
-            );
-            0
-        }
-        Some(false) => {
-            println!(
-                "nothing to purge: no learned entry for `{capability}` on `{}`",
-                parsed.for_log()
-            );
-            0
-        }
+    let Some(lines) = success_lines(&body, capability, &parsed.for_log()) else {
         // A success status with no `purged` field means the daemon answered
         // something this build does not understand -- report it rather than
         // guessing, so an operator never reads a purge that may not have
         // happened.
-        None => {
-            eprintln!("error: the daemon returned an unrecognized purge response");
-            1
-        }
+        eprintln!("error: the daemon returned an unrecognized purge response");
+        return 1;
+    };
+    for line in lines {
+        println!("{line}");
     }
+    0
+}
+
+/// The lines a success envelope renders, or `None` when it carries no
+/// `purged` verdict. A seed lift is told apart from a learned purge because
+/// the two leave different things behind: a lifted seed returns at the next
+/// catalog or overlay revision change, a purged observation does not.
+fn success_lines(body: &serde_json::Value, capability: &str, lane: &str) -> Option<Vec<String>> {
+    let purged = body["purged"].as_bool()?;
+    let lines = if !purged {
+        vec![format!(
+            "nothing to purge: no learned entry for `{capability}` on `{lane}`"
+        )]
+    } else if body["seed_lifted"].as_bool() == Some(true) {
+        vec![
+            format!(
+                "lifted the shipped seed for `{capability}` on `{lane}`: the flag is sent again"
+            ),
+            format!(
+                "note: a rejection the upstream names is learned again, and a catalog or \
+                 overlay revision change restores the seed. To make the decision durable, \
+                 set it under {OVERRIDE_TABLE} in your config."
+            ),
+        ]
+    } else {
+        vec![
+            format!("purged learned capability `{capability}` on `{lane}`"),
+            format!(
+                "note: live traffic can teach this again. To make the decision \
+                 durable, set it under {OVERRIDE_TABLE} in your config."
+            ),
+        ]
+    };
+    Some(lines)
 }
 
 /// Build the HTTP client for a control call.

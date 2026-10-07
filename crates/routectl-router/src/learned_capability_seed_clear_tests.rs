@@ -243,3 +243,124 @@ fn a_registry_with_no_seed_scope_marks_nothing() {
 
     assert!(reg.seed_clear_snapshot().is_empty());
 }
+
+fn prepare(reg: &LearnedCapabilityRegistry, key: &str) -> PurgePreparation {
+    reg.prepare_purge(reg.generation(), LANE, key, KIND)
+}
+
+#[test]
+fn an_unmarked_seeded_cell_with_nothing_resident_reserves_a_seed_lift() {
+    // Arrange
+    let reg = registry();
+
+    // Act
+    let prepared = prepare(&reg, &beta("fx-a"));
+
+    // Assert
+    let PurgePreparation::SeedLift(lease) = prepared else {
+        panic!("expected a seed lift, got {prepared:?}");
+    };
+    assert_eq!(lease.incarnation(), 0, "nothing resident to supersede");
+    assert_eq!(lease.generation(), reg.generation());
+    assert!(lease.captured_entry().is_none());
+    assert!(
+        !marked(&reg, &beta("fx-a")),
+        "reserving records no marker before the clear commits",
+    );
+    reg.restore_purge(lease);
+}
+
+#[test]
+fn a_seed_lift_is_refused_when_nothing_is_left_to_lift() {
+    // Arrange
+    let reg = registry();
+    let _ = reg.replay_cleared(LANE, &beta("fx-kept"), KIND);
+    let rows = [
+        ("an already-cleared seeded cell", beta("fx-kept"), KIND),
+        ("an unseeded beta flag", beta("zz-unseeded"), KIND),
+        (
+            "a seeded flag under another kind",
+            beta("fx-a"),
+            "anthropic-api",
+        ),
+        ("a non-beta key", "web_search".to_string(), KIND),
+    ];
+
+    for (name, key, kind) in rows {
+        // Act
+        let prepared = reg.prepare_purge(reg.generation(), LANE, &key, kind);
+
+        // Assert
+        assert!(
+            matches!(prepared, PurgePreparation::Absent),
+            "{name}: expected absent, got {prepared:?}",
+        );
+    }
+}
+
+#[test]
+fn a_finalized_seed_lift_marks_the_cell_and_an_abandoned_one_does_not() {
+    // Arrange
+    let reg = registry();
+    let lift = |flag: &str| match prepare(&reg, &beta(flag)) {
+        PurgePreparation::SeedLift(lease) => lease,
+        other => panic!("expected a seed lift for {flag}, got {other:?}"),
+    };
+
+    // Act
+    reg.restore_purge(lift("fx-kept"));
+    reg.finalize_seed_lift(lift("fx-purged"));
+
+    // Assert
+    assert!(!marked(&reg, &beta("fx-kept")));
+    assert!(marked(&reg, &beta("fx-purged")));
+    assert!(reg.snapshot().is_empty(), "a lift creates no entry");
+    assert!(
+        matches!(prepare(&reg, &beta("fx-purged")), PurgePreparation::Absent),
+        "a lifted cell has nothing left to lift",
+    );
+    assert!(
+        matches!(
+            prepare(&reg, &beta("fx-kept")),
+            PurgePreparation::SeedLift(_)
+        ),
+        "an abandoned lift released its lease",
+    );
+}
+
+#[test]
+fn a_leased_seed_lift_refuses_a_second_lift_and_a_boundary_cut() {
+    // Arrange
+    let reg = registry();
+    let PurgePreparation::SeedLift(held) = prepare(&reg, &beta("fx-a")) else {
+        panic!("premise: the first lift reserves");
+    };
+
+    // Act
+    let second = prepare(&reg, &beta("fx-a"));
+    let cut = reg.with_boundary_cut(|_, _| (), |()| true);
+
+    // Assert
+    assert!(matches!(second, PurgePreparation::Busy), "{second:?}");
+    assert!(
+        !matches!(cut, BoundaryCut::Taken { .. }),
+        "an open lift lease refuses the boundary cut, as a learned purge's does",
+    );
+    reg.restore_purge(held);
+}
+
+#[test]
+fn an_admitted_unsettled_boundary_refuses_a_seed_lift_as_busy() {
+    // Arrange
+    let reg = registry();
+    let BoundaryCut::Taken { receipt, .. } = reg.with_boundary_cut(|_, _| (), |()| true) else {
+        panic!("the boundary must be admitted");
+    };
+
+    // Act
+    let prepared = prepare(&reg, &beta("fx-a"));
+
+    // Assert
+    assert!(matches!(prepared, PurgePreparation::Busy), "{prepared:?}");
+    let _ = reg.rollback_pending_generation(&receipt);
+}

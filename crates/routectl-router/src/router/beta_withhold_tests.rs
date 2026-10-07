@@ -684,3 +684,109 @@ fn the_owner_sweep_keeps_an_owned_marker() {
         vec![(lane_of(&target), BEDROCK.to_string())]
     );
 }
+
+fn purge_on(router: &Router, target: &DispatchTarget, flag: &str) -> super::super::PurgeOutcome {
+    let lane = crate::state_key::StateKey::parse(&lane_of(target)).expect("fixture lane parses");
+    router.reserve_learned_capability_purge(&lane, &key(flag))
+}
+
+#[test]
+fn a_finalized_seed_lift_sends_the_flag_and_carries_a_zero_incarnation_clear() {
+    // Arrange
+    let router = router(&capability(true));
+    let target = target_on(&router, "bed");
+    let generation = router.registry_generation();
+
+    // Act
+    let super::super::PurgeOutcome::SeedLift(lift) = purge_on(&router, &target, "fx-seed-only")
+    else {
+        panic!("premise: an unlifted seeded flag with nothing resident reserves a lift");
+    };
+    let settlement = lift.settlement();
+    assert_eq!(
+        withheld(&router, &target, &["fx-seed-only"]),
+        vec!["fx-seed-only"],
+        "the seed still withholds until the lift is finalized",
+    );
+    let events = routectl_testkit::capture_events(|| router.finalize_seed_lift(lift));
+
+    // Assert
+    assert_eq!(settlement.incarnation, 0);
+    assert_eq!(settlement.persistence_generation, generation);
+    assert_eq!(settlement.state_key, lane_of(&target));
+    assert_eq!(settlement.capability_key, key("fx-seed-only"));
+    assert_eq!(settlement.provider_kind, BEDROCK);
+    assert!(withheld(&router, &target, &["fx-seed-only"]).is_empty());
+    let audit: Vec<_> = events
+        .iter()
+        .filter(|e| e.field("event") == Some("purge"))
+        .collect();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].field("removed"), Some("false"));
+    assert_eq!(audit[0].field("seed_lifted"), Some("true"));
+    assert!(matches!(
+        purge_on(&router, &target, "fx-seed-only"),
+        super::super::PurgeOutcome::Absent
+    ));
+}
+
+#[test]
+fn an_abandoned_seed_lift_keeps_the_seed_withholding() {
+    let router = router(&capability(true));
+    let target = target_on(&router, "bed");
+    let super::super::PurgeOutcome::SeedLift(lift) = purge_on(&router, &target, "fx-seed-only")
+    else {
+        panic!("premise: the lift reserves");
+    };
+
+    router.abandon_seed_lift(lift);
+
+    assert_eq!(
+        withheld(&router, &target, &["fx-seed-only"]),
+        vec!["fx-seed-only"]
+    );
+    assert!(markers_on(&router).is_empty());
+}
+
+#[test]
+fn purging_an_unseeded_or_non_bedrock_beta_with_nothing_resident_stays_absent() {
+    let router = router(&capability(true));
+    let rows = [
+        ("unseeded flag on bedrock", "bed", "fx-unknown"),
+        ("seeded flag on another kind", "oc", "fx-seed-only"),
+    ];
+
+    for (name, provider, flag) in rows {
+        let target = target_on(&router, provider);
+
+        let outcome = purge_on(&router, &target, flag);
+
+        assert!(
+            matches!(outcome, super::super::PurgeOutcome::Absent),
+            "{name}: expected absent",
+        );
+    }
+    assert!(markers_on(&router).is_empty());
+}
+
+#[test]
+fn purging_a_resident_seeded_negative_stays_a_learned_purge_and_lifts_the_seed() {
+    // Arrange
+    let router = router(&capability(true));
+    let target = target_on(&router, "bed");
+    plant_acting_negative(&router, &target, "fx-seed-only");
+
+    // Act
+    let super::super::PurgeOutcome::Reserved(reserved) = purge_on(&router, &target, "fx-seed-only")
+    else {
+        panic!("a resident negative reserves a learned purge, not a lift");
+    };
+    assert!(router.finalize_learned_capability_purge(reserved));
+
+    // Assert
+    assert!(withheld(&router, &target, &["fx-seed-only"]).is_empty());
+    assert_eq!(
+        markers_on(&router),
+        vec![(lane_of(&target), BEDROCK.to_string())]
+    );
+}
