@@ -43,7 +43,6 @@ const FORBIDDEN_FLAG_BYTES: [char; 2] = ['.', ':'];
 /// `is_safe_token` shape) containing neither `.` nor `:`. An accepted flag is
 /// appended to the prefix unchanged, so the key preserves the upstream's
 /// spelling byte for byte.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn beta_capability_key(flag: &str) -> Option<String> {
     is_beta_flag(flag).then(|| format!("{BETA_CAPABILITY_PREFIX}{flag}"))
 }

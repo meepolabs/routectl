@@ -26,6 +26,7 @@ use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::ProviderState;
 
+mod beta_report_learn;
 mod cache_plan;
 mod capability_cleared;
 mod capability_health;

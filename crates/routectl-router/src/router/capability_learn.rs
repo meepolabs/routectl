@@ -128,6 +128,34 @@ pub struct CapabilityLearnEvent {
     pub source: EvidenceSource,
 }
 
+/// One learned negative ready for [`Router::mint_learned_negative`]: the
+/// capability and lane it names plus the structured facts the WARN and the
+/// [`CapabilityLearnEvent`] carry.
+pub(super) struct LearnedMint<'a> {
+    /// Learned-registry key of the rejecting target.
+    pub learned_key: String,
+    /// Normalized capability key the rejection named.
+    pub feature_key: String,
+    /// Breaker state key of the rejecting target, for the WARN only.
+    pub state_key: &'a str,
+    /// Stable provider-kind token of the rejecting target.
+    pub provider_kind: &'static str,
+    /// Evidence tier of the rejection.
+    pub tier: SignalTier,
+    /// Detection phase that attributed the rejection.
+    pub phase: FailurePhase,
+    /// The request-fault status that carried the rejection.
+    pub upstream_status: u16,
+    /// The upstream's `error.code`, when it sent one.
+    pub upstream_code: Option<&'a str>,
+    /// The upstream's `error.param`, only when safe to log verbatim.
+    pub upstream_param: Option<String>,
+    /// Whether a config class remap produced the class.
+    pub remapped: bool,
+    /// The request's derived in-flight feature set.
+    pub request_features: Vec<String>,
+}
+
 impl Router {
     /// After a config-only carry-over, lapse into a single re-probe every
     /// learned negative whose EFFECTIVE operator override verdict changed
@@ -813,41 +841,16 @@ impl Router {
             return;
         }
         // If this target was admitted as the single re-probe for this same
-        // capability, the rejection SETTLES the probe (capped backoff owns the
-        // observation bump and expiry) instead of feeding the observe path.
-        // The dedupe key is inserted too, so a same-request retry that hits
-        // this arm again does not re-observe the entry the probe refreshed.
-        match probe_guard.settle_same_capability(&learned_key, &feature_key, provider_kind) {
-            // A STALE settlement released its admission but recorded nothing, so
-            // none of the consequences below may follow: no probe-failure metric
-            // (no probe failure was booked), no F1Seen marker (nothing was
-            // reconfirmed), and no dedupe key (there is no refreshed entry for a
-            // retry to avoid re-observing). Returning early also keeps it off the
-            // observe path, which would mint against a generation the daemon left.
-            super::runtime_gate::SameCapabilitySettlement::Stale => return,
-            super::runtime_gate::SameCapabilitySettlement::NoMatch => {}
-            super::runtime_gate::SameCapabilitySettlement::Applied => {
-                self.metrics.incr_probe_failures();
-                // A re-probe that reconfirms an F1 negative is F1 evidence for this
-                // capability earlier in this attempt chain (criterion (c) reads
-                // "no F1 seen", not "no F1 freshly minted"): record F1Seen so a
-                // later cross-lane F2 candidate is suppressed rather than
-                // blind-minted past the reconfirmed F1. Phase-conditional -- a
-                // reconfirmed F2 must NOT set it, or a sibling lane's own F2 would
-                // be wrongly suppressed.
-                if self.settled_negative_phase(&learned_key, &feature_key, provider_kind)
-                    == Some(FailurePhase::F1)
-                {
-                    dedupe.insert(LearnDedupeKey::F1Seen {
-                        feature_key: feature_key.clone(),
-                    });
-                }
-                dedupe.insert(LearnDedupeKey::Capability {
-                    learned_key,
-                    feature_key,
-                });
-                return;
-            }
+        // capability, the rejection SETTLES the probe instead of feeding the
+        // observe path.
+        if self.settle_probe_rejection(
+            &learned_key,
+            &feature_key,
+            provider_kind,
+            dedupe,
+            probe_guard,
+        ) {
+            return;
         }
         // F2 mint gates. A feature-naming negative is minted only on
         // self-identifying evidence of a deterministic request fault, and never
@@ -879,6 +882,100 @@ impl Router {
                 return;
             }
         }
+        let upstream_param = crate::capability_matcher::upstream_param(err);
+        self.mint_learned_negative(
+            LearnedMint {
+                learned_key,
+                feature_key,
+                state_key: &state_key,
+                provider_kind,
+                tier,
+                phase,
+                upstream_status,
+                upstream_code,
+                upstream_param,
+                remapped,
+                request_features,
+            },
+            dedupe,
+            meta,
+        );
+    }
+
+    /// Settle a rejection of `feature_key` against this target's held
+    /// re-probe for the same capability. Returns `true` when the rejection
+    /// was consumed by the probe (applied or stale) and the caller must not
+    /// observe or mint it.
+    ///
+    /// An applied settlement refreshes the entry with capped backoff, which
+    /// owns the observation bump and expiry, and inserts the dedupe key so a
+    /// same-request retry that hits this capability again does not re-observe
+    /// the entry the probe refreshed.
+    pub(super) fn settle_probe_rejection(
+        &self,
+        learned_key: &str,
+        feature_key: &str,
+        provider_kind: &'static str,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+        probe_guard: &mut LearnedProbeGuard,
+    ) -> bool {
+        match probe_guard.settle_same_capability(learned_key, feature_key, provider_kind) {
+            // A STALE settlement released its admission but recorded nothing, so
+            // none of the consequences below may follow: no probe-failure metric
+            // (no probe failure was booked), no F1Seen marker (nothing was
+            // reconfirmed), and no dedupe key (there is no refreshed entry for a
+            // retry to avoid re-observing). It still stops the caller: the
+            // observe path would mint against a generation the daemon left.
+            super::runtime_gate::SameCapabilitySettlement::Stale => true,
+            super::runtime_gate::SameCapabilitySettlement::NoMatch => false,
+            super::runtime_gate::SameCapabilitySettlement::Applied => {
+                self.metrics.incr_probe_failures();
+                // A re-probe that reconfirms an F1 negative is F1 evidence for this
+                // capability earlier in this attempt chain (criterion (c) reads
+                // "no F1 seen", not "no F1 freshly minted"): record F1Seen so a
+                // later cross-lane F2 candidate is suppressed rather than
+                // blind-minted past the reconfirmed F1. Phase-conditional -- a
+                // reconfirmed F2 must NOT set it, or a sibling lane's own F2 would
+                // be wrongly suppressed.
+                if self.settled_negative_phase(learned_key, feature_key, provider_kind)
+                    == Some(FailurePhase::F1)
+                {
+                    dedupe.insert(LearnDedupeKey::F1Seen {
+                        feature_key: feature_key.to_string(),
+                    });
+                }
+                dedupe.insert(LearnDedupeKey::Capability {
+                    learned_key: learned_key.to_string(),
+                    feature_key: feature_key.to_string(),
+                });
+                true
+            }
+        }
+    }
+
+    /// Record one learned negative through the generation barrier, deduped per
+    /// request on `(learned key, capability)`, emit the structured learn WARN,
+    /// and -- when the entry acts -- ride a [`CapabilityLearnEvent`] out on
+    /// `meta`. Every caller has already applied its own eligibility gates.
+    pub(super) fn mint_learned_negative(
+        &self,
+        mint: LearnedMint<'_>,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+        meta: &mut DispatchMeta,
+    ) {
+        let LearnedMint {
+            learned_key,
+            feature_key,
+            state_key,
+            provider_kind,
+            tier,
+            phase,
+            upstream_status,
+            upstream_code,
+            upstream_param,
+            remapped,
+            request_features,
+        } = mint;
         // One observation per request per (learned key, feature): a retry, a
         // per-target re-entry, or a sibling target on the same lane that hits
         // this arm again is dropped here.
@@ -945,7 +1042,6 @@ impl Router {
                 feature_key: feature_key.clone(),
             });
         }
-        let upstream_param = crate::capability_matcher::upstream_param(err);
         // Emit `upstream_param` ONLY when the sanitizer deemed it safe to log
         // verbatim (bounded, single-token, no whitespace/control bytes). An
         // adversarial or buggy upstream can put arbitrary text in `error.param`;
@@ -955,7 +1051,7 @@ impl Router {
         match upstream_param.as_deref() {
             Some(param) => tracing::warn!(
                 event = "learn",
-                state_key = %routectl_core::sanitize_for_log(&state_key),
+                state_key = %routectl_core::sanitize_for_log(state_key),
                 lane = %routectl_core::sanitize_for_log(&learned_key),
                 capability_key = %feature_key,
                 provider_kind,
@@ -970,7 +1066,7 @@ impl Router {
             ),
             None => tracing::warn!(
                 event = "learn",
-                state_key = %routectl_core::sanitize_for_log(&state_key),
+                state_key = %routectl_core::sanitize_for_log(state_key),
                 lane = %routectl_core::sanitize_for_log(&learned_key),
                 capability_key = %feature_key,
                 provider_kind,

@@ -34,6 +34,7 @@ use crate::cost_gate::{break_even_k, emission_break_even_k};
 use crate::feature_keys::derive_feature_keys;
 
 use super::ReplayDegradation;
+use super::beta_report_learn::install_beta_repair_report;
 use super::cache_plan::{AutoCacheRequestPlan, CacheDecision, CacheInjection};
 use super::capability_learn::LearnDedupeKey;
 use super::class_observe::{
@@ -621,6 +622,7 @@ impl Router {
                 // returns without dialing or awaiting, so this request is not
                 // delayed and its outcome does not depend on it.
                 self.on_admitted_request(target, &attempt_req);
+                let beta_report = install_beta_repair_report(&mut attempt_req);
                 let result = run_with_timeout(
                     provider_name,
                     provider.as_ref(),
@@ -663,8 +665,16 @@ impl Router {
                         // any learned negative this dispatch re-probed, and
                         // ride each clear out on the meta so the ledger records
                         // it and a warm rebuild does not resurrect the negative.
-                        meta.cleared_capabilities
-                            .extend(learned_probe_guard.settle_success());
+                        // Beta flags the provider reported stripping settle
+                        // first, as rejections.
+                        self.settle_attempt_success(
+                            &beta_report,
+                            target,
+                            &req,
+                            &mut learn_dedupe,
+                            meta,
+                            &mut learned_probe_guard,
+                        );
                         // Response-evidence observer: the success-arm mirror of
                         // `observe_for_learning`. Reads structural positive /
                         // suspected-absence evidence off the assembled response
@@ -1555,6 +1565,7 @@ impl Router {
                 // lane/capability identity, so a session mixing surfaces still
                 // queues one job.
                 self.on_admitted_request(target, &attempt_req);
+                let beta_report = install_beta_repair_report(&mut attempt_req);
                 let r = try_stream_with_first_content(
                     provider_name,
                     model,
@@ -1605,8 +1616,16 @@ impl Router {
                         // clear any learned negative this dispatch re-probed,
                         // and ride each clear out on the meta so the ledger
                         // records it and a warm rebuild does not resurrect it.
-                        meta.cleared_capabilities
-                            .extend(learned_probe_guard.settle_success());
+                        // Beta flags the provider reported stripping settle
+                        // first, as rejections.
+                        self.settle_attempt_success(
+                            &beta_report,
+                            target,
+                            &req,
+                            &mut learn_dedupe,
+                            meta,
+                            &mut learned_probe_guard,
+                        );
                         // No response-evidence observation on the stream path:
                         // no assembled response exists here to read structural
                         // evidence from, so positive detection fails closed. A

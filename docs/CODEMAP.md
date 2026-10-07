@@ -3776,6 +3776,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the entry's lane; a one-nickname change is left to the per-target filter), `learned_capability_snapshot` (the status
   read-model), and `learned_replay` (the crate-internal `&self` delegate handing
   the dispatch arm the `ReplayLearnRegistry` for its carry-slot claim)
+- `src/router/beta_report_learn.rs` -- learning from the provider's per-attempt
+  `BetaRepairReport`: `install_beta_repair_report` puts a fresh slot on the
+  request before each complete/stream provider call (never per target, never on
+  count_tokens), and `settle_attempt_success` mints a `beta:<flag>` negative
+  per reported client flag (via `capability_learn`'s shared
+  `settle_probe_rejection` / `mint_learned_negative`) BEFORE the probe guard's
+  `settle_success`, so an admitted re-probe the provider re-confirmed is not
+  cleared
 - `src/router/capability_observe.rs` -- response-evidence observer: the
   SUCCESS-arm mirror of `observe_for_learning`, run inline on the terminal
   successful NON-STREAMING response (the streaming arm records nothing -- no
