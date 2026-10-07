@@ -341,11 +341,37 @@ mod replay {
 
     /// GATE 4: every proven replay-rejection shape. Grounded in captured
     /// envelopes only -- an unverified shape waits for its capture.
-    const PROVEN_REJECTIONS: &[ReplaySignature] = &[ReplaySignature {
-        upstream_type: Some("invalid_request_error"),
-        upstream_code: Some("validation_error"),
-        message_anchor: Some("encrypted content missing recognized prefix"),
-    }];
+    const PROVEN_REJECTIONS: &[ReplaySignature] = &[
+        ReplaySignature {
+            upstream_type: Some("invalid_request_error"),
+            upstream_code: Some("validation_error"),
+            message_anchor: Some("encrypted content missing recognized prefix"),
+        },
+        // The chatgpt.com codex lane's ID-VERIFICATION rejection: the
+        // blob itself is well-formed, but the item id the client replayed
+        // it under does not match the id the blob was minted for
+        // (embedded in the encrypted payload). Real captured envelope
+        // (2026-10, chatgpt-oauth lane):
+        //   {"error":{"message":"The encrypted content for item rs_1
+        //    could not be verified. Reason: Encrypted content item_id
+        //    did not match the target item id.","type":
+        //    "invalid_request_error","param":null,
+        //    "code":"invalid_encrypted_content"}}
+        // The `rs_1` token in the middle is the VARIABLE part (the id the
+        // client used), so the anchor is the tail phrase AFTER it --
+        // `starts_with` would pin the client-controlled head. The
+        // message-anchor match below treats a `Some` anchor as a PREFIX
+        // check, so this row cannot use the tail as an anchor; instead
+        // the structured tokens (type + code) carry the match and the
+        // anchor is None. `invalid_encrypted_content` is not a generic
+        // validation token, so the precision of the four-gate conjunct
+        // is preserved: only this specific replay failure matches.
+        ReplaySignature {
+            upstream_type: Some("invalid_request_error"),
+            upstream_code: Some("invalid_encrypted_content"),
+            message_anchor: None,
+        },
+    ];
 
     /// What the attempted request carried, supplied by the DISPATCHER.
     ///
