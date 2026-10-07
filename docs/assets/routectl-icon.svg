@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">routectl</title>
+  <desc id="desc">A dark gray routing hub connects a request to red, green, and blue provider nodes.</desc>
+  <g fill="none" stroke="#4a4a4a" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5">
+    <path d="M 15.5 32 H 26 M 38 32 h 10.5 M 36.69 28.25 l 12.58 -10.06 M 36.69 35.75 l 12.58 10.06"/>
+  </g>
+  <g fill="#4a4a4a">
+    <circle cx="12" cy="32" r="3.5"/>
+    <circle cx="32" cy="32" r="6"/>
+  </g>
+  <circle cx="52" cy="16" r="3.5" fill="#e53935"/>
+  <circle cx="52" cy="32" r="3.5" fill="#34a853"/>
+  <circle cx="52" cy="48" r="3.5" fill="#4285f4"/>
+</svg>

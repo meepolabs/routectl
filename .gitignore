@@ -52,6 +52,8 @@ crates/routectl-cli/tests/fixtures/captured/
 # Claude Code per-project session state (scheduled tasks, local
 # settings, transient scratch). Never commit -- machine-specific.
 .claude/
+# Local codegraph index and cache -- machine-specific, never commit.
+.codegraph/
 
 # Local research scratch -- personal notes, config references, experiments.
 scratch/
