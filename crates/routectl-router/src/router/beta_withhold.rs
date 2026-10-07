@@ -8,8 +8,10 @@
 //! 2. operator override on the flag's capability key -- `force_supported`
 //!    sends, `unsupported` withholds (a beta flag never routes a target away);
 //! 3. learned lane verdict, only with the capability subsystem enabled -- an
-//!    acting negative withholds, a lapsed one admits a re-probe and sends, a
-//!    verified positive sends;
+//!    acting negative withholds, a lapsed one admits a re-probe and sends on
+//!    an inference surface (a token count carries no capability test, so
+//!    there it stays withheld and the slot stays free), a verified positive
+//!    sends;
 //! 4. the shipped Bedrock seed -- withholds, independent of the kill switch,
 //!    unless the registry holds a seed-clear marker for the cell.
 //!
@@ -22,9 +24,10 @@ use routectl_core::ChatRequest;
 use routectl_core::capability::normalize_capability_key;
 
 use crate::beta_capability::beta_capability_key;
-use crate::learned_capability::RoutingDecision;
+use crate::learned_capability::{BetaLaneReading, ProbeClaim};
 use crate::override_registry::OverrideVerdict;
 
+use super::class_observe::DispatchSurface;
 use super::{DispatchTarget, ProbeAdmission, Router};
 
 /// What the precedence chain decided for one flag on one target.
@@ -44,16 +47,21 @@ impl Router {
         &self,
         chain: Vec<DispatchTarget>,
         req: &ChatRequest,
+        surface: DispatchSurface,
         admissions: &mut Vec<ProbeAdmission>,
     ) -> Vec<DispatchTarget> {
         if req.anthropic_beta.is_empty() {
             return chain;
         }
+        let claim = match surface {
+            DispatchSurface::Complete | DispatchSurface::Stream => ProbeClaim::Claim,
+            DispatchSurface::CountTokens => ProbeClaim::Forgo,
+        };
         let now = Instant::now();
         chain
             .into_iter()
             .map(|target| {
-                let withheld = self.withheld_betas_for_target(&target, req, admissions, now);
+                let withheld = self.withheld_betas_for_target(&target, req, claim, admissions, now);
                 if withheld.is_empty() {
                     target
                 } else {
@@ -72,6 +80,7 @@ impl Router {
         &self,
         target: &DispatchTarget,
         req: &ChatRequest,
+        claim: ProbeClaim,
         admissions: &mut Vec<ProbeAdmission>,
         now: Instant,
     ) -> Vec<String> {
@@ -83,7 +92,7 @@ impl Router {
             if withheld.contains(flag) {
                 continue;
             }
-            if self.beta_verdict(target, flag, admissions, now) == BetaVerdict::Withhold {
+            if self.beta_verdict(target, flag, claim, admissions, now) == BetaVerdict::Withhold {
                 withheld.push(flag.clone());
             }
         }
@@ -96,6 +105,7 @@ impl Router {
         &self,
         target: &DispatchTarget,
         flag: &str,
+        claim: ProbeClaim,
         admissions: &mut Vec<ProbeAdmission>,
         now: Instant,
     ) -> BetaVerdict {
@@ -109,7 +119,7 @@ impl Router {
             BetaVerdict::Open => {}
             decided => return decided,
         }
-        match self.learned_beta_verdict(target, &key, admissions, now) {
+        match self.learned_beta_verdict(target, &key, claim, admissions, now) {
             BetaVerdict::Open => {}
             decided => return decided,
         }
@@ -135,11 +145,13 @@ impl Router {
 
     /// The learned lane's verdict on `key`. Claiming a lapsed negative's
     /// re-probe slot pushes its admission and sends the flag, so the full
-    /// request re-tests it.
+    /// request re-tests it; under [`ProbeClaim::Forgo`] the lapsed negative
+    /// keeps withholding.
     fn learned_beta_verdict(
         &self,
         target: &DispatchTarget,
         key: &str,
+        claim: ProbeClaim,
         admissions: &mut Vec<ProbeAdmission>,
         now: Instant,
     ) -> BetaVerdict {
@@ -152,11 +164,11 @@ impl Router {
         let Some(learned_key) = target.learned_key(key) else {
             return BetaVerdict::Open;
         };
-        let (decision, generation) =
-            self.acting_negative_with_generation(learned_key, key, provider_kind, now);
-        match decision {
-            RoutingDecision::RouteAway { .. } => BetaVerdict::Withhold,
-            RoutingDecision::ProbeAdmitted => {
+        let (reading, generation) =
+            self.beta_reading_with_generation(learned_key, key, provider_kind, claim, now);
+        match reading {
+            BetaLaneReading::ActingNegative => BetaVerdict::Withhold,
+            BetaLaneReading::ProbeAdmitted => {
                 self.metrics.incr_probe_attempts();
                 admissions.push(ProbeAdmission {
                     state_key: target.state_key.clone(),
@@ -167,12 +179,8 @@ impl Router {
                 });
                 BetaVerdict::Send
             }
-            RoutingDecision::Allow
-                if self.is_verified_working_or_false(learned_key, key, provider_kind, now) =>
-            {
-                BetaVerdict::Send
-            }
-            RoutingDecision::Allow => BetaVerdict::Open,
+            BetaLaneReading::VerifiedPositive => BetaVerdict::Send,
+            BetaLaneReading::NoVerdict => BetaVerdict::Open,
         }
     }
 

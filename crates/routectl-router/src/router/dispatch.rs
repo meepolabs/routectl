@@ -278,7 +278,8 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<ChatResponse> {
         validate_request_transcript(&req)?;
-        let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
+        let (chain, probe_admissions) =
+            self.dispatch_chain_for_request(&req, DispatchSurface::Complete)?;
         // Re-probes the chain filter admitted, owned by a request-scoped set
         // that settles them on transfer or on drop. `take(state_key)` moves a
         // target's admissions into its `LearnedProbeGuard` when the loop
@@ -1302,7 +1303,8 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         validate_request_transcript(&req)?;
-        let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
+        let (chain, probe_admissions) =
+            self.dispatch_chain_for_request(&req, DispatchSurface::Stream)?;
         // See `complete_inner`: re-probes the filter admitted, owned by a
         // request-scoped set that settles each on transfer (`take`) or on drop
         // (`OtherError` for any admission the loop never reached).

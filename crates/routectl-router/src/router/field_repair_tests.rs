@@ -1561,7 +1561,10 @@ fn an_apply_that_removes_nothing_charges_no_budget_and_reports_no_repair() {
 
     let carrying = req_on(ALIAS);
     let target = router
-        .dispatch_chain_for_request(&carrying)
+        .dispatch_chain_for_request(
+            &carrying,
+            crate::router::class_observe::DispatchSurface::Complete,
+        )
         .expect("the fixture chain resolves")
         .0
         .into_iter()

@@ -2478,6 +2478,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe_learned_capability` / `observe_verified_capability` /
   `acting_negative_with_generation` (the live act-side read: decision plus the
   effective generation, paired under one guard) /
+  `beta_reading_with_generation` (the beta pass's one guarded read: acting
+  negative / probe admitted / verified positive / none) /
   `is_verified_working_or_false` / `clear_learned_capability` (catalog-scoped work
   from a superseded Router is refused as `Stale` and emits no event or metric; a
   catalog-independent observation is always accepted into the live store),
@@ -3150,7 +3152,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
 - `src/router/beta_withhold.rs` -- per-target withheld client beta set
   (`withhold_betas_on_chain`), resolved pin > override > learned > seed; a
-  seed-clear marker on the cell stops the seed withholding
+  seed-clear marker on the cell stops the seed withholding; a lapsed learned
+  negative claims its re-probe only on complete / stream, never count_tokens
 - `src/router/feature_filter.rs` -- capability pre-filter + strip-interceptor
   application: `filter_chain_by_features` (alias-chain pre-filter with the
   prior/learned soft-drop tail: prior-demoted targets sort ahead of

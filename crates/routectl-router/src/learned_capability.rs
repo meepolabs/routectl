@@ -277,6 +277,29 @@ pub enum RoutingDecision {
     ProbeAdmitted,
 }
 
+/// One generation-guarded read of a lane's learned verdict on a beta flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BetaLaneReading {
+    /// An acting negative applies: withhold the flag.
+    ActingNegative,
+    /// A lapsed negative's single re-probe slot was claimed by this read.
+    ProbeAdmitted,
+    /// A verified-working positive owns the key.
+    VerifiedPositive,
+    /// Nothing the lane acts on.
+    NoVerdict,
+}
+
+/// Whether a [`LearnedCapabilityRegistry::beta_reading_in_generation`] read
+/// may claim a lapsed negative's re-probe slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeClaim {
+    /// Claim the slot when the negative has lapsed and nobody holds it.
+    Claim,
+    /// Never claim: a lapsed negative reads as still acting.
+    Forgo,
+}
+
 /// Non-claiming view of the resident negative for a key.
 ///
 /// The read-only counterpart to
@@ -2375,6 +2398,65 @@ impl LearnedCapabilityRegistry {
             | GenerationOutcome::Reserved
             | GenerationOutcome::Exhausted => None,
         }
+    }
+
+    /// A beta flag's learned verdict for `generation`, in ONE guarded read, or
+    /// `None` when that generation may not read the key or a purge holds it.
+    ///
+    /// Folds the acting-negative decision and the verified-positive check into
+    /// a single acquisition: `guarded_keyed` takes `entries` for write, so two
+    /// separate reads per flag would double that contention on the dispatch
+    /// path. Under [`ProbeClaim::Forgo`] a lapsed negative stays
+    /// [`BetaLaneReading::ActingNegative`] and its slot is left free.
+    pub(crate) fn beta_reading_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        claim: ProbeClaim,
+        now: Instant,
+    ) -> Option<(BetaLaneReading, u64)> {
+        match self.guarded_read(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, _leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                let decision = match claim {
+                    ProbeClaim::Claim => self.acting_negative_for_in(entries, &key, now),
+                    ProbeClaim::Forgo => Self::unclaimed_decision_in(entries, &key),
+                };
+                match decision {
+                    RoutingDecision::RouteAway { .. } => BetaLaneReading::ActingNegative,
+                    RoutingDecision::ProbeAdmitted => BetaLaneReading::ProbeAdmitted,
+                    RoutingDecision::Allow if Self::is_verified_working_in(entries, &key) => {
+                        BetaLaneReading::VerifiedPositive
+                    }
+                    RoutingDecision::Allow => BetaLaneReading::NoVerdict,
+                }
+            },
+        ) {
+            GenerationOutcome::Applied {
+                value, generation, ..
+            } => Some((value, generation)),
+            GenerationOutcome::Stale
+            | GenerationOutcome::Reserved
+            | GenerationOutcome::Exhausted => None,
+        }
+    }
+
+    /// The resident entry's routing decision with its decay ignored, so a
+    /// lapsed negative still routes away and no re-probe slot is touched.
+    fn unclaimed_decision_in(
+        entries: &BTreeMap<RegistryKey, LearnedEntry>,
+        key: &RegistryKey,
+    ) -> RoutingDecision {
+        entries
+            .get(key)
+            .filter(|entry| entry.is_acting())
+            .map_or(RoutingDecision::Allow, LearnedEntry::acting_decision)
     }
 
     /// Remove a keyed entry on behalf of `generation` (the probe-settlement

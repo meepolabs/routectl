@@ -8,6 +8,7 @@ use routectl_core::{ChatRequest, Error, Result};
 use crate::config::AliasValue;
 use crate::resolved::ResolvedModel;
 
+use super::class_observe::DispatchSurface;
 use super::{
     ALIAS_MAX_RECURSION_DEPTH, DispatchTarget, ProbeAdmission, Router, catalog_capabilities,
 };
@@ -463,9 +464,13 @@ impl Router {
     /// claimed). Each one MUST be settled by the dispatch path -- success,
     /// same-capability rejection, or other error -- or the entry's
     /// `in_flight` slot latches and the target routes away permanently.
+    ///
+    /// `surface` is the entry point resolving the chain: a lapsed beta
+    /// negative claims its re-probe only on an inference surface.
     pub(super) fn dispatch_chain_for_request(
         &self,
         req: &ChatRequest,
+        surface: DispatchSurface,
     ) -> Result<(Vec<DispatchTarget>, Vec<ProbeAdmission>)> {
         let chain = self.dispatch_chain(
             &req.model,
@@ -484,7 +489,7 @@ impl Router {
         // early for a request with no feature keys, and beta flags are not
         // feature keys. After the window pass so a skipped target never claims
         // a re-probe slot.
-        let chain = self.withhold_betas_on_chain(chain, req, &mut admissions);
+        let chain = self.withhold_betas_on_chain(chain, req, surface, &mut admissions);
         Ok((chain, admissions))
     }
 }

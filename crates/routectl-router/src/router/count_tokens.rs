@@ -218,7 +218,8 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<TokenCount> {
         validate_request_transcript(&req)?;
-        let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
+        let (chain, probe_admissions) =
+            self.dispatch_chain_for_request(&req, DispatchSurface::CountTokens)?;
         // A token-count is not a messages-capability test, so a re-probe the
         // filter admitted here settles OtherError: release the in_flight slot
         // and leave the entry expired for the next real request to re-probe,

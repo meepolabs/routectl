@@ -578,6 +578,33 @@ impl Router {
         }
     }
 
+    /// A beta flag's learned verdict AND the effective persistence generation
+    /// it was read under, through the generation barrier in one acquisition.
+    /// A stale or purge-held read yields `NoVerdict` and the live generation:
+    /// nothing will be admitted from it.
+    pub(crate) fn beta_reading_with_generation(
+        &self,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+        claim: crate::learned_capability::ProbeClaim,
+        now: Instant,
+    ) -> (crate::learned_capability::BetaLaneReading, u64) {
+        self.learned_capabilities
+            .beta_reading_in_generation(
+                self.registry_generation(),
+                state_key,
+                feature_key,
+                provider_kind,
+                claim,
+                now,
+            )
+            .unwrap_or((
+                crate::learned_capability::BetaLaneReading::NoVerdict,
+                self.registry_generation(),
+            ))
+    }
+
     /// Read-only snapshot of the learned-capability registry in the fixed
     /// contract shape: every resident entry recorded under the kind this
     /// Router's config gives its lane. `&self` delegate over the private

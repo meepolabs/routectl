@@ -16,8 +16,9 @@ use serde_json::json;
 use super::super::{DispatchTarget, Router};
 use crate::beta_capability::beta_capability_key;
 use crate::config::{Config, OverrideEntry, ProviderEntry};
-use crate::learned_capability::{EntryVerdict, ExportedEntry};
+use crate::learned_capability::{EntryVerdict, ExportedEntry, ProbeClaim};
 use crate::resolved::ResolvedModel;
+use crate::router::class_observe::DispatchSurface;
 
 const BEDROCK: &str = "bedrock";
 
@@ -205,8 +206,13 @@ fn betas(flags: &[&str]) -> ChatRequest {
 
 fn withheld(router: &Router, target: &DispatchTarget, flags: &[&str]) -> Vec<String> {
     let mut admissions = Vec::new();
-    let out =
-        router.withheld_betas_for_target(target, &betas(flags), &mut admissions, Instant::now());
+    let out = router.withheld_betas_for_target(
+        target,
+        &betas(flags),
+        ProbeClaim::Claim,
+        &mut admissions,
+        Instant::now(),
+    );
     assert!(admissions.is_empty(), "no fixture here lapses a negative");
     out
 }
@@ -272,6 +278,7 @@ fn probe_admitted_sends_the_flag_and_yields_exactly_one_admission() {
     let out = router.withheld_betas_for_target(
         &target,
         &betas(&["fx-seed-only"]),
+        ProbeClaim::Claim,
         &mut admissions,
         Instant::now(),
     );
@@ -465,12 +472,73 @@ fn a_lapsed_negative_admission_is_claimed_once_per_chain_pass() {
     let chain = router.withhold_betas_on_chain(
         vec![target],
         &betas(&["fx-unknown", "fx-seed-only"]),
+        DispatchSurface::Complete,
         &mut admissions,
     );
 
     // Assert
     assert_eq!(admissions.len(), 1);
     assert_eq!(chain[0].withheld_betas.to_vec(), vec!["fx-seed-only"]);
+}
+
+#[test]
+fn each_client_beta_takes_the_registry_entries_lock_once_per_target() {
+    // Arrange -- one flag per learned shape: acting negative, verified
+    // positive, nothing resident.
+    let router = router(&capability(true));
+    let target = target_on(&router, "bed");
+    seed_negative(&router, &target, "fx-unknown");
+    seed_positive(&router, &target, "fx-learned-pos");
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sink = Arc::clone(&count);
+    router
+        .learned_capabilities
+        .set_lock_acquire_hook(Box::new(move |lock| {
+            if lock == "entries" {
+                sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }));
+
+    // Act
+    let out = withheld(
+        &router,
+        &target,
+        &["fx-unknown", "fx-learned-pos", "fx-other"],
+    );
+
+    // Assert
+    assert_eq!(out, vec!["fx-unknown".to_string()]);
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn count_tokens_keeps_a_lapsed_negative_withheld_and_claims_no_probe() {
+    // Arrange -- an unseeded flag, so only the lapsed learned negative can
+    // withhold it.
+    let (router, provider) = dispatch_router(true);
+    let target = target_on(&router, "bed");
+    seed_lapsed_negative(&router, &target, "fx-unknown");
+    let flagged = vec!["fx-unknown".to_string()];
+
+    // Act -- repeated token counts.
+    for _ in 0..2 {
+        Box::pin(router.count_tokens(betas(&["fx-unknown"])))
+            .await
+            .expect("count_tokens succeeds");
+    }
+
+    // Assert -- each count withholds the flag and none claimed the slot.
+    assert_eq!(provider.withheld(), vec![flagged.clone(), flagged]);
+    assert_eq!(router.metrics.probe_attempts_total(), 0);
+
+    // Act -- an inference request on the same lane.
+    Box::pin(router.complete(betas(&["fx-unknown"])))
+        .await
+        .expect("complete succeeds");
+
+    // Assert -- the slot was still free, so exactly one probe sends the flag.
+    assert_eq!(provider.withheld().last(), Some(&Vec::new()));
+    assert_eq!(router.metrics.probe_attempts_total(), 1);
 }
 
 fn mark_seed_cleared(router: &Router, target: &DispatchTarget, flag: &str) {
