@@ -227,8 +227,9 @@ pub struct CapabilityRebuildSummary {
     pub replayed_negative: usize,
     /// `cleared` events that removed a resident entry.
     pub replayed_cleared: usize,
-    /// `cleared` events with no resident entry to remove (a no-op, e.g. a
-    /// cleared event replayed before its negative).
+    /// `cleared` events with no resident entry to remove (e.g. a cleared
+    /// event replayed before its negative, or a seed lift). A `beta:` row
+    /// still records its seed-clear marker.
     pub cleared_noop: usize,
     /// Probe-source events replayed through the shared admission arms. A
     /// by-source tally bumped ALONGSIDE the by-verdict counter each probe
@@ -423,7 +424,7 @@ fn replay_row(
             mint_negative(row, registry, tier, phase, source, summary);
         }
         "cleared" => {
-            if registry.remove_keyed(&row.state_key, &row.capability, &row.provider_kind) {
+            if registry.replay_cleared(&row.state_key, &row.capability, &row.provider_kind) {
                 summary.replayed_cleared += 1;
             } else {
                 summary.cleared_noop += 1;

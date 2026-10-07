@@ -3154,7 +3154,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `apply_layered_overlays`, `operator_betas`, `operator_payload_extras`, the
   `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
 - `src/router/beta_withhold.rs` -- per-target withheld client beta set
-  (`withhold_betas_on_chain`), resolved pin > override > learned > seed
+  (`withhold_betas_on_chain`), resolved pin > override > learned > seed; a
+  seed-clear marker on the cell stops the seed withholding
 - `src/router/feature_filter.rs` -- capability pre-filter + strip-interceptor
   application: `filter_chain_by_features` (alias-chain pre-filter with the
   prior/learned soft-drop tail: prior-demoted targets sort ahead of
@@ -4075,7 +4076,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   catalog-scoped write land after the generation advanced and the prune ran).
   Lock order is documented on the `generation` field and is the same
   everywhere: `generation` -> `pending_generation` -> `entries` ->
-  `purge_leases` -> `tuning`. A path needing
+  `purge_leases` -> `seed_clears` -> `tuning`. Seed-clear markers
+  (`seed_cleared`, `seed_clear_snapshot` / `SeedClearMarker`) sit beside
+  `entries`, outside both caps: a `beta:` key's replayed `cleared` row
+  (`replay_cleared`), probe-success clear or finalized purge records one, an
+  acting learned negative lifts it, and `commit_boundary_transition` prunes them
+  with the catalog-scoped entries. A path needing
   only a subset still takes what it needs in that sequence, including
   `effective_persistence_generation`, the hand-rolled `Debug` (which SNAPSHOTS all
   four values in order and drops every guard before formatting -- reading them

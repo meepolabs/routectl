@@ -10,7 +10,8 @@
 //! 3. learned lane verdict, only with the capability subsystem enabled -- an
 //!    acting negative withholds, a lapsed one admits a re-probe and sends, a
 //!    verified positive sends;
-//! 4. the shipped Bedrock seed -- withholds, independent of the kill switch.
+//! 4. the shipped Bedrock seed -- withholds, independent of the kill switch,
+//!    unless the registry holds a seed-clear marker for the cell.
 //!
 //! A forwarded-credential target withholds nothing: the client owns that
 //! credential and its beta choices.
@@ -112,7 +113,7 @@ impl Router {
             BetaVerdict::Open => {}
             decided => return decided,
         }
-        if self.seed_withholds(target, flag) {
+        if self.seed_withholds(target, &key, flag) {
             BetaVerdict::Withhold
         } else {
             BetaVerdict::Send
@@ -175,10 +176,22 @@ impl Router {
         }
     }
 
-    fn seed_withholds(&self, target: &DispatchTarget, flag: &str) -> bool {
+    fn seed_withholds(&self, target: &DispatchTarget, key: &str, flag: &str) -> bool {
         target.provider_kind == Some(crate::beta_seed::BEDROCK_SEED_PROVIDER_KIND)
             && self.beta_seed.contains(&flag)
-            && !seed_cleared_for_cell(target, flag)
+            && !self.seed_cleared_for_cell(target, key)
+    }
+
+    /// Whether the seed has been cleared for this target's (lane, flag) cell.
+    /// A target with no lane or no kind has no cell to clear.
+    fn seed_cleared_for_cell(&self, target: &DispatchTarget, key: &str) -> bool {
+        let (Some(provider_kind), Some(learned_key)) =
+            (target.provider_kind, target.learned_key(key))
+        else {
+            return false;
+        };
+        self.learned_capabilities
+            .seed_cleared(learned_key, key, provider_kind)
     }
 
     /// Replace the Bedrock beta seed with a fixture list.
@@ -186,12 +199,6 @@ impl Router {
     pub const fn set_beta_seed_for_tests(&mut self, seed: &'static [&'static str]) {
         self.beta_seed = seed;
     }
-}
-
-/// Whether the seed has been cleared for this (lane, flag) cell, so it no
-/// longer withholds the flag there. No cell is ever cleared yet.
-const fn seed_cleared_for_cell(_target: &DispatchTarget, _flag: &str) -> bool {
-    false
 }
 
 #[cfg(all(test, feature = "bedrock"))]

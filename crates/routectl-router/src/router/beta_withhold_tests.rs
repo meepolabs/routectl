@@ -472,3 +472,86 @@ fn a_lapsed_negative_admission_is_claimed_once_per_chain_pass() {
     assert_eq!(admissions.len(), 1);
     assert_eq!(chain[0].withheld_betas.to_vec(), vec!["fx-seed-only"]);
 }
+
+fn mark_seed_cleared(router: &Router, target: &DispatchTarget, flag: &str) {
+    let _ = router
+        .learned_capabilities
+        .replay_cleared(&lane_of(target), &key(flag), BEDROCK);
+}
+
+/// An acting negative planted without passing through `observe`, so a marker
+/// already on the cell stays put beside it.
+fn plant_acting_negative(router: &Router, target: &DispatchTarget, flag: &str) {
+    let base = Instant::now();
+    router
+        .learned_capabilities
+        .import_entries(vec![ExportedEntry {
+            provider_kind: BEDROCK.into(),
+            state_key: lane_of(target),
+            feature_key: key(flag),
+            verdict: EntryVerdict::Negative,
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: base,
+            last_seen: base,
+            expires_at: base + std::time::Duration::from_hours(1),
+            evidence_class: None,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+        }]);
+}
+
+#[test]
+fn a_cleared_seed_is_sent_unless_a_learned_negative_resides() {
+    // Arrange
+    let router = router(&capability(true));
+    let target = target_on(&router, "bed");
+    mark_seed_cleared(&router, &target, "fx-seed-only");
+    mark_seed_cleared(&router, &target, "fx-learned-pos");
+    plant_acting_negative(&router, &target, "fx-learned-pos");
+    assert!(
+        router.learned_capabilities.seed_cleared(
+            &lane_of(&target),
+            &key("fx-learned-pos"),
+            BEDROCK
+        ),
+        "premise: the marker sits beside the negative",
+    );
+
+    // Act
+    let out = withheld(&router, &target, &["fx-seed-only", "fx-learned-pos"]);
+
+    // Assert
+    assert_eq!(out, vec!["fx-learned-pos"]);
+}
+
+#[test]
+fn a_cleared_seed_is_sent_with_the_learning_switch_off() {
+    let router = router(&capability(false));
+    let target = target_on(&router, "bed");
+    mark_seed_cleared(&router, &target, "fx-seed-only");
+
+    let out = withheld(&router, &target, &["fx-seed-only", "fx-learned-pos"]);
+
+    assert_eq!(out, vec!["fx-learned-pos"]);
+}
+
+#[test]
+fn a_config_only_reload_keeps_a_cleared_seed() {
+    // Arrange
+    let before = router(&capability(true));
+    let target = target_on(&before, "bed");
+    mark_seed_cleared(&before, &target, "fx-seed-only");
+    let mut after = router(&capability(true));
+    assert_eq!(after.catalog_version, before.catalog_version);
+    assert_eq!(after.overlay_revision, before.overlay_revision);
+
+    // Act
+    after.carry_over_learned_from(&before);
+
+    // Assert
+    let target = target_on(&after, "bed");
+    assert!(withheld(&after, &target, &["fx-seed-only"]).is_empty());
+}

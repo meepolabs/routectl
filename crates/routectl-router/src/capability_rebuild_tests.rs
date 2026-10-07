@@ -978,3 +978,93 @@ fn replayed_beta_negatives_past_the_lane_bound_keep_the_newest() {
     );
     assert!(resident.contains(&key(MAX_BETA_ENTRIES_PER_LANE)));
 }
+
+fn beta_key(flag: &str) -> String {
+    crate::beta_capability::beta_capability_key(flag).expect("well formed")
+}
+
+fn seed_cleared(reg: &LearnedCapabilityRegistry, key: &str) -> bool {
+    reg.seed_cleared(LANE, key, "openai-compat")
+}
+
+#[test]
+fn a_cleared_beta_row_with_no_entry_marks_the_seed_and_counts_a_noop() {
+    // Arrange
+    let base = Instant::now();
+    let beta = beta_key("zz-flag-a");
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![cleared(1, base, &beta), cleared(2, base, "web_search")],
+    };
+    let reg = registry();
+
+    // Act
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    // Assert
+    assert_eq!(summary.cleared_noop, 2);
+    assert_eq!(summary.replayed_cleared, 0);
+    assert!(seed_cleared(&reg, &beta));
+    assert!(
+        !seed_cleared(&reg, "web_search"),
+        "a non-beta row marks nothing"
+    );
+    assert_eq!(reg.seed_clear_snapshot().len(), 1);
+}
+
+#[test]
+fn replayed_beta_clear_and_negative_resolve_by_rowid() {
+    // Arrange -- one cell cleared then re-learned, one learned then cleared.
+    let base = Instant::now();
+    let relearned = beta_key("zz-relearned");
+    let lifted = beta_key("zz-lifted");
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![
+            cleared(1, base, &relearned),
+            broken(2, base, &relearned),
+            broken(3, base, &lifted),
+            cleared(4, base, &lifted),
+        ],
+    };
+    let reg = registry();
+
+    // Act
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    // Assert -- the newer row wins each cell.
+    assert_eq!(summary.replayed_cleared, 1);
+    assert_eq!(summary.cleared_noop, 1);
+    let at = base + Duration::from_secs(1);
+    assert!(matches!(
+        reg.acting_negative_for(LANE, &relearned, "openai-compat", at),
+        RoutingDecision::RouteAway { .. }
+    ));
+    assert!(
+        !seed_cleared(&reg, &relearned),
+        "the later negative lifts the marker"
+    );
+    assert_eq!(
+        reg.acting_negative_for(LANE, &lifted, "openai-compat", at),
+        RoutingDecision::Allow,
+    );
+    assert!(seed_cleared(&reg, &lifted));
+}
+
+#[test]
+fn a_cleared_beta_row_from_another_revision_marks_nothing() {
+    let base = Instant::now();
+    let beta = beta_key("zz-flag-a");
+    let mut stale = cleared(1, base, &beta);
+    stale.overlay_revision = OV + 1;
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![stale],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    assert_eq!(summary.skipped_revision, 1);
+    assert!(!seed_cleared(&reg, &beta));
+}

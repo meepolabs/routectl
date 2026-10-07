@@ -24,7 +24,8 @@
 //! # Concurrency
 //!
 //! State lives behind a family of locks taken in one fixed order --
-//! `generation -> pending_generation -> entries -> purge_leases` -- enforced by
+//! `generation -> pending_generation -> entries -> purge_leases ->
+//! seed_clears` -- enforced by
 //! [`LearnedCapabilityRegistry::guarded_keyed`], the single choke point every
 //! generation-validated, per-key operation runs through. Calling
 //! [`LearnedCapabilityRegistry::acting_negative_for`] directly (bypassing
@@ -46,7 +47,7 @@
 //! runtime gate's now-parameter style.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -358,6 +359,18 @@ pub struct RecordedLearnedEntry {
     pub provider_kind: String,
 }
 
+/// One cleared seed cell: a `beta:` key on a lane whose shipped seed no longer
+/// withholds the flag. See [`LearnedCapabilityRegistry::seed_clear_snapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SeedClearMarker {
+    /// The serialized learned lane (`provider_entry#upstream`).
+    pub state_key: String,
+    /// The provider kind the clear was recorded under.
+    pub provider_kind: String,
+    /// The normalized `beta:<flag>` capability key.
+    pub feature_key: String,
+}
+
 /// The incarnation and PROVENANCE of one currently-acting field-namespace
 /// entry, read out of a single guarded acquisition. See
 /// [`LearnedCapabilityRegistry::field_acting_facts_in_generation`].
@@ -457,7 +470,7 @@ pub struct LearnedCapabilityRegistry {
     /// # Lock order (the ONE order every path uses)
     ///
     /// `generation` -> `pending_generation` -> `entries` -> `purge_leases` ->
-    /// `tuning`.
+    /// `seed_clears` -> `tuning`.
     ///
     /// Every generation-validated operation acquires `generation` FIRST and holds
     /// it across the `entries` work, so validation and the operation it guards
@@ -505,6 +518,22 @@ pub struct LearnedCapabilityRegistry {
     /// cannot invert against a boundary transition. Per-key rather than
     /// registry-wide: one operator purge must not stall unrelated learning.
     purge_leases: Arc<RwLock<std::collections::HashSet<RegistryKey>>>,
+    /// Beta keys whose shipped seed has been cleared, keyed like an entry.
+    ///
+    /// A marker is the in-memory image of a `cleared` ledger row for a `beta:`
+    /// key: recorded wherever such a row is written or replayed, dropped when an
+    /// acting learned negative for the same key lands (in memory and on replay
+    /// alike, so the two agree), and pruned with the catalog-scoped entries
+    /// at a revision boundary, because the next boot's replay drops the row
+    /// there too.
+    ///
+    /// Kept apart from `entries` so a marker neither counts toward nor can be
+    /// evicted by either capacity bound: evicting one would silently re-seed a
+    /// flag an operator lifted.
+    ///
+    /// A leaf in the documented order: held only for the insert, remove or read
+    /// itself, never while acquiring another lock.
+    seed_clears: RwLock<BTreeSet<RegistryKey>>,
     /// Monotonic incarnation sequence, shared by every key.
     ///
     /// ONE sequence rather than a per-key counter: a consumer comparing two
@@ -960,6 +989,7 @@ impl LearnedCapabilityRegistry {
             pending_generation: RwLock::new(None),
             next_receipt_id: RwLock::new(1),
             purge_leases: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            seed_clears: RwLock::new(BTreeSet::new()),
             next_incarnation: RwLock::new(0),
             exhausted_incarnations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -1026,6 +1056,35 @@ impl LearnedCapabilityRegistry {
     /// either lock on the same thread.
     #[allow(clippy::too_many_arguments)]
     fn observe_in(
+        &self,
+        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+        key: &RegistryKey,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> ObserveOutcome {
+        let outcome = self.observe_entry_in(
+            entries,
+            leased,
+            key,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        );
+        if outcome == ObserveOutcome::Acting {
+            self.lift_seed_clear(key);
+        }
+        outcome
+    }
+
+    /// [`Self::observe_in`]'s entry mutation, without the seed-clear upkeep.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_entry_in(
         &self,
         entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
         leased: &std::collections::HashSet<RegistryKey>,
@@ -1307,6 +1366,9 @@ impl LearnedCapabilityRegistry {
     ) {
         match outcome {
             ProbeOutcome::Success => {
+                // Marked whether or not an entry was resident: the settlement
+                // writes its `cleared` row either way, and replay marks from it.
+                self.mark_seed_cleared(key);
                 if let Some(entry) = entries.remove(key) {
                     tracing::info!(
                         event = "clear",
@@ -1549,9 +1611,9 @@ impl LearnedCapabilityRegistry {
 
     /// Remove the resident entry keyed by `(state_key, feature_key)`
     /// outright, returning whether one was present. The keyed counterpart
-    /// to the `record_probe_outcome(Success)` clear: a warm rebuild replays
-    /// a persisted `cleared` settlement event through here so a
-    /// probe-settled negative does not resurrect across a restart. Unlike
+    /// to the `record_probe_outcome(Success)` clear, without its seed-clear
+    /// marker (a warm rebuild replays a persisted `cleared` row through
+    /// [`Self::replay_cleared`], which also records the marker). Unlike
     /// `expire_keyed`, this drops the entry entirely rather than lapsing it
     /// into a single re-probe -- the settlement already proved the target
     /// works, so there is nothing to re-verify.
@@ -1572,6 +1634,64 @@ impl LearnedCapabilityRegistry {
         key: &RegistryKey,
     ) -> bool {
         entries.remove(key).is_some()
+    }
+
+    /// Replay a persisted `cleared` row: remove the resident entry, and record
+    /// the seed-clear marker when the key is a beta key, whether or not an
+    /// entry was resident. Returns whether an entry was removed.
+    pub fn replay_cleared(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+    ) -> bool {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        let mut entries = self.entries.write();
+        self.mark_seed_cleared(&key);
+        Self::remove_keyed_in(&mut entries, &key)
+    }
+
+    /// Whether the shipped seed is cleared for `(state_key, feature_key)` under
+    /// `provider_kind`. Only a beta key can carry a marker.
+    pub fn seed_cleared(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+    ) -> bool {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        self.seed_clears.read().contains(&key)
+    }
+
+    /// Every cleared seed cell, in key order. A read-only view for display.
+    pub fn seed_clear_snapshot(&self) -> Vec<SeedClearMarker> {
+        self.seed_clears
+            .read()
+            .iter()
+            .map(|key| SeedClearMarker {
+                state_key: key.state_key.clone(),
+                provider_kind: key.provider_kind.clone(),
+                feature_key: key.feature_key.clone(),
+            })
+            .collect()
+    }
+
+    /// Record the seed-clear marker for `key` when it is a beta key.
+    fn mark_seed_cleared(&self, key: &RegistryKey) {
+        if capability_key_is_beta(&key.feature_key) {
+            self.seed_clears.write().insert(key.clone());
+        }
+    }
+
+    /// Drop `key`'s seed-clear marker: an acting learned negative now speaks for
+    /// the cell, so if that negative later leaves (evicted, or purged without a
+    /// durable clear) the seed withholds again rather than a stale lift sending.
+    /// A positive keeps the marker: it sends anyway, and losing it to the lane
+    /// cap must not re-seed a flag both the operator and the upstream accepted.
+    fn lift_seed_clear(&self, key: &RegistryKey) {
+        if capability_key_is_beta(&key.feature_key) {
+            self.seed_clears.write().remove(key);
+        }
     }
 
     /// The ACTIVE router generation.
@@ -2354,7 +2474,9 @@ impl LearnedCapabilityRegistry {
         }
     }
 
-    /// Finalize a reserved purge: remove the entry and release the lease.
+    /// Finalize a reserved purge: remove the entry and release the lease. A
+    /// removed beta key also records its seed-clear marker, as the replay of
+    /// the committed `cleared` row will.
     ///
     /// Called ONLY after the durable clear has committed, so the removal and the
     /// ledger agree from this instant on. Returns whether an entry was removed --
@@ -2373,6 +2495,7 @@ impl LearnedCapabilityRegistry {
             .get(&lease.key)
             .is_some_and(|entry| entry.incarnation == lease.incarnation);
         let removed = if matches {
+            self.mark_seed_cleared(&lease.key);
             entries.remove(&lease.key).is_some()
         } else {
             tracing::error!(
@@ -2736,6 +2859,7 @@ impl LearnedCapabilityRegistry {
         entries.retain(|key, _| {
             !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
         });
+        self.prune_catalog_scoped_seed_clears();
         BoundarySettlement::Applied {
             generation: *generation,
             pruned: before - entries.len(),
@@ -2998,7 +3122,17 @@ impl LearnedCapabilityRegistry {
         entries.retain(|key, _| {
             !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
         });
+        self.prune_catalog_scoped_seed_clears();
         before - entries.len()
+    }
+
+    /// Drop every catalog-scoped seed-clear marker. Runs inside the boundary
+    /// transition, under the `entries` write lock, because the next boot's
+    /// replay drops the rows behind them at the same boundary.
+    fn prune_catalog_scoped_seed_clears(&self) {
+        self.seed_clears.write().retain(|key| {
+            !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+        });
     }
 
     /// Build the map key, normalizing the raw capability key so an insert
@@ -4612,3 +4746,7 @@ mod owner_tests;
 #[cfg(test)]
 #[path = "learned_capability_beta_cap_tests.rs"]
 mod beta_cap_tests;
+
+#[cfg(test)]
+#[path = "learned_capability_seed_clear_tests.rs"]
+mod seed_clear_tests;
