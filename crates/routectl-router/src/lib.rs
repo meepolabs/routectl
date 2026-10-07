@@ -21,6 +21,7 @@ pub(crate) mod activation;
 #[cfg(test)]
 pub(crate) mod alloc_probe;
 pub(crate) mod anthropic_family;
+pub(crate) mod beta_capability;
 pub(crate) mod calibration;
 pub(crate) mod capability_detect;
 pub(crate) mod capability_display;
@@ -56,6 +57,9 @@ pub(crate) mod field_capability;
 pub(crate) mod field_verdict;
 pub(crate) mod glob;
 pub(crate) mod k_estimator;
+#[cfg(test)]
+#[path = "key_literal_scan_tests.rs"]
+pub(crate) mod key_literal_scan;
 pub(crate) mod learned_capability;
 pub(crate) mod learned_replay;
 pub(crate) mod log_hash;

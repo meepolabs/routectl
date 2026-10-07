@@ -54,6 +54,7 @@ use routectl_core::capability::{COMPUTER_USE, REASONING_REPLAY, STRUCTURED_OUTPU
 use routectl_core::error::Error;
 use routectl_core::{ChatRequest, ToolDef};
 
+use crate::beta_capability::capability_key_is_beta;
 use crate::feature_keys::strip_date_suffix;
 
 /// Feature key for the Anthropic `advisor` server tool.
@@ -130,9 +131,15 @@ const STRIP_ACTIONS: &[(&str, StripKind)] = &[
 ];
 
 /// The single policy consult point. See the module docs.
+///
+/// Every key in the beta-flag namespace strips as [`StripKind::BetaFlag`]
+/// through a namespace arm rather than a [`STRIP_ACTIONS`] row: the namespace
+/// is open-ended, so it widens neither [`strippable_keys`] nor the operator
+/// `[capability] essential` accept set.
 pub fn action_for(feature_key: &str) -> CapabilityAction {
     match feature_key {
         WEB_SEARCH | COMPUTER_USE | STRUCTURED_OUTPUT => CapabilityAction::RouteAway,
+        _ if capability_key_is_beta(feature_key) => CapabilityAction::Strip(StripKind::BetaFlag),
         _ => STRIP_ACTIONS
             .iter()
             .find(|(key, _)| *key == feature_key)
@@ -279,6 +286,11 @@ impl RequestInterceptor for StripInterceptor {
         let would_strip: Vec<&str> = keys
             .into_iter()
             .filter(|key| {
+                // A beta-namespace key has no StripPlan: the provider withholds
+                // its flag at egress, so this interceptor has nothing to remove.
+                if capability_key_is_beta(key) {
+                    return false;
+                }
                 match action_for(key) {
                     // The lane-parameterized surface is not a key-only
                     // transform and has no StripPlan by design; it runs
