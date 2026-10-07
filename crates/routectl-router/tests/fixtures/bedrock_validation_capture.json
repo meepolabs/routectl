@@ -1,5 +1,5 @@
 {
-  "note": "Mixed bedrock-runtime 400 ValidationException set. Rows without an api key are InvokeModel captures (2026-07-28, global anthropic claude opus), byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. Rows with api converse use the same flat body around a Converse message: converse-field-probe carries a message captured verbatim on Converse (us.anthropic.claude-sonnet-5); converse-advisor-composed (model composed) joins that captured Converse wrapper to the captured InvokeModel advisor message. Rows with api invoke or converse and a named model (web-search-template-sonnet-5, structured-output-*, schema-error-*) carry messages captured verbatim on 2026-10-02 on that carrier and model. Each templates row names the step that turns its token into a key: tool_type (open; the type minus any date suffix) or translated (closed; the translations rows). Near-miss output_config_effort is synthesized and was never captured. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). Kept as a data file, never inline .rs literals.",
+  "note": "Mixed bedrock-runtime 400 ValidationException set. Rows without an api key are InvokeModel captures (2026-07-28, global anthropic claude opus), byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. Rows with api converse use the same flat body around a Converse message: converse-field-probe carries a message captured verbatim on Converse (us.anthropic.claude-sonnet-5); converse-advisor-composed (model composed) joins that captured Converse wrapper to the captured InvokeModel advisor message. Rows with api invoke or converse and a named model (web-search-template-sonnet-5, structured-output-*, schema-error-*) carry messages captured verbatim on 2026-10-02 on that carrier and model; that includes the middle-anchored tool-type rejections (web-search-pydantic-*, computer-aws-*) and their must-not-learn neighbours (tool-removal-messages-*, tool-changes-*, toolset-name-*), which are read by dedicated extractors rather than the templates rows. Each templates row names the step that turns its token into a key: tool_type (open; the type minus any date suffix) or translated (closed; the translations rows). Near-misses output_config_effort, pydantic_* and aws_* are synthesized and were never captured. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). Kept as a data file, never inline .rs literals.",
   "error_type_header": "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
   "lifted_type": "ValidationException",
   "templates": [
@@ -78,6 +78,48 @@
       "status": 400,
       "body": "{\"message\": \"The model returned the following errors: output_config.format.schema: For 'object' type, 'additionalProperties' must be explicitly set to false\"}",
       "expect_capability": null
+    },
+    "web-search-pydantic-sonnet-4-6": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "status": 400,
+      "body": "{\"message\": \"tools.0: Input tag 'web_search_20250305' found using 'type' does not match any of the expected tags: 'bash_20250124', 'custom', 'memory_20250818', 'text_editor_20250124', 'text_editor_20250429', 'text_editor_20250728', 'tool_search_tool_bm25', 'tool_search_tool_bm25_20251119', 'tool_search_tool_regex', 'tool_search_tool_regex_20251119'\"}",
+      "expect_capability": "web_search"
+    },
+    "computer-aws-sonnet-4-6": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "status": 400,
+      "body": "{\"message\": \"'claude-sonnet-4-6' does not support tool types: computer_20250124. Did you mean one of bash_20250124, memory_20250818, text_editor_20250728, tool_search_tool_bm25_20251119, tool_search_tool_regex_20251119?\"}",
+      "expect_capability": "computer"
+    },
+    "computer-aws-sonnet-5": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-sonnet-5",
+      "status": 400,
+      "body": "{\"message\": \"'claude-sonnet-5' does not support tool types: computer_20250124. Did you mean one of bash_20250124, browser_toolset_20260801, computer_toolset_20260801, memory_20250818, text_editor_20250728, tool_search_tool_bm25_20251119, tool_search_tool_regex_20251119?\"}",
+      "expect_capability": "computer"
+    },
+    "tool-removal-messages-opus-5-5": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-opus-5-5",
+      "status": 400,
+      "body": "{\"message\": \"messages.3.content.0: Input tag 'tool_removal' found using 'type' does not match any of the expected tags: 'connector_text', 'document', 'image', 'mid_conv_system', 'redacted_thinking', 'search_result', 'server_tool_use', 'text', 'thinking', 'tool_result', 'tool_search_tool_result', 'tool_use'\"}",
+      "expect_capability": null
+    },
+    "tool-changes-sonnet-5": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-sonnet-5",
+      "status": 400,
+      "body": "{\"message\": \"tool_addition/tool_removal is not supported on this model\"}",
+      "expect_capability": null
+    },
+    "toolset-name-opus-5-5": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-opus-5-5",
+      "status": 400,
+      "body": "{\"message\": \"tools.0.computer_toolset_20260801: name is not accepted on a toolset entry: the member names are fixed by the dated type, and the served tool keeps the family's bare name\"}",
+      "expect_capability": null
     }
   },
   "near_miss_messages": {
@@ -90,6 +132,13 @@
     "advisor_wrapper_extra_space": "The model returned the following errors:  tool type 'advisor' is not supported for this model",
     "output_config_effort": "output_config.effort: Extra inputs are not permitted",
     "structured_output_doubled_wrapper": "The model returned the following errors: The model returned the following errors: output_config.format: Extra inputs are not permitted",
-    "tool_type_unsafe_token": "tool type 'two words' is not supported for this model"
+    "tool_type_unsafe_token": "tool type 'two words' is not supported for this model",
+    "pydantic_non_digit_index": "tools.x: Input tag 'web_search_20250305' found using 'type' does not match any of the expected tags: 'custom'",
+    "pydantic_oversized_index": "tools.123456: Input tag 'web_search_20250305' found using 'type' does not match any of the expected tags: 'custom'",
+    "pydantic_nested_index": "tools.0.1: Input tag 'web_search_20250305' found using 'type' does not match any of the expected tags: 'custom'",
+    "pydantic_drifted_discriminator": "tools.0: Input tag 'web_search_20250305' found using 'kind' does not match any of the expected tags: 'custom'",
+    "aws_two_tokens": "'claude-sonnet-5' does not support tool types: computer_20250124, bash_20250124. Did you mean one of bash_20250124?",
+    "aws_no_suggestion": "'claude-sonnet-5' does not support tool types: computer_20250124.",
+    "aws_model_with_space": "'claude sonnet' does not support tool types: computer_20250124. Did you mean one of bash_20250124?"
   }
 }

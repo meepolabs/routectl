@@ -4610,9 +4610,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   with no table edit; `<field>: Extra inputs are not permitted`, closed
   `BEDROCK_TOKEN_TRANSLATIONS` step) -- a rejected wire field name with no
   row stays dormant; new keys fall to `action_for`'s `RouteAway` default. The trimmed message loses at most one Converse
-  wrapper (`routectl_core::strip_converse_errors_prefix`) before either leg
-  reads it, so templates and phrases match InvokeModel and Converse alike.
-  When no template matches, `BEDROCK_VALIDATION_PHRASES` is
+  wrapper (`routectl_core::strip_converse_errors_prefix`) before any leg
+  reads it, so templates, extractors and phrases match InvokeModel and Converse alike.
+  When no template matches, two hand-written extractors read the
+  middle-anchored tool-type rejections (`match_bedrock_tool_rejection`):
+  `extract_pydantic_tool_tag` (`tools.<1-5 digits>: Input tag '<type>' found
+  using 'type' ...`; the `tools.` head keeps the `messages.*` tag rejection
+  out) and `extract_unsupported_tool_type` (`'<model>' does not support tool
+  types: <type>. Did you mean one of ...`, exactly one type); both parse the
+  whole head, fail closed on any deviation, and key through `tool_type_key`.
+  When neither matches, `BEDROCK_VALIDATION_PHRASES` is
   checked by exact equality on the whole unwrapped message; one row maps
   the forced-`tool_choice` rejection to `forced_tool_choice` (the same phrase
   is an `ANTHROPIC_INFERRED` row for the first-party lane), another maps

@@ -541,7 +541,7 @@ const BEDROCK_VALIDATION_PHRASES: &[(&str, &str)] = &[
 /// type may unlock a match. A rejection without the lifted discriminator
 /// yields `None` (a visible, recoverable non-learn) rather than risking a
 /// silent false attribution from a shape fallback. The trimmed message loses
-/// at most one Converse errors wrapper before EITHER leg reads it, so a
+/// at most one Converse errors wrapper before ANY leg reads it, so a
 /// Converse-wrapped rejection resolves exactly as its bare InvokeModel form.
 fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     if !is_bedrock_validation_exception(err) {
@@ -550,7 +550,68 @@ fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier, Fail
     let message = bedrock_validation_message(err)?;
     let unwrapped = strip_converse_errors_prefix(message.trim());
     extract_bedrock_capability(unwrapped, BEDROCK_VALIDATION_TEMPLATES)
+        .or_else(|| match_bedrock_tool_rejection(unwrapped))
         .or_else(|| match_bedrock_validation_phrase(unwrapped))
+}
+
+/// Most digits a `tools.<index>` head may carry in the pydantic tag rejection.
+const MAX_TOOL_INDEX_DIGITS: usize = 5;
+
+const PYDANTIC_TOOLS_HEAD: &str = "tools.";
+const PYDANTIC_TAG_SEAM: &str = ": Input tag '";
+const PYDANTIC_TAG_TAIL: &str = " found using 'type' does not match any of the expected tags: ";
+
+const AWS_TOOL_TYPES_SEAM: &str = " does not support tool types: ";
+const AWS_SUGGESTION_SEAM: &str = ". Did you mean one of ";
+
+/// The middle-anchored Bedrock tool-type rejections the single-token
+/// templates cannot bracket, because each ends in a variable list of
+/// accepted types. Each extractor reads the already-trimmed, already-unwrapped
+/// message as-is, parses its whole head, and fails closed on any deviation;
+/// the extracted type keys through [`tool_type_key`].
+fn match_bedrock_tool_rejection(unwrapped: &str) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
+    let token = extract_pydantic_tool_tag(unwrapped)
+        .or_else(|| extract_unsupported_tool_type(unwrapped))?;
+    let capability = tool_type_key(token)?;
+    Some((capability, SignalTier::SelfIdentifying, FailurePhase::F1))
+}
+
+/// The tool type in
+/// `tools.<index>: Input tag '<type>' found using 'type' does not match any of the expected tags: <list>`.
+/// The `tools.<index>` head is what keeps the same pydantic tag rejection on
+/// a `messages.*` path (a refused content block, not a tool) from learning.
+fn extract_pydantic_tool_tag(message: &str) -> Option<&str> {
+    let (head, rest) = message.split_once(PYDANTIC_TAG_SEAM)?;
+    if !is_tools_index_head(head) {
+        return None;
+    }
+    let (token, tail) = rest.split_once('\'')?;
+    tail.strip_prefix(PYDANTIC_TAG_TAIL)?;
+    is_safe_token(token).then_some(token)
+}
+
+/// True for `tools.` followed by 1 to [`MAX_TOOL_INDEX_DIGITS`] ASCII digits.
+fn is_tools_index_head(head: &str) -> bool {
+    head.strip_prefix(PYDANTIC_TOOLS_HEAD).is_some_and(|index| {
+        (1..=MAX_TOOL_INDEX_DIGITS).contains(&index.len())
+            && index.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// The tool type in
+/// `'<model>' does not support tool types: <type>. Did you mean one of <list>`.
+/// Exactly one rejected type is accepted: a comma-separated pair names more
+/// than one capability, and a message without the suggestion seam is not
+/// the captured shape.
+fn extract_unsupported_tool_type(message: &str) -> Option<&str> {
+    let (model, rest) = message.strip_prefix('\'')?.split_once('\'')?;
+    if !is_safe_token(model) {
+        return None;
+    }
+    let (token, _) = rest
+        .strip_prefix(AWS_TOOL_TYPES_SEAM)?
+        .split_once(AWS_SUGGESTION_SEAM)?;
+    (is_safe_token(token) && !token.contains(',')).then_some(token)
 }
 
 /// The exact-phrase leg of the Bedrock arm: the already-unwrapped message
@@ -1395,10 +1456,12 @@ mod tests {
     /// Each captured canary, driven through the full resolver with a VALID
     /// lifted discriminator, resolves to its expected outcome: the
     /// advisor-tool rejection, bare or inside one Converse wrapper, to the
-    /// `advisor` capability at SelfIdentifying;
+    /// `advisor` capability at SelfIdentifying; the middle-anchored pydantic
+    /// and AWS tool-type rejections to `web_search` / `computer`;
     /// the two must-not-learn controls (unknown beta flag, bad model id --
     /// same flat shape, same valid header) and the untranslated field-name
-    /// rejections (bare or Converse-wrapped) all to `None` (no-learn).
+    /// rejections (bare or Converse-wrapped) and the tool-change and toolset
+    /// rejections all to `None` (no-learn).
     #[test]
     fn bedrock_capture_canaries_resolve_to_expected_capability() {
         let fx = capture_fixture();
