@@ -1462,20 +1462,30 @@ INFO routectl_router::learned_capability event=expire_probe
 
 ### `evict` (WARN)
 
-Emitted when the registry is at capacity and evicts the oldest entry. A
-safety valve, not a routine cache policy.
+Emitted when inserting a new entry evicts a resident one. Two bounds, told
+apart by `reason`: `registry_cap` when the registry is at capacity and evicts
+its oldest entry, and `beta_lane_cap` when a new beta-flag key arrives on a
+lane (under one provider kind) already holding 32 beta-flag entries, which
+evicts that lane's oldest beta-flag entry and nothing else. The lane bound is
+checked first. A safety valve, not a routine cache policy.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `evict`. |
+| `reason` | string | `registry_cap` or `beta_lane_cap`. |
 | `state_key` | string | The evicted entry's learned lane (`provider_entry#upstream`). |
 | `capability_key` | string | The evicted entry's capability token. |
-| `max_entries` | integer | The registry capacity that triggered eviction. |
+| `max_entries` | integer | `registry_cap` only: the registry capacity that triggered eviction. |
+| `max_beta_entries_per_lane` | integer | `beta_lane_cap` only: the per-lane beta-flag bound. |
 
 ```
-WARN routectl_router::learned_capability event=evict
+WARN routectl_router::learned_capability event=evict reason=registry_cap
   state_key=anthropic#claude-sonnet-4-5 capability_key=cap_a max_entries=2
   "learned-capability registry at capacity; evicted oldest entry"
+WARN routectl_router::learned_capability event=evict reason=beta_lane_cap
+  state_key=anthropic#claude-sonnet-4-5 capability_key=beta:zz-flag-0
+  max_beta_entries_per_lane=32
+  "learned-capability lane at its beta-flag cap; evicted the lane's oldest beta entry"
 ```
 
 ### `route_away` (INFO / WARN)

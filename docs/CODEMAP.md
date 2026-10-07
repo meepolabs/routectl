@@ -4141,7 +4141,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the entry on a probe success, refreshes it with a capped exponential backoff
   on a reject, and releases the in-flight slot on any other outcome.
   `snapshot`/`export`/`import`/`clear` surface and seed the registry; a
-  1024-entry cap evicts the oldest `last_seen` first. Constructed via `new` or
+  1024-entry cap evicts the oldest `last_seen` first, after a per-(lane, kind)
+  beta-flag bound (`MAX_BETA_ENTRIES_PER_LANE` = 32) that evicts only that
+  lane's oldest unleased beta entry, on every insert path. Constructed via `new` or
   `from_capability_config` (decay / inferred-window from the `[capability]`
   hours + the shared `DEFAULT_MAX_ENTRIES` cap) -- the shared sizing path for
   both the router build and the doctor's read-only one-shot ledger rebuild;

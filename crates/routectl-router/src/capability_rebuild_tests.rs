@@ -945,3 +945,36 @@ fn a_passive_verified_row_after_a_negative_stays_suppressed() {
         RoutingDecision::RouteAway { .. }
     ));
 }
+
+#[test]
+fn replayed_beta_negatives_past_the_lane_bound_keep_the_newest() {
+    // A ledger holding more beta rejections on one lane than the live bound
+    // allows rebuilds to the same bounded set the live registry would hold.
+    use crate::learned_capability::MAX_BETA_ENTRIES_PER_LANE;
+    let base = Instant::now();
+    let key = |n: usize| {
+        crate::beta_capability::beta_capability_key(&format!("zz-flag-{n}")).expect("well formed")
+    };
+    let rows = (0..=MAX_BETA_ENTRIES_PER_LANE)
+        .map(|n| {
+            let offset = u64::try_from(n).expect("small index");
+            let rowid = i64::try_from(n).expect("small index") + 1;
+            broken(rowid, base + Duration::from_secs(offset), &key(n))
+        })
+        .collect();
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows,
+    };
+    let reg = registry();
+
+    let _ = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    let resident: Vec<String> = reg.snapshot().into_iter().map(|e| e.feature_key).collect();
+    assert_eq!(resident.len(), MAX_BETA_ENTRIES_PER_LANE);
+    assert!(
+        !resident.contains(&key(0)),
+        "the oldest replayed beta is evicted"
+    );
+    assert!(resident.contains(&key(MAX_BETA_ENTRIES_PER_LANE)));
+}
