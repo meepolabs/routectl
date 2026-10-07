@@ -206,3 +206,7 @@ mod capability_lifecycle_tests;
 #[cfg(test)]
 #[path = "capability_positive_window_tests.rs"]
 mod capability_positive_window_tests;
+
+#[cfg(test)]
+#[path = "beta_capability_restart_tests.rs"]
+mod beta_capability_restart_tests;

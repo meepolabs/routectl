@@ -5792,6 +5792,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   loopback base URLs and every in-process HTTP mock binds loopback -- a
   daemon-plus-wiremock harness would assert over a lane where the feature is
   correctly inert
+- `src/server/beta_capability_restart_tests.rs` -- cross-restart proof for the
+  two durable beta-flag facts, declared from `server/mod.rs`. A real Router on a
+  `bedrock` entry behind an in-process seat that records each call's client betas
+  and `withheld_betas` (a real Bedrock provider derives its endpoint from the
+  region and cannot be aimed at a mock). A beta the seat reports stripping is
+  learned, persisted through the production `drain_capability_events`, and
+  withheld by a Router warmed from the ledger (control: an empty ledger forwards
+  it); a seed lift through the real control route is forwarded after a restart
+  (control: no lift still withholds); and a boot under a different overlay
+  revision withholds the seeded flag again
 - `src/server/capability_boundary.rs` -- the replay boundary a
   revision-changing reload must commit BEFORE it publishes the replacement
   router, in two phases. `admit_capability_boundary(usage, router) ->
