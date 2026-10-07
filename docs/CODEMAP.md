@@ -4589,9 +4589,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `bedrock_flat_field` reader (distinct from the nested
   `upstream_error_field`, same `MAX_ERROR_BODY_BYTES` cap) and runs the
   message through an anchored-template engine (`extract_bedrock_capability`):
-  each `(prefix, suffix)` template extracts one token that must pass
-  `routectl_core::is_safe_token`, normalize via `normalize_capability_key`, and hit a
-  CLOSED translation table for a `SelfIdentifying` signal. The arm gates on
+  each `BedrockTemplate` (`prefix`, `suffix`, `TokenKey` step) extracts one
+  token that must pass `routectl_core::is_safe_token`; its step turns the
+  token into a key for a `SelfIdentifying` signal -- `TokenKey::ToolType`
+  (`tool_type_key`, open: the type minus its date suffix, the key
+  `derive_feature_keys` emits for that `tools[]` type) or
+  `TokenKey::Translated` (normalize via `normalize_capability_key`, then a
+  CLOSED translation table). The arm gates on
   `is_bedrock_validation_exception` (the lifted, namespace-stripped
   `upstream_type == "ValidationException"`) BEFORE the message read: the
   captured must-not-learn rejections (bad model id, unknown beta flag) share
@@ -4601,17 +4605,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `VALIDATION_EXCEPTION_TYPE`, so a discriminator arriving still namespaced
   (an intermediary that bypassed the provider lift) matches identically to the
   bare token instead of being silently missed. `BEDROCK_VALIDATION_TEMPLATES` are grounded in captured
-  InvokeModel 400s (`tool type '<type>' is not supported for this model`;
-  `<field>: Extra inputs are not permitted`); `BEDROCK_TOKEN_TRANSLATIONS`
-  maps the rejected tool type onto the identically-named `derive_feature_keys`
-  tool-type key (`advisor` -> `advisor`) -- a rejected wire field name has no
-  row and stays dormant. The trimmed message loses at most one Converse
+  400s (`tool type '<type>' is not supported for this model`, open tool-type
+  step, so `web_search_20250305` -> `web_search` and an unseen type learns
+  with no table edit; `<field>: Extra inputs are not permitted`, closed
+  `BEDROCK_TOKEN_TRANSLATIONS` step) -- a rejected wire field name with no
+  row stays dormant; new keys fall to `action_for`'s `RouteAway` default. The trimmed message loses at most one Converse
   wrapper (`routectl_core::strip_converse_errors_prefix`) before either leg
   reads it, so templates and phrases match InvokeModel and Converse alike.
   When no template matches, `BEDROCK_VALIDATION_PHRASES` is
-  checked by exact equality on the whole unwrapped message; its one
-  row maps the forced-`tool_choice` rejection to `forced_tool_choice`, and the
-  same phrase is an `ANTHROPIC_INFERRED` row for the first-party lane. `pub is_bedrock_validation_exception` also lets the
+  checked by exact equality on the whole unwrapped message; one row maps
+  the forced-`tool_choice` rejection to `forced_tool_choice` (the same phrase
+  is an `ANTHROPIC_INFERRED` row for the first-party lane), another maps
+  `output_config.format: Extra inputs are not permitted` to
+  `structured_output` (a phrase, not a field row, because Bedrock
+  normalization collapses every `output_config.*` path to `output_config`).
+  A guardrail test requires every closed row's target to be producible by a
+  named canonical request's membership vocabulary. `pub is_bedrock_validation_exception` also lets the
   learn site flag drift when a real `ValidationException` matched no template.
   A third F2
   FEATURE-NAMING arm handles a `BadRequest` whose nested `error.message` names

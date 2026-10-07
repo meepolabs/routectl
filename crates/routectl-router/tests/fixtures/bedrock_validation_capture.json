@@ -1,10 +1,10 @@
 {
-  "note": "Mixed bedrock-runtime 400 ValidationException set. Rows without an api key are InvokeModel captures (2026-07-28, global anthropic claude opus), byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. Rows with api converse use the same flat body around a Converse message: converse-field-probe carries a message captured verbatim on Converse (us.anthropic.claude-sonnet-5); converse-advisor-composed (model composed) joins that captured Converse wrapper to the captured InvokeModel advisor message. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). Kept as a data file, never inline .rs literals.",
+  "note": "Mixed bedrock-runtime 400 ValidationException set. Rows without an api key are InvokeModel captures (2026-07-28, global anthropic claude opus), byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. Rows with api converse use the same flat body around a Converse message: converse-field-probe carries a message captured verbatim on Converse (us.anthropic.claude-sonnet-5); converse-advisor-composed (model composed) joins that captured Converse wrapper to the captured InvokeModel advisor message. Rows with api invoke or converse and a named model (web-search-template-sonnet-5, structured-output-*, schema-error-*) carry messages captured verbatim on 2026-10-02 on that carrier and model. Each templates row names the step that turns its token into a key: tool_type (open; the type minus any date suffix) or translated (closed; the translations rows). Near-miss output_config_effort is synthesized and was never captured. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). Kept as a data file, never inline .rs literals.",
   "error_type_header": "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
   "lifted_type": "ValidationException",
   "templates": [
-    { "prefix": "tool type '", "suffix": "' is not supported for this model" },
-    { "prefix": "", "suffix": ": Extra inputs are not permitted" }
+    { "prefix": "tool type '", "suffix": "' is not supported for this model", "key": "tool_type" },
+    { "prefix": "", "suffix": ": Extra inputs are not permitted", "key": "translated" }
   ],
   "translations": [
     { "token": "advisor", "capability": "advisor" }
@@ -43,6 +43,41 @@
       "status": 400,
       "body": "{\"message\":\"The model returned the following errors: thinking.adaptive.routectl_probe_garbage: Extra inputs are not permitted\"}",
       "expect_capability": null
+    },
+    "web-search-template-sonnet-5": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-sonnet-5",
+      "status": 400,
+      "body": "{\"message\": \"tool type 'web_search_20250305' is not supported for this model\"}",
+      "expect_capability": "web_search"
+    },
+    "structured-output-invoke-opus-5-5": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-opus-5-5",
+      "status": 400,
+      "body": "{\"message\": \"output_config.format: Extra inputs are not permitted\"}",
+      "expect_capability": "structured_output"
+    },
+    "structured-output-converse-opus-5-5": {
+      "api": "converse",
+      "model": "us.anthropic.claude-opus-5-5",
+      "status": 400,
+      "body": "{\"message\": \"The model returned the following errors: output_config.format: Extra inputs are not permitted\"}",
+      "expect_capability": "structured_output"
+    },
+    "schema-error-invoke-sonnet-4-6": {
+      "api": "invoke",
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "status": 400,
+      "body": "{\"message\": \"output_config.format.schema: For 'object' type, 'additionalProperties' must be explicitly set to false\"}",
+      "expect_capability": null
+    },
+    "schema-error-converse-sonnet-4-6": {
+      "api": "converse",
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "status": 400,
+      "body": "{\"message\": \"The model returned the following errors: output_config.format.schema: For 'object' type, 'additionalProperties' must be explicitly set to false\"}",
+      "expect_capability": null
     }
   },
   "near_miss_messages": {
@@ -52,6 +87,9 @@
     "field_wording_drift": "routectl_envelope_probe_field: Extra inputs not permitted",
     "field_whitespace_token": "two words: Extra inputs are not permitted",
     "advisor_doubled_wrapper": "The model returned the following errors: The model returned the following errors: tool type 'advisor' is not supported for this model",
-    "advisor_wrapper_extra_space": "The model returned the following errors:  tool type 'advisor' is not supported for this model"
+    "advisor_wrapper_extra_space": "The model returned the following errors:  tool type 'advisor' is not supported for this model",
+    "output_config_effort": "output_config.effort: Extra inputs are not permitted",
+    "structured_output_doubled_wrapper": "The model returned the following errors: The model returned the following errors: output_config.format: Extra inputs are not permitted",
+    "tool_type_unsafe_token": "tool type 'two words' is not supported for this model"
   }
 }

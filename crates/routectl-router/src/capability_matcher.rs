@@ -459,40 +459,59 @@ pub fn upstream_param(err: &Error) -> Option<String> {
 /// capability.
 const BEDROCK_VALIDATION_EXCEPTION_TYPE: &str = routectl_providers::VALIDATION_EXCEPTION_TYPE;
 
+/// How a Bedrock validation template's extracted token becomes a capability
+/// key. Both steps fail closed on a token that is not token-shaped ASCII
+/// ([`is_safe_token`]).
+#[derive(Debug, Clone, Copy)]
+enum TokenKey<'a> {
+    /// Open set: a rejected tool type keys exactly as `derive_feature_keys`
+    /// keys a `tools[]` entry of that type ([`tool_type_key`]), so any dated
+    /// version of any tool lands on the key the request side derives.
+    ToolType,
+    /// Closed set: the token, normalized via [`normalize_capability_key`],
+    /// must hit a translation row.
+    Translated(&'a [(&'a str, &'a str)]),
+}
+
+/// One anchored Bedrock validation template: the whole message must equal
+/// `prefix + token + suffix`, and `key` turns the token into a capability.
+#[derive(Debug, Clone, Copy)]
+struct BedrockTemplate<'a> {
+    prefix: &'a str,
+    suffix: &'a str,
+    key: TokenKey<'a>,
+}
+
 /// Anchored-template extractions for a Bedrock `ValidationException`
-/// message. Each entry is a `(prefix, suffix)` literal template with
-/// exactly ONE extracted token between the anchors; the whole (trimmed)
-/// message must equal `prefix + token + suffix`, so wording drift, an extra
-/// sentence, or a missing anchor all fail closed. The extracted token must
-/// pass [`is_safe_token`], normalize via [`normalize_capability_key`],
-/// and hit [`BEDROCK_TOKEN_TRANSLATIONS`].
+/// message, each with exactly ONE extracted token between literal anchors;
+/// wording drift, an extra sentence, or a missing anchor all fail closed.
 ///
-/// Grounded byte-for-byte in captured bedrock-runtime InvokeModel 400
-/// envelopes:
+/// Grounded byte-for-byte in captured bedrock-runtime 400 envelopes:
 /// - a rejected tool type, single-quoted
-///   (`tool type '<type>' is not supported for this model`);
+///   (`tool type '<type>' is not supported for this model`), keyed through
+///   the open [`TokenKey::ToolType`] step;
 /// - a rejected request field, pydantic-style prefix
-///   (`<field>: Extra inputs are not permitted`).
-///
-/// A message matching a template but whose extracted token has no
-/// [`BEDROCK_TOKEN_TRANSLATIONS`] row (the field-name case, absent a closed
-/// row) stays dormant: the seam extracts, but the closed set yields no
-/// capability, so nothing is learned.
-const BEDROCK_VALIDATION_TEMPLATES: &[(&str, &str)] = &[
-    ("tool type '", "' is not supported for this model"),
-    ("", ": Extra inputs are not permitted"),
+///   (`<field>: Extra inputs are not permitted`), keyed through the closed
+///   [`BEDROCK_TOKEN_TRANSLATIONS`] set. A field name with no row stays
+///   dormant: the seam extracts, but nothing is learned.
+const BEDROCK_VALIDATION_TEMPLATES: &[BedrockTemplate<'static>] = &[
+    BedrockTemplate {
+        prefix: "tool type '",
+        suffix: "' is not supported for this model",
+        key: TokenKey::ToolType,
+    },
+    BedrockTemplate {
+        prefix: "",
+        suffix: ": Extra inputs are not permitted",
+        key: TokenKey::Translated(BEDROCK_TOKEN_TRANSLATIONS),
+    },
 ];
 
-/// Closed-set translation of a normalized Bedrock validation token onto the
-/// canonical request-capability key the request side derives and the act
-/// side looks up (the [`OPENAI_PARAM_TRANSLATIONS`] pattern). A token
-/// outside this set yields `None` (no-learn), keeping the set closed.
-///
-/// A rejected tool type maps onto the identically-named tool-type key
-/// `derive_feature_keys` emits for a `tools[]` entry of that type, so a
-/// learned key lands where the request side derives it and the membership
-/// gate admits the observation. A rejected wire field name has no row: it
-/// is not a `derive_feature_keys`-producible key, so it stays dormant.
+/// Closed-set translation of a normalized Bedrock field-template token onto
+/// the canonical request-capability key the request side derives and the act
+/// side looks up (the [`OPENAI_PARAM_TRANSLATIONS`] pattern). A token outside
+/// this set yields `None` (no-learn), keeping the field leg closed: a rejected
+/// wire field name is not a `derive_feature_keys`-producible key.
 const BEDROCK_TOKEN_TRANSLATIONS: &[(&str, &str)] = &[("advisor", "advisor")];
 
 /// Whole-message Bedrock `ValidationException` rejections that name a
@@ -500,8 +519,18 @@ const BEDROCK_TOKEN_TRANSLATIONS: &[(&str, &str)] = &[("advisor", "advisor")];
 /// cannot read them. Matched by exact equality after the discriminator gate,
 /// on the bare message (InvokeModel) or on the message inside exactly one
 /// Converse errors wrapper ([`strip_converse_errors_prefix`]).
-const BEDROCK_VALIDATION_PHRASES: &[(&str, &str)] =
-    &[(FORCED_TOOL_CHOICE_REJECTION, FORCED_TOOL_CHOICE)];
+///
+/// The structured-output row is a full phrase rather than a field-template
+/// translation because Bedrock normalization reduces every `output_config.*`
+/// path to `output_config`, which would also catch rejections of its other
+/// members.
+const BEDROCK_VALIDATION_PHRASES: &[(&str, &str)] = &[
+    (FORCED_TOOL_CHOICE_REJECTION, FORCED_TOOL_CHOICE),
+    (
+        "output_config.format: Extra inputs are not permitted",
+        STRUCTURED_OUTPUT,
+    ),
+];
 
 /// The Bedrock `BadRequest` arm: gate on the lifted `ValidationException`
 /// discriminator, then read the flat validation message and run the
@@ -520,12 +549,8 @@ fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier, Fail
     }
     let message = bedrock_validation_message(err)?;
     let unwrapped = strip_converse_errors_prefix(message.trim());
-    extract_bedrock_capability(
-        unwrapped,
-        BEDROCK_VALIDATION_TEMPLATES,
-        BEDROCK_TOKEN_TRANSLATIONS,
-    )
-    .or_else(|| match_bedrock_validation_phrase(unwrapped))
+    extract_bedrock_capability(unwrapped, BEDROCK_VALIDATION_TEMPLATES)
+        .or_else(|| match_bedrock_validation_phrase(unwrapped))
 }
 
 /// The exact-phrase leg of the Bedrock arm: the already-unwrapped message
@@ -548,33 +573,49 @@ fn match_bedrock_validation_phrase(
 /// Run the anchored-template pipeline over an already-trimmed, already-unwrapped
 /// validation `message`, read as-is: re-trimming here would let whitespace left
 /// behind a removed Converse wrapper pass as a clean match. The first template
-/// whose anchors bracket the message extracts its single
-/// token; the token must be token-shaped ASCII ([`is_safe_token`]) or
-/// the match fails closed; the normalized token must resolve through the
-/// closed `translations` set to a canonical capability. Split from the table
-/// consts so tests can drive the engine with provisional shapes without
-/// touching the shipped-empty production tables. A Bedrock validation
-/// rejection names a wire field, so a match is [`FailurePhase::F1`].
+/// whose anchors bracket the message extracts its single token, and that
+/// template's [`TokenKey`] step alone decides the capability. Split from the
+/// table consts so tests can drive the engine with fixture shapes. A Bedrock
+/// validation rejection names a wire token, so a match is [`FailurePhase::F1`].
 fn extract_bedrock_capability(
     message: &str,
-    templates: &[(&str, &str)],
-    translations: &[(&str, &str)],
+    templates: &[BedrockTemplate<'_>],
 ) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
-    let token = templates
-        .iter()
-        .find_map(|&(prefix, suffix)| extract_anchored_token(message, prefix, suffix))?;
+    let (token, key) = templates.iter().find_map(|template| {
+        extract_anchored_token(message, template.prefix, template.suffix)
+            .map(|token| (token, template.key))
+    })?;
+    let capability = match key {
+        TokenKey::ToolType => tool_type_key(token),
+        TokenKey::Translated(translations) => translated_key(token, translations),
+    }?;
+    Some((capability, SignalTier::SelfIdentifying, FailurePhase::F1))
+}
+
+/// The capability key for a tool type an upstream rejected: the type with its
+/// trailing date suffix removed ([`strip_date_suffix`]), exactly the key
+/// `derive_feature_keys` emits for a `tools[]` entry of that type, so the
+/// request-membership gate admits it. Open set by design; an unsafe token, or
+/// one that is nothing but a date suffix, yields `None`.
+/// [`normalize_capability_key`] is deliberately not applied: it splits on `.`.
+fn tool_type_key(token: &str) -> Option<FeatureKey> {
+    if !is_safe_token(token) {
+        return None;
+    }
+    let key = strip_date_suffix(token);
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+/// The capability key a closed `translations` set assigns to `token` after
+/// Bedrock normalization, or `None` for an unsafe or untranslated token.
+fn translated_key(token: &str, translations: &[(&str, &str)]) -> Option<FeatureKey> {
     if !is_safe_token(token) {
         return None;
     }
     let normalized = normalize_capability_key(token, BEDROCK_KIND);
-    let capability = translations
+    translations
         .iter()
-        .find_map(|&(surface, canonical)| (normalized == surface).then_some(canonical))?;
-    Some((
-        capability.to_string(),
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-    ))
+        .find_map(|&(surface, canonical)| (normalized == surface).then(|| canonical.to_string()))
 }
 
 /// Extract the single token an anchored template brackets: the whole message
@@ -641,14 +682,17 @@ mod tests {
     use super::resolve_requested_capability;
     use super::upstream_param;
     use super::{
-        BEDROCK_VALIDATION_EXCEPTION_TYPE, MAX_ERROR_BODY_BYTES, bedrock_validation_message,
-        extract_bedrock_capability, extract_feature_naming_capability,
-        is_bedrock_validation_exception,
+        BEDROCK_TOKEN_TRANSLATIONS, BEDROCK_VALIDATION_EXCEPTION_TYPE, BEDROCK_VALIDATION_PHRASES,
+        BEDROCK_VALIDATION_TEMPLATES, BedrockTemplate, MAX_ERROR_BODY_BYTES, TokenKey,
+        bedrock_validation_message, extract_bedrock_capability, extract_feature_naming_capability,
+        is_bedrock_validation_exception, tool_type_key,
     };
-    use routectl_core::MAX_SAFE_TOKEN_LEN;
-    use routectl_core::capability::{FailurePhase, SignalTier};
+    use crate::capability_strip::{CapabilityAction, action_for};
+    use crate::feature_keys::{FORCED_TOOL_CHOICE, derive_feature_keys, tool_choice_force};
+    use routectl_core::capability::{FailurePhase, STRUCTURED_OUTPUT, SignalTier};
     use routectl_core::error::Error;
     use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify};
+    use routectl_core::{ChatRequest, MAX_SAFE_TOKEN_LEN, ToolDef};
 
     /// The verbatim Anthropic Messages API 400 body for a prefill
     /// rejection.
@@ -1421,19 +1465,71 @@ mod tests {
         }
     }
 
-    /// The templates + translations, driven directly, extract and translate
-    /// the advisor token onto the canonical capability at SelfIdentifying;
-    /// the field-name token extracts through the same engine but has no
-    /// closed-set row, so it stays dormant.
+    /// The fixture's `translations` rows as `(token, capability)` pairs.
+    fn fixture_translations(fx: &serde_json::Value) -> Vec<(&str, &str)> {
+        fixture_pairs(fx, "translations", "token", "capability")
+    }
+
+    /// The fixture's `templates` rows as engine templates, each keyed by the
+    /// step its `key` field names; a `translated` row reads `translations`.
+    fn fixture_templates<'a>(
+        fx: &'a serde_json::Value,
+        translations: &'a [(&'a str, &'a str)],
+    ) -> Vec<BedrockTemplate<'a>> {
+        fx["templates"]
+            .as_array()
+            .expect("fixture templates")
+            .iter()
+            .map(|row| BedrockTemplate {
+                prefix: row["prefix"].as_str().expect("template prefix"),
+                suffix: row["suffix"].as_str().expect("template suffix"),
+                key: match row["key"].as_str().expect("template key") {
+                    "tool_type" => TokenKey::ToolType,
+                    "translated" => TokenKey::Translated(translations),
+                    other => panic!("unknown template key step {other}"),
+                },
+            })
+            .collect()
+    }
+
+    /// A template's key step, comparable across fixture and production.
+    fn template_shape<'a>(template: &BedrockTemplate<'a>) -> (&'a str, &'a str, String) {
+        let step = match template.key {
+            TokenKey::ToolType => "tool_type".to_string(),
+            TokenKey::Translated(rows) => format!("translated{rows:?}"),
+        };
+        (template.prefix, template.suffix, step)
+    }
+
+    #[test]
+    fn bedrock_fixture_tables_mirror_production() {
+        let fx = capture_fixture();
+        let translations = fixture_translations(&fx);
+        let fixture: Vec<_> = fixture_templates(&fx, &translations)
+            .iter()
+            .map(template_shape)
+            .collect();
+        let production: Vec<_> = BEDROCK_VALIDATION_TEMPLATES
+            .iter()
+            .map(template_shape)
+            .collect();
+
+        assert_eq!(fixture, production);
+        assert_eq!(translations, BEDROCK_TOKEN_TRANSLATIONS);
+    }
+
+    /// The fixture tables, driven directly: the tool-type template keys the
+    /// advisor token at SelfIdentifying; the field-name token extracts
+    /// through the same engine but has no closed-set row, so it stays dormant.
     #[test]
     fn bedrock_engine_translates_advisor_and_leaves_field_dormant() {
         let fx = capture_fixture();
-        let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
-        let translations = fixture_pairs(&fx, "translations", "token", "capability");
+        let translations = fixture_translations(&fx);
+        let templates = fixture_templates(&fx, &translations);
 
         let advisor = "tool type 'advisor' is not supported for this model";
         assert_eq!(
-            extract_bedrock_capability(advisor, &templates, &translations),
+            extract_bedrock_capability(advisor, &templates),
             Some((
                 "advisor".to_string(),
                 SignalTier::SelfIdentifying,
@@ -1443,7 +1539,7 @@ mod tests {
 
         let field = "routectl_envelope_probe_field: Extra inputs are not permitted";
         assert_eq!(
-            extract_bedrock_capability(field, &templates, &translations),
+            extract_bedrock_capability(field, &templates),
             None,
             "an extracted field name with no closed-set row stays dormant"
         );
@@ -1454,15 +1550,165 @@ mod tests {
         // A structurally-anchored match whose extracted token exceeds the
         // token-shape length cap fails closed rather than surfacing a blob.
         let fx = capture_fixture();
-        let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
-        let translations = fixture_pairs(&fx, "translations", "token", "capability");
-        let (prefix, suffix) = templates[0];
-        let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_SAFE_TOKEN_LEN + 1));
+        let translations = fixture_translations(&fx);
+        let templates = fixture_templates(&fx, &translations);
+        for template in &templates {
+            let oversized = format!(
+                "{}{}{}",
+                template.prefix,
+                "a".repeat(MAX_SAFE_TOKEN_LEN + 1),
+                template.suffix
+            );
+
+            assert_eq!(
+                extract_bedrock_capability(&oversized, &templates),
+                None,
+                "template {:?}",
+                template.prefix
+            );
+        }
+    }
+
+    #[test]
+    fn tool_type_step_keys_a_type_as_the_request_side_does() {
+        for (token, expected) in [
+            ("web_search_20250305", "web_search"),
+            ("computer_20250124", "computer"),
+            ("advisor", "advisor"),
+            ("future_tool_20991231", "future_tool"),
+        ] {
+            assert_eq!(
+                tool_type_key(token).as_deref(),
+                Some(expected),
+                "tool type {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_type_step_matches_derive_feature_keys_for_the_same_type() {
+        for token in ["web_search_20250305", "computer_20250124", "advisor"] {
+            let derived = derive_feature_keys(
+                &[ToolDef::Other(serde_json::json!({ "type": token }))],
+                None,
+                None,
+            );
+
+            assert_eq!(
+                tool_type_key(token).into_iter().collect::<Vec<_>>(),
+                derived
+            );
+        }
+    }
+
+    #[test]
+    fn tool_type_step_fails_closed_on_unusable_tokens() {
+        for token in ["", "two words", "_20250305"] {
+            assert_eq!(tool_type_key(token), None, "token {token:?}");
+        }
+    }
+
+    #[test]
+    fn unseen_tool_type_rejection_learns_with_no_table_edit() {
+        let body = flat_validation_body(
+            "tool type 'future_tool_20991231' is not supported for this model",
+        );
+        let err = upstream(400, &body, Some("ValidationException"), None);
 
         assert_eq!(
-            extract_bedrock_capability(&oversized, &templates, &translations),
-            None
+            resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+            Some((
+                "future_tool".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1
+            ))
         );
+    }
+
+    #[test]
+    fn bedrock_field_leg_stays_closed() {
+        for message in [
+            "routectl_envelope_probe_field: Extra inputs are not permitted",
+            "output_config.effort: Extra inputs are not permitted",
+        ] {
+            let body = flat_validation_body(message);
+            let err = upstream(400, &body, Some("ValidationException"), None);
+
+            assert_eq!(
+                resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+                None,
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn keys_the_open_tool_leg_can_learn_route_away() {
+        for key in [
+            "web_search",
+            "computer",
+            STRUCTURED_OUTPUT,
+            "unseen_tool_key",
+        ] {
+            assert_eq!(action_for(key), CapabilityAction::RouteAway, "key {key}");
+        }
+    }
+
+    /// A canonical request whose membership vocabulary carries `key`, or
+    /// `None` when no builder is named for it.
+    fn canonical_request_for(key: &str) -> Option<ChatRequest> {
+        let request = match key {
+            "advisor" => ChatRequest {
+                tools: Some(vec![ToolDef::Other(
+                    serde_json::json!({"type": "advisor", "name": "advisor"}),
+                )]),
+                ..ChatRequest::default()
+            },
+            FORCED_TOOL_CHOICE => ChatRequest {
+                tool_choice: Some(serde_json::json!({"type": "any"})),
+                ..ChatRequest::default()
+            },
+            STRUCTURED_OUTPUT => ChatRequest {
+                provider_extras: Some(serde_json::json!({
+                    "output_config": {"format": {"type": "json_schema", "schema": {}}}
+                })),
+                ..ChatRequest::default()
+            },
+            _ => return None,
+        };
+        Some(request)
+    }
+
+    /// The request-membership vocabulary a learned key must belong to.
+    fn membership_vocabulary(req: &ChatRequest) -> Vec<String> {
+        derive_feature_keys(
+            req.tools.as_deref().unwrap_or(&[]),
+            req.provider_extras.as_ref(),
+            req.response_format.as_ref(),
+        )
+        .into_iter()
+        .chain(tool_choice_force(req.tool_choice.as_ref()).map(|_| FORCED_TOOL_CHOICE.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn every_closed_bedrock_row_target_is_request_producible() {
+        let rows = BEDROCK_TOKEN_TRANSLATIONS
+            .iter()
+            .map(|row| ("translation", row))
+            .chain(BEDROCK_VALIDATION_PHRASES.iter().map(|row| ("phrase", row)));
+        for (table, (surface, target)) in rows {
+            let request = canonical_request_for(target).unwrap_or_else(|| {
+                panic!("{table} row {surface:?}: no request builder for {target}")
+            });
+
+            assert!(
+                membership_vocabulary(&request)
+                    .iter()
+                    .any(|key| key == target),
+                "{table} row {surface:?}: builder does not produce {target}"
+            );
+        }
     }
 
     #[test]
