@@ -824,7 +824,7 @@ fn seed_cleared_beta(conn: &rusqlite::Connection, ts: i64, flag: &str, cat: i64,
         params![
             ts,
             SEED_LANE,
-            format!("{}{}{flag}", "be", "ta:"),
+            routectl_router::beta_capability_key(flag).expect("well-formed fixture flag"),
             cat,
             overlay,
             routectl_router::CURRENT_VOCAB_VERSION,
