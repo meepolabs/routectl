@@ -1,4 +1,46 @@
 pub mod routectl_core
+pub mod routectl_core::beta_repair_report
+pub struct routectl_core::beta_repair_report::BetaRepairReport
+impl routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::record(&self, &[alloc::string::String])
+pub fn routectl_core::beta_repair_report::BetaRepairReport::take(&self) -> alloc::vec::Vec<alloc::string::String>
+impl core::clone::Clone for routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::clone(&self) -> routectl_core::beta_repair_report::BetaRepairReport
+impl core::default::Default for routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::default() -> routectl_core::beta_repair_report::BetaRepairReport
+impl core::fmt::Debug for routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::beta_repair_report::BetaRepairReport
+impl core::marker::Send for routectl_core::beta_repair_report::BetaRepairReport
+impl core::marker::Sync for routectl_core::beta_repair_report::BetaRepairReport
+impl core::marker::Unpin for routectl_core::beta_repair_report::BetaRepairReport
+impl core::marker::UnsafeUnpin for routectl_core::beta_repair_report::BetaRepairReport
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::beta_repair_report::BetaRepairReport
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::beta_repair_report::BetaRepairReport
+impl<T, U> core::convert::Into<U> for routectl_core::beta_repair_report::BetaRepairReport where U: core::convert::From<T>
+pub fn routectl_core::beta_repair_report::BetaRepairReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::beta_repair_report::BetaRepairReport where U: core::convert::Into<T>
+pub type routectl_core::beta_repair_report::BetaRepairReport::Error = core::convert::Infallible
+pub fn routectl_core::beta_repair_report::BetaRepairReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::beta_repair_report::BetaRepairReport where U: core::convert::TryFrom<T>
+pub type routectl_core::beta_repair_report::BetaRepairReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::beta_repair_report::BetaRepairReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::beta_repair_report::BetaRepairReport where T: core::clone::Clone
+pub type routectl_core::beta_repair_report::BetaRepairReport::Owned = T
+pub fn routectl_core::beta_repair_report::BetaRepairReport::clone_into(&self, &mut T)
+pub fn routectl_core::beta_repair_report::BetaRepairReport::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::beta_repair_report::BetaRepairReport where T: 'static + ?core::marker::Sized
+pub fn routectl_core::beta_repair_report::BetaRepairReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::beta_repair_report::BetaRepairReport where T: ?core::marker::Sized
+pub fn routectl_core::beta_repair_report::BetaRepairReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::beta_repair_report::BetaRepairReport where T: ?core::marker::Sized
+pub fn routectl_core::beta_repair_report::BetaRepairReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::beta_repair_report::BetaRepairReport where T: core::clone::Clone
+pub unsafe fn routectl_core::beta_repair_report::BetaRepairReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::beta_repair_report::BetaRepairReport
+impl<T> tracing::instrument::WithSubscriber for routectl_core::beta_repair_report::BetaRepairReport
 pub mod routectl_core::cache_control
 pub enum routectl_core::cache_control::BreakpointPosition
 pub routectl_core::cache_control::BreakpointPosition::Messages
@@ -2144,6 +2186,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::Responses
 #[non_exhaustive] pub struct routectl_core::schema::RoutectlInternal
 pub routectl_core::schema::RoutectlInternal::anthropic_thinking_display: core::option::Option<alloc::string::String>
 pub routectl_core::schema::RoutectlInternal::background_probe: bool
+pub routectl_core::schema::RoutectlInternal::beta_repair_report: core::option::Option<routectl_core::beta_repair_report::BetaRepairReport>
 pub routectl_core::schema::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
 pub routectl_core::schema::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
@@ -2160,6 +2203,7 @@ pub routectl_core::schema::RoutectlInternal::reasoning_dialect: core::option::Op
 pub routectl_core::schema::RoutectlInternal::responses_input_passthrough: alloc::vec::Vec<routectl_core::schema::ResponsesPassthroughItem>
 pub routectl_core::schema::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::supports_adaptive_thinking: bool
+pub routectl_core::schema::RoutectlInternal::withheld_betas: alloc::sync::Arc<[alloc::string::String]>
 impl core::clone::Clone for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::clone(&self) -> routectl_core::schema::RoutectlInternal
 impl core::default::Default for routectl_core::schema::RoutectlInternal
@@ -4241,6 +4285,47 @@ impl<T> core::convert::From<T> for routectl_core::upstream_meta::AnthropicUnifie
 pub fn routectl_core::upstream_meta::AnthropicUnifiedQuota::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::AnthropicUnifiedQuota
 impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::AnthropicUnifiedQuota
+pub struct routectl_core::BetaRepairReport
+impl routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::record(&self, &[alloc::string::String])
+pub fn routectl_core::beta_repair_report::BetaRepairReport::take(&self) -> alloc::vec::Vec<alloc::string::String>
+impl core::clone::Clone for routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::clone(&self) -> routectl_core::beta_repair_report::BetaRepairReport
+impl core::default::Default for routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::default() -> routectl_core::beta_repair_report::BetaRepairReport
+impl core::fmt::Debug for routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::beta_repair_report::BetaRepairReport
+impl core::marker::Send for routectl_core::beta_repair_report::BetaRepairReport
+impl core::marker::Sync for routectl_core::beta_repair_report::BetaRepairReport
+impl core::marker::Unpin for routectl_core::beta_repair_report::BetaRepairReport
+impl core::marker::UnsafeUnpin for routectl_core::beta_repair_report::BetaRepairReport
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::beta_repair_report::BetaRepairReport
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::beta_repair_report::BetaRepairReport
+impl<T, U> core::convert::Into<U> for routectl_core::beta_repair_report::BetaRepairReport where U: core::convert::From<T>
+pub fn routectl_core::beta_repair_report::BetaRepairReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::beta_repair_report::BetaRepairReport where U: core::convert::Into<T>
+pub type routectl_core::beta_repair_report::BetaRepairReport::Error = core::convert::Infallible
+pub fn routectl_core::beta_repair_report::BetaRepairReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::beta_repair_report::BetaRepairReport where U: core::convert::TryFrom<T>
+pub type routectl_core::beta_repair_report::BetaRepairReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::beta_repair_report::BetaRepairReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::beta_repair_report::BetaRepairReport where T: core::clone::Clone
+pub type routectl_core::beta_repair_report::BetaRepairReport::Owned = T
+pub fn routectl_core::beta_repair_report::BetaRepairReport::clone_into(&self, &mut T)
+pub fn routectl_core::beta_repair_report::BetaRepairReport::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::beta_repair_report::BetaRepairReport where T: 'static + ?core::marker::Sized
+pub fn routectl_core::beta_repair_report::BetaRepairReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::beta_repair_report::BetaRepairReport where T: ?core::marker::Sized
+pub fn routectl_core::beta_repair_report::BetaRepairReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::beta_repair_report::BetaRepairReport where T: ?core::marker::Sized
+pub fn routectl_core::beta_repair_report::BetaRepairReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::beta_repair_report::BetaRepairReport where T: core::clone::Clone
+pub unsafe fn routectl_core::beta_repair_report::BetaRepairReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::beta_repair_report::BetaRepairReport
+pub fn routectl_core::beta_repair_report::BetaRepairReport::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::beta_repair_report::BetaRepairReport
+impl<T> tracing::instrument::WithSubscriber for routectl_core::beta_repair_report::BetaRepairReport
 pub struct routectl_core::Breakpoint<'a>
 pub routectl_core::Breakpoint::control: &'a routectl_core::cache_control::CacheControl
 pub routectl_core::Breakpoint::position: routectl_core::cache_control::BreakpointPosition
@@ -5372,6 +5457,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::Responses
 #[non_exhaustive] pub struct routectl_core::RoutectlInternal
 pub routectl_core::RoutectlInternal::anthropic_thinking_display: core::option::Option<alloc::string::String>
 pub routectl_core::RoutectlInternal::background_probe: bool
+pub routectl_core::RoutectlInternal::beta_repair_report: core::option::Option<routectl_core::beta_repair_report::BetaRepairReport>
 pub routectl_core::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
 pub routectl_core::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
@@ -5388,6 +5474,7 @@ pub routectl_core::RoutectlInternal::reasoning_dialect: core::option::Option<rou
 pub routectl_core::RoutectlInternal::responses_input_passthrough: alloc::vec::Vec<routectl_core::schema::ResponsesPassthroughItem>
 pub routectl_core::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::supports_adaptive_thinking: bool
+pub routectl_core::RoutectlInternal::withheld_betas: alloc::sync::Arc<[alloc::string::String]>
 impl core::clone::Clone for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::clone(&self) -> routectl_core::schema::RoutectlInternal
 impl core::default::Default for routectl_core::schema::RoutectlInternal

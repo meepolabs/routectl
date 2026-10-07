@@ -1602,7 +1602,7 @@ async fn cache_auto_decision_line_carries_tokens_only() {
         type_tag: None,
     })]);
 
-    let (result, lines) = routectl_testkit::capture_lines(router.complete(req)).await;
+    let (result, lines) = routectl_testkit::capture_lines(Box::pin(router.complete(req))).await;
     result.expect("ok");
 
     let decision_lines: Vec<&String> = lines

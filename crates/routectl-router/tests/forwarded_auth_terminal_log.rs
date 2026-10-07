@@ -163,7 +163,7 @@ fn assert_no_secret_leak(events: &[CapturedEvent]) {
 async fn forwarded_terminal_warn_carries_safe_dimensions_with_session() {
     let router = router_with_anthropic_target();
 
-    let (result, events) = with_capture(router.complete(forwarded_req(true))).await;
+    let (result, events) = with_capture(Box::pin(router.complete(forwarded_req(true)))).await;
 
     assert!(
         result.is_err(),
@@ -197,7 +197,7 @@ async fn forwarded_terminal_warn_carries_safe_dimensions_with_session() {
 async fn forwarded_terminal_warn_reports_false_when_no_session_id() {
     let router = router_with_anthropic_target();
 
-    let (result, events) = with_capture(router.complete(forwarded_req(false))).await;
+    let (result, events) = with_capture(Box::pin(router.complete(forwarded_req(false)))).await;
 
     assert!(result.is_err());
 

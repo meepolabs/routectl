@@ -6,6 +6,7 @@
 //! OpenRouter speaks routectl. See `schema` for request/response types and
 //! `provider` for the per-backend trait.
 
+pub mod beta_repair_report;
 pub mod cache_control;
 pub mod cache_decision;
 pub mod capability;
@@ -39,6 +40,7 @@ pub(crate) mod volatile;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+pub use beta_repair_report::BetaRepairReport;
 pub use cache_control::{
     Breakpoint, BreakpointPosition, CacheBreakpointSource, CacheControl, FrontSlot, FrozenFloor,
     OwnedBreakpoint, compute_frozen_floor, eligible_system_block_index, front_breakpoint_slot,

@@ -38,6 +38,9 @@ license.
   the `RoutectlInternal` carrier (resolved per-model knobs plus the
   transport-internal capture fields, never serialized to the wire -- see the
   struct's own docs for the field-by-field contract)
+- `src/beta_repair_report.rs` -- `BetaRepairReport`: clone-shared slot where a
+  provider records the client beta flags it stripped after a named rejection
+  (deduped, first-seen order); the router `take`s it after the call
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for
   unknown Anthropic SSE bytes (skip-serialized; preserves unknown
   content_block types verbatim through the canonical pipeline so Anthropic

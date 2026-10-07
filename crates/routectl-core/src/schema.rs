@@ -265,6 +265,8 @@ pub struct ResponsesPassthroughItem {
 /// `responses_input_passthrough`, `inbound_session_key`,
 /// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`), which
 /// egresses read and re-emit deliberately rather than by serialization.
+/// The same holds for the per-request beta-repair fields the router sets
+/// (`withheld_betas`, `beta_repair_report`), which only providers read.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct RoutectlInternal {
@@ -530,6 +532,20 @@ pub struct RoutectlInternal {
     /// `None` for every other ingress, for library consumers, and when the
     /// inbound request carried no `thinking.display`.
     pub anthropic_thinking_display: Option<String>,
+
+    /// Client-lifted `anthropic-beta` flags the router decided this
+    /// provider must not send. A provider removes these from the outbound
+    /// beta set before emitting. Empty for library consumers.
+    ///
+    /// `Arc<[String]>` so the once-per-attempt carrier clone is a refcount
+    /// bump; the empty default allocates nothing.
+    pub withheld_betas: std::sync::Arc<[String]>,
+
+    /// Slot where a provider records the client beta flags it stripped
+    /// after the upstream rejected them by name; the router reads it after
+    /// the call. `None` means nobody is listening and the provider records
+    /// nothing.
+    pub beta_repair_report: Option<crate::beta_repair_report::BetaRepairReport>,
 }
 
 /// Fixed redaction placeholder shared by `ForwardedBearer`'s `Debug` and
@@ -1596,6 +1612,14 @@ mod tests {
             rendered.contains("<redacted>"),
             "carrier Debug missing the redaction placeholder: {rendered}"
         );
+    }
+
+    #[test]
+    fn default_carrier_has_no_withheld_betas_and_no_repair_report() {
+        let internal = RoutectlInternal::default();
+
+        assert!(internal.withheld_betas.is_empty());
+        assert!(internal.beta_repair_report.is_none());
     }
 
     /// The raw token is reachable only through the explicit accessor.

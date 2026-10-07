@@ -80,7 +80,7 @@ creds = { kind = "default-chain" }
     let router = router_from_toml(toml_text, provider);
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert: the feature_unsupported event fires with the
     // operator-remap capability token and remapped=true.
@@ -201,7 +201,7 @@ creds = { kind = "default-chain" }
     let router = router_from_toml(toml_text, provider.clone());
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert: the baked retry_on_5xx=2 cap is exhausted before
     // falling back -- the presence of an unrelated remap block for

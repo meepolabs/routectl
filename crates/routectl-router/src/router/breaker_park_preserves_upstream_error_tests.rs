@@ -157,7 +157,7 @@ async fn parking_request_surfaces_real_429_not_synthetic_gate_error() {
 #[tokio::test]
 async fn parking_request_does_not_retry_the_self_parked_provider() {
     let (router, calls) = router_with_parking_entry();
-    let (_result, events) = with_capture(router.complete(solo_req())).await;
+    let (_result, events) = with_capture(Box::pin(router.complete(solo_req()))).await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
@@ -206,7 +206,7 @@ async fn next_request_during_park_still_sees_synthetic_circuit_open() {
 #[tokio::test]
 async fn retry_decision_event_carries_full_field_set() {
     let (router, _calls) = router_with_parking_entry();
-    let (_result, events) = with_capture(router.complete(solo_req())).await;
+    let (_result, events) = with_capture(Box::pin(router.complete(solo_req()))).await;
     let ev = events
         .iter()
         .find(|e| e.message == "retry decision")

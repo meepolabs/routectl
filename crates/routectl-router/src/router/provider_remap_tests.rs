@@ -38,7 +38,7 @@ api_key_ref = "literal:k"
     let router = router_from_toml(toml_text, provider.clone());
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert: the remap's retry_cap of 0 means exactly one call --
     // no same-provider retry fired.
@@ -88,7 +88,7 @@ api_key_ref = "literal:k"
     let router = router_from_toml(toml_text, provider.clone());
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert: the baked retry_on_5xx=2 cap is exhausted before
     // falling back, so the provider is dispatched twice.
@@ -133,7 +133,7 @@ api_key_ref = "literal:k"
     let router = router_from_toml(toml_text, provider);
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert
     assert!(result.is_err());
@@ -181,7 +181,7 @@ api_key_ref = "literal:k"
     let router = router_from_toml(toml_text, provider);
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert
     assert!(result.is_err());

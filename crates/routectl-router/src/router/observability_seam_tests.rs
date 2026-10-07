@@ -136,7 +136,7 @@ async fn feature_unsupported_event_fires_on_complete_with_safe_fields() {
     let router = router_with_failing(400, None, Some("unsupported_parameter"));
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert: the request still fails (event is observational only).
     assert!(result.is_err());
@@ -193,7 +193,7 @@ async fn unknown_upstream_classification_warns_and_counts_on_complete() {
     let router = router_with_failing(600, None, None);
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert
     assert!(result.is_err());
@@ -243,7 +243,7 @@ async fn generic_bad_request_emits_single_debug_decision() {
     let router = router_with_failing(400, Some("invalid_request_error"), None);
 
     // Act
-    let (result, events) = with_capture(router.complete(req_m1())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_m1()))).await;
 
     // Assert: exactly one class-decision event per error-arm pass.
     assert!(result.is_err());

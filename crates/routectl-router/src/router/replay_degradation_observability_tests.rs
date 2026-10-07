@@ -197,7 +197,7 @@ async fn degradation_emits_exactly_one_warn_with_closed_tokens() {
     let router = router_with(provider.clone());
 
     // Act
-    let (result, events) = with_capture(router.complete(req_carrying_artifact())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_carrying_artifact()))).await;
 
     // Assert: the stripped repair succeeded, and EXACTLY one aggregated
     // degradation WARN fired for the whole request.
@@ -228,7 +228,7 @@ async fn no_degradation_emits_zero_warns() {
     let router = router_with(provider.clone());
 
     // Act
-    let (result, events) = with_capture(router.complete(req_no_artifact())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_no_artifact()))).await;
 
     // Assert: served on the first call, and NOT one degradation WARN.
     assert!(result.is_ok());
@@ -247,7 +247,7 @@ async fn warn_carries_no_blob_id_or_body() {
     let router = router_with(provider);
 
     // Act
-    let (result, events) = with_capture(router.complete(req_carrying_artifact())).await;
+    let (result, events) = with_capture(Box::pin(router.complete(req_carrying_artifact()))).await;
 
     // Assert: the WARN's message and every field are free of the artifact
     // blob, the reasoning item id, and the upstream body.
@@ -272,7 +272,7 @@ async fn trace_across_repair_path_leaks_no_blob_id_or_body() {
     let router = router_with(provider);
 
     // Act
-    let (result, lines) = capture_lines(router.complete(req_carrying_artifact())).await;
+    let (result, lines) = capture_lines(Box::pin(router.complete(req_carrying_artifact()))).await;
 
     // Assert: the request failed, and no captured line at ANY level carries
     // the artifact blob, the reasoning item id, or the upstream body.
@@ -294,7 +294,7 @@ async fn classified_replay_rejection_is_body_free_before_generic_logs() {
     let router = router_with(provider.clone());
 
     // Act
-    let (result, lines) = capture_lines(router.complete(req_carrying_artifact())).await;
+    let (result, lines) = capture_lines(Box::pin(router.complete(req_carrying_artifact()))).await;
 
     // Assert: exactly two calls (carried + one repair), and the upstream
     // body never appears in any rendered line.
