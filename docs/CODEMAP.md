@@ -3021,15 +3021,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   forced request skips the lane, an unforced one does not, the directive
   reaches every lane unchanged, and an `unsupported` override routes away
   before dispatch
-- `src/router/bedrock_learn_breadth_tests.rs` -- captured Bedrock rejections
-  replayed through real dispatch on a two-Bedrock-lane chain, driven by the
-  `replay_rows` of `tests/fixtures/bedrock_validation_capture.json`: a
-  web_search, computer or structured_output refusal is learned on the first
-  miss per lane and the next request skips it, must-not-learn rejections keep
-  the lane dialed, a declared `unsupported_features` entry skips both
-  Bedrock lanes before dispatch, the learned negatives survive a restart
-  through their persisted rows, and the stream arm learns a rejection before
-  the first chunk but never one after streamed content (bedrock feature only)
+- `src/router/bedrock_learn_breadth_tests.rs` -- captured Bedrock
+  `ValidationException` rejections (`replay_rows` of
+  `tests/fixtures/bedrock_validation_capture.json`) replayed through real
+  dispatch on a two-Bedrock-plus-fallback chain (bedrock feature only)
 - `src/router/field_canary_settlement_tests.rs` -- behavioral coverage of the
   re-verification canary through real dispatches, asserting on the mock seats'
   RECORDED REQUEST BODIES rather than on decision records: "restores the field
@@ -3781,17 +3776,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   read-model), and `learned_replay` (the crate-internal `&self` delegate handing
   the dispatch arm the `ReplayLearnRegistry` for its carry-slot claim)
 - `src/router/beta_report_learn.rs` -- learning from the provider's per-attempt
-  `BetaRepairReport`: `install_beta_repair_report` puts a fresh slot on the
-  request before each complete/stream provider call (never per target, never on
-  count_tokens), and `settle_attempt_success` mints a `beta:<flag>` negative
-  per reported client flag (via `capability_learn`'s shared
-  `settle_probe_rejection` / `mint_learned_negative`) BEFORE the probe guard's
-  `settle_success`, so an admitted re-probe the provider re-confirmed is not
-  cleared; a held beta re-probe the report did NOT name was accepted and is
-  replaced by a verified positive (`BETA_ACCEPTED` evidence,
-  `LearnedCapabilityRegistry::observe_accepted_beta_in_generation`, one
-  `verified` observation only on a transition) so live acceptance beats the
-  seed, and the warm rebuild replays that row as the same replacement
+  `BetaRepairReport`: `install_beta_repair_report` (fresh slot per provider
+  call) and `settle_attempt_success` (`beta:<flag>` negatives for reported
+  flags, a `BETA_ACCEPTED` verified positive for an accepted re-probe)
 - `src/router/capability_observe.rs` -- response-evidence observer: the
   SUCCESS-arm mirror of `observe_for_learning`, run inline on the terminal
   successful NON-STREAMING response (the streaming arm records nothing -- no
@@ -4184,11 +4171,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   decay settlements: lapse -> one carry, success -> clear, same rejection ->
   refresh, unrelated error -> release unchanged
 - `src/beta_capability.rs` -- sole owner of the beta-flag capability namespace
-  (crate-internal): `beta_capability_key`, `beta_flag_of`, `capability_key_is_beta`;
-  `BetaSeedScope` (`covers`, `provider_kind`, `seeded_keys`) names a seed's
-  provider kind and flags
-- `src/beta_seed.rs` -- `BEDROCK_BETA_SEED`, the shipped prior of client beta
-  flags a `bedrock` target withholds absent a stronger verdict
+  (`beta_capability_key`, `beta_flag_of`, `capability_key_is_beta`) and
+  `BetaSeedScope`; the module is crate-internal, the root re-exports
+  `capability_key_is_beta`, `BetaSeedScope`, and (test-utils) the constructor
+- `src/beta_seed.rs` -- `BEDROCK_BETA_SEED` / `BEDROCK_SEED_PROVIDER_KIND`, the
+  shipped prior of client beta flags a `bedrock` target withholds absent a
+  stronger verdict; `shipped_scope` (root: `shipped_beta_seed_scope`)
 - `src/field_capability.rs` -- sole owner of the envelope-field capability
   namespace (crate-internal): `field_capability_key` mints a bounded key from a
   qualified dotted path, `capability_key_is_catalog_scoped` classifies any key
@@ -5799,15 +5787,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   daemon-plus-wiremock harness would assert over a lane where the feature is
   correctly inert
 - `src/server/beta_capability_restart_tests.rs` -- cross-restart proof for the
-  two durable beta-flag facts, declared from `server/mod.rs`. A real Router on a
-  `bedrock` entry behind an in-process seat that records each call's client betas
-  and `withheld_betas` (a real Bedrock provider derives its endpoint from the
-  region and cannot be aimed at a mock). A beta the seat reports stripping is
-  learned, persisted through the production `drain_capability_events`, and
-  withheld by a Router warmed from the ledger (control: an empty ledger forwards
-  it); a seed lift through the real control route is forwarded after a restart
-  (control: no lift still withholds); and a boot under a different overlay
-  revision withholds the seeded flag again
+  two durable beta-flag facts (a learned beta negative, an operator seed lift):
+  a real Router behind a recording seat, persisted through the production
+  writer and read back by a second Router; declared from `server/mod.rs`
 - `src/server/capability_boundary.rs` -- the replay boundary a
   revision-changing reload must commit BEFORE it publishes the replacement
   router, in two phases. `admit_capability_boundary(usage, router) ->
