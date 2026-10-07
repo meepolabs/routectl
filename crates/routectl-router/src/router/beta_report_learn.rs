@@ -119,7 +119,7 @@ impl Router {
             return;
         }
         self.metrics.incr_verified_working();
-        tracing::info!(
+        tracing::warn!(
             event = "observe",
             state_key = %routectl_core::sanitize_for_log(&admission.state_key),
             lane = %routectl_core::sanitize_for_log(&admission.learned_key),
@@ -176,7 +176,8 @@ impl Router {
                 continue;
             };
             let Some(learned_key) = target.learned_key(&feature_key) else {
-                return;
+                // Skip this flag only: one flag's lookup never ends the loop early.
+                continue;
             };
             if self.override_forces_supported(target, &feature_key, provider_kind) {
                 continue;

@@ -13,7 +13,7 @@ pub mod capability;
 pub(crate) mod cloud_project;
 pub mod content_part;
 pub mod context_reduction;
-pub mod converse_errors;
+mod converse_errors;
 pub mod error;
 pub mod failure_class;
 pub mod identity;

@@ -697,8 +697,6 @@ impl<T> tracing::instrument::Instrument for routectl_core::context_reduction::Re
 impl<T> tracing::instrument::WithSubscriber for routectl_core::context_reduction::ReductionDelta
 pub fn routectl_core::context_reduction::apply_json_minify(&mut routectl_core::schema::ChatRequest) -> routectl_core::context_reduction::ReductionOutcome
 pub fn routectl_core::context_reduction::minify_json_whitespace(&str) -> core::option::Option<alloc::string::String>
-pub mod routectl_core::converse_errors
-pub fn routectl_core::converse_errors::strip_converse_errors_prefix(&str) -> &str
 pub mod routectl_core::error
 pub enum routectl_core::error::Error
 pub routectl_core::error::Error::Auth(alloc::string::String)

@@ -1356,7 +1356,7 @@ key held anything. `removed` is what tells the two apart, so an operator
 reading the log can distinguish "I removed a verdict" from "there was
 nothing there".
 
-Content-free by construction: the four fields below are the whole record.
+Content-free by construction: the fields below are the whole record.
 The state key and the normalized capability key are the same
 display-safe discriminants every sibling event carries, and both are run
 through the shared log sanitizer since the caller supplies them. No
@@ -1368,6 +1368,7 @@ request body, prompt, upstream text, or caller address ever appears.
 | `state_key` | string | The learned lane (`provider_entry#upstream`), as requested. |
 | `capability_key` | string | The NORMALIZED capability token the purge was keyed on. |
 | `removed` | bool | `true` when a resident entry was removed; `false` for a clean no-op on a key that held nothing. |
+| `seed_lifted` | bool | Present only as `true`, on a purge of a seeded Bedrock beta flag with nothing resident: the shipped seed stops withholding the flag on that lane. Such a line carries `removed=false`. |
 
 ```
 INFO routectl_router::router::capability_purge event=purge
