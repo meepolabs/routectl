@@ -108,6 +108,15 @@ impl Router {
         let had_cc_session = routectl_core::identity::anthropic::has_claude_code_session(
             &attempt_req.routectl_internal.claude_code_headers,
         );
+        // A flag withheld for this lane's client traffic never rides a
+        // background probe either.
+        let withheld = &attempt_req.routectl_internal.withheld_betas;
+        let client_betas: Vec<String> = attempt_req
+            .anthropic_beta
+            .iter()
+            .filter(|flag| !withheld.contains(flag))
+            .cloned()
+            .collect();
         for (path, field_value) in super::field_repair::grounded_closed_table_payloads(attempt_req)
         {
             let Some(key) = FieldVerdictKey::new(lane, path, kind) else {
@@ -123,7 +132,7 @@ impl Router {
             let Some(payload) = crate::probe_scheduler::ProbePayload::new(
                 path,
                 field_value,
-                &attempt_req.anthropic_beta,
+                &client_betas,
                 &attempt_req.routectl_internal.operator_betas,
                 had_cc_session,
             ) else {

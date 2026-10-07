@@ -480,6 +480,11 @@ impl Router {
         // a target that feature filtering then makes the last one, and the
         // feature filter would fabricate an empty-chain error.
         let chain = self.filter_chain_by_window(chain, req);
+        // Beta withholding runs as its own pass: the feature filter returns
+        // early for a request with no feature keys, and beta flags are not
+        // feature keys. After the window pass so a skipped target never claims
+        // a re-probe slot.
+        let chain = self.withhold_betas_on_chain(chain, req, &mut admissions);
         Ok((chain, admissions))
     }
 }
@@ -520,6 +525,7 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
         strip_capabilities: std::sync::Arc::default(),
+        withheld_betas: std::sync::Arc::default(),
         nickname: Some(m.nickname.clone()),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
@@ -585,6 +591,7 @@ pub(super) fn dispatch_target_for_seat(
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
         strip_capabilities: std::sync::Arc::default(),
+        withheld_betas: std::sync::Arc::default(),
         nickname: Some(m.nickname.clone()),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,

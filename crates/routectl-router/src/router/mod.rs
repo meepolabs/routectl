@@ -27,6 +27,7 @@ use crate::resolved::ResolvedModel;
 use crate::runtime_state::ProviderState;
 
 mod beta_report_learn;
+mod beta_withhold;
 mod cache_plan;
 mod capability_cleared;
 mod capability_health;
@@ -434,6 +435,10 @@ pub struct Router {
     /// carry-over on reload, since a reload builds a fresh Router from the
     /// new config and this rebuilds deterministically from it.
     override_registry: crate::override_registry::OverrideRegistry,
+    /// Client beta flags a `bedrock` target withholds when nothing stronger
+    /// (operator pin, override, learned verdict) decides the flag. Always
+    /// [`crate::beta_seed::BEDROCK_BETA_SEED`] outside tests.
+    beta_seed: &'static [&'static str],
     /// Baked catalog table version this Router was built against
     /// (`catalog_baked::CATALOG_VERSION`). Compared old-vs-new in
     /// `carry_over_learned_from`: a bump invalidates the learned registry.
@@ -1904,6 +1909,11 @@ struct DispatchTarget {
     /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
     /// bump rather than a heap allocation.
     strip_capabilities: std::sync::Arc<[String]>,
+    /// Client `anthropic-beta` flags this target must not send, decided once
+    /// at chain resolution and copied onto every attempt's
+    /// `RoutectlInternal.withheld_betas`. Empty (the default in both
+    /// constructors) withholds nothing.
+    withheld_betas: std::sync::Arc<[String]>,
     /// Model nickname for tracing.
     nickname: Option<String>,
     /// The shared resolved model this target dispatches to. Carried as
@@ -2122,6 +2132,7 @@ impl Router {
             probe_queue_full_warned: Mutex::new(false),
             probe_payload_refused_warned: Mutex::new(false),
             override_registry,
+            beta_seed: crate::beta_seed::BEDROCK_BETA_SEED,
             pool_reports: Vec::new(),
             catalog_version: crate::catalog_baked::CATALOG_VERSION,
             overlay_revision: 0,

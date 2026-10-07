@@ -22,6 +22,7 @@ pub(crate) mod activation;
 pub(crate) mod alloc_probe;
 pub(crate) mod anthropic_family;
 pub(crate) mod beta_capability;
+pub(crate) mod beta_seed;
 pub(crate) mod calibration;
 pub(crate) mod capability_detect;
 pub(crate) mod capability_display;

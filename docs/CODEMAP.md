@@ -3152,6 +3152,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays`, `operator_betas`, `operator_payload_extras`, the
   `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
+- `src/router/beta_withhold.rs` -- per-target withheld client beta set
+  (`withhold_betas_on_chain`), resolved pin > override > learned > seed
 - `src/router/feature_filter.rs` -- capability pre-filter + strip-interceptor
   application: `filter_chain_by_features` (alias-chain pre-filter with the
   prior/learned soft-drop tail: prior-demoted targets sort ahead of
@@ -4164,6 +4166,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   refresh, unrelated error -> release unchanged
 - `src/beta_capability.rs` -- sole owner of the beta-flag capability namespace
   (crate-internal): `beta_capability_key`, `beta_flag_of`, `capability_key_is_beta`
+- `src/beta_seed.rs` -- `BEDROCK_BETA_SEED`, the shipped prior of client beta
+  flags a `bedrock` target withholds absent a stronger verdict
 - `src/field_capability.rs` -- sole owner of the envelope-field capability
   namespace (crate-internal): `field_capability_key` mints a bounded key from a
   qualified dotted path, `capability_key_is_catalog_scoped` classifies any key

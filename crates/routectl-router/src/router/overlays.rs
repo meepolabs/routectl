@@ -135,6 +135,7 @@ pub(super) fn apply_layered_overlays(
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
+    internal.withheld_betas = std::sync::Arc::clone(&target.withheld_betas);
     // Per-model `max_tokens` ceiling. Zero means no per-model override;
     // Anthropic-shape egresses (anthropic-api, bedrock-invoke) read this
     // and fall through to their hardcoded 64000 baseline when zero.

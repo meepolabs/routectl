@@ -476,20 +476,25 @@ impl Router {
     /// ineffective, so the caller must route away instead. Non-beta strips
     /// (e.g. a tool-shape strip) carry no beta token and are never pinned.
     fn beta_pinned_for_target(&self, target: &DispatchTarget, feature: &str) -> bool {
-        let tokens = crate::capability_strip::strip_beta_tokens(feature);
-        if tokens.is_empty() {
-            return false;
-        }
+        crate::capability_strip::strip_beta_tokens(feature)
+            .iter()
+            .any(|token| self.beta_flag_pinned_for_target(target, token))
+    }
+
+    /// Whether the operator floor pins the beta `flag` on this target: the
+    /// provider `anthropic_beta` config or a provider/model `header_extras`
+    /// `anthropic-beta` contribution. A pinned flag is re-added on the wire
+    /// whatever the router decides about it.
+    pub(super) fn beta_flag_pinned_for_target(&self, target: &DispatchTarget, flag: &str) -> bool {
         let provider_entry = self.config.providers.get(&target.provider_name);
         let provider_floor = provider_entry.map_or(&[][..], ProviderEntry::anthropic_beta_floor);
-        let header_floor = operator_betas(
-            provider_entry.map(ProviderEntry::header_extras),
-            &target.model.header_extras,
-        );
-        tokens.iter().any(|token| {
-            provider_floor.iter().any(|pinned| pinned == token)
-                || header_floor.iter().any(|pinned| pinned == token)
-        })
+        provider_floor.iter().any(|pinned| pinned == flag)
+            || operator_betas(
+                provider_entry.map(ProviderEntry::header_extras),
+                &target.model.header_extras,
+            )
+            .iter()
+            .any(|pinned| pinned == flag)
     }
 
     /// Whether an operator `force_supported` override masks `feature` for
