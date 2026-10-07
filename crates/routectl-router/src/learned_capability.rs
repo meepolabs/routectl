@@ -2094,6 +2094,83 @@ impl LearnedCapabilityRegistry {
         )
     }
 
+    /// Settle an admitted beta re-probe the upstream ACCEPTED, on behalf of
+    /// `generation`: replace the resident negative with a verified positive in
+    /// one guarded mutation.
+    ///
+    /// Unlike [`Self::observe_positive_in_generation`], a resident negative does
+    /// not suppress this: the re-probe IS that negative's lifecycle settling,
+    /// the same authority under which a success settlement removes it. Removing
+    /// and then inserting in two calls would expose a window with neither
+    /// verdict, and stamp two incarnations for one transition.
+    ///
+    /// `Recorded` when the key now holds a positive it did not hold before (a
+    /// replaced negative, or no entry); `Refreshed` when a positive already
+    /// resided.
+    pub fn observe_accepted_beta_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> GenerationOutcome<PositiveOutcome> {
+        self.guarded_for(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            |entries, leased| {
+                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                self.accept_beta_in(entries, leased, &key, EvidenceSource::Live, now)
+            },
+        )
+    }
+
+    /// Replay an accepted-beta row: the same replacement as
+    /// [`Self::observe_accepted_beta_in_generation`], without a generation, so a
+    /// rebuilt registry ends where the live one did rather than letting the
+    /// earlier negative suppress the later positive.
+    pub fn replay_accepted_beta(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        source: EvidenceSource,
+        now: Instant,
+    ) -> PositiveOutcome {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        let mut entries = self.entries.write();
+        let leased = self.purge_leases.read();
+        self.accept_beta_in(&mut entries, &leased, &key, source, now)
+    }
+
+    /// Replace a resident negative for `key` with a verified accepted-beta
+    /// positive, on already-held guards.
+    fn accept_beta_in(
+        &self,
+        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+        key: &RegistryKey,
+        source: EvidenceSource,
+        now: Instant,
+    ) -> PositiveOutcome {
+        if entries
+            .get(key)
+            .is_some_and(|entry| entry.verdict == EntryVerdict::Negative)
+        {
+            entries.remove(key);
+        }
+        self.observe_positive_in(
+            entries,
+            leased,
+            key,
+            source,
+            Some(routectl_core::capability::BETA_ACCEPTED),
+            now,
+        )
+    }
+
     /// The routing decision for `generation`, or `None` when that generation
     /// may not read this key.
     ///

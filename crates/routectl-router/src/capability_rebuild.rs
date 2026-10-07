@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use routectl_core::capability::{
-    EvidenceSource, FailurePhase, SignalTier, is_known_evidence_class,
+    BETA_ACCEPTED, EvidenceSource, FailurePhase, SignalTier, is_known_evidence_class,
 };
 
 use crate::capability_owner::owner_decision;
@@ -370,14 +370,26 @@ fn replay_row(
                 skip_unknown_evidence_class(row, summary);
                 return;
             }
-            registry.observe_positive(
-                &row.state_key,
-                &row.capability,
-                &row.provider_kind,
-                source,
-                row.evidence_class.as_deref(),
-                row.observed_at,
-            );
+            // An accepted beta re-probe superseded the negative it settled; a
+            // plain positive would be suppressed by the earlier `broken` row.
+            if row.evidence_class.as_deref() == Some(BETA_ACCEPTED) {
+                registry.replay_accepted_beta(
+                    &row.state_key,
+                    &row.capability,
+                    &row.provider_kind,
+                    source,
+                    row.observed_at,
+                );
+            } else {
+                registry.observe_positive(
+                    &row.state_key,
+                    &row.capability,
+                    &row.provider_kind,
+                    source,
+                    row.evidence_class.as_deref(),
+                    row.observed_at,
+                );
+            }
             summary.replayed_verified += 1;
             bump_probe(source, summary);
         }

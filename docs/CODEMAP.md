@@ -155,7 +155,8 @@ license.
   evidence-class tokens
   written verbatim to the capability ledger and read back open-set-tolerant on
   replay (`SCHEMA_PARSE`/`SCHEMA_MISMATCH`,
-  `SEARCH_BLOCKS`/`SEARCH_ABSENT_FORCED`, `CACHE_HIT`, `THINKING_BLOCKS`),
+  `SEARCH_BLOCKS`/`SEARCH_ABSENT_FORCED`, `CACHE_HIT`, `THINKING_BLOCKS`,
+  `BETA_ACCEPTED`),
   collected in `EVIDENCE_CLASSES` with the `is_known_evidence_class`
   membership predicate the warm rebuild uses to fail closed on an unrecognized
   class. Also `normalize_capability_key` (the learned-capability storage
@@ -3785,7 +3786,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   per reported client flag (via `capability_learn`'s shared
   `settle_probe_rejection` / `mint_learned_negative`) BEFORE the probe guard's
   `settle_success`, so an admitted re-probe the provider re-confirmed is not
-  cleared
+  cleared; a held beta re-probe the report did NOT name was accepted and is
+  replaced by a verified positive (`BETA_ACCEPTED` evidence,
+  `LearnedCapabilityRegistry::observe_accepted_beta_in_generation`, one
+  `verified` observation only on a transition) so live acceptance beats the
+  seed, and the warm rebuild replays that row as the same replacement
 - `src/router/capability_observe.rs` -- response-evidence observer: the
   SUCCESS-arm mirror of `observe_for_learning`, run inline on the terminal
   successful NON-STREAMING response (the streaming arm records nothing -- no

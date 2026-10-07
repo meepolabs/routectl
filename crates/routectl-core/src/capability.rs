@@ -88,6 +88,11 @@ pub const CACHE_HIT: &str = "cache_hit";
 /// Positive-only. Versioned, internal contract -- see [`SCHEMA_PARSE`].
 pub const THINKING_BLOCKS: &str = "thinking_blocks";
 
+/// Evidence class for a verified beta flag: a re-probe sent the flag and the
+/// upstream accepted the request without the provider stripping it.
+/// Positive-only. Versioned, internal contract -- see [`SCHEMA_PARSE`].
+pub const BETA_ACCEPTED: &str = "beta_accepted";
+
 /// Every recognized evidence-class token. A warm-rebuild replayer checks
 /// membership through [`is_known_evidence_class`] to fail closed on a row
 /// carrying a class it does not recognize, rather than replaying it blind.
@@ -98,6 +103,7 @@ pub const EVIDENCE_CLASSES: &[&str] = &[
     SEARCH_ABSENT_FORCED,
     CACHE_HIT,
     THINKING_BLOCKS,
+    BETA_ACCEPTED,
 ];
 
 /// Whether `token` is a recognized evidence class. Open-set-tolerant:
@@ -413,14 +419,15 @@ mod tests {
         assert_eq!(SEARCH_ABSENT_FORCED, "search_absent_forced");
         assert_eq!(CACHE_HIT, "cache_hit");
         assert_eq!(THINKING_BLOCKS, "thinking_blocks");
+        assert_eq!(BETA_ACCEPTED, "beta_accepted");
     }
 
     #[test]
-    fn is_known_evidence_class_recognizes_exactly_the_six_pinned_tokens() {
+    fn is_known_evidence_class_recognizes_exactly_the_seven_pinned_tokens() {
         for token in EVIDENCE_CLASSES {
             assert!(is_known_evidence_class(token), "{token} must be recognized");
         }
-        assert_eq!(EVIDENCE_CLASSES.len(), 6);
+        assert_eq!(EVIDENCE_CLASSES.len(), 7);
         assert!(!is_known_evidence_class("bogus_class"));
         assert!(!is_known_evidence_class(""));
         assert!(!is_known_evidence_class("SCHEMA_PARSE"));

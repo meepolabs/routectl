@@ -435,6 +435,33 @@ impl LearnedProbeGuard {
         cleared
     }
 
+    /// Remove and return every still-held beta-flag admission
+    /// (`capability_key_is_beta`) whose key is not in `reported`, leaving every
+    /// other admission in the held set.
+    ///
+    /// A beta admission the provider's repair report did not name was SENT and
+    /// ACCEPTED: that is a positive transition, not the clear `settle_success`
+    /// records, so the caller takes these out before `settle_success` and
+    /// records each as a positive against the generation its admission was
+    /// granted under. A guard with no registry (inert, or already settled)
+    /// holds nothing and returns empty.
+    pub(super) fn take_unreported_beta_admissions(
+        &mut self,
+        reported: &[String],
+    ) -> Vec<ProbeAdmission> {
+        if self.registry.is_none() {
+            return Vec::new();
+        }
+        let (taken, kept) = std::mem::take(&mut self.probes)
+            .into_iter()
+            .partition(|probe| {
+                crate::beta_capability::capability_key_is_beta(&probe.feature)
+                    && !reported.contains(&probe.feature)
+            });
+        self.probes = kept;
+        taken
+    }
+
     /// The dispatch hit the same capability rejection for one held probe:
     /// refresh that entry with capped backoff and drop it from the held set.
     /// Returns `true` when a held probe matched.

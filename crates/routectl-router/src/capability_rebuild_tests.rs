@@ -876,3 +876,72 @@ fn a_row_its_provider_entry_no_longer_owns_is_skipped_and_counted() {
         .collect();
     assert_eq!(resident, vec![(LANE.to_string(), "web_search".to_string())]);
 }
+
+#[test]
+fn an_accepted_beta_row_replaces_the_negative_it_settled() {
+    // The live path replaced a lapsed beta negative with a positive when the
+    // re-probe was accepted; replay must end in the same state, rather than
+    // letting the earlier `broken` row suppress the later positive.
+    let key = crate::beta_capability::beta_capability_key("zz-flag-a").expect("well formed");
+    let base = Instant::now();
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![
+            broken(1, base, &key),
+            row(
+                2,
+                base + Duration::from_secs(1),
+                "verified",
+                None,
+                "live",
+                None,
+                Some(routectl_core::capability::BETA_ACCEPTED),
+                &key,
+            ),
+        ],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    assert_eq!(summary.replayed_verified, 1);
+    let at = base + Duration::from_secs(2);
+    assert!(reg.is_verified_working(LANE, &key, "openai-compat", at));
+    assert_eq!(
+        reg.acting_negative_for(LANE, &key, "openai-compat", at),
+        RoutingDecision::Allow,
+    );
+}
+
+#[test]
+fn a_passive_verified_row_after_a_negative_stays_suppressed() {
+    // Control for the accepted-beta replacement: any other verified row keeps
+    // today's rule, where a resident negative suppresses a passive positive.
+    let base = Instant::now();
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![
+            broken(1, base, "web_search"),
+            row(
+                2,
+                base + Duration::from_secs(1),
+                "verified",
+                None,
+                "live",
+                None,
+                Some("search_blocks"),
+                "web_search",
+            ),
+        ],
+    };
+    let reg = registry();
+
+    let _ = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    let at = base + Duration::from_secs(2);
+    assert!(!reg.is_verified_working(LANE, "web_search", "openai-compat", at));
+    assert!(matches!(
+        reg.acting_negative_for(LANE, "web_search", "openai-compat", at),
+        RoutingDecision::RouteAway { .. }
+    ));
+}
