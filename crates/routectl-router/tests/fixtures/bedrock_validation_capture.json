@@ -1,5 +1,5 @@
 {
-  "note": "Mixed bedrock-runtime 400 ValidationException set. Rows without an api key are InvokeModel captures (2026-07-28, global anthropic claude opus), byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. Rows with api converse use the same flat body around a Converse message: converse-field-probe carries a message captured verbatim on Converse (us.anthropic.claude-sonnet-5); converse-advisor-composed (model composed) joins that captured Converse wrapper to the captured InvokeModel advisor message. Rows with api invoke or converse and a named model (web-search-template-sonnet-5, structured-output-*, schema-error-*) carry messages captured verbatim on 2026-10-02 on that carrier and model; that includes the middle-anchored tool-type rejections (web-search-pydantic-*, computer-aws-*) and their must-not-learn neighbours (tool-removal-messages-*, tool-changes-*, toolset-name-*), which are read by dedicated extractors rather than the templates rows. Each templates row names the step that turns its token into a key: tool_type (open; the type minus any date suffix) or translated (closed; the translations rows). Near-misses output_config_effort, pydantic_* and aws_* are synthesized and were never captured. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). Kept as a data file, never inline .rs literals.",
+  "note": "Mixed bedrock-runtime 400 ValidationException set. Rows without an api key are InvokeModel captures (2026-07-28, global anthropic claude opus), byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. Rows with api converse use the same flat body around a Converse message: converse-field-probe carries a message captured verbatim on Converse (us.anthropic.claude-sonnet-5); converse-advisor-composed (model composed) joins that captured Converse wrapper to the captured InvokeModel advisor message. converse-web-search-composed (model composed) joins the same captured Converse wrapper to the captured InvokeModel web_search template message. Rows with api invoke or converse and a named model (web-search-template-sonnet-5, structured-output-*, schema-error-*) carry messages captured verbatim on 2026-10-02 on that carrier and model; that includes the middle-anchored tool-type rejections (web-search-pydantic-*, computer-aws-*) and their must-not-learn neighbours (tool-removal-messages-*, tool-changes-*, toolset-name-*), which are read by dedicated extractors rather than the templates rows. Each templates row names the step that turns its token into a key: tool_type (open; the type minus any date suffix) or translated (closed; the translations rows). Near-misses output_config_effort, pydantic_* and aws_* are synthesized and were never captured. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). replay_rows drive canaries (or near_miss_messages, by name) through real dispatch on a two-Bedrock-lane chain: request names the request shape, lane_a / lane_b name what each Bedrock lane answers (\"accept\" succeeds), expect_capability null means nothing may be learned, expect_served is the seat that serves. Kept as a data file, never inline .rs literals.",
   "error_type_header": "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
   "lifted_type": "ValidationException",
   "templates": [
@@ -36,6 +36,13 @@
       "status": 400,
       "body": "{\"message\":\"The model returned the following errors: tool type 'advisor' is not supported for this model\"}",
       "expect_capability": "advisor"
+    },
+    "converse-web-search-composed": {
+      "api": "converse",
+      "model": "composed",
+      "status": 400,
+      "body": "{\"message\":\"The model returned the following errors: tool type 'web_search_20250305' is not supported for this model\"}",
+      "expect_capability": "web_search"
     },
     "converse-field-probe": {
       "api": "converse",
@@ -140,5 +147,16 @@
     "aws_two_tokens": "'claude-sonnet-5' does not support tool types: computer_20250124, bash_20250124. Did you mean one of bash_20250124?",
     "aws_no_suggestion": "'claude-sonnet-5' does not support tool types: computer_20250124.",
     "aws_model_with_space": "'claude sonnet' does not support tool types: computer_20250124. Did you mean one of bash_20250124?"
-  }
+  },
+  "replay_rows": [
+    {"request": "web_search", "lane_a": "web-search-pydantic-sonnet-4-6", "lane_b": "web-search-template-sonnet-5", "expect_capability": "web_search", "expect_served": "m3"},
+    {"request": "web_search", "lane_a": "converse-web-search-composed", "lane_b": "web-search-template-sonnet-5", "expect_capability": "web_search", "expect_served": "m3"},
+    {"request": "computer", "lane_a": "computer-aws-sonnet-4-6", "lane_b": "computer-aws-sonnet-5", "expect_capability": "computer", "expect_served": "m3"},
+    {"request": "structured_output", "lane_a": "structured-output-invoke-opus-5-5", "lane_b": "accept", "expect_capability": "structured_output", "expect_served": "m2"},
+    {"request": "structured_output", "lane_a": "structured-output-converse-opus-5-5", "lane_b": "accept", "expect_capability": "structured_output", "expect_served": "m2"},
+    {"request": "structured_output", "lane_a": "schema-error-converse-sonnet-4-6", "lane_b": "accept", "expect_capability": null, "expect_served": "m2"},
+    {"request": "plain", "lane_a": "tool-removal-messages-opus-5-5", "lane_b": "accept", "expect_capability": null, "expect_served": "m2"},
+    {"request": "structured_output", "lane_a": "structured_output_doubled_wrapper", "lane_b": "accept", "expect_capability": null, "expect_served": "m2"},
+    {"request": "plain", "lane_a": "web-search-template-sonnet-5", "lane_b": "accept", "expect_capability": null, "expect_served": "m2"}
+  ]
 }

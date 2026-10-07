@@ -1304,10 +1304,14 @@ endpoint without a new provider kind.
 
 Some upstreams reject specific built-in tool shapes (Bedrock, for
 example, currently 400s on Anthropic's `web_search_*` tool families).
-The legacy behavior was tried-and-fallback: dispatch to Bedrock, get
-a 400, walk to the next chain entry. That burns latency, surfaces a
-400 in operator dashboards, and counts the failure against Bedrock's
-breaker even though the request never had a chance.
+Without a declaration the router learns this on its own: the first
+such request on each Bedrock lane gets the 400, falls back to the next
+chain entry, and records the refused capability, and later requests
+carrying it skip that lane (see "Learned capability tempo" below).
+`unsupported_features` stays valid when you already know the answer:
+it skips the lane before the first dispatch, so even that one miss per
+lane -- the latency, the 400 in operator dashboards, the failure
+counted against the lane's breaker -- never happens.
 
 `unsupported_features` is a declarative, operator-supplied list set
 directly on each `[providers.X]` table. The router derives feature keys from
@@ -1325,10 +1329,11 @@ custom tools (`ToolDef::Custom`) do not contribute feature keys.
 
 ```toml
 # Bedrock provider in a chain that also has anthropic-api fallback.
-# claude-code's web_search tool fails on Bedrock today; declaring it
-# unsupported here means the router skips Bedrock for web-search-using
-# requests entirely (no 400, no breaker hit) and goes straight to the
-# anthropic-api fallback.
+# claude-code's web_search tool fails on Bedrock today. The router learns
+# that after the first rejected request per Bedrock lane; declaring it
+# unsupported here is optional and skips Bedrock for web-search-using
+# requests from the very first one (no 400, no breaker hit), going
+# straight to the anthropic-api fallback.
 [providers.bedrock]
 kind   = "bedrock"
 region = "us-west-2"
@@ -4943,7 +4948,7 @@ What each family does (one line each):
 | `/v1/messages/count_tokens` | works | proxied to upstream; first-target only (no fallback chain walk) |
 | `/v1/models` (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) | works | glob alias keys and `default` skipped |
 | OAuth refresh on 401 | not yet | re-run `routectl login anthropic` to refresh today; auto-refresh is a follow-up |
-| `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; declare `unsupported_features = ["web_search"]` on the Bedrock provider so the chain skips it for web-search requests (see "Per-provider capability filter" above) |
+| `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; the router learns the rejection after the first miss per Bedrock lane and skips that lane for later web-search requests. Optionally declare `unsupported_features = ["web_search"]` on the Bedrock provider to skip even that first miss (see "Per-provider capability filter" above) |
 | Tool use + streaming | works | end-to-end SSE, multi-turn |
 | Subagent / agent-team dispatch | works | every subagent call flows through the same `/v1/messages` route |
 | `claude.ai` Routines / `RemoteTrigger` / `PushNotification` / `ShareOnboardingGuide` | bypass routectl | hardcoded `claude.ai` integrations; the gateway has no visibility |

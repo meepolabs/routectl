@@ -3017,6 +3017,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   forced request skips the lane, an unforced one does not, the directive
   reaches every lane unchanged, and an `unsupported` override routes away
   before dispatch
+- `src/router/bedrock_learn_breadth_tests.rs` -- captured Bedrock rejections
+  replayed through real dispatch on a two-Bedrock-lane chain, driven by the
+  `replay_rows` of `tests/fixtures/bedrock_validation_capture.json`: a
+  web_search, computer or structured_output refusal is learned on the first
+  miss per lane and the next request skips it, must-not-learn rejections keep
+  the lane dialed, and a declared `unsupported_features` entry skips both
+  Bedrock lanes before dispatch (bedrock feature only)
 - `src/router/field_canary_settlement_tests.rs` -- behavioral coverage of the
   re-verification canary through real dispatches, asserting on the mock seats'
   RECORDED REQUEST BODIES rather than on decision records: "restores the field

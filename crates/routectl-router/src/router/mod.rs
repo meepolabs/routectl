@@ -3179,6 +3179,10 @@ mod forwarded_model_transparency_tests;
 #[path = "forced_tool_choice_tests.rs"]
 mod forced_tool_choice_tests;
 
+#[cfg(all(test, feature = "bedrock"))]
+#[path = "bedrock_learn_breadth_tests.rs"]
+mod bedrock_learn_breadth_tests;
+
 #[cfg(test)]
 #[path = "seat_pool_dispatch_tests.rs"]
 mod seat_pool_dispatch_tests;
