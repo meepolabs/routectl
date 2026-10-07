@@ -51,6 +51,7 @@
     "advisor_missing_seam": "advisor is not supported for this model",
     "field_wording_drift": "routectl_envelope_probe_field: Extra inputs not permitted",
     "field_whitespace_token": "two words: Extra inputs are not permitted",
-    "advisor_doubled_wrapper": "The model returned the following errors: The model returned the following errors: tool type 'advisor' is not supported for this model"
+    "advisor_doubled_wrapper": "The model returned the following errors: The model returned the following errors: tool type 'advisor' is not supported for this model",
+    "advisor_wrapper_extra_space": "The model returned the following errors:  tool type 'advisor' is not supported for this model"
   }
 }

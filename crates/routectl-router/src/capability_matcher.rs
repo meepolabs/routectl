@@ -545,8 +545,10 @@ fn match_bedrock_validation_phrase(
     ))
 }
 
-/// Run the anchored-template pipeline over a trimmed validation `message`:
-/// the first template whose anchors bracket the message extracts its single
+/// Run the anchored-template pipeline over an already-trimmed, already-unwrapped
+/// validation `message`, read as-is: re-trimming here would let whitespace left
+/// behind a removed Converse wrapper pass as a clean match. The first template
+/// whose anchors bracket the message extracts its single
 /// token; the token must be token-shaped ASCII ([`is_safe_token`]) or
 /// the match fails closed; the normalized token must resolve through the
 /// closed `translations` set to a canonical capability. Split from the table
@@ -558,10 +560,9 @@ fn extract_bedrock_capability(
     templates: &[(&str, &str)],
     translations: &[(&str, &str)],
 ) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
-    let needle = message.trim();
     let token = templates
         .iter()
-        .find_map(|&(prefix, suffix)| extract_anchored_token(needle, prefix, suffix))?;
+        .find_map(|&(prefix, suffix)| extract_anchored_token(message, prefix, suffix))?;
     if !is_safe_token(token) {
         return None;
     }
