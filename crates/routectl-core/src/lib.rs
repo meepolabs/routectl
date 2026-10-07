@@ -12,6 +12,7 @@ pub mod capability;
 pub(crate) mod cloud_project;
 pub mod content_part;
 pub mod context_reduction;
+pub mod converse_errors;
 pub mod error;
 pub mod failure_class;
 pub mod identity;
@@ -54,6 +55,7 @@ pub use content_part::{ContentPart, KnownContentPart};
 pub use context_reduction::{
     ReductionDelta, ReductionOutcome, apply_json_minify, minify_json_whitespace,
 };
+pub use converse_errors::strip_converse_errors_prefix;
 pub use error::{Error, Result};
 pub use failure_class::ReplayAttempt;
 pub use log_safe::{

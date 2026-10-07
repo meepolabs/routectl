@@ -55,7 +55,7 @@ use routectl_core::capability::{
 };
 use routectl_core::error::Error;
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
-use routectl_core::is_safe_token;
+use routectl_core::{is_safe_token, strip_converse_errors_prefix};
 
 use crate::feature_keys::{FORCED_TOOL_CHOICE, strip_date_suffix};
 
@@ -499,13 +499,9 @@ const BEDROCK_TOKEN_TRANSLATIONS: &[(&str, &str)] = &[("advisor", "advisor")];
 /// capability without bracketing a token, so the anchored-template engine
 /// cannot read them. Matched by exact equality after the discriminator gate,
 /// on the bare message (InvokeModel) or on the message inside exactly one
-/// [`BEDROCK_CONVERSE_ERRORS_PREFIX`] wrapper (Converse).
+/// Converse errors wrapper ([`strip_converse_errors_prefix`]).
 const BEDROCK_VALIDATION_PHRASES: &[(&str, &str)] =
     &[(FORCED_TOOL_CHOICE_REJECTION, FORCED_TOOL_CHOICE)];
-
-/// The wrapper Converse puts in front of a model-level validation message
-/// that InvokeModel returns bare.
-const BEDROCK_CONVERSE_ERRORS_PREFIX: &str = "The model returned the following errors: ";
 
 /// The Bedrock `BadRequest` arm: gate on the lifted `ValidationException`
 /// discriminator, then read the flat validation message and run the
@@ -515,31 +511,30 @@ const BEDROCK_CONVERSE_ERRORS_PREFIX: &str = "The model returned the following e
 /// the learnable one, so shape alone cannot discriminate -- only the lifted
 /// type may unlock a match. A rejection without the lifted discriminator
 /// yields `None` (a visible, recoverable non-learn) rather than risking a
-/// silent false attribution from a shape fallback.
+/// silent false attribution from a shape fallback. The trimmed message loses
+/// at most one Converse errors wrapper before EITHER leg reads it, so a
+/// Converse-wrapped rejection resolves exactly as its bare InvokeModel form.
 fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     if !is_bedrock_validation_exception(err) {
         return None;
     }
     let message = bedrock_validation_message(err)?;
+    let unwrapped = strip_converse_errors_prefix(message.trim());
     extract_bedrock_capability(
-        &message,
+        unwrapped,
         BEDROCK_VALIDATION_TEMPLATES,
         BEDROCK_TOKEN_TRANSLATIONS,
     )
-    .or_else(|| match_bedrock_validation_phrase(&message))
+    .or_else(|| match_bedrock_validation_phrase(unwrapped))
 }
 
-/// The exact-phrase leg of the Bedrock arm: the trimmed message, with at most
-/// one Converse wrapper removed, must equal a [`BEDROCK_VALIDATION_PHRASES`]
-/// row. The upstream named the refused capability, so a match is
-/// self-identifying [`FailurePhase::F1`] evidence like the template leg.
+/// The exact-phrase leg of the Bedrock arm: the already-unwrapped message
+/// must equal a [`BEDROCK_VALIDATION_PHRASES`] row. The upstream named the
+/// refused capability, so a match is self-identifying [`FailurePhase::F1`]
+/// evidence like the template leg.
 fn match_bedrock_validation_phrase(
-    message: &str,
+    unwrapped: &str,
 ) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
-    let trimmed = message.trim();
-    let unwrapped = trimmed
-        .strip_prefix(BEDROCK_CONVERSE_ERRORS_PREFIX)
-        .unwrap_or(trimmed);
     let (_, capability) = BEDROCK_VALIDATION_PHRASES
         .iter()
         .find(|(phrase, _)| *phrase == unwrapped)?;
@@ -1354,10 +1349,11 @@ mod tests {
 
     /// Each captured canary, driven through the full resolver with a VALID
     /// lifted discriminator, resolves to its expected outcome: the
-    /// advisor-tool rejection to the `advisor` capability at SelfIdentifying;
+    /// advisor-tool rejection, bare or inside one Converse wrapper, to the
+    /// `advisor` capability at SelfIdentifying;
     /// the two must-not-learn controls (unknown beta flag, bad model id --
     /// same flat shape, same valid header) and the untranslated field-name
-    /// rejection all to `None` (no-learn).
+    /// rejections (bare or Converse-wrapped) all to `None` (no-learn).
     #[test]
     fn bedrock_capture_canaries_resolve_to_expected_capability() {
         let fx = capture_fixture();
@@ -1403,8 +1399,9 @@ mod tests {
     }
 
     /// Near-miss / drifted variants of each real template fail closed: a
-    /// changed verb, a trailing sentence, a missing seam, and a
-    /// whitespace-bearing (unsafe) extracted token all yield `None`.
+    /// changed verb, a trailing sentence, a missing seam, a doubled Converse
+    /// wrapper, and a whitespace-bearing (unsafe) extracted token all yield
+    /// `None`.
     #[test]
     fn bedrock_near_miss_variants_yield_none() {
         let fx = capture_fixture();

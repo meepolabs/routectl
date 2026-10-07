@@ -29,13 +29,13 @@ use std::sync::{Mutex, PoisonError};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
-use routectl_core::{ChatRequest, Error, Result, is_safe_token, sanitize_for_log};
+use routectl_core::{
+    ChatRequest, Error, Result, is_safe_token, sanitize_for_log, strip_converse_errors_prefix,
+};
 
 use super::BedrockProvider;
 use crate::aws_error::{VALIDATION_EXCEPTION_TYPE, aws_exception_type_is};
 
-/// The wrapper Converse puts in front of the upstream model's message.
-const CONVERSE_ERRORS_PREFIX: &str = "The model returned the following errors: ";
 const ENVELOPE_HEAD: &str = "Unexpected value(s) ";
 const ENVELOPE_TAIL: &str = " for the `anthropic-beta` header. Please consult our documentation at platform.claude.com/docs or try again without the header.";
 const LIST_SEPARATOR: &str = ", ";
@@ -50,9 +50,7 @@ pub(super) const MAX_REMEMBERED_REJECTED_BETAS: usize = 32;
 /// Converse prefix. `None` when the message deviates from the envelope in any
 /// byte, or when any listed token is not token-shaped.
 pub(super) fn parse_rejected_beta_envelope(message: &str) -> Option<Vec<&str>> {
-    let envelope = message
-        .strip_prefix(CONVERSE_ERRORS_PREFIX)
-        .unwrap_or(message);
+    let envelope = strip_converse_errors_prefix(message);
     let list = envelope
         .strip_prefix(ENVELOPE_HEAD)?
         .strip_suffix(ENVELOPE_TAIL)?;

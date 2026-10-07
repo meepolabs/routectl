@@ -210,6 +210,9 @@ license.
   `InMemoryProjectCache` default impl; lives in core so `routectl-providers`
   avoids the `SecretRef`/`SecretStore` surface (the auth-crate
   `OAuthStoreProjectCache` is the persistent adapter)
+- `src/converse_errors.rs` -- `strip_converse_errors_prefix`: removes at
+  most one Bedrock Converse `The model returned the following errors: `
+  wrapper, untrimmed; the single definition of that literal
 - `src/safe_token.rs` -- `is_safe_token`: shape gate for one token lifted
   from an upstream error message
 - `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions),
@@ -4602,9 +4605,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `<field>: Extra inputs are not permitted`); `BEDROCK_TOKEN_TRANSLATIONS`
   maps the rejected tool type onto the identically-named `derive_feature_keys`
   tool-type key (`advisor` -> `advisor`) -- a rejected wire field name has no
-  row and stays dormant. When no template matches, `BEDROCK_VALIDATION_PHRASES` is
-  checked by exact equality on the whole message, bare (InvokeModel) or inside
-  one `The model returned the following errors: ` wrapper (Converse); its one
+  row and stays dormant. The trimmed message loses at most one Converse
+  wrapper (`routectl_core::strip_converse_errors_prefix`) before either leg
+  reads it, so templates and phrases match InvokeModel and Converse alike.
+  When no template matches, `BEDROCK_VALIDATION_PHRASES` is
+  checked by exact equality on the whole unwrapped message; its one
   row maps the forced-`tool_choice` rejection to `forced_tool_choice`, and the
   same phrase is an `ANTHROPIC_INFERRED` row for the first-party lane. `pub is_bedrock_validation_exception` also lets the
   learn site flag drift when a real `ValidationException` matched no template.

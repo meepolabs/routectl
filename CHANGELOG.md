@@ -518,6 +518,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A Converse-wrapped Bedrock template rejection is now learned.** Converse puts `The model returned the following errors: ` in front of a model validation message that InvokeModel returns bare, and only the exact-phrase rejections were unwrapped, so a wrapped template rejection such as `tool type 'advisor' is not supported for this model` was never learned on the Converse carrier. The wrapper is now removed once before both the template and the phrase match, so the rejection is learned on either carrier; a doubled wrapper still fails closed.
+
 - **`[capability] essential = ["forced_tool_choice"]` now loads.** The key was known only to the router, so an essential list naming it was refused at config load as an unknown capability. It is now a well-known capability key: the config loads, and the key renders as a leading doctor matrix column.
 
 - **A boot after a catalog or overlay bump keeps learned envelope-field verdicts.** A revision change at startup wrote a fresh replay boundary and replayed nothing, so wire-shape verdicts that are meant to survive a revision change were lost until relearned, while a hot reload already restated them. Boot now restates them through the same boundary batch reload uses, and installs them only once that batch has committed.
