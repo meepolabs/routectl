@@ -17,7 +17,6 @@ use routectl_router::{
     today_epoch_day,
 };
 
-use crate::commands::capability_legacy::present_legacy_capability_keys;
 use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 use crate::commands::pricing::{is_subscription, missing_equivalence_dimensions};
@@ -373,10 +372,9 @@ const fn replay_summary(
 
 /// Build the capability section's per-layer inputs. A config parse error
 /// (already redacted) yields the "panel unavailable" state -- NOT an
-/// empty-from-default-config view. Otherwise the legacy keys come from the
-/// parsed config and the prior cells from the overlay (empty when the
-/// overlay could not be read -- priors are then absent, while the matrix's
-/// learned and override cells still render).
+/// empty-from-default-config view. Otherwise the prior cells come from the
+/// overlay (empty when the overlay could not be read -- priors are then
+/// absent, while the matrix's learned and override cells still render).
 pub(super) fn build_capability_inputs(
     config: &Config,
     config_parse_error: Option<String>,
@@ -389,16 +387,12 @@ pub(super) fn build_capability_inputs(
         };
     }
 
-    let legacy_keys = present_legacy_capability_keys(config);
     let priors = overlay
         .map(|overlay| derive_prior_cells(config, &overlay))
         .unwrap_or_default();
 
     CapabilityInputs {
-        config: Some(CapabilityConfig {
-            legacy_keys,
-            priors,
-        }),
+        config: Some(CapabilityConfig { priors }),
         panel_unavailable: None,
     }
 }

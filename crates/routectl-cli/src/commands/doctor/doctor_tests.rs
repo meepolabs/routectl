@@ -10,7 +10,6 @@ use routectl_router::{
 };
 use routectl_testkit::ScopedEnv;
 
-use crate::commands::capability_legacy::present_legacy_capability_keys;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 
 use super::gather::{
@@ -20,9 +19,9 @@ use super::gather::{
 };
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
-    freshness_findings, legacy_nudge, secret_finding, section_auth, section_capability,
-    section_config, section_knobs, section_pricing, section_probe, section_seat_orphans,
-    section_seat_pools, section_secret_orphans, section_version,
+    freshness_findings, secret_finding, section_auth, section_capability, section_config,
+    section_knobs, section_pricing, section_probe, section_seat_orphans, section_seat_pools,
+    section_secret_orphans, section_version,
 };
 use super::*;
 
@@ -660,53 +659,7 @@ fn overlay_unavailable_leaves_priors_absent_and_still_builds_the_panel() {
 }
 
 #[test]
-fn legacy_nudge_warns_once_with_guarded_phrasing() {
-    let config: Config = toml::from_str(
-        "version = 3\n\
-         [providers.p]\n\
-         kind = \"openai-compat\"\n\
-         base_url = \"https://x\"\n\
-         api_key_ref = \"literal:k\"\n\
-         unsupported_features = [\"web_search\"]\n\
-         [bedrock]\n\
-         allowed_betas = [\"some-beta\"]\n",
-    )
-    .expect("config parses");
-    let keys = present_legacy_capability_keys(&config);
-    let nudge = legacy_nudge(&keys).expect("nudge present");
-    assert_eq!(nudge.status, Status::Warn);
-    assert!(nudge.detail.contains("unsupported_features"), "{nudge:?}");
-    assert!(nudge.detail.contains("allowed_betas"), "{nudge:?}");
-    // Exact guarded phrasing.
-    assert!(
-        nudge
-            .detail
-            .contains("the override layer replaces these via config migrate"),
-        "{nudge:?}"
-    );
-    assert!(
-        nudge.detail.contains(
-            "the learner discovers use-time rejections automatically; these lists remain \
-             operator-owned until the next schema version"
-        ),
-        "{nudge:?}"
-    );
-    // Must not imply the lists are safe to delete.
-    assert!(!nudge.detail.contains("delete"), "{nudge:?}");
-    assert!(!nudge.detail.contains("remove"), "{nudge:?}");
-    assert!(
-        nudge
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("config migrate")
-    );
-}
-
-#[test]
-fn legacy_nudge_absent_without_legacy_lists() {
-    assert!(legacy_nudge(&[]).is_none());
-    // A config with a new override but no legacy list emits no nudge.
+fn capability_section_emits_no_finding_for_a_loaded_config() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.p]\n\
@@ -723,11 +676,10 @@ fn legacy_nudge_absent_without_legacy_lists() {
         Vec::new(),
         Vec::new(),
     );
+
     let findings = section_capability(&context);
-    assert!(
-        findings.iter().all(|f| f.name != "legacy keys"),
-        "no nudge without a legacy list"
-    );
+
+    assert!(findings.is_empty(), "{findings:?}");
 }
 
 #[test]
@@ -3608,10 +3560,7 @@ mod matrix_panel {
         DoctorContext {
             capability_matrix: source,
             capability: CapabilityInputs {
-                config: Some(CapabilityConfig {
-                    legacy_keys: Vec::new(),
-                    priors,
-                }),
+                config: Some(CapabilityConfig { priors }),
                 panel_unavailable: None,
             },
             ..base
@@ -4015,7 +3964,6 @@ mod seeded_matrix_surfaces {
             capability_matrix: source,
             capability: CapabilityInputs {
                 config: Some(CapabilityConfig {
-                    legacy_keys: Vec::new(),
                     priors: vec![PriorCell {
                         nickname: "laneB".to_string(),
                         verified_at: today,

@@ -373,9 +373,6 @@ struct CapabilityInputs {
 /// The config-derived capability view: everything the section and the
 /// matrix panel draw from the parsed config.
 struct CapabilityConfig {
-    /// Present legacy capability-list key NAMES (never values) driving the
-    /// migrate nudge.
-    legacy_keys: Vec<&'static str>,
     /// The catalog/overlay capability prior cells, one per configured model
     /// whose resolved catalog row carries capability data. Empty when the
     /// overlay could not be read -- priors are then absent, while the

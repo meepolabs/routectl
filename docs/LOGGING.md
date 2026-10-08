@@ -1230,7 +1230,6 @@ Summary (grep the `event` field to isolate a kind):
 | `strip` | WARN | `routectl_router::router` | `capability_strip_decision` |
 | `suppression` | WARN | `routectl_router::router` | `force_supported override contradicted: masked capability still rejected upstream` |
 | `dead_override_key` | WARN | `routectl_router::override_registry` | `capability override key is rewritten by normalization; ...` |
-| `legacy_deprecation` | WARN | `routectl_cli::server` | `deprecated capability-list keys are set; ...` |
 
 ## Bounded probe-scheduler diagnostics
 
@@ -1733,27 +1732,4 @@ WARN routectl_router::override_registry event=dead_override_key
   normalized_key=anthropic_beta
   "capability override key is rewritten by normalization; it can never
   match and is dead -- use the normalized form"
-```
-
-### `legacy_deprecation` (WARN)
-
-A config-layer event, emitted exactly once on a serve cold-start or hot
-reload when the loaded config carries any legacy capability-list key. It
-names key NAMES only -- never config values (secrets can live near these
-tables). `config check` never emits it.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `event` | string | Always `legacy_deprecation`. |
-| `legacy_keys` | string | Debug-rendered list of the present legacy key names. |
-| `successor` | string | Always `[capability.overrides]`. |
-| `migrate_command` | string | Always `config migrate`. |
-
-```
-WARN routectl_cli::server event=legacy_deprecation
-  legacy_keys=["unsupported_features", "allowed_betas"]
-  successor=[capability.overrides] migrate_command="config migrate"
-  "deprecated capability-list keys are set; they are tolerated for one
-  release cycle and rejected at the next config schema version. Move them
-  under [capability.overrides] with `config migrate`."
 ```

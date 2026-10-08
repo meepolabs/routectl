@@ -54,33 +54,7 @@ pub(super) fn compute_max_body_bytes(config: &Config) -> usize {
 pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
     let loaded = load_effective_config_unvalidated(path)?;
     validate_effective_config(&loaded.config)?;
-    warn_deprecated_capability_lists(&loaded.config);
     Ok(loaded)
-}
-
-/// Emit ONE structured deprecation WARN when a serve-loaded config carries
-/// any legacy capability-list key, naming which keys are present, the
-/// `[capability.overrides]` successor, and the `config migrate` command that
-/// rewrites them. Runs on the serve cold-start AND hot-reload load paths
-/// (both flow through [`load_effective_config`]); `config check` loads via
-/// [`load_effective_config_unvalidated`], which never calls this, so the
-/// check surface stays silent per the settled constraint. The WARN carries
-/// key NAMES only -- no config values (secrets can live near these tables).
-fn warn_deprecated_capability_lists(config: &Config) {
-    let present = crate::commands::capability_legacy::present_legacy_capability_keys(config);
-    if present.is_empty() {
-        return;
-    }
-
-    tracing::warn!(
-        event = "legacy_deprecation",
-        legacy_keys = ?present,
-        successor = "[capability.overrides]",
-        migrate_command = "config migrate",
-        "deprecated capability-list keys are set; they are tolerated for one release cycle and \
-         rejected at the next config schema version. Move them under [capability.overrides] with \
-         `config migrate`.",
-    );
 }
 
 /// The parse + overlay body of [`load_effective_config`], WITHOUT the

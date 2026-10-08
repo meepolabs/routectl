@@ -8,9 +8,6 @@ use routectl_router::{
     preflight_config_version,
 };
 
-use crate::commands::capability_legacy::{
-    LEGACY_ALLOWED_BETAS, LEGACY_ALLOWED_BODY_FIELDS, LEGACY_UNSUPPORTED_FEATURES,
-};
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
@@ -495,22 +492,16 @@ fn seat_provider(seat_key: &str) -> &str {
 /// Capability section: the config-derived findings NOT absorbed by the
 /// capability matrix panel. The operator override cells, the catalog priors,
 /// and the runtime-only learned line are now structured cells on the matrix
-/// panel; only the config-unavailable degradation line and the legacy-key
-/// migrate nudge remain findings here. Every finding is `Pass` or `Warn`;
-/// the section NEVER emits a `Fail`, so it can never flip the doctor exit
-/// code.
+/// panel; only the config-unavailable degradation line remains a finding
+/// here, so a config that loads yields no findings. The section NEVER emits
+/// a `Fail`, so it can never flip the doctor exit code.
 pub(super) fn section_capability(ctx: &DoctorContext) -> Vec<Finding> {
-    let Some(config) = &ctx.capability.config else {
-        return vec![capability_unavailable(
-            ctx.capability.panel_unavailable.as_deref(),
-        )];
-    };
-
-    let mut findings = Vec::new();
-    if let Some(nudge) = legacy_nudge(&config.legacy_keys) {
-        findings.push(nudge);
+    if ctx.capability.config.is_some() {
+        return Vec::new();
     }
-    findings
+    vec![capability_unavailable(
+        ctx.capability.panel_unavailable.as_deref(),
+    )]
 }
 
 /// The panel-unavailable finding: the config layer could not be parsed. The
@@ -534,47 +525,6 @@ fn capability_unavailable(redacted: Option<&str>) -> Finding {
             "resolve the config error reported above, then re-run `routectl doctor`".to_string(),
         ),
     }
-}
-
-/// The legacy-key migrate nudge: ONE `Warn` finding when a legacy
-/// capability-list key is present, naming the present keys and the `config
-/// migrate` pointer with the guarded phrasing. Absent (returns `None`) when
-/// no legacy list is set. `Warn`, so it never flips the exit code. The
-/// phrasing is EXACT and MUST NOT imply the lists are safe to delete.
-pub(super) fn legacy_nudge(legacy_keys: &[&'static str]) -> Option<Finding> {
-    if legacy_keys.is_empty() {
-        return None;
-    }
-
-    let mut clauses = Vec::new();
-    if legacy_keys.contains(&LEGACY_UNSUPPORTED_FEATURES) {
-        clauses.push("the override layer replaces these via config migrate");
-    }
-    if legacy_keys
-        .iter()
-        .any(|k| *k == LEGACY_ALLOWED_BETAS || *k == LEGACY_ALLOWED_BODY_FIELDS)
-    {
-        clauses.push(
-            "the learner discovers use-time rejections automatically; these lists remain \
-             operator-owned until the next schema version",
-        );
-    }
-
-    let detail = format!(
-        "deprecated capability-list keys are set ({}); {}",
-        legacy_keys.join(", "),
-        clauses.join("; "),
-    );
-    Some(Finding {
-        section: "capability",
-        name: "legacy keys".to_string(),
-        status: Status::Warn,
-        detail,
-        remediation: Some(
-            "run `routectl config migrate` to move deprecated keys under [capability.overrides]"
-                .to_string(),
-        ),
-    })
 }
 
 /// Freshness section: three findings-shaped rows describing how current the
