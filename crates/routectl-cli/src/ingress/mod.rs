@@ -18,6 +18,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::TryRng;
 use rand::rngs::SysRng;
+use std::collections::HashSet;
+
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
     Result, Role, SystemBlock, SystemContent,
@@ -304,6 +306,70 @@ pub fn read_alias_header(headers: &HeaderMap) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
+
+// Client `anthropic-beta` flags arrive in the body's `anthropic_beta` array
+// and, on the Anthropic dialect, in the `anthropic-beta` header. Every source
+// goes through `normalize_client_betas`, so each canonical entry is exactly
+// one trimmed flag: the router decides per flag whether a lane withholds it,
+// and that decision only holds if it sees the spelling the egress ships.
+
+/// The most distinct client beta flags one request may carry.
+///
+/// Claude Code sends fewer than ten per request; the cap bounds the per-flag
+/// work every dispatch target repeats, far above any real client.
+pub const MAX_CLIENT_BETA_FLAGS: usize = 64;
+
+/// Split every entry on `,`, trim each piece, and keep the first occurrence of
+/// each non-empty, header-safe flag, in source order.
+///
+/// # Errors
+///
+/// [`Error::Validation`] when more than [`MAX_CLIENT_BETA_FLAGS`] distinct
+/// flags survive, so the ingress answers 400 in its own envelope.
+pub(crate) fn normalize_client_betas<'a>(
+    dialect: &str,
+    entries: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<String>> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut flags: Vec<String> = Vec::new();
+    for piece in entries.into_iter().flat_map(|entry| entry.split(',')) {
+        let flag = piece.trim();
+        if flag.is_empty() {
+            continue;
+        }
+        if !is_safe_beta_value(flag) {
+            tracing::warn!(
+                dialect,
+                value_len = flag.len(),
+                "ingress: anthropic-beta value contains CR/LF; dropping",
+            );
+            continue;
+        }
+        if !seen.insert(flag) {
+            continue;
+        }
+        if flags.len() == MAX_CLIENT_BETA_FLAGS {
+            return Err(Error::Validation(format!(
+                "{dialect} ingress: more than {MAX_CLIENT_BETA_FLAGS} distinct anthropic-beta flags"
+            )));
+        }
+        flags.push(flag.to_string());
+    }
+    Ok(flags)
+}
+
+/// Reject a flag containing CR or LF.
+///
+/// `HeaderValue::to_str` already refuses control bytes on the header path,
+/// but a body string can carry them, and a flag ships on the upstream
+/// `anthropic-beta` header on some egresses.
+fn is_safe_beta_value(s: &str) -> bool {
+    !s.contains(['\r', '\n'])
+}
+
+#[cfg(test)]
+#[path = "client_betas_tests.rs"]
+mod client_betas_tests;
 
 #[cfg(test)]
 mod read_alias_header_tests {

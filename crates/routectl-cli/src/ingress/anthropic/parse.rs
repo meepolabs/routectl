@@ -10,6 +10,7 @@ use routectl_core::{ChatRequest, Error, ReasoningConfig, Result, sanitize_detail
 #[cfg(test)]
 use routectl_core::{ContentPart, MessageContent};
 
+use crate::ingress::normalize_client_betas;
 use crate::ingress::read_alias_header;
 use crate::ingress::session_key::resolve_session_key;
 
@@ -74,11 +75,9 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // values on the upstream `anthropic-beta` HTTP header
     // (api.anthropic.com rejects the body-level field on OAuth
     // flavors), so routing through canonical normalizes both wire
-    // shapes onto one egress path. Comma-separated header values are
-    // split + trimmed
-    // and merged with any existing body-level `anthropic_beta`,
-    // preserving order and dropping duplicates.
-    merge_inbound_anthropic_beta_header(headers, &mut req);
+    // shapes onto one egress path. Body and header entries are
+    // comma-split, trimmed and deduplicated together, body first.
+    merge_inbound_anthropic_beta_header(headers, &mut req)?;
 
     // Capture inbound X-Claude-Code-* headers so the Anthropic-API
     // egress can forward them upstream for gateway cost attribution
@@ -229,53 +228,33 @@ fn sweep_anthropic_extras(obj: &mut Map<String, Value>) -> Value {
     Value::Object(extras)
 }
 
-/// Parse the inbound `anthropic-beta` HTTP header(s) and merge the
-/// values into `req.anthropic_beta` (deduplicated, preserving order).
-/// Multiple header instances and comma-separated values within one
-/// instance both expand correctly.
-fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatRequest) {
-    let mut all: Vec<String> = req.anthropic_beta.clone();
-    for hv in &headers.get_all("anthropic-beta") {
-        let Ok(s) = hv.to_str() else {
-            tracing::warn!("anthropic ingress: anthropic-beta header is not valid UTF-8; ignoring");
-            continue;
-        };
-        for piece in s.split(',') {
-            let trimmed = piece.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if !is_safe_beta_value(trimmed) {
+/// Merge the body-level `anthropic_beta` entries and the inbound
+/// `anthropic-beta` header values into `req.anthropic_beta`, body first,
+/// through the shared ingress normalizer. Multiple header instances and
+/// comma-separated values in either source expand to one flag per entry.
+fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatRequest) -> Result<()> {
+    let header_values: Vec<&str> = headers
+        .get_all("anthropic-beta")
+        .iter()
+        .filter_map(|hv| {
+            let s = hv.to_str().ok();
+            if s.is_none() {
                 tracing::warn!(
-                    "anthropic ingress: anthropic-beta value contains CR/LF; \
-                     dropping (possible header-injection attempt) value_len={}",
-                    trimmed.len(),
+                    "anthropic ingress: anthropic-beta header is not valid UTF-8; ignoring"
                 );
-                continue;
             }
-            if !all.iter().any(|existing| existing == trimmed) {
-                all.push(trimmed.to_string());
-            }
-        }
-    }
-    req.anthropic_beta = all;
-}
-
-/// Defense-in-depth filter for inbound `anthropic-beta` header values:
-/// reject pieces containing CR or LF.
-///
-/// `HeaderValue::to_str` already rejects control bytes (so this filter
-/// would not currently fire on inbound axum-decoded headers), but a
-/// future refactor that switches to a byte-level decode -- or any code
-/// path that synthesizes a `Vec<String>` of betas through a different
-/// route -- could otherwise allow `legit-beta\r\nX-Injected: evil` to
-/// flow through into the outbound `anthropic-beta` HTTP header on the
-/// egress side. The http crate would reject the egress emission, but
-/// failing here keeps the wire surface explicit and unit-testable in
-/// isolation (we can drive the filter directly with CR/LF-bearing
-/// strings, bypassing `HeaderValue`'s defense).
-fn is_safe_beta_value(s: &str) -> bool {
-    !s.contains(['\r', '\n'])
+            s
+        })
+        .collect();
+    let body_values = std::mem::take(&mut req.anthropic_beta);
+    req.anthropic_beta = normalize_client_betas(
+        "anthropic",
+        body_values
+            .iter()
+            .map(String::as_str)
+            .chain(header_values.iter().copied()),
+    )?;
+    Ok(())
 }
 
 /// Capture inbound `x-claude-code-*` headers (case-insensitive prefix

@@ -267,6 +267,54 @@ fn precedence_runs_pin_then_override_then_learned_then_seed() {
 }
 
 #[test]
+fn verdict_reads_the_trimmed_flag_and_each_comma_separated_piece() {
+    // Arrange -- an unsupported override on one flag no other tier names.
+    let overrides = "[capability.overrides.bed]\nunsupported = [\"beta:fx-override-off\"]\n";
+    let router = router(&format!("{}{overrides}", capability(true)));
+    let target = target_on(&router, "bed");
+    let rows: &[(&str, &str, &[&str])] = &[
+        ("clean", "fx-override-off", &["fx-override-off"]),
+        ("padded", " fx-override-off ", &["fx-override-off"]),
+        (
+            "comma-joined",
+            "fx-unknown,fx-override-off",
+            &["fx-unknown,fx-override-off"],
+        ),
+        ("untouched flag", " fx-unknown ", &[]),
+    ];
+
+    for (name, entry, expected) in rows {
+        // Act
+        let out = withheld(&router, &target, &[entry]);
+
+        // Assert -- the withheld spelling is the trimmed entry the overlay ships.
+        assert_eq!(out, *expected, "row {name}");
+    }
+}
+
+#[test]
+fn a_multi_piece_entry_never_claims_a_re_probe_slot() {
+    // Arrange -- a lapsed negative on one piece of a comma-joined entry.
+    let router = router(&capability(true));
+    let target = target_on(&router, "bed");
+    seed_lapsed_negative(&router, &target, "fx-seed-only");
+    let mut admissions = Vec::new();
+
+    // Act
+    let out = router.withheld_betas_for_target(
+        &target,
+        &betas(&["fx-unknown,fx-seed-only"]),
+        ProbeClaim::Claim,
+        &mut admissions,
+        Instant::now(),
+    );
+
+    // Assert
+    assert!(admissions.is_empty(), "a multi-piece entry claimed a slot");
+    assert_eq!(out, vec!["fx-unknown,fx-seed-only".to_string()]);
+}
+
+#[test]
 fn probe_admitted_sends_the_flag_and_yields_exactly_one_admission() {
     // Arrange -- a lapsed negative on a seeded flag.
     let router = router(&capability(true));

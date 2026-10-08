@@ -556,15 +556,17 @@ fn merge_floor_and_client_betas(floor: &[String], client: Option<&Value>) -> Vec
     let client = client
         .and_then(Value::as_array)
         .map_or(&[][..], Vec::as_slice);
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut merged: Vec<Value> = Vec::with_capacity(floor.len() + client.len());
-    for item in floor
-        .iter()
-        .map(|flag| Value::String(flag.clone()))
-        .chain(client.iter().cloned())
-    {
-        let is_repeat = item.is_string() && merged.contains(&item);
+    for flag in floor {
+        if seen.insert(flag.as_str()) {
+            merged.push(Value::String(flag.clone()));
+        }
+    }
+    for item in client {
+        let is_repeat = item.as_str().is_some_and(|flag| !seen.insert(flag));
         if !is_repeat {
-            merged.push(item);
+            merged.push(item.clone());
         }
     }
     merged
@@ -606,9 +608,8 @@ mod tests {
             user_agent: None,
             header_extras: Vec::new(),
             anthropic_beta: vec!["context-1m-2025-08-07".into()],
-            // `top_p` is canonical and would now be filtered out;
-            // use `top_k` here as a real long-tail Anthropic-only
-            // knob the allow-list lets through.
+            // `top_p` is a routectl-managed key the merge drops; `top_k`
+            // is a long-tail Anthropic-only knob it forwards.
             additional_model_request_fields: Some(json!({"top_k": 40})),
             adaptive_thinking: None,
         }

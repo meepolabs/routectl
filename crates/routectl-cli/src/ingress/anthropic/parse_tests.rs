@@ -354,84 +354,65 @@ fn parse_request_unknown_block_type_passes_through() {
 }
 
 // -------- response rendering --------
-/// Review follow-up to merge_inbound_anthropic_beta_header
-/// (security defense-in-depth): a beta value containing CR or
-/// LF must be dropped rather than appended to req.anthropic_beta.
-/// `HeaderValue::to_str` already rejects control bytes so the
-/// natural ingress path doesn't deliver such values, but pinning
-/// the explicit filter prevents a future refactor (or a test
-/// that constructs the header bytes through a different path)
-/// from silently re-opening the header-injection seam.
+/// Body and header beta entries are normalized together, body first: each
+/// entry is comma-split and trimmed, empties and CR/LF-bearing pieces are
+/// dropped, and a repeat across the two sources ships once.
 #[test]
-fn merge_inbound_anthropic_beta_header_filters_crlf_in_values() {
+fn body_and_header_betas_are_normalized_together() {
     use axum::http::{HeaderMap, HeaderName};
-    use routectl_core::ChatRequest;
-    // Build a HeaderMap whose anthropic-beta value carries CRLF
-    // mid-string. We have to use `from_maybe_shared_unchecked`
-    // via raw bytes because HeaderValue::from_str rightly rejects
-    // CR/LF; the test is here to prove the merge function itself
-    // would reject them even if a future path bypassed http's
-    // own validation.
     let mut headers = HeaderMap::new();
-    // We cannot insert a header carrying CRLF via the public API.
-    // Instead, simulate the failure at the trim step by inserting
-    // a benign value that DOES contain a CRLF substring after
-    // trim via a pre-merge mutation of req.anthropic_beta. The
-    // function's contract is the filter; this test asserts that
-    // contract by driving the filter directly with a comma-list.
     headers.insert(
         HeaderName::from_static("anthropic-beta"),
-        "good-beta,benign".parse().unwrap(),
+        "good-beta, body-b ,".parse().unwrap(),
     );
-    // Seed an already-bad entry to exercise the filter on the
-    // existing-vec path too. (We can put CR/LF in a plain
-    // String -- only HeaderValue rejects them.)
-    let mut req = ChatRequest {
-        anthropic_beta: vec!["pre-existing\r\nX-Inject: evil".into()],
-        ..Default::default()
-    };
-    merge_inbound_anthropic_beta_header(&headers, &mut req);
-    // The headers-side values flow through cleanly.
-    assert!(req.anthropic_beta.contains(&"good-beta".to_string()));
-    assert!(req.anthropic_beta.contains(&"benign".to_string()));
-    // The pre-existing seeded entry persists: the filter only fires
-    // on freshly-parsed header pieces; pre-existing
-    // req.anthropic_beta entries are operator-supplied and not
-    // subject to this filter intentionally -- if the operator wants
-    // CRLF in a body field, that's their call. Direct coverage of
-    // the actual CR/LF-drop branch lives in
-    // `is_safe_beta_value_rejects_crlf_strings` below, which drives
-    // the helper with strings that no HeaderValue could ever carry.
-    assert!(
-        req.anthropic_beta
-            .iter()
-            .any(|b| b.contains("pre-existing"))
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 16,
+        "anthropic_beta": [" body-a", "body-b,body-c ", "", "evil\r\nX-Inject: bad"]
+    });
+
+    let req = AnthropicIngress
+        .parse_request_value(&headers, body)
+        .unwrap();
+
+    assert_eq!(
+        req.anthropic_beta,
+        vec!["body-a", "body-b", "body-c", "good-beta"],
     );
 }
 
-/// Review follow-up: the CR/LF defense-in-depth filter lives in a
-/// helper that can be unit-tested in isolation, sidestepping
-/// `HeaderValue::from_str`'s own rejection of control bytes. Pin the
-/// contract: benign strings pass, CR or LF anywhere causes rejection.
-/// Without this, the security-relevant branch of
-/// `merge_inbound_anthropic_beta_header` was not actually exercised
-/// (the outer test could only synthesize benign HeaderValues).
+/// The distinct-flag cap counts body and header flags together and rejects
+/// one over it as a validation error, which the handler answers with 400.
 #[test]
-fn is_safe_beta_value_rejects_crlf_strings() {
-    // Benign cases pass.
-    assert!(is_safe_beta_value("legit-beta"));
-    assert!(is_safe_beta_value("context-management-2025-06-27"));
-    assert!(is_safe_beta_value("")); // empty is structurally safe
-    assert!(is_safe_beta_value("with spaces"));
-    assert!(is_safe_beta_value("with-special!@#$%^&*()chars"));
-    // CR or LF anywhere in the value rejects.
-    assert!(!is_safe_beta_value("evil\r\nX-Injected: bad"));
-    assert!(!is_safe_beta_value("evil\rmid"));
-    assert!(!is_safe_beta_value("evil\nmid"));
-    assert!(!is_safe_beta_value("\revil-leading-cr"));
-    assert!(!is_safe_beta_value("\nevil-leading-lf"));
-    assert!(!is_safe_beta_value("evil-trailing\r"));
-    assert!(!is_safe_beta_value("evil-trailing\n"));
+fn beta_flag_cap_counts_body_and_header_flags_together() {
+    use crate::ingress::MAX_CLIENT_BETA_FLAGS;
+    use axum::http::{HeaderMap, HeaderName};
+    let body_flags: Vec<String> = (0..MAX_CLIENT_BETA_FLAGS)
+        .map(|i| format!("f-{i}"))
+        .collect();
+    let body = |flags: &[String]| {
+        json!({
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 16,
+            "anthropic_beta": flags
+        })
+    };
+    let mut over = HeaderMap::new();
+    over.insert(
+        HeaderName::from_static("anthropic-beta"),
+        "one-more".parse().unwrap(),
+    );
+
+    let at_cap = AnthropicIngress.parse_request_value(&HeaderMap::new(), body(&body_flags));
+    let over_cap = AnthropicIngress.parse_request_value(&over, body(&body_flags));
+
+    assert_eq!(at_cap.unwrap().anthropic_beta.len(), MAX_CLIENT_BETA_FLAGS);
+    assert!(
+        matches!(over_cap, Err(Error::Validation(_))),
+        "{over_cap:?}"
+    );
 }
 
 /// Gateway-correctness contract: every inbound header whose name

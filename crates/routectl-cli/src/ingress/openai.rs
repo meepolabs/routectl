@@ -23,6 +23,7 @@ use routectl_core::{
 };
 use serde_json::{Map, Value};
 
+use super::normalize_client_betas;
 use super::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
     StreamRequestContext, read_alias_header,
@@ -153,6 +154,12 @@ impl IngressAdapter for OpenAiIngress {
         // The kind aliases handle the discriminator; this lands the
         // Anthropic `thinking` payload key on canonical `text`.
         routectl_core::normalize_reasoning_detail_payloads(&mut req);
+        // The body's `anthropic_beta` is canonical here too; normalize it
+        // exactly as the Anthropic ingress does so every beta-flag decision
+        // downstream sees one trimmed flag per entry.
+        let body_betas = std::mem::take(&mut req.anthropic_beta);
+        req.anthropic_beta =
+            normalize_client_betas("openai", body_betas.iter().map(String::as_str))?;
         // Merge swept extras into req.provider_extras (the body may
         // have already carried an explicit `provider_extras` object;
         // sweep keeps both -- the swept ones win on conflict because
@@ -885,6 +892,39 @@ mod tests {
         ReasoningDetailKind, Role, SystemContent, Usage,
     };
     use serde_json::json;
+
+    #[test]
+    fn body_anthropic_beta_is_split_trimmed_and_deduplicated() {
+        let body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "anthropic_beta": [" flag-a ", "flag-b,flag-a", ""]
+        });
+
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+
+        assert_eq!(req.anthropic_beta, vec!["flag-a", "flag-b"]);
+    }
+
+    #[test]
+    fn body_anthropic_beta_over_the_cap_is_a_validation_error() {
+        let flags: Vec<String> = (0..=super::super::MAX_CLIENT_BETA_FLAGS)
+            .map(|i| format!("f-{i}"))
+            .collect();
+        let body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "anthropic_beta": flags
+        });
+
+        let err = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Validation(_)), "{err:?}");
+    }
 
     #[test]
     fn parse_request_accepts_canonical_body() {

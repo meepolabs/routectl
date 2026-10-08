@@ -3616,3 +3616,298 @@ async fn stream_first_message_start_carries_meter_estimate_of_inbound_request() 
         "first message_start must carry the meter estimate; got: {downstream}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Client beta flag cap
+// ---------------------------------------------------------------------------
+
+use routectl_cli::ingress::MAX_CLIENT_BETA_FLAGS as BETA_CAP;
+
+#[tokio::test]
+async fn beta_flag_cap_admits_the_maximum_and_rejects_one_more_with_400() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+    let post = |count: usize| {
+        let flags: Vec<String> = (0..count).map(|i| format!("zz-flag-{i}")).collect();
+        reqwest::Client::new()
+            .post(format!("{base}/v1/messages"))
+            .json(&json!({
+                "model": "heavy",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}],
+                "anthropic_beta": flags,
+            }))
+            .send()
+    };
+
+    let at_cap = post(BETA_CAP).await.unwrap();
+    let over_cap = post(BETA_CAP + 1).await.unwrap();
+
+    assert_eq!(at_cap.status(), 200);
+    assert_eq!(over_cap.status(), 400);
+    let envelope: Value = over_cap.json().await.unwrap();
+    assert_eq!(envelope["type"], "error");
+    assert_eq!(envelope["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        1,
+        "the over-cap request never reaches the upstream",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Client beta flags reaching a Bedrock wire
+// ---------------------------------------------------------------------------
+
+mod bedrock_beta_withhold {
+    //! A client beta flag the operator marked unsupported never reaches a Bedrock
+    //! wire, however the client spelled it in the body. The Anthropic Messages
+    //! ingress parses the raw body, a real `Router` dispatches it, and a real
+    //! `BedrockProvider` aimed at a mock bedrock-runtime records the
+    //! `anthropic_beta` array each carrier ships.
+
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use axum::http::HeaderMap;
+    use routectl_cli::ingress::IngressAdapter;
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+    use routectl_providers::bedrock::{
+        BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth,
+    };
+    use routectl_router::{
+        CURRENT_CONFIG_VERSION, ResolvedModel, Router, RouterOptions, beta_capability_key,
+        parse_config,
+    };
+    use serde_json::{Value, json};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    use crate::common;
+
+    /// The flag the operator marks unsupported. The shipped seed does not name it.
+    const OVERRIDDEN: &str = "zz-overridden-2099-01-01";
+
+    /// A flag no tier withholds.
+    const UNTOUCHED: &str = "zz-untouched-2099-01-01";
+
+    const PROVIDER: &str = "bed";
+    const NICKNAME: &str = "m1";
+    const MODEL_ID: &str = "us.anthropic.claude-opus-5-5";
+    const REGION: &str = "us-east-1";
+
+    const SHAPES: [BedrockApiShape; 2] = [BedrockApiShape::Invoke, BedrockApiShape::Converse];
+
+    /// Records the `anthropic_beta` array of every body it receives and answers
+    /// with the carrier's success body.
+    struct RecordingUpstream {
+        shape: BedrockApiShape,
+        betas: Arc<Mutex<Vec<Option<Vec<String>>>>>,
+    }
+
+    impl Respond for RecordingUpstream {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).expect("request body is JSON");
+            let bag = match self.shape {
+                BedrockApiShape::Converse => {
+                    &body["additionalModelRequestFields"]["anthropic_beta"]
+                }
+                _ => &body["anthropic_beta"],
+            };
+            let betas = bag.as_array().map(|arr| {
+                arr.iter()
+                    .map(|v| v.as_str().expect("beta entries are strings").to_string())
+                    .collect()
+            });
+            self.betas
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(betas);
+            ResponseTemplate::new(200).set_body_json(success_body(self.shape))
+        }
+    }
+
+    fn success_body(shape: BedrockApiShape) -> Value {
+        match shape {
+            BedrockApiShape::Converse => json!({
+                "output": { "message": { "role": "assistant", "content": [{ "text": "ok" }] } },
+                "stopReason": "end_turn",
+                "usage": { "inputTokens": 3, "outputTokens": 1, "totalTokens": 4 }
+            }),
+            _ => json!({
+                "id": "msg_ingress_beta",
+                "type": "message",
+                "role": "assistant",
+                "model": MODEL_ID,
+                "content": [{ "type": "text", "text": "ok" }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 3, "output_tokens": 1 }
+            }),
+        }
+    }
+
+    const fn shape_toml(shape: BedrockApiShape) -> &'static str {
+        match shape {
+            BedrockApiShape::Converse => "converse",
+            _ => "invoke",
+        }
+    }
+
+    /// Assembled at runtime so no key-shaped literal sits in the source.
+    fn bearer_key() -> String {
+        ["ingress", "beta", "test", "key"].join("-")
+    }
+
+    /// One Bedrock lane whose operator marked [`OVERRIDDEN`] unsupported.
+    fn lane_config(shape: BedrockApiShape) -> routectl_router::Config {
+        let key = beta_capability_key(OVERRIDDEN).expect("well-formed flag");
+        let text = format!(
+            "version = {CURRENT_CONFIG_VERSION}\n\n\
+             [providers.{PROVIDER}]\n\
+             kind = \"bedrock\"\n\
+             region = \"{REGION}\"\n\
+             api_shape = \"{shape}\"\n\
+             creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+             [models.{NICKNAME}]\n\
+             provider = \"{PROVIDER}\"\n\
+             upstream = \"{MODEL_ID}\"\n\n\
+             [capability.overrides.{PROVIDER}]\n\
+             unsupported = [\"{key}\"]\n",
+            shape = shape_toml(shape),
+            key_ref = common::file_ref(&bearer_key()),
+        );
+        parse_config(&text).expect("valid test config")
+    }
+
+    struct Lane {
+        router: Router,
+        betas: Arc<Mutex<Vec<Option<Vec<String>>>>>,
+        _server: MockServer,
+    }
+
+    impl Lane {
+        async fn start(shape: BedrockApiShape) -> Self {
+            let server = MockServer::start().await;
+            let betas = Arc::new(Mutex::new(Vec::new()));
+            Mock::given(method("POST"))
+                .respond_with(RecordingUpstream {
+                    shape,
+                    betas: Arc::clone(&betas),
+                })
+                .mount(&server)
+                .await;
+
+            let creds = BedrockCreds::BearerKey { key: bearer_key() };
+            let cfg = BedrockConfig {
+                id: format!("bedrock:{PROVIDER}"),
+                region: REGION.into(),
+                model_id: MODEL_ID.into(),
+                api_shape: shape,
+                creds: creds.clone(),
+                user_agent: None,
+                header_extras: Vec::new(),
+                anthropic_beta: Vec::new(),
+                additional_model_request_fields: None,
+                adaptive_thinking: None,
+            };
+            let resolved = auth::resolve(&creds, REGION).await.expect("resolve");
+            let provider = BedrockProvider::new(cfg, resolved)
+                .expect("canonical region")
+                .with_runtime_origin_for_tests(&server.uri());
+
+            let mut router = Router::new(Arc::new(lane_config(shape)));
+            let mut models = BTreeMap::new();
+            models.insert(
+                NICKNAME.to_string(),
+                Arc::new(ResolvedModel::new(
+                    NICKNAME,
+                    PROVIDER,
+                    Arc::new(provider),
+                    MODEL_ID,
+                )),
+            );
+            router.install_resolved_models(models);
+            Self {
+                router,
+                betas,
+                _server: server,
+            }
+        }
+
+        /// Parse an Anthropic Messages body carrying `client_betas` and dispatch
+        /// it; returns the `anthropic_beta` array the wire saw.
+        async fn send(&self, client_betas: &[&str]) -> Option<Vec<String>> {
+            let body = json!({
+                "model": NICKNAME,
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hello" }],
+                "anthropic_beta": client_betas,
+            });
+            let bytes = serde_json::to_vec(&body).expect("body serializes");
+            let req = AnthropicIngress
+                .parse_request(&HeaderMap::new(), &bytes)
+                .expect("ingress parses the body");
+            let dispatched = self
+                .router
+                .complete_with_options(req, RouterOptions::default())
+                .await;
+            assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+            let calls = self
+                .betas
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            assert_eq!(calls.len(), 1, "one wire call: {calls:?}");
+            calls.into_iter().next().expect("one wire call")
+        }
+    }
+
+    #[tokio::test]
+    async fn an_overridden_flag_is_absent_on_the_wire_however_the_body_spells_it() {
+        let padded = format!(" {OVERRIDDEN} ");
+        let joined = format!("{UNTOUCHED},{OVERRIDDEN}");
+        let padded_joined = format!(" {UNTOUCHED} , {OVERRIDDEN} ");
+        let rows: [(&str, Vec<&str>); 4] = [
+            ("clean", vec![UNTOUCHED, OVERRIDDEN]),
+            ("padded", vec![UNTOUCHED, padded.as_str()]),
+            ("comma-joined", vec![joined.as_str()]),
+            ("padded comma-joined", vec![padded_joined.as_str()]),
+        ];
+        for shape in SHAPES {
+            for (name, client_betas) in &rows {
+                // Arrange
+                let lane = Lane::start(shape).await;
+
+                // Act
+                let wire = lane.send(client_betas).await;
+
+                // Assert
+                assert_eq!(
+                    wire,
+                    Some(vec![UNTOUCHED.to_string()]),
+                    "{shape:?} row {name}: only the untouched flag ships",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_untouched_clean_flag_still_ships() {
+        for shape in SHAPES {
+            // Arrange
+            let lane = Lane::start(shape).await;
+
+            // Act
+            let wire = lane.send(&[UNTOUCHED]).await;
+
+            // Assert
+            assert_eq!(wire, Some(vec![UNTOUCHED.to_string()]), "{shape:?}");
+        }
+    }
+}

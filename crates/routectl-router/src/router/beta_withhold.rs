@@ -74,8 +74,12 @@ impl Router {
             .collect()
     }
 
-    /// The client beta flags `target` must not send, in request order and
-    /// without duplicates.
+    /// The client beta entries `target` must not send, trimmed as the
+    /// dispatch overlay ships them, in request order and without duplicates.
+    ///
+    /// Each comma-separated piece of an entry is judged on its own; an entry
+    /// is withheld whole when any piece is, since the egress drops entries,
+    /// not pieces. A multi-piece entry never claims a re-probe slot.
     pub(super) fn withheld_betas_for_target(
         &self,
         target: &DispatchTarget,
@@ -88,12 +92,28 @@ impl Router {
             return Vec::new();
         }
         let mut withheld: Vec<String> = Vec::new();
-        for flag in &req.anthropic_beta {
-            if withheld.contains(flag) {
+        for entry in &req.anthropic_beta {
+            let entry = entry.trim();
+            if entry.is_empty() || withheld.iter().any(|w| w == entry) {
                 continue;
             }
-            if self.beta_verdict(target, flag, claim, admissions, now) == BetaVerdict::Withhold {
-                withheld.push(flag.clone());
+            let pieces: Vec<&str> = entry
+                .split(',')
+                .map(str::trim)
+                .filter(|piece| !piece.is_empty())
+                .collect();
+            // A sibling piece can withhold the entry after a lapsed negative
+            // claimed its re-probe slot, and that probe would never be sent.
+            let claim = if pieces.len() > 1 {
+                ProbeClaim::Forgo
+            } else {
+                claim
+            };
+            let withholds = pieces.iter().any(|piece| {
+                self.beta_verdict(target, piece, claim, admissions, now) == BetaVerdict::Withhold
+            });
+            if withholds {
+                withheld.push(entry.to_string());
             }
         }
         withheld

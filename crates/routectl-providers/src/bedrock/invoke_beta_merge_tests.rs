@@ -1,6 +1,7 @@
 //! The Invoke body's `anthropic_beta` is the configured floor followed by
-//! the client's flags, each flag sent once. Built with empty allowlists so
-//! nothing but the merge (and the withhold) shapes the array.
+//! the client's flags, each flag sent once. The fixture config carries no
+//! `additional_model_request_fields`, so nothing but the merge (and the
+//! withhold) shapes the array.
 
 use serde_json::{Value, json};
 

@@ -142,6 +142,9 @@ routectl-core = { workspace = true, features = ["test-utils"] }
 # without them.
 routectl-usage = { path = "../routectl-usage", features = ["test-utils"] }
 routectl-router = { workspace = true, features = ["test-utils"] }
+# The providers' seam that aims a real BedrockProvider at a mock origin, for
+# the ingress-to-Bedrock-wire tests. Test and bench builds only, as above.
+routectl-providers = { workspace = true, features = ["test-utils"] }
 wiremock.workspace = true
 futures = { workspace = true }
 # `io-util` adds `AsyncReadExt`/`AsyncWriteExt` (`read_exact`/`write_all`),

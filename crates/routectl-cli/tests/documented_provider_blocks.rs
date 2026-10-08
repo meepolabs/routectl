@@ -226,10 +226,10 @@ fn assert_block_matches_schema(origin: &str, toml_src: &str) -> Option<BlockShap
 /// `config.toml`: the version preflight the loader runs off the raw text,
 /// then the `config check` validator suite (alias cycles and patterns,
 /// model-to-provider references, pool membership, float and base-URL
-/// sanity, the Bedrock allowlists). Secret RESOLUTION is deliberately not
-/// exercised -- every published credential is a reference to an env var or
-/// a login the test machine does not have, and an unresolved ref is a
-/// warning rather than an error even for an operator.
+/// sanity, the Bedrock model-family, credential and region checks). Secret
+/// RESOLUTION is deliberately not exercised -- every published credential is
+/// a reference to an env var or a login the test machine does not have, and
+/// an unresolved ref is a warning rather than an error even for an operator.
 fn assert_whole_config_loads(origin: &str, toml_src: &str, cfg: &Config) {
     if let Err(e) = preflight_config_version(toml_src) {
         panic!("{origin} is a whole config that the version preflight rejects: {e}");
