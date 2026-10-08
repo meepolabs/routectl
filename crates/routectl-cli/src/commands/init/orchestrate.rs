@@ -442,9 +442,12 @@ fn scaffold_path(config_path: &Path) -> Result<()> {
 /// Load the config at `config_path` for detection, or `None` when the file is
 /// absent (the fresh-machine path). A present-but-unparseable config is a hard
 /// error -- init edits it surgically and cannot reason about a broken file.
+/// The shared edit preflight runs first, so an out-of-range version or a
+/// retired key surfaces its actionable message rather than a parse error.
 pub(super) fn load_existing(config_path: &Path) -> Result<Option<Config>> {
     match std::fs::read_to_string(config_path) {
         Ok(text) => {
+            preflight(&text)?;
             let config = parse_config(&text).map_err(|e| {
                 Error::Config(format!(
                     "current config `{}` does not parse; fix it before running init: {e}",
@@ -1274,6 +1277,34 @@ default = \"m\"
             stale,
             "a refused preflight leaves the file byte-identical"
         );
+    }
+
+    /// Init's first read of an existing config runs the shared preflight, so
+    /// a retired key is named by path rather than reported as a parse error.
+    /// The control file without the key loads.
+    #[test]
+    fn load_existing_refuses_a_retired_key_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let clean = format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\n");
+        std::fs::write(&path, &clean).unwrap();
+        assert!(
+            load_existing(&path)
+                .expect("the clean file loads")
+                .is_some(),
+            "control: a present clean config loads"
+        );
+        let retired = format!("{clean}[bedrock]\nallowed_betas = []\n");
+        std::fs::write(&path, &retired).unwrap();
+
+        let err = load_existing(&path).expect_err("a retired key must be refused");
+
+        assert!(
+            err.to_string()
+                .contains("`bedrock` was retired in config version 5"),
+            "err: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), retired);
     }
 
     #[tokio::test]

@@ -446,6 +446,37 @@ default = \"gpt\"
         assert_no_write(&body, "server.port", "9999");
     }
 
+    /// A current-version file still carrying a retired key is refused with
+    /// that key's path named and left byte-identical, even though the key
+    /// itself still deserializes. The control edit on the same file without
+    /// the key goes through, so the refusal is the retired key's doing.
+    #[test]
+    fn retired_key_is_refused_by_path_and_leaves_file_unchanged() {
+        let body = current_base().replace(
+            "upstream = \"gpt-4o\"\n",
+            "upstream = \"gpt-4o\"\nunsupported_features = [\"web_search\"]\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), &body);
+
+        let err = set(&path, "server.port", "9999").expect_err("a retired key must be refused");
+
+        assert!(
+            err.to_string()
+                .contains("`models.gpt.unsupported_features` was retired in config version 5"),
+            "err: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            body,
+            "a refused edit leaves the file byte-identical"
+        );
+
+        let clean = tempfile::tempdir().unwrap();
+        let clean_path = write_config(clean.path(), &current_base());
+        set(&clean_path, "server.port", "9999").expect("the same edit on a clean file applies");
+    }
+
     // -----------------------------------------------------------------
     // Migration refusal: a v1 file is refused, byte-identical, unstamped.
     // -----------------------------------------------------------------

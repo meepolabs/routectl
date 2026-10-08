@@ -182,6 +182,106 @@ pub fn preflight_legacy_mitm_credential_source(
     Ok(())
 }
 
+/// The retired per-target capability list, on a provider or a model entry.
+const RETIRED_UNSUPPORTED_FEATURES_KEY: &str = "unsupported_features";
+
+/// The retired per-provider beta-flag egress allowlist.
+const RETIRED_PROVIDER_ALLOWLIST_KEY: &str = "allowed_betas";
+
+/// The retired top-level Bedrock egress-allowlist table.
+const RETIRED_BEDROCK_TABLE: &str = "bedrock";
+
+/// Error from [`preflight_retired_capability_keys`]: the config still
+/// carries one or more keys retired in config version 5. Holds the dotted
+/// key paths only -- never the values, which an operator may have pasted
+/// anything into.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}", render_retired_paths(.paths))]
+pub struct RetiredCapabilityKeysError {
+    /// Dotted key paths of every retired key found, in document order:
+    /// `bedrock`, then each provider, then each model, by name.
+    pub paths: Vec<String>,
+}
+
+fn render_retired_paths(paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            format!(
+                "`{path}` was retired in config version 5; remove it (a version 4 file is \
+                 converted by `routectl config migrate`)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Read the RAW TOML text, before `Config`'s full deserialize runs, and
+/// collect every key retired in config version 5: the top-level `bedrock`
+/// table, `providers.<name>.allowed_betas`,
+/// `providers.<name>.unsupported_features`, and
+/// `models.<nick>.unsupported_features`. A version 4 file carrying them is
+/// converted by `config migrate`; a version 5 file carrying them was
+/// hand-edited back, and running migrate on it is a no-op, so the message
+/// names the key to remove instead.
+///
+/// Same pattern as [`preflight_legacy_mitm_credential_source`]: TOML that
+/// does not parse falls through as `Ok` so the typed deserialize reports
+/// the real syntax error. Callers run this after
+/// [`preflight_config_version`], so a version 4 file is told to migrate
+/// rather than to delete keys by hand.
+pub fn preflight_retired_capability_keys(raw_toml: &str) -> Result<(), RetiredCapabilityKeysError> {
+    let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
+        return Ok(());
+    };
+
+    let mut paths = Vec::new();
+    if value.get(RETIRED_BEDROCK_TABLE).is_some() {
+        paths.push(RETIRED_BEDROCK_TABLE.to_string());
+    }
+    paths.extend(retired_entry_keys(
+        &value,
+        "providers",
+        &[
+            RETIRED_PROVIDER_ALLOWLIST_KEY,
+            RETIRED_UNSUPPORTED_FEATURES_KEY,
+        ],
+    ));
+    paths.extend(retired_entry_keys(
+        &value,
+        "models",
+        &[RETIRED_UNSUPPORTED_FEATURES_KEY],
+    ));
+
+    if paths.is_empty() {
+        Ok(())
+    } else {
+        Err(RetiredCapabilityKeysError { paths })
+    }
+}
+
+/// `<section>.<name>.<key>` for every entry of the `section` table that
+/// carries one of `keys`, ordered by entry name then by `keys` order.
+fn retired_entry_keys(value: &toml::Value, section: &str, keys: &[&str]) -> Vec<String> {
+    let Some(entries) = value.get(section).and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    let mut names: Vec<&String> = entries.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let entry = entries.get(name)?.as_table()?;
+            Some(
+                keys.iter()
+                    .filter(|key| entry.contains_key(**key))
+                    .map(move |key| format!("{section}.{name}.{key}")),
+            )
+        })
+        .flatten()
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "validate_tests.rs"]
 mod validate_tests;

@@ -3,7 +3,7 @@ use super::*;
 mod config_version_tests {
     use super::{
         CURRENT_CONFIG_VERSION, Config, ConfigVersionError, preflight_config_version,
-        validate_cache_pricing_retired,
+        preflight_retired_capability_keys, validate_cache_pricing_retired,
     };
 
     #[test]
@@ -22,6 +22,11 @@ mod config_version_tests {
             preflight_config_version(example),
             Ok(CURRENT_CONFIG_VERSION),
             "example config must preflight at the current schema version"
+        );
+        assert_eq!(
+            preflight_retired_capability_keys(example),
+            Ok(()),
+            "example config must not carry a retired key"
         );
 
         #[cfg(all(feature = "bedrock", feature = "openai-responses"))]
@@ -304,6 +309,112 @@ mod legacy_mitm_credential_source_preflight_tests {
                 .to_string()
                 .contains("[providers.anthropic-forwarded]"),
             "sanity: the raw deserialize error must NOT already name the replacement block"
+        );
+    }
+}
+
+mod retired_capability_keys_preflight_tests {
+    use super::{CURRENT_CONFIG_VERSION, preflight_retired_capability_keys};
+
+    /// A value that must never be echoed back: operators paste anything
+    /// into a list, and the error goes to logs and terminals.
+    const CANARY: &str = "sk-canary-0123456789abcdef";
+
+    fn current_with(body: &str) -> String {
+        format!("version = {CURRENT_CONFIG_VERSION}\n{body}")
+    }
+
+    #[test]
+    fn each_retired_path_is_named_without_its_value() {
+        let cases = [
+            (
+                "bedrock",
+                format!("[bedrock]\nallowed_betas = [\"{CANARY}\"]\n"),
+            ),
+            (
+                "providers.p.allowed_betas",
+                format!(
+                    "[providers.p]\nkind = \"anthropic-api\"\nallowed_betas = [\"{CANARY}\"]\n"
+                ),
+            ),
+            (
+                "providers.p.unsupported_features",
+                format!(
+                    "[providers.p]\nkind = \"openai-compat\"\n\
+                     unsupported_features = [\"{CANARY}\"]\n"
+                ),
+            ),
+            (
+                "models.m.unsupported_features",
+                format!(
+                    "[models.m]\nprovider = \"p\"\nupstream = \"x\"\n\
+                     unsupported_features = [\"{CANARY}\"]\n"
+                ),
+            ),
+        ];
+
+        for (path, body) in cases {
+            // Act
+            let err = preflight_retired_capability_keys(&current_with(&body))
+                .expect_err(&format!("`{path}` must be refused"));
+            let msg = err.to_string();
+
+            // Assert
+            assert_eq!(err.paths, vec![path.to_string()], "row `{path}`");
+            assert_eq!(
+                msg,
+                format!(
+                    "`{path}` was retired in config version 5; remove it (a version 4 \
+                     file is converted by `routectl config migrate`)"
+                ),
+                "row `{path}`"
+            );
+            assert!(!msg.contains(CANARY), "row `{path}` leaked a value: {msg}");
+        }
+    }
+
+    #[test]
+    fn every_retired_key_is_reported_in_deterministic_order() {
+        let body = current_with(
+            "[models.zeta]\nunsupported_features = []\n\
+             [models.alpha]\nunsupported_features = []\n\
+             [providers.b]\nunsupported_features = []\nallowed_betas = []\n\
+             [providers.a]\nallowed_betas = []\n\
+             [bedrock]\n",
+        );
+
+        let err = preflight_retired_capability_keys(&body).expect_err("retired keys present");
+
+        assert_eq!(
+            err.paths,
+            [
+                "bedrock",
+                "providers.a.allowed_betas",
+                "providers.b.allowed_betas",
+                "providers.b.unsupported_features",
+                "models.alpha.unsupported_features",
+                "models.zeta.unsupported_features",
+            ]
+        );
+        assert_eq!(err.to_string().lines().count(), 6, "one line per path");
+    }
+
+    #[test]
+    fn a_clean_current_config_passes() {
+        let body = current_with(
+            "[providers.p]\nkind = \"anthropic-api\"\nanthropic_beta = [\"x\"]\n\
+             [models.m]\nprovider = \"p\"\nupstream = \"x\"\n\
+             [capability.overrides.p]\nunsupported = [\"web_search\"]\n",
+        );
+
+        assert_eq!(preflight_retired_capability_keys(&body), Ok(()));
+    }
+
+    #[test]
+    fn malformed_toml_falls_through_to_the_typed_parse() {
+        assert_eq!(
+            preflight_retired_capability_keys("[bedrock\nallowed_betas = = 1\n"),
+            Ok(())
         );
     }
 }

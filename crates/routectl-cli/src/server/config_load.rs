@@ -85,8 +85,8 @@ pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, St
     })
 }
 
-/// Parse `config.toml` ONLY -- version preflight, the legacy-mitm preflight,
-/// and the typed `deny_unknown_fields` deserialize -- WITHOUT loading the
+/// Parse `config.toml` ONLY -- version preflight, the legacy-mitm and
+/// retired-key preflights, and the typed `deny_unknown_fields` deserialize -- WITHOUT loading the
 /// catalog overlay. Doctor's capability panel uses this so an unreadable
 /// overlay degrades the catalog priors alone while the config-derived
 /// override rows still render. Produces the SAME wrapped error strings as
@@ -112,6 +112,12 @@ pub fn parse_config_only(path: &Path) -> Result<Config, String> {
     // how to migrate, so detect the legacy key first and return the error
     // that names the exact provider-block replacement.
     routectl_router::preflight_legacy_mitm_credential_source(&text).map_err(|e| e.to_string())?;
+
+    // A current-version file carrying a key retired in that version is
+    // refused with each retired path named. Runs after the version
+    // preflight so a version 4 file is pointed at `config migrate` rather
+    // than told to delete keys by hand.
+    routectl_router::preflight_retired_capability_keys(&text).map_err(|e| e.to_string())?;
 
     routectl_router::parse_config(&text)
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))

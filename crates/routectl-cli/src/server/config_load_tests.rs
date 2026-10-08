@@ -616,3 +616,214 @@ fn a_hot_reload_of_a_previous_version_config_is_declined() {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// A current-version config carrying a key retired in that version is
+// refused on every load path with the retired path named, never its value.
+// -----------------------------------------------------------------------
+
+/// Must never surface in a load error: the retired lists are free-form and
+/// an operator may have pasted anything into them.
+const RETIRED_VALUE_CANARY: &str = "sk-canary-0123456789abcdef";
+
+/// Where a retired key is spliced into [`config_with`].
+#[derive(Clone, Copy)]
+enum Splice {
+    Provider,
+    Model,
+    TopLevel,
+}
+
+/// A loadable config with `extra` spliced into the provider entry, the
+/// model entry, or a trailing top-level table. Every retired key still
+/// deserializes, so with the right version only the retired-key preflight
+/// can refuse it.
+fn config_with(version: u32, at: Splice, extra: &str) -> String {
+    let (provider, model, tail) = match at {
+        Splice::Provider => (extra, "", ""),
+        Splice::Model => ("", extra, ""),
+        Splice::TopLevel => ("", "", extra),
+    };
+    format!(
+        "version = {version}\n\
+         [providers.fast]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"http://127.0.0.1:1\"\n\
+         api_key_ref = \"env://ROUTECTL_TEST_UNSET_KEY\"\n\
+         {provider}\
+         [models.gpt]\n\
+         provider = \"fast\"\n\
+         upstream = \"gpt-4o\"\n\
+         {model}\
+         [aliases]\n\
+         default = \"gpt\"\n\
+         {tail}"
+    )
+}
+
+/// One row per retired path: the path the error must name, and the
+/// current-version config carrying it.
+fn retired_key_rows() -> Vec<(&'static str, String)> {
+    let list = format!("[\"{RETIRED_VALUE_CANARY}\"]");
+    vec![
+        (
+            "bedrock",
+            config_with(
+                CURRENT_CONFIG_VERSION,
+                Splice::TopLevel,
+                &format!("[bedrock]\nallowed_betas = {list}\n"),
+            ),
+        ),
+        (
+            "providers.fast.allowed_betas",
+            config_with(
+                CURRENT_CONFIG_VERSION,
+                Splice::Provider,
+                &format!("allowed_betas = {list}\n"),
+            ),
+        ),
+        (
+            "providers.fast.unsupported_features",
+            config_with(
+                CURRENT_CONFIG_VERSION,
+                Splice::Provider,
+                &format!("unsupported_features = {list}\n"),
+            ),
+        ),
+        (
+            "models.gpt.unsupported_features",
+            config_with(
+                CURRENT_CONFIG_VERSION,
+                Splice::Model,
+                &format!("unsupported_features = {list}\n"),
+            ),
+        ),
+    ]
+}
+
+fn assert_names_retired_path(path: &str, err: &str) {
+    assert!(
+        err.contains(&format!("`{path}` was retired in config version 5")),
+        "the error must name `{path}`: {err}"
+    );
+    assert!(
+        err.contains("routectl config migrate"),
+        "the error must say how a version 4 file is converted: {err}"
+    );
+    assert!(
+        !err.contains(RETIRED_VALUE_CANARY),
+        "the error must not echo the retired value: {err}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn cold_start_refuses_each_retired_key_by_path() {
+    for (path, body) in retired_key_rows() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        // Act: the loader `serve` runs at cold start.
+        let err = match load_effective_config(&cfg_path) {
+            Ok(_) => panic!("a config carrying `{path}` must not load"),
+            Err(e) => e,
+        };
+
+        // Assert
+        assert_names_retired_path(path, &err);
+    }
+}
+
+/// Positive control for the rows above: the same fixture with nothing
+/// retired spliced in loads, so each refusal is the retired key's doing.
+#[test]
+#[serial_test::serial]
+fn cold_start_loads_the_fixture_without_a_retired_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    let body = config_with(CURRENT_CONFIG_VERSION, Splice::TopLevel, "");
+    std::fs::write(&cfg_path, body).expect("write config.toml");
+
+    if let Err(e) = load_effective_config(&cfg_path) {
+        panic!("the clean fixture must load: {e}");
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn config_check_refuses_each_retired_key_by_path() {
+    for (path, body) in retired_key_rows() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        // Act: `config check` and doctor parse through this seam.
+        let err = parse_config_only(&cfg_path)
+            .err()
+            .unwrap_or_else(|| panic!("config check must refuse `{path}`"));
+
+        // Assert
+        assert_names_retired_path(path, &err);
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn a_hot_reload_carrying_a_retired_key_is_declined() {
+    for (path, body) in retired_key_rows() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        // Act
+        let mut loaded = None;
+        let events = routectl_testkit::capture_events(|| {
+            loaded = Some(read_parse_validate_config(&cfg_path));
+        });
+
+        // Assert: a None keeps the running router live.
+        assert!(
+            loaded.expect("the loader ran").is_none(),
+            "a reload carrying `{path}` must be declined so the running router \
+             stays live"
+        );
+        assert!(
+            events.iter().any(|e| e.level == tracing::Level::WARN),
+            "a declined reload must say so (`{path}`)"
+        );
+    }
+}
+
+/// A previous-version file carrying a retired key is told to migrate: the
+/// version preflight runs first, so neither the retired-key message nor an
+/// "unknown field" diagnostic reaches the operator.
+#[test]
+#[serial_test::serial]
+fn a_previous_version_file_with_a_retired_key_points_at_config_migrate() {
+    let body = config_with(
+        CURRENT_CONFIG_VERSION - 1,
+        Splice::Provider,
+        "unsupported_features = [\"web_search\"]\n",
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+    let err = match load_effective_config(&cfg_path) {
+        Ok(_) => panic!("a previous-version config must not load"),
+        Err(e) => e,
+    };
+
+    assert!(is_migrate_pointer(&err), "err: {err}");
+    assert!(err.contains("predates"), "err: {err}");
+    assert!(!err.contains("was retired"), "err: {err}");
+}

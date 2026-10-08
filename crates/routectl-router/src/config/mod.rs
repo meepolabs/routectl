@@ -30,7 +30,8 @@ pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig}
 use validate::default_config_version;
 pub use validate::{
     CURRENT_CONFIG_VERSION, ConfigVersionError, LegacyMitmCredentialSourceError,
-    VersionTooNewError, preflight_config_version, preflight_legacy_mitm_credential_source,
+    RetiredCapabilityKeysError, VersionTooNewError, preflight_config_version,
+    preflight_legacy_mitm_credential_source, preflight_retired_capability_keys,
     validate_cache_pricing_retired,
 };
 
