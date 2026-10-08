@@ -95,12 +95,6 @@ fn capability_tokens_reuse_the_routing_filter_vocabulary() {
         verdict_token(OverrideVerdict::ForceSupported),
         "force-supported"
     );
-    assert_eq!(
-        provenance_token(OverrideProvenance::ProviderStatic),
-        "provider"
-    );
-    assert_eq!(provenance_token(OverrideProvenance::ModelStatic), "model");
-    assert_eq!(provenance_token(OverrideProvenance::Override), "override");
 }
 
 #[test]
@@ -126,7 +120,6 @@ fn build_panel_maps_every_effective_surface_with_provenance() {
             target_spec: "anthropic".to_string(),
             capability_key: "web_search".to_string(),
             verdict: OverrideVerdict::RouteAway,
-            provenance: OverrideProvenance::Override,
         }],
         aliases: Vec::new(),
         providers: Vec::new(),

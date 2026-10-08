@@ -16,7 +16,7 @@
 use routectl_core::Result;
 use routectl_router::{
     CatalogOverlay, ClassPolicyCell, ClassPolicySource, Config, EffectiveRow, ModelCell,
-    OverrideProvenance, OverrideRow, OverrideVerdict, Source, derive_effective_view,
+    OverrideRow, OverrideVerdict, Source, derive_effective_view,
 };
 
 /// Print the plain redacted config dump, then the provenance-annotated
@@ -115,21 +115,16 @@ fn capability_line(cell: &OverrideRow) -> String {
         target = cell.target_spec,
         capability = cell.capability_key,
         verdict = verdict_tag(cell.verdict),
-        source = capability_source_tag(cell.provenance),
+        source = CAPABILITY_SOURCE_TAG,
     )
 }
 
-/// The grep-friendly tag for a capability cell's winning source layer. Uses
-/// the SAME tokens the routing filter emits on its skip log (`provider` /
-/// `model` / `override`), so an operator reading the effective view and an
-/// operator reading a route-away log see one vocabulary.
-const fn capability_source_tag(provenance: OverrideProvenance) -> &'static str {
-    match provenance {
-        OverrideProvenance::ProviderStatic => "provider",
-        OverrideProvenance::ModelStatic => "model",
-        OverrideProvenance::Override => "override",
-    }
-}
+/// The grep-friendly tag for a capability cell's source layer. Every
+/// config-derived cell comes from `[capability.overrides]`, so this is the
+/// SAME `override` token the routing filter emits on its skip log: an
+/// operator reading the effective view and an operator reading a route-away
+/// log see one vocabulary.
+const CAPABILITY_SOURCE_TAG: &str = "override";
 
 /// The grep-friendly tag for a capability cell's verdict.
 const fn verdict_tag(verdict: OverrideVerdict) -> &'static str {
@@ -186,7 +181,6 @@ mod tests {
             target_spec: "anthropic".to_string(),
             capability_key: "web_search".to_string(),
             verdict: OverrideVerdict::RouteAway,
-            provenance: OverrideProvenance::Override,
         };
 
         // Act
@@ -198,23 +192,5 @@ mod tests {
         assert!(line.contains("web_search"), "line: {line}");
         assert!(line.contains("verdict=route-away"), "line: {line}");
         assert!(line.contains("source=override"), "line: {line}");
-    }
-
-    #[test]
-    fn capability_source_tags_match_the_routing_filter_contract() {
-        // The effective-view source tokens are the SAME strings the routing
-        // filter emits on its skip log.
-        assert_eq!(
-            capability_source_tag(OverrideProvenance::ProviderStatic),
-            "provider"
-        );
-        assert_eq!(
-            capability_source_tag(OverrideProvenance::ModelStatic),
-            "model"
-        );
-        assert_eq!(
-            capability_source_tag(OverrideProvenance::Override),
-            "override"
-        );
     }
 }

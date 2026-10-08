@@ -568,7 +568,7 @@ impl Router {
                         key.capability_key(),
                         provider_kind,
                     ),
-                    Some((crate::override_registry::OverrideVerdict::ForceSupported, _))
+                    Some(crate::override_registry::OverrideVerdict::ForceSupported)
                 )
             })
     }

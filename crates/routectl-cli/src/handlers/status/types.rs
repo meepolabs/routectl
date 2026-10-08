@@ -78,10 +78,6 @@ pub mod vocabulary {
     /// Provenance / filter-source value tokens. A contract with the routing
     /// consult's `source` label (see `routectl_router` `FilterSource`).
     pub mod provenance {
-        /// Retired provider-scoped static capability list.
-        pub const PROVIDER: &str = "provider";
-        /// Retired model-scoped static capability list.
-        pub const MODEL: &str = "model";
         /// A `[capability.overrides.<spec>]` entry.
         pub const OVERRIDE: &str = "override";
         /// A non-expired acting negative in the learned registry.

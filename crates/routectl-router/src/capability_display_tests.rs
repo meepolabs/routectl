@@ -11,7 +11,7 @@ use super::*;
 
 use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 
-use crate::override_registry::{OverrideProvenance, OverrideVerdict};
+use crate::override_registry::OverrideVerdict;
 
 /// A learned negative seen on live traffic, in the given phase.
 fn learned_negative(phase: FailurePhase) -> Option<(Verdict, EvidenceSource)> {
@@ -23,15 +23,12 @@ fn verified() -> Option<(Verdict, EvidenceSource)> {
     Some((Verdict::VerifiedWorking, EvidenceSource::Live))
 }
 
-fn route_away() -> Option<(OverrideVerdict, OverrideProvenance)> {
-    Some((OverrideVerdict::RouteAway, OverrideProvenance::Override))
+const fn route_away() -> Option<OverrideVerdict> {
+    Some(OverrideVerdict::RouteAway)
 }
 
-fn force_supported() -> Option<(OverrideVerdict, OverrideProvenance)> {
-    Some((
-        OverrideVerdict::ForceSupported,
-        OverrideProvenance::Override,
-    ))
+const fn force_supported() -> Option<OverrideVerdict> {
+    Some(OverrideVerdict::ForceSupported)
 }
 
 // --- override hard-drop > learned ---
@@ -176,7 +173,7 @@ fn negative(phase: FailurePhase, source: EvidenceSource) -> LearnedActing {
 }
 
 fn action(
-    override_cell: Option<(OverrideVerdict, OverrideProvenance)>,
+    override_cell: Option<OverrideVerdict>,
     learned: Option<LearnedActing>,
     prior: Option<bool>,
     strip_applies: bool,
@@ -383,7 +380,7 @@ fn a_seed_cell_is_unsupported_and_a_cleared_seed_is_supported() {
 
 /// The action for a beta-key cell, resolving the display from the same inputs.
 fn beta_action(
-    override_cell: Option<(OverrideVerdict, OverrideProvenance)>,
+    override_cell: Option<OverrideVerdict>,
     learned: Option<LearnedActing>,
     seed: Option<SeedCell>,
     capability_enabled: bool,

@@ -7584,66 +7584,6 @@ impl<T> typenum::type_operators::Same for routectl_router::OverlaySource
 pub type routectl_router::OverlaySource::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::OverlaySource where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::OverlaySource::into_shared(self) -> Shared
-pub enum routectl_router::OverrideProvenance
-pub routectl_router::OverrideProvenance::ModelStatic
-pub routectl_router::OverrideProvenance::Override
-pub routectl_router::OverrideProvenance::ProviderStatic
-impl core::clone::Clone for routectl_router::OverrideProvenance
-pub fn routectl_router::OverrideProvenance::clone(&self) -> routectl_router::OverrideProvenance
-impl core::cmp::Eq for routectl_router::OverrideProvenance
-impl core::cmp::PartialEq for routectl_router::OverrideProvenance
-pub fn routectl_router::OverrideProvenance::eq(&self, &routectl_router::OverrideProvenance) -> bool
-impl core::fmt::Debug for routectl_router::OverrideProvenance
-pub fn routectl_router::OverrideProvenance::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_router::OverrideProvenance
-impl core::marker::StructuralPartialEq for routectl_router::OverrideProvenance
-impl core::marker::Freeze for routectl_router::OverrideProvenance
-impl core::marker::Send for routectl_router::OverrideProvenance
-impl core::marker::Sync for routectl_router::OverrideProvenance
-impl core::marker::Unpin for routectl_router::OverrideProvenance
-impl core::marker::UnsafeUnpin for routectl_router::OverrideProvenance
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::OverrideProvenance
-impl core::panic::unwind_safe::UnwindSafe for routectl_router::OverrideProvenance
-impl<Q, K> equivalent::Equivalent<K> for routectl_router::OverrideProvenance where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn routectl_router::OverrideProvenance::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for routectl_router::OverrideProvenance where U: core::convert::From<T>
-pub fn routectl_router::OverrideProvenance::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_router::OverrideProvenance where U: core::convert::Into<T>
-pub type routectl_router::OverrideProvenance::Error = core::convert::Infallible
-pub fn routectl_router::OverrideProvenance::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_router::OverrideProvenance where U: core::convert::TryFrom<T>
-pub type routectl_router::OverrideProvenance::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_router::OverrideProvenance::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_router::OverrideProvenance where T: core::clone::Clone
-pub type routectl_router::OverrideProvenance::Owned = T
-pub fn routectl_router::OverrideProvenance::clone_into(&self, &mut T)
-pub fn routectl_router::OverrideProvenance::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::OverrideProvenance where T: core::clone::Clone
-pub fn routectl_router::OverrideProvenance::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_router::OverrideProvenance where T: 'static + ?core::marker::Sized
-pub fn routectl_router::OverrideProvenance::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_router::OverrideProvenance where T: ?core::marker::Sized
-pub fn routectl_router::OverrideProvenance::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_router::OverrideProvenance where T: ?core::marker::Sized
-pub fn routectl_router::OverrideProvenance::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_router::OverrideProvenance where T: core::clone::Clone
-pub unsafe fn routectl_router::OverrideProvenance::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_router::OverrideProvenance
-pub fn routectl_router::OverrideProvenance::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_router::OverrideProvenance where T: core::clone::Clone
-pub fn routectl_router::OverrideProvenance::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_router::OverrideProvenance
-impl<T> outref::AsOut<T> for routectl_router::OverrideProvenance where T: core::marker::Copy
-pub fn routectl_router::OverrideProvenance::as_out(&mut self) -> outref::Out<'_, T>
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::OverrideProvenance where T: ?core::marker::Sized
-pub fn routectl_router::OverrideProvenance::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_router::OverrideProvenance::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_router::OverrideProvenance
-impl<T> tracing::instrument::WithSubscriber for routectl_router::OverrideProvenance
-impl<T> typenum::type_operators::Same for routectl_router::OverrideProvenance
-pub type routectl_router::OverrideProvenance::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::OverrideProvenance where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_router::OverrideProvenance::into_shared(self) -> Shared
 pub enum routectl_router::OverrideVerdict
 pub routectl_router::OverrideVerdict::ForceSupported
 pub routectl_router::OverrideVerdict::RouteAway
@@ -13705,7 +13645,7 @@ impl routectl_router::OverrideRegistry
 pub fn routectl_router::OverrideRegistry::build(&routectl_router::config::Config) -> Self
 pub fn routectl_router::OverrideRegistry::is_empty(&self) -> bool
 pub fn routectl_router::OverrideRegistry::len(&self) -> usize
-pub fn routectl_router::OverrideRegistry::resolve(&self, &str, &str, &str, &str) -> core::option::Option<(routectl_router::OverrideVerdict, routectl_router::OverrideProvenance)>
+pub fn routectl_router::OverrideRegistry::resolve(&self, &str, &str, &str, &str) -> core::option::Option<routectl_router::OverrideVerdict>
 pub fn routectl_router::OverrideRegistry::snapshot(&self) -> alloc::vec::Vec<routectl_router::OverrideRow>
 impl core::default::Default for routectl_router::OverrideRegistry
 pub fn routectl_router::OverrideRegistry::default() -> routectl_router::OverrideRegistry
@@ -13746,7 +13686,6 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::OverrideRegistry::into_shared(self) -> Shared
 pub struct routectl_router::OverrideRow
 pub routectl_router::OverrideRow::capability_key: alloc::string::String
-pub routectl_router::OverrideRow::provenance: routectl_router::OverrideProvenance
 pub routectl_router::OverrideRow::target_spec: alloc::string::String
 pub routectl_router::OverrideRow::verdict: routectl_router::OverrideVerdict
 impl core::clone::Clone for routectl_router::OverrideRow
@@ -16707,7 +16646,7 @@ pub fn routectl_router::provider_kind_for_oauth_id(&str) -> core::option::Option
 pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::LearnedCapabilityRegistry, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ProviderEntry>) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::rebuild_into(&dyn routectl_router::LedgerReader, &routectl_router::KSessionStore, std::time::SystemTime, usize)
 pub fn routectl_router::resolve_display_action(routectl_router::ActionInputs) -> &'static str
-pub const fn routectl_router::resolve_display_verdict(core::option::Option<(routectl_router::OverrideVerdict, routectl_router::OverrideProvenance)>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<routectl_router::SeedCell>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
+pub const fn routectl_router::resolve_display_verdict(core::option::Option<routectl_router::OverrideVerdict>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<routectl_router::SeedCell>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
 pub fn routectl_router::resolve_effective_row(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &routectl_router::CatalogOverlay) -> routectl_router::catalog::EffectiveRow
 pub fn routectl_router::resolve_requested_capability(&str, &routectl_core::error::Error, &routectl_core::failure_class::ClassifiedFailure) -> core::option::Option<(alloc::string::String, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase)>
 pub fn routectl_router::resolved_codex_version(&routectl_router::config::Config) -> core::option::Option<alloc::string::String>

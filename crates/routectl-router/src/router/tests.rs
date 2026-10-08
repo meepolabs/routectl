@@ -1177,17 +1177,11 @@ fn router_new_builds_override_registry_from_capability_overrides() {
     let registry = router.override_registry();
     assert_eq!(
         registry.resolve("p", "nick", "web_search", "openai-compat"),
-        Some((
-            crate::override_registry::OverrideVerdict::RouteAway,
-            crate::override_registry::OverrideProvenance::Override
-        )),
+        Some(crate::override_registry::OverrideVerdict::RouteAway),
     );
     assert_eq!(
         registry.resolve("p", "nick", "computer_use", "openai-compat"),
-        Some((
-            crate::override_registry::OverrideVerdict::RouteAway,
-            crate::override_registry::OverrideProvenance::Override
-        )),
+        Some(crate::override_registry::OverrideVerdict::RouteAway),
     );
     assert_eq!(
         registry.resolve("p", "other", "computer_use", "openai-compat"),

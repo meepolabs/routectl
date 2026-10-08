@@ -36,7 +36,7 @@ impl Provider for StubProvider {
 }
 
 fn override_router_from_toml(body: &str) -> Router {
-    let config: Config = toml::from_str(&format!("version = 3\n{body}")).expect("config parses");
+    let config: Config = toml::from_str(&format!("version = 5\n{body}")).expect("config parses");
     Router::new(Arc::new(config))
 }
 

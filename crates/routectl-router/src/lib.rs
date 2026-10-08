@@ -204,8 +204,7 @@ pub use learned_capability::{
     LearnedRegistryEntry, RecordedLearnedEntry, SeedClearMarker,
 };
 pub use override_registry::{
-    OverrideProvenance, OverrideRegistry, OverrideRow, OverrideVerdict,
-    validate_capability_overrides,
+    OverrideRegistry, OverrideRow, OverrideVerdict, validate_capability_overrides,
 };
 pub use pool_build::{PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolReport};
 pub use pricing::{PricingSource, effective_pricing};

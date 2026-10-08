@@ -798,12 +798,6 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
     );
 }
 
-#[test]
-fn filter_source_as_str_tokens() {
-    assert_eq!(FilterSource::ProviderStatic.as_str(), "provider");
-    assert_eq!(FilterSource::ModelStatic.as_str(), "model");
-}
-
 // --- strip-vs-route verdict (capability-strip wiring) ---
 
 /// An acting (non-expired) learned negative for the [`strip_target`] named

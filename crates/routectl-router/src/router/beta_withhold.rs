@@ -137,8 +137,8 @@ impl Router {
             key,
             target.provider_kind.unwrap_or(""),
         ) {
-            Some((OverrideVerdict::ForceSupported, _)) => BetaVerdict::Send,
-            Some((OverrideVerdict::RouteAway, _)) => BetaVerdict::Withhold,
+            Some(OverrideVerdict::ForceSupported) => BetaVerdict::Send,
+            Some(OverrideVerdict::RouteAway) => BetaVerdict::Withhold,
             None => BetaVerdict::Open,
         }
     }

@@ -11,7 +11,7 @@ use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ClassPolicy;
 use crate::config::Config;
 use crate::factory::apply_catalog_overlay;
-use crate::override_registry::{OverrideProvenance, OverrideVerdict};
+use crate::override_registry::OverrideVerdict;
 use crate::resolved::ResolvedModel;
 
 struct StubProvider {
@@ -200,16 +200,14 @@ fn seeded_override_appears_as_capability_cell_with_override_source() {
     // Act
     let view = derive_effective_view(&config, &CatalogOverlay::default());
 
-    // Assert: the capability layer carries the cell, tagged with the
-    // Override provenance (the "override" token of the routing filter's
-    // source contract) and the route-away verdict.
+    // Assert: the capability layer carries the cell with the route-away
+    // verdict.
     let cell = view
         .capabilities
         .iter()
         .find(|c| c.target_spec == "anthropic" && c.capability_key == "web_search")
         .expect("seeded override must surface as a capability cell");
     assert_eq!(cell.verdict, OverrideVerdict::RouteAway);
-    assert_eq!(cell.provenance, OverrideProvenance::Override);
 }
 
 /// The exact fixture `factory::validate_tests` uses to pin that a REJECTED

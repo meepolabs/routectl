@@ -144,7 +144,7 @@ tr.exp-row { cursor: pointer; }
 .circuit-half_open_ready, .status-Warn {
   background: var(--pill-warn-bg); color: var(--pill-warn-fg);
 }
-.verdict-force-supported, .tier-self-identifying, .prov-provider, .prov-model, .src-import {
+.verdict-force-supported, .tier-self-identifying, .src-import {
   background: var(--pill-info-bg); color: var(--pill-info-fg);
 }
 /* Categorical (non-state) distinctions resolve inside the accent + second

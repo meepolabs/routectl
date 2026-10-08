@@ -3097,7 +3097,7 @@ api_key_ref = \"literal:k\"\n";
 
     #[test]
     fn v4_to_v5_preserves_route_away_verdicts_for_every_folded_cell() {
-        use crate::override_registry::{OverrideProvenance, OverrideRegistry, OverrideVerdict};
+        use crate::override_registry::{OverrideRegistry, OverrideVerdict};
 
         // Arrange: the v4 input routes `web_search` away on provider `fast`
         // and `computer_use` away on its model `gpt`.
@@ -3110,7 +3110,7 @@ api_key_ref = \"literal:k\"\n";
         let registry = OverrideRegistry::build(&after);
 
         // Assert: each legacy list's verdict survives at its own scope.
-        let route_away = Some((OverrideVerdict::RouteAway, OverrideProvenance::Override));
+        let route_away = Some(OverrideVerdict::RouteAway);
         for (nickname, capability, expected) in [
             ("gpt", "web_search", route_away),
             ("gpt", "computer_use", route_away),

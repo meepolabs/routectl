@@ -445,8 +445,7 @@ fn purging_a_learned_entry_does_not_touch_the_operator_override_registry() {
     plant_negative(&router, SONNET, WEB_SEARCH);
     let before = router
         .override_registry
-        .resolve("anthropic", "", WEB_SEARCH, ANTHROPIC_API)
-        .map(|(verdict, _)| verdict);
+        .resolve("anthropic", "", WEB_SEARCH, ANTHROPIC_API);
     assert!(
         before.is_some(),
         "premise: the override cell must resolve before the purge, else this \
@@ -460,8 +459,7 @@ fn purging_a_learned_entry_does_not_touch_the_operator_override_registry() {
     assert!(report.removed, "the learned entry itself must be purged");
     let after = router
         .override_registry
-        .resolve("anthropic", "", WEB_SEARCH, ANTHROPIC_API)
-        .map(|(verdict, _)| verdict);
+        .resolve("anthropic", "", WEB_SEARCH, ANTHROPIC_API);
     assert_eq!(
         before, after,
         "a learned purge must leave the operator override cell exactly as it was"

@@ -25,14 +25,8 @@ type FeatureKey = String;
 /// soft learned or prior de-prioritization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FilterSource {
-    /// Matched a route-away override with the retired provider-static
-    /// provenance. No config source produces it any more.
-    ProviderStatic,
-    /// Matched a route-away override with the retired model-static
-    /// provenance. No config source produces it any more.
-    ModelStatic,
-    /// Matched a route-away override whose provenance is a
-    /// `[capability.overrides.<spec>].unsupported` entry.
+    /// Matched a route-away `[capability.overrides.<spec>].unsupported`
+    /// entry.
     Override,
     /// Matched a non-expired acting negative in the learned-capability
     /// registry. A soft signal: the target is de-prioritized to the tail,
@@ -53,22 +47,9 @@ impl FilterSource {
     /// future status endpoint).
     pub(super) const fn as_str(self) -> &'static str {
         match self {
-            Self::ProviderStatic => "provider",
-            Self::ModelStatic => "model",
             Self::Override => "override",
             Self::Learned => "learned",
             Self::Prior => "prior",
-        }
-    }
-}
-
-impl From<crate::override_registry::OverrideProvenance> for FilterSource {
-    fn from(provenance: crate::override_registry::OverrideProvenance) -> Self {
-        use crate::override_registry::OverrideProvenance;
-        match provenance {
-            OverrideProvenance::ProviderStatic => Self::ProviderStatic,
-            OverrideProvenance::ModelStatic => Self::ModelStatic,
-            OverrideProvenance::Override => Self::Override,
         }
     }
 }
@@ -286,19 +267,17 @@ impl Router {
         strip_keys: &mut Vec<String>,
     ) -> Option<(FeatureKey, FilterSource)> {
         // Override consult: the registry (built from
-        // `[capability.overrides]`) hard-drops on a `RouteAway`, reporting
-        // its provenance as the source label.
+        // `[capability.overrides]`) hard-drops on a `RouteAway`.
         let nickname = target.nickname.as_deref().unwrap_or("");
         for feature in features {
-            if let Some((crate::override_registry::OverrideVerdict::RouteAway, provenance)) =
-                self.override_registry.resolve(
-                    &target.provider_name,
-                    nickname,
-                    feature,
-                    target.provider_kind.unwrap_or(""),
-                )
-            {
-                return Some((feature.clone(), provenance.into()));
+            let verdict = self.override_registry.resolve(
+                &target.provider_name,
+                nickname,
+                feature,
+                target.provider_kind.unwrap_or(""),
+            );
+            if verdict == Some(crate::override_registry::OverrideVerdict::RouteAway) {
+                return Some((feature.clone(), FilterSource::Override));
             }
         }
         // Learned pass: consult the adaptive registry only when the kill
@@ -511,7 +490,7 @@ impl Router {
                 feature,
                 provider_kind,
             ),
-            Some((crate::override_registry::OverrideVerdict::ForceSupported, _))
+            Some(crate::override_registry::OverrideVerdict::ForceSupported)
         )
     }
 

@@ -18,7 +18,7 @@ use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 
 use crate::config::{Config, ModelEntry, ProviderEntry};
 use crate::learned_capability::LearnedRegistryEntry;
-use crate::override_registry::{OverrideProvenance, OverrideVerdict};
+use crate::override_registry::OverrideVerdict;
 
 /// Display verdict token for an operator route-away override cell. A
 /// PANEL-ONLY token, distinct from the core [`Verdict`] vocabulary: an
@@ -100,12 +100,12 @@ pub struct DisplayVerdict {
 /// - `prior`: the catalog capability prior's truthiness, or `None` when
 ///   the catalog carries no prior for the cell.
 pub const fn resolve_display_verdict(
-    override_cell: Option<(OverrideVerdict, OverrideProvenance)>,
+    override_cell: Option<OverrideVerdict>,
     learned: Option<(Verdict, EvidenceSource)>,
     seed: Option<SeedCell>,
     prior: Option<bool>,
 ) -> DisplayVerdict {
-    if let Some((verdict, _provenance)) = override_cell {
+    if let Some(verdict) = override_cell {
         return match verdict {
             OverrideVerdict::RouteAway => DisplayVerdict {
                 verdict: FORCED_UNSUPPORTED,

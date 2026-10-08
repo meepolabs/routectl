@@ -1,15 +1,15 @@
 //! Operator capability-override registry: the one keyed read-model that
 //! flattens `[capability.overrides]` into a single `(target_spec,
-//! normalized_capability_key)` map carrying PROVENANCE.
+//! normalized_capability_key)` map of override verdicts.
 //!
 //! Built purely from [`Config`] at Router construction (and therefore
 //! rebuilt on every reload, since a reload constructs a fresh Router).
 //! Two sources feed the map:
 //!
 //! - `[capability.overrides.<spec>].unsupported` ->
-//!   [`OverrideVerdict::RouteAway`] / [`OverrideProvenance::Override`];
+//!   [`OverrideVerdict::RouteAway`];
 //! - `[capability.overrides.<spec>].force_supported` ->
-//!   [`OverrideVerdict::ForceSupported`] / `Override`.
+//!   [`OverrideVerdict::ForceSupported`].
 //!
 //! The spec is either a provider name or `provider:nickname`. Every key is
 //! normalized at build via [`normalize_capability_key`]
@@ -53,35 +53,12 @@ pub enum OverrideVerdict {
     ForceSupported,
 }
 
-/// Where a cell's verdict came from. Legacy static provenance is
-/// preserved so the routing consult emits the same source labels it
-/// always has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverrideProvenance {
-    /// Retired provider-scoped static list. No config source produces it
-    /// any more.
-    ProviderStatic,
-    /// Retired model-scoped static list. No config source produces it any
-    /// more.
-    ModelStatic,
-    /// New `[capability.overrides.<spec>]`.
-    Override,
-}
-
 /// Internal cell key: a two-tier target spec (`provider` or
 /// `provider:nickname`) paired with the normalized capability key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CellKey {
     target_spec: String,
     capability_key: String,
-}
-
-/// Resolved cell: the single verdict + provenance that survived
-/// flattening for one `(target_spec, capability_key)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Cell {
-    verdict: OverrideVerdict,
-    provenance: OverrideProvenance,
 }
 
 /// Snapshot row -- the fixed contract shape downstream consumers read,
@@ -94,8 +71,6 @@ pub struct OverrideRow {
     pub capability_key: String,
     /// The override verdict.
     pub verdict: OverrideVerdict,
-    /// Where the override came from.
-    pub provenance: OverrideProvenance,
 }
 
 /// One raw contribution before cells are folded. Carries the source
@@ -104,14 +79,13 @@ struct Contribution {
     target_spec: String,
     capability_key: String,
     verdict: OverrideVerdict,
-    provenance: OverrideProvenance,
     source: String,
 }
 
 /// Immutable, config-derived override read-model held on the Router.
 #[derive(Debug, Default)]
 pub struct OverrideRegistry {
-    cells: HashMap<CellKey, Cell>,
+    cells: HashMap<CellKey, OverrideVerdict>,
 }
 
 impl OverrideRegistry {
@@ -132,21 +106,18 @@ impl OverrideRegistry {
     pub fn build(config: &Config) -> Self {
         warn_dead_override_keys(config);
 
-        let mut cells: HashMap<CellKey, Cell> = HashMap::new();
+        let mut cells: HashMap<CellKey, OverrideVerdict> = HashMap::new();
         for contribution in collect_contributions(config) {
             let key = CellKey {
                 target_spec: contribution.target_spec,
                 capability_key: contribution.capability_key,
             };
-            let incoming = Cell {
-                verdict: contribution.verdict,
-                provenance: contribution.provenance,
-            };
+            let incoming = contribution.verdict;
             match cells.get_mut(&key) {
                 None => {
                     cells.insert(key, incoming);
                 }
-                Some(existing) => *existing = merge_cell(*existing, incoming),
+                Some(existing) => *existing = merge_verdict(*existing, incoming),
             }
         }
         Self { cells }
@@ -162,34 +133,31 @@ impl OverrideRegistry {
         nickname: &str,
         capability_raw: &str,
         provider_kind: &str,
-    ) -> Option<(OverrideVerdict, OverrideProvenance)> {
+    ) -> Option<OverrideVerdict> {
         let capability_key = normalize_capability_key(capability_raw, provider_kind);
         let model_spec = format!("{provider_name}:{nickname}");
         let model_key = CellKey {
             target_spec: model_spec,
             capability_key: capability_key.clone(),
         };
-        if let Some(cell) = self.cells.get(&model_key) {
-            return Some((cell.verdict, cell.provenance));
+        if let Some(verdict) = self.cells.get(&model_key) {
+            return Some(*verdict);
         }
         let provider_key = CellKey {
             target_spec: provider_name.to_string(),
             capability_key,
         };
-        self.cells
-            .get(&provider_key)
-            .map(|cell| (cell.verdict, cell.provenance))
+        self.cells.get(&provider_key).copied()
     }
 
     /// Snapshot every resident cell in the fixed contract shape.
     pub fn snapshot(&self) -> Vec<OverrideRow> {
         self.cells
             .iter()
-            .map(|(key, cell)| OverrideRow {
+            .map(|(key, verdict)| OverrideRow {
                 target_spec: key.target_spec.clone(),
                 capability_key: key.capability_key.clone(),
-                verdict: cell.verdict,
-                provenance: cell.provenance,
+                verdict: *verdict,
             })
             .collect()
     }
@@ -206,31 +174,14 @@ impl OverrideRegistry {
 }
 
 /// Fold a second contribution into an existing cell. Two identical
-/// verdicts collapse, preferring static provenance so legacy labels
-/// survive a duplicate new entry. Contradictory verdicts resolve to
-/// `RouteAway` (the conservative, route-away-by-default choice); this
-/// path is unreachable for a config that passed
-/// [`validate_capability_overrides`].
-fn merge_cell(existing: Cell, incoming: Cell) -> Cell {
-    if existing.verdict == incoming.verdict {
-        let provenance = if existing.provenance == OverrideProvenance::Override {
-            incoming.provenance
-        } else {
-            existing.provenance
-        };
-        return Cell {
-            verdict: existing.verdict,
-            provenance,
-        };
-    }
-    let route_away = if existing.verdict == OverrideVerdict::RouteAway {
+/// verdicts collapse. Contradictory verdicts resolve to `RouteAway` (the
+/// conservative, route-away-by-default choice); this path is unreachable
+/// for a config that passed [`validate_capability_overrides`].
+fn merge_verdict(existing: OverrideVerdict, incoming: OverrideVerdict) -> OverrideVerdict {
+    if existing == incoming {
         existing
     } else {
-        incoming
-    };
-    Cell {
-        verdict: OverrideVerdict::RouteAway,
-        provenance: route_away.provenance,
+        OverrideVerdict::RouteAway
     }
 }
 
@@ -246,7 +197,6 @@ fn collect_contributions(config: &Config) -> Vec<Contribution> {
                 target_spec: spec.clone(),
                 capability_key: normalize_capability_key(raw, kind),
                 verdict: OverrideVerdict::RouteAway,
-                provenance: OverrideProvenance::Override,
                 source: format!("[capability.overrides.{spec}].unsupported"),
             });
         }
@@ -255,7 +205,6 @@ fn collect_contributions(config: &Config) -> Vec<Contribution> {
                 target_spec: spec.clone(),
                 capability_key: normalize_capability_key(raw, kind),
                 verdict: OverrideVerdict::ForceSupported,
-                provenance: OverrideProvenance::Override,
                 source: format!("[capability.overrides.{spec}].force_supported"),
             });
         }
@@ -409,7 +358,7 @@ mod tests {
     /// providers, models, and overrides all deserialize through the real
     /// serde path.
     fn config(toml_body: &str) -> Config {
-        toml::from_str(&format!("version = 3\n{toml_body}")).expect("config parses")
+        toml::from_str(&format!("version = 5\n{toml_body}")).expect("config parses")
     }
 
     const OPENAI_P: &str = "[providers.p]\n\
@@ -435,7 +384,6 @@ mod tests {
         assert_eq!(rows[0].target_spec, "p");
         assert_eq!(rows[0].capability_key, "web_search");
         assert_eq!(rows[0].verdict, OverrideVerdict::RouteAway);
-        assert_eq!(rows[0].provenance, OverrideProvenance::Override);
     }
 
     #[test]
@@ -459,11 +407,10 @@ mod tests {
         assert_eq!(rows[0].target_spec, "p:nick");
         assert_eq!(rows[0].capability_key, "computer_use");
         assert_eq!(rows[0].verdict, OverrideVerdict::RouteAway);
-        assert_eq!(rows[0].provenance, OverrideProvenance::Override);
     }
 
     #[test]
-    fn new_override_unsupported_and_force_supported_carry_override_provenance() {
+    fn unsupported_and_force_supported_resolve_to_their_verdicts() {
         // Arrange
         let config = config(&format!(
             "{OPENAI_P}\
@@ -478,14 +425,11 @@ mod tests {
         // Assert
         assert_eq!(
             registry.resolve("p", "any", "web_search", "openai-compat"),
-            Some((OverrideVerdict::RouteAway, OverrideProvenance::Override))
+            Some(OverrideVerdict::RouteAway)
         );
         assert_eq!(
             registry.resolve("p", "any", "structured_output", "openai-compat"),
-            Some((
-                OverrideVerdict::ForceSupported,
-                OverrideProvenance::Override
-            ))
+            Some(OverrideVerdict::ForceSupported)
         );
     }
 
@@ -513,14 +457,11 @@ mod tests {
         // provider-scoped route-away.
         assert_eq!(
             registry.resolve("p", "nick", "web_search", "openai-compat"),
-            Some((
-                OverrideVerdict::ForceSupported,
-                OverrideProvenance::Override
-            ))
+            Some(OverrideVerdict::ForceSupported)
         );
         assert_eq!(
             registry.resolve("p", "other", "web_search", "openai-compat"),
-            Some((OverrideVerdict::RouteAway, OverrideProvenance::Override))
+            Some(OverrideVerdict::RouteAway)
         );
     }
 
@@ -543,7 +484,7 @@ mod tests {
         assert_eq!(registry.len(), 1);
         assert_eq!(
             registry.resolve("p", "any", "web_search", "openai-compat"),
-            Some((OverrideVerdict::RouteAway, OverrideProvenance::Override))
+            Some(OverrideVerdict::RouteAway)
         );
     }
 
@@ -627,7 +568,7 @@ mod tests {
         let registry = OverrideRegistry::build(&config);
         assert_eq!(
             registry.resolve("br", "any", "anthropic_beta", "bedrock"),
-            Some((OverrideVerdict::RouteAway, OverrideProvenance::Override))
+            Some(OverrideVerdict::RouteAway)
         );
     }
 

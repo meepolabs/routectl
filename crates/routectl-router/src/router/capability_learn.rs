@@ -186,14 +186,18 @@ impl Router {
                         .providers
                         .get(provider_name)
                         .map_or("", |p| p.kind_str());
-                    let before = previous
-                        .override_registry
-                        .resolve(provider_name, nickname, &entry.feature_key, provider_kind)
-                        .map(|(verdict, _)| verdict);
-                    let after = self
-                        .override_registry
-                        .resolve(provider_name, nickname, &entry.feature_key, provider_kind)
-                        .map(|(verdict, _)| verdict);
+                    let before = previous.override_registry.resolve(
+                        provider_name,
+                        nickname,
+                        &entry.feature_key,
+                        provider_kind,
+                    );
+                    let after = self.override_registry.resolve(
+                        provider_name,
+                        nickname,
+                        &entry.feature_key,
+                        provider_kind,
+                    );
                     before != after
                 });
             if !changed {

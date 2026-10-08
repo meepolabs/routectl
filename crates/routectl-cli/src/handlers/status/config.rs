@@ -25,8 +25,8 @@ use serde::Serialize;
 use routectl_router::class_policy::ConfigFailureClass;
 use routectl_router::{
     ActivationEntry, ActivationState, ActivationStatus, AliasChain, ClassPolicyCell,
-    ClassPolicySource, EffectiveRow, EffectiveView, ModelCell, OverrideProvenance, OverrideRow,
-    OverrideVerdict, ProviderCell, Source, class_debits,
+    ClassPolicySource, EffectiveRow, EffectiveView, ModelCell, OverrideRow, OverrideVerdict,
+    ProviderCell, Source, class_debits,
 };
 
 use super::daemon_meta::DaemonMetaSnapshot;
@@ -174,8 +174,8 @@ struct CapabilityCellWire {
     capability_key: String,
     /// `route-away` or `force-supported`.
     verdict: &'static str,
-    /// Provenance token from the shared routing-filter vocabulary
-    /// (`provider` / `model` / `override`).
+    /// Provenance token from the shared routing-filter vocabulary; always
+    /// `override` for a config-derived cell.
     provenance: &'static str,
 }
 
@@ -229,16 +229,6 @@ const fn verdict_token(verdict: OverrideVerdict) -> &'static str {
     match verdict {
         OverrideVerdict::RouteAway => "route-away",
         OverrideVerdict::ForceSupported => "force-supported",
-    }
-}
-
-/// The capability provenance token, reusing the shared routing-filter
-/// vocabulary so the effective view and a route-away log read one dialect.
-const fn provenance_token(source: OverrideProvenance) -> &'static str {
-    match source {
-        OverrideProvenance::ProviderStatic => provenance::PROVIDER,
-        OverrideProvenance::ModelStatic => provenance::MODEL,
-        OverrideProvenance::Override => provenance::OVERRIDE,
     }
 }
 
@@ -308,7 +298,10 @@ fn map_capability(row: OverrideRow) -> CapabilityCellWire {
         target_spec: row.target_spec,
         capability_key: row.capability_key,
         verdict: verdict_token(row.verdict),
-        provenance: provenance_token(row.provenance),
+        // Every config-derived cell comes from `[capability.overrides]`; the
+        // token is the routing filter's own skip-log `source` value, so the
+        // effective view and a route-away log read one dialect.
+        provenance: provenance::OVERRIDE,
     }
 }
 
