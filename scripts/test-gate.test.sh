@@ -14,9 +14,9 @@
 #     skipping it.
 #
 # The leg is driven from a scratch copy of scripts/ whose test-gate.sh is a
-# stub recording its argv, with stub cargo-public-api and rustup on a PATH
-# that holds only them and the system directories, so the caller's own
-# toolchain never decides a verdict. Every skip case is paired with the
+# stub recording its argv, with stub cargo-public-api, rustup, and rustup's
+# cargo / rustdoc / rustc proxies on a PATH that holds only them and the
+# system directories, so the caller's own toolchain never decides a verdict. Every skip case is paired with the
 # run case it differs from by one stub.
 #
 # Run it from anywhere:
@@ -81,9 +81,12 @@ STUB
 
 # Writes the tool stubs into a fresh bin dir named $1 and prints its path.
 # Options: --tool-version V, --no-tool, --toolchains "A B" (installed names
-# without the host triple), --no-rustup.
+# without the host triple), --no-rustup, --plain-cargo (a cargo that is not
+# the rustup proxy), --no-rustdoc, --no-rust-std (the installed toolchains
+# lack that component).
 make_bin() {
     local dir="$TMP/bin-$1" tool_version="$VERSION" toolchains="$NIGHTLY" tool=1 rustup=1
+    local plain_cargo=0 rustdoc=1 rust_std=1
     shift
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -91,9 +94,17 @@ make_bin() {
             --toolchains) toolchains="$2"; shift 2 ;;
             --no-tool) tool=0; shift ;;
             --no-rustup) rustup=0; shift ;;
+            --plain-cargo) plain_cargo=1; shift ;;
+            --no-rustdoc) rustdoc=0; shift ;;
+            --no-rust-std) rust_std=0; shift ;;
         esac
     done
     mkdir -p "$dir"
+    local libdir="$dir/rustlib/lib"
+    mkdir -p "$libdir"
+    if ((rust_std)); then
+        touch "$libdir/libstd-0000000000000000.rlib"
+    fi
     if ((tool)); then
         printf '#!/bin/sh\necho "cargo-public-api %s"\n' "$tool_version" >"$dir/cargo-public-api"
         chmod +x "$dir/cargo-public-api"
@@ -119,6 +130,43 @@ echo "rustup stub: unsupported: \$*" >&2
 exit 1
 STUB
         chmod +x "$dir/rustup"
+        # Models a rustup proxy invoked as `<proxy> +T ...`: T must be an
+        # installed name and the proxied component present.
+        local proxy present
+        for proxy in cargo rustdoc rustc; do
+            present=1
+            [[ "$proxy" == rustdoc ]] && present=$rustdoc
+            cat >"$dir/$proxy" <<STUB
+#!/usr/bin/env bash
+installed=(stable $toolchains)
+found=0
+for t in "\${installed[@]}"; do
+    [[ "\$1" == "+\$t" ]] && found=1
+done
+if ((!found)); then
+    echo "error: toolchain '\${1#+}' is not installed" >&2
+    exit 1
+fi
+if ((!$present)); then
+    echo "error: '$proxy' is not installed for the toolchain" >&2
+    exit 1
+fi
+if [[ "$proxy \$2 \$3" == "rustc --print target-libdir" ]]; then
+    echo "$libdir"
+    exit 0
+fi
+echo "$proxy 1.0.0-nightly (stub)"
+STUB
+            chmod +x "$dir/$proxy"
+        done
+    fi
+    if ((plain_cargo)); then
+        cat >"$dir/cargo" <<'STUB'
+#!/bin/sh
+case "$1" in +*) echo "error: no such command: $1" >&2; exit 101 ;; esac
+echo "cargo 1.0.0"
+STUB
+        chmod +x "$dir/cargo"
     fi
     echo "$dir"
 }
@@ -134,9 +182,11 @@ gate_ran() { [[ -f "$GATE_LOG" && "$(cat "$GATE_LOG")" == "public-api" ]]; }
 
 skip_line() { printf '%s\n' "$OUT" | grep -q '^public-api: SKIPPED locally (.*); CI runs this check\.'; }
 
-if [[ -n "$(PATH="$SYSTEM_PATH" command -v cargo-public-api)" ]]; then
-    fail "cargo-public-api is in $SYSTEM_PATH, so the absent-tool cases cannot be hermetic"
-fi
+for bin in cargo-public-api rustup cargo rustdoc rustc; do
+    if [[ -n "$(PATH="$SYSTEM_PATH" command -v "$bin")" ]]; then
+        fail "$bin is in $SYSTEM_PATH, so the absent-tool cases cannot be hermetic"
+    fi
+done
 
 full="$(make_bin full)"
 run_leg "$full"
@@ -177,6 +227,12 @@ assert_skip "cargo-public-api at another version" \
 assert_skip "pinned nightly absent" \
     "$(make_bin no-nightly --toolchains "nightly-1999-01-01")" "toolchain $NIGHTLY not installed"
 assert_skip "rustup absent" "$(make_bin no-rustup --no-rustup)" "rustup not on PATH"
+assert_skip "cargo on PATH is not the rustup proxy" \
+    "$(make_bin plain-cargo --plain-cargo)" "not the rustup proxy"
+assert_skip "pinned nightly lacks rustdoc" \
+    "$(make_bin no-rustdoc --no-rustdoc)" "rustdoc for $NIGHTLY unavailable"
+assert_skip "pinned nightly lacks the host rust-std" \
+    "$(make_bin no-rust-std --no-rust-std)" "lacks rust-std for the host"
 
 # The nightly match must not accept a toolchain whose name merely starts
 # with the pin, with or without a separating dash.
