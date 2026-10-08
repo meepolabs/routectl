@@ -423,7 +423,9 @@ fn confirmed_scaffold(config_path: &Path, yes: bool, io: &dyn InitIo) -> Result<
 fn scaffold_path(config_path: &Path) -> Result<()> {
     scaffold::scaffold_fresh(config_path).map_err(|e| Error::Config(e.to_string()))?;
 
-    let cfg = parse_config(&read_config_text(config_path)?)
+    let text = read_config_text(config_path)?;
+    preflight(&text)?;
+    let cfg = parse_config(&text)
         .map_err(|e| Error::Config(format!("scaffolded config does not parse: {e}")))?;
     let default_alias = cfg
         .aliases

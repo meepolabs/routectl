@@ -444,6 +444,38 @@ mod retired_capability_keys_preflight_tests {
     }
 
     #[test]
+    fn a_key_name_with_control_characters_is_filtered_out_of_the_message() {
+        let cases = [
+            (
+                "provider name",
+                "[providers.\"p\\u001b[31m\\r\\nx\"]\nallowed_betas = []\n",
+                "providers.p?[31m??x.allowed_betas",
+            ),
+            (
+                "model nickname",
+                "[models.\"m\\u001b\\r\\n\"]\nunsupported_features = []\n",
+                "models.m???.unsupported_features",
+            ),
+        ];
+
+        for (row, body, rendered) in cases {
+            // Act
+            let msg = preflight_retired_capability_keys(&current_with(body))
+                .expect_err(row)
+                .to_string();
+
+            // Assert
+            for byte in ['\u{1b}', '\r', '\n'] {
+                assert!(!msg.contains(byte), "{row}: {byte:?} survived in {msg:?}");
+            }
+            assert!(
+                msg.starts_with(&format!("`{rendered}` was retired")),
+                "{row}: {msg:?}"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_toml_falls_through_to_the_typed_parse() {
         assert_eq!(
             preflight_retired_capability_keys("[bedrock\nallowed_betas = = 1\n"),

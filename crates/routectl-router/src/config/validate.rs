@@ -203,10 +203,23 @@ pub struct RetiredCapabilityKeysError {
     pub paths: Vec<String>,
 }
 
+/// Character ceiling for one operator-written key rendered into an error
+/// message by [`message_safe_key`].
+const MAX_MESSAGE_KEY_CHARS: usize = 256;
+
+/// An operator-written TOML key (or a dotted path built from one) made safe
+/// to interpolate into an error message. A quoted key may carry an ESC, CR or
+/// LF byte; rendered raw, it would split the message or forge a terminal
+/// escape. Printable ASCII passes through unchanged.
+pub fn message_safe_key(key: &str) -> String {
+    routectl_core::sanitize_for_log_with_cap(key, MAX_MESSAGE_KEY_CHARS)
+}
+
 fn render_retired_paths(paths: &[String]) -> String {
     paths
         .iter()
         .map(|path| {
+            let path = message_safe_key(path);
             format!(
                 "`{path}` was retired in config version 5; remove it (a version 4 file is \
                  converted by `routectl config migrate`)"

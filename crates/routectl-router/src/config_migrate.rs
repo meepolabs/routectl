@@ -41,7 +41,7 @@ use toml_edit::{Array, DocumentMut, Item, Key, Table, TableLike, Value};
 
 use crate::catalog::{CachePricingOverride, CachePricingSelector};
 use crate::catalog_overlay::{self, OverlayCell, OverlaySource};
-use crate::config::CURRENT_CONFIG_VERSION;
+use crate::config::{CURRENT_CONFIG_VERSION, message_safe_key};
 
 /// Seconds in a day, for epoch-day arithmetic off the system clock.
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -375,8 +375,8 @@ const LATEST_MIGRATION_VERSION: u32 = 5;
 /// a bump of the const without a matching rung is caught by the build, not
 /// at runtime.
 const _: () = assert!(
-    LATEST_MIGRATION_VERSION >= CURRENT_CONFIG_VERSION,
-    "config migration ladder is missing a step for the current config version",
+    LATEST_MIGRATION_VERSION == CURRENT_CONFIG_VERSION,
+    "config migration ladder must end exactly at the current config version",
 );
 
 /// What a single migration step accomplished, for the ladder's audit line.
@@ -1009,10 +1009,11 @@ fn forced_fold_conflicts(doc: &DocumentMut, plan: &UnsupportedFeaturesPlan) -> V
         for value in fold.values.iter().filter_map(Value::as_str) {
             if forced.iter().any(|f| f.as_str() == Some(value)) {
                 cells.push(format!(
-                    "[capability.overrides.{}] `{value}`: in force_supported, and in the \
+                    "[capability.overrides.{}] `{}`: in force_supported, and in the \
                      retired {}",
                     render_spec_key(&fold.spec),
-                    fold.source,
+                    message_safe_key(value),
+                    message_safe_key(&fold.source),
                 ));
             }
         }
@@ -1022,13 +1023,15 @@ fn forced_fold_conflicts(doc: &DocumentMut, plan: &UnsupportedFeaturesPlan) -> V
     cells
 }
 
-/// A `[capability.overrides.<spec>]` key as it renders in a TOML header: a
-/// model-scoped `provider:nick` spec needs quoting.
+/// A `[capability.overrides.<spec>]` key as it renders in a TOML header in
+/// refusal text: a model-scoped `provider:nick` spec needs quoting, and the
+/// operator-written names are control-char filtered.
 fn render_spec_key(spec: &str) -> String {
+    let spec = message_safe_key(spec);
     if spec.contains(':') {
         format!("\"{spec}\"")
     } else {
-        spec.to_string()
+        spec
     }
 }
 
@@ -1088,7 +1091,10 @@ fn present_egress_allowlists(doc: &DocumentMut) -> Vec<PresentAllowlist> {
                 .and_then(|entry| non_empty_array_len(entry, PROVIDER_ALLOWLIST_KEY))
             {
                 found.push(PresentAllowlist {
-                    path: format!("providers.{name}.{PROVIDER_ALLOWLIST_KEY}"),
+                    path: format!(
+                        "providers.{}.{PROVIDER_ALLOWLIST_KEY}",
+                        message_safe_key(name)
+                    ),
                     entry_count,
                 });
             }
@@ -3250,6 +3256,76 @@ api_key_ref = \"literal:k\"\n";
                 "providers.a.allowed_betas"
             ]
         );
+    }
+
+    /// The lines a refusal names an operator-written key or value in.
+    fn refusal_item_lines(refusal: &Refusal) -> Vec<String> {
+        match refusal {
+            Refusal::EgressAllowlist { allowlists } => {
+                allowlists.iter().map(|a| a.path.clone()).collect()
+            }
+            Refusal::CapabilityConflict { cells } => cells.clone(),
+            Refusal::OverrideShape { paths } => paths.clone(),
+            other => panic!("unexpected refusal {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v4_to_v5_refusal_text_filters_control_characters_from_key_names() {
+        // A quoted TOML key carrying ESC, CR and LF, spelled as TOML escapes.
+        const KEY: &str = "f\\u001b[31m\\r\\n";
+        const RENDERED: &str = "f?[31m??";
+        let provider = format!(
+            "version = 4\n[providers.\"{KEY}\"]\nkind = \"openai-compat\"\n\
+             base_url = \"https://x\"\napi_key_ref = \"literal:k\"\n"
+        );
+        let cases = [
+            (
+                "allowlist path",
+                format!("{provider}allowed_betas = [\"x\"]\n"),
+                format!("providers.{RENDERED}.allowed_betas"),
+            ),
+            (
+                "conflict cell and value",
+                format!(
+                    "{provider}unsupported_features = [\"web\\u001b\\r\\n\"]\n\
+                     [capability.overrides.\"{KEY}\"]\n\
+                     force_supported = [\"web\\u001b\\r\\n\"]\n"
+                ),
+                format!(
+                    "[capability.overrides.{RENDERED}] `web???`: in force_supported, and in \
+                     the retired [providers.{RENDERED}].unsupported_features"
+                ),
+            ),
+            (
+                "override cell path",
+                format!(
+                    "{provider}unsupported_features = [\"web_search\"]\n\
+                     [capability.overrides]\n\"{KEY}\" = 1\n"
+                ),
+                format!("capability.overrides.{RENDERED} (must be a table)"),
+            ),
+        ];
+
+        for (row, src, expected) in cases {
+            // Arrange
+            let mut doc = doc_of(&src);
+
+            // Act
+            let refusal = migrate_v4_to_v5(&mut doc).expect_err(row);
+            let message = refusal.to_string();
+
+            // Assert
+            assert_eq!(refusal_item_lines(&refusal), [expected.as_str()], "{row}");
+            for byte in ['\u{1b}', '\r'] {
+                assert!(!message.contains(byte), "{row}: {byte:?} in {message:?}");
+            }
+            let item = format!("  - {expected}");
+            assert!(
+                message.lines().any(|line| line.starts_with(&item)),
+                "{row}: the item line is not whole in {message:?}"
+            );
+        }
     }
 
     /// A v3 file whose v3 -> v4 rung succeeds (it relocates

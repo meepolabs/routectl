@@ -72,7 +72,7 @@ use routectl_router::{
     ConfigWriteError, EditOutcome, MigrateError, MigrationPlan, OverlayError, OverlayWrite,
     Refusal, SeatPoolAccount, SeatPoolMove, WriteKind, apply_config_transforms,
     apply_seat_pool_move, bare_oauth_pool_candidates, edit_config_toml, models_routed_at,
-    parse_config, plan_migration, with_overlay_write_lock,
+    parse_config, plan_migration, preflight_retired_capability_keys, with_overlay_write_lock,
 };
 use toml_edit::DocumentMut;
 
@@ -446,6 +446,7 @@ pub async fn run_at(
 
     let doc = parse_document(&snapshot_text)?;
     let from_version = raw_version_of(&doc)?;
+    refuse_retired_keys_at_current(&snapshot_text, from_version, config_path, dry_run)?;
 
     // The v1 rung folds the operator's `[cache_pricing]` table (merged with
     // any legacy sidecar) into the catalog overlay; only a v1 file needs it.
@@ -800,6 +801,34 @@ fn resumable_commit_error(e: &ConfigWriteError<CommitError>) -> Error {
     ))
 }
 
+/// A file already at the current version has no rung left to fold a retired
+/// key, so one carrying such a key is refused up front with the key paths
+/// named. Without this, the shared gate would reject it later as a redacted
+/// unknown field that does not say which key to remove.
+fn refuse_retired_keys_at_current(
+    snapshot_text: &str,
+    from_version: u32,
+    config_path: &Path,
+    dry_run: bool,
+) -> Result<()> {
+    if from_version != CURRENT_CONFIG_VERSION {
+        return Ok(());
+    }
+    preflight_retired_capability_keys(snapshot_text).map_err(|e| {
+        audit_event(
+            config_path,
+            from_version,
+            from_version,
+            dry_run,
+            false,
+            false,
+            "invalid",
+            None,
+        );
+        Error::Config(e.to_string())
+    })
+}
+
 /// Read the file's raw `version` off the document: an absent key is legacy v1,
 /// a present-but-non-integer value is a malformed file the ladder cannot act on.
 fn raw_version_of(doc: &DocumentMut) -> Result<u32> {
@@ -820,7 +849,80 @@ fn raw_version_of(doc: &DocumentMut) -> Result<u32> {
 #[derive(Default, serde::Deserialize)]
 struct V1CachePricingTable {
     #[serde(default)]
-    cache_pricing: BTreeMap<String, CachePricingOverride>,
+    cache_pricing: BTreeMap<String, V1CachePricingEntry>,
+}
+
+/// One `[cache_pricing]` entry exactly as a version 1 file spelled it. Frozen
+/// here rather than borrowed from the router's override type, so a later
+/// change to that type's serde shape cannot change what this migration reads.
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct V1CachePricingEntry {
+    wm: Option<f32>,
+    rm: Option<f32>,
+    ttl_seconds: Option<u32>,
+    min_prefix_tokens: Option<u32>,
+    has_storage_rent: Option<bool>,
+    storage_rent: Option<f32>,
+    auto_cacher: Option<bool>,
+    verified_at: Option<String>,
+    override_acknowledges_cost_risk: bool,
+    max_context_tokens: Option<u32>,
+    max_output_tokens: Option<u32>,
+    input_cost_per_token: Option<f32>,
+    output_cost_per_token: Option<f32>,
+}
+
+impl V1CachePricingEntry {
+    /// A verification-only entry: a sidecar date and no value fields.
+    fn verified_on(date: &str) -> Self {
+        Self {
+            verified_at: Some(date.to_string()),
+            ..Self::default()
+        }
+    }
+
+    /// The ladder's input for this entry. Field-by-field, so every legacy
+    /// field is mapped explicitly rather than by a shared serde shape.
+    fn into_override(self) -> CachePricingOverride {
+        CachePricingOverride {
+            wm: self.wm,
+            rm: self.rm,
+            ttl_seconds: self.ttl_seconds,
+            min_prefix_tokens: self.min_prefix_tokens,
+            has_storage_rent: self.has_storage_rent,
+            storage_rent: self.storage_rent,
+            auto_cacher: self.auto_cacher,
+            verified_at: self.verified_at,
+            override_acknowledges_cost_risk: self.override_acknowledges_cost_risk,
+            max_context_tokens: self.max_context_tokens,
+            max_output_tokens: self.max_output_tokens,
+            input_cost_per_token: self.input_cost_per_token,
+            output_cost_per_token: self.output_cost_per_token,
+        }
+    }
+}
+
+/// Fold the legacy sidecar's `selector -> date` stamps into `table`. An entry
+/// the config already carries wins and is skipped silently; a stamp whose
+/// date is not `YYYY-MM-DD` is dropped, and its selector returned so the
+/// caller can warn.
+fn merge_v1_verifications(
+    table: &mut BTreeMap<String, V1CachePricingEntry>,
+    verified: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut skipped = Vec::new();
+    for (selector, date) in verified {
+        if table.contains_key(selector) {
+            continue;
+        }
+        if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+            skipped.push(selector.clone());
+            continue;
+        }
+        table.insert(selector.clone(), V1CachePricingEntry::verified_on(date));
+    }
+    skipped
 }
 
 /// Build the v1 rung's `cache_pricing` input: the file's `[cache_pricing]`
@@ -832,19 +934,15 @@ fn load_v1_cache_pricing(
     snapshot_text: &str,
     config_path: &Path,
 ) -> Result<BTreeMap<String, CachePricingOverride>> {
-    let table: V1CachePricingTable = toml::from_str(snapshot_text).map_err(|e| {
+    let V1CachePricingTable { mut cache_pricing } = toml::from_str(snapshot_text).map_err(|e| {
         Error::Config(format!(
             "legacy config `[cache_pricing]` does not parse; fix it before migrating: {e}"
         ))
     })?;
-    let mut config = Config {
-        cache_pricing: table.cache_pricing,
-        ..Config::default()
-    };
     let sidecar = config_path.with_file_name("pricing_verifications.json");
     match super::catalog::load_verifications(&sidecar) {
         Ok(v) => {
-            let skipped = super::catalog::merge_verifications_into(&mut config, &v);
+            let skipped = merge_v1_verifications(&mut cache_pricing, &v.verified);
             for sel in &skipped {
                 tracing::warn!(
                     selector = %routectl_core::sanitize_for_log(sel),
@@ -858,7 +956,10 @@ fn load_v1_cache_pricing(
             "pricing verifications sidecar could not be loaded; skipping merge"
         ),
     }
-    Ok(config.cache_pricing)
+    Ok(cache_pricing
+        .into_iter()
+        .map(|(selector, entry)| (selector, entry.into_override()))
+        .collect())
 }
 
 /// Shared validation gate: `parse_config` then the centralized validator suite
@@ -2983,6 +3084,94 @@ default = \"gpt\"
             before,
             "a current-version file must not be rewritten"
         );
+    }
+
+    #[tokio::test]
+    async fn a_current_version_file_with_a_retired_key_names_the_key_byte_identical() {
+        let cases = [
+            (
+                "provider allowlist",
+                latest_clean().replace(
+                    "api_key_ref = \"literal:test-key\"\n",
+                    "api_key_ref = \"literal:test-key\"\nallowed_betas = []\n",
+                ),
+                "providers.fast.allowed_betas",
+            ),
+            (
+                "model capability list",
+                latest_clean().replace(
+                    "upstream = \"gpt-4o\"\n",
+                    "upstream = \"gpt-4o\"\nunsupported_features = []\n",
+                ),
+                "models.gpt.unsupported_features",
+            ),
+        ];
+
+        for (row, body, path) in cases {
+            // Arrange
+            let f = fixture(&body);
+            let before = std::fs::read(&f.config).unwrap();
+
+            // Act
+            let err = f.migrate(false, true).await.expect_err(row);
+
+            // Assert
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "config: `{path}` was retired in config version 5; remove it (a version 4 \
+                     file is converted by `routectl config migrate`)"
+                ),
+                "{row}"
+            );
+            assert_eq!(std::fs::read(&f.config).unwrap(), before, "{row}");
+            assert!(!f.overlay.exists(), "{row}: no overlay write");
+        }
+    }
+
+    #[test]
+    fn v1_cache_pricing_merges_the_sidecar_with_the_config_entry_winning() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            dir.path().join("pricing_verifications.json"),
+            r#"{"verified":{"openai-compat:grok-*":"2026-06-30",
+                "anthropic-api:claude-*":"2026-07-01",
+                "openai-compat:bad-*":"not-a-date"}}"#,
+        )
+        .unwrap();
+
+        // Act
+        let merged = load_v1_cache_pricing(V1_WITH_CACHE_PRICING, &config_path).expect("load");
+
+        // Assert
+        assert_eq!(
+            merged.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["anthropic-api:claude-*", "openai-compat:grok-*"]
+        );
+        let config_entry = &merged["openai-compat:grok-*"];
+        assert_eq!(config_entry.wm, Some(1.5));
+        assert!(config_entry.override_acknowledges_cost_risk);
+        assert_eq!(config_entry.verified_at, None, "the config entry wins");
+        assert_eq!(
+            merged["anthropic-api:claude-*"],
+            CachePricingOverride {
+                verified_at: Some("2026-07-01".to_string()),
+                ..CachePricingOverride::default()
+            }
+        );
+    }
+
+    #[test]
+    fn v1_cache_pricing_refuses_an_unknown_entry_field() {
+        let body = V1_WITH_CACHE_PRICING.replace("wm = 1.5", "wmm = 1.5");
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = load_v1_cache_pricing(&body, &dir.path().join("config.toml"))
+            .expect_err("a typo in a legacy entry must not be dropped silently");
+
+        assert!(err.to_string().contains("unknown field `wmm`"), "{err}");
     }
 
     #[tokio::test]
