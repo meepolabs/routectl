@@ -312,8 +312,9 @@ pub struct AnthropicApiProvider {
 ///
 ///   1. `cloak_body` (billing strip, identity stamp, tool-name normalization),
 ///   2. `resign_cch_in_place` (the billing-checksum re-sign),
-///   3. the minted OAuth/Claude-Code beta-floor injection and the
-///      capability-driven beta unions (the anthropic-beta HEADER).
+///   3. the minted OAuth/Claude-Code beta-floor injection, the
+///      capability-driven beta unions, and the withheld-beta filter over the
+///      client's own flags (the anthropic-beta HEADER).
 ///
 /// The predicate is always derived via the single `forwarded_leg` helper --
 /// self-gating inside `cloak_body`, and a local computed at the top of each
@@ -376,6 +377,39 @@ impl AnthropicApiProvider {
             context_management::THINKING_CACHE_TTL,
             "test-seed",
         );
+    }
+
+    /// Resolve the configured base URL's host to `addr` instead of DNS, with
+    /// no proxy, so a cross-crate test can keep a host-gated base URL (the
+    /// exact Anthropic host, carrying the mock's port) while a mock answers.
+    /// Only the address changes; every host-keyed decision still reads the
+    /// configured base URL. The port in `addr` is ignored: the URL's applies.
+    ///
+    /// # Panics
+    ///
+    /// When the base URL has no host or the HTTP client cannot be built.
+    #[cfg(feature = "test-utils")]
+    pub fn with_host_resolved_to_for_tests(mut self, addr: std::net::SocketAddr) -> Self {
+        let host = reqwest::Url::parse(&self.cfg.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .expect("the base URL must carry a host");
+        let ua = resolve_user_agent(
+            self.cfg.user_agent.as_deref(),
+            self.cfg.auth_kind,
+            &self.cfg.base_url,
+        );
+        let mut builder = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .resolve(&host, addr);
+        if let Some(ua) = ua {
+            builder = builder.user_agent(ua);
+        }
+        self.client = builder
+            .build()
+            .expect("reqwest client build failed for the test resolution");
+        self
     }
 
     pub(super) fn messages_url(&self) -> String {
@@ -566,23 +600,24 @@ impl AnthropicApiProvider {
         // union it in here too (deduplicated) so a `cfg.header_extras
         // = [("anthropic-beta", "ctx-1m")]` works without a router.
         //
-        // Client-supplied betas pass through unfiltered on every leg, so a
-        // flag routectl has never seen reaches the upstream verbatim.
+        // Client-supplied betas pass through minus the flags the router
+        // withheld for this lane, so a flag routectl has never seen reaches
+        // the upstream verbatim. The forwarded leg ships the client's set
+        // untouched.
+        let client_betas = if forwarded_leg {
+            req.anthropic_beta.clone()
+        } else {
+            self.withhold_client_betas(req, is_non_cc)
+        };
         let mut beta_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut merged_betas: Vec<String> = Vec::new();
-        for entry in &req.anthropic_beta {
+        for entry in &client_betas {
             let t = entry.trim();
             if !t.is_empty() && beta_seen.insert(t.to_string()) {
                 merged_betas.push(t.to_string());
             }
         }
-        let config_betas = self
-            .cfg
-            .header_extras
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
-            .map_or("", |(_, v)| v.as_str());
-        for entry in config_betas.split(',') {
+        for entry in self.config_betas().split(',') {
             let t = entry.trim();
             if !t.is_empty() && beta_seen.insert(t.to_string()) {
                 merged_betas.push(t.to_string());
@@ -825,6 +860,69 @@ impl AnthropicApiProvider {
             body_has_effort,
         };
         (rb, decision)
+    }
+
+    /// The provider-level `header_extras["anthropic-beta"]` value, or `""`.
+    fn config_betas(&self) -> &str {
+        self.cfg
+            .header_extras
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
+            .map_or("", |(_, v)| v.as_str())
+    }
+
+    /// The flags this egress itself adds to the header for `req`: the
+    /// provider and operator pins, and on the cloak lane the OAuth gate plus
+    /// (for a non-CC request) the pinned Claude Code floor. A client flag in
+    /// this set is never withheld, so it keeps its client position.
+    fn beta_floor(&self, req: &ChatRequest, is_non_cc: bool) -> Vec<String> {
+        let mut floor: Vec<String> = self
+            .config_betas()
+            .split(',')
+            .chain(
+                req.routectl_internal
+                    .operator_betas
+                    .iter()
+                    .map(String::as_str),
+            )
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect();
+        if self.is_cloak_lane(req) {
+            floor.push(routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA.to_string());
+            if is_non_cc {
+                floor.extend(
+                    routectl_core::identity::anthropic::default_claude_code_anthropic_betas()
+                        .iter()
+                        .map(|f| (*f).to_string()),
+                );
+            }
+        }
+        floor
+    }
+
+    /// The client betas minus `routectl_internal.withheld_betas`, keeping
+    /// every flag in [`Self::beta_floor`]. Each withheld flag logs at debug.
+    fn withhold_client_betas(&self, req: &ChatRequest, is_non_cc: bool) -> Vec<String> {
+        let withheld = &req.routectl_internal.withheld_betas;
+        if withheld.is_empty() {
+            return req.anthropic_beta.clone();
+        }
+        let split = crate::beta_withhold::split_withheld(
+            &req.anthropic_beta,
+            |entry| Some(entry.trim()),
+            withheld,
+            &self.beta_floor(req, is_non_cc),
+        );
+        for flag in &split.dropped {
+            tracing::debug!(
+                provider = %self.cfg.id,
+                flag = %sanitize_for_log(flag.trim()),
+                "dropping beta flag withheld for this lane"
+            );
+        }
+        split.kept
     }
 
     /// Stamp the two Claude Code session-identity headers into an

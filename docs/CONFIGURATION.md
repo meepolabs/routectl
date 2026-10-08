@@ -262,7 +262,7 @@ pass-through, or by the router's own learned and seeded verdicts:
 | --- | --- |
 | `[providers.X] unsupported_features` | `[capability.overrides.<provider>] unsupported` |
 | `[models.X] unsupported_features` | `[capability.overrides."<provider>:<nickname>"] unsupported` |
-| `[providers.X] allowed_betas` (anthropic-api) | nothing: client betas pass through unfiltered |
+| `[providers.X] allowed_betas` (anthropic-api) | nothing: client betas pass through, minus the flags the router withholds from the lane |
 | `[bedrock] allowed_betas` | nothing: client betas pass through, minus the flags the router withholds from the lane |
 | `[bedrock] allowed_body_fields` | nothing: every body field passes through except `mcp_servers` and an orphan `tool_choice` |
 | `[bedrock]` table | nothing: it held only the two lists above |
@@ -855,8 +855,17 @@ anthropic_beta = ["computer-use-2025-01-24"]
 ### Anthropic API: client betas pass through
 
 An `anthropic-api` provider forwards every client `anthropic-beta` flag to
-the upstream unfiltered, on every leg; the operator floor (provider and
-model `header_extras["anthropic-beta"]`) always ships alongside them.
+the upstream except the ones the router withholds from the lane: an
+`unsupported` override on the flag's `beta:<flag>` key under
+[`[capability.overrides]`](#capabilityoverrides-is-the-durable-decision-surface)
+(a `force_supported` one sends it), and a learned or seeded `beta:` verdict
+where the lane has one (today only Bedrock lanes learn or seed them). The
+floor is never withheld: the operator floor (provider and model
+`header_extras["anthropic-beta"]`) always ships, as do the own-OAuth flags
+below and the [capability betas](#capability-betas-are-always-unioned); a
+client flag the floor also carries keeps its client position. A request on
+a forwarded credential withholds nothing. Each withheld flag is logged at
+`debug` (see [LOGGING.md](LOGGING.md)).
 
 On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
 routectl also injects a 9-flag model-agnostic floor

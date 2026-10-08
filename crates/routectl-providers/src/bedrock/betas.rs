@@ -20,6 +20,8 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, sanitize_for_log};
 
+use crate::beta_withhold::split_withheld;
+
 use super::{BedrockApiShape, BedrockConfig};
 
 /// The `anthropic-beta` flag gating `thinking.display: "updates"`.
@@ -107,36 +109,24 @@ pub(super) fn withhold_betas(
     withheld_betas: &[String],
     floor_betas: &[String],
 ) -> bool {
-    let is_withheld = |item: &Value| {
-        item.as_str().is_some_and(|flag| {
-            withheld_betas.iter().any(|w| w == flag) && !floor_betas.iter().any(|s| s == flag)
-        })
-    };
     let Some(arr) = bag.get("anthropic_beta").and_then(Value::as_array) else {
         return false;
     };
-    if !arr.iter().any(is_withheld) {
+    let split = split_withheld(arr, Value::as_str, withheld_betas, floor_betas);
+    if split.dropped.is_empty() {
         return false;
     }
-    let kept: Vec<Value> = arr
-        .iter()
-        .filter(|item| {
-            let withheld = is_withheld(item);
-            if withheld {
-                tracing::debug!(
-                    provider = %provider_id,
-                    flag = %sanitize_for_log(item.as_str().unwrap_or_default()),
-                    "dropping beta flag withheld for this lane"
-                );
-            }
-            !withheld
-        })
-        .cloned()
-        .collect();
-    if kept.is_empty() {
+    for item in &split.dropped {
+        tracing::debug!(
+            provider = %provider_id,
+            flag = %sanitize_for_log(item.as_str().unwrap_or_default()),
+            "dropping beta flag withheld for this lane"
+        );
+    }
+    if split.kept.is_empty() {
         bag.remove("anthropic_beta");
     } else {
-        bag.insert("anthropic_beta".into(), Value::Array(kept));
+        bag.insert("anthropic_beta".into(), Value::Array(split.kept));
     }
     true
 }

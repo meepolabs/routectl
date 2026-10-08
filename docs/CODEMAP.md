@@ -503,6 +503,10 @@ license.
   synthetic-status mapping (`anthropic_error_type_to_status`; unknown tokens
   -> 502) consumed by `anthropic_api/sse.rs` and `bedrock/eventstream.rs` so
   an in-stream error event classifies identically to the sync error path
+- `src/beta_withhold.rs` -- `split_withheld`: the withheld client-beta
+  decision shared by the anthropic-api header compose and Bedrock's
+  `withhold_betas` (drop a withheld flag unless the caller's floor asserts it;
+  both sides keep order); gated on `anthropic-api` or `bedrock`
 - `src/aws_error.rs` -- shared redaction + token lift for AWS/Bedrock upstream
   error envelopes: single `classify_bedrock_error` source drives both
   `classify_client_error_message` (client-facing) and `sanitized_debug_body`
@@ -646,7 +650,15 @@ license.
   shipped body implies -- today `output_config.format` ->
   `STRUCTURED_OUTPUTS_BETA`, unioned last (post-floor,
   post-context_management-strip, suppressed on the forwarded leg) and
-  idempotent, so an OAuth Claude-Code list stays byte-identical
+  idempotent, so an OAuth Claude-Code list stays byte-identical. Off the
+  forwarded leg, the client betas first lose the request's
+  `routectl_internal.withheld_betas` (`withhold_client_betas`, via
+  `crate::beta_withhold`) except a flag in `beta_floor` (provider and operator
+  pins, plus the OAuth gate and, for non-CC, the Claude Code floor on the cloak
+  lane), which keeps its client position; each withheld flag logs at debug.
+  `with_host_resolved_to_for_tests` (behind `test-utils`) resolves the base
+  URL's host to a mock address so a cross-crate test keeps the exact Anthropic
+  host
 - `src/anthropic_api/context_management.rs` -- LRU+TTL thinking-block store
   for context-management beta emulation; exports `ThinkingCache`,
   `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA`,
@@ -1164,7 +1176,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` handling (Invoke body +
   Converse `additionalModelRequestFields`): client flags pass verbatim except
   that `withhold_betas` drops the request's `routectl_internal.withheld_betas`
-  unless the operator floor (`operator_floor`) asserts it; plus
+  unless the operator floor (`operator_floor`) asserts it, deciding through
+  `crate::beta_withhold`; plus
   `feature_implied_betas` /
   `union_feature_implied_betas`: the single source for the betas both
   carriers add from body fields (structured-outputs; Converse
@@ -4835,12 +4848,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   loop end-to-end binary: shared upstream/router fixtures plus `#[path]`
   wiring of the scenario submodules under `tests/learned_capability_loop/`
   (`real_envelope`, `learn_and_decay`, `never_learn`, `learned_tail`,
-  `streaming`, `bedrock_new_beta`); one binary
+  `streaming`, `bedrock_new_beta`, `anthropic_beta_withhold`); one binary
 - `tests/learned_capability_loop/bedrock_new_beta.rs` -- a beta flag
   routectl has never seen crosses a real Bedrock lane (Invoke and Converse)
   against a mock bedrock-runtime: sent verbatim, repaired after the named
   rejection, learned as one `beta:` negative, withheld on the next request;
   plus operator-override and floor+client dedup controls
+- `tests/learned_capability_loop/anthropic_beta_withhold.rs` -- an
+  `unsupported = ["beta:<flag>"]` override keeps the flag off a real
+  anthropic-api lane's `anthropic-beta` header (own-OAuth, exact Anthropic
+  host resolved to a mock), for non-CC and genuine-CC requests, with the
+  floor and client order intact
 - `tests/live_learned_capability.rs` -- live-network smoke of that loop
   against the real openai-compat provider at `ROUTECTL_LIVE_BASE_URL`;
   `test = false` behind `live-integration`, so it runs only when named

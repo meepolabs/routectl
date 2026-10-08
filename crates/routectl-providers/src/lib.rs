@@ -239,6 +239,12 @@ pub(crate) mod claude_signing;
 #[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
 pub(crate) mod anthropic_error;
 
+// The withheld client-beta decision both anthropic-vocabulary egresses apply
+// before the wire. Gated like `anthropic_error`, so the lean anthropic-api
+// build carries it and an openai-compat-only build does not.
+#[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
+pub(crate) mod beta_withhold;
+
 // Shared redaction + token lift for AWS/Bedrock upstream error envelopes. A
 // 403 AccessDenied body names the caller principal ARN, account id, and
 // resource ARN; the single classifier here keeps that out of both the

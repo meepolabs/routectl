@@ -101,9 +101,11 @@ ROUTECTL_LOG=routectl=trace ./routectl serve
 # Trace one specific request end-to-end:
 ROUTECTL_LOG=routectl=trace ./routectl serve 2>&1 | grep request_id=<id>
 
-# Which client beta flags a Bedrock lane is withholding (seeded or
-# learned after AWS rejected them), on Invoke or Converse:
-ROUTECTL_LOG=routectl_providers::bedrock=debug ./routectl serve 2>&1 \
+# Which client beta flags a lane is withholding: an `unsupported`
+# override on `beta:<flag>`, or on Bedrock (Invoke or Converse) a seeded
+# or learned rejection. Both the bedrock and anthropic-api egresses log
+# the same line:
+ROUTECTL_LOG=routectl_providers=debug ./routectl serve 2>&1 \
   | grep "dropping beta flag"
 ```
 

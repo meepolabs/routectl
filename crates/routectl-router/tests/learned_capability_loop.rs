@@ -369,3 +369,6 @@ mod streaming;
 #[cfg(feature = "bedrock")]
 #[path = "learned_capability_loop/bedrock_new_beta.rs"]
 mod bedrock_new_beta;
+
+#[path = "learned_capability_loop/anthropic_beta_withhold.rs"]
+mod anthropic_beta_withhold;

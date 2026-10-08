@@ -1165,6 +1165,11 @@ mod identity_host_tests;
 #[path = "mod_redact_display_tests.rs"]
 mod redact_display_tests;
 
+// The router's withheld client betas on the `anthropic-beta` header.
+#[cfg(test)]
+#[path = "client_beta_withhold_tests.rs"]
+mod client_beta_withhold_tests;
+
 // A cloak relocation refusal halts all three dispatch paths before egress.
 #[cfg(test)]
 #[path = "mod_cloak_refusal_tests.rs"]
