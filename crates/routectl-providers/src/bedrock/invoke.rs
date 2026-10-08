@@ -86,24 +86,14 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         Value::String(BEDROCK_ANTHROPIC_VERSION.into()),
     );
 
-    // Merge the configured beta flags. If the body already has its own
-    // anthropic_beta (e.g. from a per-request override), prepend the
-    // provider-level flags so user overrides take precedence on
-    // duplicate keys.
-    if !cfg.anthropic_beta.is_empty() {
-        let combined: Vec<Value> = cfg
-            .anthropic_beta
-            .iter()
-            .cloned()
-            .map(Value::String)
-            .chain(
-                obj.get("anthropic_beta")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .collect();
-        obj.insert("anthropic_beta".into(), Value::Array(combined));
+    // Merge the configured beta flags ahead of the client's, keeping only
+    // the first occurrence of each flag. Runs even with no configured
+    // flags, so a client list carrying a repeat is collapsed too. A flag
+    // in both lists keeps its configured position, and the withhold below
+    // spares every floor flag, so it is never removed.
+    let merged = merge_floor_and_client_betas(&cfg.anthropic_beta, obj.get("anthropic_beta"));
+    if !merged.is_empty() {
+        obj.insert("anthropic_beta".into(), Value::Array(merged));
     }
 
     // Filter the merged anthropic_beta against the operator-supplied
@@ -603,6 +593,29 @@ fn is_cache_control_eligible_block_type(block_type: &str) -> bool {
     )
 }
 
+/// The configured `floor` flags, then each client flag from `client` (the
+/// body's `anthropic_beta` array, if any) not already present, so every flag
+/// appears once in floor-then-client order. Non-string client entries are
+/// kept verbatim so the upstream reports them rather than routectl dropping
+/// them silently.
+fn merge_floor_and_client_betas(floor: &[String], client: Option<&Value>) -> Vec<Value> {
+    let client = client
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut merged: Vec<Value> = Vec::with_capacity(floor.len() + client.len());
+    for item in floor
+        .iter()
+        .map(|flag| Value::String(flag.clone()))
+        .chain(client.iter().cloned())
+    {
+        let is_repeat = item.is_string() && merged.contains(&item);
+        if !is_repeat {
+            merged.push(item);
+        }
+    }
+    merged
+}
+
 /// Parse the Bedrock InvokeModel response body into a `ChatResponse`.
 ///
 /// For Anthropic Claude models this is exactly the Anthropic Messages
@@ -615,6 +628,11 @@ pub fn normalize_response(provider_id: &str, raw: Value) -> Result<ChatResponse>
 #[cfg(test)]
 #[path = "invoke_orphan_tool_choice_tests.rs"]
 mod orphan_tool_choice_tests;
+
+// The floor and client beta lists merge with each flag sent once.
+#[cfg(test)]
+#[path = "invoke_beta_merge_tests.rs"]
+mod beta_merge_tests;
 
 #[cfg(test)]
 mod tests {
