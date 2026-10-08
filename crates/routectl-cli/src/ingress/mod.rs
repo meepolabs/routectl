@@ -320,7 +320,9 @@ pub fn read_alias_header(headers: &HeaderMap) -> Option<String> {
 pub const MAX_CLIENT_BETA_FLAGS: usize = 64;
 
 /// Split every entry on `,`, trim each piece, and keep the first occurrence of
-/// each non-empty, header-safe flag, in source order.
+/// each non-empty flag whose bytes are all visible ASCII (`0x21..=0x7E`), in
+/// source order. A flag holding any other byte (a control byte, DEL, a space,
+/// or non-ASCII) is dropped with a warning that logs only its length.
 ///
 /// # Errors
 ///
@@ -341,7 +343,7 @@ pub(crate) fn normalize_client_betas<'a>(
             tracing::warn!(
                 dialect,
                 value_len = flag.len(),
-                "ingress: anthropic-beta value contains CR/LF; dropping",
+                "ingress: anthropic-beta value contains a byte outside visible ASCII; dropping",
             );
             continue;
         }
@@ -358,13 +360,15 @@ pub(crate) fn normalize_client_betas<'a>(
     Ok(flags)
 }
 
-/// Reject a flag containing CR or LF.
+/// Accept a flag only when every byte is visible ASCII.
 ///
 /// `HeaderValue::to_str` already refuses control bytes on the header path,
-/// but a body string can carry them, and a flag ships on the upstream
-/// `anthropic-beta` header on some egresses.
+/// but a body string can carry any byte, and a flag ships on the upstream
+/// `anthropic-beta` header on some egresses: a byte the upstream header
+/// builder refuses there fails the request as a transport error against the
+/// seat rather than a client error.
 fn is_safe_beta_value(s: &str) -> bool {
-    !s.contains(['\r', '\n'])
+    s.bytes().all(|b| b.is_ascii_graphic())
 }
 
 #[cfg(test)]

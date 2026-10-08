@@ -20,11 +20,30 @@ fn entries_are_split_trimmed_and_deduplicated_in_source_order() {
             &["evil\r\nX-Injected: bad", "a-1", "b\nc"],
             &["a-1"],
         ),
+        ("SOH dropped", &["a\u{0001}b", "a-1"], &["a-1"]),
+        ("NUL dropped", &["a\u{0000}b", "a-1"], &["a-1"]),
+        ("DEL dropped", &["a\u{007f}b", "a-1"], &["a-1"]),
+        ("ESC dropped", &["\u{001b}[31m", "a-1"], &["a-1"]),
+        ("interior space dropped", &["a b", "a-1"], &["a-1"]),
+        (
+            "non-ASCII letter dropped",
+            &["caf\u{00e9}-1", "a-1"],
+            &["a-1"],
+        ),
+        (
+            "real flag kept",
+            &["interleaved-thinking-2025-05-14"],
+            &["interleaved-thinking-2025-05-14"],
+        ),
     ];
-    for (name, entries, expected) in rows {
-        let out = normalize_client_betas("test", entries.iter().copied()).expect(name);
-        assert_eq!(out, *expected, "row {name}");
-    }
+    let mismatched: Vec<String> = rows
+        .iter()
+        .filter_map(|(name, entries, expected)| {
+            let out = normalize_client_betas("test", entries.iter().copied()).expect(name);
+            (out != *expected).then(|| format!("{name}: got {out:?}, want {expected:?}"))
+        })
+        .collect();
+    assert!(mismatched.is_empty(), "mismatched rows: {mismatched:#?}");
 }
 
 #[test]
@@ -63,13 +82,8 @@ fn repeats_do_not_count_toward_the_cap() {
 }
 
 #[test]
-fn is_safe_beta_value_rejects_crlf_strings() {
-    for ok in [
-        "legit-beta",
-        "",
-        "with spaces",
-        "with-special!@#$%^&*()chars",
-    ] {
+fn is_safe_beta_value_accepts_only_visible_ascii() {
+    for ok in ["legit-beta", "", "with-special!@#$%^&*()chars"] {
         assert!(is_safe_beta_value(ok), "{ok:?}");
     }
     for bad in [
@@ -80,6 +94,8 @@ fn is_safe_beta_value_rejects_crlf_strings() {
         "\nevil-leading-lf",
         "evil-trailing\r",
         "evil-trailing\n",
+        "with spaces",
+        "tab\tinside",
     ] {
         assert!(!is_safe_beta_value(bad), "{bad:?}");
     }

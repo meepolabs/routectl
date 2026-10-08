@@ -1299,6 +1299,42 @@ async fn anthropic_beta_header_merges_with_body_anthropic_beta_dedup() {
     );
 }
 
+#[tokio::test]
+async fn body_beta_flag_with_control_byte_is_dropped_before_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&json!({
+            "model": "heavy",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+            "anthropic_beta": ["bad\u{0001}flag", "beta-a"]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "exactly one upstream attempt");
+    let header = received[0]
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = header.split(',').map(str::trim).collect();
+    assert_eq!(names, vec!["beta-a"], "got {header}");
+}
+
 // ---------------------------------------------------------------------------
 // Response shape: stop_reason round-trip preservation
 // ---------------------------------------------------------------------------

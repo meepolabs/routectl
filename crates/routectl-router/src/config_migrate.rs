@@ -2042,6 +2042,7 @@ fn collect_removed_keys(doc: &DocumentMut, raw_version: u32) -> Vec<String> {
     }
     if raw_version <= 3 {
         for entry in provider_entries_with_seat_selection(doc) {
+            let entry = message_safe_key(&entry);
             removed.push(format!(
                 "[providers.{entry}].seat_selection (relocated onto the pool block that groups \
                  the accounts)"
@@ -2065,6 +2066,7 @@ fn collect_unsupported_features_removals(doc: &DocumentMut, removed: &mut Vec<St
                 .as_table_like()
                 .is_some_and(|t| t.contains_key(UNSUPPORTED_FEATURES_KEY))
             {
+                let name = message_safe_key(name);
                 removed.push(format!(
                     "[providers.{name}].unsupported_features (folded into \
                      [capability.overrides.{name}].unsupported)"
@@ -2078,10 +2080,12 @@ fn collect_unsupported_features_removals(doc: &DocumentMut, removed: &mut Vec<St
                 continue;
             };
             if entry.contains_key(UNSUPPORTED_FEATURES_KEY) {
+                let nick = message_safe_key(nick);
                 match entry.get("provider").and_then(Item::as_str) {
                     Some(provider) => removed.push(format!(
                         "[models.{nick}].unsupported_features (folded into \
-                         [capability.overrides.\"{provider}:{nick}\"].unsupported)"
+                         [capability.overrides.\"{}:{nick}\"].unsupported)",
+                        message_safe_key(provider)
                     )),
                     None => removed.push(format!("[models.{nick}].unsupported_features")),
                 }
@@ -2115,6 +2119,7 @@ fn collect_egress_allowlist_removals(doc: &DocumentMut, removed: &mut Vec<String
                 .as_table_like()
                 .is_some_and(|entry| array_is_empty(entry, PROVIDER_ALLOWLIST_KEY))
             {
+                let name = message_safe_key(name);
                 removed.push(format!(
                     "providers.{name}.{PROVIDER_ALLOWLIST_KEY} (empty; retired)"
                 ));
@@ -3325,6 +3330,69 @@ api_key_ref = \"literal:k\"\n";
                 message.lines().any(|line| line.starts_with(&item)),
                 "{row}: the item line is not whole in {message:?}"
             );
+        }
+    }
+
+    #[test]
+    fn removed_keys_summary_filters_control_characters_from_key_names() {
+        // A quoted TOML key carrying ESC, CR and LF, spelled as TOML escapes.
+        const KEY: &str = "f\\u001b[31m\\r\\n";
+        const RENDERED: &str = "f?[31m??";
+        let provider = format!("[providers.\"{KEY}\"]\nkind = \"openai-compat\"\n");
+        let cases = [
+            (
+                "provider unsupported_features",
+                4,
+                format!("version = 4\n{provider}unsupported_features = [\"x\"]\n"),
+                format!(
+                    "[providers.{RENDERED}].unsupported_features (folded into \
+                     [capability.overrides.{RENDERED}].unsupported)"
+                ),
+            ),
+            (
+                "model nick and provider",
+                4,
+                format!(
+                    "version = 4\n[models.\"{KEY}\"]\nprovider = \"{KEY}\"\n\
+                     unsupported_features = [\"x\"]\n"
+                ),
+                format!(
+                    "[models.{RENDERED}].unsupported_features (folded into \
+                     [capability.overrides.\"{RENDERED}:{RENDERED}\"].unsupported)"
+                ),
+            ),
+            (
+                "model nick without provider",
+                4,
+                format!("version = 4\n[models.\"{KEY}\"]\nunsupported_features = [\"x\"]\n"),
+                format!("[models.{RENDERED}].unsupported_features"),
+            ),
+            (
+                "provider empty allowlist",
+                4,
+                format!("version = 4\n{provider}allowed_betas = []\n"),
+                format!("providers.{RENDERED}.allowed_betas (empty; retired)"),
+            ),
+            (
+                "provider seat_selection",
+                3,
+                format!("version = 3\n{provider}seat_selection = \"round-robin\"\n"),
+                format!(
+                    "[providers.{RENDERED}].seat_selection (relocated onto the pool block \
+                     that groups the accounts)"
+                ),
+            ),
+        ];
+
+        for (row, raw_version, src, expected) in cases {
+            // Arrange
+            let doc = doc_of(&src);
+
+            // Act
+            let removed = collect_removed_keys(&doc, raw_version);
+
+            // Assert
+            assert_eq!(removed, [expected.as_str()], "{row}");
         }
     }
 
