@@ -445,37 +445,30 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   (`mcp_servers`, `diagnostics`, `context_hint`, ...), only a subset
   of which AWS gates for distribution.
 
-  routectl ships NO const default for either surface -- AWS schema
-  drift is operator-tracked, not release-bound. Both surfaces are
-  filtered against operator-supplied TOML lists:
+  routectl forwards both surfaces as-is: there is no allowlist of betas
+  or body fields to keep current, so a flag or field AWS later accepts
+  needs no routectl release. A few entries are still filtered:
 
-  ```toml
-  [bedrock]
-  allowed_betas       = [...]   # filters body's anthropic_beta array
-  allowed_body_fields = [...]   # filters top-level body keys
-  ```
+  - the router withholds, per lane, its shipped seed of Bedrock-rejected
+    client betas and any beta flag it learned the lane rejects, and a
+    rejection naming its client betas is repaired with one retry, which
+    teaches the lane those flags;
+  - `mcp_servers` never ships, and neither does a `tool_choice` left
+    with no non-empty `tools`.
 
-  See `examples/bedrock.toml` for the empirical 2026-05-12 baseline
-  (16 betas + 16 body fields). An empty list (or omitted [bedrock]
-  section) is the discovery default for bringing routectl up against
-  a fresh AWS account; use
-  `ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture sent
-  fields/flags, then populate the lists. Empty still filters a few
-  entries: the router withholds its shipped seed of Bedrock-rejected
-  client betas and any beta flag it learned the lane rejects, a
-  rejection naming its client betas is repaired with one retry, and
-  `mcp_servers` never ships (see
-  [CONFIGURATION.md](CONFIGURATION.md#bedrock-allowed_betas----global-bedrock-post-filter)).
+  Use `ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture what
+  is sent (see
+  [CONFIGURATION.md](CONFIGURATION.md#bedrock-which-client-betas-reach-aws)).
+  The withholding lives in `bedrock/betas.rs` and the body-field drops in
+  `bedrock/body_fields.rs`. The withholding and the `mcp_servers` drop
+  apply on both Invoke (top-level Anthropic body) and Converse
+  (`additionalModelRequestFields` bag); the orphan `tool_choice` drop is
+  Invoke-only. Drops log at
+  DEBUG (not WARN -- the SDK reliably sends a handful of rejected
+  entries per request and WARN would flood `routectl-warn.log`).
 
-  Filters live in `bedrock/{betas,body_fields}.rs` and apply on both
-  Invoke (top-level Anthropic body) and Converse
-  (`additionalModelRequestFields` bag). Drops log at DEBUG (not WARN
-  -- the SDK reliably sends a handful of unsupported entries per
-  request and WARN would flood `routectl-warn.log`).
-
-  Per-provider escape hatch -- `[providers.X] anthropic_beta = [...]`
-  is unchanged: those flags are always sent and bypass the filter
-  (operator-asserted), independent of the global allowlist. Together
+  Per-provider escape hatch -- `[providers.X] anthropic_beta = [...]`:
+  those flags are always sent, once each (operator-asserted). Together
   with `header_extras`-pinned betas it always sends a seeded or
   learned-rejected flag, and the beta repair never strips it.
 

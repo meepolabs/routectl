@@ -39,7 +39,7 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   tracing.
 
 - `crates/routectl-router/` -- alias resolution, fallback chain
-  walker, retry policy, capability filter (`unsupported_features`),
+  walker, retry policy, capability filter (`[capability.overrides]`),
   provider factory. A `[pools.<name>]` block groups same-kind member
   provider entries; the factory compiles one seat per usable member
   (from that member's OWN credential ref) once per pool, and

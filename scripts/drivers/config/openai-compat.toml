@@ -20,7 +20,7 @@
 # directory. That default resolution is what keeps a driven run off the
 # operator's own state -- no path in this file names it.
 
-version = 4
+version = 5
 
 # Placeholder only. The runner ALWAYS overrides the bind port on the
 # command line (`serve --port`), because it selects a free port at boot

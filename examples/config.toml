@@ -297,16 +297,6 @@ staleness_hint_days   = 14      # age past which a verified capability reads as 
 # [fidelity.paid_probe_daily_caps]
 # anthropic = 0
 
-# ---- Bedrock global filters (operator-owned allowlists) ----
-# Empty list (or section omitted) = pass-through. See
-# examples/bedrock.toml for the empirical baseline (16 betas + 16
-# body fields). Populate via TRACE-log discovery against your AWS
-# account, then tune.
-
-# [bedrock]
-# allowed_betas = []
-# allowed_body_fields = []
-
 # ---- claude-code gateway config (optional template) ----
 # Drop-in snippet for fronting claude-code with routectl. See
 # docs/CONFIGURATION.md "claude-code as a gateway client" for the

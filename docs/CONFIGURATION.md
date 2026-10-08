@@ -26,13 +26,13 @@ overlays merge, what's reserved.
 
 **Providers**
 - [Per-provider runtime gates](#per-provider-runtime-gates) (RPM, circuit breaker, timeouts)
-- [Per-provider capability filter](#per-provider-capability-filter-unsupported_features)
+- [Per-provider capability filter](#per-provider-capability-filter)
 - [Gemini](#providersx-gemini-kind--gemini) -
   [ChatGPT / Codex](#chatgpt--codex-provider) -
   [xAI (Grok)](#xai-grok-provider)
 - Bedrock: [api_shape](#providersx-api_shape----bedrock-api-selector) -
   [beta-flag controls](#bedrock-and-anthropic-api-beta-flag-controls) -
-  [body-field allowlist](#bedrock-allowed_body_fields----global-bedrock-body-field-allowlist) -
+  [body fields](#bedrock-body-fields) -
   [mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane) -
   [mantle OpenAI lanes](#providersxbedrock_mantle----bedrock-mantle-openai-lanes)
 - anthropic-api flags: [context_management](#context_management-anthropic-api-provider-flag) -
@@ -175,9 +175,6 @@ version = 5           # config schema version; see "Config schema version"
 [seat_quota]          # quota-aware seat placement kill switch
                       # (enabled). Optional; default on.
 
-[bedrock]             # global Bedrock allowlists (allowed_betas,
-                      # allowed_body_fields). Optional.
-
 [log]                 # operator-configurable runtime log knobs
                       # (trace_headers, trace_body_bytes,
                       # redact_prompts). Optional. The env-filter
@@ -206,11 +203,8 @@ version = 5           # config schema version; see "Config schema version"
 check` exactly as shipped, but it is NOT boot-ready: every credential in
 it is a REFERENCE, and none resolves until the named env var is set or
 the matching `routectl login` has run (an unresolved ref is a warning,
-never an error). [`examples/bedrock.toml`](../examples/bedrock.toml)
-ships an empirical Bedrock allowlist baseline (16 betas + 16 body
-fields) as a `[bedrock]`-section FRAGMENT, not a whole config -- paste it
-into your own file rather than checking it standalone. Copy and edit; do
-not re-derive. Carrying a v1 `[cache_pricing]` table: see
+never an error). Copy and edit; do not re-derive. Carrying a v1
+`[cache_pricing]` table: see
 [Retired: `[cache_pricing]`](#retired-cache_pricing).
 
 ## Config schema version (`version`)
@@ -220,7 +214,7 @@ version = 5
 ```
 
 - **`version`** (u32, required in practice) -- the config schema version
-  this file is written against. The current version is `4`
+  this file is written against. The current version is `5`
   (`CURRENT_CONFIG_VERSION` in
   `crates/routectl-router/src/config/validate.rs`); a file omitting the
   key reads as the legacy `1`.
@@ -251,9 +245,70 @@ retry allow/deny escape hatch becomes per-class policy (see
 [Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)),
 and v3's provider-level `seat_selection` moves onto the `[pools.<name>]`
 block that groups the accounts (see
-[Migrating a v3 config to explicit pools](#migrating-a-v3-config-to-explicit-pools)).
+[Migrating a v3 config to explicit pools](#migrating-a-v3-config-to-explicit-pools)),
+and v4's capability lists are replaced by `[capability.overrides]` and
+pass-through (see
+[Version 5 retires the capability lists](#version-5-retires-the-capability-lists)).
 `version` is hot-reloadable: a live swap to a config carrying an
 out-of-range version is REJECTED and the prior router keeps serving.
+
+### Version 5 retires the capability lists
+
+Config version 5 removes every per-provider and per-model capability
+list. What they did is now covered by `[capability.overrides]`, by
+pass-through, or by the router's own learned and seeded verdicts:
+
+| Retired key | What replaces it |
+| --- | --- |
+| `[providers.X] unsupported_features` | `[capability.overrides.<provider>] unsupported` |
+| `[models.X] unsupported_features` | `[capability.overrides."<provider>:<nickname>"] unsupported` |
+| `[providers.X] allowed_betas` (anthropic-api) | nothing: client betas pass through unfiltered |
+| `[bedrock] allowed_betas` | nothing: client betas pass through, minus the flags the router withholds from the lane |
+| `[bedrock] allowed_body_fields` | nothing: every body field passes through except `mcp_servers` and an orphan `tool_choice` |
+| `[bedrock]` table | nothing: it held only the two lists above |
+
+`routectl config migrate` carries a version 1-4 file to version 5 in one
+change:
+
+- **Folds** each `unsupported_features` list into
+  `[capability.overrides.<spec>].unsupported`, where `<spec>` is the
+  provider name for a provider list and `"<provider>:<nickname>"` for a
+  model list, appending to any entry the cell already has.
+- **Drops** every EMPTY `allowed_betas` / `allowed_body_fields` list, and
+  removes the `[bedrock]` table when nothing is left in it.
+- **Refuses, writing nothing,** when any allowlist is NON-empty. An
+  allowlist names what may be sent; it does not convert losslessly into
+  the list of what must not be, so the decision is yours. The refusal
+  names each list's path and entry count (never its values). Delete each
+  list and rerun. Deleting a beta list accepts pass-through: client betas
+  are forwarded except the ones the router withholds from the lane. For a
+  beta that must never be sent, add the replacement before rerunning:
+
+  ```toml
+  [capability.overrides.bedrock-west]
+  unsupported = ["beta:context-1m-2025-08-07"]
+  ```
+
+  A body-field list has no successor; delete it.
+- **Refuses, writing nothing,** when a folded capability is already in
+  `force_supported` on the same cell: which of the two is meant cannot be
+  derived. Remove the capability from one of the two lists and rerun.
+
+Run `routectl config migrate --dry-run` first to review the rewritten
+file. A version 5 file that still carries a retired key (`[bedrock]`,
+`allowed_betas`, `allowed_body_fields`, or `unsupported_features`) is
+refused at load with a message naming the key's path; migrate is a no-op
+on a version 5 file, so remove the key by hand.
+
+**Upgrading a running daemon.** The version check runs in both
+directions, so the binary and the file move together. A version 5
+binary refuses a version 4 file at startup, and an older binary rejects
+a version 5 file as too new. Migrating while the old daemon still serves
+is safe: its hot reload rejects the version 5 file and the running router
+keeps serving the old config. The daemon must then be RESTARTED onto the
+version 5 binary before the migrated file takes effect. Rolling back
+means restoring the version 4 file together with the old binary;
+swapping the binary back alone leaves it facing a file it refuses.
 
 ## Editor autocomplete (JSON Schema)
 
@@ -542,10 +597,8 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only; `anthropic_version` default `2023-06-01` (anthropic-api only) |
 | `credential_source`            | `[providers.X]` AnthropicApi    | string, default `"own"`; `"forwarded"` requires empty `api_key_ref` + `base_url` pinned to `api.anthropic.com` (see "credential_source" below) |
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
-| `runtime` (RPM, breaker, timeouts, `unsupported_features`) | `[providers.X]` | provider-only                                                          |
-| `allowed_betas`                | `[providers.X]` AnthropicApi    | provider-only; allowlist for `anthropic_beta` flags to `api.anthropic.com`; empty = pass-through |
-| `allowed_betas`                | `[bedrock]` global              | global filter for Bedrock-accepted `anthropic_beta` values; empty = pass-through (see `[bedrock]`) |
-| `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor always sent, bypasses `[bedrock] allowed_betas`            |
+| `runtime` (RPM, breaker, timeouts) | `[providers.X]`             | provider-only                                                          |
+| `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor, always sent and never withheld                            |
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
 | `allow_disable_fallbacks`      | `[server]`                      | bool, default true; when false the `x-routectl-disable-fallbacks` per-request header is ignored   |
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
@@ -598,8 +651,8 @@ model `header_extras` per request:
    comma-split + union + dedup + comma-rejoin in visit order
    `req.anthropic_beta -> provider value -> model value`. The unioned
    string lands back on the merged map AND on `req.anthropic_beta`, so
-   downstream readers (the Anthropic-API egress's wire header,
-   `bedrock::betas::filter_bedrock_betas`) see the same fully-composed
+   downstream readers (the Anthropic-API egress's wire header, the
+   Bedrock egresses' `anthropic_beta` array) see the same fully-composed
    list.
 
 ## payload_extras merge
@@ -668,41 +721,26 @@ Result: `req.anthropic_beta = ["foo", "claude-code-20250219",
 "oauth-2025-04-20", "context-1m-2025-08-07"]`. The Anthropic-API
 egress reads `req.anthropic_beta` and emits ONE
 `anthropic-beta: foo,claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07`
-HTTP header. Bedrock egresses route the same canonical list through
-`filter_bedrock_betas`.
+HTTP header. Bedrock egresses carry the same canonical list in the body's
+`anthropic_beta` array, minus any flag the router withholds from the
+lane (see below).
 
 ## Bedrock and Anthropic API beta-flag controls
 
-Three distinct knobs govern how `anthropic_beta` flags reach each
-upstream. They are independent and serve different purposes.
+routectl keeps no allowlist of `anthropic_beta` flags or body fields: a
+flag or field Anthropic adds reaches the upstream without a routectl
+release or a config change. What still shapes the wire is the operator
+floor, the flags the router withholds from a Bedrock lane, the two
+unconditional Bedrock body-field drops, and the capability betas a
+request's own body implies. Config version 5 retired the earlier
+`[bedrock]` and `[providers.X]` allowlists; see
+[Version 5 retires the capability lists](#version-5-retires-the-capability-lists).
 
-### `[bedrock] allowed_betas` -- global Bedrock post-filter
+### Bedrock: which client betas reach AWS
 
-An allowlist of `anthropic_beta` flag strings accepted by AWS Bedrock.
-Applied as a post-filter to every Bedrock-destined request: any flag
-NOT in the list is silently dropped before the request goes on the
-wire. Omitting the list (empty = default) puts the filter in
-pass-through mode -- every client flag reaches AWS as-is except the
-flags the router withholds from that lane (the shipped seed and learned
-beta verdicts, below).
-
-Use this to prevent unknown flags (new Anthropic betas not yet
-supported by Bedrock) from causing upstream 400 errors fleet-wide.
-The list has no default; AWS schema drift is operator-tracked.
-
-```toml
-[bedrock]
-allowed_betas        = ["computer-use-2025-01-24", "files-api-2025-04-14"]
-# allowed_body_fields  = [...]  # optional body-field allowlist
-```
-
-Two flags bypass this filter unconditionally: see
-[the capability-beta carve-out](#allowed_betas-carve-out-the-capability-betas).
-
-Independently of this list, the router decides per dispatch target which
-client-sent flags that lane must not send, and the Bedrock egress drops
-them -- in pass-through mode too, and even when `allowed_betas` names
-them. Per lane and flag, strongest first:
+Every client flag reaches AWS except the ones the router decides that
+lane must not send, which the Bedrock egress drops. Per lane and flag,
+strongest first:
 
 1. **The operator floor sends.** The provider's
    [`[providers.X] anthropic_beta`](#providersx-anthropic_beta----per-provider-bedrock-floor)
@@ -773,66 +811,34 @@ Bedrock provider directly, without the router, gets no withheld set and
 so no longer has the seed applied: it must drop rejected flags itself
 (or route through the router).
 
-### `[bedrock] allowed_body_fields` -- global Bedrock body-field allowlist
+### Bedrock body fields
 
-The `[bedrock]` block's second list, and the only other key on it. Bedrock's
-strict-schema validator 400s any unrecognized field with "Extra inputs are
-not permitted", and routectl's forward-compat sweep forwards
-quarterly-added Anthropic body fields (`context_management`,
-`context_hint`, `speed`, ...) it does not itself model. This list is what
-keeps those from reaching an account whose Bedrock schema has not caught
-up.
+Every body field reaches Bedrock -- the assembled Invoke body and the
+Converse `additionalModelRequestFields` bag alike, including the
+quarterly-added Anthropic fields routectl's forward-compat sweep forwards
+without modelling them -- except two, which are always dropped with no
+operator knob:
 
-```toml
-[bedrock]
-allowed_body_fields = ["messages", "anthropic_version", "max_tokens",
-                       "system", "tools", "anthropic_beta"]
-```
+- **`mcp_servers`** never ships. Bedrock rejects it on both carriers,
+  and its entries can carry a connector credential meant for a remote MCP
+  server. It is removed as the last mutation of each carrier's body,
+  whichever source supplied it.
+- **An orphan `tool_choice`** -- one left with no non-empty `tools` list,
+  a pairing Anthropic rejects -- is removed from the Invoke body that
+  ships.
 
-- **Empty / omitted = pass-through (the default).** No filtering; the
-  assembled body and the Converse extras bag are forwarded as-is. This is
-  discovery mode: bring routectl up, observe what is actually sent with
-  `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then populate the
-  list. The empirical baseline is in
-  [`examples/bedrock.toml`](../examples/bedrock.toml) -- copy it rather
-  than re-deriving.
-- **Non-empty = allowlist.** Every key not on the list is dropped before
-  egress, logged at `debug` (not `warn`: the forward-compat sweep produces
-  forwarded keys on every request, so a WARN would flood the log).
-- **Two surfaces, one list.** On `api_shape = "invoke"` it filters the
-  top-level Anthropic Messages body, so the structural keys routectl
-  writes (`messages`, `system`, `tools`, ...) must be ON the list or the
-  assembled body is malformed. On Converse those keys live at the AWS top
-  level and never appear in the filtered
-  `additionalModelRequestFields` bag.
-- **`mcp_servers` never ships.** Bedrock rejects it on both carriers, so
-  it is dropped from every Bedrock egress body whatever this list says
-  (empty, or even listing it) and whichever source supplied it; the drop
-  is logged at `debug` by field name only.
-
-Two coherence checks run at startup, reload, and `config check`, both only
-when the list is non-empty:
-
-- The routectl-mandatory keys `messages`, `anthropic_version`, and
-  `max_tokens` must be present -- but only when some provider uses
-  `api_shape = "invoke"`; a Converse-only deployment is unaffected.
-- `anthropic_beta` must be present when any Bedrock provider sets an
-  `anthropic_beta` floor, or the filter would silently drop the
-  operator-asserted always-send value.
-
-A partial allowlist silently breaks every Bedrock request, so both are
-hard errors at startup rather than a runtime 400. `[bedrock]` is
-hot-reloadable.
+Both drops log at `debug`, by field name only. A field the account's
+Bedrock schema has not caught up with is answered with a 400 naming it
+(`Extra inputs are not permitted`); route requests that carry it
+elsewhere, or have the client stop sending it.
 
 ### `[providers.X] anthropic_beta` -- per-provider Bedrock floor
 
 A static `anthropic_beta` value that routectl always injects on
 requests destined for this Bedrock provider, regardless of what the
-caller sent. The floor is merged into the request BEFORE the
-`[bedrock] allowed_betas` filter runs, and the filter preserves it:
-flags present in `[providers.X] anthropic_beta` pass through the
-filter unconditionally even when they are absent from
-`allowed_betas`, so the floor is always present on the wire.
+caller sent. The floor is merged ahead of the client's flags, each flag
+appears once on the wire (a client flag repeating a floor flag is not
+sent twice), and no withholding or repair ever removes a floor flag.
 
 Use this to guarantee a required beta flag is always present (for
 example, a model that requires `computer-use-2025-01-24` to operate
@@ -846,19 +852,11 @@ creds          = { kind = "default-chain" }
 anthropic_beta = ["computer-use-2025-01-24"]
 ```
 
-### `[providers.X] allowed_betas` -- Anthropic API (non-Bedrock) allowlist
+### Anthropic API: client betas pass through
 
-An allowlist of `anthropic_beta` flags accepted by this
-`anthropic-api` provider. Applied analogously to the Bedrock
-global filter but scoped to one provider. Empty (default) = every
-flag the caller requests reaches `api.anthropic.com` unfiltered.
-
-```toml
-[providers.anthropic-strict]
-kind         = "anthropic-api"
-api_key_ref  = "env://ANTHROPIC_API_KEY"
-allowed_betas = ["claude-code-20250219", "oauth-2025-04-20"]
-```
+An `anthropic-api` provider forwards every client `anthropic-beta` flag to
+the upstream unfiltered, on every leg; the operator floor (provider and
+model `header_extras["anthropic-beta"]`) always ships alongside them.
 
 On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
 routectl also injects a 9-flag model-agnostic floor
@@ -866,8 +864,8 @@ routectl also injects a 9-flag model-agnostic floor
 `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`,
 `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`,
 `structured-outputs-2025-12-15`, `fast-mode-2026-02-01`,
-`redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28`). The floor
-bypasses this allowlist -- those nine are operator-equivalent pins.
+`redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28`); those
+nine are operator-equivalent pins.
 `redact-thinking-2026-02-12` is removed again, whatever supplied it, when the
 request body carries `thinking.display`: Anthropic lets the redaction win over
 the display mode, so the two never ship together (except on a forwarded
@@ -877,22 +875,19 @@ The floor carries ONLY model-agnostic flags. Model-gated ones
 (`context-1m-2025-08-07`, `effort-2025-11-24`,
 `thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`,
 `advisor-tool-2026-03-01`) are NOT injected, because forcing them 400s models
-that do not support them. They travel as ordinary client-driven flags, which
-means `allowed_betas` now APPLIES to them where the floor previously bypassed
-it: a non-empty `allowed_betas` that omits `context-1m-2025-08-07` drops a
-caller's request for it.
+that do not support them. They travel as ordinary client-driven flags, sent
+when the caller sends them.
 
-### `allowed_betas` carve-out: the capability betas
+### Capability betas are always unioned
 
-Two flags are exempt from BOTH allowlists above. Each is force-added
-whenever the request's ASSEMBLED body carries the field that flag gates:
+Two flags are force-added whenever the request's ASSEMBLED body carries
+the field that flag gates, after every other beta step, so nothing that
+runs earlier can remove them:
 
 | Body field | Beta force-added | Lanes |
 | --- | --- | --- |
 | `output_config.format` (structured outputs) | `structured-outputs-2025-12-15` | `anthropic-api` (`anthropic-beta` header) and Bedrock (body `anthropic_beta` array) |
 | `output_config.effort` (adaptive thinking) | `effort-2025-11-24` | own-OAuth to `api.anthropic.com` only |
-
-Both bypass `[providers.X] allowed_betas` and `[bedrock] allowed_betas`.
 
 Neither is a client-opted beta: each is a routectl-derived capability
 signal implied by the feature the request is already using. A 2026-08-11
@@ -909,9 +904,11 @@ caller-supplied flag with no matching field is passed through untouched
 (routectl never manufactures the field to match a flag).
 
 An operator who wants to deny either feature should deny the FEATURE --
-declare it in the provider's `unsupported_features` so requests using it
-are never routed to that provider -- rather than relying on the beta
-allowlist.
+list its capability key (`structured_output` for `output_config.format`)
+under `unsupported` in
+[`[capability.overrides]`](#capabilityoverrides-is-the-durable-decision-surface)
+so requests using it are never routed to that target -- rather than
+trying to withhold the beta.
 
 ### OAuth lane: `temperature` and `top_p` are dropped
 
@@ -1343,7 +1340,7 @@ published contract. Vertex AI / Google service-account ADC is still NOT
 implemented; it is reachable later by pointing `base_url` at a Vertex
 endpoint without a new provider kind.
 
-## Per-provider capability filter (`unsupported_features`)
+## Per-provider capability filter
 
 Some upstreams reject specific built-in tool shapes (Bedrock, for
 example, currently 400s on Anthropic's `web_search_*` tool families).
@@ -1351,65 +1348,29 @@ Without a declaration the router learns this on its own: the first
 such request on each Bedrock lane gets the 400, falls back to the next
 chain entry, and records the refused capability, and later requests
 carrying it skip that lane (see "Learned capability tempo" below).
-`unsupported_features` stays valid when you already know the answer:
-it skips the lane before the first dispatch, so even that one miss per
-lane -- the latency, the 400 in operator dashboards, the failure
-counted against the lane's breaker -- never happens.
 
-`unsupported_features` is a declarative, operator-supplied list set
-directly on each `[providers.X]` table. The router derives feature keys from
-the request's `tools` array and pre-filters the alias chain BEFORE
-dispatch -- a chain entry whose provider lists ANY of the request's
-features is dropped. If every entry gets filtered, the router returns
-a 501 `Not Implemented` naming the offending feature.
-
-Feature-key derivation walks `tools[].type` strings on the
-canonical `ToolDef::Other` variant (Anthropic builtins, server-side
-tools, future shapes). A trailing `-YYYYMMDD` or `_YYYYMMDD` suffix
-is stripped so `web_search_20250305` and a future
-`web_search_20251102` both reduce to `web_search`. User-defined
-custom tools (`ToolDef::Custom`) do not contribute feature keys.
+When you already know the answer, declare it under `unsupported` in
+[`[capability.overrides]`](#capabilityoverrides-is-the-durable-decision-surface),
+keyed by the provider (or `"<provider>:<nickname>"` for one model). The
+target is skipped before the first dispatch, so even that one miss per
+lane -- the latency, the 400 in operator dashboards, the failure counted
+against the lane's breaker -- never happens:
 
 ```toml
-# Bedrock provider in a chain that also has anthropic-api fallback.
-# claude-code's web_search tool fails on Bedrock today. The router learns
-# that after the first rejected request per Bedrock lane; declaring it
-# unsupported here is optional and skips Bedrock for web-search-using
-# requests from the very first one (no 400, no breaker hit), going
-# straight to the anthropic-api fallback.
-[providers.bedrock]
-kind   = "bedrock"
-region = "us-west-2"
-creds  = { kind = "default-chain" }
-unsupported_features = ["web_search"]
-
-[providers.anthropic-api]
-kind        = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
-
-[models.bedrock-opus]
-provider = "bedrock"
-upstream = "us.anthropic.claude-opus-4-7-v1:0"
-
-[models.anthropic-opus]
-provider = "anthropic-api"
-upstream = "claude-opus-4-7"
-
-[aliases]
-"claude-opus-*" = ["bedrock-opus", "anthropic-opus"]
+[capability.overrides.bedrock]
+unsupported = ["web_search"]
 ```
 
-A request without built-in tools dispatches to `bedrock-opus` first
-per the chain order. A request carrying a `web_search_20250305` tool
-skips Bedrock and goes directly to `anthropic-opus`. If BOTH
-providers listed `web_search` as unsupported, the router returns
-`501 not_implemented` with the message `no provider in chain
-supports features: web_search` (the feature keys are comma-joined).
-
-Per-skip events log at DEBUG (`provider skipped: feature in
-unsupported_features list`); the terminal empty-chain event logs at
-WARN. INFO would flood; the codebase precedent is "fallback events
-at WARN, retry-same-provider at DEBUG".
+Feature keys come from the request's `tools` array: a trailing
+`-YYYYMMDD` or `_YYYYMMDD` suffix on a built-in tool's `type` is
+stripped, so `web_search_20250305` and a future `web_search_20251102`
+both reduce to `web_search`; user-defined custom tools contribute no
+key. If every chain entry is skipped this way, the router returns
+`501 not_implemented` with the message `no provider in chain supports
+features: <keys>`. Config version 5 retired the per-provider and
+per-model `unsupported_features` lists this used to be written as;
+`routectl config migrate` folds them into `[capability.overrides]` (see
+[Version 5 retires the capability lists](#version-5-retires-the-capability-lists)).
 
 ## Per-provider runtime gates
 
@@ -1443,13 +1404,7 @@ rpm_limit              = 60
 circuit_failures       = 5
 circuit_cooldown_ms    = 60000
 request_timeout_ms     = 120000
-unsupported_features   = ["web_search"]
 ```
-
-`unsupported_features` is optional here: without it the router learns a
-Bedrock lane's `web_search` rejection after the first miss on that lane
-(see [Per-provider capability filter](#per-provider-capability-filter-unsupported_features)).
-Declaring it skips even that first miss.
 
 ## Retry and fallback defaults
 
@@ -4335,7 +4290,7 @@ The battery sections, in render order:
 | OAuth seats (`seats`) | Stored OAuth seats no provider entry's `oauth://` ref reaches surface as a WARN naming the seat. Matching is by full seat identity: every ref names exactly one seat, so a bare `oauth://<provider>` ref vouches for the DEFAULT seat alone and a labeled seat is reached only by a ref naming it -- in a pooled configuration, that pool member's own pinned ref. Read-only -- a stored credential is NEVER auto-deleted or refreshed, and the finding names only the seat key, never token material or a storage path. |
 | Managed secrets (`secrets`) | Managed secret files not referenced by any provider surface as a WARN. The scan is a read-only directory diff; a stored secret is NEVER auto-deleted. |
 | Provider reachability (`probe`) | One finding per provider through the SAME probe seam `provider probe` uses, so the two surfaces never diverge on status, detail, or remediation. |
-| Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty), and a WARN nudging `config migrate` when deprecated capability-list keys are still set. Never emits a FAIL, so it can never flip the exit code. |
+| Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty). Never emits a FAIL, so it can never flip the exit code. |
 | Catalog freshness (`freshness`) | Three advisory rows on how current the catalog data is: the baked catalog version and snapshot date, the freshest overlay verification stamp and its age, and the last SUCCESSFUL `catalog import` with its row counts. A stale overlay or import is a WARN pointing at `catalog import`; never a FAIL. |
 | Cost pricing (`pricing`) | One row per configured model naming WHERE its cost rates come from -- an operator `[registry]` row (taken verbatim), the baked catalog's own rates (the auto-fill when `[registry]` is silent), a managed subscription (billed by seat, no per-token rate), or unpriced (neither layer has rates, so usage reports no cost for it). Every priced row names the resolved per-million input / output rates; a dimension the winning layer left unset reads `unset`, never `$0`, and a `[registry]` row that sets no rate at all says it prices nothing. A subscription row adds a second clause naming its API-EQUIVALENCE basis: the bill is by seat either way, but `usage` values that seat's traffic at API-equivalent rates only when every dimension resolves one, so the row says whether that basis is complete and, when it is not, which dimensions are unpriced (cache read and the two cache-write buckets are `[registry]`-only, so a catalog basis always lacks them) or that neither layer prices the upstream at all. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay supersedes baked rates, so reporting the baked figure could name a rate the bill does not use. Never FAILs, so it can never move the exit code. |
 | Model knobs (`knobs`) | One row per configured model naming WHERE its outbound `max_output_tokens` ceiling comes from -- the operator's own `[models.X]` value (which the catalog never overrides), the catalog fill (when `[models.X]` sets none and the model's resolved cell confirms one figure), or neither (the Anthropic-shape egresses then use their built-in baseline and every other egress forwards caller omission untouched). Every row names the resolved ceiling and the `(kind, upstream)` selector it was resolved for. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay both corrects and disables baked ceilings, so reporting the baked figure could name a ceiling the router does not use. Never FAILs, so it can never move the exit code. |
@@ -4434,14 +4389,7 @@ only what it classifies and never discloses a credential value.
 
 `config check` runs the same startup validation `serve` does -- secret
 refs resolve, provider kinds map to known impls, alias chains reference
-existing model nicknames, Bedrock allowlists include the
-routectl-mandatory keys (`messages`, `anthropic_version`, `max_tokens`)
-when set, and if any `[providers.X]` Bedrock entry sets an
-`anthropic_beta` floor, the validator also confirms that
-`allowed_body_fields` includes `anthropic_beta` (so the floor value
-actually reaches the upstream). A partial Bedrock allowlist silently
-breaks every Bedrock request, so the validator surfaces it as a clean
-`Error::Config` at startup rather than a runtime 400.
+existing model nicknames.
 
 On a config declaring pools or `oauth://` refs, `config check` also prints
 the seat-pool readout ahead of its warnings and errors -- the same rows
@@ -5004,7 +4952,7 @@ What each family does (one line each):
 | `/v1/messages/count_tokens` | works | proxied to upstream; first-target only (no fallback chain walk) |
 | `/v1/models` (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) | works | glob alias keys and `default` skipped |
 | OAuth refresh on 401 | not yet | re-run `routectl login anthropic` to refresh today; auto-refresh is a follow-up |
-| `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; the router learns the rejection after the first miss per Bedrock lane and skips that lane for later web-search requests. Optionally declare `unsupported_features = ["web_search"]` on the Bedrock provider to skip even that first miss (see "Per-provider capability filter" above) |
+| `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; the router learns the rejection after the first miss per Bedrock lane and skips that lane for later web-search requests. Optionally declare `unsupported = ["web_search"]` under `[capability.overrides.<bedrock-provider>]` to skip even that first miss (see "Per-provider capability filter" above) |
 | Tool use + streaming | works | end-to-end SSE, multi-turn |
 | Subagent / agent-team dispatch | works | every subagent call flows through the same `/v1/messages` route |
 | `claude.ai` Routines / `RemoteTrigger` / `PushNotification` / `ShareOnboardingGuide` | bypass routectl | hardcoded `claude.ai` integrations; the gateway has no visibility |

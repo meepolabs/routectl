@@ -171,7 +171,7 @@ auth_kind = "oauth-bearer"
 
 For `auth_kind = "api-key"` (default), routectl does not auto-inject beta gates -- declare the ones you need in `header_extras`. For `auth_kind = "oauth-bearer"` on `api.anthropic.com`, `default_claude_code_anthropic_betas()` auto-injects a 9-flag model-agnostic base -- `claude-code-20250219`, `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01`, `redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28` -- so no manual `header_extras` beta list is needed for those.
 
-The base is deliberately NOT the full set genuine Claude Code emits. Model-gated flags (`context-1m-2025-08-07`, `effort-2025-11-24`, `thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`, `advisor-tool-2026-03-01`) are excluded because forcing them 400s models that do not support them (haiku rejects `context-1m-2025-08-07`). They reach upstream only when the caller sends them -- as client pass-through, now subject to `allowed_betas` where the floor previously bypassed it. If you need a model-gated flag on every request to a model that DOES support it, declare it in that `[models.X] header_extras`.
+The base is deliberately NOT the full set genuine Claude Code emits. Model-gated flags (`context-1m-2025-08-07`, `effort-2025-11-24`, `thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`, `advisor-tool-2026-03-01`) are excluded because forcing them 400s models that do not support them (haiku rejects `context-1m-2025-08-07`). They reach upstream only when the caller sends them, as client pass-through. If you need a model-gated flag on every request to a model that DOES support it, declare it in that `[models.X] header_extras`.
 
 Two of the gated flags are additionally unioned ON DEMAND, keyed on what the assembled body actually carries, so a request that uses the feature always ships its flag:
 
@@ -180,7 +180,7 @@ Two of the gated flags are additionally unioned ON DEMAND, keyed on what the ass
 | `output_config.format` | `structured-outputs-2025-12-15` | every auth kind (suppressed on the forwarded leg) |
 | `output_config.effort` | `effort-2025-11-24` | own-OAuth to `api.anthropic.com` only |
 
-Both unions run AFTER the `allowed_betas` filter and after the floor: they are capability signals implied by the shipped body, not client-opted betas. `output_config.format` was measured 2026-08-11 (one lane, one seat, one model) to be accepted both with and without its beta, so its union is retained as belt-and-braces rather than a proven hard requirement; the `output_config.effort` case is unmeasured. Both are one-way -- the body's field adds the flag; a caller-supplied flag with no matching field is left untouched.
+Both unions run after the floor and after every other beta step: they are capability signals implied by the shipped body, not client-opted betas. `output_config.format` was measured 2026-08-11 (one lane, one seat, one model) to be accepted both with and without its beta, so its union is retained as belt-and-braces rather than a proven hard requirement; the `output_config.effort` case is unmeasured. Both are one-way -- the body's field adds the flag; a caller-supplied flag with no matching field is left untouched.
 
 ### Sampling params stripped on the own-OAuth lane
 
@@ -232,40 +232,29 @@ Both `api_shape = "invoke"` (Anthropic Messages body) and
 models on Sonnet/Haiku/Opus. Set `supports_adaptive_thinking = true` on Opus
 4.7+ models regardless of api_shape.
 
-**Bedrock allowlist (optional, recommended in production).** AWS
-strict-schema validation 400s any unrecognized `anthropic_beta` flag
-or top-level body field. Neither list has a default; populate the
-operator-supplied lists in TOML to gate which entries reach AWS:
-
-```toml
-[bedrock]
-# List every flag / field you want to reach AWS; see examples/bedrock.toml
-# for the full empirical baseline.
-allowed_betas       = ["context-1m-2025-08-07"]
-allowed_body_fields = ["anthropic_version", "messages"]
-```
-
-An empty or omitted list is not a bare pass-through. The router
-withholds, per lane and in either mode, a small shipped seed of betas
-Bedrock rejects (`advanced-tool-use-2025-11-20`,
-`advisor-tool-2026-03-01`, `prompt-caching-scope-2026-01-05`; applied
-even with `[capability] enabled = false`) plus every beta flag it
-learned that lane rejects. A rejection that names its client betas is
-repaired with one retry, and the stripped flags become learned
-`beta:<flag>` negatives: persisted across restarts, decaying after 48
-hours into one re-probe, visible in `routectl doctor`, and removable
-with `routectl capability purge <provider#upstream> beta:<flag>`. The
-same purge lifts a seeded flag on a routed lane until the next catalog
-or overlay revision change; a `force_supported` override on
-`beta:<flag>`, or the operator floor (provider `anthropic_beta` plus
-`header_extras`-pinned betas), sends a flag regardless. Code that calls
+**Betas and body fields pass through.** routectl keeps no Bedrock
+allowlist: every client `anthropic_beta` flag and every body field
+reaches AWS, so a flag or field Anthropic adds needs no routectl release.
+The router withholds, per lane, a small shipped seed of betas Bedrock
+rejects (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
+`prompt-caching-scope-2026-01-05`; applied even with `[capability]
+enabled = false`) plus every beta flag it learned that lane rejects. A
+rejection that names its client betas is repaired with one retry, and
+the stripped flags become learned `beta:<flag>` negatives: persisted
+across restarts, decaying after 48 hours into one re-probe, visible in
+`routectl doctor`, and removable with `routectl capability purge
+<provider#upstream> beta:<flag>`. The same purge lifts a seeded flag on a
+routed lane until the next catalog or overlay revision change. To pin a
+decision, put the flag under `[capability.overrides.<provider>]`:
+`unsupported = ["beta:<flag>"]` never sends it, `force_supported`
+always does. The operator floor (provider `anthropic_beta` plus
+`header_extras`-pinned betas) is always sent, once each. Code that calls
 the Bedrock provider directly, without the router, gets no seed.
-`mcp_servers` never ships to Bedrock, whatever `allowed_body_fields`
-says. Use
-`ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture sent
-flags/fields when building the lists. See `examples/bedrock.toml` for
-the empirical 2026-05-12 baseline and
-[CONFIGURATION.md](CONFIGURATION.md#bedrock-allowed_betas----global-bedrock-post-filter)
+Two body fields never ship: `mcp_servers`, and a `tool_choice` left
+with no non-empty `tools`. Use
+`ROUTECTL_LOG=routectl_providers::bedrock=trace` to see what is sent.
+See
+[CONFIGURATION.md](CONFIGURATION.md#bedrock-which-client-betas-reach-aws)
 for the detail.
 
 **RPM bucket semantics for shared Bedrock providers.** Runtime state
@@ -308,8 +297,8 @@ upstream default is model-dependent). Converse accepts and honors
 `"summarized"` and `"omitted"` on both shapes. `"updates"` is gated
 upstream behind the `thinking-display-updates-2026-08-18` beta, so routectl
 adds that flag to the bag's `anthropic_beta` whenever the shipped bag
-carries `display: "updates"` -- even when `[bedrock] allowed_betas` omits
-it -- and never when a forcing `tool_choice` has stripped thinking. Any
+carries `display: "updates"` -- even when the router withholds it from
+the lane -- and never when a forcing `tool_choice` has stripped thinking. Any
 other value forwards unchanged with no beta, and upstream rules on it.
 
 **Example provider + model:**
