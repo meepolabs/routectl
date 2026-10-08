@@ -23,9 +23,11 @@
 //! is the explanation the dialect change owed. The count is a per-release
 //! fact, so the one tolerated difference is a pair whose halves were
 //! captured from DIFFERENT client releases with the base-url half the newer
-//! one -- the state between re-capturing the base-url half and re-capturing
-//! its front-proxy twin. A same-release pair, or one whose front-proxy half
-//! is the newer, must still agree, and a client version that does not parse
+//! one, carrying system turns its front-proxy twin has none of -- the state
+//! between re-capturing the base-url half and re-capturing its front-proxy
+//! twin. Any other count difference must still agree: a same-release pair,
+//! one whose front-proxy half is the newer, or a newer base-url half whose
+//! twin already carries system turns. A client version that does not parse
 //! as `major.minor.patch` earns no tolerance.
 //!
 //! Every clause is adjudicated by [`cross_mode_violations`] over two
@@ -86,10 +88,17 @@ fn ingress_carries(fixture: &Fixture, name: &str) -> bool {
 
 /// A stable `major.minor.patch` client version as a comparable triple, or
 /// `None` for anything else -- a prerelease, a build suffix, an empty
-/// field.
+/// field, a signed component.
 fn release_triple(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = version.split('.');
-    let mut next = || parts.next()?.parse::<u64>().ok();
+    // `u64::from_str` accepts a leading `+`, so the digit check comes first.
+    let mut next = || {
+        let part = parts.next()?;
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        part.parse::<u64>().ok()
+    };
     let triple = (next()?, next()?, next()?);
     parts.next().is_none().then_some(triple)
 }
@@ -144,7 +153,9 @@ fn cross_mode_violations(base: &Fixture, front_proxy: &Fixture) -> Vec<String> {
 
     let base_turns = in_band_system_turns(&base.ingress_request);
     let fp_turns = in_band_system_turns(&front_proxy.ingress_request);
-    if base_turns != fp_turns && !base_half_is_the_newer_release(base, front_proxy) {
+    let is_tolerated_release_gap =
+        fp_turns == 0 && base_turns >= 1 && base_half_is_the_newer_release(base, front_proxy);
+    if base_turns != fp_turns && !is_tolerated_release_gap {
         out.push(format!(
             "{CLAUSE_SYSTEM_TURNS} `{}` carries {base_turns} in-band `role:\"system\"` \
              turn(s) and `{}` carries {fp_turns}; the count is a property of the client \
@@ -473,6 +484,7 @@ fn an_older_or_unreadable_base_url_release_earns_no_tolerance() {
         ("2.1.246", "2.1.294"),
         ("2.1.294-beta.1", "2.1.246"),
         ("2.1.294", "not-a-version"),
+        ("2.1.+295", "2.1.246"),
     ] {
         let mut base = with_client_version(PlantedHalf::base_url(), base_version);
         base.body = planted_body(1);
@@ -496,4 +508,21 @@ fn a_same_release_pair_both_carrying_in_band_system_turns_holds() {
     let violations = violations_over(&base, &front_proxy);
 
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+/// The tolerance covers exactly the observed release gap -- a newer base-url
+/// half with system turns over a twin carrying none. A newer base-url half
+/// whose count differs any other way is still flagged.
+#[test]
+fn a_newer_base_url_half_outside_the_observed_shape_is_flagged() {
+    for (base_count, fp_count) in [(0, 1), (1, 2)] {
+        let mut base = with_client_version(PlantedHalf::base_url(), "2.1.294");
+        base.body = planted_body(base_count);
+        let mut front_proxy = with_client_version(PlantedHalf::front_proxy(), "2.1.246");
+        front_proxy.body = planted_body(fp_count);
+
+        let violations = violations_over(&base, &front_proxy);
+
+        assert_flags_only(&violations, CLAUSE_SYSTEM_TURNS);
+    }
 }

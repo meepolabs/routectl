@@ -457,6 +457,49 @@ assert_clean "a fresh uuid as an x-client-request-id header value is accepted" \
     "[[\"content-type\",\"application/json\"],[\"x-client-request-id\",\"$(fresh_uuid_v4)\"]]" \
     "$SEAT_STORE"
 
+# --- user-identity ---------------------------------------------------
+# Claude Code sends the capturing OS login as
+# `safeguards[].classifier_context.user_identity`. A bare login has no shape
+# to match, so the class is keyed on the NAME and compared against the
+# neutral owner set.
+identity_body_with() {
+    printf '{"model":"claude-opus-4-8","safeguards":[{"classifier_context":{"cwd":{"resolved":["/tmp/work"]},"user_identity":%s,"v":1},"type":"dangerous_tool"}]}' "$1"
+}
+
+assert_caught "a login name under user_identity is refused" \
+    ingress_request.json "$(identity_body_with '"jsmith"')" user-identity
+
+# The same key echoed inside a JSON string, one escape level down, which is
+# how a tool transcript carrying a request body presents it.
+assert_caught "a login name under an escaped user_identity key is refused" \
+    ingress_request.json \
+    "$(body_with '{\"classifier_context\":{\"user_identity\":\"jsmith\"}}')" \
+    user-identity
+
+# A value --write cannot splice in place must still refuse, not pass.
+assert_caught "a non-string user_identity value is refused" \
+    ingress_request.json "$(identity_body_with '{"name":"jsmith"}')" user-identity
+
+assert_clean "the neutral placeholder login under user_identity is accepted" \
+    ingress_request.json "$(identity_body_with '"user"')"
+
+assert_clean "a user_identity mentioned in prose with no value is accepted" \
+    ingress_request.json "$(body_with "the classifier reads user_identity from the context")"
+
+assert_write "a user_identity login is rewritten to the neutral placeholder" \
+    ingress_request.json "$(identity_body_with '"jsmith"')" \
+    '! printf "%s" "$WRITTEN" | grep -qF "jsmith" && printf "%s" "$WRITTEN" | grep -qF "\"user_identity\":\"user\",\"v\":1"'
+
+assert_write "an escaped user_identity login is rewritten at its own escape level" \
+    ingress_request.json \
+    "$(body_with '{\"user_identity\":\"jsmith\"}')" \
+    'printf "%s" "$WRITTEN" | grep -qF "{\\\"user_identity\\\":\\\"user\\\"}"'
+
+# Only the value moves: every other byte of the body is preserved.
+assert_write "the user_identity rewrite leaves the rest of the body byte-identical" \
+    ingress_request.json "$(identity_body_with '"jsmith"')" \
+    '[ "$WRITTEN" = "$(identity_body_with "\"user\"")" ]'
+
 # --- ls-owner-column -------------------------------------------------
 # The second named gap: an `ls -l` listing whose owner/group columns name
 # a real account.
@@ -1227,6 +1270,7 @@ run_write_then_check ingress_request.headers.json "$HEADERS_LIVE"
 run_write_then_check upstream_response.headers.json "$ACCOUNT_HEADERS_RAW"
 run_write_then_check ingress_request.json \
     "$(body_with "cat @HOME@/.config/routectl/config.toml")"
+run_write_then_check ingress_request.json "$(identity_body_with '"jsmith"')"
 
 # --- interface and fail-closed behavior ------------------------------
 assert_usage() {
@@ -1271,7 +1315,7 @@ assert_help_lists_new_classes() {
         return
     fi
     for class in google-oauth-token google-api-key jwt aws-temp-key-id nvidia-api-key seat-session-id \
-        anthropic-account-id claude-session-header chatgpt-account-id; do
+        anthropic-account-id claude-session-header chatgpt-account-id user-identity; do
         printf '%s\n' "$out" | grep -qF -- "$class" || missing+=" $class"
     done
     if [ -n "$missing" ]; then

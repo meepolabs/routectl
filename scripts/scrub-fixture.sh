@@ -5,8 +5,9 @@
 # Two modes, deliberately asymmetric:
 #
 #   --write <path>...   Apply the transforms that are proven safe to
-#                       automate: rewrite the operator's own home path to
-#                       a neutral placeholder, and redact the VALUE of
+#                       automate: rewrite the operator's own home path and
+#                       every `user_identity` login to a neutral
+#                       placeholder, and redact the VALUE of
 #                       every credential-shaped and every account-scoped
 #                       header while keeping its NAME. Runs as the fixture
 #                       is written, before it is promoted into the corpus.
@@ -98,6 +99,15 @@
 #   nvidia-api-key     an `nvapi-`-prefixed NVIDIA API key
 #   headers-unparseable  a `*.headers.json` that is not valid JSON, so its
 #                      auth content cannot be inspected at all
+#   user-identity      a `user_identity` key whose value is not a neutral
+#                      owner name. Claude Code puts the capturing OS login
+#                      there (`safeguards[].classifier_context`). Keyed on
+#                      the NAME, at any depth and at any JSON-escape level,
+#                      because a bare login has no shape of its own to match.
+#                      `--write` rewrites a plain string value to the
+#                      neutral placeholder; a value it cannot rewrite in
+#                      place (not a string, or carrying an escape) is left
+#                      for `--check` to refuse.
 #
 # The header classes and the BODY classes are separate layers on purpose.
 # `auth-header` reasons over a parsed header NAME, so it covers any value
@@ -154,8 +164,10 @@ PLACEHOLDER_HOME_ENC="-home-user"
 REDACTED_BEARER="Bearer [REDACTED]"
 REDACTED_SECRET="[REDACTED]"
 
-# Owner/group names in an `ls -l` column that identify nobody.
+# Owner/group names in an `ls -l` column that identify nobody. The first
+# entry is also the login `--write` puts under a `user_identity` key.
 NEUTRAL_OWNERS=("user" "root")
+PLACEHOLDER_LOGIN="${NEUTRAL_OWNERS[0]}"
 
 # Hostnames that are not personal identifiers. Deny-listing one of these
 # would match routectl's own loopback base URLs in every fixture body.
@@ -867,6 +879,68 @@ has_aws_cred_assignment() {
   grep_has -qE "$AWS_CRED_ASSIGN_RE" "$1"
 }
 
+# A `user_identity` key and its value, found in the RAW text rather than in
+# a parsed document: the key also arrives inside a JSON string (a tool
+# transcript echoing a request body), escaped one or more levels deep, where
+# no parser sees it as a key. The value's closing quote is searched at the
+# key's own escape level. A value that is not a quoted string at that level,
+# or that carries a backslash, is reported as unreadable rather than guessed
+# at -- `--check` refuses it and `--write` leaves it alone.
+#
+# Shared verbatim by the check and write paths, so what the writer rewrote
+# is exactly what the checker accepts.
+read -r -d '' USER_IDENTITY_PY <<'PY' || true
+import re
+
+USER_IDENTITY_KEY = re.compile(r'(\\*)"user_identity(\\*)"[ \t\r\n]*:[ \t\r\n]*')
+
+def user_identity_values(text):
+    """Yield (start, end, value) per key; value is None when unreadable."""
+    for m in USER_IDENTITY_KEY.finditer(text):
+        if m.group(1) != m.group(2):
+            continue
+        quote = m.group(2) + '"'
+        start = m.end()
+        if not text.startswith(quote, start):
+            yield start, start, None
+            continue
+        body = start + len(quote)
+        end = text.find(quote, body)
+        value = text[body:end] if end >= 0 else ""
+        if end < 0 or "\\" in value:
+            yield start, start, None
+            continue
+        yield body, end, value
+
+def read_text(path):
+    with open(path, "rb") as fh:
+        return fh.read().decode("utf-8", "surrogateescape")
+
+def write_text(path, text):
+    with open(path, "wb") as fh:
+        fh.write(text.encode("utf-8", "surrogateescape"))
+PY
+
+# True when any `user_identity` value is not a neutral owner name.
+has_user_identity() {
+  local rc=0
+  python3 - "$1" "${NEUTRAL_OWNERS[@]}" <<PY || rc=$?
+import sys
+$USER_IDENTITY_PY
+
+path, neutral = sys.argv[1], set(sys.argv[2:])
+for _, _, value in user_identity_values(read_text(path)):
+    if value not in neutral:
+        sys.exit(3)
+sys.exit(0)
+PY
+  case "$rc" in
+    0) return 1 ;;
+    3) return 0 ;;
+    *) fatal "user_identity inspection failed on $1" ;;
+  esac
+}
+
 # --- provider shape coverage -----------------------------------------
 # The map from a provider KIND to the credential shapes this gate can
 # detect for it. Declared as a closed, sentinel-delimited array literal
@@ -1083,6 +1157,7 @@ run_check() {
     has_aws_cred_assignment "$f" && findings+="  $f  aws-credential-assignment"$'\n'
     has_scratch_task_id "$f" && findings+="  $f  scratch-task-id"$'\n'
     has_scratch_worktree "$f" && findings+="  $f  scratch-worktree-path"$'\n'
+    has_user_identity "$f" && findings+="  $f  user-identity"$'\n'
     case "$f" in
       *.headers.json)
         local hrc=0 hclasses hclass
@@ -1174,6 +1249,30 @@ PY
   fi
 }
 
+# Rewrite every readable `user_identity` value to the neutral login. A text
+# splice rather than a JSON re-emit, so every other byte of the fixture --
+# key order, escapes, number spellings -- survives unchanged, and the file
+# is rewritten only when a value actually changes.
+rewrite_user_identity() {
+  local file="$1" rc=0
+  python3 - "$file" "$PLACEHOLDER_LOGIN" <<PY || rc=$?
+import sys
+$USER_IDENTITY_PY
+
+path, placeholder = sys.argv[1], sys.argv[2]
+text = read_text(path)
+out, last = [], 0
+for start, end, value in user_identity_values(text):
+    if value is None or value == placeholder:
+        continue
+    out += [text[last:start], placeholder]
+    last = end
+if out:
+    write_text(path, "".join(out) + text[last:])
+PY
+  [ "$rc" -eq 0 ] || fatal "user_identity rewrite failed on $file"
+}
+
 run_write() {
   local f
   for f in "${FILES[@]}"; do
@@ -1181,6 +1280,7 @@ run_write() {
     case "$f" in
       *.headers.json) redact_headers_file "$f" ;;
     esac
+    rewrite_user_identity "$f"
     rewrite_home "$f"
   done
   echo "scrub-fixture: scrubbed ${#FILES[@]} file(s)"
