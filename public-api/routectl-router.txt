@@ -8337,6 +8337,8 @@ pub routectl_router::Refusal::EgressAllowlist::allowlists: alloc::vec::Vec<route
 pub routectl_router::Refusal::Malformed
 pub routectl_router::Refusal::Malformed::entries: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::Refusal::Malformed::source: routectl_router::RefusalSource
+pub routectl_router::Refusal::OverrideShape
+pub routectl_router::Refusal::OverrideShape::paths: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::Refusal::SeatSelectionRelocation
 pub routectl_router::Refusal::SeatSelectionRelocation::entries: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::Refusal

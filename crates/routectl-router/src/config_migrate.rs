@@ -418,6 +418,11 @@ pub enum RefusalSource {
 /// - [`Refusal::CapabilityConflict`]: the v4 -> v5 fold would put a
 ///   capability into `unsupported` on a cell whose `force_supported`
 ///   already names it.
+/// - [`Refusal::OverrideShape`]: the v4 -> v5 fold's destination under
+///   `[capability.overrides]` already exists in a shape it cannot extend
+///   (a non-table `capability` / `overrides` / cell, or a non-array
+///   `unsupported`). Removing the retired key without landing its values
+///   would lose them, so the migrator refuses instead.
 ///
 /// Carries the offending content and (where meaningful) rendered guidance so
 /// the caller can both log a structured audit event and print hand-edit
@@ -456,6 +461,13 @@ pub enum Refusal {
         /// One line per conflicting value, naming the cell, the capability
         /// and the retired key it was folded from.
         cells: Vec<String>,
+    },
+    /// A `[capability.overrides]` destination the v4 -> v5 fold must extend
+    /// already holds a value of the wrong shape.
+    OverrideShape {
+        /// One line per offending destination, naming its key path and the
+        /// shape it must have. Carries no values.
+        paths: Vec<String>,
     },
     /// A provider-level `seat_selection` the v3 -> v4 rung cannot relocate
     /// onto a pool block without guessing -- including two entries whose
@@ -559,6 +571,20 @@ impl fmt::Display for Refusal {
                 )?;
                 for cell in cells {
                     writeln!(f, "  - {cell}")?;
+                }
+                Ok(())
+            }
+            Self::OverrideShape { paths } => {
+                writeln!(
+                    f,
+                    "folding the retired `unsupported_features` lists into \
+                     `[capability.overrides]` needs to extend the destinations below, but each \
+                     already holds a value of another shape. Dropping the retired lists without \
+                     landing their values would lose them, so nothing was written. Give each \
+                     destination the shape shown, then rerun:"
+                )?;
+                for path in paths {
+                    writeln!(f, "  - {path}")?;
                 }
                 Ok(())
             }
@@ -827,9 +853,11 @@ const UNSUPPORTED_FEATURES_KEY: &str = "unsupported_features";
 ///
 /// # Errors
 ///
-/// Both refusals happen before any mutation, leaving `doc` byte-untouched:
+/// Every refusal happens before any mutation, leaving `doc` byte-untouched:
 ///
 /// - [`Refusal::EgressAllowlist`] when any allowlist is non-empty;
+/// - [`Refusal::OverrideShape`] when a fold destination under
+///   `[capability.overrides]` exists in a shape the fold cannot extend;
 /// - [`Refusal::CapabilityConflict`] when a folded value is already in the
 ///   target cell's `force_supported`.
 pub fn migrate_v4_to_v5(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
@@ -839,12 +867,16 @@ pub fn migrate_v4_to_v5(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
     }
 
     let plan = collect_unsupported_features(doc);
+    let paths = override_shape_problems(doc, &plan);
+    if !paths.is_empty() {
+        return Err(Refusal::OverrideShape { paths });
+    }
     let cells = forced_fold_conflicts(doc, &plan);
     if !cells.is_empty() {
         return Err(Refusal::CapabilityConflict { cells });
     }
 
-    fold_unsupported_features(doc, &plan);
+    fold_unsupported_features(doc, &plan)?;
     drop_empty_egress_allowlists(doc);
     doc["version"] = toml_edit::value(5i64);
 
@@ -856,9 +888,17 @@ pub fn migrate_v4_to_v5(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
 
 /// Apply the folds in `plan` and remove every retired `unsupported_features`
 /// key it names.
-fn fold_unsupported_features(doc: &mut DocumentMut, plan: &UnsupportedFeaturesPlan) {
+///
+/// # Errors
+///
+/// [`Refusal::OverrideShape`] when a destination cannot be extended; the
+/// retired key is then left in place rather than dropped unfolded.
+fn fold_unsupported_features(
+    doc: &mut DocumentMut,
+    plan: &UnsupportedFeaturesPlan,
+) -> Result<(), Refusal> {
     for fold in &plan.folds {
-        append_unsupported_override(doc, &fold.spec, &fold.values);
+        append_unsupported_override(doc, &fold.spec, &fold.values)?;
     }
     if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut) {
         for name in &plan.provider_removals {
@@ -874,6 +914,75 @@ fn fold_unsupported_features(doc: &mut DocumentMut, plan: &UnsupportedFeaturesPl
             }
         }
     }
+    Ok(())
+}
+
+/// The `[capability]` table key.
+const CAPABILITY_KEY: &str = "capability";
+
+/// The `[capability.overrides]` table key.
+const OVERRIDES_KEY: &str = "overrides";
+
+/// The per-cell array the fold extends.
+const OVERRIDE_UNSUPPORTED_KEY: &str = "unsupported";
+
+/// The key path of the `[capability.overrides]` cell for `spec`.
+fn override_cell_path(spec: &str) -> String {
+    format!("{CAPABILITY_KEY}.{OVERRIDES_KEY}.{}", render_spec_key(spec))
+}
+
+/// One [`Refusal::OverrideShape`] line: the path and the shape it needs.
+fn shape_line(path: &str, shape: &str) -> String {
+    format!("{path} (must be {shape})")
+}
+
+/// One line per fold destination that already exists in a shape the fold
+/// cannot extend, in deterministic order. Destinations that do not exist yet
+/// are fine (the fold creates them), and nothing is checked when there is
+/// nothing to fold.
+fn override_shape_problems(doc: &DocumentMut, plan: &UnsupportedFeaturesPlan) -> Vec<String> {
+    if plan.folds.is_empty() {
+        return Vec::new();
+    }
+    let Some(capability) = doc.get(CAPABILITY_KEY) else {
+        return Vec::new();
+    };
+    let Some(capability) = capability.as_table_like() else {
+        return vec![shape_line(CAPABILITY_KEY, "a table")];
+    };
+    let Some(overrides) = capability.get(OVERRIDES_KEY) else {
+        return Vec::new();
+    };
+    let Some(overrides) = overrides.as_table_like() else {
+        return vec![shape_line(
+            &format!("{CAPABILITY_KEY}.{OVERRIDES_KEY}"),
+            "a table",
+        )];
+    };
+    let mut problems = Vec::new();
+    for fold in &plan.folds {
+        let Some(cell) = overrides.get(&fold.spec) else {
+            continue;
+        };
+        let path = override_cell_path(&fold.spec);
+        match cell.as_table_like() {
+            None => problems.push(shape_line(&path, "a table")),
+            Some(cell)
+                if cell
+                    .get(OVERRIDE_UNSUPPORTED_KEY)
+                    .is_some_and(|item| item.as_array().is_none()) =>
+            {
+                problems.push(shape_line(
+                    &format!("{path}.{OVERRIDE_UNSUPPORTED_KEY}"),
+                    "an array",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    problems.sort();
+    problems.dedup();
+    problems
 }
 
 /// One line per folded value whose target cell already lists the same string
@@ -1093,22 +1202,40 @@ fn read_unsupported_features(table: &dyn TableLike) -> Option<Vec<Value>> {
 /// empty headers are emitted) and the per-spec table as needed. Values whose
 /// string form already appears on the target array are skipped so a
 /// duplicate legacy+override declaration folds without doubling up.
-fn append_unsupported_override(doc: &mut DocumentMut, spec: &str, values: &[Value]) {
-    let Some(overrides) = ensure_overrides_table(doc) else {
-        return;
+///
+/// # Errors
+///
+/// [`Refusal::OverrideShape`] naming the first destination that exists in a
+/// shape the fold cannot extend. Nothing is written before that check.
+fn append_unsupported_override(
+    doc: &mut DocumentMut,
+    spec: &str,
+    values: &[Value],
+) -> Result<(), Refusal> {
+    let shape_refusal = |path: &str, shape: &str| Refusal::OverrideShape {
+        paths: vec![shape_line(path, shape)],
     };
+    let cell_path = override_cell_path(spec);
+    let overrides = ensure_overrides_table(doc)?;
     if !overrides.contains_key(spec) {
         overrides.insert(spec, Item::Table(Table::new()));
     }
-    let Some(entry) = overrides.get_mut(spec).and_then(Item::as_table_like_mut) else {
-        return;
-    };
-    if !entry.contains_key("unsupported") {
-        entry.insert("unsupported", toml_edit::value(Array::new()));
+    let entry = overrides
+        .get_mut(spec)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| shape_refusal(&cell_path, "a table"))?;
+    if !entry.contains_key(OVERRIDE_UNSUPPORTED_KEY) {
+        entry.insert(OVERRIDE_UNSUPPORTED_KEY, toml_edit::value(Array::new()));
     }
-    let Some(arr) = entry.get_mut("unsupported").and_then(Item::as_array_mut) else {
-        return;
-    };
+    let arr = entry
+        .get_mut(OVERRIDE_UNSUPPORTED_KEY)
+        .and_then(Item::as_array_mut)
+        .ok_or_else(|| {
+            shape_refusal(
+                &format!("{cell_path}.{OVERRIDE_UNSUPPORTED_KEY}"),
+                "an array",
+            )
+        })?;
     let mut seen: std::collections::BTreeSet<String> = arr
         .iter()
         .filter_map(|v| v.as_str().map(str::to_string))
@@ -1121,27 +1248,40 @@ fn append_unsupported_override(doc: &mut DocumentMut, spec: &str, values: &[Valu
         }
         arr.push(value.clone());
     }
+    Ok(())
 }
 
 /// Get (or create) the `[capability.overrides]` table, creating the
 /// `[capability]` and `[capability.overrides]` parents as implicit tables so
-/// they never render as empty headers. Returns `None` only when `capability`
-/// or `overrides` already exists in a non-table shape (an invalid config the
-/// shared gate rejects downstream).
-fn ensure_overrides_table(doc: &mut DocumentMut) -> Option<&mut dyn TableLike> {
+/// they never render as empty headers.
+///
+/// # Errors
+///
+/// [`Refusal::OverrideShape`] when `capability` or `overrides` already
+/// exists in a non-table shape.
+fn ensure_overrides_table(doc: &mut DocumentMut) -> Result<&mut dyn TableLike, Refusal> {
+    let not_a_table = |path: String| Refusal::OverrideShape {
+        paths: vec![shape_line(&path, "a table")],
+    };
     let root = doc.as_table_mut();
-    if !root.contains_key("capability") {
+    if !root.contains_key(CAPABILITY_KEY) {
         let mut table = Table::new();
         table.set_implicit(true);
-        root.insert("capability", Item::Table(table));
+        root.insert(CAPABILITY_KEY, Item::Table(table));
     }
-    let capability = root.get_mut("capability")?.as_table_like_mut()?;
-    if !capability.contains_key("overrides") {
+    let capability = root
+        .get_mut(CAPABILITY_KEY)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| not_a_table(CAPABILITY_KEY.to_string()))?;
+    if !capability.contains_key(OVERRIDES_KEY) {
         let mut table = Table::new();
         table.set_implicit(true);
-        capability.insert("overrides", Item::Table(table));
+        capability.insert(OVERRIDES_KEY, Item::Table(table));
     }
-    capability.get_mut("overrides")?.as_table_like_mut()
+    capability
+        .get_mut(OVERRIDES_KEY)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| not_a_table(format!("{CAPABILITY_KEY}.{OVERRIDES_KEY}")))
 }
 
 /// The config key a provider entry's OAuth credential reference lives on.
@@ -1757,11 +1897,14 @@ pub fn apply_config_transforms(
     doc: &mut DocumentMut,
     raw_version: u32,
 ) -> Result<Vec<StepOutcome>, Refusal> {
+    // Every rung runs on a scratch copy: a later rung's refusal must not
+    // leave an earlier rung's edits behind in the caller's document.
+    let mut next = doc.clone();
     let mut steps = Vec::new();
     let mut version = raw_version;
 
     if version <= 1 {
-        apply_v1_to_v2_doc(doc);
+        apply_v1_to_v2_doc(&mut next);
         steps.push(StepOutcome {
             from_version: 1,
             to_version: 2,
@@ -1770,19 +1913,20 @@ pub fn apply_config_transforms(
     }
 
     if version == 2 {
-        steps.push(migrate_v2_to_v3(doc)?);
+        steps.push(migrate_v2_to_v3(&mut next)?);
         version = 3;
     }
 
     if version == 3 {
-        steps.push(migrate_v3_to_v4(doc)?);
+        steps.push(migrate_v3_to_v4(&mut next)?);
         version = 4;
     }
 
     if version == 4 {
-        steps.push(migrate_v4_to_v5(doc)?);
+        steps.push(migrate_v4_to_v5(&mut next)?);
     }
 
+    *doc = next;
     Ok(steps)
 }
 
@@ -3114,11 +3258,28 @@ api_key_ref = \"literal:k\"\n";
         );
     }
 
+    /// A v3 file whose v3 -> v4 rung succeeds (it relocates
+    /// `seat_selection`) and whose v4 -> v5 fold then conflicts with a
+    /// `force_supported` entry on the same cell.
+    const V3_LADDER_CONFLICT: &str = "\
+version = 3
+
+[providers.anthropic-managed]
+kind = \"anthropic-api\"
+api_key_ref = \"oauth://anthropic\"
+seat_selection = \"round-robin\"
+unsupported_features = [\"computer_use\"]
+
+[capability.overrides.anthropic-managed]
+force_supported = [\"computer_use\"]
+";
+
     #[test]
-    fn v4_to_v5_refuses_a_fold_onto_a_force_supported_cell_untouched() {
+    fn a_fold_onto_a_force_supported_cell_refuses_with_the_doc_untouched() {
         let cases = [
             (
                 "provider-scoped",
+                4,
                 format!(
                     "{V4_PROVIDER_MODEL}\n[capability.overrides.fast]\n\
                      force_supported = [\"web_search\"]\n"
@@ -3127,18 +3288,28 @@ api_key_ref = \"literal:k\"\n";
             ),
             (
                 "model-scoped",
+                4,
                 format!(
                     "{V4_PROVIDER_MODEL}\n[capability.overrides.\"fast:gpt\"]\n\
                      force_supported = [\"computer_use\"]\n"
                 ),
                 "[capability.overrides.\"fast:gpt\"] `computer_use`",
             ),
+            (
+                "v3 ladder, refused at the v4 rung",
+                3,
+                V3_LADDER_CONFLICT.to_string(),
+                "[capability.overrides.anthropic-managed] `computer_use`",
+            ),
         ];
-        for (row, src, expected_cell) in cases {
+        for (row, raw_version, src, expected_cell) in cases {
+            // Arrange
             let mut doc = doc_of(&src);
 
-            let refusal = migrate_v4_to_v5(&mut doc).expect_err(row);
+            // Act
+            let refusal = apply_config_transforms(&mut doc, raw_version).expect_err(row);
 
+            // Assert
             assert_eq!(
                 doc.to_string(),
                 src,
@@ -3149,6 +3320,108 @@ api_key_ref = \"literal:k\"\n";
             };
             assert_eq!(cells.len(), 1, "{row}: {cells:?}");
             assert!(cells[0].starts_with(expected_cell), "{row}: {cells:?}");
+        }
+    }
+
+    #[test]
+    fn v4_to_v5_refuses_a_fold_onto_a_mis_shaped_override_untouched() {
+        const CANARY: &str = "canary-capability-2099";
+        let cases = [
+            (
+                "capability is not a table",
+                V4_PROVIDER_MODEL.replacen("version = 4\n", "version = 4\ncapability = 1\n", 1),
+                "capability (must be a table)",
+            ),
+            (
+                "overrides is not a table",
+                format!("{V4_PROVIDER_MODEL}\n[capability]\noverrides = \"{CANARY}\"\n"),
+                "capability.overrides (must be a table)",
+            ),
+            (
+                "the cell is not a table",
+                format!("{V4_PROVIDER_MODEL}\n[capability.overrides]\nfast = \"{CANARY}\"\n"),
+                "capability.overrides.fast (must be a table)",
+            ),
+            (
+                "the cell's unsupported is not an array",
+                format!(
+                    "{V4_PROVIDER_MODEL}\n[capability.overrides.fast]\n\
+                     unsupported = \"{CANARY}\"\n"
+                ),
+                "capability.overrides.fast.unsupported (must be an array)",
+            ),
+            (
+                "a model cell's unsupported is not an array",
+                format!(
+                    "{V4_PROVIDER_MODEL}\n[capability.overrides.\"fast:gpt\"]\n\
+                     unsupported = \"{CANARY}\"\n"
+                ),
+                "capability.overrides.\"fast:gpt\".unsupported (must be an array)",
+            ),
+        ];
+        for (row, src, expected_path) in cases {
+            // Arrange
+            let mut doc = doc_of(&src);
+
+            // Act
+            let refusal = migrate_v4_to_v5(&mut doc).expect_err(row);
+
+            // Assert
+            assert_eq!(
+                doc.to_string(),
+                src,
+                "{row}: the doc must stay byte-identical"
+            );
+            let Refusal::OverrideShape { paths } = &refusal else {
+                panic!("{row}: expected OverrideShape, got {refusal:?}");
+            };
+            assert_eq!(paths, &[expected_path.to_string()], "{row}");
+            let text = refusal.to_string();
+            assert!(text.contains(expected_path), "{row}: {text}");
+            assert!(
+                !text.contains(CANARY),
+                "{row}: values must never render: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn mis_shaped_override_destinations_refuse_at_the_fold_itself() {
+        let cases = [
+            (
+                "capability",
+                "capability = 1\n",
+                "capability (must be a table)",
+            ),
+            (
+                "overrides",
+                "[capability]\noverrides = \"x\"\n",
+                "capability.overrides (must be a table)",
+            ),
+            (
+                "cell",
+                "[capability.overrides]\nfast = 1\n",
+                "capability.overrides.fast (must be a table)",
+            ),
+            (
+                "unsupported",
+                "[capability.overrides.fast]\nunsupported = \"x\"\n",
+                "capability.overrides.fast.unsupported (must be an array)",
+            ),
+        ];
+        for (row, src, expected_path) in cases {
+            let mut doc = doc_of(src);
+            let values = [Value::from("web_search")];
+
+            let refusal = append_unsupported_override(&mut doc, "fast", &values).expect_err(row);
+
+            assert_eq!(
+                refusal,
+                Refusal::OverrideShape {
+                    paths: vec![expected_path.to_string()]
+                },
+                "{row}"
+            );
         }
     }
 

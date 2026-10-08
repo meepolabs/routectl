@@ -492,10 +492,25 @@ default = \"gpt\"
 /// Run `config migrate` with `args` on a temp copy of `body`, returning
 /// (stdout, stderr, final file text).
 fn run_migrate(body: &str, args: &[&str]) -> (String, String, String) {
+    run_migrate_with_seats(body, args, &[])
+}
+
+/// [`run_migrate`] with the child's credential store (under the temp
+/// `XDG_CONFIG_HOME`) seeded with `seat_keys` first.
+fn run_migrate_with_seats(
+    body: &str,
+    args: &[&str],
+    seat_keys: &[&str],
+) -> (String, String, String) {
     let bin = env!("CARGO_BIN_EXE_routectl");
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, body).unwrap();
+    if !seat_keys.is_empty() {
+        let store_dir = dir.path().join("routectl");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        seed_seats(&store_dir.join("credentials.json"), seat_keys);
+    }
 
     let out = std::process::Command::new(bin)
         .args(["config", "migrate"])
@@ -700,4 +715,71 @@ fn a_current_version_file_reports_already_current() {
         )),
         "stdout:\n{stdout}"
     );
+}
+
+/// A current-version file whose provider entry carries a bare `oauth://` ref
+/// while the store holds two seats for that family: the only work left is
+/// seat materialization, and nothing may claim a version bump.
+#[test]
+fn a_current_version_seat_materialization_claims_no_version_bump() {
+    // Arrange
+    let version = routectl_router::CURRENT_CONFIG_VERSION;
+    let body = format!(
+        "version = {version}\n\
+         \n\
+         [server]\n\
+         host = \"127.0.0.1\"\n\
+         port = 0\n\
+         \n\
+         [providers.anthropic-managed]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         \n\
+         [models.opus]\n\
+         provider = \"anthropic-managed\"\n\
+         upstream = \"claude-opus-4-8\"\n\
+         \n\
+         [aliases]\n\
+         default = \"opus\"\n"
+    );
+    let seats = ["anthropic", "anthropic#work"];
+
+    // Act
+    let (dry_stdout, _, unwritten) = run_migrate_with_seats(&body, &["--dry-run"], &seats);
+    let (stdout, _, written) = run_migrate_with_seats(&body, &["--yes"], &seats);
+
+    // Assert: the dry run describes materialization at the same version.
+    assert_eq!(unwritten, body, "dry-run must not write");
+    assert!(
+        dry_stdout.contains(&format!(
+            "summary: materializes stored seats at version {version} (no version bump)"
+        )),
+        "stdout:\n{dry_stdout}"
+    );
+    assert!(
+        !dry_stdout.contains("migrates config from version"),
+        "stdout:\n{dry_stdout}"
+    );
+    assert!(
+        dry_stdout.contains("[pools.anthropic]"),
+        "stdout:\n{dry_stdout}"
+    );
+    // ... and the real run says the same, at the same version.
+    assert!(
+        stdout.contains(&format!(
+            "materialized the stored seats into explicit account entries at version {version}."
+        )),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("migrated config to version"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        written.contains(&format!("version = {version}")),
+        "{written}"
+    );
+    assert!(written.contains("[pools.anthropic]"), "{written}");
+    assert!(written.contains("[providers.anthropic-work]"), "{written}");
+    routectl_router::parse_config(&written).expect("the materialized output parses");
 }

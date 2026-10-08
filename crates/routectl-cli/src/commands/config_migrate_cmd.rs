@@ -940,6 +940,7 @@ const fn refusal_kind(refusal: &Refusal) -> &'static str {
         Refusal::Malformed { .. } => "malformed",
         Refusal::EgressAllowlist { .. } => "egress_allowlist",
         Refusal::CapabilityConflict { .. } => "capability_conflict",
+        Refusal::OverrideShape { .. } => "override_shape",
         Refusal::SeatSelectionRelocation { .. } => "seat_selection_relocation",
     }
 }
@@ -1176,22 +1177,7 @@ fn confirm_migration(
     if !std::io::stdin().is_terminal() {
         return false;
     }
-    if from_version == to_version {
-        println!(
-            "this rewrites config.toml at version {to_version}, materializing the stored seats \
-             behind a bare `oauth://` ref into explicit account entries on a pool. A running \
-             routectl daemon must be restarted onto the matching binary afterward."
-        );
-    } else {
-        println!(
-            "this migrates config.toml from version {from_version} to {to_version}. The break \
-             retires per-status retry lists (and, from a v1 file, the `[cache_pricing]` table), \
-             moves `seat_selection` onto the `[pools.<name>]` block that groups the accounts, \
-             folds `unsupported_features` into `[capability.overrides]`, and removes empty \
-             `allowed_betas` / `allowed_body_fields` lists. A running routectl daemon must be \
-             restarted onto the matching binary after migration."
-        );
-    }
+    println!("{}", confirmation_header(from_version, to_version));
     for line in change_summary(&[], renamed, original, phase_two) {
         println!("  - {line}");
     }
@@ -1202,6 +1188,26 @@ fn confirm_migration(
         return false;
     }
     matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// The opening line of the confirmation prompt.
+fn confirmation_header(from_version: u32, to_version: u32) -> String {
+    if from_version == to_version {
+        format!(
+            "this rewrites config.toml at version {to_version}, materializing the stored seats \
+             behind a bare `oauth://` ref into explicit account entries on a pool. A running \
+             routectl daemon must be restarted onto the matching binary afterward."
+        )
+    } else {
+        format!(
+            "this migrates config.toml from version {from_version} to {to_version}. The break \
+             retires per-status retry lists (and, from a v1 file, the `[cache_pricing]` table), \
+             moves `seat_selection` onto the `[pools.<name>]` block that groups the accounts, \
+             folds `unsupported_features` into `[capability.overrides]`, and removes empty \
+             `allowed_betas` / `allowed_body_fields` lists. A running routectl daemon must be \
+             restarted onto the matching binary after migration."
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3035,6 +3041,56 @@ default = \"gpt\"
             .find(|e| e.field("verb") == Some("migrate"))
             .expect("a migrate audit event");
         assert_eq!(audit.field("refusal_kind"), Some("capability_conflict"));
+    }
+
+    #[tokio::test]
+    async fn mis_shaped_override_refuses_byte_identical_and_audits_the_kind() {
+        let body = v4_with_legacy().replace(
+            "[aliases]\n",
+            "[capability.overrides.fast]\nunsupported = \"web_search\"\n\n[aliases]\n",
+        );
+        let f = fixture(&body);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let (result, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
+
+        let err = result.expect_err("a mis-shaped destination must refuse");
+        assert!(
+            err.to_string()
+                .contains("capability.overrides.fast.unsupported (must be an array)"),
+            "err: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "a refused migration must leave the file byte-identical"
+        );
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("refusal_kind"), Some("override_shape"));
+    }
+
+    #[test]
+    fn the_confirmation_header_names_a_bump_only_when_the_version_moves() {
+        let cases = [
+            (
+                "same version",
+                5,
+                5,
+                "materializing the stored seats",
+                "migrates",
+            ),
+            ("version bump", 4, 5, "from version 4 to 5", "materializing"),
+        ];
+        for (row, from, to, must, must_not) in cases {
+            let header = confirmation_header(from, to);
+
+            assert!(header.contains(must), "{row}: {header}");
+            assert!(!header.contains(must_not), "{row}: {header}");
+        }
     }
 
     #[tokio::test]
