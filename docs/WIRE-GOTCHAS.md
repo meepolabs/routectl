@@ -615,6 +615,15 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   `#[serde(skip_serializing_if = "String::is_empty")]` -- it is always
   emitted (possibly as `""`) so the server never sees the field missing.
 
+- **A Responses function_call can arrive with no argument deltas.** The
+  chatgpt-oauth backend may stream a `function_call` item as
+  `output_item.added` (empty `arguments`) followed directly by
+  `function_call_arguments.done` and `output_item.done`, both carrying the
+  full arguments, with no `function_call_arguments.delta` in between. The
+  SSE translator (`openai_responses/sse.rs`) therefore emits the arguments
+  from the first done event when no delta carried them, never twice, and
+  drops any delta that arrives after a done event.
+
 - **A Responses-family reasoning artifact loses its id and scheme across
   an Anthropic-dialect client.** The Anthropic wire has no slot for
   either, so the blob flattens to `redacted_thinking.data`. When the

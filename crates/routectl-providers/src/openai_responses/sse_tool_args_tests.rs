@@ -235,7 +235,50 @@ fn empty_final_arguments_emit_a_zero_argument_tool_call() {
 }
 
 #[test]
-fn done_events_for_a_non_tool_block_emit_no_tool_call() {
+fn item_done_without_arguments_field_emits_a_zero_argument_tool_call() {
+    // Arrange
+    let events = [
+        function_call_added(0, "call_a", "now"),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "call_a",
+                     "name": "now", "status": "completed"}
+        }),
+        completed(),
+    ];
+
+    // Act
+    let chunks = drive_all(events);
+
+    // Assert
+    assert_eq!(
+        tool_deltas(&chunks),
+        vec![(0, "call_a".into(), "now".into(), "{}".into())]
+    );
+}
+
+#[test]
+fn delta_arriving_after_args_done_is_dropped() {
+    // Arrange
+    let events = [
+        function_call_added(0, "call_a", "calc"),
+        args_done(0, "{\"x\":1}"),
+        args_delta(0, "{\"x\":1}"),
+    ];
+
+    // Act
+    let chunks = drive_all(events);
+
+    // Assert
+    assert_eq!(
+        tool_deltas(&chunks),
+        vec![(0, "call_a".into(), "calc".into(), "{\"x\":1}".into())]
+    );
+}
+
+#[test]
+fn done_events_route_only_to_the_tool_block_at_their_output_index() {
     // Arrange
     let events = [
         json!({
@@ -243,14 +286,19 @@ fn done_events_for_a_non_tool_block_emit_no_tool_call() {
             "output_index": 0,
             "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}
         }),
-        args_done(0, "{\"x\":1}"),
-        args_done(7, "{\"x\":1}"),
-        function_call_item_done(7, "call_a", "calc", "{\"x\":1}"),
+        function_call_added(1, "call_b", "calc"),
+        args_done(0, "{\"text\":0}"),
+        args_done(1, "{\"x\":1}"),
+        args_done(7, "{\"orphan\":7}"),
+        function_call_item_done(7, "call_z", "calc", "{\"orphan\":7}"),
     ];
 
     // Act
     let chunks = drive_all(events);
 
     // Assert
-    assert!(tool_deltas(&chunks).is_empty());
+    assert_eq!(
+        tool_deltas(&chunks),
+        vec![(0, "call_b".into(), "calc".into(), "{\"x\":1}".into())]
+    );
 }

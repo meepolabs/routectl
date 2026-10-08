@@ -12,7 +12,9 @@
 //! - `Text`     -- assistant message item; text deltas flow through
 //! - `Reasoning` -- chain-of-thought item; summary + content deltas
 //!   accumulate, encrypted_content flushes on item.done
-//! - `ToolUse`  -- function_call item; argument deltas accumulate
+//! - `ToolUse`  -- function_call item; argument deltas stream
+//!   through, or, when no delta carried them, the final arguments from
+//!   `function_call_arguments.done` / `output_item.done` are emitted once
 //!
 //! Indices (`call_index`, `detail_index`) are assigned dense (0, 1, 2,
 //! ...) per stream via `next_call_index` / `next_detail_index`
@@ -78,7 +80,10 @@ enum BlockState {
     /// already emitted downstream. Empty means nothing has been sent
     /// yet, so the final arguments carried by
     /// `function_call_arguments.done` (or, failing that, by the item on
-    /// `output_item.done`) are emitted in one chunk.
+    /// `output_item.done`) are emitted in one chunk. `finalized` is
+    /// set once a done event has settled the arguments; any delta
+    /// arriving after that would append to an already-complete JSON
+    /// value, so it is dropped.
     ToolUse {
         #[allow(dead_code)]
         item_id: String,
@@ -86,6 +91,7 @@ enum BlockState {
         name: String,
         call_index: u32,
         arguments: String,
+        finalized: bool,
     },
 }
 
@@ -167,7 +173,9 @@ impl ResponsesStreamState {
             }
             "response.reasoning_text.delta" => Ok(self.handle_reasoning_text_delta(&event)),
             "response.reasoning_summary_part.added" => Ok(Vec::new()),
-            "response.function_call_arguments.delta" => Ok(self.handle_function_call_delta(&event)),
+            "response.function_call_arguments.delta" => {
+                Ok(self.handle_function_call_delta(provider_id, &event))
+            }
             "response.function_call_arguments.done" => {
                 Ok(self.handle_function_call_args_done(provider_id, &event))
             }
@@ -324,6 +332,7 @@ impl ResponsesStreamState {
                         name,
                         call_index,
                         arguments: String::new(),
+                        finalized: false,
                     },
                 );
                 // The sticky `saw_function_call` flag was already set
@@ -425,7 +434,11 @@ impl ResponsesStreamState {
         vec![self.reasoning_text_chunk(&detail_id, detail_index, delta.to_string())]
     }
 
-    fn handle_function_call_delta(&mut self, event: &ResponsesStreamEvent) -> Vec<ChatChunk> {
+    fn handle_function_call_delta(
+        &mut self,
+        provider_id: &str,
+        event: &ResponsesStreamEvent,
+    ) -> Vec<ChatChunk> {
         let Some(delta) = event.delta.as_deref() else {
             return Vec::new();
         };
@@ -433,6 +446,16 @@ impl ResponsesStreamState {
             return Vec::new();
         };
         let (call_id, name, call_index) = match self.blocks.get_mut(&idx) {
+            Some(BlockState::ToolUse {
+                finalized: true, ..
+            }) => {
+                tracing::debug!(
+                    provider = provider_id,
+                    output_index = idx,
+                    "openai-responses: function_call argument delta after done event; dropping"
+                );
+                return Vec::new();
+            }
             Some(BlockState::ToolUse {
                 call_id,
                 name,
@@ -478,11 +501,13 @@ impl ResponsesStreamState {
             name,
             call_index,
             arguments,
+            finalized,
             ..
         }) = self.blocks.get_mut(&idx)
         else {
             return None;
         };
+        *finalized = true;
         // An empty final payload is a zero-argument call; `{}` keeps the
         // emitted arguments parseable JSON for every downstream client.
         let final_args = if final_args.is_empty() {
@@ -517,12 +542,17 @@ impl ResponsesStreamState {
         };
         let mut chunks = Vec::new();
         if matches!(self.blocks.get(&idx), Some(BlockState::ToolUse { .. })) {
-            let final_args = event
-                .item
-                .as_ref()
-                .and_then(|v| v.get("arguments"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let final_args = match event.item.as_ref().and_then(|v| v.get("arguments")) {
+                Some(v) => v.as_str().unwrap_or(""),
+                None => {
+                    tracing::debug!(
+                        provider = provider_id,
+                        output_index = idx,
+                        "openai-responses: function_call item.done without arguments"
+                    );
+                    ""
+                }
+            };
             chunks.extend(self.finalize_tool_arguments(provider_id, idx, final_args));
         }
         // The final item shape may include the `encrypted_content`
