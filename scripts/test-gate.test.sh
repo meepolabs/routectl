@@ -16,8 +16,9 @@
 # The leg is driven from a scratch copy of scripts/ whose test-gate.sh is a
 # stub recording its argv, with stub cargo-public-api, rustup, and rustup's
 # cargo / rustdoc / rustc proxies on a PATH that holds only them and the
-# system directories, so the caller's own toolchain never decides a verdict. Every skip case is paired with the
-# run case it differs from by one stub.
+# system directories, so the caller's own toolchain never decides a verdict.
+# Each skip case is paired with the run case it differs from by one missing
+# tool; the rustup-absent case also drops the three proxies rustup provides.
 #
 # Run it from anywhere:
 #   bash scripts/test-gate.test.sh
