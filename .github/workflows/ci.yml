@@ -503,6 +503,11 @@ jobs:
       - name: live-gate isolation self-test
         run: bash scripts/check-live-gate-isolation.test.sh
 
+      # The gate registry's public-api subcommand and the pre-push leg that
+      # runs it only where the pinned tooling is installed.
+      - name: gate registry self-test
+        run: bash scripts/test-gate.test.sh
+
       # Self-test only: the toolchain preflight itself is not run on CI's rust
       # jobs, which select the toolchain through the setup action rather than
       # the rustup shim. What CI does guard is that the preflight local hooks
@@ -628,9 +633,10 @@ jobs:
       - name: AWS-LC build environment preflight
         run: bash scripts/assert-aws-lc-env.sh
 
-      # The ONLY place this check runs as a gate. It is not a commit hook:
-      # it needs cargo-public-api plus a pinned nightly, and a hook that
-      # skips where that toolchain is absent lets a surface change authored
+      # The only place this check runs for EVERY change. The local pre-push
+      # leg (scripts/public-api-pre-push.sh) runs it only where
+      # cargo-public-api plus the pinned nightly are installed, and a hook
+      # that skips where that toolchain is absent lets a surface change authored
       # without it reach the branch with nothing catching it. CI pays that
       # bootstrap once and reproducibly instead of every contributor paying
       # it or silently skipping. Contributors can still run the script on

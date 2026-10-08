@@ -11,10 +11,11 @@ every surface change a visible, reviewable artifact in the same diff that
 causes it.
 
 It **IS a CI gate** and fails the build when a baseline is out of date
-with the live surface. CI is the only place it runs automatically: it is
-not a commit hook, because it needs `cargo-public-api` and a pinned
-nightly. Locally, run `scripts/public-api.sh --check all` on demand once
-that tooling is installed.
+with the live surface. It needs `cargo-public-api` and a pinned nightly,
+so CI is the only place it runs for every change. Locally it runs at the
+pre-push stage once that tooling is installed (and is skipped with a
+notice where it is not), or on demand with
+`scripts/public-api.sh --check all`.
 
 A surface diff is expected and fine whenever the change was intended.
 The gate does not object to the change; it objects to the baseline not

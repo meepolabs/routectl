@@ -22,7 +22,9 @@ crates with feature gates also get reduced-feature legs. The exact gate
 commands live in [`scripts/test-gate.sh`](../scripts/test-gate.sh); run it
 with no
 arguments to list them (`bash scripts/test-gate.sh pre-push` reproduces
-the pre-push gate).
+the pre-push test leg; `bash scripts/test-gate.sh public-api` the
+public-API baseline leg, which needs the tooling described under "Commit
+gate").
 
 Every change must keep all of the following green:
 
@@ -183,9 +185,10 @@ no row in `docs/CODEMAP.md` or this file (pre-existing gaps are listed in
 `scripts/check-nav-index.allowlist`, which only shrinks) and its self-test,
 `cargo fmt --check`, a separate leg that runs rustfmt on `include!`d
 fragments `cargo fmt` never opens, `cargo clippy`, a lean
-providers-only `cargo check`, and `cargo doc` with rustdoc
-lints denied. The `commit-msg` stage applies the same identifier scan to
-the commit message, plus a subject-line length check.
+providers-only `cargo check`, `cargo doc` with rustdoc
+lints denied, and the gate-registry self-test. The `commit-msg` stage
+applies the same identifier scan to the commit message, plus a
+subject-line length check.
 
 `cargo test` is deliberately not a COMMIT-stage leg: it was 275 of the
 305 seconds a commit used to take, and a multi-minute release suite on
@@ -194,6 +197,18 @@ the fast legs with it. It runs at the `pre-push` stage instead, once
 per push rather than once per commit -- the same protection against
 pushing a broken branch, at a fraction of the cost.
 
+The `pre-push` stage also runs the public-API baseline check
+(`scripts/public-api-pre-push.sh`), but only where its tooling is
+installed: `cargo-public-api` at the version pinned on the Bootstrap line
+of [`scripts/public-api.sh`](../scripts/public-api.sh), and the rustup
+toolchain named by its `PUBLIC_API_NIGHTLY`. Where either is missing the
+leg prints one `public-api: SKIPPED locally (...); CI runs this check.`
+line and passes -- missing tooling never fails a push. Where both are
+present a stale baseline fails the push, the same verdict CI's
+`public-api` job would reach later. `scripts/test-gate.test.sh` is the
+self-test for that leg and the registry's `public-api` subcommand; it
+runs in the commit stage and in CI.
+
 The three stages divide by a single rule: a check belongs at the
 earliest stage where it is cheap and the latest stage where it is
 authoritative. The secret scan is the clearest case for the commit
@@ -201,12 +216,21 @@ stage and stays there, because catching a secret after it is pushed is
 already too late -- it is in history and needs rotating. The test suite
 is authoritative about a branch, not about one commit, so it sits at
 pre-push. Everything with no local counterpart -- the advisory and
-licence scans, the public-API baseline -- is authoritative in CI.
+licence scans -- is authoritative in CI. The public-API baseline is
+authoritative in CI too: its pre-push leg runs only where the tooling is
+installed, so CI's `public-api` job is the one place it runs for every
+change.
 
-The public-API baseline check is not a hook because it needs
-`cargo-public-api` and a pinned nightly (bootstrap lines and the pin are
-at the top of [`scripts/public-api.sh`](../scripts/public-api.sh)). To
-check locally on demand, or to regenerate a baseline after an intended
+To get the pre-push public-API leg, install the tooling once per machine
+(the exact lines, with the current pins, are at the top of
+[`scripts/public-api.sh`](../scripts/public-api.sh)):
+
+```bash
+cargo install cargo-public-api --version <pinned version>
+rustup toolchain install <PUBLIC_API_NIGHTLY> --profile minimal
+```
+
+To check on demand, or to regenerate a baseline after an intended
 surface change (see [`public-api/POLICY.md`](../public-api/POLICY.md)):
 
 ```bash
