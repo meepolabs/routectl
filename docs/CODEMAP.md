@@ -596,7 +596,7 @@ license.
 - `src/anthropic_api/client.rs` -- provider construction, auth-kind
   resolution, and header plumbing: `AnthropicApiConfig` (fields: `auth`,
   `base_url`, `anthropic_version`, `auth_kind`, `header_extras`, `user_agent`,
-  `allowed_betas`, `forward_client_headers`, `context_management`,
+  `forward_client_headers`, `context_management`,
   `max_thinking_entry_bytes`, `session_id`, `cloak`, `use_forwarded_bearer`,
   `mantle` (`Option<MantleAuth>`, cfg `bedrock`)) + `AuthKind` (ApiKey /
   OauthBearer) +
@@ -644,7 +644,7 @@ license.
   request span). `build_headers` also takes the assembled `wire_body`
   (`Option<&Value>`) so the beta compose can union capability betas the
   shipped body implies -- today `output_config.format` ->
-  `STRUCTURED_OUTPUTS_BETA`, unioned last (post-allowlist, post-floor,
+  `STRUCTURED_OUTPUTS_BETA`, unioned last (post-floor,
   post-context_management-strip, suppressed on the forwarded leg) and
   idempotent, so an OAuth Claude-Code list stays byte-identical
 - `src/anthropic_api/context_management.rs` -- LRU+TTL thinking-block store
@@ -673,7 +673,7 @@ license.
   `EnvelopeUnwrapTally` (threaded into message translation and cache
   reinjection, flushed once after both), and cache_control
   breakpoint validation (`validate_breakpoints`); re-exports `build_thinking`,
-  `filter_anthropic_betas`, `translate_tool`, `translate_system`,
+  `translate_tool`, `translate_system`,
   `lift_legacy_system` for the Bedrock egress and `mod.rs`; also owns
   `drop_unrepresentable_output_format_keys`, the assembled-body scrub of the
   `output_config.format` keys Anthropic rejects (`name`, `strict`) -- that
@@ -712,19 +712,19 @@ license.
   place vs treat it as lift-consumed, resolved by `request.rs`), the
   billing/attribution screen on the forwarded path, and the
   accounted-identity ledger that turns an unaccounted message drop into a
-  normalize error
+  normalize error. Sidecar `request_body_beta_tests.rs` pins that the shared
+  normalizer leaves the body `anthropic_beta` carrier to each egress
 - `src/anthropic_api/extras.rs` -- thinking-budget composition
   (`build_thinking`, effort clamp, `build_output_config`) + post-merge body
-  reconciliation (`merge_provider_extras`, `filter_anthropic_betas`,
+  reconciliation (`merge_provider_extras`,
   `drop_redact_beta_for_display`, `reconcile_output_config_effort`,
   `strip_thinking_when_tool_choice_forces_use`); the sampling strip
   `normalize_claude_sampling`, which drops `temperature`/`top_p` (keeping
   `stop_sequences`) as the LAST body mutation on the own-OAuth
   `api.anthropic.com` lane, called from both `complete` and `stream` and
   emitting one names-only WARN per affected request; also the two
-  capability-beta unions, each gating its flag on the ASSEMBLED body and
-  bypassing `allowed_betas` as a server requirement rather than a
-  client-opted beta: structured-outputs (`body_has_output_config_format` +
+  capability-beta unions, each gating its flag on the ASSEMBLED body as a
+  server requirement rather than a client-opted beta: structured-outputs (`body_has_output_config_format` +
   `union_structured_outputs_beta` for the header carrier; the Bedrock body
   carriers use `bedrock::betas::union_feature_implied_betas`) keyed on
   `output_config.format`, and effort (`body_has_output_config_effort` +
@@ -1155,14 +1155,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the post-`additional_model_request_fields` body via
   `DeferredOutputConfigDiagnostics::rescanning`, since that merge is a
   post-normalize write path that can replace `output_config` wholesale.
-  Order after the allowlist filters: `drop_orphan_tool_choice`, the
-  `output_config` rescan, `union_feature_implied_betas` (so a body shipping
+  The body's `anthropic_beta` is the operator floor then the client's flags,
+  each flag once (`merge_floor_and_client_betas`; sidecar
+  `invoke_beta_merge_tests.rs`), then `withhold_betas`. Order after that:
+  `drop_orphan_tool_choice`, the `output_config` rescan, `union_feature_implied_betas` (so a body shipping
   `output_config.format` never egresses without its gating flag), then
   `drop_unrepresentable_body_fields` as the last mutation
-- `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke
-  body + Converse `additionalModelRequestFields`), plus the request's
-  `routectl_internal.withheld_betas` withheld in both allowlist modes unless
-  the operator floor asserts it, and `feature_implied_betas` /
+- `src/bedrock/betas.rs` -- shared `anthropic_beta` handling (Invoke body +
+  Converse `additionalModelRequestFields`): client flags pass verbatim except
+  that `withhold_betas` drops the request's `routectl_internal.withheld_betas`
+  unless the operator floor (`operator_floor`) asserts it; plus
+  `feature_implied_betas` /
   `union_feature_implied_betas`: the single source for the betas both
   carriers add from body fields (structured-outputs; Converse
   display-updates)
@@ -1175,11 +1178,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `converse` member (four-key allowlist), and the `inputTokens` response
   parse. No status is mapped to a capability signal (posture recorded at the
   `count_tokens` call site in `src/bedrock/mod.rs`)
-- `src/bedrock/body_fields.rs` -- shared `allowed_body_fields` filter against
-  AWS strict-schema 400s, plus `drop_orphan_tool_choice` (removes a
-  `tool_choice` the allowlist left without `tools`) and
-  `drop_unrepresentable_body_fields` (`mcp_servers` never forwarded on either
-  carrier; each carrier's last mutation)
+- `src/bedrock/body_fields.rs` -- the unconditional Bedrock body drops, no
+  operator knob: `drop_unrepresentable_body_fields` (`mcp_servers` never
+  forwarded on either carrier; each carrier's last mutation) and
+  `drop_orphan_tool_choice` (a `tool_choice` with no non-empty `tools`, on the
+  Invoke body that ships); every other key passes through
 
 ### bedrock/converse
 
@@ -1292,8 +1295,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   values, never a panic while the chain builds; isolated because the chain
   reads process-global env
 - `tests/bedrock_rejected_betas.rs` -- Invoke + Converse egress pins for the
-  `withheld_betas` withhold (both allowlist modes, floor escape hatch,
-  Converse drop counter, empty set withholds nothing)
+  `withheld_betas` withhold (client flags otherwise verbatim, floor escape
+  hatch, Converse drop counter, empty set withholds nothing)
 - `tests/bedrock_streaming.rs` -- scoped Bedrock integration tests over the
   public credential-resolution / auth-dispatch API (`bedrock::auth::resolve`
   Bearer vs SigV4 variants across regions)
@@ -1551,7 +1554,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   override so it renders as a string-keyed object rather than a u16 map)
 - `src/config/validate.rs` -- Config version preflight + non-schema
   validation: `version: u32` schema-stamps the file (`CURRENT_CONFIG_VERSION
-  == 4`); `preflight_config_version(raw_toml)` reads `version` off the RAW
+  == 5`); `preflight_config_version(raw_toml)` reads `version` off the RAW
   TOML before the `deny_unknown_fields` typed deserialize, failing closed with
   `ConfigVersionError` (too-new -> upgrade the binary; too-old -> `config
   migrate`, never mutated on load) rather than a confusing unknown-field
@@ -1559,7 +1562,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `[cache_pricing]` at v2+ as a hand-edited inconsistency;
   `preflight_legacy_mitm_credential_source(raw_toml)` reads `[mitm]` off the
   RAW TOML and rejects the removed `credential_source` key with an actionable
-  error naming the provider-block replacement
+  error naming the provider-block replacement;
+  `preflight_retired_capability_keys(raw_toml)` -> `RetiredCapabilityKeysError`
+  is a raw-TOML pre-parse naming each key retired in version 5 (`bedrock`,
+  provider `allowed_betas` / `unsupported_features`, model
+  `unsupported_features`) by dotted path only, never values; it runs after the
+  version and legacy-mitm preflights, in the shared loader, the edit-pipeline
+  preflight and `init`'s `load_existing`
 - `src/config_error.rs` -- the single production `Config` parse funnel
   `parse_config(text) -> Result<Config, String>` (re-exported from the crate
   root; consumed by `serve`/hot-reload load and every CLI config load) plus
@@ -1684,8 +1693,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   closed, for ANY key). `apply_config_transforms(&mut DocumentMut,
   raw_version) -> Result<Vec<StepOutcome>, Refusal>` is the pure document-only
   ladder (v1->v2 via `apply_v1_to_v2_doc` stamping the LITERAL `2` and
-  dropping `[cache_pricing]`, then v2->v3, then v3->v4, then the
-  same-version normalization at the latest version) -- both `plan_migration` (on a clone, to build the candidate)
+  dropping `[cache_pricing]`, then v2->v3, then v3->v4, then v4->v5) on a
+  scratch copy, committing to the caller's document only when every rung
+  succeeds -- both `plan_migration` (on a clone, to build the candidate)
   and the caller's commit closure (on the re-read document under the write
   lock) call it, so the committed bytes reproduce exactly what planning gated.
   `migrate_v2_to_v3(&mut DocumentMut) -> Result<StepOutcome, Refusal>` retires
@@ -1745,10 +1755,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   what the other wrote. `models_routed_at(&DocumentMut, entry) ->
   Vec<String>` is the read-only counterpart, for the change summary the
   operator confirms.
-  `normalize_capability_overrides(&mut DocumentMut) -> Result<bool, Refusal>`
-  folds legacy `unsupported_features` into `[capability.overrides]`
-  (same-version, no version bump, idempotent), refusing on a behavior-bearing
-  egress allowlist (`Refusal::EgressAllowlist`). `RefusalSource`
+  `migrate_v4_to_v5(&mut DocumentMut) -> Result<StepOutcome, Refusal>` stamps
+  the LITERAL `5`: folds every provider/model `unsupported_features` into its
+  `[capability.overrides.<spec>].unsupported` cell, removes EMPTY egress
+  allowlists (`allowed_betas` / `allowed_body_fields`) and drops `[bedrock]`
+  only when nothing is left in it. Every refusal precedes any mutation:
+  `Refusal::EgressAllowlist` (a non-empty allowlist, reported as
+  `PresentAllowlist{path, entry_count}`, never the values),
+  `Refusal::OverrideShape` (a fold destination of the wrong shape) and
+  `Refusal::CapabilityConflict` (a folded value already in the cell's
+  `force_supported`). `RefusalSource`
   (`Allowlist`/`Denylist`/`Both`) names which retired key(s) bore the cause.
   `MigrationError` (`InvalidSelector`/`InvalidOverride`/`Conflict`/`Overlay`)
   is the overlay-fold error; `MigrateError` (`V1ToV2(#[from] MigrationError)`,
@@ -1769,7 +1785,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `build_resolved_models_reported`, `ResolvedModelBuild`,
   `apply_catalog_overlay`, `BuildOptions`, the `validate_*` family,
   `resolved_codex_version`, `collect_config_validation`, `ConfigValidation`,
-  `validate_bedrock_global_config`, `validate_bedrock_invoke_model_family`,
+  `validate_bedrock_invoke_model_family`,
   `class_policy_warnings`,
   `codex_identity_warnings`, `cloudcode_host_warnings`,
   `cloudcode_model_warnings`) so
@@ -3711,7 +3727,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   remote-looking base URL behind a provider that answers in-process
 - `tests/probe_beta_wire.rs` -- the OUTGOING `anthropic-beta` header a probe
   sends must equal the admitted request's, captured off a real wiremock request
-  under a NON-EMPTY `allowed_betas`. Two stages, because the router refuses to
+  (client flags leading, the operator floor unioned after the provider's own
+  `header_extras` betas). Two stages, because the router refuses to
   activate for a loopback base URL: the real router yields the two canonical
   requests, then a real `AnthropicApiProvider` emits headers from them
 - `src/router/probe_terminal_state_tests.rs` -- tombstones, their own capacity
@@ -4006,9 +4023,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   sanitized `for_log`. Distinct from the runtime breaker `state_key`
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain
   pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date
-  suffixes (e.g. `_20250305`) so `unsupported_features` on
-  `ProviderRuntimePolicy` can match capability-class regardless of vendor
-  versioning; `ToolDef::Custom` (user-defined tools) does not contribute
+  suffixes (e.g. `_20250305`) so `[capability.overrides.<spec>].unsupported`
+  can match capability-class regardless of vendor versioning; `ToolDef::Custom` (user-defined tools) does not contribute
   tool-type keys. ALSO emits the request-derived `structured_output` key
   (appended after tool-type keys) when the request needs constrained decoding
   -- either `provider_extras["output_config"]["format"]` is non-null, the
@@ -4509,9 +4525,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   on the beta half:
   `PROBE_BETA_MAX_COUNT_PER_SOURCE` / `PROBE_BETA_MAX_TOKEN_BYTES` (per source)
   and `PROBE_BETA_MAX_TOTAL_BYTES` (combined across both). Stores the client and
-  operator beta sets SEPARATELY -- the egress filters one through
-  `allowed_betas` and exempts the other, so a union reapplied to either carrier
-  would send a header the admitted request did not -- plus the originating
+  operator beta sets SEPARATELY -- the egress composes them at different
+  points (the client set leads the header, the operator set is unioned after
+  the configured betas), so a union reapplied to either carrier would send a
+  header the admitted request did not -- plus the originating
   Claude-Code classification as a BIT (presence is all `is_non_cc` reads, and a
   scheduler has no business holding a session id across a queueing delay). The
   count bound is read off `len()` BEFORE any per-token work and dedupe runs
@@ -4688,18 +4705,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/override_registry.rs` -- operator capability-override read-model, built
   from `Config` at `Router::new` (rebuilt on reload since reload constructs a
   fresh Router) and held on `Router` (accessor `Router::override_registry`).
-  `OverrideRegistry::build` flattens FOUR sources into one map keyed
-  `(target_spec, normalized_capability_key)` carrying PROVENANCE: legacy
-  `[providers.X].unsupported_features` -> `RouteAway`/`ProviderStatic` (key =
-  provider name); legacy `[models.X].unsupported_features` ->
-  `RouteAway`/`ModelStatic` (key = `provider:nickname`); new
-  `[capability.overrides.<spec>].unsupported` -> `RouteAway`/`Override`;
-  `.force_supported` -> `ForceSupported`/`Override`. Keys normalized via
-  `routectl_core::capability::normalize_capability_key` with the target's
-  provider kind so a stored override meets a normalized lookup; legacy entries
-  keep static provenance so existing configs stay byte-identical in behavior
-  AND labels. `resolve(provider, nickname, cap, kind)` consults the
-  model-scoped cell before the provider-scoped cell (model wins). A dead-key
+  `OverrideRegistry::build` flattens `[capability.overrides.<spec>].unsupported`
+  -> `RouteAway` and `.force_supported` -> `ForceSupported` into one map keyed
+  `(target_spec, normalized_capability_key)` -> `OverrideVerdict`. Keys
+  normalized via `routectl_core::capability::normalize_capability_key` with
+  the target's provider kind so a stored override meets a normalized lookup.
+  `resolve(provider, nickname, cap, kind) -> Option<OverrideVerdict>` consults
+  the model-scoped cell, then the provider-scoped cell (model wins). A dead-key
   WARN fires per override key that normalization rewrites (dead: it could
   never match). `validate_capability_overrides` (wired into
   `factory::collect_config_validation`, so `serve` load, `config check`, and
@@ -5988,14 +6000,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   an overrunning reload task. Tests in `reload_shutdown_tests.rs`
 - `src/server/config_load.rs` -- effective-config load/parse/validate,
   re-exported at `server::` paths from `mod.rs`. The shared config loader
-  splits into `parse_config_only` (version + legacy-mitm preflight + typed
-  parse, NO overlay) and `load_overlay_default` (overlay only);
+  splits into `parse_config_only` (version + legacy-mitm + retired-key
+  preflights + typed parse, NO overlay) and `load_overlay_default` (overlay only);
   `load_effective_config_unvalidated` composes both, `load_effective_config`
   adds the fail-fast `validate_effective_config` gate, while `doctor` calls
   each independently so its capability panel degrades the two layers
-  separately. `warn_deprecated_capability_lists` emits the one-shot legacy-key
-  deprecation WARN via the shared `commands::capability_legacy` helper;
-  `read_parse_validate_config` is the synchronous hot-reload loader;
+  separately. `read_parse_validate_config` is the synchronous hot-reload loader;
   `warn_if_config_world_readable` (unix) WARNs on group/world-readable configs
   carrying secrets; `compute_max_body_bytes` maps the zero-means-default
   body-limit knob
@@ -6468,7 +6478,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `as_of` and a relative age from ONE clock read);
   `vocabulary` const module -- the fixed snake_case tokens the wire DTOs reuse
   from the event surface (`state_key`/`capability_key`/`signal_tier`,
-  provenance tokens `provider`/`model`/`override`/`learned`, signal-tier
+  provenance tokens `override`/`learned`, signal-tier
   tokens) plus the `unavailable` reason codes
   (`no_data`/`schema_mismatch`/`db_busy`/`db_unavailable`/`config_unavailable`/`doctor_unavailable`/`no_config_path`/`query_timeout`)
 - `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 1),
@@ -6694,8 +6704,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   kebab class + `config`/`baked-default` source + `debits_breaker` read from
   the router's public `class_debits` so the transient-health set is never
   restated on the wire; capability cells with
-  `route-away`/`force-supported` verdict + `provider`/`model`/`override`
-  provenance reusing the shared vocabulary; `aliases` carrying each alias's
+  `route-away`/`force-supported` verdict + `override` provenance (the only
+  config-derived source) reusing the shared vocabulary; `aliases` carrying each alias's
   ORDERED fallback chain; `providers` carrying one routing-shape row per
   `[providers.X]` -- `provider_id`/`provider_kind`/`endpoint_origin` (the
   derivation's ORIGIN reduction, never widened here)/`credential_ref_scheme`/
@@ -7226,8 +7236,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `src/commands/mod.rs` -- groups CLI subcommand entry points (init, test,
   prompt_size, config, migrate, provider add, provider probe, doctor, login,
-  logout, refresh, whoami, usage, catalog, catalog_import; the shared
-  `capability_legacy` legacy-key helper lives here too; `serve` lives in
+  logout, refresh, whoami, usage, catalog, catalog_import; `serve` lives in
   `crate::server`)
 - `src/commands/config.rs` -- `routectl config check/show/example` (secret
   resolution, alias chain validation, the shared `collect_config_validation`
@@ -7281,7 +7290,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   pipeline through the shared gate. Order: RAW version preflight FIRST
   (refuses `version < CURRENT_CONFIG_VERSION` byte-identically BEFORE any
   shared-loader call -- the loader preflight-rejects a too-old file and only
-  `config migrate` migrates it; also rejects too-new) + legacy-key preflight;
+  `config migrate` migrates it; also rejects too-new) + the legacy-mitm and
+  retired-capability-key preflights;
   `validate_config_path` (unknown segments error with siblings pre-mutation;
   `Table` targets allowed only for unset); scalar inference
   (bool/int/float/else string -- the re-parse gate backstops mistypes);
@@ -7345,7 +7355,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`confirm_migration` -- interactive `y` / `--yes`, with `--force` kept one
   release as a deprecated hidden alias for `--yes`;
   non-interactive-without-acknowledgement refuses) -- ONE acknowledgement for
-  the whole combined change, including a same-version normalization, AFTER the
+  the whole combined change, including a same-version seat materialization, AFTER the
   gate and BEFORE any write; then `commit_plan`
   (takes the plan BY VALUE, moving the overlay cells) writes the overlay FIRST
   via `commit_overlay` -> `with_overlay_write_lock` (the revision check runs
@@ -7363,6 +7373,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   reported as resumable (`resumable_commit_error`/`CommitFailure`, outcome
   `incomplete`) and NEVER claims "nothing was written"; a rerun re-plans
   (overlay fold now a no-op) and completes.
+  The v1 rung's `[cache_pricing]` input comes from `load_v1_cache_pricing`,
+  which deserializes ONLY that table (merged with any legacy
+  `pricing_verifications.json` stamp), so a v1 file still carrying keys the
+  current schema retired reaches the ladder instead of failing the typed parse.
   `MigrateResult::{AlreadyCurrent,DryRun,Migrated{from_version},Aborted}`; a
   `Refusal` / future-version file / gate failure / conflict surfaces as `Err`.
   Emits ONE value-free audit event (surface/verb/from/to
@@ -7384,7 +7398,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (source=config vs baked-default). No generic per-key provenance tree
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
   config.toml-mutating commands (`config set/unset`, `provider add`, the login
-  auto-surface): the raw version/legacy preflights, the in-memory
+  auto-surface): the raw version, legacy-mitm and retired-capability-key
+  preflights (the same three the loader runs, in the same order), the in-memory
   `parse_config` + `collect_config_validation` gate plus its error rendering,
   the pre-lock high-consequence confirmation prompt (`--yes` bypasses; a
   non-TTY stdin declines without reading, so a silent pipe cannot hang any
@@ -8152,7 +8167,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   then reports the stored seat keys no ref reaches -- seat key only, never
   token material or a storage path, and nothing is refreshed or removed.
   `build_capability_inputs` resolves the config-derived capability inputs
-  (legacy keys + `derive_prior_cells` -- one prior per model whose
+  (`derive_prior_cells` -- one prior per model whose
   `EffectiveRow::Present` carries capability data, retaining its `verified_at`
   so the matrix panel flags staleness; NO stale-filter at derivation); a
   config parse error -> a redacted "panel unavailable" (via
@@ -8199,9 +8214,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   default), secrets
   (orphan managed file -> WARN, never auto-deleted), probe via the shared
   `probe_finding` seam, and `capability` -- reduced to the config-unavailable
-  degradation line plus the guarded legacy-key migrate nudge (the override /
-  prior / learned cells are now on the capability matrix panel), every finding
-  `Pass`/`Warn` so it NEVER flips the exit code.
+  degradation line, so a config that loads emits no finding there (the
+  override / prior / learned cells are on the capability matrix panel); it
+  NEVER emits a `Fail`, so it never flips the exit code.
   `section_freshness`/`freshness_findings` map the `FreshnessInputs` to three
   findings-shaped rows (baked catalog version + snapshot date; overlay
   verification age via `epoch_day_age`/`is_stale_days` past the staleness
@@ -8258,15 +8273,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   columns (the lane printed exactly as `capability purge` accepts it),
   compact `verdict[source]->action` cells with a `(stale)` marker, an
   `(unrouted)` lane tag, and a `(+N more)` column-overflow note
-- `src/commands/capability_legacy.rs` -- shared detection of the deprecated
-  capability-list keys (`unsupported_features`, `allowed_betas`,
-  `allowed_body_fields`) superseded by `[capability.overrides]`.
-  `present_legacy_capability_keys(&Config) -> Vec<&'static str>` returns the
-  present key NAMES only (never the operator's list VALUES, which can sit next
-  to secrets) in a stable order; a key counts as present only when its list is
-  non-empty. Consumed by BOTH `server`'s deprecation WARN
-  (`warn_deprecated_capability_lists`) and `doctor`'s capability migrate
-  nudge, so the two surfaces never diverge on which keys count
 - `src/commands/capability_purge.rs` -- `routectl capability purge <lane>
   <capability>`: parses `<lane>` through `StateKey::parse` (refusing an
   unparseable lane locally, non-zero), POSTs the two keys to the daemon's

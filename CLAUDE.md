@@ -69,7 +69,7 @@ contributor workflow source of truth.
 | Module-level architecture, hub-and-spoke design, config-layering rationale | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Add a new model, debug a failing matrix row, extend a provider | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | Configure listener auth, providers, models, aliases, retry, header/payload extras merge | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
-| Tune a specific upstream (DeepSeek v4 echo-back, NIM cold-start, Opus 4.7+ adaptive thinking, Bedrock allowlist) | [docs/PROVIDER-QUIRKS.md](docs/PROVIDER-QUIRKS.md) |
+| Tune a specific upstream (DeepSeek v4 echo-back, NIM cold-start, Opus 4.7+ adaptive thinking, Bedrock beta withholding) | [docs/PROVIDER-QUIRKS.md](docs/PROVIDER-QUIRKS.md) |
 | Triage a failing request (logs, env filter, redaction, request_id correlation, auth-failure shapes) | [docs/LOGGING.md](docs/LOGGING.md) |
 | Investigate an upstream wire-shape bug (does routectl already handle this? where in the code?) | [docs/WIRE-GOTCHAS.md](docs/WIRE-GOTCHAS.md) |
 | Verify against the known-good live-matrix baseline | [docs/TESTED_MODELS.md](docs/TESTED_MODELS.md) |
