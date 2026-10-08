@@ -884,7 +884,10 @@ fn degradations(run: &ConservationRun) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::lane::{MCP_TOOL_RENAME_ID, in_band_system_turns, system_turns_were_lifted};
+    use super::super::lane::{
+        EFFORT_STRIP_CASE, EFFORT_STRIP_CLIENT_VERSION, MCP_TOOL_RENAME_ID, in_band_system_turns,
+        system_turns_were_lifted,
+    };
     use super::super::loader::{FIXTURE_SCHEMA_VERSION, FixtureClient, FixtureMeta};
     use super::*;
     use serde_json::json;
@@ -965,13 +968,16 @@ mod tests {
     /// `oauth-sampling-stripped` and `mcp-tool-name-prefixed` eligible:
     /// both entries' fixture gate reads the captured outgoing credential,
     /// and an api-key capture would (correctly) leave the dropped `top_p`
-    /// and the prefixed tool name unexplained.
+    /// and the prefixed tool name unexplained. Its recorded case and client
+    /// version are the one capture the effort-strip entry is recorded for,
+    /// which is what makes the dropped `output_config` eligible.
     fn all_transforms(name: &str) -> Fixture {
         let ingress = json!({
             "model": "claude-opus-4-8[1m]",
             "max_tokens": 1024,
             "top_p": 0.9,
             "thinking": {"type": "disabled"},
+            "output_config": {"effort": "high"},
             "tools": [{"name": "Read"}],
             "system": [
                 {"type": "text", "text": "x-anthropic-billing-header: cc_version=1.2.3;"},
@@ -1001,10 +1007,13 @@ mod tests {
                 {"role": "assistant", "content": "second turn"},
             ],
         });
-        Fixture {
+        let mut fixture = Fixture {
             outgoing_request_headers: bearer_outgoing_headers(),
             ..fixture(name, "anthropic", "anthropic", ingress, outgoing)
-        }
+        };
+        fixture.meta.case_id = EFFORT_STRIP_CASE.to_string();
+        fixture.meta.client.version = EFFORT_STRIP_CLIENT_VERSION.to_string();
+        fixture
     }
 
     fn slice(fixtures: &[Fixture]) -> CorpusSlice<'_> {

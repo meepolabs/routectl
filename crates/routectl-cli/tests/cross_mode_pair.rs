@@ -9,14 +9,24 @@
 //! absence halves a later recapture that lost the axis would leave two
 //! identical fixtures passing a green test.
 //!
-//! IN-BAND SYSTEM TURNS ARE NOT THE CONTRAST, and the zero is asserted on
-//! BOTH halves deliberately. `role:"system"` turns in `messages[]` are an
-//! ingress-DIALECT property: the system-turn lift runs only for the OpenAI
-//! and OpenAI-Responses ingress parsers, never for the Anthropic one,
-//! because an Anthropic client sends `system` top-level. So no
-//! Anthropic-lane capture exhibits in-band system turns in either mode,
-//! and a future one that did would be a dialect change that owes an
-//! explanation -- which is what pinning the zero buys.
+//! IN-BAND SYSTEM TURNS ARE NOT THE CONTRAST, so their count is asserted
+//! EQUAL across the two halves. `role:"system"` turns in `messages[]` are a
+//! property of the client release, not of how it reached routectl: the
+//! system-turn lift runs only for the OpenAI and OpenAI-Responses ingress
+//! parsers, never for the Anthropic one, so whatever the client sends
+//! reaches the wire in place in either mode.
+//!
+//! The count was zero on every Anthropic-lane capture until Claude Code
+//! 2.1.294, which sends its environment block as an in-band system turn
+//! beside the top-level `system`, together with the
+//! `mid-conversation-system-2026-04-07` beta; the upstream accepts it. That
+//! is the explanation the dialect change owed. The count is a per-release
+//! fact, so the one tolerated difference is a pair whose halves were
+//! captured from DIFFERENT client releases with the base-url half the newer
+//! one -- the state between re-capturing the base-url half and re-capturing
+//! its front-proxy twin. A same-release pair, or one whose front-proxy half
+//! is the newer, must still agree, and a client version that does not parse
+//! as `major.minor.patch` earns no tolerance.
 //!
 //! Every clause is adjudicated by [`cross_mode_violations`] over two
 //! loaded fixtures, so the same predicate that runs on the committed pair
@@ -74,6 +84,29 @@ fn ingress_carries(fixture: &Fixture, name: &str) -> bool {
     headers_from_pairs(&fixture.ingress_request_headers).contains_key(name)
 }
 
+/// A stable `major.minor.patch` client version as a comparable triple, or
+/// `None` for anything else -- a prerelease, a build suffix, an empty
+/// field.
+fn release_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    let mut next = || parts.next()?.parse::<u64>().ok();
+    let triple = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(triple)
+}
+
+/// Whether the base-url half was captured from a strictly newer client
+/// release than the front-proxy half. False when either version does not
+/// parse, so an unreadable version earns no tolerance.
+fn base_half_is_the_newer_release(base: &Fixture, front_proxy: &Fixture) -> bool {
+    match (
+        release_triple(&base.meta.client.version),
+        release_triple(&front_proxy.meta.client.version),
+    ) {
+        (Some(base), Some(front_proxy)) => base > front_proxy,
+        _ => false,
+    }
+}
+
 /// Every way a loaded pair fails to be the cross-mode pair. Empty means
 /// the pair holds every clause.
 fn cross_mode_violations(base: &Fixture, front_proxy: &Fixture) -> Vec<String> {
@@ -109,16 +142,16 @@ fn cross_mode_violations(base: &Fixture, front_proxy: &Fixture) -> Vec<String> {
         }
     }
 
-    for fixture in [base, front_proxy] {
-        let turns = in_band_system_turns(&fixture.ingress_request);
-        if turns != 0 {
-            out.push(format!(
-                "{CLAUSE_SYSTEM_TURNS} `{}` carries {turns} in-band `role:\"system\"` \
-                 turn(s); the Anthropic ingress takes `system` top-level and never \
-                 lifts in-band turns, so this is a dialect change owing an explanation",
-                fixture.name,
-            ));
-        }
+    let base_turns = in_band_system_turns(&base.ingress_request);
+    let fp_turns = in_band_system_turns(&front_proxy.ingress_request);
+    if base_turns != fp_turns && !base_half_is_the_newer_release(base, front_proxy) {
+        out.push(format!(
+            "{CLAUSE_SYSTEM_TURNS} `{}` carries {base_turns} in-band `role:\"system\"` \
+             turn(s) and `{}` carries {fp_turns}; the count is a property of the client \
+             release, and the halves were not captured from releases that explain the \
+             difference (client `{}` vs `{}`)",
+            base.name, front_proxy.name, base.meta.client.version, front_proxy.meta.client.version,
+        ));
     }
 
     for (field, base_value, fp_value) in [
@@ -366,9 +399,10 @@ fn a_base_url_half_carrying_the_client_credential_is_flagged() {
     assert_flags_only(&violations, CLAUSE_CREDENTIAL);
 }
 
-/// The deliberately-pinned zero, flipped on EACH half in turn: the clause
-/// is about the Anthropic dialect and holds regardless of mode, so a
-/// control on one half alone would leave the other unpinned.
+/// Equality flipped on EACH half in turn over a SAME-release pair (the
+/// planter stamps one client version on both): the count is a release
+/// property and holds regardless of mode, so a control on one half alone
+/// would leave the other unpinned.
 #[test]
 fn either_half_growing_in_band_system_turns_is_flagged() {
     let mut base = PlantedHalf::base_url();
@@ -392,4 +426,74 @@ fn a_pair_disagreeing_on_a_held_constant_field_is_flagged() {
 
         assert_flags_only(&violations, CLAUSE_HELD_CONSTANT);
     }
+}
+
+/// Set one planted half's recorded client version, on both the self-reported
+/// and the binary-read fields, which a rig-written fixture keeps in step.
+fn with_client_version(mut half: PlantedHalf, version: &str) -> PlantedHalf {
+    half.meta["client"]["version"] = json!(version);
+    half.meta["client"]["binary_version"] = json!(format!("{version} (Claude Code)"));
+    half
+}
+
+/// The tolerated state: the base-url half re-captured from a newer release
+/// carries a system turn its older front-proxy twin does not.
+#[test]
+fn a_newer_base_url_half_may_differ_in_in_band_system_turns() {
+    let mut base = with_client_version(PlantedHalf::base_url(), "2.1.294");
+    base.body = planted_body(1);
+    let front_proxy = with_client_version(PlantedHalf::front_proxy(), "2.1.246");
+
+    let violations = violations_over(&base, &front_proxy);
+
+    assert!(
+        violations.is_empty(),
+        "a newer base-url half must be tolerated:\n{}",
+        violations.join("\n"),
+    );
+}
+
+/// The tolerance is keyed on the release, not on the count: a same-release
+/// pair with the mismatch the tolerated state carries is still flagged.
+#[test]
+fn a_same_release_pair_differing_in_in_band_system_turns_is_flagged() {
+    let mut base = with_client_version(PlantedHalf::base_url(), "2.1.294");
+    base.body = planted_body(1);
+    let front_proxy = with_client_version(PlantedHalf::front_proxy(), "2.1.294");
+
+    let violations = violations_over(&base, &front_proxy);
+
+    assert_flags_only(&violations, CLAUSE_SYSTEM_TURNS);
+}
+
+/// The tolerance is one-directional, and an unreadable version earns none.
+#[test]
+fn an_older_or_unreadable_base_url_release_earns_no_tolerance() {
+    for (base_version, fp_version) in [
+        ("2.1.246", "2.1.294"),
+        ("2.1.294-beta.1", "2.1.246"),
+        ("2.1.294", "not-a-version"),
+    ] {
+        let mut base = with_client_version(PlantedHalf::base_url(), base_version);
+        base.body = planted_body(1);
+        let front_proxy = with_client_version(PlantedHalf::front_proxy(), fp_version);
+
+        let violations = violations_over(&base, &front_proxy);
+
+        assert_flags_only(&violations, CLAUSE_SYSTEM_TURNS);
+    }
+}
+
+/// The re-captured state: a same-release pair whose halves BOTH carry the
+/// system turn is the mode axis intact, not a violation.
+#[test]
+fn a_same_release_pair_both_carrying_in_band_system_turns_holds() {
+    let mut base = with_client_version(PlantedHalf::base_url(), "2.1.294");
+    base.body = planted_body(1);
+    let mut front_proxy = with_client_version(PlantedHalf::front_proxy(), "2.1.294");
+    front_proxy.body = planted_body(1);
+
+    let violations = violations_over(&base, &front_proxy);
+
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }

@@ -329,6 +329,14 @@ TRACE
 #                 `output_config` forcing the closed `{title: string}` schema
 #   title-open    `title` with one extra schema property -- a near miss of
 #                 the closed shape, which must NOT be set aside
+#   title-effort  `title` plus a string `output_config.effort`, as newer
+#                 clients send it -- still the side-request
+#   title-effort-extra
+#                 `title-effort` plus one more `output_config` key -- a near
+#                 miss, which must NOT be set aside
+#   title-effort-int
+#                 `title` plus a NON-string `effort` -- a near miss, which
+#                 must NOT be set aside
 #
 # `$5` and `$6` override the model and the traced provider kind, so a
 # candidate can satisfy the claim while differing from the selected one in
@@ -368,6 +376,15 @@ candidate_trace() {
             ;;
         title-open)
             body="{\"model\":\"$model\",\"output_config\":{\"format\":{\"schema\":{\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}},\"required\":[\"title\"],\"type\":\"object\"},\"type\":\"json_schema\"}},\"messages\":[$t_turn]}"
+            ;;
+        title-effort)
+            body="{\"model\":\"$model\",\"output_config\":{\"effort\":\"medium\",\"format\":{\"schema\":{\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"],\"type\":\"object\"},\"type\":\"json_schema\"}},\"messages\":[$t_turn]}"
+            ;;
+        title-effort-extra)
+            body="{\"model\":\"$model\",\"output_config\":{\"effort\":\"medium\",\"format\":{\"schema\":{\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"],\"type\":\"object\"},\"type\":\"json_schema\"},\"task_budget\":1024},\"messages\":[$t_turn]}"
+            ;;
+        title-effort-int)
+            body="{\"model\":\"$model\",\"output_config\":{\"effort\":3,\"format\":{\"schema\":{\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"],\"type\":\"object\"},\"type\":\"json_schema\"}},\"messages\":[$t_turn]}"
             ;;
         tools-retry)
             body="{\"model\":\"$model\",\"messages\":[$t_user,{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_02\",\"name\":\"Bash\",\"input\":{\"command\":\"ls -a\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_02\",\"content\":\"notes.txt\"}]}]}"
@@ -2730,7 +2747,8 @@ rm -rf "$work"
 # length -- exactly the shape the continuation check refuses as two
 # interactions. Both orders are driven because the two race: a positional
 # rule would pass one leg and fail the other.
-for leg in "title-first:title:turn:$SEL_ID_B" "title-second:turn:title:$SEL_ID_A"; do
+for leg in "title-first:title:turn:$SEL_ID_B" "title-second:turn:title:$SEL_ID_A" \
+    "effort-first:title-effort:turn:$SEL_ID_B" "effort-second:turn:title-effort:$SEL_ID_A"; do
     IFS=: read -r name first second want_id <<<"$leg"
     set_pins "side-$name-01" abc123 base-url baseline
     work="$(make_repo)"
@@ -2780,9 +2798,11 @@ rm -rf "$work"
 # TWO GENUINE EQUAL-LENGTH INTERACTIONS still fail closed. Same one-turn
 # length, same model and lane, neither carrying the title schema: the
 # classifier must not have become a general "equal length is fine" rule.
-# And a NEAR MISS of the title schema (one extra property) is not the closed
-# shape, so it stays a candidate and is refused the same way.
-for leg in "genuine:turn-other" "near-miss:title-open"; do
+# And a NEAR MISS of the title shape -- one extra schema property, an extra
+# `output_config` key beside `effort`, or a non-string `effort` -- is not the
+# closed shape, so it stays a candidate and is refused the same way.
+for leg in "genuine:turn-other" "near-miss:title-open" \
+    "effort-extra:title-effort-extra" "effort-int:title-effort-int"; do
     IFS=: read -r name second <<<"$leg"
     set_pins "side-$name-01" abc123 base-url baseline
     work="$(make_repo)"

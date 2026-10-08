@@ -323,7 +323,7 @@ staleness_hint_days   = 14      # age past which a verified capability reads as 
 # seat: that makes a later login ambiguous, and it refuses to guess which
 # of the two a pool should grow around.
 
-# user_agent = "claude-cli/2.1.287 (external, cli)"
+# user_agent = "claude-cli/2.1.294 (external, cli)"
 # forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id", "x-claude-code-parent-agent-id"]
 
 # [providers.anthropic-default.header_extras]
@@ -333,7 +333,7 @@ staleness_hint_days   = 14      # age past which a verified capability reads as 
 # "x-stainless-arch"                          = "x64"
 # "x-stainless-lang"                          = "js"
 # "x-stainless-os"                            = "Linux"
-# "x-stainless-package-version"               = "0.127.0"
+# "x-stainless-package-version"               = "0.128.0"
 # "x-stainless-runtime"                       = "node"
 # "x-stainless-runtime-version"               = "v26.3.0"
 # "x-stainless-timeout"                       = "600"

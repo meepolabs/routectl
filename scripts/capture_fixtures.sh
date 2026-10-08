@@ -719,12 +719,15 @@ PY
 # yes, 1 no (including an absent or unparseable body -- an unreadable body
 # is never exempted from the selector).
 #
-# The test is EXACT equality of the whole `output_config` against the one
-# closed structured-output contract the title request declares: a JSON
-# object with exactly one required string property `title` and no others.
-# Any extra property, a relaxed `additionalProperties`, a different format
-# type, or an extra `output_config` key is NOT this shape and stays a
-# candidate -- a near-miss is safer refused than set aside.
+# `output_config` must hold a `format` key EXACTLY equal to the one closed
+# structured-output contract the title request declares (a JSON object with
+# exactly one required string property `title` and no others), and at most
+# one other key: `effort`, whose value is a string. The client attaches its
+# effort level to the title request, so that one key is tolerated; nothing
+# else is. Any extra schema property, a relaxed `additionalProperties`, a
+# different format type, a non-string `effort`, or any other `output_config`
+# key is NOT this shape and stays a candidate -- a near-miss is safer refused
+# than set aside.
 is_title_side_request() {
   python3 - "$1" <<'PY'
 import json
@@ -749,7 +752,13 @@ except (OSError, UnicodeDecodeError, ValueError):
     sys.exit(1)
 if not isinstance(body, dict):
     sys.exit(1)
-sys.exit(0 if body.get("output_config") == TITLE_OUTPUT_CONFIG else 1)
+output_config = body.get("output_config")
+if not isinstance(output_config, dict):
+    sys.exit(1)
+rest = dict(output_config)
+if "effort" in rest and not isinstance(rest.pop("effort"), str):
+    sys.exit(1)
+sys.exit(0 if rest == TITLE_OUTPUT_CONFIG else 1)
 PY
 }
 

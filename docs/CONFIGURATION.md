@@ -4604,7 +4604,7 @@ static credential (`api_key_ref = "env://OPENAI_JWT"` plus
    kind          = "anthropic-api"
    api_key_ref   = "oauth://anthropic"
    auth_kind     = "oauth-bearer"
-   user_agent    = "claude-cli/2.1.287 (external, cli)"
+   user_agent    = "claude-cli/2.1.294 (external, cli)"
    forward_client_headers = [
        "x-claude-code-session-id",
        "x-claude-code-agent-id",
@@ -4925,7 +4925,7 @@ the family, its members suffixed) with the models routed through it.
 
 Drop this into `header_extras` on the OAuth-bearer Anthropic entry (the
 one `routectl login anthropic` wrote) so the upstream sees the same SDK
-fingerprint a stock claude-code 2.1.287 sends from the bundled
+fingerprint a stock claude-code 2.1.294 sends from the bundled
 `@anthropic-ai/sdk` (a client run with `API_TIMEOUT_MS` set reports its
 configured `x-stainless-timeout` instead of the default `600`). Written as a
 sub-table -- a multi-line inline table
@@ -4939,7 +4939,7 @@ sub-table -- a multi-line inline table
 "x-stainless-arch"                          = "x64"
 "x-stainless-lang"                          = "js"
 "x-stainless-os"                            = "Linux"
-"x-stainless-package-version"               = "0.127.0"
+"x-stainless-package-version"               = "0.128.0"
 "x-stainless-runtime"                       = "node"
 "x-stainless-runtime-version"               = "v26.3.0"
 "x-stainless-timeout"                       = "600"

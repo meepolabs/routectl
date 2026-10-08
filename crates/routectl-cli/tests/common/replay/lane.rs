@@ -938,6 +938,25 @@ fn is_bracketed_alias_of(expected: &str, actual: &str) -> bool {
 }
 
 /// The header name whose value carries the OAuth-bearer credential.
+/// Id of the entry recording the effort strip on the 2.1.294 plain turn.
+pub const EFFORT_WITHOUT_ADAPTIVE_THINKING_ID: &str = "effort-without-adaptive-thinking-stripped";
+
+/// The case the effort-strip entry is recorded for.
+pub const EFFORT_STRIP_CASE: &str = "plain-turn-01";
+
+/// The client release whose capture of [`EFFORT_STRIP_CASE`] the entry is
+/// recorded for.
+pub const EFFORT_STRIP_CLIENT_VERSION: &str = "2.1.294";
+
+/// The one capture the effort-strip entry is recorded for. Keyed on BOTH
+/// the recorded case and the recorded client version, so a re-capture of
+/// the same case from another client release must re-earn the entry, and
+/// no other case is covered at any version.
+fn is_known_effort_strip_capture(fixture: &Fixture) -> bool {
+    fixture.meta.case_id == EFFORT_STRIP_CASE
+        && fixture.meta.client.version == EFFORT_STRIP_CLIENT_VERSION
+}
+
 const AUTHORIZATION_HEADER: &str = "authorization";
 /// The credential scheme an OAuth-bearer egress presents. Case-insensitive
 /// per RFC 7235.
@@ -1168,7 +1187,7 @@ pub const MCP_TOOL_RENAME_ID: &str = "mcp-tool-name-prefixed";
 ///
 /// Every `reason` below was re-confirmed by reading the named symbol in
 /// current code; `site_symbol` records which one.
-static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
+static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 9] = [
     Exception {
         lane: ANTHROPIC_FIDELITY_LANE,
         id: "system-turn-lift",
@@ -1469,6 +1488,42 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
         max_per_fixture: None,
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Changed && is_canonical_mcp_rename(divergence)
+        }),
+        matched: AtomicUsize::new(0),
+    },
+    Exception {
+        lane: ANTHROPIC_FIDELITY_LANE,
+        id: EFFORT_WITHOUT_ADAPTIVE_THINKING_ID,
+        reason: "The ingress `output_config` carries only `effort` and the wire body carries no \
+                 `output_config` at all. Confirmed at `reconcile_output_config_effort` \
+                 (crates/routectl-providers/src/anthropic_api/extras.rs), which removes \
+                 `output_config.effort` -- and the then-empty `output_config` with it -- whenever \
+                 the assembled body does not carry adaptive thinking. Claude Code 2.1.294 sends \
+                 its effort level alongside `thinking: {\"type\": \"disabled\"}`, so on its plain \
+                 turn the client's effort never reaches the upstream. The strip is an encoded \
+                 acceptance rule (effort is only meaningful beside adaptive thinking), not a \
+                 measured upstream rejection, and is expected to be replaced by learned \
+                 verdicts; until then this loss is KNOWN rather than explained away. Scoped as \
+                 narrowly as the table allows: the fixture gate admits exactly the recorded \
+                 `plain-turn-01` case captured from client 2.1.294, the path is exactly \
+                 `output_config`, \
+                 and the matcher admits only a removed object whose sole key is a string \
+                 `effort` -- a lost `format`, a second key, or the same shape on any other \
+                 fixture or client version stays unexplained. In-place key removal that moves \
+                 no positions, hence a MATCHER.",
+        site_symbol: "reconcile_output_config_effort",
+        site_path: "crates/routectl-providers/src/anthropic_api/extras.rs",
+        path_predicate: |path| path == "output_config",
+        applies_to: Some(is_known_effort_strip_capture),
+        max_per_fixture: Some(1),
+        transform: Transform::Matcher(|divergence| {
+            divergence.kind == DivergenceKind::Removed
+                && divergence
+                    .expected()
+                    .and_then(Value::as_object)
+                    .is_some_and(|oc| {
+                        oc.len() == 1 && oc.get("effort").is_some_and(Value::is_string)
+                    })
         }),
         matched: AtomicUsize::new(0),
     },
@@ -2016,7 +2071,7 @@ mod tests {
     }
 
     #[test]
-    fn the_anthropic_fidelity_lane_carries_two_normalizers_and_six_matchers() {
+    fn the_anthropic_fidelity_lane_carries_two_normalizers_and_seven_matchers() {
         let entries = exceptions_for_lane(&ANTHROPIC_FIDELITY_LANE);
 
         let kinds: Vec<(&str, ExceptionKind)> = entries.iter().map(|e| (e.id, e.kind())).collect();
@@ -2031,6 +2086,7 @@ mod tests {
                 ("auto-cache-breakpoint-injected", ExceptionKind::Matcher),
                 ("oauth-sampling-stripped", ExceptionKind::Matcher),
                 ("mcp-tool-name-prefixed", ExceptionKind::Matcher),
+                (EFFORT_WITHOUT_ADAPTIVE_THINKING_ID, ExceptionKind::Matcher),
             ],
             "the length-changing entries must be NORMALIZERS and the in-place \
              value changes MATCHERS",
@@ -3014,11 +3070,72 @@ mod tests {
         assert!(!entry.eligible_for(&ingress_only));
     }
 
-    /// The entries that carry a per-fixture credential gate, and the only
-    /// ones allowed to. Both transforms behind them run on the OAuth cloak
-    /// lane alone, so a capture on any other credential must leave the
-    /// shape they would have produced unexplained.
-    const GATED_ENTRY_IDS: [&str; 2] = ["oauth-sampling-stripped", MCP_TOOL_RENAME_ID];
+    fn effort_strip_capture(case_id: &str, client_version: &str) -> super::super::loader::Fixture {
+        let mut fixture = fixture_with_outgoing_headers(&[]);
+        fixture.meta.case_id = case_id.to_string();
+        fixture.meta.client.version = client_version.to_string();
+        fixture
+    }
+
+    #[test]
+    fn the_effort_strip_entry_is_eligible_only_for_the_recorded_capture() {
+        let entry = matcher(EFFORT_WITHOUT_ADAPTIVE_THINKING_ID);
+
+        assert!(entry.eligible_for(&effort_strip_capture("plain-turn-01", "2.1.294")));
+        for (case_id, version) in [
+            ("plain-turn-01", "2.1.287"),
+            ("plain-turn-01", ""),
+            ("plain-turn-01-fp", "2.1.294"),
+            ("thinking-01", "2.1.294"),
+        ] {
+            assert!(
+                !entry.eligible_for(&effort_strip_capture(case_id, version)),
+                "`{case_id}` at client `{version}` must not be covered",
+            );
+        }
+    }
+
+    #[test]
+    fn the_effort_strip_matches_a_removed_lone_string_effort_and_nothing_else() {
+        let entry = matcher(EFFORT_WITHOUT_ADAPTIVE_THINKING_ID);
+        let removed = |path: &str, expected: Value| {
+            Divergence::new(path, DivergenceKind::Removed, None, Some(expected))
+        };
+
+        assert!(entry.matches(&removed("output_config", json!({"effort": "high"}))));
+
+        // A lost `format` is a different loss, alone or beside effort.
+        assert!(!entry.matches(&removed(
+            "output_config",
+            json!({"format": {"type": "json_schema"}})
+        )));
+        assert!(!entry.matches(&removed(
+            "output_config",
+            json!({"effort": "high", "format": {"type": "json_schema"}})
+        )));
+        // A non-string effort is not the shape the client sends.
+        assert!(!entry.matches(&removed("output_config", json!({"effort": 3}))));
+        // Any other path, including the nested effort key itself.
+        assert!(!entry.matches(&removed("output_config.effort", json!("high"))));
+        assert!(!entry.matches(&removed("metadata", json!({"effort": "high"}))));
+        // A changed value is not a removal.
+        assert!(!entry.matches(&Divergence::new(
+            "output_config",
+            DivergenceKind::Changed,
+            Some(json!({"effort": "low"})),
+            Some(json!({"effort": "high"})),
+        )));
+    }
+
+    /// The entries that carry a per-fixture gate, and the only ones allowed
+    /// to. The first two transforms run on the OAuth cloak lane alone, so a
+    /// capture on any other credential must leave the shape they would have
+    /// produced unexplained; the third is recorded for one capture only.
+    const GATED_ENTRY_IDS: [&str; 3] = [
+        "oauth-sampling-stripped",
+        MCP_TOOL_RENAME_ID,
+        EFFORT_WITHOUT_ADAPTIVE_THINKING_ID,
+    ];
 
     #[test]
     fn an_ungated_entry_is_eligible_for_every_fixture_on_its_lane() {

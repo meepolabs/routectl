@@ -75,12 +75,12 @@ const MIN_FIXTURES: usize = 7;
 
 // -- OBSERVED SETS, exact-pinned ------------------------------------------
 //
-// Derived from the committed corpus on 2026-10-02 and pinned as EXACTLY
+// Derived from the committed corpus on 2026-10-08 and pinned as EXACTLY
 // these values. Extend a list here in the same commit that lands a capture
 // carrying a new value, having read what changed.
 
 /// Stable Claude CLI versions the corpus self-reports.
-const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246", "2.1.287"];
+const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246", "2.1.294"];
 
 /// `User-Agent` surface tokens the corpus self-reports -- the trailing word
 /// in the `(external, <surface>)` parenthetical. Its own dimension because
@@ -89,7 +89,7 @@ const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246", "2.1.287"];
 const OBSERVED_UA_SURFACES: &[&str] = &["cli", "sdk-cli"];
 
 /// `x-stainless-package-version` values the corpus self-reports.
-const OBSERVED_STAINLESS_PACKAGE_VERSIONS: &[&str] = &["0.112.1", "0.127.0"];
+const OBSERVED_STAINLESS_PACKAGE_VERSIONS: &[&str] = &["0.112.1", "0.128.0"];
 
 /// `x-stainless-runtime-version` values the corpus self-reports.
 const OBSERVED_STAINLESS_RUNTIME_VERSIONS: &[&str] = &["v26.3.0"];
@@ -102,10 +102,15 @@ const OBSERVED_STAINLESS_TIMEOUTS: &[&str] = &["1800", "600"];
 /// [`OBSERVED_DISTINCT_BETA_SETS`]) and each is legitimate client
 /// behavior, so the pin is over what the client is capable of sending.
 const OBSERVED_CLIENT_BETAS: &[&str] = &[
+    "afk-mode-2026-01-31",
     "cache-diagnosis-2026-04-07",
     "claude-code-20250219",
     "context-management-2025-06-27",
+    "dangerous-tool-use-2026-09-03",
+    "effort-2025-11-24",
     "interleaved-thinking-2025-05-14",
+    "mid-conversation-system-2026-04-07",
+    "mid-conversation-tool-changes-2026-07-01",
     "prompt-caching-scope-2026-01-05",
     "redact-thinking-2026-02-12",
     "thinking-token-count-2026-05-13",
@@ -114,7 +119,8 @@ const OBSERVED_CLIENT_BETAS: &[&str] = &[
 /// Distinct `anthropic-beta` sets the corpus carries. Pinned as a count so
 /// a capture that collapses or splits the populations is a review moment.
 /// Three: the base set, the base set plus a cache-diagnosis flag, and the
-/// newer release's base set, which also requests redacted thinking.
+/// newer release's set, which also requests redacted thinking and opts into
+/// several model-gated flags.
 const OBSERVED_DISTINCT_BETA_SETS: usize = 3;
 
 /// Reviewed rows the register must hold. Pinned so DELETING a row is a red
@@ -232,7 +238,7 @@ fn register() -> Vec<RegisterRow> {
             ],
             relation: Relation::ObservedSpansMinted,
             reason: "the corpus spans an older SDK-driven 2.1.246 release and the current \
-                     2.1.287 release routectl now mints; a capture of a newer release moves \
+                     2.1.294 release routectl now mints; a capture of a newer release moves \
                      this row, and the ingress drift warning reports any live gap",
         },
         RegisterRow {
@@ -240,7 +246,7 @@ fn register() -> Vec<RegisterRow> {
             observed: sorted(OBSERVED_UA_SURFACES),
             minted: vec![routectl_core::identity::anthropic::MINTED_UA_SURFACE.to_string()],
             relation: Relation::ObservedSpansMinted,
-            reason: "the 2.1.246 captures report the SDK-driven surface while the 2.1.287 \
+            reason: "the 2.1.246 captures report the SDK-driven surface while the 2.1.294 \
                      capture reports the plain CLI surface routectl mints -- the surface is \
                      a fingerprint difference independent of the version, so pinning the \
                      version alone would leave it unreviewed",
@@ -251,7 +257,7 @@ fn register() -> Vec<RegisterRow> {
             minted: minted_header("x-stainless-package-version"),
             relation: Relation::ObservedSpansMinted,
             reason: "the SDK version travels with the client release: the 2.1.246 captures \
-                     carry the older SDK and the 2.1.287 capture carries the one routectl \
+                     carry the older SDK and the 2.1.294 capture carries the one routectl \
                      now mints, on the same cadence as the CLI version above",
         },
         RegisterRow {
@@ -269,7 +275,7 @@ fn register() -> Vec<RegisterRow> {
             relation: Relation::ObservedSpansMinted,
             reason: "the header carries the client's configured request timeout, not its \
                      release: the client default is 600 seconds, which the 2.1.246 captures \
-                     carry and routectl mints, while the 2.1.287 capture carries 1800 because \
+                     carry and routectl mints, while the 2.1.294 capture carries 1800 because \
                      it ran under a configured API_TIMEOUT_MS -- an operator override, not \
                      the default, so routectl does not mint it",
         },

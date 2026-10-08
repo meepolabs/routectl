@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "request_id": "01a0faea-f653-7311-882c-d13590a22831",
-  "captured_at_ts": "2026-10-02T04:41:38.493604Z",
+  "request_id": "01a11cb2-64f3-7aa3-bdca-150eb8cf8ac6",
+  "captured_at_ts": "2026-10-08T18:06:56.580047Z",
   "routectl_version": "0.9.0",
-  "alias": "claude-sonnet-4-5",
-  "model": "claude-sonnet-4-5",
+  "alias": "claude-opus-4-8",
+  "model": "claude-opus-4-8",
   "case_id": "plain-turn-01",
-  "config_sha": "94c2fc59b38b6f22e01f8e402bd9f3402299479fab4c775aba4ff95b58572eb2",
+  "config_sha": "dfa0961c950b892bdbdf1f51e5df01d9016ff0d72fe463df3fcfbf2c684bdf1c",
   "wire_pattern": "baseline",
   "client": {
     "name": "claude-cli",
-    "version": "2.1.287",
-    "binary_version": "2.1.287 (Claude Code)",
+    "version": "2.1.294",
+    "binary_version": "2.1.294 (Claude Code)",
     "connection_mode": "base-url"
   },
   "ingress_kind": "anthropic",
@@ -19,7 +19,7 @@
   "lane": "anthropic-api",
   "stream": true,
   "finish_reason": "stop",
-  "input_tokens": 6413,
-  "output_tokens": 4,
-  "total_tokens": 6417
+  "input_tokens": 2496,
+  "output_tokens": 7,
+  "total_tokens": 2503
 }

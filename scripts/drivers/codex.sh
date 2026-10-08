@@ -57,7 +57,7 @@ export DISABLE_AUTOUPDATER=1
 # codex-appropriate rather than the shared Anthropic-shaped default,
 # computed straight off the runner's own env var rather than off
 # DRIVER_REQUEST_MODEL, which common.sh has already defaulted to
-# claude-sonnet-4-5 by the time this line runs.
+# claude-opus-4-8 by the time this line runs.
 CODEX_MODEL="${ROUTECTL_DRIVER_REQUEST_MODEL:-gpt-5-codex}"
 
 # The name codex's config reads its credential env var from. Not

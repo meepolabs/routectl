@@ -204,7 +204,7 @@ driver_seed_workspace() {
 # the lane config's business (`[aliases]` there catches this id by glob and
 # maps it to the lane's own entry). Overridable for a lane whose alias
 # vocabulary differs.
-DRIVER_REQUEST_MODEL="${ROUTECTL_DRIVER_REQUEST_MODEL:-claude-sonnet-4-5}"
+DRIVER_REQUEST_MODEL="${ROUTECTL_DRIVER_REQUEST_MODEL:-claude-opus-4-8}"
 
 # Anything non-empty satisfies a client's own credential preflight: the
 # client authenticates to the LOCAL daemon, and routectl injects the real

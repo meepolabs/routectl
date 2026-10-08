@@ -528,7 +528,7 @@ fn oauth_bearer_user_agent_defaults_to_claude_cli() {
     const HOST: &str = "https://api.anthropic.com";
     assert_eq!(
         resolve_user_agent(None, AuthKind::OauthBearer, HOST).as_deref(),
-        Some("claude-cli/2.1.287 (external, cli)"),
+        Some("claude-cli/2.1.294 (external, cli)"),
         "oauth-bearer on the Anthropic host with no override must default to the Claude Code SDK UA",
     );
     assert_eq!(

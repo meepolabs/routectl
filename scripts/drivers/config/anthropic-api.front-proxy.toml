@@ -57,7 +57,7 @@ auth_kind   = "oauth-bearer"
 
 [models.fixture-sonnet]
 provider = "anthropic"
-upstream = "claude-sonnet-4-5"
+upstream = "claude-opus-4-8"
 
 # `claude-*` catches the model ids the installed Anthropic clients ask for
 # by name, so a driver does not have to know routectl's alias vocabulary.
