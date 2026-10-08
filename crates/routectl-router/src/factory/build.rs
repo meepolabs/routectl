@@ -36,14 +36,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Convenience wrapper that builds a provider with `BuildOptions::default()`.
-///
-/// Note for Bedrock providers: `BuildOptions::default()` carries an empty
-/// `bedrock_allowed_betas` list, which puts the beta filter in pass-through
-/// mode -- routectl forwards every flag to AWS as-is. That is the correct
-/// discovery default; if you want filtering, populate the list from
-/// `[bedrock] allowed_betas` (see `examples/bedrock.toml`) and pass it via
-/// `build_provider_with_options`. routectl-cli callers (`server`,
-/// `commands::test`) do this automatically.
 pub async fn build_provider(
     name: &str,
     entry: &ProviderEntry,
@@ -67,14 +59,6 @@ pub struct BuildOptions {
     /// `CloakConfig` at build time (the same global-to-provider channel
     /// `strict_translation` uses). Default `true`.
     pub normalize_tools: bool,
-    /// Bedrock-accepted `anthropic_beta` flags. Sourced from
-    /// `[bedrock] allowed_betas` TOML and applied to every Bedrock
-    /// provider. No default; AWS schema drift is operator-tracked. Empty
-    /// list = pass-through for every client flag the router does not
-    /// withhold per target (a shipped seed of betas Bedrock rejects, plus
-    /// flags learned as rejected on the lane); the operator floor or a
-    /// `force_supported` override on `beta:<flag>` sends a withheld flag.
-    pub bedrock_allowed_betas: Vec<String>,
 }
 
 impl Default for BuildOptions {
@@ -82,7 +66,6 @@ impl Default for BuildOptions {
         Self {
             strict_translation: false,
             normalize_tools: true,
-            bedrock_allowed_betas: Vec::new(),
         }
     }
 }
@@ -102,12 +85,6 @@ impl BuildOptions {
     /// Set the anthropic-cloak tool-array canonicalization switch.
     pub const fn with_normalize_tools(mut self, normalize: bool) -> Self {
         self.normalize_tools = normalize;
-        self
-    }
-
-    /// Set the Bedrock `anthropic_beta` allowlist.
-    pub fn with_bedrock_allowed_betas(mut self, list: Vec<String>) -> Self {
-        self.bedrock_allowed_betas = list;
         self
     }
 }
@@ -638,7 +615,6 @@ async fn build_provider_inner(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
                 anthropic_beta: anthropic_beta.clone(),
-                allowed_betas: opts.bedrock_allowed_betas.clone(),
                 additional_model_request_fields: overrides.additional_model_request_fields,
                 adaptive_thinking: overrides.adaptive_thinking,
             };

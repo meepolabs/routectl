@@ -14,9 +14,8 @@
 //!     {text} sibling when no Text exists in the same message.
 //!   - Role::Tool Parts of type Image / Document dispatch
 //!     through the typed translator (no opaque Json wrap).
-//!   - The anthropic_beta filter applies on the Converse path
-//!     identically to Invoke (allowlist + per-provider floor +
-//!     global override hooks).
+//!   - Client anthropic_beta flags reach additionalModelRequestFields
+//!     verbatim, and the per-provider floor ships as on Invoke.
 
 use super::super::normalize_request;
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
@@ -35,18 +34,6 @@ fn fake_cfg() -> BedrockConfig {
         user_agent: None,
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
-        allowed_betas: vec![
-            "context-1m-2025-08-07".into(),
-            "claude-code-20250219".into(),
-            "interleaved-thinking-2025-05-14".into(),
-            "context-management-2025-06-27".into(),
-            "effort-2025-11-24".into(),
-            "fine-grained-tool-streaming-2025-05-14".into(),
-            "computer-use-2025-01-24".into(),
-            "computer-use-2024-10-22".into(),
-            "mcp-client-2025-04-04".into(),
-            "search-results-2025-06-09".into(),
-        ],
         additional_model_request_fields: None,
         adaptive_thinking: None,
     }
@@ -406,48 +393,37 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
 }
 
 // ---------------------------------------------------------------------------
-// anthropic_beta filter on Converse (matches Invoke)
+// anthropic_beta on Converse (matches Invoke)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn anthropic_beta_filtered_against_bedrock_allowlist_in_additional_fields() {
-    // Arrange: a request whose canonical anthropic_beta carries
-    // both an officially-accepted Bedrock flag and one routectl's
-    // shared filter would drop. Converse re-applies the same
-    // allowlist as Invoke -- AWS validates anthropic_beta whether
-    // it sits on the body (Invoke) or in
-    // additionalModelRequestFields (Converse), so the filter
-    // applies on both paths.
+fn client_anthropic_beta_outside_every_list_reaches_additional_fields_verbatim() {
+    // Arrange: client flags no operator list or withheld set names, one of
+    // them unknown to any release, in the order the client sent them.
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")].into(),
         anthropic_beta: vec![
-            "context-1m-2025-08-07".into(),           // accepted
-            "made-up-flag".into(),                    // not in allowlist
-            "interleaved-thinking-2025-05-14".into(), // accepted
+            "context-1m-2025-08-07".into(),
+            "made-up-flag".into(),
+            "interleaved-thinking-2025-05-14".into(),
         ],
         ..Default::default()
     };
 
+    // Act
     let body = normalize_request(&cfg, &req).unwrap();
 
-    let bag = body["additionalModelRequestFields"]
-        .as_object()
-        .expect("expected bag");
-    let betas = bag["anthropic_beta"].as_array().expect("expected betas");
-    let strs: Vec<&str> = betas.iter().filter_map(|v| v.as_str()).collect();
-    assert!(
-        strs.contains(&"context-1m-2025-08-07"),
-        "accepted flag missing: {strs:?}"
-    );
-    assert!(
-        strs.contains(&"interleaved-thinking-2025-05-14"),
-        "accepted flag missing: {strs:?}"
-    );
-    assert!(
-        !strs.contains(&"made-up-flag"),
-        "unsupported flag leaked through Converse filter: {strs:?}"
+    // Assert
+    assert_eq!(
+        body["additionalModelRequestFields"]["anthropic_beta"],
+        json!([
+            "context-1m-2025-08-07",
+            "made-up-flag",
+            "interleaved-thinking-2025-05-14"
+        ]),
+        "every client flag must reach the Converse bag verbatim and in order"
     );
 }
 
@@ -455,8 +431,7 @@ fn anthropic_beta_filtered_against_bedrock_allowlist_in_additional_fields() {
 fn anthropic_beta_provider_config_floor_bypasses_filter_on_converse() {
     // Arrange: the per-provider floor (`[providers.X] anthropic_beta`)
     // applies to Converse identically to Invoke. Operator-asserted
-    // flags pass through unconditionally regardless of the routectl
-    // allowlist, because the operator typed them into TOML.
+    // flags always ship, because the operator typed them into TOML.
     let mut cfg = fake_cfg();
     cfg.anthropic_beta = vec!["future-flag-2099".into()];
     let req = ChatRequest {
@@ -479,44 +454,6 @@ fn anthropic_beta_provider_config_floor_bypasses_filter_on_converse() {
     assert!(
         strs.contains(&"future-flag-2099"),
         "operator-asserted flag was filtered out on Converse: {strs:?}"
-    );
-}
-
-#[test]
-fn anthropic_beta_global_allowed_betas_filters_against_operator_list_on_converse() {
-    // Arrange: `cfg.allowed_betas` (sourced from
-    // `[bedrock] allowed_betas` global TOML) is the FULL operator-
-    // supplied allowlist -- the list has no default. Same
-    // hook, same precedence as Invoke.
-    let mut cfg = fake_cfg();
-    cfg.allowed_betas = vec!["my-override".into()];
-    let req = ChatRequest {
-        model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")].into(),
-        anthropic_beta: vec![
-            // NOT in operator list: drops.
-            "context-1m-2025-08-07".into(),
-            // In operator list: survives.
-            "my-override".into(),
-        ],
-        ..Default::default()
-    };
-
-    let body = normalize_request(&cfg, &req).unwrap();
-
-    let bag = body["additionalModelRequestFields"]
-        .as_object()
-        .expect("expected bag");
-    let strs: Vec<&str> = bag["anthropic_beta"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    assert_eq!(
-        strs,
-        vec!["my-override"],
-        "global allowlist override did not replace const: {strs:?}"
     );
 }
 

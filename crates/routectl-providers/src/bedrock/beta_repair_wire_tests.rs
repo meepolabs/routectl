@@ -207,7 +207,6 @@ impl Lane {
             user_agent: None,
             header_extras: Vec::new(),
             anthropic_beta: floor.iter().map(|f| (*f).to_string()).collect(),
-            allowed_betas: Vec::new(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };

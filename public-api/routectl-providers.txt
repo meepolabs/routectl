@@ -857,7 +857,6 @@ pub fn routectl_providers::bedrock::BedrockCreds::into_shared(self) -> Shared
 pub struct routectl_providers::bedrock::BedrockConfig
 pub routectl_providers::bedrock::BedrockConfig::adaptive_thinking: core::option::Option<bool>
 pub routectl_providers::bedrock::BedrockConfig::additional_model_request_fields: core::option::Option<serde_json::value::Value>
-pub routectl_providers::bedrock::BedrockConfig::allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_providers::bedrock::BedrockConfig::anthropic_beta: alloc::vec::Vec<alloc::string::String>
 pub routectl_providers::bedrock::BedrockConfig::api_shape: routectl_providers::bedrock::BedrockApiShape
 pub routectl_providers::bedrock::BedrockConfig::creds: routectl_providers::bedrock::BedrockCreds

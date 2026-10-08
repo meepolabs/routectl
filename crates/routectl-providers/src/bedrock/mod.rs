@@ -237,19 +237,9 @@ pub struct BedrockConfig {
     /// shape, these go in the request body's top-level `anthropic_beta`
     /// array; for `Converse`, they go in
     /// `additionalModelRequestFields.anthropic_beta`. Per-provider
-    /// floor that bypasses the `allowed_betas` filter (operator
-    /// asserts these by typing them into TOML).
+    /// floor that is never withheld (operator asserts these by typing
+    /// them into TOML).
     pub anthropic_beta: Vec<String>,
-    /// Bedrock-accepted `anthropic_beta` flags. Sourced from
-    /// `[bedrock] allowed_betas` TOML and cloned onto every Bedrock
-    /// provider. No default -- AWS schema drift is operator-tracked. See
-    /// `examples/bedrock.toml` for the empirical 2026-05-12 baseline.
-    /// Empty list = pass-through, the discovery default; the request's
-    /// `routectl_internal.withheld_betas` (the router's seed of betas
-    /// Bedrock rejects plus flags learned as rejected on the lane) are
-    /// withheld in either mode. The provider holds no seed of its own: a
-    /// caller that does not fill that set withholds nothing.
-    pub allowed_betas: Vec<String>,
     /// Free-form fields merged into the request body. For `Invoke`,
     /// merged at the top level; for `Converse`, merged into
     /// `additionalModelRequestFields`.
@@ -1208,7 +1198,6 @@ mod tests {
             user_agent: None,
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
-            allowed_betas: Vec::new(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
@@ -1235,7 +1224,6 @@ mod tests {
             user_agent: None,
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
-            allowed_betas: Vec::new(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         }

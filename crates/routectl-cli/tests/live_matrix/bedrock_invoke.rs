@@ -39,8 +39,8 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
 
     // v0.6.0 wiring detour: the live Bedrock tests bypass
     // `build_resolved_models` because they need to construct
-    // `BedrockProvider` directly (with a custom `allowed_*` allowlist)
-    // before handing it to the router. We build one provider per
+    // `BedrockProvider` directly from the live environment's region and
+    // credentials before handing it to the router. We build one provider per
     // target -- mirroring the per-model Arc fan-out that v0.6's
     // factory produces -- then install a synthetic `ResolvedModel`
     // table so dispatch walks the per-nickname Arc.
@@ -67,18 +67,6 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
             user_agent: Some("routectl-live-test/0.4".into()),
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
-            allowed_betas: vec![
-                "context-1m-2025-08-07".into(),
-                "claude-code-20250219".into(),
-                "interleaved-thinking-2025-05-14".into(),
-                "context-management-2025-06-27".into(),
-                "effort-2025-11-24".into(),
-                "fine-grained-tool-streaming-2025-05-14".into(),
-                "computer-use-2025-01-24".into(),
-                "computer-use-2024-10-22".into(),
-                "mcp-client-2025-04-04".into(),
-                "search-results-2025-06-09".into(),
-            ],
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };

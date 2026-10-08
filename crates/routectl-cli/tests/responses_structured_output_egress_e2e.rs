@@ -469,7 +469,6 @@ fn bedrock_invoke_cfg() -> BedrockConfig {
         // Empty allowlists are pass-through, so nothing this test asserts
         // can be filtered out by operator policy rather than by the
         // translation under test.
-        allowed_betas: Vec::new(),
         additional_model_request_fields: None,
         adaptive_thinking: None,
     }

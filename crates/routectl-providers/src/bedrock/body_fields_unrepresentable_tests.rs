@@ -62,7 +62,6 @@ fn cfg(carrier: Carrier, seam: Seam) -> BedrockConfig {
         user_agent: None,
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
-        allowed_betas: Vec::new(),
         additional_model_request_fields: match seam {
             Seam::OperatorExtras => Some(extras_with_mcp_servers_and_adjacent()),
             Seam::ClientBody | Seam::ProviderExtras => None,

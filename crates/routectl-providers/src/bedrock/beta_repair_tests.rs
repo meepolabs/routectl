@@ -299,17 +299,15 @@ fn stripping_removes_exactly_the_named_flags_and_keeps_order() {
 // Withheld set vs the operator floor
 // ---------------------------------------------------------------------------
 
-/// The bag's `anthropic_beta` after the shared filter in pass-through mode.
+/// The bag's `anthropic_beta` after the shared withhold.
 fn filtered(client: &[&str], withheld: &[&str], floor: &[&str]) -> (Option<Value>, bool) {
     let mut bag = serde_json::Map::new();
     bag.insert("anthropic_beta".into(), json!(client));
-    let dropped = super::super::betas::filter_bedrock_betas(
+    let dropped = super::super::betas::withhold_betas(
         PROVIDER,
         &mut bag,
-        &[],
-        &strings(floor),
         &strings(withheld),
-        &[],
+        &strings(floor),
     );
     (bag.remove("anthropic_beta"), dropped)
 }

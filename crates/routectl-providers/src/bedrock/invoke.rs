@@ -22,7 +22,7 @@ use serde_json::Value;
 use routectl_core::{ChatRequest, ChatResponse, Error, Result, sanitize_for_log};
 
 use super::BedrockConfig;
-use super::betas::filter_bedrock_betas;
+use super::betas::{operator_floor, withhold_betas};
 
 /// The Bedrock-required `anthropic_version` body field. Distinct from
 /// the Anthropic API's `anthropic-version: 2023-06-01` header.
@@ -91,30 +91,16 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         obj.insert("anthropic_beta".into(), Value::Array(merged));
     }
 
-    // Filter the merged anthropic_beta against the operator-supplied
-    // `[bedrock] allowed_betas` list.
-    // Operator-supplied flags from `cfg.anthropic_beta`
-    // (`[providers.X] anthropic_beta`) pass through unconditionally;
-    // flags lifted from the inbound `anthropic-beta` HTTP header that
-    // are not on the operator's accepted list drop at DEBUG. Without
-    // this filter, claude-code's TS SDK 400s every Bedrock request
-    // because it ships up to ten betas, only a subset of which AWS
-    // gates for distribution. Shared with the Converse adapter via
-    // `super::betas`.
-    //
-    // Empty `cfg.allowed_betas` puts the filter in pass-through mode
-    // (every flag except the request's withheld set survives; the router
-    // fills that set from its seed and learned beta verdicts) -- the
-    // discovery default for operators bringing up routectl against a fresh
-    // AWS account. The withheld-rejected signal is discarded: this lane
-    // carries no translation counters (see the fingerprint tally above).
-    let _ = filter_bedrock_betas(
+    // Drop the request's withheld client flags (the router fills that set
+    // from its seed and learned beta verdicts); every other flag reaches the
+    // wire verbatim, and the operator floor is never withheld. The
+    // withheld-rejected signal is discarded: this lane carries no
+    // translation counters (see the fingerprint tally above).
+    let _ = withhold_betas(
         &cfg.id,
         obj,
-        &cfg.anthropic_beta,
-        &super::betas::operator_floor(cfg, req),
         &req.routectl_internal.withheld_betas,
-        &cfg.allowed_betas,
+        &operator_floor(cfg, req),
     );
 
     // Merge any additional model request fields at the top level
@@ -216,12 +202,9 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // UNMEASURED, and an older account/model tier may still gate the field,
     // so the union stays; revisit it if Anthropic retires the flag (whether
     // an unknown beta string is itself rejected is also unmeasured).
-    // Deliberately AFTER `filter_bedrock_betas`, because the flag is a
-    // routectl-derived capability signal implied by the shipped body, not a
-    // client-opted beta, so it bypasses `[bedrock] allowed_betas` with the
-    // same standing the operator's `cfg.anthropic_beta` floor has. Unioning
-    // it earlier lets a restrictive allowlist that omits the flag drop it
-    // again.
+    // Deliberately AFTER the withhold, because the flag is a routectl-derived
+    // capability signal implied by the shipped body, not a client-opted beta,
+    // so a withheld entry naming it must not drop it.
     // Feature-triggered and idempotent: no `output_config.format` means no
     // flag, and an already-present flag is neither duplicated nor reordered.
     if let Some(obj) = body.as_object_mut() {
@@ -260,9 +243,6 @@ fn is_bedrock_invoke_managed_key(key: &str) -> bool {
             | "cache_control"
     )
 }
-
-// `filter_bedrock_betas` moved to `super::betas`; the Converse adapter
-// applies the identical filter via the same helper.
 
 /// Drop the Claude Code billing/attribution block from the assembled
 /// Anthropic-shape `system` body field. Handles both wire shapes: a flat
@@ -626,18 +606,6 @@ mod tests {
             user_agent: None,
             header_extras: Vec::new(),
             anthropic_beta: vec!["context-1m-2025-08-07".into()],
-            allowed_betas: vec![
-                "context-1m-2025-08-07".into(),
-                "claude-code-20250219".into(),
-                "interleaved-thinking-2025-05-14".into(),
-                "context-management-2025-06-27".into(),
-                "effort-2025-11-24".into(),
-                "fine-grained-tool-streaming-2025-05-14".into(),
-                "computer-use-2025-01-24".into(),
-                "computer-use-2024-10-22".into(),
-                "mcp-client-2025-04-04".into(),
-                "search-results-2025-06-09".into(),
-            ],
             // `top_p` is canonical and would now be filtered out;
             // use `top_k` here as a real long-tail Anthropic-only
             // knob the allow-list lets through.
@@ -1189,8 +1157,7 @@ mod tests {
         let body = normalize_request(&cfg, &req).unwrap();
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
-        // The gating beta rides along with the field it gates. `fake_cfg`'s
-        // `allowed_betas` omits it, so this also pins the carve-out.
+        // The gating beta rides along with the field it gates.
         let betas = body["anthropic_beta"]
             .as_array()
             .expect("a structured-output body must carry anthropic_beta");
@@ -1205,27 +1172,23 @@ mod tests {
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
     }
 
-    /// REGRESSION: a NON-EMPTY `[bedrock] allowed_betas` that omits the
-    /// structured-outputs flag must not strip it off a body that carries
-    /// `output_config.format`. The flag is a routectl-derived server
-    /// requirement implied by the shipped field, so the union runs AFTER
-    /// `filter_bedrock_betas` -- running it earlier let the filter drop the
-    /// flag again and shipped the gated field ungated, which AWS 400s.
+    /// REGRESSION: a withheld entry naming the structured-outputs flag must
+    /// not strip it off a body that carries `output_config.format`. The flag
+    /// is a routectl-derived server requirement implied by the shipped field,
+    /// so the union runs AFTER the withhold -- running it earlier lets the
+    /// withhold drop the flag and ship the gated field ungated.
     #[test]
-    fn structured_outputs_beta_survives_a_restrictive_bedrock_allowlist() {
+    fn structured_outputs_beta_survives_a_withheld_entry_naming_it() {
         let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
-        let mut cfg = fake_cfg();
-        cfg.allowed_betas = vec!["context-1m-2025-08-07".into()];
-        assert!(
-            !cfg.allowed_betas.iter().any(|b| b == flag),
-            "precondition: the allowlist must omit the structured-outputs flag"
-        );
+        let cfg = fake_cfg();
         assert!(
             !cfg.anthropic_beta.iter().any(|b| b == flag),
-            "precondition: the operator floor must not supply the flag either"
+            "precondition: the operator floor must not supply the flag"
         );
 
         let mut req = user_req();
+        req.anthropic_beta = vec![flag.into()];
+        req.routectl_internal.withheld_betas = std::iter::once(flag.to_string()).collect();
         req.response_format = Some(json!({
             "type": "json_schema",
             "json_schema": {"name": "widget", "schema": {"type": "object"}},
@@ -1245,191 +1208,35 @@ mod tests {
         assert_eq!(
             betas.iter().filter(|b| **b == flag).count(),
             1,
-            "the flag must survive the allowlist exactly once; got: {betas:?}"
+            "the flag must survive the withhold exactly once; got: {betas:?}"
         );
     }
 
-    // -----------------------------------------------------------------
-    // anthropic_beta filter against Bedrock-accepted set
-    // -----------------------------------------------------------------
-
-    fn fake_cfg_no_betas() -> BedrockConfig {
-        BedrockConfig {
-            id: "bedrock:test".into(),
-            region: "us-west-2".into(),
-            model_id: "anthropic.claude-haiku-4-5".into(),
-            api_shape: BedrockApiShape::Invoke,
-            creds: BedrockCreds::BearerKey { key: "test".into() },
-            user_agent: None,
-            header_extras: Vec::new(),
-            anthropic_beta: vec![],
-            allowed_betas: vec![
-                "context-1m-2025-08-07".into(),
-                "claude-code-20250219".into(),
-                "interleaved-thinking-2025-05-14".into(),
-                "context-management-2025-06-27".into(),
-                "effort-2025-11-24".into(),
-                "fine-grained-tool-streaming-2025-05-14".into(),
-                "computer-use-2025-01-24".into(),
-                "computer-use-2024-10-22".into(),
-                "mcp-client-2025-04-04".into(),
-                "search-results-2025-06-09".into(),
-            ],
-            additional_model_request_fields: None,
-            adaptive_thinking: None,
-        }
-    }
-
-    /// Pre-canned request whose canonical anthropic_beta has 4 flags,
-    /// 2 in the operator-supplied `allowed_betas` (from
-    /// `fake_cfg_no_betas()`) and 2 not. After normalize_request, only
-    /// the two accepted survive in the body.
+    /// Client flags that no operator list or withheld set names reach the
+    /// Invoke body verbatim and in order, after the operator floor.
     #[test]
-    fn invoke_filters_unsupported_anthropic_beta_against_accepted_set() {
+    fn client_betas_outside_every_list_reach_the_invoke_body_verbatim() {
         // Arrange
-        let cfg = fake_cfg_no_betas();
+        let cfg = fake_cfg();
         let mut req = user_req();
         req.anthropic_beta = vec![
-            "context-1m-2025-08-07".into(),           // accepted
-            "oauth-2025-04-20".into(),                // rejected by Bedrock
-            "interleaved-thinking-2025-05-14".into(), // accepted
-            "redact-thinking-2026-02-12".into(),      // rejected by Bedrock
-        ];
-
-        // Act
-        let body = normalize_request(&cfg, &req).unwrap();
-
-        // Assert: only the accepted subset survives.
-        let arr = body["anthropic_beta"].as_array().unwrap();
-        let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-        assert!(
-            strs.contains(&"context-1m-2025-08-07"),
-            "missing accepted: {strs:?}"
-        );
-        assert!(
-            strs.contains(&"interleaved-thinking-2025-05-14"),
-            "missing accepted: {strs:?}"
-        );
-        assert!(
-            !strs.contains(&"oauth-2025-04-20"),
-            "rejected flag leaked through: {strs:?}"
-        );
-        assert!(
-            !strs.contains(&"redact-thinking-2026-02-12"),
-            "rejected flag leaked through: {strs:?}"
-        );
-    }
-
-    /// Provider-config anthropic_beta survives the filter even when its
-    /// contents are not in the routectl-shipped accepted set. This is
-    /// the documented operator escape hatch for AWS allowlist drift.
-    #[test]
-    fn invoke_provider_config_betas_bypass_filter() {
-        // Arrange
-        let mut cfg = fake_cfg_no_betas();
-        cfg.anthropic_beta = vec![
-            // A flag NOT in the operator-supplied `allowed_betas`
-            // list, but the operator typed it into
-            // `[providers.X] anthropic_beta` -- they assert it is
-            // safe (e.g. AWS gated it for their account before the
-            // next routectl release).
-            "future-flag-2026-12-31".into(),
-        ];
-        let req = user_req();
-
-        // Act
-        let body = normalize_request(&cfg, &req).unwrap();
-
-        // Assert: cfg-asserted flag survives.
-        let arr = body["anthropic_beta"].as_array().unwrap();
-        let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-        assert!(
-            strs.contains(&"future-flag-2026-12-31"),
-            "operator-asserted flag was filtered out: {strs:?}"
-        );
-    }
-
-    /// When all input flags are rejected, the field is removed from the
-    /// body entirely (not emitted as `anthropic_beta: []`). This matches
-    /// the wire shape callers without any betas already produce.
-    #[test]
-    fn invoke_strips_field_when_filter_empties_array() {
-        // Arrange
-        let cfg = fake_cfg_no_betas();
-        let mut req = user_req();
-        req.anthropic_beta = vec!["oauth-2025-04-20".into(), "files-api-2025-04-14".into()];
-
-        // Act
-        let body = normalize_request(&cfg, &req).unwrap();
-
-        // Assert
-        assert!(
-            body.get("anthropic_beta").is_none(),
-            "filter emptied the array but field survived: {body}"
-        );
-    }
-
-    /// Dedup-vs-allowlist edge case. The Anthropic ingress's
-    /// `merge_inbound_anthropic_beta_header` dedupes header-vs-body,
-    /// but a direct caller (e.g. a library user constructing
-    /// ChatRequest by hand) could supply duplicates. The filter must
-    /// also dedup so a flag appearing twice in the canonical does not
-    /// appear twice in the upstream body.
-    #[test]
-    fn invoke_preserves_dedup_when_header_and_body_share_flag() {
-        // Arrange
-        let cfg = fake_cfg_no_betas();
-        let mut req = user_req();
-        req.anthropic_beta = vec![
-            "context-1m-2025-08-07".into(),
-            "context-1m-2025-08-07".into(), // duplicate
-            "claude-code-20250219".into(),
-        ];
-
-        // Act
-        let body = normalize_request(&cfg, &req).unwrap();
-
-        // Assert: duplicate collapses; both unique accepted flags survive.
-        let arr = body["anthropic_beta"].as_array().unwrap();
-        let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-        assert_eq!(
-            strs.iter()
-                .filter(|s| **s == "context-1m-2025-08-07")
-                .count(),
-            1,
-            "duplicate flag was not deduped: {strs:?}"
-        );
-        assert!(strs.contains(&"claude-code-20250219"), "missing: {strs:?}");
-    }
-
-    /// `cfg.allowed_betas` is sourced from the global
-    /// `[bedrock] allowed_betas` TOML field. Lets operators add flags
-    /// AWS gated post-release, or remove flags AWS deprecated, without
-    /// a routectl rebuild.
-    #[test]
-    fn invoke_allowed_betas_filters_against_operator_list() {
-        // Arrange: a request with two flags. One is in the operator's
-        // list (kept), the other is not (dropped).
-        let mut cfg = fake_cfg_no_betas();
-        cfg.allowed_betas = vec!["future-flag-2026-12-31".into()];
-        let mut req = user_req();
-        req.anthropic_beta = vec![
-            // NOT in operator list: should be DROPPED.
-            "context-1m-2025-08-07".into(),
-            // In operator list: should be ACCEPTED.
-            "future-flag-2026-12-31".into(),
+            "oauth-2025-04-20".into(),
+            "made-up-flag".into(),
+            "interleaved-thinking-2025-05-14".into(),
         ];
 
         // Act
         let body = normalize_request(&cfg, &req).unwrap();
 
         // Assert
-        let arr = body["anthropic_beta"].as_array().unwrap();
-        let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(
-            strs,
-            vec!["future-flag-2026-12-31"],
-            "allowed_betas filter did not match operator list: {strs:?}"
+            body["anthropic_beta"],
+            json!([
+                "context-1m-2025-08-07",
+                "oauth-2025-04-20",
+                "made-up-flag",
+                "interleaved-thinking-2025-05-14"
+            ])
         );
     }
 
@@ -1580,7 +1387,7 @@ mod tests {
         // Bedrock Invoke delegates body construction to the Anthropic-API
         // normalizer, so honoring req.response_format there means the
         // output_config.format field rides through onto the Invoke body
-        // (it survives the anthropic_beta allowlist pass).
+        // (it survives the anthropic_beta withhold).
         // `name` is NOT carried: Anthropic's format object accepts only
         // `type` and `schema`, and AWS forwards the bag verbatim to the same
         // validator.

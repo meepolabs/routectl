@@ -148,8 +148,9 @@ pub(super) fn apply_layered_overlays(
     // Anthropic-API egress unions these unconditionally after the client
     // set, so an operator's model-pinned beta always ships.
     // `req.anthropic_beta` itself stays the full union (composed by
-    // `merge_header_extras`) so Bedrock's `filter_bedrock_betas` and the
-    // log-safe summary still see the complete set.
+    // `merge_header_extras`) so the Bedrock egress, which withholds only
+    // flags outside this floor, and the log-safe summary still see the
+    // complete set.
     internal.operator_betas = operator_betas(provider_headers, &target.model.header_extras);
     internal.operator_payload_extras = operator_payload_extras(
         &target.provider_name,
@@ -220,7 +221,7 @@ pub fn operator_betas(
 ///      pass over the three sources in visit order: `req.anthropic_beta`
 ///      (ingress lift) -> provider value -> model value. The unioned
 ///      string lands back on the merged map AND on `req.anthropic_beta`
-///      so downstream readers (e.g. Bedrock's `filter_bedrock_betas`)
+///      so downstream readers (e.g. the Bedrock egress beta withhold)
 ///      see the same fully-composed list.
 ///
 /// The merged headers are published via `req.routectl_internal.header_extras`

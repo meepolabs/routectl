@@ -261,7 +261,7 @@ fn apply_layered_overlays_records_operator_betas_excluding_client() {
     );
 
     // `req.anthropic_beta` still carries the full union (client +
-    // provider + model) so Bedrock's `filter_bedrock_betas` and the
+    // provider + model) so the Bedrock egress beta withhold and the
     // log-safe summary see the complete set.
     for expected in ["client-beta", "prov-beta", "model-beta"] {
         assert!(

@@ -18,7 +18,7 @@ use crate::anthropic_api::request::build_thinking;
 use crate::anthropic_api::types::ThinkingConfig;
 use crate::effort::clamp_effort_to_supported;
 
-use super::super::betas::{filter_bedrock_betas, operator_floor, union_feature_implied_betas};
+use super::super::betas::{operator_floor, union_feature_implied_betas, withhold_betas};
 use super::super::{BedrockApiShape, BedrockConfig};
 use super::request::ClientFingerprintStripTally;
 use super::types::ConverseToolChoice;
@@ -27,8 +27,8 @@ use super::types::ConverseToolChoice;
 /// fields land in the bag (avoids emitting `additionalModelRequestFields:
 /// {}` upstream).
 ///
-/// `anthropic_beta` is filtered against the same Bedrock allowlist as
-/// the Invoke adapter (see `super::super::betas`). AWS validates the
+/// `anthropic_beta` drops the request's withheld client flags exactly as
+/// the Invoke adapter does (see `super::super::betas`). AWS validates the
 /// flag set independently per-request whether the body shape is
 /// Invoke (Anthropic-shape body) or Converse (`additionalModelRequestFields`).
 /// The Invoke gotcha applies on both paths: a single unsupported flag
@@ -77,17 +77,11 @@ pub(super) fn build_additional_fields(
     provider_actions.flush();
     operator_actions.flush();
 
-    // Filter anthropic_beta against the operator-supplied
-    // `[bedrock] allowed_betas` list (no default) and drop the request's
-    // router-withheld flags.
-    // Operator-supplied flags from cfg.anthropic_beta pass through
-    // unconditionally; flags lifted from the inbound `anthropic-beta`
-    // HTTP header that are not on the operator's accepted list drop
-    // at DEBUG. The override hooks (`[bedrock] allowed_betas` global,
-    // `[providers.X] anthropic_beta` per-provider floor) apply
-    // identically to both Invoke and Converse paths. See
-    // `super::super::betas` for the full contract.
-    filter_anthropic_beta(cfg, req, &mut bag);
+    // Drop the request's router-withheld client flags; every other flag
+    // reaches the wire verbatim and the operator floor is never withheld.
+    // Invoke applies the same withhold. See `super::super::betas` for the
+    // full contract.
+    withhold_client_betas(cfg, req, &mut bag);
 
     // Final pass: Anthropic's extended-thinking docs forbid `thinking`
     // alongside a `tool_choice` that forces tool use. Strip thinking
@@ -108,8 +102,8 @@ pub(super) fn build_additional_fields(
 
     // The display-updates and structured-outputs betas are implied by the
     // final bag rather than opted into by the client, so they union here,
-    // after every filter and strip that could change what ships: a
-    // restrictive `allowed_betas` cannot drop them, and a bag whose
+    // after the withhold and every strip that could change what ships: a
+    // withheld entry cannot drop them, and a bag whose
     // `output_config` or `thinking` was removed gains neither. An empty bag
     // implies nothing, so the union never fills one.
     union_feature_implied_betas(BedrockApiShape::Converse, &mut bag);
@@ -340,20 +334,18 @@ fn insert_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<S
     }
 }
 
-/// Apply the shared Bedrock beta filter to the bag and count a withheld
+/// Apply the shared Bedrock beta withhold to the bag and count a withheld
 /// client flag once per request, not once per flag.
-fn filter_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
-    // The withheld set is dropped even in pass-through mode: the router put
-    // each flag in it because its seed or a learned verdict says this lane's
-    // upstream rejects it, so the upstream compels the loss.
+fn withhold_client_betas(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
+    // The router put each withheld flag in the set because its seed or a
+    // learned verdict says this lane's upstream rejects it, so the upstream
+    // compels the loss.
     // TRANSLATION-DROP: lane=bedrock-converse class=anthropic_beta_rejected_by_bedrock test=bedrock_rejected_beta_withhold_bumps_the_drop_counter_once
-    if filter_bedrock_betas(
+    if withhold_betas(
         &cfg.id,
         bag,
-        &cfg.anthropic_beta,
-        &operator_floor(cfg, req),
         &req.routectl_internal.withheld_betas,
-        &cfg.allowed_betas,
+        &operator_floor(cfg, req),
     ) {
         crate::translation_drop_metrics::record_translation_drop(
             super::LANE,
@@ -728,7 +720,6 @@ mod tests {
             user_agent: None,
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
-            allowed_betas: Vec::new(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         }
@@ -961,30 +952,27 @@ mod tests {
 
     /// A request carrying `response_format` maps to `output_config.format`
     /// in the Converse bag; the structured-outputs beta it gates must ride
-    /// along in `anthropic_beta` even when a NON-EMPTY `[bedrock]
-    /// allowed_betas` omits the flag. The union is a routectl-derived server
-    /// requirement implied by the shipped field, not a client-opted beta, so
-    /// it bypasses the allowlist -- parallel to the Bedrock-Invoke test
-    /// `structured_outputs_beta_survives_a_restrictive_bedrock_allowlist`.
+    /// along in `anthropic_beta` even when the request's withheld set names
+    /// the flag. The union is a routectl-derived server requirement implied
+    /// by the shipped field, not a client-opted beta, so it runs after the
+    /// withhold -- parallel to the Bedrock-Invoke test
+    /// `structured_outputs_beta_survives_a_withheld_entry_naming_it`.
     #[test]
-    fn structured_outputs_beta_survives_restrictive_converse_allowlist() {
+    fn structured_outputs_beta_survives_a_converse_withheld_entry_naming_it() {
         use serde_json::json;
 
-        // Arrange: restrictive allowlist that omits the flag, plus a
-        // structured-output directive on the request.
+        // Arrange: a withheld entry naming the flag, plus a structured-output
+        // directive on the request.
         let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
-        let mut cfg = fake_cfg();
-        cfg.allowed_betas = vec!["context-1m-2025-08-07".into()];
-        assert!(
-            !cfg.allowed_betas.iter().any(|b| b == flag),
-            "precondition: the allowlist must omit the structured-outputs flag"
-        );
+        let cfg = fake_cfg();
         assert!(
             !cfg.anthropic_beta.iter().any(|b| b == flag),
-            "precondition: the operator floor must not supply the flag either"
+            "precondition: the operator floor must not supply the flag"
         );
 
         let mut req = req_with_thinking();
+        req.anthropic_beta = vec![flag.into()];
+        req.routectl_internal.withheld_betas = std::iter::once(flag.to_string()).collect();
         req.response_format = Some(json!({
             "type": "json_schema",
             "json_schema": {"name": "widget", "schema": {"type": "object"}},
@@ -1001,7 +989,7 @@ mod tests {
         let bag = bag.as_object().expect("bag is an object");
 
         // Assert: the directive reached the bag, and its gating beta rode
-        // along despite the restrictive allowlist.
+        // along despite the withheld entry.
         assert!(
             bag.get("output_config")
                 .and_then(|oc| oc.get("format"))
@@ -1217,15 +1205,17 @@ mod tests {
     }
 
     /// `updates` is gated behind its own beta. The flag is implied by the
-    /// shipped bag rather than opted into by the client, so a restrictive
-    /// allowlist that omits it cannot drop it.
+    /// shipped bag rather than opted into by the client, so a withheld entry
+    /// naming it cannot drop it.
     #[test]
-    fn updates_display_unions_its_beta_past_a_restrictive_allowlist() {
+    fn updates_display_unions_its_beta_past_a_withheld_entry_naming_it() {
         for adaptive in [false, true] {
             // Arrange
-            let mut cfg = cfg_with_shape(adaptive);
-            cfg.allowed_betas = vec!["context-1m-2025-08-07".into()];
-            let req = req_with_display(Some("updates"));
+            let cfg = cfg_with_shape(adaptive);
+            let mut req = req_with_display(Some("updates"));
+            req.anthropic_beta = vec![THINKING_DISPLAY_UPDATES_BETA.to_string()];
+            req.routectl_internal.withheld_betas =
+                std::iter::once(THINKING_DISPLAY_UPDATES_BETA.to_string()).collect();
 
             // Act
             let bag = bag_for(&cfg, &req);

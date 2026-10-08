@@ -41,10 +41,10 @@ use common::scenarios;
 /// dummy key here is purely structural -- it never crosses any wire in
 /// these tests.
 ///
-/// `allowed_betas` is intentionally empty (pass-through, the "discovery
-/// default" per `BedrockConfig` doc) so the scenarios exercise the
-/// unfiltered translator. The filter surface has dedicated coverage in
-/// `bedrock/converse/request_tests*.rs` and `bedrock/betas.rs::tests`.
+/// The request carries no withheld set, so the scenarios exercise the
+/// translator with every client beta forwarded. The withhold has dedicated
+/// coverage in `tests/bedrock_rejected_betas.rs` and
+/// `bedrock/beta_repair_tests.rs`.
 fn bedrock_converse_provider() -> BedrockProvider {
     let cfg = BedrockConfig {
         id: "bedrock-converse-test".into(),
@@ -57,7 +57,6 @@ fn bedrock_converse_provider() -> BedrockProvider {
         user_agent: None,
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
-        allowed_betas: Vec::new(),
         additional_model_request_fields: None,
         adaptive_thinking: None,
     };

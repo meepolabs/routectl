@@ -9697,12 +9697,10 @@ pub type routectl_router::BoundaryReceipt::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BoundaryReceipt where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::BoundaryReceipt::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::BuildOptions
-pub routectl_router::BuildOptions::bedrock_allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::BuildOptions::normalize_tools: bool
 pub routectl_router::BuildOptions::strict_translation: bool
 impl routectl_router::BuildOptions
 pub fn routectl_router::BuildOptions::new() -> Self
-pub fn routectl_router::BuildOptions::with_bedrock_allowed_betas(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub const fn routectl_router::BuildOptions::with_normalize_tools(self, bool) -> Self
 pub const fn routectl_router::BuildOptions::with_strict_translation(self, bool) -> Self
 impl core::clone::Clone for routectl_router::BuildOptions

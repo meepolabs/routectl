@@ -1944,13 +1944,11 @@ async fn cross_response_openai_tool_calls_become_anthropic_tool_use_blocks() {
 //
 // claude-code's TS SDK ships up to ten anthropic-beta flags via the HTTP
 // header on every /v1/messages request. The Anthropic ingress lifts the
-// header into canonical req.anthropic_beta; the Bedrock egress's
-// `filter_bedrock_betas` (in `bedrock::betas`) drops values not on the
-// operator-supplied `[bedrock] allowed_betas` list. The combined
-// behavior must (a) preserve flags the operator allows, (b) drop
-// flags the operator excludes, (c) dedup duplicates introduced by
-// either surface, (d) preserve operator-asserted flags from
-// cfg.anthropic_beta.
+// header into canonical req.anthropic_beta, and the Bedrock egress
+// forwards every client flag apart from the request's withheld set
+// (`bedrock::betas`). The combined behavior must (a) forward each client
+// flag verbatim and in order, and (b) dedup duplicates introduced by
+// either surface.
 //
 // Wiremock against the actual Bedrock SigV4 path is deferred to a
 // future live-matrix expansion (no AWS creds in the test env). This
@@ -1959,7 +1957,7 @@ async fn cross_response_openai_tool_calls_become_anthropic_tool_use_blocks() {
 // routectl-providers dep, so no cfg gate is needed here.
 
 #[tokio::test]
-async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
+async fn bedrock_invoke_forwards_client_betas_through_anthropic_ingress() {
     use axum::http::HeaderMap;
     use routectl_cli::ingress::IngressAdapter;
     use routectl_cli::ingress::anthropic::AnthropicIngress;
@@ -2015,18 +2013,6 @@ async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
         user_agent: None,
         header_extras: Vec::new(),
         anthropic_beta: vec![],
-        allowed_betas: vec![
-            "context-1m-2025-08-07".into(),
-            "claude-code-20250219".into(),
-            "interleaved-thinking-2025-05-14".into(),
-            "context-management-2025-06-27".into(),
-            "effort-2025-11-24".into(),
-            "fine-grained-tool-streaming-2025-05-14".into(),
-            "computer-use-2025-01-24".into(),
-            "computer-use-2024-10-22".into(),
-            "mcp-client-2025-04-04".into(),
-            "search-results-2025-06-09".into(),
-        ],
         additional_model_request_fields: None,
         adaptive_thinking: None,
     };
@@ -2036,13 +2022,20 @@ async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
     // in BedrockProvider::complete / stream.
     let body = bedrock_invoke::normalize_request(&cfg, &req).unwrap();
 
-    // Assert: only the Bedrock-accepted flag survives in the upstream
-    // body; the rejected flags were dropped at DEBUG by the filter.
+    // Assert: with no withheld set, every client flag reaches the upstream
+    // body once, in ingress order.
     let arr = body["anthropic_beta"]
         .as_array()
-        .expect("anthropic_beta should be present with one element");
+        .expect("anthropic_beta should be present");
     let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-    assert_eq!(strs, vec!["context-1m-2025-08-07"]);
+    assert_eq!(
+        strs,
+        vec![
+            "context-1m-2025-08-07",
+            "oauth-2025-04-20",
+            "redact-thinking-2026-02-12",
+        ]
+    );
     // Per CLAUDE.md the Bedrock body field also carries
     // anthropic_version (Bedrock-specific).
     assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
@@ -2485,18 +2478,6 @@ async fn converse_request_body_has_camel_case_inference_config() {
         user_agent: None,
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
-        allowed_betas: vec![
-            "context-1m-2025-08-07".into(),
-            "claude-code-20250219".into(),
-            "interleaved-thinking-2025-05-14".into(),
-            "context-management-2025-06-27".into(),
-            "effort-2025-11-24".into(),
-            "fine-grained-tool-streaming-2025-05-14".into(),
-            "computer-use-2025-01-24".into(),
-            "computer-use-2024-10-22".into(),
-            "mcp-client-2025-04-04".into(),
-            "search-results-2025-06-09".into(),
-        ],
         additional_model_request_fields: None,
         adaptive_thinking: None,
     };
@@ -2584,18 +2565,6 @@ async fn converse_request_includes_tool_config_for_tool_defs() {
         user_agent: None,
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
-        allowed_betas: vec![
-            "context-1m-2025-08-07".into(),
-            "claude-code-20250219".into(),
-            "interleaved-thinking-2025-05-14".into(),
-            "context-management-2025-06-27".into(),
-            "effort-2025-11-24".into(),
-            "fine-grained-tool-streaming-2025-05-14".into(),
-            "computer-use-2025-01-24".into(),
-            "computer-use-2024-10-22".into(),
-            "mcp-client-2025-04-04".into(),
-            "search-results-2025-06-09".into(),
-        ],
         additional_model_request_fields: None,
         adaptive_thinking: None,
     };
@@ -2754,18 +2723,6 @@ async fn converse_request_system_with_cache_control_emits_cache_point_block() {
         user_agent: None,
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
-        allowed_betas: vec![
-            "context-1m-2025-08-07".into(),
-            "claude-code-20250219".into(),
-            "interleaved-thinking-2025-05-14".into(),
-            "context-management-2025-06-27".into(),
-            "effort-2025-11-24".into(),
-            "fine-grained-tool-streaming-2025-05-14".into(),
-            "computer-use-2025-01-24".into(),
-            "computer-use-2024-10-22".into(),
-            "mcp-client-2025-04-04".into(),
-            "search-results-2025-06-09".into(),
-        ],
         additional_model_request_fields: None,
         adaptive_thinking: None,
     };

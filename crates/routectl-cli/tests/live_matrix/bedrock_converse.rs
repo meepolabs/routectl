@@ -57,18 +57,6 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
             user_agent: Some("routectl-live-test/0.4".into()),
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
-            allowed_betas: vec![
-                "context-1m-2025-08-07".into(),
-                "claude-code-20250219".into(),
-                "interleaved-thinking-2025-05-14".into(),
-                "context-management-2025-06-27".into(),
-                "effort-2025-11-24".into(),
-                "fine-grained-tool-streaming-2025-05-14".into(),
-                "computer-use-2025-01-24".into(),
-                "computer-use-2024-10-22".into(),
-                "mcp-client-2025-04-04".into(),
-                "search-results-2025-06-09".into(),
-            ],
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };

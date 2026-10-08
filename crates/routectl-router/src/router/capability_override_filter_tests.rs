@@ -371,7 +371,7 @@ fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
 ///
 /// One config carrying ALL three legacy capability lists (a per-provider
 /// `unsupported_features`, a per-model `unsupported_features`, and the
-/// `[bedrock]` egress allowlist `allowed_betas` -- inert for routing but
+/// `[bedrock] allowed_betas` key, which nothing reads any more but stays
 /// present so the whole legacy surface coexists)
 /// must route away with the SAME `FilterSource` labels the earlier raw
 /// static-list scan produced: a provider-scoped drop reports
