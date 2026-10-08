@@ -402,10 +402,9 @@ pub struct ResponsesStreamEvent {
     #[serde(default)]
     #[allow(dead_code)]
     pub(crate) text: Option<String>,
-    /// Finalized arguments on function_call_arguments.done. Same
-    /// rationale as `text`.
+    /// Finalized arguments on function_call_arguments.done. Emitted
+    /// by the state machine only when no argument delta preceded it.
     #[serde(default)]
-    #[allow(dead_code)]
     pub(crate) arguments: Option<String>,
     #[serde(default)]
     pub(crate) response: Option<Value>,

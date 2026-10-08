@@ -74,17 +74,17 @@ enum BlockState {
         content_text: String,
         encrypted_content: Option<String>,
     },
-    /// Function-call item. `arguments` accumulator preserved across
-    /// deltas so a re-emit on item.done is possible if needed; today
-    /// the wire deltas already arrive as concatenable strings and we
-    /// emit per-delta partial-arguments chunks.
+    /// Function-call item. `arguments` holds every argument byte
+    /// already emitted downstream. Empty means nothing has been sent
+    /// yet, so the final arguments carried by
+    /// `function_call_arguments.done` (or, failing that, by the item on
+    /// `output_item.done`) are emitted in one chunk.
     ToolUse {
         #[allow(dead_code)]
         item_id: String,
         call_id: String,
         name: String,
         call_index: u32,
-        #[allow(dead_code)]
         arguments: String,
     },
 }
@@ -168,8 +168,10 @@ impl ResponsesStreamState {
             "response.reasoning_text.delta" => Ok(self.handle_reasoning_text_delta(&event)),
             "response.reasoning_summary_part.added" => Ok(Vec::new()),
             "response.function_call_arguments.delta" => Ok(self.handle_function_call_delta(&event)),
-            "response.function_call_arguments.done" => Ok(Vec::new()),
-            "response.output_item.done" => Ok(self.handle_item_done(&event)),
+            "response.function_call_arguments.done" => {
+                Ok(self.handle_function_call_args_done(provider_id, &event))
+            }
+            "response.output_item.done" => Ok(self.handle_item_done(provider_id, &event)),
             "response.completed" => self.handle_completed(provider_id, &event),
             "response.incomplete" => self.handle_incomplete(provider_id, &event),
             "response.failed" => Err(self.handle_failed(provider_id, &event)),
@@ -446,11 +448,83 @@ impl ResponsesStreamState {
         vec![self.tool_delta_chunk(call_id, name, call_index, delta.to_string())]
     }
 
-    fn handle_item_done(&mut self, event: &ResponsesStreamEvent) -> Vec<ChatChunk> {
+    fn handle_function_call_args_done(
+        &mut self,
+        provider_id: &str,
+        event: &ResponsesStreamEvent,
+    ) -> Vec<ChatChunk> {
+        let (Some(idx), Some(final_args)) = (event.output_index, event.arguments.as_deref()) else {
+            return Vec::new();
+        };
+        self.finalize_tool_arguments(provider_id, idx, final_args)
+            .into_iter()
+            .collect()
+    }
+
+    /// Emit a ToolUse block's arguments from a done-event payload.
+    /// Some upstreams send no `function_call_arguments.delta` at all
+    /// and carry the arguments only on the done events; without this
+    /// the client sees `finish_reason=tool_calls` with no tool call.
+    /// When deltas already streamed bytes those are kept as-is, so the
+    /// arguments are never emitted twice.
+    fn finalize_tool_arguments(
+        &mut self,
+        provider_id: &str,
+        idx: u32,
+        final_args: &str,
+    ) -> Option<ChatChunk> {
+        let Some(BlockState::ToolUse {
+            call_id,
+            name,
+            call_index,
+            arguments,
+            ..
+        }) = self.blocks.get_mut(&idx)
+        else {
+            return None;
+        };
+        // An empty final payload is a zero-argument call; `{}` keeps the
+        // emitted arguments parseable JSON for every downstream client.
+        let final_args = if final_args.is_empty() {
+            "{}"
+        } else {
+            final_args
+        };
+        if !arguments.is_empty() {
+            if arguments.as_str() != final_args {
+                tracing::debug!(
+                    provider = provider_id,
+                    output_index = idx,
+                    streamed_len = arguments.len(),
+                    final_len = final_args.len(),
+                    "openai-responses: final function_call arguments differ from streamed deltas; keeping streamed"
+                );
+            }
+            return None;
+        }
+        arguments.push_str(final_args);
+        let (call_id, name, call_index) = (call_id.clone(), name.clone(), *call_index);
+        Some(self.tool_delta_chunk(call_id, name, call_index, final_args.to_string()))
+    }
+
+    fn handle_item_done(
+        &mut self,
+        provider_id: &str,
+        event: &ResponsesStreamEvent,
+    ) -> Vec<ChatChunk> {
         let Some(idx) = event.output_index else {
             return Vec::new();
         };
         let mut chunks = Vec::new();
+        if matches!(self.blocks.get(&idx), Some(BlockState::ToolUse { .. })) {
+            let final_args = event
+                .item
+                .as_ref()
+                .and_then(|v| v.get("arguments"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            chunks.extend(self.finalize_tool_arguments(provider_id, idx, final_args));
+        }
         // The final item shape may include the `encrypted_content`
         // signature even when item.added didn't carry it (typical
         // shape: signature is computed server-side after reasoning
@@ -837,3 +911,7 @@ impl UnwrapOrDefaultResp for serde_json::Result<ResponsesResponse> {
 #[cfg(test)]
 #[path = "sse_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sse_tool_args_tests.rs"]
+mod tool_args_tests;
