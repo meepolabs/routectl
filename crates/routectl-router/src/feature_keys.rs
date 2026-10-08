@@ -1,11 +1,11 @@
 //! Feature-key derivation for the alias-chain pre-filter.
 //!
-//! `unsupported_features` on `ProviderRuntimePolicy` is an
-//! operator-supplied list of feature keys (e.g. `web_search`,
-//! `computer_use`) the operator has declared the provider does not
-//! support. Before walking the alias chain, the router maps the
-//! request's tool definitions to feature keys and filters out any
-//! chain entry whose provider lists ANY of those keys. The result is
+//! `[capability.overrides.<spec>].unsupported` is an operator-supplied
+//! list of feature keys (e.g. `web_search`, `computer_use`) the operator
+//! has declared a provider or model does not support. Before walking the
+//! alias chain, the router maps the request's tool definitions to feature
+//! keys and filters out any chain entry whose override lists ANY of those
+//! keys. The result is
 //! the original chain minus skipped providers; an empty chain after
 //! filter surfaces as `Error::NotImplemented` rather than walking and
 //! getting per-target 400s from each upstream that can't handle the
@@ -27,8 +27,9 @@
 //! All rely on constrained decoding, which some upstreams (e.g. a
 //! Bedrock Invoke leg on certain Claude models) do not enforce, yielding
 //! malformed `tool_use` JSON the client cannot parse. Declaring
-//! `unsupported_features = ["structured_output"]` on such a provider
-//! steers these requests to a leg that DOES enforce it.
+//! `unsupported = ["structured_output"]` in that provider's
+//! `[capability.overrides]` entry steers these requests to a leg that DOES
+//! enforce it.
 
 use routectl_core::ToolDef;
 pub use routectl_core::capability::FORCED_TOOL_CHOICE;

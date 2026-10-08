@@ -463,8 +463,9 @@ fn capability_section_drops_absorbed_findings_on_default_config() {
     );
 }
 
-/// A config with a legacy provider list plus a new override, so the
-/// registry snapshot carries both a provider-static and an override row.
+/// A config with a provider-scoped override carrying both an `unsupported`
+/// and a `force_supported` entry, so the registry snapshot carries a
+/// route-away row and a forced-supported row.
 fn config_with_overrides() -> Config {
     toml::from_str(
         "version = 3\n\
@@ -472,8 +473,8 @@ fn config_with_overrides() -> Config {
          kind = \"openai-compat\"\n\
          base_url = \"https://x\"\n\
          api_key_ref = \"literal:k\"\n\
-         unsupported_features = [\"web_search\"]\n\
          [capability.overrides.p]\n\
+         unsupported = [\"web_search\"]\n\
          force_supported = [\"structured_output\"]\n",
     )
     .expect("override config parses")

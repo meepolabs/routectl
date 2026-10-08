@@ -1,6 +1,6 @@
 //! The learned-only tail: a chain whose every member carries an acting learned
 //! negative is still attempted (route-away-with-floor) rather than hard-emptied,
-//! a static `unsupported_features` match returns NotImplemented, and two
+//! an `unsupported` override match returns NotImplemented, and two
 //! distinct negatives on one target both re-probe and clear without leaking a
 //! probe slot.
 
@@ -62,14 +62,12 @@ async fn all_targets_learned_still_attempts_the_tail() {
 
 #[tokio::test]
 async fn statically_unsupported_chain_returns_not_implemented() {
-    // A STATIC `unsupported_features` match hard-drops the only chain member,
+    // An `unsupported` override match hard-drops the only chain member,
     // emptying the chain: NotImplemented, and the upstream is never dialed.
     let a = upstream_server(vec![(200, ok_body())]).await;
-    let mut runtime_a = ProviderRuntimePolicy::default();
-    runtime_a.unsupported_features = vec![WEB_SEARCH.to_string()];
     let router = build_router(
         vec![Upstream {
-            runtime: runtime_a,
+            unsupported: vec![WEB_SEARCH.to_string()],
             ..Upstream::openai("m_a", "prov_a", &a.uri())
         }],
         "solo",

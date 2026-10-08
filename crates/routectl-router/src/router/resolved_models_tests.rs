@@ -1314,8 +1314,8 @@ fn learned_negative_deprioritizes_target_to_tail() {
 
 #[test]
 fn static_unsupported_emptying_chain_returns_not_implemented() {
-    // The model-static list lives in config.models: the override
-    // registry is built from config.
+    // A model-scoped `unsupported` override: the override registry is
+    // built from config, so the model lives in config.models too.
     let mut config = Config::default();
     config.providers.insert(
         "test-prov".into(),
@@ -1323,8 +1323,14 @@ fn static_unsupported_emptying_chain_returns_not_implemented() {
     );
     config.models.insert(
         "only".into(),
-        crate::config::ModelEntry::new("test-prov", "claude-x")
-            .with_unsupported_features(vec!["web_search".to_string()]),
+        crate::config::ModelEntry::new("test-prov", "claude-x"),
+    );
+    config.capability.overrides.insert(
+        "test-prov:only".into(),
+        crate::config::OverrideEntry {
+            unsupported: vec!["web_search".to_string()],
+            ..Default::default()
+        },
     );
     let router = Router::new(Arc::new(config));
     let only = learned_target(&router, "only");

@@ -814,6 +814,15 @@ fn raw_version_of(doc: &DocumentMut) -> Result<u32> {
     }
 }
 
+/// The one table the v1 rung reads off the legacy file. Every other key is
+/// ignored: a v1 file may still carry keys the current schema retired, and
+/// the raw-document ladder, not this read, is what folds or refuses them.
+#[derive(Default, serde::Deserialize)]
+struct V1CachePricingTable {
+    #[serde(default)]
+    cache_pricing: BTreeMap<String, CachePricingOverride>,
+}
+
 /// Build the v1 rung's `cache_pricing` input: the file's `[cache_pricing]`
 /// table merged with any legacy `pricing_verifications.json` stamp. The
 /// sidecar is resolved as a sibling of the config file so the merge is
@@ -823,11 +832,15 @@ fn load_v1_cache_pricing(
     snapshot_text: &str,
     config_path: &Path,
 ) -> Result<BTreeMap<String, CachePricingOverride>> {
-    let mut config: Config = parse_config(snapshot_text).map_err(|e| {
+    let table: V1CachePricingTable = toml::from_str(snapshot_text).map_err(|e| {
         Error::Config(format!(
-            "legacy config does not parse; fix it before migrating: {e}"
+            "legacy config `[cache_pricing]` does not parse; fix it before migrating: {e}"
         ))
     })?;
+    let mut config = Config {
+        cache_pricing: table.cache_pricing,
+        ..Config::default()
+    };
     let sidecar = config_path.with_file_name("pricing_verifications.json");
     match super::catalog::load_verifications(&sidecar) {
         Ok(v) => {

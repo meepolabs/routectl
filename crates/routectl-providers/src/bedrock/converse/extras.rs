@@ -263,8 +263,8 @@ fn insert_provider_extras(
 /// sibling; a caller-supplied `output_config.format` is left untouched.
 ///
 /// Non-Claude Converse models do not honor `output_config.format`; the
-/// admission-time capability gate (an operator `unsupported_features`
-/// declaration) is what routes those away -- forwarding the inert bag key
+/// admission-time capability gate (an operator `[capability.overrides]`
+/// `unsupported` declaration) is what routes those away -- forwarding the inert bag key
 /// here is harmless (AWS ignores unknown bag fields for such models).
 fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) -> DroppedFormatKeys {
     let Some(rf) = req.response_format.as_ref() else {

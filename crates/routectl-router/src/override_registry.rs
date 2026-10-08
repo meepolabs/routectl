@@ -1,24 +1,17 @@
 //! Operator capability-override registry: the one keyed read-model that
-//! flattens config overrides and the legacy provider / model
-//! `unsupported_features` lists into a single `(target_spec,
+//! flattens `[capability.overrides]` into a single `(target_spec,
 //! normalized_capability_key)` map carrying PROVENANCE.
 //!
 //! Built purely from [`Config`] at Router construction (and therefore
 //! rebuilt on every reload, since a reload constructs a fresh Router).
-//! Four sources feed the map:
+//! Two sources feed the map:
 //!
-//! - legacy `[providers.X].unsupported_features` -> [`OverrideVerdict::RouteAway`]
-//!   / [`OverrideProvenance::ProviderStatic`], keyed by the provider name;
-//! - legacy `[models.X].unsupported_features` -> `RouteAway` /
-//!   [`OverrideProvenance::ModelStatic`], keyed by `provider:nickname`;
-//! - new `[capability.overrides.<spec>].unsupported` -> `RouteAway` /
-//!   [`OverrideProvenance::Override`];
-//! - new `[capability.overrides.<spec>].force_supported` ->
+//! - `[capability.overrides.<spec>].unsupported` ->
+//!   [`OverrideVerdict::RouteAway`] / [`OverrideProvenance::Override`];
+//! - `[capability.overrides.<spec>].force_supported` ->
 //!   [`OverrideVerdict::ForceSupported`] / `Override`.
 //!
-//! Legacy entries keep their static provenance so an existing config's
-//! routing behavior AND its source labels stay byte-identical once the
-//! consult reads this model instead of the two raw lists. Every key is
+//! The spec is either a provider name or `provider:nickname`. Every key is
 //! normalized at build via [`normalize_capability_key`]
 //! with the target's provider kind, so a stored override and a later
 //! normalized lookup meet on identical strings.
@@ -40,8 +33,8 @@
 //! a config error surfaced by [`validate_capability_overrides`], wired
 //! into the shared validator so `serve` load, `config check`, and the
 //! `config migrate` gate all reject it. Semantically identical duplicates
-//! (two `RouteAway` contributions, e.g. a legacy list and a new
-//! `unsupported` entry naming the same capability) are not a conflict.
+//! (two `RouteAway` contributions, e.g. two `unsupported` entries that
+//! normalize to the same capability) are not a conflict.
 
 use std::collections::HashMap;
 
@@ -53,8 +46,7 @@ use crate::config::Config;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverrideVerdict {
     /// Route away from the target for this capability -- a hard negative,
-    /// the semantics of both the legacy `unsupported_features` lists and
-    /// a new `overrides.*.unsupported` entry.
+    /// the semantics of an `overrides.*.unsupported` entry.
     RouteAway,
     /// Force the capability supported for the target, overriding a
     /// learned or catalog negative back to available.
@@ -66,9 +58,11 @@ pub enum OverrideVerdict {
 /// always has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverrideProvenance {
-    /// Legacy `[providers.X].unsupported_features`.
+    /// Retired provider-scoped static list. No config source produces it
+    /// any more.
     ProviderStatic,
-    /// Legacy `[models.X].unsupported_features`.
+    /// Retired model-scoped static list. No config source produces it any
+    /// more.
     ModelStatic,
     /// New `[capability.overrides.<spec>]`.
     Override,
@@ -240,37 +234,10 @@ fn merge_cell(existing: Cell, incoming: Cell) -> Cell {
     }
 }
 
-/// Collect every override contribution from all four sources with keys
-/// normalized to each target's provider kind.
+/// Collect every override contribution from `[capability.overrides]` with
+/// keys normalized to each target's provider kind.
 fn collect_contributions(config: &Config) -> Vec<Contribution> {
     let mut out = Vec::new();
-
-    for (provider_name, entry) in &config.providers {
-        let kind = entry.kind_str();
-        for raw in &entry.runtime().unsupported_features {
-            out.push(Contribution {
-                target_spec: provider_name.clone(),
-                capability_key: normalize_capability_key(raw, kind),
-                verdict: OverrideVerdict::RouteAway,
-                provenance: OverrideProvenance::ProviderStatic,
-                source: format!("[providers.{provider_name}].unsupported_features"),
-            });
-        }
-    }
-
-    for (nickname, model) in &config.models {
-        let kind = provider_kind_for(config, &model.provider);
-        let target_spec = format!("{}:{}", model.provider, nickname);
-        for raw in &model.unsupported_features {
-            out.push(Contribution {
-                target_spec: target_spec.clone(),
-                capability_key: normalize_capability_key(raw, kind),
-                verdict: OverrideVerdict::RouteAway,
-                provenance: OverrideProvenance::ModelStatic,
-                source: format!("[models.{nickname}].unsupported_features"),
-            });
-        }
-    }
 
     for (spec, override_entry) in &config.capability.overrides {
         let kind = provider_kind_for(config, provider_of_spec(spec));
@@ -382,10 +349,9 @@ fn override_key_reachable(stored_key: &str, provider_kind: &str) -> bool {
 }
 
 /// Reject a config whose override sources place contradictory verdicts on
-/// one `(target, capability)` cell -- a legacy `unsupported_features`
-/// entry (or a new `unsupported` entry) marking a capability route-away
-/// while a `force_supported` entry marks the SAME capability supported
-/// for the SAME target. Semantically identical duplicates (both
+/// one `(target, capability)` cell -- an `unsupported` entry marking a
+/// capability route-away while a `force_supported` entry marks the SAME
+/// capability supported for the SAME target. Semantically identical duplicates (both
 /// route-away) pass. Wired into [`collect_config_validation`] so every
 /// config surface rejects the conflict uniformly.
 ///
@@ -452,10 +418,12 @@ mod tests {
         api_key_ref = \"literal:k\"\n";
 
     #[test]
-    fn provider_legacy_list_maps_to_route_away_provider_static() {
+    fn provider_scoped_unsupported_snapshots_as_route_away_override() {
         // Arrange
         let config = config(&format!(
-            "{OPENAI_P}unsupported_features = [\"web_search\"]\n"
+            "{OPENAI_P}\
+             [capability.overrides.p]\n\
+             unsupported = [\"web_search\"]\n"
         ));
 
         // Act
@@ -467,32 +435,31 @@ mod tests {
         assert_eq!(rows[0].target_spec, "p");
         assert_eq!(rows[0].capability_key, "web_search");
         assert_eq!(rows[0].verdict, OverrideVerdict::RouteAway);
-        assert_eq!(rows[0].provenance, OverrideProvenance::ProviderStatic);
+        assert_eq!(rows[0].provenance, OverrideProvenance::Override);
     }
 
     #[test]
-    fn model_legacy_list_maps_to_route_away_model_static() {
+    fn model_scoped_unsupported_snapshots_under_provider_nickname_spec() {
         // Arrange
         let config = config(&format!(
             "{OPENAI_P}\
              [models.nick]\n\
              provider = \"p\"\n\
              upstream = \"gpt-x\"\n\
-             unsupported_features = [\"computer_use\"]\n"
+             [capability.overrides.\"p:nick\"]\n\
+             unsupported = [\"computer_use\"]\n"
         ));
 
         // Act
         let registry = OverrideRegistry::build(&config);
 
         // Assert
-        let row = registry
-            .snapshot()
-            .into_iter()
-            .find(|r| r.provenance == OverrideProvenance::ModelStatic)
-            .expect("model-static row present");
-        assert_eq!(row.target_spec, "p:nick");
-        assert_eq!(row.capability_key, "computer_use");
-        assert_eq!(row.verdict, OverrideVerdict::RouteAway);
+        let rows = registry.snapshot();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target_spec, "p:nick");
+        assert_eq!(rows[0].capability_key, "computer_use");
+        assert_eq!(rows[0].verdict, OverrideVerdict::RouteAway);
+        assert_eq!(rows[0].provenance, OverrideProvenance::Override);
     }
 
     #[test]
@@ -558,14 +525,14 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_route_away_prefers_static_provenance_and_does_not_conflict() {
-        // Arrange -- legacy provider list AND a new unsupported entry name
-        // the same capability. Same verdict: they collapse, keeping the
-        // static label, and validation passes.
+    fn duplicate_route_away_collapses_to_one_cell_and_does_not_conflict() {
+        // Arrange -- one unsupported list names the same capability twice.
+        // Same verdict: the entries collapse into one cell and validation
+        // passes.
         let config = config(&format!(
-            "{OPENAI_P}unsupported_features = [\"web_search\"]\n\
+            "{OPENAI_P}\
              [capability.overrides.p]\n\
-             unsupported = [\"web_search\"]\n"
+             unsupported = [\"web_search\", \"web_search\"]\n"
         ));
 
         // Act
@@ -573,22 +540,21 @@ mod tests {
 
         // Assert
         assert!(validate_capability_overrides(&config).is_ok());
+        assert_eq!(registry.len(), 1);
         assert_eq!(
             registry.resolve("p", "any", "web_search", "openai-compat"),
-            Some((
-                OverrideVerdict::RouteAway,
-                OverrideProvenance::ProviderStatic
-            ))
+            Some((OverrideVerdict::RouteAway, OverrideProvenance::Override))
         );
     }
 
     #[test]
-    fn contradictory_legacy_and_force_supported_fails_validation() {
-        // Arrange -- legacy provider list routes away, new force_supported
-        // marks the same capability supported for the same target.
+    fn contradictory_unsupported_and_force_supported_names_both_sources() {
+        // Arrange -- unsupported routes away while force_supported marks
+        // the same capability supported for the same target.
         let config = config(&format!(
-            "{OPENAI_P}unsupported_features = [\"web_search\"]\n\
+            "{OPENAI_P}\
              [capability.overrides.p]\n\
+             unsupported = [\"web_search\"]\n\
              force_supported = [\"web_search\"]\n"
         ));
 
@@ -599,7 +565,7 @@ mod tests {
         // Assert -- the message names the cell and both sources.
         assert!(err.contains("web_search"), "got: {err}");
         assert!(
-            err.contains("[providers.p].unsupported_features"),
+            err.contains("[capability.overrides.p].unsupported "),
             "got: {err}"
         );
         assert!(

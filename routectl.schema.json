@@ -772,14 +772,6 @@
           "description": "Whether this model supports the Anthropic adaptive thinking shape\n(Opus 4.7+). Projected via apply_layered_overlays into\nRoutectlInternal.supports_adaptive_thinking; the AnthropicApi\negress reads it at request time. `false` (the default) uses the\nstandard fixed-budget shape or no thinking at all.",
           "type": "boolean"
         },
-        "unsupported_features": {
-          "default": [],
-          "description": "Operator-supplied list of feature keys this MODEL does not\nsupport, unioned with the per-provider list (`ProviderEntry::\nunsupported_features`) at filter time. Same key vocabulary and\nconcept as the provider-side field -- a model listed here is\nskipped before dispatch when the request needs any of these\nfeatures -- but keyed at the finer model scope: two nicknames on\none provider (e.g. opus-4-8 vs opus-4-6 on Bedrock) filter\nindependently. A feature is unsupported if EITHER the model OR\nthe provider list contains it. Empty (the default) preserves the\npre-existing provider-only behavior. See feature-key derivation\nin `crates/routectl-router/src/feature_keys.rs`.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
         "upstream": {
           "description": "Upstream model id. Forwarded to the provider verbatim. For\nBedrock this becomes the `BedrockConfig.model_id` value (the\nAWS inference profile id, e.g.\n`us.anthropic.claude-haiku-4-5-20251001-v1:0`). For OpenAI-\ncompatible egresses it is the wire `model` field.",
           "type": "string"
@@ -1020,14 +1012,6 @@
                 "null"
               ]
             },
-            "unsupported_features": {
-              "default": [],
-              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
             "user_agent": {
               "default": null,
               "description": "Override the outbound User-Agent.",
@@ -1223,14 +1207,6 @@
                 "null"
               ]
             },
-            "unsupported_features": {
-              "default": [],
-              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
             "user_agent": {
               "default": null,
               "description": "Override the outbound User-Agent. Useful for IAM-gated upstreams.",
@@ -1392,14 +1368,6 @@
                 "null"
               ]
             },
-            "unsupported_features": {
-              "default": [],
-              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
             "user_agent": {
               "default": null,
               "description": "Override the outbound User-Agent. None -> default\n`routectl/<version> codex-cli`.",
@@ -1539,14 +1507,6 @@
                 "integer",
                 "null"
               ]
-            },
-            "unsupported_features": {
-              "default": [],
-              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "user_agent": {
               "default": null,
@@ -1688,14 +1648,6 @@
                 "integer",
                 "null"
               ]
-            },
-            "unsupported_features": {
-              "default": [],
-              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "user_agent": {
               "default": null,

@@ -2081,7 +2081,6 @@ pub routectl_router::config::ModelEntry::reported_model: core::option::Option<al
 pub routectl_router::config::ModelEntry::selectable: bool
 pub routectl_router::config::ModelEntry::stream_first_byte_timeout_ms: core::option::Option<u64>
 pub routectl_router::config::ModelEntry::supports_adaptive_thinking: bool
-pub routectl_router::config::ModelEntry::unsupported_features: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::config::ModelEntry::upstream: alloc::string::String
 pub routectl_router::config::ModelEntry::visible_routectl_provider: bool
 impl routectl_router::ModelEntry
@@ -2097,7 +2096,6 @@ pub fn routectl_router::ModelEntry::with_reported_model(self, impl core::convert
 pub const fn routectl_router::ModelEntry::with_selectable(self, bool) -> Self
 pub fn routectl_router::ModelEntry::with_stream_first_byte_timeout_ms(self, u64) -> Self
 pub const fn routectl_router::ModelEntry::with_supports_adaptive_thinking(self, bool) -> Self
-pub fn routectl_router::ModelEntry::with_unsupported_features(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub const fn routectl_router::ModelEntry::with_visible_routectl_provider(self, bool) -> Self
 impl core::clone::Clone for routectl_router::ModelEntry
 pub fn routectl_router::ModelEntry::clone(&self) -> routectl_router::ModelEntry
@@ -2366,7 +2364,6 @@ pub routectl_router::config::ProviderRuntimePolicy::class_overrides: alloc::coll
 pub routectl_router::config::ProviderRuntimePolicy::request_timeout_ms: core::option::Option<u64>
 pub routectl_router::config::ProviderRuntimePolicy::rpm_limit: core::option::Option<u32>
 pub routectl_router::config::ProviderRuntimePolicy::stream_first_byte_timeout_ms: core::option::Option<u64>
-pub routectl_router::config::ProviderRuntimePolicy::unsupported_features: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::ProviderRuntimePolicy
 pub fn routectl_router::ProviderRuntimePolicy::clone(&self) -> routectl_router::ProviderRuntimePolicy
 impl core::default::Default for routectl_router::ProviderRuntimePolicy
@@ -13323,7 +13320,6 @@ pub routectl_router::ModelEntry::reported_model: core::option::Option<alloc::str
 pub routectl_router::ModelEntry::selectable: bool
 pub routectl_router::ModelEntry::stream_first_byte_timeout_ms: core::option::Option<u64>
 pub routectl_router::ModelEntry::supports_adaptive_thinking: bool
-pub routectl_router::ModelEntry::unsupported_features: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::ModelEntry::upstream: alloc::string::String
 pub routectl_router::ModelEntry::visible_routectl_provider: bool
 impl routectl_router::ModelEntry
@@ -13339,7 +13335,6 @@ pub fn routectl_router::ModelEntry::with_reported_model(self, impl core::convert
 pub const fn routectl_router::ModelEntry::with_selectable(self, bool) -> Self
 pub fn routectl_router::ModelEntry::with_stream_first_byte_timeout_ms(self, u64) -> Self
 pub const fn routectl_router::ModelEntry::with_supports_adaptive_thinking(self, bool) -> Self
-pub fn routectl_router::ModelEntry::with_unsupported_features(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub const fn routectl_router::ModelEntry::with_visible_routectl_provider(self, bool) -> Self
 impl core::clone::Clone for routectl_router::ModelEntry
 pub fn routectl_router::ModelEntry::clone(&self) -> routectl_router::ModelEntry
@@ -14393,7 +14388,6 @@ pub routectl_router::ProviderRuntimePolicy::class_overrides: alloc::collections:
 pub routectl_router::ProviderRuntimePolicy::request_timeout_ms: core::option::Option<u64>
 pub routectl_router::ProviderRuntimePolicy::rpm_limit: core::option::Option<u32>
 pub routectl_router::ProviderRuntimePolicy::stream_first_byte_timeout_ms: core::option::Option<u64>
-pub routectl_router::ProviderRuntimePolicy::unsupported_features: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::ProviderRuntimePolicy
 pub fn routectl_router::ProviderRuntimePolicy::clone(&self) -> routectl_router::ProviderRuntimePolicy
 impl core::default::Default for routectl_router::ProviderRuntimePolicy

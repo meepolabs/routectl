@@ -57,8 +57,8 @@ impl Provider for StubProvider {
 const KIND: &str = "openai-compat";
 
 /// A router with the capability subsystem enabled and one `openai-compat`
-/// provider `p`. `extra` appends further TOML tables (override cells, static
-/// per-model lists) after the `[capability]` table.
+/// provider `p`. `extra` appends further TOML tables (models, override
+/// cells) after the `[capability]` table.
 fn base_router(extra: &str) -> Router {
     let body = format!(
         "version = 3\n\
@@ -459,13 +459,14 @@ fn all_lanes_demoted_leaves_a_non_empty_chain() {
 
 #[test]
 fn one_hard_drop_with_rest_demoted_leaves_a_non_empty_chain() {
-    // Arrange -- one lane is hard-dropped by a per-model static list; the
-    // other is soft-demoted by a `Some(false)` prior.
+    // Arrange -- one lane is hard-dropped by a model-scoped `unsupported`
+    // override; the other is soft-demoted by a `Some(false)` prior.
     let router = base_router(
         "[models.dropme]\n\
          provider = \"p\"\n\
          upstream = \"gpt-x\"\n\
-         unsupported_features = [\"web_search\"]\n",
+         [capability.overrides.\"p:dropme\"]\n\
+         unsupported = [\"web_search\"]\n",
     );
     let hard = target_with_priors(&router, "dropme", &[]);
     let soft = target_with_priors(&router, "keep", &[("web_search", false)]);
@@ -480,7 +481,7 @@ fn one_hard_drop_with_rest_demoted_leaves_a_non_empty_chain() {
         )
         .expect("the demoted survivor keeps the chain non-empty");
 
-    // Assert -- the static hard-drop is removed; the prior-demoted lane
+    // Assert -- the override hard-drop is removed; the prior-demoted lane
     // survives in the tail.
     let order: Vec<&str> = out.iter().map(|t| t.state_key.as_str()).collect();
     assert_eq!(order, vec!["keep"]);

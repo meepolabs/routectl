@@ -430,8 +430,7 @@ pub struct Router {
     /// volume.
     probe_payload_refused_warned: Mutex<bool>,
     /// Operator capability-override read-model, flattened from config at
-    /// construction. Pure projection of `config.capability.overrides` plus
-    /// the legacy provider / model `unsupported_features` lists -- no
+    /// construction. Pure projection of `config.capability.overrides` -- no
     /// carry-over on reload, since a reload builds a fresh Router from the
     /// new config and this rebuilds deterministically from it.
     override_registry: crate::override_registry::OverrideRegistry,
@@ -2154,9 +2153,8 @@ impl Router {
     }
 
     /// The operator capability-override read-model built from this
-    /// Router's config. Provenance-preserving projection of the config
-    /// overrides plus the legacy provider / model `unsupported_features`
-    /// lists.
+    /// Router's config. Provenance-preserving projection of
+    /// `[capability.overrides]`.
     pub const fn override_registry(&self) -> &crate::override_registry::OverrideRegistry {
         &self.override_registry
     }

@@ -20,18 +20,18 @@ use super::{DispatchTarget, ProbeAdmission, Router, operator_betas};
 type FeatureKey = String;
 
 /// What flagged a feature as unsupported for a target. The feature
-/// filter's decision site returns this so the skip log can distinguish a
-/// provider-scoped restriction from a model-scoped one, and so the filter
-/// loop can tell a hard static drop from a soft learned de-prioritization.
+/// filter's decision site returns this so the skip log can name the
+/// source, and so the filter loop can tell a hard override drop from a
+/// soft learned or prior de-prioritization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FilterSource {
-    /// Matched a route-away override whose provenance is the legacy
-    /// per-provider `unsupported_features` list.
+    /// Matched a route-away override with the retired provider-static
+    /// provenance. No config source produces it any more.
     ProviderStatic,
-    /// Matched a route-away override whose provenance is the legacy
-    /// per-model `unsupported_features` list.
+    /// Matched a route-away override with the retired model-static
+    /// provenance. No config source produces it any more.
     ModelStatic,
-    /// Matched a route-away override whose provenance is a new
+    /// Matched a route-away override whose provenance is a
     /// `[capability.overrides.<spec>].unsupported` entry.
     Override,
     /// Matched a non-expired acting negative in the learned-capability
@@ -91,11 +91,11 @@ pub(super) enum StripDecision {
 }
 
 impl Router {
-    /// Filter the resolved chain by request features. Per-provider
-    /// `unsupported_features` lists are consulted via the provider
-    /// table; the per-model list is carried on the target. An entry
-    /// whose union of those two lists intersects the request feature
-    /// set is dropped with a DEBUG log (tagging the matching source).
+    /// Filter the resolved chain by request features. An entry whose
+    /// provider- or model-scoped `[capability.overrides]` `unsupported`
+    /// list intersects the request feature set is dropped with a DEBUG
+    /// log (tagging the matching source); learned and catalog-prior
+    /// negatives demote the entry to a tail instead.
     ///
     /// No-ops when `features` is empty (no built-in tool in the
     /// request -> nothing to filter against). Returns
@@ -114,7 +114,7 @@ impl Router {
         if features.is_empty() || chain.is_empty() {
             return Ok(chain);
         }
-        // SOFT-DROP: a static (provider / model) match hard-drops the
+        // SOFT-DROP: an override `unsupported` match hard-drops the
         // target; a learned or catalog-prior match moves it to a
         // de-prioritized tail. The result is
         // [supported...] ++ [prior tail] ++ [learned tail]: a catalog
@@ -170,19 +170,19 @@ impl Router {
                         ),
                         capability_key = %feature,
                         source = %source.as_str(),
-                        "target skipped: capability in unsupported_features list",
+                        "target skipped: capability in an unsupported override",
                     );
                 }
             }
         }
-        // NotImplemented fires ONLY when the static lists hard-dropped
-        // every entry (nothing survived, not even the de-prioritized tail).
+        // NotImplemented fires ONLY when override `unsupported` entries
+        // hard-dropped every entry (nothing survived, not even the de-prioritized tail).
         if supported.is_empty() && prior_tail.is_empty() && learned_tail.is_empty() {
             let feature_list = features.join(", ");
             tracing::warn!(
                 alias = %sanitize_for_log(alias),
                 features = %sanitize_for_log(&feature_list),
-                "alias chain filtered to empty by unsupported_features; \
+                "alias chain filtered to empty by unsupported overrides; \
                  no provider in chain supports the requested features",
             );
             return Err(Error::NotImplemented(
@@ -231,12 +231,10 @@ impl Router {
     /// supports every requested feature.
     ///
     /// The union is over the operator-override registry plus the learned
-    /// registry. The override consult flattens the legacy per-PROVIDER and
-    /// per-MODEL `unsupported_features` lists and the
-    /// `[capability.overrides]` table into one provenance-preserving
-    /// read-model; a `RouteAway` verdict of ANY provenance is consulted
-    /// FIRST so it hard-drops (and reports its preserved source label --
-    /// `provider`, `model`, or `override`) ahead of any learned signal.
+    /// registry. The override consult reads the `[capability.overrides]`
+    /// table through one provenance-preserving read-model; a `RouteAway`
+    /// verdict is consulted FIRST so it hard-drops (reporting its source
+    /// label) ahead of any learned signal.
     /// When the kill switch is on, a non-expired acting learned negative
     /// for this `(learned lane, feature)` is consulted after.
     ///
@@ -287,12 +285,9 @@ impl Router {
         admissions: &mut Vec<ProbeAdmission>,
         strip_keys: &mut Vec<String>,
     ) -> Option<(FeatureKey, FilterSource)> {
-        // Override consult replaces the two raw static-list scans: the
-        // registry (built from the legacy provider / model
-        // `unsupported_features` lists plus `[capability.overrides]`)
-        // hard-drops on a `RouteAway` of ANY provenance, reporting the
-        // preserved source label so an existing config's behavior and
-        // labels stay byte-identical.
+        // Override consult: the registry (built from
+        // `[capability.overrides]`) hard-drops on a `RouteAway`, reporting
+        // its provenance as the source label.
         let nickname = target.nickname.as_deref().unwrap_or("");
         for feature in features {
             if let Some((crate::override_registry::OverrideVerdict::RouteAway, provenance)) =

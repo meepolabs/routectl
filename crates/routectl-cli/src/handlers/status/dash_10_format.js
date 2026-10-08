@@ -117,8 +117,8 @@
       broken: { label: 'broken', title: 'broken - capability confirmed unsupported for this target' }
     },
     prov: {
-      provider: { label: 'provider', title: 'provider - legacy per-provider unsupported_features' },
-      model: { label: 'model', title: 'model - legacy per-model unsupported_features' },
+      provider: { label: 'provider', title: 'provider - retired per-provider capability list' },
+      model: { label: 'model', title: 'model - retired per-model capability list' },
       override: { label: 'override', title: 'override - a [capability.overrides.<spec>] entry' },
       learned: { label: 'learned', title: 'learned - a non-expired acting negative in the learned registry' }
     },

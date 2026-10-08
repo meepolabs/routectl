@@ -1151,42 +1151,47 @@ fn router_new_builds_learned_registry_reflecting_config_knobs() {
 }
 
 #[test]
-fn router_new_builds_override_registry_with_static_provenance_from_legacy_config() {
-    // Arrange: a legacy-only config (provider + model
-    // `unsupported_features`, no `[capability.overrides]`). The
-    // override read-model must be built from it at construction and
-    // carry the legacy static provenance so labels stay unchanged.
+fn router_new_builds_override_registry_from_capability_overrides() {
+    // Arrange: provider- and model-scoped `[capability.overrides]`
+    // entries. The override read-model must be built from them at
+    // construction, each carrying `Override` provenance.
     let toml_text = "\
             [providers.p]\n\
             kind = \"openai-compat\"\n\
             base_url = \"https://x\"\n\
             api_key_ref = \"literal:k\"\n\
-            unsupported_features = [\"web_search\"]\n\
             [models.nick]\n\
             provider = \"p\"\n\
             upstream = \"gpt-x\"\n\
-            unsupported_features = [\"computer_use\"]\n";
+            [capability.overrides.p]\n\
+            unsupported = [\"web_search\"]\n\
+            [capability.overrides.\"p:nick\"]\n\
+            unsupported = [\"computer_use\"]\n";
     let config: Config = toml::from_str(toml_text).expect("config parses");
 
     // Act
     let router = Router::new(Arc::new(config));
 
-    // Assert: the accessor exposes a registry whose legacy entries
-    // carry ProviderStatic / ModelStatic provenance.
+    // Assert: the accessor exposes a registry whose entries resolve at
+    // the right scope with `Override` provenance.
     let registry = router.override_registry();
     assert_eq!(
         registry.resolve("p", "nick", "web_search", "openai-compat"),
         Some((
             crate::override_registry::OverrideVerdict::RouteAway,
-            crate::override_registry::OverrideProvenance::ProviderStatic
+            crate::override_registry::OverrideProvenance::Override
         )),
     );
     assert_eq!(
         registry.resolve("p", "nick", "computer_use", "openai-compat"),
         Some((
             crate::override_registry::OverrideVerdict::RouteAway,
-            crate::override_registry::OverrideProvenance::ModelStatic
+            crate::override_registry::OverrideProvenance::Override
         )),
+    );
+    assert_eq!(
+        registry.resolve("p", "other", "computer_use", "openai-compat"),
+        None,
     );
 }
 

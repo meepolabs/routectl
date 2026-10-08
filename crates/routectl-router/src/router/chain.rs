@@ -437,7 +437,7 @@ impl Router {
     }
 
     /// Resolve the dispatch chain for a request and pre-filter against
-    /// per-provider `unsupported_features` lists. Wraps `dispatch_chain`
+    /// the operator's `[capability.overrides]` and the learned registry. Wraps `dispatch_chain`
     /// so the three dispatch entry points (`complete_with_options`,
     /// `stream_with_options`, `count_tokens`) share one filter pass.
     ///

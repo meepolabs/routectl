@@ -1001,20 +1001,6 @@ pub struct ModelEntry {
     /// `DispatchMeta.served_provider` / `served_upstream`.
     #[serde(default = "default_true")]
     pub visible_routectl_provider: bool,
-
-    /// Operator-supplied list of feature keys this MODEL does not
-    /// support, unioned with the per-provider list (`ProviderEntry::
-    /// unsupported_features`) at filter time. Same key vocabulary and
-    /// concept as the provider-side field -- a model listed here is
-    /// skipped before dispatch when the request needs any of these
-    /// features -- but keyed at the finer model scope: two nicknames on
-    /// one provider (e.g. opus-4-8 vs opus-4-6 on Bedrock) filter
-    /// independently. A feature is unsupported if EITHER the model OR
-    /// the provider list contains it. Empty (the default) preserves the
-    /// pre-existing provider-only behavior. See feature-key derivation
-    /// in `crates/routectl-router/src/feature_keys.rs`.
-    #[serde(default)]
-    pub unsupported_features: Vec<String>,
 }
 
 impl ModelEntry {
@@ -1037,7 +1023,6 @@ impl ModelEntry {
             max_output_tokens: None,
             reported_model: None,
             visible_routectl_provider: true,
-            unsupported_features: Vec::new(),
         }
     }
     /// Set whether this model supports the Anthropic adaptive thinking
@@ -1135,14 +1120,6 @@ impl ModelEntry {
     /// suppress the served-provider name on the response.
     pub const fn with_visible_routectl_provider(mut self, b: bool) -> Self {
         self.visible_routectl_provider = b;
-        self
-    }
-
-    /// Set the per-model `unsupported_features` list. Unioned with the
-    /// provider-side list at filter time; an empty vec (the default)
-    /// preserves provider-only behavior.
-    pub fn with_unsupported_features(mut self, features: Vec<String>) -> Self {
-        self.unsupported_features = features;
         self
     }
 }
@@ -2967,20 +2944,6 @@ pub struct ProviderRuntimePolicy {
     /// `request_timeout_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
-    /// Operator-supplied list of feature keys this provider does not
-    /// support. Router pre-filters the alias chain before dispatch -- a
-    /// provider listed here is skipped entirely (not tried-and-fallback)
-    /// when the request needs any of these features. Tool-type keys are
-    /// derived from built-in tool `type` strings (e.g. `web_search`,
-    /// `computer_use`). The `structured_output` key is request-derived
-    /// (NOT a tool type): it fires when the request carries
-    /// `output_config.format` or any strict tool, both of which need
-    /// constrained decoding some upstreams (e.g. a Bedrock Invoke leg)
-    /// cannot enforce. See feature-key derivation in
-    /// `crates/routectl-router/src/feature_keys.rs`.
-    #[serde(default)]
-    pub unsupported_features: Vec<String>,
-
     /// Operator remap of a raw upstream status code to a config-facing
     /// failure class, keyed by the numeric status. Empty (the default)
     /// leaves the built-in status-to-class classification untouched. The

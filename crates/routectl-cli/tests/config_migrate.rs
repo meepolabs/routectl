@@ -160,6 +160,55 @@ async fn serve_boots_on_a_migrated_v1_config() {
     assert_eq!(resp.status(), 200);
 }
 
+/// A v1 file that still carries the capability lists and an empty Bedrock
+/// beta allowlist, both of which the current schema no longer accepts.
+const V1_WITH_RETIRED_CAPABILITY_KEYS: &str = "\
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+[bedrock]
+allowed_betas = []
+
+[cache_pricing]
+\"openai-compat:grok-*\" = { wm = 1.5, override_acknowledges_cost_risk = true }
+
+[providers.fast]
+kind = \"openai-compat\"
+base_url = \"http://127.0.0.1:1\"
+api_key_ref = \"__API_KEY_REF__\"
+unsupported_features = [\"web_search\"]
+
+[models.gpt]
+provider = \"fast\"
+upstream = \"gpt-4o\"
+unsupported_features = [\"computer_use\"]
+
+[aliases]
+default = \"gpt\"
+";
+
+#[tokio::test]
+async fn serve_boots_on_a_migrated_v1_config_with_retired_capability_keys() {
+    let (dir, config) = migrate_temp(V1_WITH_RETIRED_CAPABILITY_KEYS, 1).await;
+    let written = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(!written.contains("unsupported_features"), "{written}");
+    assert!(!written.contains("bedrock"), "{written}");
+    assert_eq!(
+        config.capability.overrides["fast"].unsupported,
+        ["web_search"]
+    );
+    assert_eq!(
+        config.capability.overrides["fast:gpt"].unsupported,
+        ["computer_use"]
+    );
+
+    let base = boot_and_await_health(Arc::new(config)).await;
+
+    let resp = reqwest::get(format!("{base}/health")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
 /// The last config version whose provider entries may carry
 /// `seat_selection`: the knob moves onto the pool block on the way to 4.
 const SEAT_SELECTION_VERSION: u32 = 3;

@@ -1545,8 +1545,8 @@ mod collect_config_validation_tests {
         );
     }
 
-    /// A capability override cell carrying contradictory verdicts (a
-    /// provider legacy list routes a capability away while a
+    /// A capability override cell carrying contradictory verdicts (an
+    /// `unsupported` entry routes a capability away while a
     /// `force_supported` entry marks it supported) -- trips
     /// `validate_capability_overrides`.
     fn contradictory_capability_override_config() -> Config {
@@ -1555,8 +1555,8 @@ mod collect_config_validation_tests {
              kind = \"openai-compat\"\n\
              base_url = \"https://x\"\n\
              api_key_ref = \"literal:k\"\n\
-             unsupported_features = [\"web_search\"]\n\
              [capability.overrides.p]\n\
+             unsupported = [\"web_search\"]\n\
              force_supported = [\"web_search\"]\n",
         )
         .expect("must parse")

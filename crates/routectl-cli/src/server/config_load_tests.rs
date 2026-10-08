@@ -635,9 +635,9 @@ enum Splice {
 }
 
 /// A loadable config with `extra` spliced into the provider entry, the
-/// model entry, or a trailing top-level table. Every retired key still
-/// deserializes, so with the right version only the retired-key preflight
-/// can refuse it.
+/// model entry, or a trailing top-level table. The retired-key preflight
+/// runs before deserialization, so with the right version it is what
+/// refuses a retired key, ahead of any "unknown field" diagnostic.
 fn config_with(version: u32, at: Splice, extra: &str) -> String {
     let (provider, model, tail) = match at {
         Splice::Provider => (extra, "", ""),

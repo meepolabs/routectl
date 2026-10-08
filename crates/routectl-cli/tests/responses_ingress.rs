@@ -16,7 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use routectl_router::{
-    AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerAuth, ServerConfig,
+    AliasValue, Config, ModelEntry, OverrideEntry, ProviderEntry, RetryPolicy, ServerAuth,
+    ServerConfig,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -305,8 +306,7 @@ fn capability_chain_config(no_search_base: &str, fallback_base: &str) -> Arc<Con
     let mut models = BTreeMap::new();
     models.insert(
         "no-search-model".to_string(),
-        ModelEntry::new("no-search", "mock-model")
-            .with_unsupported_features(vec!["web_search".to_string()]),
+        ModelEntry::new("no-search", "mock-model"),
     );
     models.insert(
         "fallback-model".to_string(),
@@ -319,7 +319,7 @@ fn capability_chain_config(no_search_base: &str, fallback_base: &str) -> Arc<Con
         AliasValue::Chain(vec!["no-search-model".into(), "fallback-model".into()]),
     );
 
-    Arc::new(Config {
+    let mut config = Config {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
@@ -332,7 +332,15 @@ fn capability_chain_config(no_search_base: &str, fallback_base: &str) -> Arc<Con
         retry: RetryPolicy::default(),
         models,
         ..Default::default()
-    })
+    };
+    config.capability.overrides.insert(
+        "no-search:no-search-model".to_string(),
+        OverrideEntry {
+            unsupported: vec!["web_search".to_string()],
+            ..OverrideEntry::default()
+        },
+    );
+    Arc::new(config)
 }
 
 async fn post_responses(base: &str, input: Value) -> reqwest::Response {

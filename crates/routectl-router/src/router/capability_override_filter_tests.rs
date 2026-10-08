@@ -1,6 +1,6 @@
-//! Filter-seam tests for the operator override consult: legacy static
-//! lists keep their provenance labels, new override entries hard-drop
-//! or mask, and a `force_supported` mask precedes probe admission.
+//! Filter-seam tests for the operator override consult: override entries
+//! hard-drop or mask at provider and model scope, and a `force_supported`
+//! mask precedes probe admission.
 use super::*;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
@@ -62,44 +62,15 @@ const OVERRIDE_PROVIDER_P: &str = "[providers.p]\n\
         api_key_ref = \"literal:k\"\n";
 
 #[test]
-fn override_consult_legacy_provider_list_hard_drops_with_provider_label() {
-    // Arrange -- a legacy per-provider list. The registry preserves its
-    // ProviderStatic provenance so the consult reports the same
-    // `provider` source label the raw scan always did.
-    let router = override_router_from_toml(&format!(
-        "{OVERRIDE_PROVIDER_P}unsupported_features = [\"web_search\"]\n"
-    ));
-    let target = override_test_target("p", "nick");
-
-    // Act
-    let mut admissions = Vec::new();
-    let mut strip_keys = Vec::new();
-    let verdict = router.unsupported_feature_for_target(
-        &target,
-        &["web_search".to_string()],
-        &mut admissions,
-        &mut strip_keys,
-    );
-
-    // Assert
-    assert_eq!(
-        verdict,
-        Some(("web_search".to_string(), FilterSource::ProviderStatic)),
-    );
-    assert_eq!(FilterSource::ProviderStatic.as_str(), "provider");
-    assert!(admissions.is_empty());
-    assert!(strip_keys.is_empty());
-}
-
-#[test]
-fn override_consult_legacy_model_list_hard_drops_with_model_label() {
-    // Arrange -- a legacy per-model list keyed by `provider:nickname`.
+fn override_consult_model_scoped_unsupported_hard_drops_with_override_label() {
+    // Arrange -- a model-scoped override keyed by `provider:nickname`.
     let router = override_router_from_toml(&format!(
         "{OVERRIDE_PROVIDER_P}\
              [models.nick]\n\
              provider = \"p\"\n\
              upstream = \"gpt-x\"\n\
-             unsupported_features = [\"computer_use\"]\n"
+             [capability.overrides.\"p:nick\"]\n\
+             unsupported = [\"computer_use\"]\n"
     ));
     let target = override_test_target("p", "nick");
 
@@ -116,14 +87,17 @@ fn override_consult_legacy_model_list_hard_drops_with_model_label() {
     // Assert
     assert_eq!(
         verdict,
-        Some(("computer_use".to_string(), FilterSource::ModelStatic)),
+        Some(("computer_use".to_string(), FilterSource::Override)),
     );
-    assert_eq!(FilterSource::ModelStatic.as_str(), "model");
+    assert_eq!(FilterSource::Override.as_str(), "override");
+    assert!(admissions.is_empty());
+    assert!(strip_keys.is_empty());
 }
 
 #[test]
-fn override_unsupported_hard_drops_and_empties_chain_like_legacy_list() {
-    // Arrange -- a NEW `[capability.overrides]` unsupported entry.
+fn override_unsupported_hard_drops_and_empties_chain() {
+    // Arrange -- a provider-scoped `[capability.overrides]` unsupported
+    // entry.
     let router = override_router_from_toml(&format!(
         "{OVERRIDE_PROVIDER_P}\
              [capability.overrides.p]\n\
@@ -132,7 +106,7 @@ fn override_unsupported_hard_drops_and_empties_chain_like_legacy_list() {
     let target = override_test_target("p", "nick");
 
     // Act / Assert -- the consult reports the `override` label and
-    // hard-drops just as a static list does.
+    // hard-drops without claiming a probe slot or a strip key.
     let mut admissions = Vec::new();
     let mut strip_keys = Vec::new();
     assert_eq!(
@@ -145,10 +119,11 @@ fn override_unsupported_hard_drops_and_empties_chain_like_legacy_list() {
         Some(("web_search".to_string(), FilterSource::Override)),
     );
     assert_eq!(FilterSource::Override.as_str(), "override");
+    assert!(admissions.is_empty());
+    assert!(strip_keys.is_empty());
 
     // The sole target hard-drops, so the chain filters to empty and
-    // surfaces the learned-tail NotImplemented (501) -- byte-identical to a legacy
-    // static list emptying the chain.
+    // surfaces NotImplemented (501).
     let mut chain_admissions = Vec::new();
     match router.filter_chain_by_features(
         vec![target],
@@ -365,81 +340,4 @@ fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
         None,
     );
     assert_eq!(advisor_strip, vec!["advisor".to_string()]);
-}
-
-/// Feature acceptance -- legacy-config filter-decision equivalence.
-///
-/// One config carrying ALL three legacy capability lists (a per-provider
-/// `unsupported_features`, a per-model `unsupported_features`, and the
-/// `[bedrock] allowed_betas` key, which nothing reads any more but stays
-/// present so the whole legacy surface coexists)
-/// must route away with the SAME `FilterSource` labels the earlier raw
-/// static-list scan produced: a provider-scoped drop reports
-/// `ProviderStatic` (`"provider"`) and a model-scoped drop reports
-/// `ModelStatic` (`"model"`). Absolute expected labels, not a diff
-/// against a rebuilt old binary.
-#[test]
-fn legacy_config_lists_route_away_with_pre_f3_source_labels() {
-    // Arrange -- every legacy list in one config.
-    let router = override_router_from_toml(
-        "[providers.p]\n\
-             kind = \"openai-compat\"\n\
-             base_url = \"https://x\"\n\
-             api_key_ref = \"literal:k\"\n\
-             unsupported_features = [\"web_search\"]\n\
-             [models.nick]\n\
-             provider = \"p\"\n\
-             upstream = \"gpt-x\"\n\
-             unsupported_features = [\"computer_use\"]\n\
-             [bedrock]\n\
-             allowed_betas = [\"some-beta\"]\n",
-    );
-    let target = override_test_target("p", "nick");
-
-    // Act / Assert -- the provider-scoped list keeps the `provider` label.
-    let mut admissions = Vec::new();
-    let mut strip_keys = Vec::new();
-    let provider_verdict = router.unsupported_feature_for_target(
-        &target,
-        &["web_search".to_string()],
-        &mut admissions,
-        &mut strip_keys,
-    );
-    assert_eq!(
-        provider_verdict,
-        Some(("web_search".to_string(), FilterSource::ProviderStatic)),
-    );
-    assert_eq!(FilterSource::ProviderStatic.as_str(), "provider");
-
-    // The model-scoped list keeps the `model` label.
-    let mut model_admissions = Vec::new();
-    let mut model_strip = Vec::new();
-    let model_verdict = router.unsupported_feature_for_target(
-        &target,
-        &["computer_use".to_string()],
-        &mut model_admissions,
-        &mut model_strip,
-    );
-    assert_eq!(
-        model_verdict,
-        Some(("computer_use".to_string(), FilterSource::ModelStatic)),
-    );
-    assert_eq!(FilterSource::ModelStatic.as_str(), "model");
-
-    // A request touching no listed feature passes through: no route-away,
-    // no probe admission, no strip -- byte-identical to the legacy
-    // no-match path.
-    let mut clean_admissions = Vec::new();
-    let mut clean_strip = Vec::new();
-    assert_eq!(
-        router.unsupported_feature_for_target(
-            &target,
-            &["structured_output".to_string()],
-            &mut clean_admissions,
-            &mut clean_strip,
-        ),
-        None,
-    );
-    assert!(clean_admissions.is_empty());
-    assert!(clean_strip.is_empty());
 }

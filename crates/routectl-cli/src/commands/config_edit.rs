@@ -447,8 +447,8 @@ default = \"gpt\"
     }
 
     /// A current-version file still carrying a retired key is refused with
-    /// that key's path named and left byte-identical, even though the key
-    /// itself still deserializes. The control edit on the same file without
+    /// that key's path named and left byte-identical, ahead of any "unknown
+    /// field" diagnostic. The control edit on the same file without
     /// the key goes through, so the refusal is the retired key's doing.
     #[test]
     fn retired_key_is_refused_by_path_and_leaves_file_unchanged() {

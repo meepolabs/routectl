@@ -4,8 +4,8 @@
 //! the request carries is learned on the first miss per lane and the next
 //! request skips that lane; a rejection that names nothing the request
 //! carries is never learned and the lane keeps being dialed. A declared
-//! `unsupported_features` entry still skips the Bedrock lanes before any
-//! dispatch. The learned negatives survive a restart through their persisted
+//! `[capability.overrides]` `unsupported` entry still skips the Bedrock lanes
+//! before any dispatch. The learned negatives survive a restart through their persisted
 //! rows, are learned on the stream arm before the first chunk, and are never
 //! learned from an error that follows streamed content.
 
@@ -430,7 +430,10 @@ async fn declared_unsupported_feature_skips_bedrock_lanes_before_dispatch() {
         .next()
         .expect("first replay row");
     let lanes = Lanes::for_row(&fx, &row);
-    let router = three_lane_router("unsupported_features = [\"web_search\"]\n", &lanes);
+    let router = three_lane_router(
+        "[capability.overrides.p1]\nunsupported = [\"web_search\"]\n",
+        &lanes,
+    );
 
     // Act
     let outcome = dispatch(&router, &row.request).await;

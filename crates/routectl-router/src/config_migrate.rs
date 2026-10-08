@@ -3097,36 +3097,30 @@ api_key_ref = \"literal:k\"\n";
 
     #[test]
     fn v4_to_v5_preserves_route_away_verdicts_for_every_folded_cell() {
-        use crate::override_registry::{OverrideRegistry, OverrideVerdict};
+        use crate::override_registry::{OverrideProvenance, OverrideRegistry, OverrideVerdict};
 
-        let before: crate::config::Config =
-            toml::from_str(V4_PROVIDER_MODEL).expect("legacy config parses");
-        let before_registry = OverrideRegistry::build(&before);
-
+        // Arrange: the v4 input routes `web_search` away on provider `fast`
+        // and `computer_use` away on its model `gpt`.
         let mut doc = doc_of(V4_PROVIDER_MODEL);
+
+        // Act
         migrate_v4_to_v5(&mut doc).expect("folds");
         let after: crate::config::Config =
             toml::from_str(&doc.to_string()).expect("migrated config parses");
-        let after_registry = OverrideRegistry::build(&after);
+        let registry = OverrideRegistry::build(&after);
 
-        for (provider, nickname, capability) in [
-            ("fast", "gpt", "web_search"),
-            ("fast", "gpt", "computer_use"),
+        // Assert: each legacy list's verdict survives at its own scope.
+        let route_away = Some((OverrideVerdict::RouteAway, OverrideProvenance::Override));
+        for (nickname, capability, expected) in [
+            ("gpt", "web_search", route_away),
+            ("gpt", "computer_use", route_away),
+            ("other", "web_search", route_away),
+            ("other", "computer_use", None),
         ] {
-            let before_verdict = before_registry
-                .resolve(provider, nickname, capability, "openai-compat")
-                .map(|(v, _)| v);
-            let after_verdict = after_registry
-                .resolve(provider, nickname, capability, "openai-compat")
-                .map(|(v, _)| v);
             assert_eq!(
-                before_verdict,
-                Some(OverrideVerdict::RouteAway),
-                "legacy {provider}:{nickname} routes {capability} away"
-            );
-            assert_eq!(
-                after_verdict, before_verdict,
-                "migration must preserve the {provider}:{nickname} {capability} verdict"
+                registry.resolve("fast", nickname, capability, "openai-compat"),
+                expected,
+                "fast:{nickname} {capability}"
             );
         }
     }

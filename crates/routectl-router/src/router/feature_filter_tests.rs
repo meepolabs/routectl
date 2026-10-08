@@ -1,12 +1,12 @@
-//! Tests for the v0.6.0 per-provider `unsupported_features`
-//! pre-filter. Confirms that providers listing a request feature
-//! get skipped BEFORE dispatch (no upstream call, no breaker
+//! Tests for the capability pre-filter driven by
+//! `[capability.overrides.<spec>].unsupported`. Confirms that targets
+//! listing a request feature get skipped BEFORE dispatch (no upstream call, no breaker
 //! account) and that a chain reduced to empty surfaces as
 //! `Error::NotImplemented` rather than walking and 400ing.
 use super::*;
 #[cfg(feature = "bedrock")]
 use crate::capability_matcher::resolve_requested_capability;
-use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy};
+use crate::config::{AliasValue, Config, OverrideEntry, ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
 use crate::router::LearnedProbeGuard;
 use crate::router::chain::into_one_dispatch_target;
@@ -135,9 +135,24 @@ fn response_format_request(model: &str) -> ChatRequest {
     }
 }
 
+/// Record `features` as a route-away `[capability.overrides.<spec>]`
+/// entry. An empty list leaves the override table untouched.
+fn insert_unsupported_override(config: &mut Config, spec: &str, features: Vec<String>) {
+    if features.is_empty() {
+        return;
+    }
+    config.capability.overrides.insert(
+        spec.into(),
+        OverrideEntry {
+            unsupported: features,
+            ..Default::default()
+        },
+    );
+}
+
 /// Build a router with a 2-entry alias chain `["bedrock-opus" ->
-/// "anthropic-opus"]`. Each provider entry carries the
-/// `unsupported_features` list passed by the caller.
+/// "anthropic-opus"]`. Each provider carries a provider-scoped
+/// `unsupported` override built from the list passed by the caller.
 fn build_router_with_chain(
     unsupported_first: Vec<String>,
     unsupported_second: Vec<String>,
@@ -157,12 +172,10 @@ fn build_router_with_chain(
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
-                unsupported_features: unsupported_first,
-                ..Default::default()
-            },
+            runtime: ProviderRuntimePolicy::default(),
         },
     );
+    insert_unsupported_override(&mut config, "bedrock-prov", unsupported_first);
     config.providers.insert(
         "anthropic-prov".into(),
         ProviderEntry::OpenaiCompat {
@@ -177,12 +190,10 @@ fn build_router_with_chain(
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
-                unsupported_features: unsupported_second,
-                ..Default::default()
-            },
+            runtime: ProviderRuntimePolicy::default(),
         },
     );
+    insert_unsupported_override(&mut config, "anthropic-prov", unsupported_second);
     config.aliases.insert(
         "alias".into(),
         AliasValue::Chain(vec!["bedrock-opus".into(), "anthropic-opus".into()]),
@@ -316,7 +327,7 @@ async fn dated_suffix_versions_normalize_to_same_key() {
 async fn custom_tools_dont_contribute_feature_keys() {
     // A user-defined `ToolDef::Custom` tool has no version-stamped
     // `type` and therefore contributes NO feature key. The filter
-    // is a no-op even when bedrock has unsupported_features set.
+    // is a no-op even when bedrock carries an `unsupported` override.
     let (router, captured_bedrock, _captured_anthropic) =
         build_router_with_chain(vec!["web_search".into()], vec![]);
     let req = ChatRequest {
@@ -408,13 +419,14 @@ async fn structured_output_empty_chain_returns_not_implemented() {
     assert_eq!(captured_anthropic.lock().len(), 0);
 }
 
-// --- per-MODEL unsupported_features (unioned with the
-// per-provider list, keyed on nickname so two models on one provider
-// filter independently) ---
+// --- model-scoped `unsupported` overrides (keyed on
+// `provider:nickname` so two models on one provider filter
+// independently) ---
 
 /// Build a router whose alias chain is two MODELS on the SAME single
 /// provider: `["mA" -> "mB"]`. The provider itself declares NO
-/// unsupported features; each model carries its own per-model list.
+/// unsupported features; each model carries its own model-scoped
+/// override.
 /// Proves nickname-keying: two nicknames on one provider filter
 /// independently. Returns per-model captured-request logs.
 fn build_router_two_models_one_provider(
@@ -436,29 +448,25 @@ fn build_router_two_models_one_provider(
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
-                unsupported_features: vec![],
-                ..Default::default()
-            },
+            runtime: ProviderRuntimePolicy::default(),
         },
     );
     config.aliases.insert(
         "alias".into(),
         AliasValue::Chain(vec!["mA".into(), "mB".into()]),
     );
-    // Model-static lists live in config.models: the override registry
-    // is built from config, mirroring the factory's
-    // build_resolved_models.
+    // The override registry is built from config, so the models live in
+    // config.models (mirroring the factory's build_resolved_models).
     config.models.insert(
         "mA".into(),
-        crate::config::ModelEntry::new("shared-prov", "upstream-a")
-            .with_unsupported_features(unsupported_model_a),
+        crate::config::ModelEntry::new("shared-prov", "upstream-a"),
     );
     config.models.insert(
         "mB".into(),
-        crate::config::ModelEntry::new("shared-prov", "upstream-b")
-            .with_unsupported_features(unsupported_model_b),
+        crate::config::ModelEntry::new("shared-prov", "upstream-b"),
     );
+    insert_unsupported_override(&mut config, "shared-prov:mA", unsupported_model_a);
+    insert_unsupported_override(&mut config, "shared-prov:mB", unsupported_model_b);
 
     let mut router = Router::new(Arc::new(config));
     let captured_a: CapturedRequests = Arc::new(ParkingMutex::new(Vec::new()));
@@ -498,7 +506,7 @@ async fn model_unsupported_drops_only_that_nickname_not_sibling() {
     assert_eq!(
         captured_a.lock().len(),
         0,
-        "mA must be skipped on its per-model unsupported list",
+        "mA must be skipped on its model-scoped unsupported override",
     );
     assert_eq!(
         captured_b.lock().len(),
@@ -525,8 +533,8 @@ async fn empty_model_lists_leave_routing_unchanged() {
 
 #[tokio::test]
 async fn both_models_unsupported_returns_not_implemented_naming_feature() {
-    // (d) Both models declare the feature unsupported via the static
-    // union. The chain filters to empty -> 501 NotImplemented naming
+    // (d) Both models declare the feature unsupported via their
+    // model-scoped overrides. The chain filters to empty -> 501 NotImplemented naming
     // the feature, no upstream attempt.
     let (router, captured_a, captured_b) = build_router_two_models_one_provider(
         vec!["structured_output".into()],
@@ -577,12 +585,12 @@ async fn route_not_strip_leaves_output_config_intact() {
 }
 
 #[test]
-fn helper_distinguishes_provider_and_model_source() {
-    // (e) Unit-test the decision seam directly: provider-scoped vs
-    // model-scoped matches return distinct FilterSource variants;
-    // a supported feature returns None. Also pins the precedence:
-    // with features listed at different scopes, the FIRST requested
-    // feature that matches wins (iteration order).
+fn helper_resolves_provider_and_model_scoped_overrides() {
+    // (e) Unit-test the decision seam directly: provider-scoped and
+    // model-scoped `unsupported` overrides both match with the
+    // `Override` source; a supported feature returns None. Also pins the
+    // precedence: with features listed at different scopes, the FIRST
+    // requested feature that matches wins (iteration order).
     let mut config = Config::default();
     config.providers.insert(
         "prov-blocks-ws".into(),
@@ -598,18 +606,20 @@ fn helper_distinguishes_provider_and_model_source() {
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
-                unsupported_features: vec!["web_search".into()],
-                ..Default::default()
-            },
+            runtime: ProviderRuntimePolicy::default(),
         },
     );
-    // The per-model list lives in config.models: the override registry
-    // is built from config (mirroring build_resolved_models).
+    // The override registry is built from config, so the model lives in
+    // config.models (mirroring build_resolved_models).
     config.models.insert(
         "m".into(),
-        crate::config::ModelEntry::new("prov-blocks-ws", "u")
-            .with_unsupported_features(vec!["structured_output".into()]),
+        crate::config::ModelEntry::new("prov-blocks-ws", "u"),
+    );
+    insert_unsupported_override(&mut config, "prov-blocks-ws", vec!["web_search".into()]);
+    insert_unsupported_override(
+        &mut config,
+        "prov-blocks-ws:m",
+        vec!["structured_output".into()],
     );
     let router = Router::new(Arc::new(config));
     let stub: Arc<dyn Provider> = Arc::new(CapturingProvider {
@@ -627,7 +637,7 @@ fn helper_distinguishes_provider_and_model_source() {
             &mut Vec::new(),
             &mut Vec::new(),
         ),
-        Some(("web_search".to_string(), FilterSource::ProviderStatic)),
+        Some(("web_search".to_string(), FilterSource::Override)),
     );
     // Model-scoped match.
     assert_eq!(
@@ -637,7 +647,7 @@ fn helper_distinguishes_provider_and_model_source() {
             &mut Vec::new(),
             &mut Vec::new(),
         ),
-        Some(("structured_output".to_string(), FilterSource::ModelStatic)),
+        Some(("structured_output".to_string(), FilterSource::Override)),
     );
     // Supported feature -> None.
     assert_eq!(
@@ -659,7 +669,7 @@ fn helper_distinguishes_provider_and_model_source() {
             &mut Vec::new(),
             &mut Vec::new(),
         ),
-        Some(("web_search".to_string(), FilterSource::ProviderStatic)),
+        Some(("web_search".to_string(), FilterSource::Override)),
     );
 }
 

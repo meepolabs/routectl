@@ -39,7 +39,7 @@ use routectl_core::schema::ForwardedBearer;
 use routectl_core::{ChatRequest, Error, Message, MessageContent, Role, ToolDef};
 use routectl_router::class_policy::{ClassPolicy, ConfigFailureClass};
 use routectl_router::{
-    AliasValue, BuildOptions, Config, DispatchedStream, ModelEntry, ProviderEntry,
+    AliasValue, BuildOptions, Config, DispatchedStream, ModelEntry, OverrideEntry, ProviderEntry,
     ProviderRuntimePolicy, RetryPolicy, Router, RouterOptions, build_resolved_models,
 };
 use serde_json::{Value, json};
@@ -148,12 +148,15 @@ async fn last_request_body(server: &MockServer) -> Value {
 
 /// One chain member: a `[models.<nickname>]` pointed at a
 /// `[providers.<provider_name>]` openai-compat entry whose `base_url` is a
-/// wiremock URL, plus the runtime policy for that provider.
+/// wiremock URL, plus the runtime policy for that provider and the
+/// capabilities a provider-scoped `[capability.overrides]` entry marks
+/// unsupported for it.
 struct Upstream {
     nickname: String,
     provider_name: String,
     base_url: String,
     runtime: ProviderRuntimePolicy,
+    unsupported: Vec<String>,
 }
 
 impl Upstream {
@@ -163,6 +166,7 @@ impl Upstream {
             provider_name: provider_name.to_string(),
             base_url: base_url.to_string(),
             runtime: ProviderRuntimePolicy::default(),
+            unsupported: Vec::new(),
         }
     }
 }
@@ -217,6 +221,15 @@ async fn build_router(
     };
     cfg.capability.enabled = true;
     cfg.capability.decay_hours = decay_hours;
+    for u in upstreams.iter().filter(|u| !u.unsupported.is_empty()) {
+        cfg.capability.overrides.insert(
+            u.provider_name.clone(),
+            OverrideEntry {
+                unsupported: u.unsupported.clone(),
+                ..OverrideEntry::default()
+            },
+        );
+    }
 
     let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
     let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
