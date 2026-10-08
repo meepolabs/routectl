@@ -8759,7 +8759,7 @@ new section or a second doc.
 - `public-api.sh` -- public-API drift gate: diffs each library crate's
   cargo-public-api surface against its checked-in baseline (`generate`,
   `--check` per crate or `all`); CI runs it unconditionally, locally it
-  runs on demand (not a commit hook)
+  runs on demand and at pre-push when the tooling is installed
 - `test-inventory.sh` -- named-test enumeration + diff (`dump`, `diff`)
   over `cargo test -- --list` output, for auditing a test-consolidation
   or gate-command change by exact test name (cargo selection and doctest
