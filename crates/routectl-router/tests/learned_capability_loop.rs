@@ -365,3 +365,7 @@ mod learned_tail;
 
 #[path = "learned_capability_loop/streaming.rs"]
 mod streaming;
+
+#[cfg(feature = "bedrock")]
+#[path = "learned_capability_loop/bedrock_new_beta.rs"]
+mod bedrock_new_beta;

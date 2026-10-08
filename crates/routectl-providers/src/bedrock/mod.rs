@@ -298,6 +298,21 @@ impl BedrockProvider {
         })
     }
 
+    /// Aim every request at `origin` instead of the region-derived
+    /// `bedrock-runtime` host, with a fresh no-redirect client for it, so a
+    /// cross-crate test can put a mock upstream behind a real provider.
+    ///
+    /// # Panics
+    ///
+    /// When the HTTP client cannot be built, as [`Self::new`] does.
+    #[cfg(all(feature = "bedrock", feature = "test-utils"))]
+    pub fn with_runtime_origin_for_tests(mut self, origin: &str) -> Self {
+        self.client = crate::http_client::build_no_redirect(self.cfg.user_agent.as_deref(), origin)
+            .expect("reqwest no-redirect client build failed for the test origin");
+        self.runtime_origin = origin.to_string();
+        self
+    }
+
     /// One non-streaming InvokeModel / Converse round trip sending `body`,
     /// the normalized form of `req`.
     async fn complete_once(&self, req: &ChatRequest, body: Value) -> Result<ChatResponse> {

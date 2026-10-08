@@ -1120,7 +1120,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 ### bedrock
 
 - `src/bedrock/mod.rs` -- `BedrockProvider`; topology comment for Invoke vs
-  Converse dispatch
+  Converse dispatch; `with_runtime_origin_for_tests` (behind `test-utils`)
+  points a real provider at a mock origin
 - `src/bedrock/auth.rs` -- AWS credential resolution (`Bearer` short-circuit,
   `SigV4` via `SharedCredentialsProvider`)
 - `src/bedrock/signing.rs` -- SigV4 signing entry points; merges
@@ -4822,7 +4823,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   loop end-to-end binary: shared upstream/router fixtures plus `#[path]`
   wiring of the scenario submodules under `tests/learned_capability_loop/`
   (`real_envelope`, `learn_and_decay`, `never_learn`, `learned_tail`,
-  `streaming`); one binary
+  `streaming`, `bedrock_new_beta`); one binary
+- `tests/learned_capability_loop/bedrock_new_beta.rs` -- a beta flag
+  routectl has never seen crosses a real Bedrock lane (Invoke and Converse)
+  against a mock bedrock-runtime: sent verbatim, repaired after the named
+  rejection, learned as one `beta:` negative, withheld on the next request;
+  plus operator-override and floor+client dedup controls
 - `tests/live_learned_capability.rs` -- live-network smoke of that loop
   against the real openai-compat provider at `ROUTECTL_LIVE_BASE_URL`;
   `test = false` behind `live-integration`, so it runs only when named

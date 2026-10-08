@@ -92,6 +92,10 @@ dhat = { version = "0.3", optional = true }
 # build, and a `--no-default-features` test or clippy run would silently build
 # the full provider set instead of the reduced one.
 routectl-router = { path = ".", default-features = false, features = ["test-utils"] }
+# The providers' `test-utils` seams (e.g. pointing a real BedrockProvider at a
+# mock origin) for the router's integration tests. Default features stay OFF
+# for the same unification reason as the self dev-dependency above.
+routectl-providers = { workspace = true, default-features = false, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 serial_test = "3"
 wiremock.workspace = true
