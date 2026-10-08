@@ -89,7 +89,7 @@ model on that provider, and an **alias** maps the model string your
 client sends to that model (or to a fallback chain of them):
 
 ```toml
-version = 4           # config schema version; routectl refuses older
+version = 5           # config schema version; routectl refuses older
                       # files until `routectl config migrate` runs
 
 [providers.anthropic-api-key]
@@ -130,7 +130,7 @@ A routectl config is a single TOML file with the following top-level
 sections:
 
 ```toml
-version = 4           # config schema version; see "Config schema version"
+version = 5           # config schema version; see "Config schema version"
 
 [server]              # listener: host, port, strict_translation
 [server.auth]         # listener auth tokens (when binding non-loopback)
@@ -216,7 +216,7 @@ not re-derive. Carrying a v1 `[cache_pricing]` table: see
 ## Config schema version (`version`)
 
 ```toml
-version = 4
+version = 5
 ```
 
 - **`version`** (u32, required in practice) -- the config schema version

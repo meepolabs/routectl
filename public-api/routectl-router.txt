@@ -8330,8 +8330,10 @@ pub routectl_router::Refusal::BehaviorBearing
 pub routectl_router::Refusal::BehaviorBearing::codes: alloc::vec::Vec<u16>
 pub routectl_router::Refusal::BehaviorBearing::guidance: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::Refusal::BehaviorBearing::source: routectl_router::RefusalSource
+pub routectl_router::Refusal::CapabilityConflict
+pub routectl_router::Refusal::CapabilityConflict::cells: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::Refusal::EgressAllowlist
-pub routectl_router::Refusal::EgressAllowlist::fields: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::Refusal::EgressAllowlist::allowlists: alloc::vec::Vec<routectl_router::PresentAllowlist>
 pub routectl_router::Refusal::Malformed
 pub routectl_router::Refusal::Malformed::entries: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::Refusal::Malformed::source: routectl_router::RefusalSource
@@ -14050,6 +14052,62 @@ impl<T> typenum::type_operators::Same for routectl_router::PrefixReductionCandid
 pub type routectl_router::PrefixReductionCandidate::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PrefixReductionCandidate where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::PrefixReductionCandidate::into_shared(self) -> Shared
+pub struct routectl_router::PresentAllowlist
+pub routectl_router::PresentAllowlist::entry_count: usize
+pub routectl_router::PresentAllowlist::path: alloc::string::String
+impl core::clone::Clone for routectl_router::PresentAllowlist
+pub fn routectl_router::PresentAllowlist::clone(&self) -> routectl_router::PresentAllowlist
+impl core::cmp::Eq for routectl_router::PresentAllowlist
+impl core::cmp::PartialEq for routectl_router::PresentAllowlist
+pub fn routectl_router::PresentAllowlist::eq(&self, &routectl_router::PresentAllowlist) -> bool
+impl core::fmt::Debug for routectl_router::PresentAllowlist
+pub fn routectl_router::PresentAllowlist::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::PresentAllowlist
+impl core::marker::Freeze for routectl_router::PresentAllowlist
+impl core::marker::Send for routectl_router::PresentAllowlist
+impl core::marker::Sync for routectl_router::PresentAllowlist
+impl core::marker::Unpin for routectl_router::PresentAllowlist
+impl core::marker::UnsafeUnpin for routectl_router::PresentAllowlist
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::PresentAllowlist
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::PresentAllowlist
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::PresentAllowlist where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::PresentAllowlist::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::PresentAllowlist where U: core::convert::From<T>
+pub fn routectl_router::PresentAllowlist::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::PresentAllowlist where U: core::convert::Into<T>
+pub type routectl_router::PresentAllowlist::Error = core::convert::Infallible
+pub fn routectl_router::PresentAllowlist::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::PresentAllowlist where U: core::convert::TryFrom<T>
+pub type routectl_router::PresentAllowlist::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::PresentAllowlist::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::PresentAllowlist where T: core::clone::Clone
+pub type routectl_router::PresentAllowlist::Owned = T
+pub fn routectl_router::PresentAllowlist::clone_into(&self, &mut T)
+pub fn routectl_router::PresentAllowlist::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::PresentAllowlist where T: core::clone::Clone
+pub fn routectl_router::PresentAllowlist::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::PresentAllowlist where T: 'static + ?core::marker::Sized
+pub fn routectl_router::PresentAllowlist::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::PresentAllowlist where T: ?core::marker::Sized
+pub fn routectl_router::PresentAllowlist::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::PresentAllowlist where T: ?core::marker::Sized
+pub fn routectl_router::PresentAllowlist::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::PresentAllowlist where T: core::clone::Clone
+pub unsafe fn routectl_router::PresentAllowlist::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::PresentAllowlist
+pub fn routectl_router::PresentAllowlist::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::PresentAllowlist where T: core::clone::Clone
+pub fn routectl_router::PresentAllowlist::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::PresentAllowlist
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::PresentAllowlist where T: ?core::marker::Sized
+pub fn routectl_router::PresentAllowlist::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::PresentAllowlist::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::PresentAllowlist
+impl<T> tracing::instrument::WithSubscriber for routectl_router::PresentAllowlist
+impl<T> typenum::type_operators::Same for routectl_router::PresentAllowlist
+pub type routectl_router::PresentAllowlist::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PresentAllowlist where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::PresentAllowlist::into_shared(self) -> Shared
 pub struct routectl_router::PricingConfig
 pub routectl_router::PricingConfig::cache_read_per_mtok: core::option::Option<f64>
 pub routectl_router::PricingConfig::cache_write_1h_per_mtok: core::option::Option<f64>
@@ -16518,9 +16576,9 @@ pub fn routectl_router::lookup_with_overrides(&str, &str, core::option::Option<&
 pub fn routectl_router::merge(core::option::Option<&routectl_router::catalog::CatalogRow>, core::option::Option<&core::option::Option<routectl_router::OverlayCell>>) -> routectl_router::catalog::EffectiveRow
 pub fn routectl_router::migrate_v2_to_v3(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::StepOutcome, routectl_router::Refusal>
 pub fn routectl_router::migrate_v3_to_v4(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::StepOutcome, routectl_router::Refusal>
+pub fn routectl_router::migrate_v4_to_v5(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::StepOutcome, routectl_router::Refusal>
 pub fn routectl_router::models_routed_at(&toml_edit::document::DocumentMut, &str) -> alloc::vec::Vec<alloc::string::String>
 pub fn routectl_router::near_lossless_candidate(&routectl_core::schema::ChatRequest, &[routectl_router::ElisionMark]) -> core::option::Option<routectl_router::PrefixReductionCandidate>
-pub fn routectl_router::normalize_capability_overrides(&mut toml_edit::document::DocumentMut) -> core::result::Result<bool, routectl_router::Refusal>
 pub fn routectl_router::overall_exit(&[routectl_router::Finding]) -> i32
 pub fn routectl_router::overlay_default_path() -> std::path::PathBuf
 pub const fn routectl_router::overlay_revision(&routectl_router::CatalogOverlay) -> u64

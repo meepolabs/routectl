@@ -150,7 +150,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the crate map.
 Minimal example:
 
 ```toml
-version = 4                      # config schema version
+version = 5                      # config schema version
 
 [server]
 host = "127.0.0.1"

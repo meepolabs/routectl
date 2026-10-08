@@ -9,9 +9,11 @@ use crate::config::Config;
 /// (`[retry.classes.*]` / provider `class_overrides`); `3` -> `4` moves the
 /// `seat_selection` knob off the provider entry onto the `[pools.<name>]`
 /// block that groups the accounts, making explicit pools the only
-/// multi-seat shape. Every transform runs via `crate::config_migrate`
+/// multi-seat shape; `4` -> `5` folds the provider / model
+/// `unsupported_features` lists into `[capability.overrides]` and retires
+/// the egress allowlists. Every transform runs via `crate::config_migrate`
 /// under `config migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 4;
+pub const CURRENT_CONFIG_VERSION: u32 = 5;
 
 pub(super) const fn default_config_version() -> u32 {
     1

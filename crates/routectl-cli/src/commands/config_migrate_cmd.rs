@@ -939,6 +939,7 @@ const fn refusal_kind(refusal: &Refusal) -> &'static str {
         Refusal::BehaviorBearing { .. } => "behavior_bearing",
         Refusal::Malformed { .. } => "malformed",
         Refusal::EgressAllowlist { .. } => "egress_allowlist",
+        Refusal::CapabilityConflict { .. } => "capability_conflict",
         Refusal::SeatSelectionRelocation { .. } => "seat_selection_relocation",
     }
 }
@@ -976,7 +977,7 @@ fn render_dry_run(
     }
     println!("--- end candidate ---");
     if from_version == to_version {
-        println!("summary: normalizes config at version {to_version} (no version bump)");
+        println!("summary: materializes stored seats at version {to_version} (no version bump)");
     } else {
         println!("summary: migrates config from version {from_version} to {to_version}");
     }
@@ -1130,8 +1131,8 @@ fn render_success(
 ) {
     if from_version == to_version {
         println!(
-            "normalized config at version {to_version} (folded legacy `unsupported_features` \
-             into [capability.overrides])."
+            "materialized the stored seats into explicit account entries at version \
+             {to_version}."
         );
     } else {
         println!("migrated config to version {to_version}.");
@@ -1153,7 +1154,7 @@ fn render_success(
 /// immediately without reading, so a silent pipe cannot hang it.
 /// Never called while the write lock is held. Called ONCE for the combined
 /// change (version stamp, key relocation, any provider rename, and any seat
-/// materialization), including a same-version normalization
+/// materialization), including a same-version seat materialization
 /// (`from_version == to_version`).
 fn confirm_migration(
     from_version: u32,
@@ -1177,17 +1178,18 @@ fn confirm_migration(
     }
     if from_version == to_version {
         println!(
-            "this normalizes config.toml at version {to_version}, folding legacy \
-             `unsupported_features` lists into `[capability.overrides]` and removing the retired \
-             keys. A running routectl daemon must be restarted onto the matching binary afterward."
+            "this rewrites config.toml at version {to_version}, materializing the stored seats \
+             behind a bare `oauth://` ref into explicit account entries on a pool. A running \
+             routectl daemon must be restarted onto the matching binary afterward."
         );
     } else {
         println!(
             "this migrates config.toml from version {from_version} to {to_version}. The break \
              retires per-status retry lists (and, from a v1 file, the `[cache_pricing]` table), \
-             and moves `seat_selection` onto the `[pools.<name>]` block that groups the \
-             accounts. A running routectl daemon must be restarted onto the matching binary \
-             after migration."
+             moves `seat_selection` onto the `[pools.<name>]` block that groups the accounts, \
+             folds `unsupported_features` into `[capability.overrides]`, and removes empty \
+             `allowed_betas` / `allowed_body_fields` lists. A running routectl daemon must be \
+             restarted onto the matching binary after migration."
         );
     }
     for line in change_summary(&[], renamed, original, phase_two) {
@@ -2875,15 +2877,14 @@ default = \"opus\"
     }
 
     // -----------------------------------------------------------------
-    // Same-version normalization: legacy unsupported_features fold into
-    // [capability.overrides]; egress allowlists and conflicts refuse.
+    // v4 -> v5: unsupported_features fold into [capability.overrides];
+    // non-empty egress allowlists and force_supported conflicts refuse.
     // -----------------------------------------------------------------
 
-    /// A current-version config carrying legacy provider AND model
-    /// `unsupported_features` plus a valid provider/model/alias so the folded
-    /// result passes the gate.
-    fn latest_with_legacy() -> String {
-        format!("# operator note: keep me\nversion = {CURRENT_CONFIG_VERSION}\n") + LEGACY_BODY
+    /// A v4 config carrying provider AND model `unsupported_features` plus a
+    /// valid provider/model/alias so the folded result passes the gate.
+    fn v4_with_legacy() -> String {
+        "# operator note: keep me\nversion = 4\n".to_string() + LEGACY_BODY
     }
 
     const LEGACY_BODY: &str = "\
@@ -2930,15 +2931,10 @@ default = \"gpt\"
 ";
 
     #[tokio::test]
-    async fn legacy_lists_normalize_into_capability_overrides_and_keys_removed() {
-        let f = fixture(&latest_with_legacy());
-        let result = f.migrate(false, true).await.expect("normalize");
-        assert_eq!(
-            result,
-            MigrateResult::Migrated {
-                from_version: CURRENT_CONFIG_VERSION
-            }
-        );
+    async fn v4_legacy_lists_fold_into_capability_overrides_and_keys_removed() {
+        let f = fixture(&v4_with_legacy());
+        let result = f.migrate(false, true).await.expect("v4 -> v5");
+        assert_eq!(result, MigrateResult::Migrated { from_version: 4 });
 
         let text = read(&f.config);
         assert!(!text.contains("unsupported_features"), "{text}");
@@ -2953,11 +2949,11 @@ default = \"gpt\"
         );
         assert!(text.contains("# operator note: keep me"), "{text}");
         // The committed file re-validates and loads with no legacy keys left.
-        gate(&text).expect("normalized config must pass the gate");
+        gate(&text).expect("the migrated config must pass the gate");
     }
 
     #[tokio::test]
-    async fn no_legacy_fields_is_already_current_and_writes_nothing() {
+    async fn a_current_version_file_is_already_current_and_writes_nothing() {
         let f = fixture(&latest_clean());
         let before = std::fs::read(&f.config).unwrap();
 
@@ -2966,13 +2962,13 @@ default = \"gpt\"
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
             before,
-            "a plain v3 file must not be rewritten"
+            "a current-version file must not be rewritten"
         );
     }
 
     #[tokio::test]
     async fn egress_allowlist_refuses_byte_identical() {
-        let body = latest_with_legacy().replace(
+        let body = v4_with_legacy().replace(
             "[server]\n",
             "[bedrock]\nallowed_betas = [\"beta-1\"]\n\n[server]\n",
         );
@@ -2987,13 +2983,13 @@ default = \"gpt\"
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
             before,
-            "a refused normalization must leave the file byte-identical"
+            "a refused migration must leave the file byte-identical"
         );
     }
 
     #[tokio::test]
     async fn egress_allowlist_refusal_audit_names_the_kind() {
-        let body = latest_with_legacy().replace(
+        let body = v4_with_legacy().replace(
             "[server]\n",
             "[bedrock]\nallowed_betas = [\"beta-1\"]\n\n[server]\n",
         );
@@ -3009,33 +3005,41 @@ default = \"gpt\"
     }
 
     #[tokio::test]
-    async fn conflicting_cell_refuses_via_the_gate_byte_identical() {
-        // Legacy provider list routes `web_search` away while a new
-        // force_supported entry marks the SAME cell supported: after folding
-        // the legacy list into `unsupported`, the shared gate's conflict
-        // check rejects, and the file stays byte-identical.
-        let body = latest_with_legacy().replace(
+    async fn conflicting_cell_refuses_byte_identical() {
+        // The provider list routes `web_search` away while a force_supported
+        // entry marks the SAME cell supported: the rung refuses rather than
+        // pick a winner, and the file stays byte-identical.
+        let body = v4_with_legacy().replace(
             "[aliases]\n",
             "[capability.overrides.fast]\nforce_supported = [\"web_search\"]\n\n[aliases]\n",
         );
         let f = fixture(&body);
         let before = std::fs::read(&f.config).unwrap();
 
-        let err = f
-            .migrate(false, true)
-            .await
-            .expect_err("conflict must refuse");
-        assert!(err.to_string().contains("config error"), "err: {err}");
+        let (result, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
+        let err = result.expect_err("conflict must refuse");
+        assert!(err.to_string().contains("force_supported"), "err: {err}");
+        assert!(
+            err.to_string()
+                .contains("[capability.overrides.fast] `web_search`"),
+            "err: {err}"
+        );
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
             before,
-            "a conflicting normalization must leave the file byte-identical"
+            "a conflicting migration must leave the file byte-identical"
         );
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("refusal_kind"), Some("capability_conflict"));
     }
 
     #[tokio::test]
-    async fn normalize_dry_run_renders_candidate_and_writes_nothing() {
-        let f = fixture(&latest_with_legacy());
+    async fn v4_dry_run_renders_candidate_and_writes_nothing() {
+        let f = fixture(&v4_with_legacy());
         let before = std::fs::read(&f.config).unwrap();
 
         let result = f.migrate(true, false).await.expect("dry-run");
@@ -3117,16 +3121,16 @@ default = \"gpt\"
     }
 
     // -----------------------------------------------------------------
-    // A same-version v3 normalization is a REAL write and must be
-    // prompt/force-gated like any other, and its audit must reflect the true
-    // acknowledgement (never a synthesized acknowledged=true).
+    // The v4 -> v5 fold is a REAL write and must be prompt/force-gated like
+    // any other, and its audit must reflect the true acknowledgement (never
+    // a synthesized acknowledged=true).
     // -----------------------------------------------------------------
 
     #[tokio::test]
-    async fn normalize_non_interactive_without_yes_aborts_byte_identical() {
-        // stdin is not a TTY under the test harness: read_line hits EOF, so
-        // the normalize prompt is declined and nothing is written.
-        let f = fixture(&latest_with_legacy());
+    async fn v4_non_interactive_without_yes_aborts_byte_identical() {
+        // stdin is not a TTY under the test harness, so the prompt is
+        // declined and nothing is written.
+        let f = fixture(&v4_with_legacy());
         let before = std::fs::read(&f.config).unwrap();
 
         let result = f
@@ -3137,16 +3141,16 @@ default = \"gpt\"
         assert_eq!(
             std::fs::read(&f.config).unwrap(),
             before,
-            "an unacknowledged v3 normalization must not write"
+            "an unacknowledged migration must not write"
         );
     }
 
     #[tokio::test]
-    async fn normalize_forced_audit_records_acknowledged_false_not_synthesized() {
-        // A forced normalize was authorized by --yes, NOT by an interactive
+    async fn forced_audit_records_acknowledged_false_not_synthesized() {
+        // A forced migration was authorized by --yes, NOT by an interactive
         // acknowledgement, so `acknowledged` must be false -- the defect
         // was a synthesized acknowledged=true on this exact path.
-        let f = fixture(&latest_with_legacy());
+        let f = fixture(&v4_with_legacy());
         let (_, events) =
             routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
         let audit = events
@@ -3158,7 +3162,7 @@ default = \"gpt\"
         assert_eq!(
             audit.field("acknowledged"),
             Some("false"),
-            "a --yes normalize must not synthesize acknowledged=true"
+            "a --yes migration must not synthesize acknowledged=true"
         );
     }
 

@@ -10,7 +10,7 @@
 # Schema version this file targets. routectl refuses a config older than
 # the schema the running binary writes; run `routectl config migrate` to
 # bring an older file forward. See docs/CONFIGURATION.md.
-version = 4
+version = 5
 
 # routectl config has four first-class tables:
 #

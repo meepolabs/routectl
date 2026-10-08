@@ -160,6 +160,10 @@ async fn serve_boots_on_a_migrated_v1_config() {
     assert_eq!(resp.status(), 200);
 }
 
+/// The last config version whose provider entries may carry
+/// `seat_selection`: the knob moves onto the pool block on the way to 4.
+const SEAT_SELECTION_VERSION: u32 = 3;
+
 /// A previous-version config whose provider entry carries a BARE `oauth://`
 /// ref and the retired provider-level `seat_selection`. With more than one
 /// stored seat for the family, the migration materializes explicit account
@@ -184,7 +188,7 @@ fn previous_version_bare_oauth_config() -> String {
          \n\
          [aliases]\n\
          default = \"opus\"\n",
-        routectl_router::CURRENT_CONFIG_VERSION - 1
+        SEAT_SELECTION_VERSION
     )
 }
 
@@ -211,7 +215,7 @@ fn previous_version_family_named_config() -> String {
          \n\
          [aliases]\n\
          default = \"opus\"\n",
-        routectl_router::CURRENT_CONFIG_VERSION - 1
+        SEAT_SELECTION_VERSION
     )
 }
 
@@ -585,5 +589,115 @@ fn dry_run_stdout_is_byte_exact_and_the_credential_warning_is_on_stderr() {
     assert!(
         !stdout.contains("warning:"),
         "the warning must not reach stdout; stdout:\n{stdout}"
+    );
+}
+
+/// A v3 file carrying the v3 -> v4 input (`seat_selection`) AND the v4 -> v5
+/// input (`unsupported_features`, an empty `[bedrock]` allowlist): one
+/// `config migrate` must apply both rungs.
+const V3_SEAT_SELECTION_AND_UNSUPPORTED: &str = "\
+version = 3
+
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+[bedrock]
+allowed_betas = []
+
+[providers.anthropic-managed]
+kind = \"anthropic-api\"
+api_key_ref = \"oauth://anthropic\"
+seat_selection = \"round-robin\"
+unsupported_features = [\"web_search\"]
+
+[models.opus]
+provider = \"anthropic-managed\"
+upstream = \"claude-opus-4-8\"
+unsupported_features = [\"computer_use\"]
+
+[aliases]
+default = \"opus\"
+";
+
+#[test]
+fn a_v3_file_migrates_through_v4_to_v5_with_the_fold_in_one_run() {
+    // Act
+    let (_, _, written) = run_migrate(V3_SEAT_SELECTION_AND_UNSUPPORTED, &["--yes"]);
+
+    // Assert: both rungs landed in the one written file.
+    assert!(
+        written.contains(&format!(
+            "version = {}",
+            routectl_router::CURRENT_CONFIG_VERSION
+        )),
+        "{written}"
+    );
+    assert!(written.contains("[pools.anthropic]"), "{written}");
+    assert!(!written.contains("unsupported_features"), "{written}");
+    assert!(!written.contains("bedrock"), "{written}");
+    assert!(
+        written.contains("[capability.overrides.anthropic-managed]"),
+        "{written}"
+    );
+    assert!(
+        written.contains("[capability.overrides.\"anthropic-managed:opus\"]"),
+        "{written}"
+    );
+    routectl_router::parse_config(&written).expect("the v5 output parses");
+}
+
+#[test]
+fn a_v4_dry_run_prints_every_folded_and_removed_key_sorted_and_writes_nothing() {
+    // Arrange
+    let v4 = V3_SEAT_SELECTION_AND_UNSUPPORTED
+        .replacen("version = 3", "version = 4", 1)
+        .replace("seat_selection = \"round-robin\"\n", "");
+
+    // Act
+    let (stdout, _, unwritten) = run_migrate(&v4, &["--dry-run"]);
+
+    // Assert
+    assert_eq!(unwritten, v4, "dry-run must not write");
+    let report: Vec<&str> = stdout
+        .split_once("--- end candidate ---")
+        .expect("the report follows the candidate")
+        .1
+        .lines()
+        .filter_map(|l| l.strip_prefix("  - removes `")?.strip_suffix('`'))
+        .collect();
+    assert_eq!(
+        report,
+        [
+            "[bedrock] (empty once its retired lists are removed)",
+            "[models.opus].unsupported_features (folded into \
+             [capability.overrides.\"anthropic-managed:opus\"].unsupported)",
+            "[providers.anthropic-managed].unsupported_features (folded into \
+             [capability.overrides.anthropic-managed].unsupported)",
+            "bedrock.allowed_betas (empty; retired)",
+        ],
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn a_current_version_file_reports_already_current() {
+    let body = format!(
+        "version = {}\n[server]\nhost = \"127.0.0.1\"\nport = 8787\n",
+        routectl_router::CURRENT_CONFIG_VERSION
+    );
+
+    let (stdout, _, unwritten) = run_migrate(&body, &["--yes"]);
+
+    assert_eq!(
+        unwritten, body,
+        "an already-current file must not be rewritten"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "already at version {}",
+            routectl_router::CURRENT_CONFIG_VERSION
+        )),
+        "stdout:\n{stdout}"
     );
 }

@@ -4,8 +4,8 @@
 //! [`plan_migration`] computes a [`MigrationPlan`] WITHOUT touching disk:
 //! it runs every ladder transform in memory (the v1 `[cache_pricing]` ->
 //! catalog-overlay fold, the v2 -> v3 retry-list retirement, the v3 -> v4
-//! `seat_selection`-onto-pool relocation, the v4 -> v4
-//! `unsupported_features` normalization) and returns the config-text
+//! `seat_selection`-onto-pool relocation, the v4 -> v5 capability-list
+//! retirement) and returns the config-text
 //! candidate, the overlay candidate, and the removed keys. Every refusal
 //! and conflict check is part of planning, so no on-disk mutation can
 //! occur before the caller has a validated plan in hand -- a [`Refusal`]
@@ -95,7 +95,7 @@ pub struct MigrationPlan {
     /// The raw on-disk version the plan migrates from.
     pub from: u32,
     /// The version the committed `config.toml` will stamp (equal to `from`
-    /// for a same-version v3 normalization).
+    /// when no rung runs).
     pub to: u32,
     /// Which files the commit will touch, and the payloads (config text,
     /// pending overlay write) it will write.
@@ -368,7 +368,7 @@ fn civil_from_epoch_day(z: i64) -> (i64, u32, u32) {
 /// bare bump of the const (task ordering) can never make the ladder claim a
 /// version it has no step for -- and an already-latest doc stays a no-op
 /// regardless of what the const currently reads.
-const LATEST_MIGRATION_VERSION: u32 = 4;
+const LATEST_MIGRATION_VERSION: u32 = 5;
 
 /// The ladder must always be able to reach the current version: every step
 /// up to `CURRENT_CONFIG_VERSION` has to exist. Enforced at compile time so
@@ -410,12 +410,14 @@ pub enum RefusalSource {
 /// - [`Refusal::Malformed`]: a `retry_allowlist` / `retry_denylist` entry is
 ///   not a valid `u16` HTTP status. Silently dropping it would strip the key
 ///   and change behavior, so the migrator refuses rather than fold.
-/// - [`Refusal::EgressAllowlist`]: the same-version v3 normalization
-///   ([`normalize_capability_overrides`]) found behavior-bearing egress
-///   allowlists (`allowed_betas` / `allowed_body_fields`). These are
-///   proactive on-the-wire allowlists, not per-cell capability facts, so
-///   they have no lossless fold into `[capability.overrides]` -- exactly
-///   the retry-list precedent.
+/// - [`Refusal::EgressAllowlist`]: the v4 -> v5 rung ([`migrate_v4_to_v5`])
+///   found a non-empty egress allowlist (`allowed_betas` /
+///   `allowed_body_fields`). Version 5 retires the lists, and an allowlist
+///   (what may be sent) has no lossless conversion into a denylist (what
+///   must not be), so the operator decides per list.
+/// - [`Refusal::CapabilityConflict`]: the v4 -> v5 fold would put a
+///   capability into `unsupported` on a cell whose `force_supported`
+///   already names it.
 ///
 /// Carries the offending content and (where meaningful) rendered guidance so
 /// the caller can both log a structured audit event and print hand-edit
@@ -440,14 +442,20 @@ pub enum Refusal {
         /// The malformed entries, rendered as they appear in the file.
         entries: Vec<String>,
     },
-    /// Behavior-bearing egress allowlists (`allowed_betas` /
-    /// `allowed_body_fields`) present in a v3 file the same-version
-    /// normalization cannot fold losslessly.
+    /// Non-empty egress allowlists (`allowed_betas` /
+    /// `allowed_body_fields`) the v4 -> v5 rung cannot retire without an
+    /// operator decision.
     EgressAllowlist {
-        /// The present non-empty allowlist keys, fully qualified in
-        /// deterministic order (e.g. `bedrock.allowed_betas`,
-        /// `providers.<name>.allowed_betas`).
-        fields: Vec<String>,
+        /// Each non-empty list, in deterministic order. Carries the entry
+        /// count only, never the listed values.
+        allowlists: Vec<PresentAllowlist>,
+    },
+    /// Folded `unsupported_features` values that a `force_supported` entry
+    /// on the same `[capability.overrides]` cell already marks supported.
+    CapabilityConflict {
+        /// One line per conflicting value, naming the cell, the capability
+        /// and the retired key it was folded from.
+        cells: Vec<String>,
     },
     /// A provider-level `seat_selection` the v3 -> v4 rung cannot relocate
     /// onto a pool block without guessing -- including two entries whose
@@ -506,20 +514,51 @@ impl fmt::Display for Refusal {
                 }
                 Ok(())
             }
-            Self::EgressAllowlist { fields } => {
+            Self::EgressAllowlist { allowlists } => {
                 writeln!(
                     f,
-                    "this config carries behavior-bearing egress allowlists (`allowed_betas` / \
-                     `allowed_body_fields`) that strip unknown flags/fields on the wire before \
-                     dispatch. They are proactive egress allowlists, not per-cell capability \
-                     facts, so they have no lossless fold into `[capability.overrides]` (a fold \
-                     would lose the armed-vs-passthrough distinction and change wire behavior). \
-                     Nothing was written. Leave these lists in place -- they remain valid config \
-                     and keep working -- or re-express them by hand, then rerun. The present \
-                     lists are:"
+                    "config version 5 retires the egress allowlists (`allowed_betas` / \
+                     `allowed_body_fields`), and the lists below are not empty. An allowlist \
+                     names what may be sent; it does not convert losslessly into the list of \
+                     what must not be, so nothing was written. Decide each list by hand, delete \
+                     it, then rerun:"
                 )?;
-                for field in fields {
-                    writeln!(f, "  - {field}")?;
+                for allowlist in allowlists {
+                    let PresentAllowlist { path, entry_count } = allowlist;
+                    let noun = if *entry_count == 1 {
+                        "entry"
+                    } else {
+                        "entries"
+                    };
+                    writeln!(f, "  - {path} ({entry_count} {noun})")?;
+                }
+                writeln!(
+                    f,
+                    "  deleting a beta list accepts pass-through: client betas are forwarded \
+                     except the ones the router withholds from the lane (its shipped seed plus \
+                     the flags it has learned the lane rejects)."
+                )?;
+                writeln!(
+                    f,
+                    "  for a beta that must never be sent, add `unsupported = [\"beta:<flag>\"]` \
+                     under `[capability.overrides.<provider>]`."
+                )?;
+                writeln!(
+                    f,
+                    "  a body-field list (`allowed_body_fields`) has no successor; delete it."
+                )
+            }
+            Self::CapabilityConflict { cells } => {
+                writeln!(
+                    f,
+                    "folding the retired `unsupported_features` lists into \
+                     `[capability.overrides]` would mark a capability unsupported on a cell \
+                     whose `force_supported` already marks it supported. Which one is meant \
+                     cannot be derived, so nothing was written. Remove the capability from one \
+                     of the two lists, then rerun:"
+                )?;
+                for cell in cells {
+                    writeln!(f, "  - {cell}")?;
                 }
                 Ok(())
             }
@@ -546,6 +585,16 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// One non-empty egress allowlist found by the v4 -> v5 rung.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentAllowlist {
+    /// The fully qualified key, e.g. `bedrock.allowed_betas` or
+    /// `providers.<name>.allowed_betas`.
+    pub path: String,
+    /// How many entries the list carries.
+    pub entry_count: usize,
+}
+
 /// Errors from the [`plan_migration`] planner.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrateError {
@@ -553,8 +602,7 @@ pub enum MigrateError {
     #[error(transparent)]
     V1ToV2(#[from] MigrationError),
 
-    /// A ladder rung or the same-version normalization refused a
-    /// behavior-bearing config; nothing written.
+    /// A ladder rung refused a behavior-bearing config; nothing written.
     #[error("config migration refused:\n{0}")]
     Refused(Refusal),
 
@@ -746,124 +794,240 @@ pub fn migrate_v2_to_v3(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
     })
 }
 
-/// Same-version (v3 -> v3) normalization on the RAW toml_edit document. NO
-/// version bump (`CURRENT_CONFIG_VERSION` stays 3) and NO IO -- the caller
-/// owns the single commit. Additive-only, format-preserving, and fully
-/// idempotent (a second run finds nothing to fold and returns `Ok(false)`).
+/// The retired egress-allowlist keys under the global `[bedrock]` table.
+const BEDROCK_ALLOWLIST_KEYS: [&str; 2] = ["allowed_betas", "allowed_body_fields"];
+
+/// The retired egress-allowlist key on a `[providers.<name>]` entry.
+const PROVIDER_ALLOWLIST_KEY: &str = "allowed_betas";
+
+/// The retired per-target capability list folded into `[capability.overrides]`.
+const UNSUPPORTED_FEATURES_KEY: &str = "unsupported_features";
+
+/// Pure v4 -> v5 transform on the RAW toml_edit document. NO IO -- the caller
+/// owns the single commit. Format-preserving: operator comments and unrelated
+/// content survive.
 ///
-/// Folds the deprecated provider / model `unsupported_features` lists into
-/// their `[capability.overrides]` successor and removes the legacy keys:
+/// Version 5 retires the per-target capability lists and the egress
+/// allowlists:
 ///
-/// - `[providers.<name>] unsupported_features = [...]` ->
-///   `[capability.overrides.<name>] unsupported = [...]` (a provider-scoped
-///   RouteAway override);
-/// - `[models.<nick>] unsupported_features = [...]` ->
-///   `[capability.overrides."<provider>:<nick>"] unsupported = [...]`
-///   (model-scoped), where `<provider>` is read from the model's own
-///   `provider` field.
+/// - `[providers.<name>] unsupported_features = [...]` folds into
+///   `[capability.overrides.<name>] unsupported = [...]`;
+/// - `[models.<nick>] unsupported_features = [...]` folds into
+///   `[capability.overrides."<provider>:<nick>"] unsupported = [...]`, where
+///   `<provider>` is the model's own `provider` field (a model with no
+///   `provider` is left for the shared gate to reject);
+/// - an EMPTY `allowed_betas` / `allowed_body_fields` list (pass-through, so
+///   it carries no behavior) is removed, and `[bedrock]` is removed once
+///   nothing is left in it.
 ///
-/// The raw capability tokens carry through verbatim (the override namespace
-/// is open and the registry normalizes at build time), so routing behavior
-/// and source labels stay byte-identical. Values already present on a target
-/// override's `unsupported` array are not duplicated. A present-but-empty
-/// `unsupported_features` is simply removed (the deprecated key retires with
-/// no fold). A model missing a `provider` field is left untouched for the
-/// shared gate to reject.
-///
-/// Returns `Ok(true)` when the document changed (at least one legacy key was
-/// present and removed), `Ok(false)` when there was nothing to normalize (a
-/// plain v3 config stays byte-identical and the caller reports it
-/// already-canonical).
+/// Raw capability tokens carry through verbatim (the override namespace is
+/// open and the registry normalizes at build time). A value already on the
+/// target's `unsupported` array is not duplicated. Stamps LITERAL
+/// `version = 5`.
 ///
 /// # Errors
 ///
-/// Returns [`Refusal::EgressAllowlist`] -- with NO mutation -- when the doc
-/// carries a behavior-bearing (non-empty) `allowed_betas` / `allowed_body_fields`
-/// egress allowlist. These proactive on-the-wire allowlists have no lossless
-/// capability fold, so the migrator refuses the whole normalization rather
-/// than partially transform (the retry-list precedent).
-pub fn normalize_capability_overrides(doc: &mut DocumentMut) -> Result<bool, Refusal> {
-    let egress = present_egress_allowlists(doc);
-    if !egress.is_empty() {
-        return Err(Refusal::EgressAllowlist { fields: egress });
+/// Both refusals happen before any mutation, leaving `doc` byte-untouched:
+///
+/// - [`Refusal::EgressAllowlist`] when any allowlist is non-empty;
+/// - [`Refusal::CapabilityConflict`] when a folded value is already in the
+///   target cell's `force_supported`.
+pub fn migrate_v4_to_v5(doc: &mut DocumentMut) -> Result<StepOutcome, Refusal> {
+    let allowlists = present_egress_allowlists(doc);
+    if !allowlists.is_empty() {
+        return Err(Refusal::EgressAllowlist { allowlists });
     }
 
     let plan = collect_unsupported_features(doc);
-    if plan.provider_removals.is_empty() && plan.model_removals.is_empty() {
-        return Ok(false);
+    let cells = forced_fold_conflicts(doc, &plan);
+    if !cells.is_empty() {
+        return Err(Refusal::CapabilityConflict { cells });
     }
 
-    for (spec, values) in &plan.folds {
-        append_unsupported_override(doc, spec, values);
-    }
+    fold_unsupported_features(doc, &plan);
+    drop_empty_egress_allowlists(doc);
+    doc["version"] = toml_edit::value(5i64);
 
+    Ok(StepOutcome {
+        from_version: 4,
+        to_version: 5,
+    })
+}
+
+/// Apply the folds in `plan` and remove every retired `unsupported_features`
+/// key it names.
+fn fold_unsupported_features(doc: &mut DocumentMut, plan: &UnsupportedFeaturesPlan) {
+    for fold in &plan.folds {
+        append_unsupported_override(doc, &fold.spec, &fold.values);
+    }
     if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut) {
         for name in &plan.provider_removals {
             if let Some(entry) = providers.get_mut(name).and_then(Item::as_table_like_mut) {
-                entry.remove("unsupported_features");
+                entry.remove(UNSUPPORTED_FEATURES_KEY);
             }
         }
     }
     if let Some(models) = doc.get_mut("models").and_then(Item::as_table_like_mut) {
         for nick in &plan.model_removals {
             if let Some(entry) = models.get_mut(nick).and_then(Item::as_table_like_mut) {
-                entry.remove("unsupported_features");
+                entry.remove(UNSUPPORTED_FEATURES_KEY);
             }
         }
     }
-
-    Ok(true)
 }
 
-/// The fully-qualified keys of every behavior-bearing (non-empty) egress
-/// allowlist in the document, in deterministic order: the global
-/// `[bedrock]` `allowed_betas` / `allowed_body_fields`, then each
+/// One line per folded value whose target cell already lists the same string
+/// in `force_supported`, in deterministic (spec, value) order.
+fn forced_fold_conflicts(doc: &DocumentMut, plan: &UnsupportedFeaturesPlan) -> Vec<String> {
+    let overrides = doc
+        .get("capability")
+        .and_then(Item::as_table_like)
+        .and_then(|capability| capability.get("overrides"))
+        .and_then(Item::as_table_like);
+    let Some(overrides) = overrides else {
+        return Vec::new();
+    };
+    let mut cells = Vec::new();
+    for fold in &plan.folds {
+        let forced = overrides
+            .get(&fold.spec)
+            .and_then(Item::as_table_like)
+            .and_then(|entry| entry.get("force_supported"))
+            .and_then(Item::as_array);
+        let Some(forced) = forced else {
+            continue;
+        };
+        for value in fold.values.iter().filter_map(Value::as_str) {
+            if forced.iter().any(|f| f.as_str() == Some(value)) {
+                cells.push(format!(
+                    "[capability.overrides.{}] `{value}`: in force_supported, and in the \
+                     retired {}",
+                    render_spec_key(&fold.spec),
+                    fold.source,
+                ));
+            }
+        }
+    }
+    cells.sort();
+    cells.dedup();
+    cells
+}
+
+/// A `[capability.overrides.<spec>]` key as it renders in a TOML header: a
+/// model-scoped `provider:nick` spec needs quoting.
+fn render_spec_key(spec: &str) -> String {
+    if spec.contains(':') {
+        format!("\"{spec}\"")
+    } else {
+        spec.to_string()
+    }
+}
+
+/// Remove every present-but-empty egress allowlist, then the `[bedrock]`
+/// table if nothing is left in it. Runs only after
+/// [`present_egress_allowlists`] found no non-empty list; a non-array value
+/// is left in place for the shared gate to reject.
+fn drop_empty_egress_allowlists(doc: &mut DocumentMut) {
+    if let Some(bedrock) = doc.get_mut("bedrock").and_then(Item::as_table_like_mut) {
+        for key in BEDROCK_ALLOWLIST_KEYS {
+            if array_is_empty(bedrock, key) {
+                bedrock.remove(key);
+            }
+        }
+    }
+    if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut) {
+        for (_, item) in providers.iter_mut() {
+            if let Some(entry) = item.as_table_like_mut()
+                && array_is_empty(entry, PROVIDER_ALLOWLIST_KEY)
+            {
+                entry.remove(PROVIDER_ALLOWLIST_KEY);
+            }
+        }
+    }
+    if bedrock_table_is_empty(doc) {
+        doc.as_table_mut().remove("bedrock");
+    }
+}
+
+/// Whether the document carries a `[bedrock]` table with no keys in it.
+fn bedrock_table_is_empty(doc: &DocumentMut) -> bool {
+    doc.get("bedrock")
+        .and_then(Item::as_table_like)
+        .is_some_and(TableLike::is_empty)
+}
+
+/// Every non-empty egress allowlist in the document, in deterministic order:
+/// the global `[bedrock]` `allowed_betas` / `allowed_body_fields`, then each
 /// `[providers.<name>]` `allowed_betas`. An empty list is pass-through
 /// (carries no behavior) and is not reported.
-fn present_egress_allowlists(doc: &DocumentMut) -> Vec<String> {
-    let mut fields = Vec::new();
+fn present_egress_allowlists(doc: &DocumentMut) -> Vec<PresentAllowlist> {
+    let mut found = Vec::new();
     if let Some(bedrock) = doc.get("bedrock").and_then(Item::as_table_like) {
-        if array_is_non_empty(bedrock, "allowed_betas") {
-            fields.push("bedrock.allowed_betas".to_string());
-        }
-        if array_is_non_empty(bedrock, "allowed_body_fields") {
-            fields.push("bedrock.allowed_body_fields".to_string());
+        for key in BEDROCK_ALLOWLIST_KEYS {
+            if let Some(entry_count) = non_empty_array_len(bedrock, key) {
+                found.push(PresentAllowlist {
+                    path: format!("bedrock.{key}"),
+                    entry_count,
+                });
+            }
         }
     }
     if let Some(providers) = doc.get("providers").and_then(Item::as_table_like) {
         for (name, item) in providers.iter() {
-            if let Some(entry) = item.as_table_like()
-                && array_is_non_empty(entry, "allowed_betas")
+            if let Some(entry_count) = item
+                .as_table_like()
+                .and_then(|entry| non_empty_array_len(entry, PROVIDER_ALLOWLIST_KEY))
             {
-                fields.push(format!("providers.{name}.allowed_betas"));
+                found.push(PresentAllowlist {
+                    path: format!("providers.{name}.{PROVIDER_ALLOWLIST_KEY}"),
+                    entry_count,
+                });
             }
         }
     }
-    fields
+    found
 }
 
-/// Whether `table` carries `key` as a non-empty array.
-fn array_is_non_empty(table: &dyn TableLike, key: &str) -> bool {
+/// The length of `table`'s `key` when it is a non-empty array.
+fn non_empty_array_len(table: &dyn TableLike, key: &str) -> Option<usize> {
     table
         .get(key)
         .and_then(Item::as_array)
-        .is_some_and(|a| !a.is_empty())
+        .map(Array::len)
+        .filter(|len| *len > 0)
+}
+
+/// Whether `table` carries `key` as an empty array.
+fn array_is_empty(table: &dyn TableLike, key: &str) -> bool {
+    table
+        .get(key)
+        .and_then(Item::as_array)
+        .is_some_and(Array::is_empty)
+}
+
+/// One `unsupported_features` list to fold: the `[capability.overrides]`
+/// spec it lands under, its values, and the retired key it came from (for
+/// refusal text).
+struct UnsupportedFold {
+    spec: String,
+    values: Vec<Value>,
+    source: String,
 }
 
 /// The mutation plan [`collect_unsupported_features`] hands to the folding
 /// pass: the provider / model names whose `unsupported_features` key retires,
-/// and the `(target_spec, values)` folds for the non-empty lists.
+/// and the folds for the non-empty lists.
 struct UnsupportedFeaturesPlan {
     provider_removals: Vec<String>,
     model_removals: Vec<String>,
-    folds: Vec<(String, Vec<Value>)>,
+    folds: Vec<UnsupportedFold>,
 }
 
-/// Immutable collection pass for [`normalize_capability_overrides`]: the
-/// provider and model names whose `unsupported_features` key must be
-/// removed, plus the `(target_spec, values)` folds for the non-empty lists.
-/// A present-but-empty list is recorded for removal with no fold; a model
-/// with no `provider` field is skipped entirely (left for the gate).
+/// Immutable collection pass for [`migrate_v4_to_v5`]: the provider and
+/// model names whose `unsupported_features` key must be removed, plus the
+/// folds for the non-empty lists. A present-but-empty list is recorded for
+/// removal with no fold; a model with no `provider` field is skipped
+/// entirely (left for the gate).
 fn collect_unsupported_features(doc: &DocumentMut) -> UnsupportedFeaturesPlan {
     let mut provider_removals = Vec::new();
     let mut model_removals = Vec::new();
@@ -877,7 +1041,11 @@ fn collect_unsupported_features(doc: &DocumentMut) -> UnsupportedFeaturesPlan {
             if let Some(values) = read_unsupported_features(entry) {
                 provider_removals.push(name.to_string());
                 if !values.is_empty() {
-                    folds.push((name.to_string(), values));
+                    folds.push(UnsupportedFold {
+                        spec: name.to_string(),
+                        values,
+                        source: format!("[providers.{name}].{UNSUPPORTED_FEATURES_KEY}"),
+                    });
                 }
             }
         }
@@ -896,7 +1064,11 @@ fn collect_unsupported_features(doc: &DocumentMut) -> UnsupportedFeaturesPlan {
             };
             model_removals.push(nick.to_string());
             if !values.is_empty() {
-                folds.push((format!("{provider}:{nick}"), values));
+                folds.push(UnsupportedFold {
+                    spec: format!("{provider}:{nick}"),
+                    values,
+                    source: format!("[models.{nick}].{UNSUPPORTED_FEATURES_KEY}"),
+                });
             }
         }
     }
@@ -912,7 +1084,7 @@ fn collect_unsupported_features(doc: &DocumentMut) -> UnsupportedFeaturesPlan {
 /// an array (possibly empty), `None` when absent or not an array (a
 /// non-array value is left in place for the shared gate to reject).
 fn read_unsupported_features(table: &dyn TableLike) -> Option<Vec<Value>> {
-    let arr = table.get("unsupported_features")?.as_array()?;
+    let arr = table.get(UNSUPPORTED_FEATURES_KEY)?.as_array()?;
     Some(arr.iter().cloned().collect())
 }
 
@@ -1572,15 +1744,15 @@ fn provider_entries_with_seat_selection(doc: &DocumentMut) -> Vec<String> {
 /// - `raw_version == 3`: [`migrate_v3_to_v4`] relocates a provider-level
 ///   `seat_selection` onto a `[pools.<name>]` block and stamps
 ///   `version = 4`.
-/// - `raw_version == LATEST` (`LATEST_MIGRATION_VERSION`): the same-version
-///   [`normalize_capability_overrides`] folds legacy `unsupported_features`
-///   into `[capability.overrides]`, recording a 4 -> 4 step only when the
-///   doc actually changed. A plain v4 file is a no-op (no step).
+/// - `raw_version == 4`: [`migrate_v4_to_v5`] folds `unsupported_features`
+///   into `[capability.overrides]`, drops the empty egress allowlists (and
+///   an emptied `[bedrock]`), and stamps `version = 5`.
+///
+/// A file already at `LATEST_MIGRATION_VERSION` runs no rung (no step).
 ///
 /// # Errors
 ///
-/// A [`Refusal`] from any rung or from the same-version normalization,
-/// leaving `doc` byte-untouched.
+/// A [`Refusal`] from any rung, leaving `doc` byte-untouched.
 pub fn apply_config_transforms(
     doc: &mut DocumentMut,
     raw_version: u32,
@@ -1604,16 +1776,11 @@ pub fn apply_config_transforms(
 
     if version == 3 {
         steps.push(migrate_v3_to_v4(doc)?);
+        version = 4;
     }
 
-    // Same-version normalization runs ONLY for a file already at the latest
-    // version: a lower-version file reaches it through the rungs above and
-    // re-runs `config migrate` there to normalize (idempotent).
-    if raw_version == LATEST_MIGRATION_VERSION && normalize_capability_overrides(doc)? {
-        steps.push(StepOutcome {
-            from_version: LATEST_MIGRATION_VERSION,
-            to_version: LATEST_MIGRATION_VERSION,
-        });
+    if version == 4 {
+        steps.push(migrate_v4_to_v5(doc)?);
     }
 
     Ok(steps)
@@ -1708,7 +1875,8 @@ fn collect_renamed_entries(doc: &DocumentMut, raw_version: u32) -> Vec<(String, 
 }
 
 /// Human-readable descriptions of the keys the migration removes, derived
-/// PURELY from the original document, for a dry-run change summary.
+/// PURELY from the original document, for a dry-run change summary. Sorted,
+/// so the report does not depend on document order.
 fn collect_removed_keys(doc: &DocumentMut, raw_version: u32) -> Vec<String> {
     let mut removed = Vec::new();
     if let Some(retry) = doc.get("retry").and_then(Item::as_table_like) {
@@ -1730,20 +1898,22 @@ fn collect_removed_keys(doc: &DocumentMut, raw_version: u32) -> Vec<String> {
             ));
         }
     }
-    if raw_version >= LATEST_MIGRATION_VERSION {
+    if raw_version <= 4 {
         collect_unsupported_features_removals(doc, &mut removed);
+        collect_egress_allowlist_removals(doc, &mut removed);
     }
+    removed.sort();
     removed
 }
 
-/// Append the provider / model `unsupported_features` keys the same-version
-/// v3 normalization folds into `[capability.overrides]`, for the summary.
+/// Append the provider / model `unsupported_features` keys the v4 -> v5 rung
+/// folds into `[capability.overrides]`, for the summary.
 fn collect_unsupported_features_removals(doc: &DocumentMut, removed: &mut Vec<String>) {
     if let Some(providers) = doc.get("providers").and_then(Item::as_table_like) {
         for (name, item) in providers.iter() {
             if item
                 .as_table_like()
-                .is_some_and(|t| t.contains_key("unsupported_features"))
+                .is_some_and(|t| t.contains_key(UNSUPPORTED_FEATURES_KEY))
             {
                 removed.push(format!(
                     "[providers.{name}].unsupported_features (folded into \
@@ -1757,7 +1927,7 @@ fn collect_unsupported_features_removals(doc: &DocumentMut, removed: &mut Vec<St
             let Some(entry) = item.as_table_like() else {
                 continue;
             };
-            if entry.contains_key("unsupported_features") {
+            if entry.contains_key(UNSUPPORTED_FEATURES_KEY) {
                 match entry.get("provider").and_then(Item::as_str) {
                     Some(provider) => removed.push(format!(
                         "[models.{nick}].unsupported_features (folded into \
@@ -1765,6 +1935,39 @@ fn collect_unsupported_features_removals(doc: &DocumentMut, removed: &mut Vec<St
                     )),
                     None => removed.push(format!("[models.{nick}].unsupported_features")),
                 }
+            }
+        }
+    }
+}
+
+/// Append the empty egress allowlists the v4 -> v5 rung removes, and the
+/// `[bedrock]` table when the removal empties it, for the summary.
+fn collect_egress_allowlist_removals(doc: &DocumentMut, removed: &mut Vec<String>) {
+    if let Some(bedrock) = doc.get("bedrock").and_then(Item::as_table_like) {
+        for key in BEDROCK_ALLOWLIST_KEYS {
+            if array_is_empty(bedrock, key) {
+                removed.push(format!("bedrock.{key} (empty; retired)"));
+            }
+        }
+        let survivors = bedrock
+            .iter()
+            .filter(|(key, _)| {
+                !(BEDROCK_ALLOWLIST_KEYS.contains(key) && array_is_empty(bedrock, key))
+            })
+            .count();
+        if survivors == 0 {
+            removed.push("[bedrock] (empty once its retired lists are removed)".to_string());
+        }
+    }
+    if let Some(providers) = doc.get("providers").and_then(Item::as_table_like) {
+        for (name, item) in providers.iter() {
+            if item
+                .as_table_like()
+                .is_some_and(|entry| array_is_empty(entry, PROVIDER_ALLOWLIST_KEY))
+            {
+                removed.push(format!(
+                    "providers.{name}.{PROVIDER_ALLOWLIST_KEY} (empty; retired)"
+                ));
             }
         }
     }
@@ -2683,11 +2886,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // normalize_capability_overrides: same-version (v3 -> v3) fold of legacy
-    // provider/model unsupported_features into [capability.overrides].
+    // v4 -> v5: provider / model `unsupported_features` fold into
+    // `[capability.overrides]`, empty egress allowlists (and an emptied
+    // `[bedrock]`) retire, and every refusal leaves the doc untouched.
     // -----------------------------------------------------------------------
 
-    const LATEST_PROVIDER_MODEL: &str = "\
+    const V4_PROVIDER_MODEL: &str = "\
 version = 4\n\
 \n\
 [providers.fast]\n\
@@ -2701,60 +2905,66 @@ provider = \"fast\"\n\
 upstream = \"gpt-4o\"\n\
 unsupported_features = [\"computer_use\"]\n";
 
+    /// A fixture carrying the provider entry the allowlist rows hang off.
+    const V4_ANTHROPIC_PROVIDER: &str = "\
+version = 4\n\
+\n\
+[providers.a]\n\
+kind = \"anthropic-api\"\n\
+base_url = \"https://x\"\n\
+api_key_ref = \"literal:k\"\n";
+
     #[test]
-    fn normalize_folds_provider_and_model_lists_and_removes_legacy_keys() {
-        let mut doc = LATEST_PROVIDER_MODEL.parse::<DocumentMut>().unwrap();
+    fn v4_to_v5_folds_provider_and_model_lists_and_stamps_five() {
+        // Arrange
+        let mut doc = doc_of(V4_PROVIDER_MODEL);
 
-        let changed = normalize_capability_overrides(&mut doc).expect("no egress -> folds");
-        assert!(changed, "a legacy-carrying v3 file changes");
+        // Act
+        let step = migrate_v4_to_v5(&mut doc).expect("no allowlist, no conflict -> folds");
 
+        // Assert
+        assert_eq!(
+            step,
+            StepOutcome {
+                from_version: 4,
+                to_version: 5
+            }
+        );
         let out = doc.to_string();
-        // Legacy keys gone.
+        assert!(out.contains("version = 5"), "{out}");
         assert!(!out.contains("unsupported_features"), "{out}");
-        // No version bump.
-        assert!(
-            out.contains(&format!("version = {LATEST_MIGRATION_VERSION}")),
-            "{out}"
+        assert!(out.contains("[capability.overrides.fast]"), "{out}");
+        assert!(out.contains("[capability.overrides.\"fast:gpt\"]"), "{out}");
+        let reparsed = doc_of(&out);
+        let overrides = &reparsed["capability"]["overrides"];
+        assert_eq!(
+            overrides["fast"]["unsupported"].as_array().map(Array::len),
+            Some(1)
         );
-        assert!(
-            !out.contains(&format!("version = {}", LATEST_MIGRATION_VERSION + 1)),
-            "{out}"
+        assert_eq!(
+            overrides["fast"]["unsupported"][0].as_str(),
+            Some("web_search")
         );
-        // Canonical override tables, provider-scoped and model-scoped.
-        assert!(
-            out.contains("[capability.overrides.fast]"),
-            "provider override missing: {out}"
-        );
-        assert!(
-            out.contains("[capability.overrides.\"fast:gpt\"]"),
-            "model override missing: {out}"
-        );
-        assert!(out.contains("web_search"), "{out}");
-        assert!(out.contains("computer_use"), "{out}");
-        // Re-parses and folds byte-identical on a second run (idempotent).
-        let mut again = out.parse::<DocumentMut>().expect("reparse");
-        assert!(
-            !normalize_capability_overrides(&mut again).expect("no egress"),
-            "second run finds nothing to fold"
+        assert_eq!(
+            overrides["fast:gpt"]["unsupported"][0].as_str(),
+            Some("computer_use")
         );
     }
 
     #[test]
-    fn normalize_preserves_route_away_verdicts_for_every_folded_cell() {
+    fn v4_to_v5_preserves_route_away_verdicts_for_every_folded_cell() {
         use crate::override_registry::{OverrideRegistry, OverrideVerdict};
 
         let before: crate::config::Config =
-            toml::from_str(LATEST_PROVIDER_MODEL).expect("legacy config parses");
+            toml::from_str(V4_PROVIDER_MODEL).expect("legacy config parses");
         let before_registry = OverrideRegistry::build(&before);
 
-        let mut doc = LATEST_PROVIDER_MODEL.parse::<DocumentMut>().unwrap();
-        normalize_capability_overrides(&mut doc).expect("folds");
+        let mut doc = doc_of(V4_PROVIDER_MODEL);
+        migrate_v4_to_v5(&mut doc).expect("folds");
         let after: crate::config::Config =
             toml::from_str(&doc.to_string()).expect("migrated config parses");
         let after_registry = OverrideRegistry::build(&after);
 
-        // Filter behavior is the resolved verdict; provenance changes by design
-        // (static legacy label -> Override) but must not change the routing.
         for (provider, nickname, capability) in [
             ("fast", "gpt", "web_search"),
             ("fast", "gpt", "computer_use"),
@@ -2778,170 +2988,340 @@ unsupported_features = [\"computer_use\"]\n";
     }
 
     #[test]
-    fn normalize_plain_v3_with_no_legacy_fields_is_a_no_op() {
-        let src = "version = 3\n\n[server]\nhost = \"127.0.0.1\"\n";
-        let mut doc = src.parse::<DocumentMut>().unwrap();
+    fn v4_to_v5_plain_file_only_stamps_the_version() {
+        let src = "# keep me\nversion = 4\n\n[server]\nhost = \"127.0.0.1\" # loopback\n";
+        let mut doc = doc_of(src);
 
-        let changed = normalize_capability_overrides(&mut doc).expect("clean");
-        assert!(!changed, "a plain v3 file must not change");
-        assert_eq!(doc.to_string(), src, "byte-identical");
-    }
+        migrate_v4_to_v5(&mut doc).expect("stamps");
 
-    #[test]
-    fn normalize_refuses_on_behavior_bearing_bedrock_allowlist_untouched() {
-        let src = "version = 3\n\n[bedrock]\nallowed_betas = [\"beta-1\"]\n\n\
-                   [providers.fast]\nkind = \"openai-compat\"\nbase_url = \"https://x\"\n\
-                   api_key_ref = \"literal:k\"\nunsupported_features = [\"web_search\"]\n";
-        let mut doc = src.parse::<DocumentMut>().unwrap();
-
-        let refusal =
-            normalize_capability_overrides(&mut doc).expect_err("non-empty allowlist refuses");
-        let Refusal::EgressAllowlist { fields } = &refusal else {
-            panic!("expected EgressAllowlist, got {refusal:?}");
-        };
-        assert_eq!(fields, &vec!["bedrock.allowed_betas".to_string()]);
-        // No mutation: the unsupported_features were NOT folded.
         assert_eq!(
             doc.to_string(),
-            src,
-            "refusal leaves the doc byte-identical"
+            src.replacen("version = 4", "version = 5", 1)
         );
-        assert!(refusal.to_string().contains("allowed_betas"));
     }
 
     #[test]
-    fn normalize_refuses_on_provider_allowed_betas() {
-        let src = "version = 3\n\n[providers.a]\nkind = \"anthropic-api\"\n\
-                   base_url = \"https://x\"\napi_key_ref = \"literal:k\"\n\
-                   allowed_betas = [\"context-management-2025-06-27\"]\n";
-        let mut doc = src.parse::<DocumentMut>().unwrap();
+    fn v4_to_v5_drops_empty_allowlists_and_the_emptied_bedrock_table() {
+        // Arrange
+        let src = format!(
+            "{V4_ANTHROPIC_PROVIDER}allowed_betas = []\n\n\
+             [bedrock]\nallowed_betas = []\nallowed_body_fields = []\n"
+        );
+        let mut doc = doc_of(&src);
 
-        let refusal = normalize_capability_overrides(&mut doc).expect_err("provider allowlist");
-        let Refusal::EgressAllowlist { fields } = &refusal else {
+        // Act
+        migrate_v4_to_v5(&mut doc).expect("empty allowlists retire");
+
+        // Assert
+        let out = doc.to_string();
+        assert!(!out.contains("allowed_betas"), "{out}");
+        assert!(!out.contains("allowed_body_fields"), "{out}");
+        assert!(!out.contains("bedrock"), "{out}");
+        assert!(out.contains("[providers.a]"), "{out}");
+        let config: crate::config::Config =
+            toml::from_str(&out).expect("the v5 output parses as config");
+        assert_eq!(config.version, 5);
+    }
+
+    #[test]
+    fn v4_to_v5_keeps_a_bedrock_table_that_still_holds_another_key() {
+        let mut doc = doc_of("version = 4\n[bedrock]\nallowed_betas = []\nother = 1\n");
+
+        migrate_v4_to_v5(&mut doc).expect("empty list retires");
+
+        let out = doc.to_string();
+        assert!(!out.contains("allowed_betas"), "{out}");
+        assert!(out.contains("[bedrock]\nother = 1"), "{out}");
+    }
+
+    #[test]
+    fn v4_to_v5_refuses_every_non_empty_allowlist_untouched_with_count_not_values() {
+        const CANARY: &str = "canary-flag-2099-01-01";
+        let cases = [
+            (
+                "bedrock.allowed_betas",
+                format!("version = 4\n[bedrock]\nallowed_betas = [\"{CANARY}\", \"b\"]\n"),
+                "bedrock.allowed_betas (2 entries)",
+            ),
+            (
+                "bedrock.allowed_body_fields",
+                format!("version = 4\n[bedrock]\nallowed_body_fields = [\"{CANARY}\"]\n"),
+                "bedrock.allowed_body_fields (1 entry)",
+            ),
+            (
+                "providers.a.allowed_betas",
+                format!("{V4_ANTHROPIC_PROVIDER}allowed_betas = [\"{CANARY}\"]\n"),
+                "providers.a.allowed_betas (1 entry)",
+            ),
+        ];
+        for (row, src, expected_line) in cases {
+            // Arrange
+            let mut doc = doc_of(&src);
+
+            // Act
+            let refusal = migrate_v4_to_v5(&mut doc).expect_err(row);
+
+            // Assert
+            assert_eq!(
+                doc.to_string(),
+                src,
+                "{row}: the doc must stay byte-identical"
+            );
+            let Refusal::EgressAllowlist { allowlists } = &refusal else {
+                panic!("{row}: expected EgressAllowlist, got {refusal:?}");
+            };
+            assert_eq!(allowlists.len(), 1, "{row}");
+            assert_eq!(allowlists[0].path, row);
+            let text = refusal.to_string();
+            assert!(text.contains(expected_line), "{row}: {text}");
+            assert!(
+                !text.contains(CANARY),
+                "{row}: values must never render: {text}"
+            );
+            assert!(
+                text.contains("unsupported = [\"beta:<flag>\"]"),
+                "{row}: the successor must be named: {text}"
+            );
+            assert!(
+                text.contains("[capability.overrides.<provider>]"),
+                "{row}: {text}"
+            );
+            assert!(text.contains("has no successor"), "{row}: {text}");
+        }
+    }
+
+    #[test]
+    fn v4_to_v5_reports_every_non_empty_allowlist_in_order() {
+        let src = format!(
+            "{V4_ANTHROPIC_PROVIDER}allowed_betas = [\"x\"]\n\n\
+             [bedrock]\nallowed_betas = [\"y\"]\nallowed_body_fields = [\"z\"]\n"
+        );
+        let mut doc = doc_of(&src);
+
+        let refusal = migrate_v4_to_v5(&mut doc).expect_err("three lists refuse");
+
+        let Refusal::EgressAllowlist { allowlists } = &refusal else {
             panic!("expected EgressAllowlist, got {refusal:?}");
         };
-        assert_eq!(fields, &vec!["providers.a.allowed_betas".to_string()]);
-        assert_eq!(doc.to_string(), src);
+        let paths: Vec<&str> = allowlists.iter().map(|a| a.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "bedrock.allowed_betas",
+                "bedrock.allowed_body_fields",
+                "providers.a.allowed_betas"
+            ]
+        );
     }
 
     #[test]
-    fn normalize_empty_allowlist_is_pass_through_not_a_refusal() {
-        // An empty allowed_betas = [] carries no behavior (pass-through), so
-        // it neither refuses nor gets removed -- it stays exactly as written.
-        let src = "version = 3\n\n[bedrock]\nallowed_betas = []\nallowed_body_fields = []\n\n\
-                   [providers.fast]\nkind = \"openai-compat\"\nbase_url = \"https://x\"\n\
-                   api_key_ref = \"literal:k\"\nunsupported_features = [\"web_search\"]\n";
-        let mut doc = src.parse::<DocumentMut>().unwrap();
+    fn v4_to_v5_refuses_a_fold_onto_a_force_supported_cell_untouched() {
+        let cases = [
+            (
+                "provider-scoped",
+                format!(
+                    "{V4_PROVIDER_MODEL}\n[capability.overrides.fast]\n\
+                     force_supported = [\"web_search\"]\n"
+                ),
+                "[capability.overrides.fast] `web_search`",
+            ),
+            (
+                "model-scoped",
+                format!(
+                    "{V4_PROVIDER_MODEL}\n[capability.overrides.\"fast:gpt\"]\n\
+                     force_supported = [\"computer_use\"]\n"
+                ),
+                "[capability.overrides.\"fast:gpt\"] `computer_use`",
+            ),
+        ];
+        for (row, src, expected_cell) in cases {
+            let mut doc = doc_of(&src);
 
-        let changed = normalize_capability_overrides(&mut doc).expect("empty allowlist is clean");
-        assert!(changed, "the provider list still folds");
-        let out = doc.to_string();
-        // Empty allowlists untouched, provider list folded.
-        assert!(out.contains("allowed_betas = []"), "{out}");
-        assert!(out.contains("[capability.overrides.fast]"), "{out}");
-        assert!(!out.contains("unsupported_features"), "{out}");
+            let refusal = migrate_v4_to_v5(&mut doc).expect_err(row);
+
+            assert_eq!(
+                doc.to_string(),
+                src,
+                "{row}: the doc must stay byte-identical"
+            );
+            let Refusal::CapabilityConflict { cells } = &refusal else {
+                panic!("{row}: expected CapabilityConflict, got {refusal:?}");
+            };
+            assert_eq!(cells.len(), 1, "{row}: {cells:?}");
+            assert!(cells[0].starts_with(expected_cell), "{row}: {cells:?}");
+        }
     }
 
     #[test]
-    fn normalize_merges_into_existing_override_without_duplicating() {
-        // The target already has a [capability.overrides.fast] entry naming
-        // the SAME capability -- folding must not double it up.
-        let src = "version = 3\n\n[providers.fast]\nkind = \"openai-compat\"\n\
+    fn v4_to_v5_merges_into_an_existing_override_without_duplicating() {
+        let src = "version = 4\n\n[providers.fast]\nkind = \"openai-compat\"\n\
                    base_url = \"https://x\"\napi_key_ref = \"literal:k\"\n\
                    unsupported_features = [\"web_search\", \"computer_use\"]\n\n\
                    [capability.overrides.fast]\nunsupported = [\"web_search\"]\n";
-        let mut doc = src.parse::<DocumentMut>().unwrap();
+        let mut doc = doc_of(src);
 
-        normalize_capability_overrides(&mut doc).expect("folds");
+        migrate_v4_to_v5(&mut doc).expect("folds");
+
         let out = doc.to_string();
         assert!(!out.contains("unsupported_features"), "{out}");
-        // web_search appears once (deduped), computer_use appended.
         assert_eq!(out.matches("web_search").count(), 1, "{out}");
         assert!(out.contains("computer_use"), "{out}");
     }
 
     #[test]
-    fn normalize_preserves_comments_and_unrelated_content() {
-        let src = "# operator note: keep me\nversion = 3\n\n\
+    fn v4_to_v5_preserves_comments_and_unrelated_content() {
+        let src = "# operator note: keep me\nversion = 4\n\n\
                    [server]\nhost = \"127.0.0.1\" # loopback\n\n\
                    [providers.fast]\nkind = \"openai-compat\"\nbase_url = \"https://x\"\n\
                    api_key_ref = \"literal:k\"\nunsupported_features = [\"web_search\"]\n";
-        let mut doc = src.parse::<DocumentMut>().unwrap();
+        let mut doc = doc_of(src);
 
-        normalize_capability_overrides(&mut doc).expect("folds");
+        migrate_v4_to_v5(&mut doc).expect("folds");
+
         let out = doc.to_string();
         assert!(out.contains("# operator note: keep me"), "{out}");
         assert!(out.contains("host = \"127.0.0.1\" # loopback"), "{out}");
-        out.parse::<DocumentMut>().expect("reparse");
     }
 
     #[test]
-    fn normalize_removes_a_present_but_empty_legacy_list() {
-        let src = "version = 3\n\n[providers.fast]\nkind = \"openai-compat\"\n\
+    fn v4_to_v5_removes_a_present_but_empty_list_with_no_override() {
+        let src = "version = 4\n\n[providers.fast]\nkind = \"openai-compat\"\n\
                    base_url = \"https://x\"\napi_key_ref = \"literal:k\"\n\
                    unsupported_features = []\n";
-        let mut doc = src.parse::<DocumentMut>().unwrap();
+        let mut doc = doc_of(src);
 
-        let changed = normalize_capability_overrides(&mut doc).expect("empty list retires");
-        assert!(changed, "the deprecated key is present, so it is removed");
+        migrate_v4_to_v5(&mut doc).expect("empty list retires");
+
         let out = doc.to_string();
         assert!(!out.contains("unsupported_features"), "{out}");
-        // An empty list folds to nothing -- no override entry is created.
         assert!(!out.contains("[capability.overrides"), "{out}");
     }
 
     // -----------------------------------------------------------------------
-    // Ladder: a raw LATEST-version file with legacy fields records a
-    // same-version step; a plain one stays a no-op; an egress allowlist
-    // refuses without IO.
+    // Ladder + report: a v3 file reaches the fold through v4, the report
+    // names every folded / removed key in sorted order for any input <= 4,
+    // and a v5 file is already current.
     // -----------------------------------------------------------------------
 
+    /// A v3 file carrying both the v3 -> v4 input (`seat_selection`) and the
+    /// v4 -> v5 input (`unsupported_features`, an empty allowlist).
+    const V3_SEAT_SELECTION_AND_UNSUPPORTED: &str = "\
+version = 3
+
+[bedrock]
+allowed_betas = []
+
+[providers.anthropic-managed]
+kind = \"anthropic-api\"
+api_key_ref = \"oauth://anthropic\"
+seat_selection = \"round-robin\"
+unsupported_features = [\"web_search\"]
+
+[models.opus]
+provider = \"anthropic-managed\"
+upstream = \"claude-opus-4-8\"
+unsupported_features = [\"computer_use\"]
+
+[aliases]
+default = \"opus\"
+";
+
     #[test]
-    fn plan_latest_with_legacy_fields_records_a_same_version_step_config_only() {
+    fn plan_v3_ladders_through_v4_to_v5_with_the_fold_applied() {
+        // Arrange
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let doc = doc_of(LATEST_PROVIDER_MODEL);
+        let doc = doc_of(V3_SEAT_SELECTION_AND_UNSUPPORTED);
 
-        let plan = plan_migration(
-            &doc,
-            LATEST_MIGRATION_VERSION,
-            &BTreeMap::new(),
-            &overlay_path,
-        )
-        .expect("a latest-version file normalizes");
+        // Act
+        let plan = plan_migration(&doc, 3, &BTreeMap::new(), &overlay_path).expect("v3 -> v5");
+
+        // Assert
         assert_eq!(
             plan.steps,
-            vec![StepOutcome {
-                from_version: LATEST_MIGRATION_VERSION,
-                to_version: LATEST_MIGRATION_VERSION
-            }]
+            vec![
+                StepOutcome {
+                    from_version: 3,
+                    to_version: 4
+                },
+                StepOutcome {
+                    from_version: 4,
+                    to_version: 5
+                },
+            ]
         );
-        assert_eq!(plan.from, LATEST_MIGRATION_VERSION);
-        assert_eq!(plan.to, LATEST_MIGRATION_VERSION);
-        assert!(matches!(plan.write_kind, WriteKind::ConfigOnly(_)));
-        assert!(plan.overlay_candidate().is_none());
-        // The candidate folds the legacy keys away.
+        assert_eq!(plan.to, 5);
         let out = plan.config_candidate().expect("candidate");
+        assert!(out.contains("version = 5"), "{out}");
+        assert!(out.contains("[pools.anthropic]"), "{out}");
         assert!(!out.contains("unsupported_features"), "{out}");
+        assert!(!out.contains("bedrock"), "{out}");
+        assert!(
+            out.contains("[capability.overrides.anthropic-managed]"),
+            "{out}"
+        );
+        assert!(
+            out.contains("[capability.overrides.\"anthropic-managed:opus\"]"),
+            "{out}"
+        );
+        let config: crate::config::Config =
+            toml::from_str(out).expect("the v5 candidate parses as config");
+        assert_eq!(config.version, 5);
     }
 
     #[test]
-    fn plan_latest_egress_allowlist_refuses() {
+    fn removed_keys_list_every_fold_and_drop_sorted_for_v3_and_v4_inputs() {
+        let v4 = V3_SEAT_SELECTION_AND_UNSUPPORTED
+            .replacen("version = 3", "version = 4", 1)
+            .replace("seat_selection = \"round-robin\"\n", "");
+        for (raw_version, src) in [(3, V3_SEAT_SELECTION_AND_UNSUPPORTED.to_string()), (4, v4)] {
+            let removed = collect_removed_keys(&doc_of(&src), raw_version);
+
+            for expected in [
+                "[bedrock] (empty once its retired lists are removed)",
+                "bedrock.allowed_betas (empty; retired)",
+                "[models.opus].unsupported_features (folded into \
+                 [capability.overrides.\"anthropic-managed:opus\"].unsupported)",
+                "[providers.anthropic-managed].unsupported_features (folded into \
+                 [capability.overrides.anthropic-managed].unsupported)",
+            ] {
+                assert!(
+                    removed.iter().any(|k| k == expected),
+                    "v{raw_version}: missing `{expected}` in {removed:?}"
+                );
+            }
+            let mut sorted = removed.clone();
+            sorted.sort();
+            assert_eq!(removed, sorted, "v{raw_version}: the report must be sorted");
+        }
+    }
+
+    #[test]
+    fn plan_v5_doc_is_already_current() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let doc = doc_of(&format!(
-            "version = {LATEST_MIGRATION_VERSION}\n[bedrock]\nallowed_body_fields = \
-             [\"messages\"]\n"
-        ));
+        let doc = doc_of("version = 5\n[server]\nhost = \"127.0.0.1\"\n");
 
-        let err = plan_migration(
-            &doc,
-            LATEST_MIGRATION_VERSION,
-            &BTreeMap::new(),
-            &overlay_path,
-        )
-        .expect_err("egress allowlist refuses");
-        assert!(matches!(err, MigrateError::Refused(_)), "err: {err}");
+        let plan = plan_migration(&doc, 5, &BTreeMap::new(), &overlay_path).expect("no-op");
+
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.write_kind, WriteKind::NoChange);
+        assert!(plan.removed_keys.is_empty(), "{:?}", plan.removed_keys);
+    }
+
+    #[test]
+    fn plan_v4_egress_allowlist_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let doc = doc_of("version = 4\n[bedrock]\nallowed_body_fields = [\"messages\"]\n");
+
+        let err = plan_migration(&doc, 4, &BTreeMap::new(), &overlay_path)
+            .expect_err("egress allowlist refuses");
+
+        assert!(
+            matches!(err, MigrateError::Refused(Refusal::EgressAllowlist { .. })),
+            "err: {err}"
+        );
     }
 
     // -----------------------------------------------------------------------
