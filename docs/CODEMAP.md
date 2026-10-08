@@ -7061,7 +7061,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   gates all opening/anchor work), `SseEvent`,
   `StreamRequestContext` (request-derived seed for `new_stream_state`:
   opening input-token count + resolved model), `read_alias_header`
-  (`x-routectl-alias` override); `MITM_PROXIED_HEADER`
+  (`x-routectl-alias` override); `normalize_client_betas` /
+  `MAX_CLIENT_BETA_FLAGS` -- the shared client beta normalizer every body- or
+  header-sourced beta goes through on the Anthropic and OpenAI ingresses:
+  comma-split, trim, visible-ASCII only, dedup in source order, a 64-flag cap
+  that fails with a 400 validation error, and one aggregated WARN per call
+  for dropped flags; `MITM_PROXIED_HEADER`
   (`x-routectl-mitm-proxied`) -- the seam header the MITM front-proxy stamps
   on the re-injected `api.anthropic.com` inference leg, shared between the
   proxy set site and the `handlers::ingress_handle` forwarded-mode

@@ -867,6 +867,11 @@ client flag the floor also carries keeps its client position. A request on
 a forwarded credential withholds nothing. Each withheld flag is logged at
 `debug` (see [LOGGING.md](LOGGING.md)).
 
+At ingress, client flags from the body and the `anthropic-beta` header are
+split on commas, trimmed and deduplicated; a flag holding any byte outside
+visible ASCII is dropped, and a request with more than 64 distinct flags is
+rejected with 400.
+
 On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
 routectl also injects a 9-flag model-agnostic floor
 (`default_claude_code_anthropic_betas()`: `claude-code-20250219`,

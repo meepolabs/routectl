@@ -100,3 +100,55 @@ fn is_safe_beta_value_accepts_only_visible_ascii() {
         assert!(!is_safe_beta_value(bad), "{bad:?}");
     }
 }
+
+const DROP_MESSAGE: &str =
+    "ingress: anthropic-beta values contain a byte outside visible ASCII; dropping";
+
+#[test]
+fn dropped_flags_log_one_aggregated_warning_per_call() {
+    let rows: &[(&str, &[&str], usize, usize)] = &[
+        ("one unsafe piece", &["a b", "a-1"], 1, 3),
+        (
+            "many unsafe pieces",
+            &["a b,c\td", "a\u{0001}b", "a-1", "caf\u{00e9}-12", "a b"],
+            5,
+            8,
+        ),
+    ];
+    for (name, entries, dropped, value_len_max) in rows {
+        let events = routectl_testkit::capture_events(|| {
+            normalize_client_betas("test", entries.iter().copied()).expect(name);
+        });
+
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.message == DROP_MESSAGE)
+            .collect();
+        assert_eq!(warns.len(), 1, "{name}: {events:?}");
+        assert_eq!(warns[0].level, tracing::Level::WARN, "{name}");
+        assert_eq!(
+            warns[0].field("dropped"),
+            Some(dropped.to_string().as_str()),
+            "{name}"
+        );
+        assert_eq!(
+            warns[0].field("value_len_max"),
+            Some(value_len_max.to_string().as_str()),
+            "{name}"
+        );
+        let names: Vec<&str> = warns[0].fields.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, ["dialect", "dropped", "value_len_max"], "{name}");
+    }
+}
+
+#[test]
+fn clean_flags_log_no_drop_warning() {
+    let events = routectl_testkit::capture_events(|| {
+        normalize_client_betas("test", [" a-1 ", "b-2,a-1"]).expect("clean");
+    });
+
+    assert!(
+        events.iter().all(|e| e.level != tracing::Level::WARN),
+        "{events:?}"
+    );
+}

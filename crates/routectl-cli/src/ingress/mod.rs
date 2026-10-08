@@ -322,7 +322,8 @@ pub const MAX_CLIENT_BETA_FLAGS: usize = 64;
 /// Split every entry on `,`, trim each piece, and keep the first occurrence of
 /// each non-empty flag whose bytes are all visible ASCII (`0x21..=0x7E`), in
 /// source order. A flag holding any other byte (a control byte, DEL, a space,
-/// or non-ASCII) is dropped with a warning that logs only its length.
+/// or non-ASCII) is dropped; one call logs at most one warning, carrying the
+/// drop count and the longest dropped length, never the values.
 ///
 /// # Errors
 ///
@@ -334,28 +335,40 @@ pub(crate) fn normalize_client_betas<'a>(
 ) -> Result<Vec<String>> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut flags: Vec<String> = Vec::new();
+    let mut dropped: usize = 0;
+    let mut value_len_max: usize = 0;
+    let mut over_cap = false;
     for piece in entries.into_iter().flat_map(|entry| entry.split(',')) {
         let flag = piece.trim();
         if flag.is_empty() {
             continue;
         }
         if !is_safe_beta_value(flag) {
-            tracing::warn!(
-                dialect,
-                value_len = flag.len(),
-                "ingress: anthropic-beta value contains a byte outside visible ASCII; dropping",
-            );
+            dropped += 1;
+            value_len_max = value_len_max.max(flag.len());
             continue;
         }
         if !seen.insert(flag) {
             continue;
         }
         if flags.len() == MAX_CLIENT_BETA_FLAGS {
-            return Err(Error::Validation(format!(
-                "{dialect} ingress: more than {MAX_CLIENT_BETA_FLAGS} distinct anthropic-beta flags"
-            )));
+            over_cap = true;
+            break;
         }
         flags.push(flag.to_string());
+    }
+    if dropped > 0 {
+        tracing::warn!(
+            dialect,
+            dropped,
+            value_len_max,
+            "ingress: anthropic-beta values contain a byte outside visible ASCII; dropping",
+        );
+    }
+    if over_cap {
+        return Err(Error::Validation(format!(
+            "{dialect} ingress: more than {MAX_CLIENT_BETA_FLAGS} distinct anthropic-beta flags"
+        )));
     }
     Ok(flags)
 }
