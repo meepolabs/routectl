@@ -64,7 +64,7 @@ fn req_with_caller_output_schema(schema: Value) -> ChatRequest {
 fn assembled(req: &ChatRequest) -> (Value, Vec<CapturedEvent>) {
     let mut body = Value::Null;
     let events = capture_events(|| {
-        body = normalize(PROVIDER, req, false, &[], false, None, false, true).unwrap();
+        body = normalize(PROVIDER, req, false, false, None, false, true).unwrap();
     });
     (body, events)
 }

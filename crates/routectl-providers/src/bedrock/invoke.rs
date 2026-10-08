@@ -39,11 +39,6 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         &cfg.id,
         req,
         cfg.adaptive_thinking.unwrap_or(false),
-        // Bedrock-Invoke applies its own beta filter via
-        // `crate::bedrock::betas::filter_bedrock_betas` (called below
-        // on the assembled body); pass an empty allowlist here so the
-        // anthropic-api egress's filter is a no-op pass-through.
-        &[],
         // Bedrock does not emulate context_management beta; no cache.
         false,
         None,

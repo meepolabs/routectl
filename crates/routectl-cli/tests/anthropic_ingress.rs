@@ -3270,8 +3270,8 @@ async fn per_model_max_output_tokens_lands_in_upstream_wire_body() {
 const UPDATES_DISPLAY: &str = "updates";
 
 /// The beta a Claude Code session pairs with `thinking.display:
-/// "updates"`. It must survive the default (empty) `allowed_betas`
-/// pass-through and reach the upstream `anthropic-beta` header.
+/// "updates"`. It must pass through and reach the upstream
+/// `anthropic-beta` header.
 const THINKING_DISPLAY_BETA: &str = "thinking-display-updates-2026-08-18";
 
 /// Assert the upstream request carried `beta` in its `anthropic-beta`
@@ -3307,8 +3307,8 @@ fn thinking_updates_request_body() -> Value {
 }
 
 /// Non-streaming pin: `thinking.display: "updates"` reaches the upstream
-/// wire body verbatim, and the beta that gates it survives the default
-/// empty `allowed_betas`.
+/// wire body verbatim, and the beta that gates it reaches the upstream
+/// header.
 #[tokio::test]
 async fn thinking_display_updates_reaches_upstream_body() {
     let upstream = MockServer::start().await;

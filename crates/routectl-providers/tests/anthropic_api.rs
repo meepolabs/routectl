@@ -34,7 +34,6 @@ fn make_provider(base_url: &str) -> AnthropicApiProvider {
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,

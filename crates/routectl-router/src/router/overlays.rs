@@ -145,9 +145,8 @@ pub(super) fn apply_layered_overlays(
     // Operator-configured beta floor: the provider + model
     // `header_extras["anthropic-beta"]` betas, EXCLUDING the
     // client/ingress betas already on `req.anthropic_beta`. The
-    // Anthropic-API egress re-adds these unconditionally after applying
-    // the per-provider `allowed_betas` allowlist, so an operator's
-    // model-pinned beta bypasses a filter meant only for client betas.
+    // Anthropic-API egress unions these unconditionally after the client
+    // set, so an operator's model-pinned beta always ships.
     // `req.anthropic_beta` itself stays the full union (composed by
     // `merge_header_extras`) so Bedrock's `filter_bedrock_betas` and the
     // log-safe summary still see the complete set.
@@ -177,8 +176,7 @@ fn operator_payload_extras(
 /// the provider and model `header_extras["anthropic-beta"]` values
 /// (comma-split, trimmed, deduplicated, visit order preserved). Client/
 /// ingress betas are deliberately excluded -- those ride on
-/// `req.anthropic_beta` and stay subject to the per-provider
-/// `allowed_betas` allowlist.
+/// `req.anthropic_beta`.
 pub fn operator_betas(
     provider_extras: Option<&BTreeMap<String, String>>,
     model_extras: &BTreeMap<String, String>,

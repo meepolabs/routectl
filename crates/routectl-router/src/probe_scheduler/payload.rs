@@ -134,12 +134,11 @@ pub struct ProbePayload {
     /// `anthropic_beta`.
     ///
     /// Stored SEPARATELY from the operator set, never unioned. The egress
-    /// treats the two differently: the client set is subject to the
-    /// per-provider `allowed_betas` allowlist, while the operator set bypasses
-    /// it unconditionally. Collapsing them into one list and reapplying it to
-    /// `operator_betas` would smuggle a client flag past the very allowlist
-    /// that filtered it out of the admitted request -- the probe's header
-    /// would then be WIDER than the header under test.
+    /// composes the two at different points: the client set leads the
+    /// header, while the operator set is unioned after the configured betas
+    /// and always ships. Collapsing them into one list and reapplying it to
+    /// `operator_betas` would reorder the probe's header relative to the
+    /// header under test.
     client_betas: Vec<String>,
     /// The OPERATOR beta floor the admitted request carried on
     /// `routectl_internal.operator_betas`, composed by the dispatch overlay

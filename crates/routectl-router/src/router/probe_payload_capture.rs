@@ -123,9 +123,9 @@ impl Router {
                 continue;
             };
             // The two beta sources stay SEPARATE all the way through: the
-            // egress subjects the client set to `allowed_betas` and exempts the
-            // operator set, so a union reapplied to either carrier would send a
-            // header the admitted request did not. Any bound or validity breach
+            // egress composes the client set and the operator set at different
+            // points of the header, so a union reapplied to either carrier would
+            // send a header the admitted request did not. Any bound or validity breach
             // refuses the payload -- counted and diagnosed rather than silently
             // skipped, since an un-probed lane otherwise looks like one that was
             // never admitted.

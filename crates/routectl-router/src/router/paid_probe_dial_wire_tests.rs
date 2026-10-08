@@ -50,11 +50,10 @@ async fn the_paid_body_carries_the_exact_seat_and_the_retained_payload() {
 
 #[tokio::test]
 async fn the_paid_body_keeps_each_beta_source_on_its_own_carrier() {
-    // Each source back onto ITS OWN carrier. The egress filters `anthropic_beta`
-    // through `allowed_betas` and exempts `operator_betas`, so crossing them over
-    // would either smuggle a filtered client flag past the allowlist or subject an
-    // operator-pinned flag to it -- either way the paid call's header would differ
-    // from the one under test.
+    // Each source back onto ITS OWN carrier. The egress leads the header with
+    // `anthropic_beta` and unions `operator_betas` after the configured betas, so
+    // crossing them over would reorder the paid call's header relative to the
+    // one under test.
     let dial = Dial::legacy(CompleteAnswer::Ok);
 
     dialed(&dial).await;

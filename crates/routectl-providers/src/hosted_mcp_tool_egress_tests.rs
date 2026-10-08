@@ -95,7 +95,7 @@ fn bedrock_cfg(api_shape: BedrockApiShape) -> BedrockConfig {
 
 fn anthropic_api_body(req: &ChatRequest) -> String {
     let body =
-        crate::anthropic_api::request::normalize("test", req, false, &[], false, None, false, true)
+        crate::anthropic_api::request::normalize("test", req, false, false, None, false, true)
             .expect("anthropic-api body assembles");
     serde_json::to_string(&body).expect("body serializes")
 }

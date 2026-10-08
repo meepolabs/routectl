@@ -2,11 +2,10 @@
 //!
 //! The routing half of this acceptance bar (the `FilterSource` labels a
 //! legacy `unsupported_features` list produces) lives in the router crate.
-//! This file proves the OTHER half: the two legacy egress allowlists
-//! (`[bedrock] allowed_betas` and `[bedrock] allowed_body_fields`, plus the
-//! anthropic-egress `allowed_betas`) emit byte-identical wire output to the
-//! legacy baseline. The egress filters were untouched by the per-provider
-//! capability migration; these tests pin
+//! This file proves the OTHER half: the two legacy Bedrock egress allowlists
+//! (`[bedrock] allowed_betas` and `[bedrock] allowed_body_fields`) emit
+//! byte-identical wire output to the legacy baseline. The egress filters
+//! were untouched by the per-provider capability migration; these tests pin
 //! their absolute output so any accidental regression is caught.
 //!
 //! Each surface is exercised in BOTH modes the allowlists support:
@@ -16,27 +15,18 @@
 //! - NON-EMPTY allowlist: only the listed betas / fields survive; the rest
 //!   drop before dispatch.
 //!
-//! The Bedrock surfaces pin the FULL assembled body via `insta` snapshots
-//! (absolute expected bytes) plus targeted drop/keep assertions. The
-//! anthropic surface carries its betas on the `anthropic-beta` HTTP header
-//! (the body-side field is stripped before send on the api.anthropic.com
-//! egress), so it is proven against the captured outbound header -- the
-//! actual wire surface -- via a wiremock round-trip.
+//! Each surface pins the FULL assembled body via `insta` snapshots
+//! (absolute expected bytes) plus targeted drop/keep assertions.
 
 #![cfg(all(feature = "bedrock", feature = "anthropic-api"))]
 
 mod common;
 
 use routectl_core::{ChatRequest, Provider};
-use routectl_providers::anthropic_api::{
-    AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
-};
 use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth::ResolvedCreds,
 };
 use serde_json::json;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // A beta the non-empty allowlist accepts, and one it rejects.
 const ALLOWED_BETA: &str = "context-1m-2025-08-07";
@@ -64,7 +54,7 @@ fn non_empty_body_fields() -> Vec<String> {
 
 /// One request carrying both betas (one to keep, one to drop) and both
 /// forward-compat body fields (one to keep, one to drop). Reused across all
-/// three egress surfaces so the equivalence proof runs against a single
+/// two egress surfaces so the equivalence proof runs against a single
 /// legacy-shaped input.
 fn legacy_request() -> ChatRequest {
     ChatRequest {
@@ -105,73 +95,6 @@ fn bedrock_provider(
         key: "test-key".into(),
     };
     BedrockProvider::new(cfg, resolved).expect("canonical region")
-}
-
-/// Anthropic provider pointed at a wiremock URI so the outbound
-/// `anthropic-beta` header can be captured. `ApiKey` auth on a non-
-/// api.anthropic.com host adds no minted beta floor, so the header carries
-/// exactly the client betas the allowlist admits.
-fn anthropic_provider(base_url: String, allowed_betas: Vec<String>) -> AnthropicApiProvider {
-    AnthropicApiProvider::new(AnthropicApiConfig {
-        id: "anthropic-equivalence-test".into(),
-        auth: std::sync::Arc::new(routectl_core::StaticToken::new("test-key")),
-        base_url,
-        anthropic_version: "2023-06-01".into(),
-        auth_kind: AuthKind::ApiKey,
-        header_extras: Vec::new(),
-        user_agent: None,
-        allowed_betas,
-        forward_client_headers: Vec::new(),
-        context_management: false,
-        max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
-        session_id: None,
-        cloak: CloakConfig::default(),
-        use_forwarded_bearer: false,
-
-        #[cfg(feature = "bedrock")]
-        mantle: None,
-    })
-}
-
-/// Minimal Anthropic-shape success body so `complete()` reaches the
-/// happy path and wiremock captures the outbound request.
-fn ok_response_body() -> serde_json::Value {
-    json!({
-        "id": "msg_equivalence",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-3-opus",
-        "stop_reason": "end_turn",
-        "usage": {"input_tokens": 1, "output_tokens": 1},
-        "content": [{"type": "text", "text": "ok"}]
-    })
-}
-
-/// Drive one `complete()` through a wiremock upstream and return the
-/// captured `anthropic-beta` header value (or `None` when absent).
-async fn captured_beta_header(allowed_betas: Vec<String>) -> Option<String> {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ok_response_body()))
-        .mount(&mock_server)
-        .await;
-
-    let provider = anthropic_provider(mock_server.uri(), allowed_betas);
-    provider
-        .complete(legacy_request())
-        .await
-        .expect("anthropic complete must succeed");
-
-    let received = mock_server
-        .received_requests()
-        .await
-        .expect("wiremock captured requests");
-    assert_eq!(received.len(), 1, "expected exactly one outbound request");
-    received[0]
-        .headers
-        .get("anthropic-beta")
-        .map(|v| v.to_str().expect("header is utf-8").to_string())
 }
 
 // =====================================================================
@@ -299,51 +222,4 @@ fn bedrock_converse_non_empty_allowlists_drop_unlisted_beta_and_field() {
     insta::with_settings!({snapshot_path => "snapshots/legacy_equivalence"}, {
         insta::assert_json_snapshot!("bedrock_converse_filtered", body);
     });
-}
-
-// =====================================================================
-// Anthropic egress
-// =====================================================================
-//
-// The anthropic egress gates only `allowed_betas` (it performs no body-field
-// allowlisting -- that surface is Bedrock-only) and carries betas on the
-// `anthropic-beta` HTTP header, so the header captured off the wire is the
-// authoritative surface.
-
-#[tokio::test]
-async fn anthropic_egress_empty_allowlist_passes_through_every_beta() {
-    // Act: empty allowlist == pass-through.
-    let header = captured_beta_header(Vec::new())
-        .await
-        .expect("anthropic-beta header must be present");
-
-    // Assert: both requested betas reach the wire header. The merge dedupes
-    // via a set and joins with `,`, so wire order is implementation-defined;
-    // assert flag presence, not order.
-    assert!(
-        header.split(',').any(|f| f.trim() == ALLOWED_BETA),
-        "listed beta must reach the header; got `{header}`"
-    );
-    assert!(
-        header.split(',').any(|f| f.trim() == UNLISTED_BETA),
-        "empty allowed_betas must pass every beta through; got `{header}`"
-    );
-}
-
-#[tokio::test]
-async fn anthropic_egress_non_empty_allowlist_drops_unlisted_beta() {
-    // Act: an allowlist admitting only one of the two requested betas.
-    let header = captured_beta_header(vec![ALLOWED_BETA.into()])
-        .await
-        .expect("anthropic-beta header must be present");
-
-    // Assert: the listed beta reaches the header, the unlisted one is gone.
-    assert!(
-        header.split(',').any(|f| f.trim() == ALLOWED_BETA),
-        "listed beta must reach the header; got `{header}`"
-    );
-    assert!(
-        !header.split(',').any(|f| f.trim() == UNLISTED_BETA),
-        "non-empty allowed_betas must drop the unlisted beta; got `{header}`"
-    );
 }

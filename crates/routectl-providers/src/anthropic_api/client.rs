@@ -11,7 +11,7 @@ use routectl_core::identity::anthropic::is_anthropic_api_host;
 use routectl_core::{ChatRequest, Result, StaticToken, TokenSource, sanitize_for_log};
 
 use super::cloak::{self, CloakConfig};
-use super::{context_management, ratelimit_unified, request};
+use super::{context_management, ratelimit_unified};
 #[cfg(feature = "bedrock")]
 use crate::mantle::MantleAuth;
 
@@ -62,22 +62,6 @@ pub struct AnthropicApiConfig {
     /// policies that gate access on `aws:UserAgent` (e.g. Claude Code's
     /// Bedrock role). `None` keeps reqwest's default UA.
     pub user_agent: Option<String>,
-    /// Operator-supplied allowlist for `anthropic_beta` flags.
-    /// Empty (default) is pass-through: every beta the client
-    /// requests via the `anthropic-beta` HTTP header or body field
-    /// reaches api.anthropic.com unchanged. When non-empty, ingress-
-    /// lifted values not in the list are dropped at DEBUG level.
-    /// Mirrors the Bedrock-egress `[bedrock] allowed_betas` shape so
-    /// multi-tenant or API-gateway deployments can constrain which
-    /// betas authenticated clients can opt into.
-    ///
-    /// CARVE-OUT: the structured-outputs beta
-    /// (`STRUCTURED_OUTPUTS_BETA`) is force-added whenever the assembled
-    /// body carries `output_config.format`, regardless of this list -- it
-    /// is a routectl-derived server requirement implied by the in-use
-    /// feature, not a client-opted beta. To deny structured outputs, deny
-    /// the feature. See `docs/CONFIGURATION.md`.
-    pub allowed_betas: Vec<String>,
     /// Strict allowlist of inbound `x-claude-code-*` header names the
     /// egress is permitted to forward upstream. The Anthropic ingress
     /// greedy-captures the whole namespace into
@@ -149,7 +133,6 @@ impl std::fmt::Debug for AnthropicApiConfig {
             .field("auth_kind", &self.auth_kind)
             .field("header_extras_len", &self.header_extras.len())
             .field("user_agent", &self.user_agent)
-            .field("allowed_betas_len", &self.allowed_betas.len())
             .field(
                 "forward_client_headers",
                 &format!("[{} entries]", self.forward_client_headers.len()),
@@ -211,7 +194,6 @@ impl AnthropicApiConfig {
             auth_kind: AuthKind::ApiKey,
             header_extras: Vec::new(),
             user_agent: None,
-            allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: Self::MAX_THINKING_ENTRY_BYTES,
@@ -328,10 +310,10 @@ pub struct AnthropicApiProvider {
 /// client's request. The following body/header mutations MUST NOT run on that
 /// leg, so the client's real bytes and fingerprint reach Anthropic verbatim:
 ///
-///   1. the client-beta `allowed_betas` filter (the anthropic-beta HEADER),
-///   2. `cloak_body` (billing strip, identity stamp, tool-name normalization),
-///   3. `resign_cch_in_place` (the billing-checksum re-sign),
-///   4. the minted OAuth/Claude-Code beta-floor injection.
+///   1. `cloak_body` (billing strip, identity stamp, tool-name normalization),
+///   2. `resign_cch_in_place` (the billing-checksum re-sign),
+///   3. the minted OAuth/Claude-Code beta-floor injection and the
+///      capability-driven beta unions (the anthropic-beta HEADER).
 ///
 /// The predicate is always derived via the single `forwarded_leg` helper --
 /// self-gating inside `cloak_body`, and a local computed at the top of each
@@ -584,28 +566,11 @@ impl AnthropicApiProvider {
         // union it in here too (deduplicated) so a `cfg.header_extras
         // = [("anthropic-beta", "ctx-1m")]` works without a router.
         //
-        // Apply the operator allowlist to the client-supplied betas
-        // before composing the header. Operator-supplied betas from
-        // `header_extras` pass through unconditionally (the operator
-        // typed them in config). Empty `allowed_betas` is pass-through
-        // mode (no filtering); see `request::filter_anthropic_betas`.
-        //
-        // SUPPRESSED on the forwarded leg: there the client's real beta set
-        // must reach Anthropic VERBATIM (per the FORWARDING TRANSPARENCY
-        // CONTRACT), so the allowlist filter is skipped and the client betas
-        // pass through unfiltered.
-        let filtered_req_betas: std::borrow::Cow<'_, [String]> = if forwarded_leg {
-            std::borrow::Cow::Borrowed(req.anthropic_beta.as_slice())
-        } else {
-            request::filter_anthropic_betas(
-                &self.cfg.id,
-                &req.anthropic_beta,
-                &self.cfg.allowed_betas,
-            )
-        };
+        // Client-supplied betas pass through unfiltered on every leg, so a
+        // flag routectl has never seen reaches the upstream verbatim.
         let mut beta_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut merged_betas: Vec<String> = Vec::new();
-        for entry in filtered_req_betas.iter() {
+        for entry in &req.anthropic_beta {
             let t = entry.trim();
             if !t.is_empty() && beta_seen.insert(t.to_string()) {
                 merged_betas.push(t.to_string());
@@ -625,9 +590,7 @@ impl AnthropicApiProvider {
         }
         // Operator-configured model-level betas, composed by the router
         // from `[models.X] header_extras["anthropic-beta"]`. Like the
-        // provider-level `config_betas` floor above, these bypass the
-        // `allowed_betas` allowlist unconditionally -- that allowlist
-        // gates only client-requested betas, never operator-pinned ones.
+        // provider-level `config_betas` floor above, these always ship.
         // Empty for library consumers that bypass the router.
         for entry in &req.routectl_internal.operator_betas {
             let t = entry.trim();
@@ -654,9 +617,7 @@ impl AnthropicApiProvider {
             union_oauth_gate_beta(&mut beta_seen, &mut merged_betas);
 
             // Pinned Claude Code beta floor. These are operator-equivalent
-            // pins (not client-requested), so they bypass the
-            // `allowed_betas` allowlist by construction -- they never pass
-            // through `filter_anthropic_betas`. GATED on `is_non_cc`: a
+            // pins (not client-requested). GATED on `is_non_cc`: a
             // genuine Claude Code client already sent its own real beta
             // set above, and force-widening it with capability betas CC
             // never asked for (e.g. `context-1m` on a haiku request) makes
@@ -679,10 +640,9 @@ impl AnthropicApiProvider {
         // Capability-driven union, LAST: a body carrying
         // `output_config.format` is rejected upstream unless the
         // structured-outputs beta rides along, on EVERY auth kind. Placed
-        // after `filter_anthropic_betas` (and after the operator/floor
-        // unions) because this is a server requirement implied by the
-        // shipped body, not a client-opted beta subject to `allowed_betas`
-        // -- the same standing the operator-pinned floor has. Idempotent, so
+        // after the client, operator and floor unions because this is a
+        // server requirement implied by the shipped body, not a client-opted
+        // beta -- the same standing the operator-pinned floor has. Idempotent, so
         // an OauthBearer request whose floor already carries the flag keeps
         // its beta list byte-identical.
         //

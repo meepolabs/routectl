@@ -709,11 +709,10 @@ pub(super) fn build_probe_request(
         max_tokens,
         ..Default::default()
     };
-    // Each source back onto ITS OWN carrier. The egress filters
-    // `anthropic_beta` through `allowed_betas` and exempts `operator_betas`, so
-    // crossing them over would either smuggle a filtered client flag past the
-    // allowlist or subject an operator-pinned flag to it -- either way the
-    // probe's header would differ from the one under test.
+    // Each source back onto ITS OWN carrier. The egress leads the header with
+    // `anthropic_beta` and unions `operator_betas` after the configured betas,
+    // so crossing them over would reorder the header -- the probe's header
+    // would differ from the one under test.
     req.routectl_internal.operator_betas = payload.operator_betas().to_vec();
     // The originating Claude-Code classification, so the egress makes the same
     // `is_non_cc` call (and so applies or suppresses the CC beta floor

@@ -229,9 +229,8 @@ fn apply_layered_overlays_records_operator_betas_excluding_client() {
     // Invariant: operator-configured betas (provider + model
     // header_extras) are recorded on `routectl_internal.operator_betas`
     // so the Anthropic-API egress can re-add them as a floor that
-    // bypasses the per-provider `allowed_betas` allowlist. The
-    // client/ingress betas (on `req.anthropic_beta`) MUST NOT leak
-    // into that floor -- the allowlist still gates them.
+    // always ships. The client/ingress betas (on `req.anthropic_beta`)
+    // MUST NOT leak into that floor -- it is the operator's set only.
     let mut config = Config::default();
     config.providers.insert(
         "test-prov".into(),

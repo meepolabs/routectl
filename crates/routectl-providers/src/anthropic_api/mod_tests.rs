@@ -146,7 +146,6 @@ fn cfg_with_allowlist(forward_client_headers: Vec<String>) -> AnthropicApiConfig
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers,
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -281,7 +280,6 @@ fn client_forwarded_headers_override_header_extras_on_collision() {
             "from-operator-config".into(),
         )],
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: vec!["x-claude-code-session-id".into()],
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -302,54 +300,12 @@ fn client_forwarded_headers_override_header_extras_on_collision() {
     );
 }
 
-/// Non-empty `allowed_betas` drops client-requested flags that are
-/// not on the operator list. The header must contain only the
-/// allowed flag and must NOT contain the blocked one.
+/// Operator `header_extras` betas are unioned with the client's betas:
+/// operator-supplied config always ships regardless of the client-request
+/// content, and every client beta rides alongside it.
 #[test]
 #[allow(clippy::field_reassign_with_default)]
-fn allowed_betas_filters_header_drops_unlisted_flag() {
-    let cfg = AnthropicApiConfig {
-        id: "test".into(),
-        auth: Arc::new(StaticToken::new("test-key")),
-        base_url: "https://api.anthropic.com".into(),
-        anthropic_version: "2023-06-01".into(),
-        auth_kind: AuthKind::ApiKey,
-        header_extras: Vec::new(),
-        user_agent: None,
-        allowed_betas: vec!["allowed-only".into()],
-        forward_client_headers: Vec::new(),
-        context_management: false,
-        max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
-        session_id: None,
-        cloak: CloakConfig::default(),
-        use_forwarded_bearer: false,
-
-        #[cfg(feature = "bedrock")]
-        mantle: None,
-    };
-    let provider = AnthropicApiProvider::new(cfg);
-    // ChatRequest is #[non_exhaustive]; mutate after default().
-    let mut req = ChatRequest::default();
-    req.anthropic_beta = vec!["allowed-only".into(), "blocked".into()];
-    let value = outbound_header_value(&provider, &req, "anthropic-beta")
-        .expect("anthropic-beta header must be present");
-    assert!(
-        value.split(',').any(|s| s.trim() == "allowed-only"),
-        "allowed flag must reach the header; got {value}"
-    );
-    assert!(
-        !value.split(',').any(|s| s.trim() == "blocked"),
-        "blocked flag must be dropped from the header; got {value}"
-    );
-}
-
-/// Operator `header_extras` betas bypass the allowlist unconditionally
-/// while non-allowlisted client betas are dropped. This pins the
-/// design contract: operator-supplied config wins regardless of the
-/// client-request content, but the allowlist still gates client betas.
-#[test]
-#[allow(clippy::field_reassign_with_default)]
-fn operator_header_extras_beta_bypasses_allowlist() {
+fn operator_header_extras_beta_unions_with_client_betas() {
     let cfg = AnthropicApiConfig {
         id: "test".into(),
         auth: Arc::new(StaticToken::new("test-key")),
@@ -358,7 +314,6 @@ fn operator_header_extras_beta_bypasses_allowlist() {
         auth_kind: AuthKind::ApiKey,
         header_extras: vec![("anthropic-beta".into(), "ops-only".into())],
         user_agent: None,
-        allowed_betas: vec!["req-allowed".into()],
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -371,29 +326,21 @@ fn operator_header_extras_beta_bypasses_allowlist() {
     };
     let provider = AnthropicApiProvider::new(cfg);
     let mut req = ChatRequest::default();
-    req.anthropic_beta = vec!["req-allowed".into(), "client-blocked".into()];
+    req.anthropic_beta = vec!["client-one".into(), "client-two".into()];
     let value = outbound_header_value(&provider, &req, "anthropic-beta")
         .expect("anthropic-beta header must be present");
-    assert!(
-        value.split(',').any(|s| s.trim() == "ops-only"),
-        "operator header_extras beta must bypass allowlist and reach the header; got {value}"
-    );
-    assert!(
-        value.split(',').any(|s| s.trim() == "req-allowed"),
-        "allowlisted client beta must reach the header; got {value}"
-    );
-    assert!(
-        !value.split(',').any(|s| s.trim() == "client-blocked"),
-        "non-allowlisted client beta must be dropped; got {value}"
+    let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+    assert_eq!(
+        betas,
+        ["client-one", "client-two", "ops-only"],
+        "client betas then the operator header_extras beta, each once; got {value}"
     );
 }
 
-/// Empty `allowed_betas` is pass-through mode: every requested
-/// beta reaches the header unchanged. This is the default for all
-/// deployments that do not set an explicit allowlist.
+/// Every client-requested beta reaches the header unchanged.
 #[test]
 #[allow(clippy::field_reassign_with_default)]
-fn allowed_betas_empty_passes_all_through() {
+fn client_betas_pass_through_to_header() {
     let cfg = AnthropicApiConfig {
         id: "test".into(),
         auth: Arc::new(StaticToken::new("test-key")),
@@ -402,7 +349,6 @@ fn allowed_betas_empty_passes_all_through() {
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -421,23 +367,22 @@ fn allowed_betas_empty_passes_all_through() {
         .expect("anthropic-beta header must be present");
     assert!(
         value.split(',').any(|s| s.trim() == "beta-one"),
-        "beta-one must pass through with empty allowlist; got {value}"
+        "beta-one must pass through; got {value}"
     );
     assert!(
         value.split(',').any(|s| s.trim() == "beta-two"),
-        "beta-two must pass through with empty allowlist; got {value}"
+        "beta-two must pass through; got {value}"
     );
 }
 
 /// Model-level operator betas (composed by the router onto
-/// `routectl_internal.operator_betas`) bypass the allowlist
-/// unconditionally, while non-allowlisted client betas folded into
-/// `req.anthropic_beta` are still dropped. This pins the invariant:
-/// `allowed_betas` gates only client-requested betas, never the
-/// betas an operator pinned in `[models.X] header_extras`.
+/// `routectl_internal.operator_betas`) always reach the header, even when
+/// the client-beta union on `req.anthropic_beta` does not carry them --
+/// the betas an operator pinned in `[models.X] header_extras` ship
+/// regardless of what the client sent.
 #[test]
 #[allow(clippy::field_reassign_with_default)]
-fn model_level_operator_beta_bypasses_allowlist() {
+fn model_level_operator_beta_always_reaches_header() {
     let cfg = AnthropicApiConfig {
         id: "test".into(),
         auth: Arc::new(StaticToken::new("test-key")),
@@ -446,7 +391,6 @@ fn model_level_operator_beta_bypasses_allowlist() {
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: vec!["req-allowed".into()],
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -459,29 +403,15 @@ fn model_level_operator_beta_bypasses_allowlist() {
     };
     let provider = AnthropicApiProvider::new(cfg);
     let mut req = ChatRequest::default();
-    // The router folds the model-level beta into the full union on
-    // `req.anthropic_beta` AND records it as an operator floor on
-    // `operator_betas`. The allowlist filter drops it from the union,
-    // but the floor re-adds it unconditionally.
-    req.anthropic_beta = vec![
-        "req-allowed".into(),
-        "client-blocked".into(),
-        "ctx-1m".into(),
-    ];
+    req.anthropic_beta = vec!["client-beta".into()];
     req.routectl_internal.operator_betas = vec!["ctx-1m".into()];
     let value = outbound_header_value(&provider, &req, "anthropic-beta")
         .expect("anthropic-beta header must be present");
-    assert!(
-        value.split(',').any(|s| s.trim() == "ctx-1m"),
-        "model-level operator beta must bypass allowlist and reach the header; got {value}"
-    );
-    assert!(
-        value.split(',').any(|s| s.trim() == "req-allowed"),
-        "allowlisted client beta must reach the header; got {value}"
-    );
-    assert!(
-        !value.split(',').any(|s| s.trim() == "client-blocked"),
-        "non-allowlisted client beta must be dropped; got {value}"
+    let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+    assert_eq!(
+        betas,
+        ["client-beta", "ctx-1m"],
+        "the model-level operator beta must ride beside the client beta; got {value}"
     );
 }
 
@@ -499,7 +429,6 @@ fn oauth_cfg(
         auth_kind: AuthKind::OauthBearer,
         header_extras,
         user_agent,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -633,7 +562,6 @@ fn oauth_cfg_with_session(
         auth_kind: AuthKind::OauthBearer,
         header_extras,
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -963,7 +891,6 @@ fn beta_floor_context_management_stripped_when_emulation_active() {
         auth_kind: AuthKind::OauthBearer,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: true,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -1002,7 +929,6 @@ fn beta_floor_absent_on_non_anthropic_host() {
         auth_kind: AuthKind::OauthBearer,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -1034,7 +960,6 @@ fn beta_floor_absent_on_api_key_auth() {
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -1058,7 +983,7 @@ fn beta_floor_absent_on_api_key_auth() {
 /// Plain api-key provider against api.anthropic.com: no OAuth gate, no
 /// beta floor, so the structured-outputs beta can only arrive from the
 /// body-derived capability union.
-fn api_key_cfg_for_betas(allowed_betas: Vec<String>) -> AnthropicApiConfig {
+fn api_key_cfg_for_betas() -> AnthropicApiConfig {
     AnthropicApiConfig {
         id: "test".into(),
         auth: Arc::new(StaticToken::new("test-key")),
@@ -1067,7 +992,6 @@ fn api_key_cfg_for_betas(allowed_betas: Vec<String>) -> AnthropicApiConfig {
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas,
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -1087,7 +1011,7 @@ fn api_key_cfg_for_betas(allowed_betas: Vec<String>) -> AnthropicApiConfig {
 /// beta header at all.
 #[test]
 fn api_key_request_with_output_config_format_carries_structured_outputs_beta() {
-    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas());
     let req = ChatRequest::default();
     let body = serde_json::json!({
         "model": "claude-sonnet-4-5",
@@ -1103,34 +1027,13 @@ fn api_key_request_with_output_config_format_carries_structured_outputs_beta() {
     );
 }
 
-/// The union is capability-driven (a server requirement implied by the
-/// shipped body), not a client-opted beta -- so it bypasses the operator
-/// `allowed_betas` allowlist exactly as the operator-pinned floor does.
-/// Without this, an operator allowlist would silently produce a body
-/// upstream rejects.
-#[test]
-fn structured_outputs_beta_bypasses_the_client_allowlist() {
-    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(vec!["some-other-beta".into()]));
-    let req = ChatRequest::default();
-    let body = serde_json::json!({"output_config": {"format": {"type": "json_object"}}});
-
-    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
-        .expect("the capability beta must survive a restrictive allowlist");
-    assert!(
-        value
-            .split(',')
-            .any(|b| b.trim() == routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA),
-        "allowed_betas gates client-requested betas only; got: {value}"
-    );
-}
-
 /// No `output_config.format` on the shipped body -> no flag added. Pins
 /// that the union is gated on the body and never fires unconditionally.
 /// A sibling `output_config.effort` (adaptive-thinking path) is NOT the
 /// structured-output directive and must not trigger it either.
 #[test]
 fn body_without_output_config_format_gains_no_structured_outputs_beta() {
-    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas());
     let req = ChatRequest::default();
 
     for body in [
@@ -1154,7 +1057,7 @@ fn body_without_output_config_format_gains_no_structured_outputs_beta() {
 /// translation.
 #[test]
 fn structured_outputs_beta_triggers_on_output_config_arriving_via_provider_extras() {
-    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas());
     let req = ChatRequest {
         model: "claude-sonnet-4-5".into(),
         max_tokens: Some(64),
@@ -1269,7 +1172,7 @@ fn genuine_cc_request_with_output_config_format_carries_structured_outputs_beta(
 /// them would otherwise reject the field.
 #[test]
 fn non_anthropic_host_with_output_config_format_still_carries_structured_outputs_beta() {
-    let mut cfg = api_key_cfg_for_betas(Vec::new());
+    let mut cfg = api_key_cfg_for_betas();
     cfg.base_url = "https://anthropic.gateway.example.com".into();
     let provider = AnthropicApiProvider::new(cfg);
     let req = ChatRequest::default();
@@ -1834,32 +1737,24 @@ fn resign_gate_false_on_forwarded_leg_true_in_own_mode() {
 }
 
 /// build_headers on the forwarded leg emits the client's anthropic-beta
-/// set VERBATIM, bypassing the operator `allowed_betas` allowlist: the
-/// client's real beta fingerprint must reach Anthropic unfiltered.
+/// set VERBATIM: the client's real beta fingerprint must reach Anthropic
+/// with no routectl-minted floor beta widening it.
 #[test]
-fn forwarded_leg_anthropic_beta_header_bypasses_allowlist() {
-    let cfg = AnthropicApiConfig {
-        allowed_betas: vec!["allowed-beta".into()],
-        ..oauth_cfg_with_session(
-            "https://api.anthropic.com",
-            Some("sid".into()),
-            Vec::new(),
-            true,
-        )
-    };
-    let provider = AnthropicApiProvider::new(cfg);
-    let req = forwarded_req(&[], &[], &["allowed-beta", "client-blocked"]);
+fn forwarded_leg_anthropic_beta_header_is_client_verbatim() {
+    let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("sid".into()),
+        Vec::new(),
+        true,
+    ));
+    let req = forwarded_req(&[], &[], &["client-one", "client-two"]);
 
     let value = outbound_header_value(&provider, &req, "anthropic-beta")
         .expect("anthropic-beta header must be present");
     let betas: Vec<&str> = value.split(',').map(str::trim).collect();
     assert!(
-        betas.contains(&"client-blocked"),
-        "a client beta not in allowed_betas must still pass verbatim on the forwarded leg; got {value}",
-    );
-    assert!(
-        betas.contains(&"allowed-beta"),
-        "the client's allowed beta must pass too; got {value}",
+        betas.contains(&"client-one") && betas.contains(&"client-two"),
+        "every client beta must pass verbatim on the forwarded leg; got {value}",
     );
     assert!(
         !betas.contains(&"oauth-2025-04-20"),
@@ -1868,39 +1763,6 @@ fn forwarded_leg_anthropic_beta_header_bypasses_allowlist() {
     assert!(
         !betas.contains(&"claude-code-20250219"),
         "no minted Claude Code floor beta may leak onto the forwarded-leg header; got {value}",
-    );
-}
-
-/// Own-mode counterpart: with `allowed_betas` set, a client beta not on
-/// the allowlist IS stripped from the anthropic-beta header. This pins
-/// that only the forwarded leg bypasses the filter.
-#[test]
-fn own_mode_anthropic_beta_header_applies_allowlist() {
-    let cfg = AnthropicApiConfig {
-        allowed_betas: vec!["allowed-beta".into()],
-        ..oauth_cfg_with_session(
-            "https://api.anthropic.com",
-            Some("sid".into()),
-            Vec::new(),
-            false,
-        )
-    };
-    let provider = AnthropicApiProvider::new(cfg);
-    let req = ChatRequest {
-        anthropic_beta: vec!["allowed-beta".into(), "client-blocked".into()],
-        ..Default::default()
-    };
-
-    let value = outbound_header_value(&provider, &req, "anthropic-beta")
-        .expect("anthropic-beta header must be present");
-    let betas: Vec<&str> = value.split(',').map(str::trim).collect();
-    assert!(
-        !betas.contains(&"client-blocked"),
-        "own mode must strip a client beta not in allowed_betas; got {value}",
-    );
-    assert!(
-        betas.contains(&"allowed-beta"),
-        "the allowlisted beta must survive; got {value}",
     );
 }
 
@@ -2130,7 +1992,6 @@ fn oauth_provider_with_cloak(cloak: CloakConfig) -> AnthropicApiProvider {
         auth_kind: AuthKind::OauthBearer,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -2525,7 +2386,6 @@ fn oauth_cfg_with_auth(
         auth_kind: AuthKind::OauthBearer,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -2990,8 +2850,8 @@ fn beta_decision_oauth_beta_false_when_absent_from_egress() {
 }
 
 /// The pass-through booleans exist to separate a caller/operator beta from
-/// floor contamination. Send `context-1m` on the request itself (pass-through
-/// mode: empty `allowed_betas`) and the boolean must flip true, while the
+/// floor contamination. Send `context-1m` on the request itself and the
+/// boolean must flip true, while the
 /// sibling pass-through flags -- which the floor also excludes -- stay false.
 #[test]
 fn beta_decision_pass_through_beta_sets_its_boolean_but_floor_does_not() {
@@ -3065,11 +2925,11 @@ fn beta_decision_each_pass_through_flag_sets_only_its_own_boolean() {
     }
 }
 
-/// The same table on the operator lane: an operator-pinned beta bypasses
-/// the `allowed_betas` allowlist, so a RESTRICTIVE allowlist must not stop
-/// the boolean from flipping -- the snapshot reads the FINAL composed set.
+/// The same table on the operator lane: an operator-pinned beta the client
+/// never sent must still flip its boolean -- the snapshot reads the FINAL
+/// composed set.
 #[test]
-fn beta_decision_operator_pinned_flag_sets_its_boolean_despite_allowlist() {
+fn beta_decision_operator_pinned_flag_sets_its_boolean() {
     let flags = [
         routectl_core::identity::anthropic::MID_CONVERSATION_SYSTEM_BETA,
         routectl_core::identity::anthropic::ADVISOR_TOOL_BETA,
@@ -3206,7 +3066,7 @@ fn log_beta_decision_on_4xx_emits_beta_context_fields() {
 #[traced_test]
 #[test]
 fn log_system_role_turns_on_4xx_fires_on_the_api_key_lane() {
-    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas());
 
     provider.log_system_role_turns_on_4xx(400, 3, true);
 
@@ -3220,7 +3080,7 @@ fn log_system_role_turns_on_4xx_fires_on_the_api_key_lane() {
 #[traced_test]
 #[test]
 fn log_system_role_turns_on_4xx_reports_an_absent_beta_as_false() {
-    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas());
 
     provider.log_system_role_turns_on_4xx(400, 1, false);
 
@@ -3231,7 +3091,7 @@ fn log_system_role_turns_on_4xx_reports_an_absent_beta_as_false() {
 /// system turns are each silent.
 #[test]
 fn log_system_role_turns_on_4xx_is_silent_without_both_conditions() {
-    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas());
 
     let events = routectl_testkit::capture_events(|| {
         provider.log_system_role_turns_on_4xx(400, 0, true);
@@ -4524,7 +4384,7 @@ fn off_lane_beta_headers_are_byte_unchanged_by_an_effort_body() {
     ));
 
     // API-key lane on the same host.
-    let api_key_provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let api_key_provider = AnthropicApiProvider::new(api_key_cfg_for_betas());
     let api_key_req = ChatRequest {
         anthropic_beta: vec!["client-sent-beta".into()],
         ..Default::default()

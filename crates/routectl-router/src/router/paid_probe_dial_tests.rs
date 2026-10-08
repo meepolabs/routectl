@@ -65,10 +65,10 @@ const CAP: u32 = 5;
 
 /// The client and operator beta tokens the captured payload carries.
 ///
-/// DISTINCT strings, and that is load-bearing: the egress filters the client
-/// carrier through `allowed_betas` and exempts the operator carrier, so a body
-/// that crossed them over would travel under a different effective header than
-/// the request under test. Two identical tokens would make a swap invisible.
+/// DISTINCT strings, and that is load-bearing: the egress composes the client
+/// carrier and the operator carrier at different points of the header, so a
+/// body that crossed them over would travel under a different effective header
+/// than the request under test. Two identical tokens would make a swap invisible.
 const CLIENT_BETA: &str = "client-only-flag-1";
 const OPERATOR_BETA: &str = "operator-only-flag-1";
 

@@ -7,15 +7,12 @@
 //! applies the operator per-model cap, and pairs `Adaptive` with a
 //! top-level `output_config` via `build_output_config`. `build_thinking`
 //! is `pub(crate)` so the Bedrock Converse egress reuses it. (2) The
-//! post-merge body reconciliation: `filter_anthropic_betas` applies the
-//! operator allowlist, `merge_provider_extras` layers forward-compat
-//! extras in while shielding routectl-managed keys
+//! post-merge body reconciliation: `merge_provider_extras` layers
+//! forward-compat extras in while shielding routectl-managed keys
 //! (`is_routectl_managed_key`), `reconcile_output_config_effort`
 //! re-clamps or strips `output_config.effort` per model capability, and
 //! `strip_thinking_when_tool_choice_forces_use` drops `thinking` when
 //! the tool_choice forces tool use (Anthropic forbids the combo).
-
-use std::borrow::Cow;
 
 use serde_json::Value;
 
@@ -379,36 +376,8 @@ pub(super) fn build_output_config(
 }
 
 // ---------------------------------------------------------------------------
-// Beta allowlist + post-assembly body reconciliation
+// Post-assembly body reconciliation
 // ---------------------------------------------------------------------------
-
-/// Filter `req.anthropic_beta` against the operator-supplied
-/// `allowed_betas` list. Empty allowlist = pass-through (default).
-/// Otherwise, drop entries not in the list at DEBUG so operators
-/// triaging unexpected behavior can see WHICH flags got removed.
-/// Mirrors the Bedrock-egress `filter_bedrock_betas` shape.
-pub fn filter_anthropic_betas<'a>(
-    provider_id: &str,
-    requested: &'a [String],
-    allowed: &[String],
-) -> Cow<'a, [String]> {
-    if allowed.is_empty() {
-        return Cow::Borrowed(requested);
-    }
-    let mut kept = Vec::with_capacity(requested.len());
-    for flag in requested {
-        if allowed.iter().any(|a| a == flag) {
-            kept.push(flag.clone());
-        } else {
-            tracing::debug!(
-                provider = provider_id,
-                flag = %routectl_core::sanitize_for_log(flag),
-                "dropping beta flag not in operator-supplied [providers.X] allowed_betas"
-            );
-        }
-    }
-    Cow::Owned(kept)
-}
 
 /// Merge `provider_extras` into the assembled body. Caller-supplied
 /// keys win EXCEPT for routectl-managed top-level keys (see
@@ -613,9 +582,9 @@ pub(super) fn body_has_output_config_format(body: &Value) -> bool {
 /// duplicated nor reordered.
 ///
 /// A capability-driven signal implied by the shipped body rather than a
-/// client-opted beta, so it runs AFTER the `allowed_betas` filter
-/// (`filter_anthropic_betas`) on every auth kind, with the same standing as
-/// the operator's beta floor.
+/// client-opted beta, so it runs AFTER the client and operator betas are
+/// composed, on every auth kind, with the same standing as the operator's
+/// beta floor.
 ///
 /// Retained as belt-and-braces, NOT a proven hard requirement. A 2026-08-11
 /// live capture -- one lane, one seat, one model -- accepted
@@ -659,8 +628,7 @@ pub(super) fn body_has_output_config_effort(body: &Value) -> bool {
 ///
 /// Mirrors `union_structured_outputs_beta` (body-predicate, dedup, post-filter
 /// ordering): a capability-driven server requirement implied by the shipped
-/// body, so it runs AFTER the `allowed_betas` filter and after the floor
-/// composition. The invariant is ONE-WAY -- a body carrying the gated field
+/// body, so it runs AFTER the client betas and the floor are composed. The invariant is ONE-WAY -- a body carrying the gated field
 /// gains the flag; a caller-supplied effort beta with NO field is left
 /// untouched (the inverse is never manufactured here).
 pub(super) fn union_effort_beta(body: &Value, betas: &mut Vec<String>) {

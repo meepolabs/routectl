@@ -65,7 +65,6 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: Some("routectl-live-test/0.4".into()),
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,

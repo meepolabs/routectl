@@ -130,7 +130,6 @@ impl Provider for AnthropicApiProvider {
             &self.cfg.id,
             req,
             req.routectl_internal.supports_adaptive_thinking,
-            &self.cfg.allowed_betas,
             self.cfg.context_management,
             if self.cfg.context_management {
                 Some(&*self.thinking_cache)

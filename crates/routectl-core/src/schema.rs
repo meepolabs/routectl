@@ -365,11 +365,10 @@ pub struct RoutectlInternal {
     /// plus model `header_extras["anthropic-beta"]` -- the
     /// client/ingress-supplied betas are deliberately excluded.
     ///
-    /// Invariant: operator betas bypass the per-provider `allowed_betas`
-    /// allowlist unconditionally. `allowed_betas` gates only the betas a
-    /// client requests; an operator who pins a beta in config has
-    /// already opted in, so the Anthropic-API egress re-adds these as a
-    /// floor after filtering the client-supplied set.
+    /// Invariant: operator betas always ship. An operator who pins a beta
+    /// in config has already opted in, so the Anthropic-API egress unions
+    /// these as a floor after the client-supplied set, even when the
+    /// client set does not carry them.
     ///
     /// Empty for library consumers that construct a `ChatRequest`
     /// without the router; in that path the egress's own

@@ -5,18 +5,17 @@
 //! on a normalizer's JSON body. The header is composed inside the egress's
 //! `build_headers` from three inputs it treats DIFFERENTLY:
 //!
-//!   - `req.anthropic_beta` (client/ingress) is filtered through the provider's
-//!     `allowed_betas` allowlist;
-//!   - `routectl_internal.operator_betas` (the operator floor) bypasses that
-//!     allowlist unconditionally;
+//!   - `req.anthropic_beta` (client/ingress) leads the header, in client order;
+//!   - `routectl_internal.operator_betas` (the operator floor) is unioned after
+//!     the provider's own `header_extras` betas and always ships;
 //!   - the pinned Claude-Code floor is added only for a request the egress
 //!     classifies NON-CC.
 //!
-//! So a probe that merged its two captured sources would smuggle a filtered
-//! client flag past the allowlist, and one that lost the originating
-//! Claude-Code classification would receive a floor the admitted request
-//! suppressed. Either way its answer is still attributed to the field under
-//! test, and only a real header capture can tell.
+//! So a probe that moved a client flag onto the operator carrier would reorder
+//! the header it sends, and one that lost the originating Claude-Code
+//! classification would receive a floor the admitted request suppressed.
+//! Either way its answer is still attributed to the field under test, and only
+//! a real header capture can tell.
 //!
 //! # Why two stages
 //!
@@ -118,7 +117,6 @@ impl Respond for HeaderCapture {
 /// STAGE ONE: run the real router and return `(admitted_per_target, probe)` --
 /// the two canonical requests production built.
 async fn canonical_requests(
-    allowed_betas: &[&str],
     model_beta: Option<&str>,
     client_betas: &[&str],
     cloak_auto: bool,
@@ -135,14 +133,12 @@ async fn canonical_requests(
     let mut entry = ProviderEntry::anthropic_api("literal:sk-ant-test");
     if let ProviderEntry::AnthropicApi {
         base_url,
-        allowed_betas: allow,
         auth_kind,
         cloak,
         ..
     } = &mut entry
     {
         *base_url = REMOTE_BASE.to_string();
-        *allow = allowed_betas.iter().map(|s| (*s).to_string()).collect();
         if cloak_auto {
             *auth_kind = AuthKind::OauthBearer;
             cloak.mode = CloakMode::Auto;
@@ -207,7 +203,6 @@ async fn canonical_requests(
 async fn wire_header(
     server: &MockServer,
     seen: &Arc<parking_lot::Mutex<Vec<String>>>,
-    allowed_betas: &[&str],
     model_beta: Option<&str>,
     cloak_auto: bool,
     req: ChatRequest,
@@ -226,7 +221,6 @@ async fn wire_header(
             .map(|b| vec![("anthropic-beta".to_string(), b.to_string())])
             .unwrap_or_default(),
         user_agent: None,
-        allowed_betas: allowed_betas.iter().map(|s| (*s).to_string()).collect(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
@@ -283,20 +277,13 @@ fn admitted_request(client_betas: &[&str], cc_session: bool) -> ChatRequest {
 
 /// Both stages: the admitted request's emitted header and the probe's.
 async fn admitted_and_probe_headers(
-    allowed_betas: &[&str],
     model_beta: Option<&str>,
     client_betas: &[&str],
     cloak_auto: bool,
     cc_session: bool,
 ) -> (String, String) {
-    let (admitted_req, probe_req) = canonical_requests(
-        allowed_betas,
-        model_beta,
-        client_betas,
-        cloak_auto,
-        cc_session,
-    )
-    .await;
+    let (admitted_req, probe_req) =
+        canonical_requests(model_beta, client_betas, cloak_auto, cc_session).await;
 
     let server = MockServer::start().await;
     let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -308,43 +295,21 @@ async fn admitted_and_probe_headers(
         .mount(&server)
         .await;
 
-    let admitted = wire_header(
-        &server,
-        &seen,
-        allowed_betas,
-        model_beta,
-        cloak_auto,
-        admitted_req,
-    )
-    .await;
-    let probe = wire_header(
-        &server,
-        &seen,
-        allowed_betas,
-        model_beta,
-        cloak_auto,
-        probe_req,
-    )
-    .await;
+    let admitted = wire_header(&server, &seen, model_beta, cloak_auto, admitted_req).await;
+    let probe = wire_header(&server, &seen, model_beta, cloak_auto, probe_req).await;
     (admitted, probe)
 }
 
 #[tokio::test]
-async fn the_probe_beta_header_equals_the_admitted_one_with_and_without_an_allowlist() {
-    // The allowlist is NON-EMPTY, which is what makes this falsifiable: with an
-    // empty one every client flag passes through and merging the two captured
-    // sources would be indistinguishable from keeping them apart.
-    //
-    // `kept-beta-2025-01-01` is allowed; `denied-beta-2025-01-01` is not, so the
-    // egress filters it out. The operator floor bypasses the allowlist.
-    //
-    // A probe that reapplied a UNION to `operator_betas` would smuggle the
-    // DENIED flag past the allowlist -- its header would be strictly wider than
-    // the admitted one, and this equality would fail.
+async fn the_probe_beta_header_equals_the_admitted_one() {
+    // Two client flags plus an operator floor the client did not send. The
+    // egress emits the client carrier first and the configured and operator
+    // betas after it, so the header ORDER records which carrier each flag
+    // rode. A probe that moved the client flags onto `operator_betas` would
+    // emit the operator floor ahead of them, and this equality would fail.
     let (admitted, probe) = admitted_and_probe_headers(
-        &["kept-beta-2025-01-01", "operator-beta-2025-01-01"],
         Some("operator-beta-2025-01-01"),
-        &["kept-beta-2025-01-01", "denied-beta-2025-01-01"],
+        &["client-beta-2025-01-01", "client-beta-2025-02-02"],
         false,
         false,
     )
@@ -354,16 +319,13 @@ async fn the_probe_beta_header_equals_the_admitted_one_with_and_without_an_allow
         probe, admitted,
         "the probe's outgoing beta header must equal the admitted request's"
     );
-    assert!(
-        !probe.contains("denied-beta-2025-01-01"),
-        "a filtered client flag must not reappear through the operator carrier: {probe}"
-    );
-    // Not vacuous: an allowed client flag AND the operator floor are both
-    // present, so the equality above is over a non-empty header.
-    assert!(
-        admitted.contains("kept-beta-2025-01-01") && admitted.contains("operator-beta-2025-01-01"),
-        "premise: the admitted header must carry both an allowed client flag \
-         and the operator floor: {admitted}"
+    // Not vacuous: both client flags AND the operator floor are present, in
+    // carrier order, so the equality above is over a header whose order
+    // depends on which carrier each flag rode.
+    assert_eq!(
+        admitted, "client-beta-2025-01-01,client-beta-2025-02-02,operator-beta-2025-01-01",
+        "premise: the admitted header must carry the client flags, then the \
+         operator floor"
     );
 
     // The same equality on the CLOAK LANE, both classifications. Folded in here
@@ -374,7 +336,7 @@ async fn the_probe_beta_header_equals_the_admitted_one_with_and_without_an_allow
     // divergence appearing only there would otherwise go unmeasured.
     for cc_session in [true, false] {
         let (admitted, probe) =
-            admitted_and_probe_headers(&[], None, &["ctx-beta-2025-01-01"], true, cc_session).await;
+            admitted_and_probe_headers(None, &["ctx-beta-2025-01-01"], true, cc_session).await;
         assert_eq!(
             probe, admitted,
             "probe and admitted headers must match on the cloak lane \
@@ -400,8 +362,7 @@ async fn the_probe_beta_header_equals_the_admitted_one_with_and_without_an_allow
 #[tokio::test]
 async fn the_router_carries_the_admitted_claude_code_classification_onto_the_probe() {
     // Genuine CC: the admitted request presents a session capture.
-    let (admitted, probe) =
-        canonical_requests(&[], None, &["ctx-beta-2025-01-01"], true, true).await;
+    let (admitted, probe) = canonical_requests(None, &["ctx-beta-2025-01-01"], true, true).await;
     assert!(
         routectl_core::identity::anthropic::has_claude_code_session(
             &admitted.routectl_internal.claude_code_headers
@@ -426,8 +387,7 @@ async fn the_router_carries_the_admitted_claude_code_classification_onto_the_pro
     // NON-CC POSITIVE CONTROL, same lane, one difference: no session capture.
     // Without this the assertion above would pass on a build that hardcoded
     // `Some(true)`.
-    let (admitted, probe) =
-        canonical_requests(&[], None, &["ctx-beta-2025-01-01"], true, false).await;
+    let (admitted, probe) = canonical_requests(None, &["ctx-beta-2025-01-01"], true, false).await;
     assert!(
         !routectl_core::identity::anthropic::has_claude_code_session(
             &admitted.routectl_internal.claude_code_headers

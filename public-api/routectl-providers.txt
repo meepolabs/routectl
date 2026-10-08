@@ -379,7 +379,6 @@ pub type routectl_providers::anthropic_api::SensitiveWordsBoundError::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::anthropic_api::SensitiveWordsBoundError where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::anthropic_api::SensitiveWordsBoundError::into_shared(self) -> Shared
 pub struct routectl_providers::anthropic_api::AnthropicApiConfig
-pub routectl_providers::anthropic_api::AnthropicApiConfig::allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_providers::anthropic_api::AnthropicApiConfig::anthropic_version: alloc::string::String
 pub routectl_providers::anthropic_api::AnthropicApiConfig::auth: alloc::sync::Arc<dyn routectl_core::token_source::TokenSource>
 pub routectl_providers::anthropic_api::AnthropicApiConfig::auth_kind: routectl_providers::anthropic_api::AuthKind

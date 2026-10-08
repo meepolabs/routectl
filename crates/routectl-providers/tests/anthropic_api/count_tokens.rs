@@ -26,7 +26,6 @@ async fn count_tokens_proxies_to_v1_messages_count_tokens_endpoint() {
         // body) for count_tokens.
         header_extras: vec![("anthropic-beta".into(), "context-1m-2025-08-07".into())],
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,

@@ -27,7 +27,6 @@ fn cfg(base_url: &str, auth_kind: AuthKind, use_forwarded_bearer: bool) -> Anthr
         auth_kind,
         header_extras: Vec::new(),
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,

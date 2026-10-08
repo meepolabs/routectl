@@ -330,7 +330,7 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             user_agent,
-            allowed_betas,
+            allowed_betas: _,
             forward_client_headers,
             context_management,
             max_thinking_entry_bytes,
@@ -381,7 +381,6 @@ async fn build_provider_inner(
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect(),
                     user_agent: user_agent.clone(),
-                    allowed_betas: allowed_betas.clone(),
                     forward_client_headers: forward_client_headers.clone(),
                     context_management: *context_management,
                     max_thinking_entry_bytes: resolve_max_thinking_entry_bytes(
@@ -462,7 +461,6 @@ async fn build_provider_inner(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
                 user_agent: user_agent.clone(),
-                allowed_betas: allowed_betas.clone(),
                 forward_client_headers: forward_client_headers.clone(),
                 context_management: *context_management,
                 max_thinking_entry_bytes: resolve_max_thinking_entry_bytes(
