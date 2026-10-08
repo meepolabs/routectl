@@ -7,7 +7,8 @@
 #
 # "Installed" means both pins at the top of scripts/public-api.sh are met:
 # cargo-public-api on PATH reporting exactly the version on its Bootstrap
-# `cargo install` line, and a rustup toolchain named PUBLIC_API_NIGHTLY.
+# `cargo install` line, and a rustup toolchain PUBLIC_API_NIGHTLY resolves
+# to that has a cargo, probed exactly as `cargo +PUBLIC_API_NIGHTLY` selects it.
 # The pins are read from that file the same way CI's public-api job reads
 # them, so there is no second copy to drift. A pin that cannot be read is a
 # wiring defect and fails rather than skips.
@@ -53,7 +54,7 @@ missing_tooling() {
         echo "rustup not on PATH, so the pinned $nightly cannot be selected"
         return
     fi
-    if ! rustup toolchain list 2>/dev/null | grep -qE "^$nightly(-| |\$)"; then
+    if ! rustup which --toolchain "$nightly" cargo >/dev/null 2>&1; then
         echo "toolchain $nightly not installed"
         return
     fi

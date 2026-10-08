@@ -80,8 +80,8 @@ exit "\${STUB_GATE_RC:-0}"
 STUB
 
 # Writes the tool stubs into a fresh bin dir named $1 and prints its path.
-# Options: --tool-version V, --no-tool, --toolchains "A B" (names before the
-# host triple, as `rustup toolchain list` prints them), --no-rustup.
+# Options: --tool-version V, --no-tool, --toolchains "A B" (installed names
+# without the host triple), --no-rustup.
 make_bin() {
     local dir="$TMP/bin-$1" tool_version="$VERSION" toolchains="$NIGHTLY" tool=1 rustup=1
     shift
@@ -99,13 +99,25 @@ make_bin() {
         chmod +x "$dir/cargo-public-api"
     fi
     if ((rustup)); then
-        {
-            printf '#!/bin/sh\n'
-            local t
-            for t in stable $toolchains; do
-                printf 'echo "%s-x86_64-unknown-linux-gnu"\n' "$t"
-            done
-        } >"$dir/rustup"
+        # Models `rustup which --toolchain T BIN`: T resolves only when it is
+        # an installed name, bare or with the host triple appended.
+        cat >"$dir/rustup" <<STUB
+#!/usr/bin/env bash
+triple=x86_64-unknown-linux-gnu
+installed=(stable $toolchains)
+if [[ "\$1 \$2" == "which --toolchain" ]]; then
+    for t in "\${installed[@]}"; do
+        if [[ "\$3" == "\$t" || "\$3" == "\$t-\$triple" ]]; then
+            echo "/stub/toolchains/\$t-\$triple/bin/\$4"
+            exit 0
+        fi
+    done
+    echo "error: toolchain '\$3' is not installed" >&2
+    exit 1
+fi
+echo "rustup stub: unsupported: \$*" >&2
+exit 1
+STUB
         chmod +x "$dir/rustup"
     fi
     echo "$dir"
@@ -167,9 +179,11 @@ assert_skip "pinned nightly absent" \
 assert_skip "rustup absent" "$(make_bin no-rustup --no-rustup)" "rustup not on PATH"
 
 # The nightly match must not accept a toolchain whose name merely starts
-# with the pin.
+# with the pin, with or without a separating dash.
 assert_skip "only a longer-named toolchain sharing the pin's prefix" \
     "$(make_bin prefix-nightly --toolchains "${NIGHTLY}0")" "toolchain $NIGHTLY not installed"
+assert_skip "only a custom toolchain named after the pin" \
+    "$(make_bin custom-nightly --toolchains "${NIGHTLY}-custom")" "toolchain $NIGHTLY not installed"
 
 # A public-api.sh without its version pin is a wiring defect, not a skip.
 sed -i 's/cargo-public-api --version [0-9.]*/cargo-public-api/' "$SCRIPTS/public-api.sh"
