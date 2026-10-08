@@ -47,24 +47,6 @@ fn fake_cfg() -> BedrockConfig {
             "mcp-client-2025-04-04".into(),
             "search-results-2025-06-09".into(),
         ],
-        allowed_body_fields: vec![
-            "anthropic_version".into(),
-            "anthropic_beta".into(),
-            "max_tokens".into(),
-            "messages".into(),
-            "system".into(),
-            "temperature".into(),
-            "top_p".into(),
-            "top_k".into(),
-            "tools".into(),
-            "tool_choice".into(),
-            "stop_sequences".into(),
-            "thinking".into(),
-            "output_config".into(),
-            "cache_control".into(),
-            "metadata".into(),
-            "context_management".into(),
-        ],
         additional_model_request_fields: None,
         adaptive_thinking: None,
     }
@@ -129,14 +111,12 @@ fn anthropic_object_none_tool_choice_suppresses_tool_config_entirely() {
 fn provider_extras_merge_into_additional_model_request_fields() {
     // Arrange: a custom forward-compat field (the Anthropic ingress
     // sweeps unknown top-level keys into provider_extras) must
-    // survive to additionalModelRequestFields verbatim PROVIDED the
-    // operator has the field on `[bedrock] allowed_body_fields`.
-    // Without this merge, fields like `context_management` and
-    // `output_config.format` disappear silently between ingress and
-    // Converse egress. Fields NOT on the operator list (e.g.
-    // `mcp_servers`, `container`) are dropped; see
-    // `body_fields_filter_drops_disallowed_keys_on_converse` for that
-    // contract. The client `metadata` fingerprint is stripped
+    // survive to additionalModelRequestFields verbatim. Without this
+    // merge, fields like `context_management` and `output_config.format`
+    // disappear silently between ingress and Converse egress. Only
+    // `mcp_servers` is dropped; see
+    // `forward_compat_keys_pass_through_and_mcp_servers_drops_on_converse`
+    // for that contract. The client `metadata` fingerprint is stripped
     // unconditionally on this seam (see
     // `client_metadata_fingerprint_skipped_from_converse_bag`).
     let cfg = fake_cfg();
@@ -168,22 +148,20 @@ fn provider_extras_merge_into_additional_model_request_fields() {
 }
 
 #[test]
-fn body_fields_filter_drops_disallowed_keys_on_converse() {
-    // Arrange: the Anthropic ingress's forward-compat sweep
-    // forwards unknown top-level keys (e.g. `mcp_servers`,
-    // `container`, `diagnostics`) into provider_extras. The Converse
-    // egress must DROP any key not on `[bedrock] allowed_body_fields`
-    // before sending; AWS forwards the bag verbatim to Anthropic
-    // which 400s the request on the first unrecognized field.
+fn forward_compat_keys_pass_through_and_mcp_servers_drops_on_converse() {
+    // Arrange: the Anthropic ingress's forward-compat sweep forwards
+    // unknown top-level keys (e.g. `mcp_servers`, `container`,
+    // `diagnostics`) into provider_extras. Every one reaches the bag
+    // unchanged except `mcp_servers`, which Bedrock cannot represent.
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")].into(),
         provider_extras: Some(json!({
-            "context_management": {"strategy": "summarize"},  // allowed
-            "mcp_servers": [{"url": "https://example.com"}],  // disallowed
-            "container": "my-container",                       // disallowed
-            "diagnostics": {"trace_id": "abc"},                // disallowed
+            "context_management": {"strategy": "summarize"},
+            "mcp_servers": [{"url": "https://example.com"}],
+            "container": "my-container",
+            "diagnostics": {"trace_id": "abc"},
         })),
         ..Default::default()
     };
@@ -193,19 +171,17 @@ fn body_fields_filter_drops_disallowed_keys_on_converse() {
         .as_object()
         .expect("expected bag");
 
-    // Assert: only the allowed key survives.
-    assert!(bag.contains_key("context_management"), "got {body}");
+    // Assert
+    assert_eq!(
+        bag["context_management"],
+        json!({"strategy": "summarize"}),
+        "got {body}"
+    );
+    assert_eq!(bag["container"], json!("my-container"), "got {body}");
+    assert_eq!(bag["diagnostics"], json!({"trace_id": "abc"}), "got {body}");
     assert!(
         !bag.contains_key("mcp_servers"),
         "mcp_servers leaked through: {body}"
-    );
-    assert!(
-        !bag.contains_key("container"),
-        "container leaked through: {body}"
-    );
-    assert!(
-        !bag.contains_key("diagnostics"),
-        "diagnostics leaked through: {body}"
     );
 }
 

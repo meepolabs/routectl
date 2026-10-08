@@ -9635,13 +9635,11 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::BoundaryReceipt::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::BuildOptions
 pub routectl_router::BuildOptions::bedrock_allowed_betas: alloc::vec::Vec<alloc::string::String>
-pub routectl_router::BuildOptions::bedrock_allowed_body_fields: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::BuildOptions::normalize_tools: bool
 pub routectl_router::BuildOptions::strict_translation: bool
 impl routectl_router::BuildOptions
 pub fn routectl_router::BuildOptions::new() -> Self
 pub fn routectl_router::BuildOptions::with_bedrock_allowed_betas(self, alloc::vec::Vec<alloc::string::String>) -> Self
-pub fn routectl_router::BuildOptions::with_bedrock_allowed_body_fields(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub const fn routectl_router::BuildOptions::with_normalize_tools(self, bool) -> Self
 pub const fn routectl_router::BuildOptions::with_strict_translation(self, bool) -> Self
 impl core::clone::Clone for routectl_router::BuildOptions
@@ -16609,7 +16607,6 @@ pub fn routectl_router::validate_alias_chain_targets(&routectl_router::config::C
 pub fn routectl_router::validate_alias_patterns(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_aws_regions(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_creds_refs(&routectl_router::config::Config) -> routectl_core::error::Result<()>
-pub fn routectl_router::validate_bedrock_global_config(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_invoke_model_family(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_cache_pricing_retired(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_router::validate_capability_overrides(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>

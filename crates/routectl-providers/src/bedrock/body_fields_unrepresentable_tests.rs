@@ -10,18 +10,12 @@ use serde_json::{Value, json};
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, converse, invoke};
 
 const SENTINEL_TOKEN: &str = "mcp-auth-sentinel-7Qz";
-const ADJACENT_FIELD: &str = "top_k";
+const ADJACENT_FIELD: &str = "diagnostics";
 
 #[derive(Debug, Clone, Copy)]
 enum Carrier {
     Invoke,
     Converse,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Allowlist {
-    Empty,
-    ListsMcpServers,
 }
 
 /// Where the field enters the request before Bedrock assembly.
@@ -36,7 +30,6 @@ enum Seam {
 }
 
 const CARRIERS: [Carrier; 2] = [Carrier::Invoke, Carrier::Converse];
-const ALLOWLISTS: [Allowlist; 2] = [Allowlist::Empty, Allowlist::ListsMcpServers];
 const SEAMS: [Seam; 3] = [Seam::ClientBody, Seam::ProviderExtras, Seam::OperatorExtras];
 
 fn mcp_servers_value() -> Value {
@@ -48,35 +41,15 @@ fn mcp_servers_value() -> Value {
     }])
 }
 
+fn adjacent_value() -> Value {
+    json!({"trace_id": "abc"})
+}
+
 fn extras_with_mcp_servers_and_adjacent() -> Value {
-    json!({ "mcp_servers": mcp_servers_value(), ADJACENT_FIELD: 40 })
+    json!({ "mcp_servers": mcp_servers_value(), ADJACENT_FIELD: adjacent_value() })
 }
 
-fn allowed_body_fields(allowlist: Allowlist) -> Vec<String> {
-    match allowlist {
-        Allowlist::Empty => Vec::new(),
-        Allowlist::ListsMcpServers => [
-            "anthropic_version",
-            "anthropic_beta",
-            "max_tokens",
-            "messages",
-            "system",
-            "tools",
-            "tool_choice",
-            "thinking",
-            "output_config",
-            "cache_control",
-            "metadata",
-            ADJACENT_FIELD,
-            "mcp_servers",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-    }
-}
-
-fn cfg(carrier: Carrier, allowlist: Allowlist, seam: Seam) -> BedrockConfig {
+fn cfg(carrier: Carrier, seam: Seam) -> BedrockConfig {
     BedrockConfig {
         id: "bedrock:unrepresentable".into(),
         region: "us-west-2".into(),
@@ -90,7 +63,6 @@ fn cfg(carrier: Carrier, allowlist: Allowlist, seam: Seam) -> BedrockConfig {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: Vec::new(),
-        allowed_body_fields: allowed_body_fields(allowlist),
         additional_model_request_fields: match seam {
             Seam::OperatorExtras => Some(extras_with_mcp_servers_and_adjacent()),
             Seam::ClientBody | Seam::ProviderExtras => None,
@@ -140,41 +112,37 @@ fn forwarded_fields(carrier: Carrier, body: &Value) -> &Value {
     }
 }
 
-fn egress_body(carrier: Carrier, allowlist: Allowlist, seam: Seam) -> Value {
-    let cfg = cfg(carrier, allowlist, seam);
+fn egress_body(carrier: Carrier, seam: Seam) -> Value {
+    let cfg = cfg(carrier, seam);
     let req = request(seam);
     match carrier {
         Carrier::Invoke => invoke::normalize_request(&cfg, &req),
         Carrier::Converse => converse::normalize_request(&cfg, &req),
     }
-    .unwrap_or_else(|e| panic!("{carrier:?}/{allowlist:?}/{seam:?} must normalize: {e}"))
+    .unwrap_or_else(|e| panic!("{carrier:?}/{seam:?} must normalize: {e}"))
 }
 
-fn cells() -> impl Iterator<Item = (Carrier, Allowlist, Seam)> {
-    CARRIERS.into_iter().flat_map(|carrier| {
-        ALLOWLISTS.into_iter().flat_map(move |allowlist| {
-            SEAMS
-                .into_iter()
-                .map(move |seam| (carrier, allowlist, seam))
-        })
-    })
+fn cells() -> impl Iterator<Item = (Carrier, Seam)> {
+    CARRIERS
+        .into_iter()
+        .flat_map(|carrier| SEAMS.into_iter().map(move |seam| (carrier, seam)))
 }
 
 #[test]
-fn mcp_servers_never_reaches_either_carrier_from_any_seam_under_any_allowlist() {
+fn mcp_servers_never_reaches_either_carrier_from_any_seam() {
     // Arrange
     let mut leaks = Vec::new();
 
     // Act
-    for (carrier, allowlist, seam) in cells() {
-        let body = egress_body(carrier, allowlist, seam);
+    for (carrier, seam) in cells() {
+        let body = egress_body(carrier, seam);
         let wire = serde_json::to_string(&body).expect("body serializes");
         if forwarded_fields(carrier, &body)
             .get("mcp_servers")
             .is_some()
             || wire.contains(SENTINEL_TOKEN)
         {
-            leaks.push(format!("{carrier:?}/{allowlist:?}/{seam:?}: {wire}"));
+            leaks.push(format!("{carrier:?}/{seam:?}: {wire}"));
         }
     }
 
@@ -191,15 +159,15 @@ fn mcp_servers_never_reaches_either_carrier_from_any_seam_under_any_allowlist() 
 /// fields to the carrier, so the absence of `mcp_servers` is the drop and
 /// not a fixture that never reached the wire.
 #[test]
-fn an_adjacent_allowed_field_from_the_same_seam_survives_on_both_carriers() {
+fn an_adjacent_forward_compat_field_from_the_same_seam_survives_on_both_carriers() {
     // Arrange
     let mut lost = Vec::new();
 
     // Act
-    for (carrier, allowlist, seam) in cells() {
-        let body = egress_body(carrier, allowlist, seam);
-        if forwarded_fields(carrier, &body).get(ADJACENT_FIELD) != Some(&json!(40)) {
-            lost.push(format!("{carrier:?}/{allowlist:?}/{seam:?}: {body}"));
+    for (carrier, seam) in cells() {
+        let body = egress_body(carrier, seam);
+        if forwarded_fields(carrier, &body).get(ADJACENT_FIELD) != Some(&adjacent_value()) {
+            lost.push(format!("{carrier:?}/{seam:?}: {body}"));
         }
     }
 
@@ -221,10 +189,10 @@ fn the_mcp_servers_drop_logs_the_field_name_and_never_the_connector_token() {
     let mut problems = Vec::new();
 
     // Act
-    for (carrier, allowlist, seam) in cells() {
-        let cell = format!("{carrier:?}/{allowlist:?}/{seam:?}");
+    for (carrier, seam) in cells() {
+        let cell = format!("{carrier:?}/{seam:?}");
         let events = routectl_testkit::capture_events(|| {
-            let _ = egress_body(carrier, allowlist, seam);
+            let _ = egress_body(carrier, seam);
         });
         if events.iter().any(|e| {
             e.message.contains(SENTINEL_TOKEN)
@@ -253,7 +221,7 @@ fn the_mcp_servers_drop_logs_the_field_name_and_never_the_connector_token() {
 fn a_body_without_mcp_servers_logs_no_drop() {
     for carrier in CARRIERS {
         // Arrange
-        let cfg = cfg(carrier, Allowlist::Empty, Seam::ClientBody);
+        let cfg = cfg(carrier, Seam::ClientBody);
         let req = request(Seam::OperatorExtras);
 
         // Act

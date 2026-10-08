@@ -20,8 +20,6 @@ pub use build::{
 #[cfg(feature = "bedrock")]
 pub use validate::validate_bedrock_creds_refs;
 #[cfg(feature = "bedrock")]
-pub use validate::validate_bedrock_global_config;
-#[cfg(feature = "bedrock")]
 pub use validate::validate_bedrock_invoke_model_family;
 #[cfg(feature = "bedrock")]
 pub use validate::validate_provider_bedrock_mantle;

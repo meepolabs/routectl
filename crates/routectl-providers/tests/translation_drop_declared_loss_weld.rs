@@ -235,14 +235,6 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
          loss costs model output rather than caller content",
     ),
     (
-        "bedrock/converse/extras.rs",
-        "build_additional_fields",
-        "allowed_body_fields omits routectl-managed field",
-        "warns that the operator's own allowed_body_fields list will drop a routectl-managed \
-         key; the loss is the operator's configuration choice, not a wire translation, and the \
-         bag filter downstream owns the drop",
-    ),
-    (
         "bedrock/converse/messages.rs",
         "record",
         "dropping unrecognized document citations value",

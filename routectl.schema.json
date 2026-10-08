@@ -152,7 +152,7 @@
       ]
     },
     "BedrockGlobalConfig": {
-      "description": "Bedrock-wide configuration shared by every `[providers.X]` entry of\n`kind = \"bedrock\"`. Both allowlists below are operator-owned and have\nno default, so AWS schema drift (Anthropic adds a beta, Bedrock gates a\nbody field) does not require a routectl release. See\n`examples/bedrock.toml` for the empirical 2026-05-12 baseline; copy and\ntune as your account's gating evolves.\n\n**Empty list = pass-through.** Either field, when empty (or the\nentire `[bedrock]` section omitted), disables that filter -- the\nupstream sees the assembled value unchanged, except that the router\nwithholds the client beta flags it decided this lane must not send\n(a small shipped seed of betas Bedrock rejects, plus flags it learned\nthe lane rejects) and `mcp_servers` is never forwarded. A\n`force_supported` override on `beta:<flag>` sends a withheld flag, and\n`routectl capability purge` lifts a seeded one on one lane. This\nis the discovery-mode default: bring up routectl, observe actual traffic\nvia `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then\npopulate the list with what you observe.\n\nStartup validation in `crate::factory::validate_bedrock_global_config`\nkicks in only when `allowed_body_fields` is non-empty, and rejects\na list missing routectl-mandatory keys (`messages`,\n`anthropic_version`, `max_tokens`) or missing `anthropic_beta`\nwhen a `[providers.X] anthropic_beta` floor is set.",
+      "description": "Bedrock-wide configuration shared by every `[providers.X]` entry of\n`kind = \"bedrock\"`. Both allowlists below are operator-owned and have\nno default, so AWS schema drift (Anthropic adds a beta, Bedrock gates a\nbody field) does not require a routectl release. See\n`examples/bedrock.toml` for the empirical 2026-05-12 baseline; copy and\ntune as your account's gating evolves.\n\n**Empty list = pass-through.** Either field, when empty (or the\nentire `[bedrock]` section omitted), disables that filter -- the\nupstream sees the assembled value unchanged, except that the router\nwithholds the client beta flags it decided this lane must not send\n(a small shipped seed of betas Bedrock rejects, plus flags it learned\nthe lane rejects) and `mcp_servers` is never forwarded. A\n`force_supported` override on `beta:<flag>` sends a withheld flag, and\n`routectl capability purge` lifts a seeded one on one lane. This\nis the discovery-mode default: bring up routectl, observe actual traffic\nvia `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then\npopulate the list with what you observe.",
       "properties": {
         "allowed_betas": {
           "default": [],
@@ -164,7 +164,7 @@
         },
         "allowed_body_fields": {
           "default": [],
-          "description": "Bedrock-accepted top-level body fields (Invoke) /\n`additionalModelRequestFields` keys (Converse). Bedrock 400s\nany unrecognized field with `\"Extra inputs are not permitted\"`,\nso the Anthropic ingress's forward-compat sweep needs filtering\non the Bedrock egress when this list is non-empty. **Empty\nlist = pass-through** (no allowlist filtering; the assembled body /\nbag is forwarded except `mcp_servers`, which Bedrock rejects on both\ncarriers and is never forwarded, whatever this list says).\n\nWhen non-empty, must include the routectl-mandatory keys\n(`messages`, `anthropic_version`, `max_tokens`) for requests\nto construct successfully -- startup validation rejects an\nincomplete list with a copy-paste hint.",
+          "description": "Retired Bedrock body-field allowlist. Still parsed so an existing\nfile loads, but no longer read: the Bedrock egress forwards every\nbody field except the ones it drops unconditionally (`mcp_servers`\nand a `tool_choice` with no tools).",
           "items": {
             "type": "string"
           },
@@ -2092,7 +2092,7 @@
         "allowed_betas": [],
         "allowed_body_fields": []
       },
-      "description": "Bedrock-wide settings that apply to every Bedrock provider.\nCarries the operator-supplied `allowed_betas` and\n`allowed_body_fields` lists -- neither list has a default, so\nAWS schema drift does not require a routectl release. Separately,\nthe router withholds a small seed of betas Bedrock rejects plus\nany beta flag it learned a lane rejects. See\n`examples/bedrock.toml` for the empirical baseline. Future\nshared knobs (e.g. region-default, retry-default) land here too."
+      "description": "Bedrock-wide settings that apply to every Bedrock provider.\nCarries the operator-supplied `allowed_betas` list -- it has no\ndefault, so AWS schema drift does not require a routectl release. Separately,\nthe router withholds a small seed of betas Bedrock rejects plus\nany beta flag it learned a lane rejects. See\n`examples/bedrock.toml` for the empirical baseline. Future\nshared knobs (e.g. region-default, retry-default) land here too."
     },
     "cache": {
       "$ref": "#/$defs/CacheConfig",

@@ -1245,12 +1245,6 @@ impl<'a> Iterator for NicknameIter<'a> {
 /// is the discovery-mode default: bring up routectl, observe actual traffic
 /// via `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then
 /// populate the list with what you observe.
-///
-/// Startup validation in `crate::factory::validate_bedrock_global_config`
-/// kicks in only when `allowed_body_fields` is non-empty, and rejects
-/// a list missing routectl-mandatory keys (`messages`,
-/// `anthropic_version`, `max_tokens`) or missing `anthropic_beta`
-/// when a `[providers.X] anthropic_beta` floor is set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BedrockGlobalConfig {
     /// Bedrock-accepted `anthropic_beta` flags. AWS validates each
@@ -1273,19 +1267,10 @@ pub struct BedrockGlobalConfig {
     #[serde(default)]
     pub allowed_betas: Vec<String>,
 
-    /// Bedrock-accepted top-level body fields (Invoke) /
-    /// `additionalModelRequestFields` keys (Converse). Bedrock 400s
-    /// any unrecognized field with `"Extra inputs are not permitted"`,
-    /// so the Anthropic ingress's forward-compat sweep needs filtering
-    /// on the Bedrock egress when this list is non-empty. **Empty
-    /// list = pass-through** (no allowlist filtering; the assembled body /
-    /// bag is forwarded except `mcp_servers`, which Bedrock rejects on both
-    /// carriers and is never forwarded, whatever this list says).
-    ///
-    /// When non-empty, must include the routectl-mandatory keys
-    /// (`messages`, `anthropic_version`, `max_tokens`) for requests
-    /// to construct successfully -- startup validation rejects an
-    /// incomplete list with a copy-paste hint.
+    /// Retired Bedrock body-field allowlist. Still parsed so an existing
+    /// file loads, but no longer read: the Bedrock egress forwards every
+    /// body field except the ones it drops unconditionally (`mcp_servers`
+    /// and a `tool_choice` with no tools).
     #[serde(default)]
     pub allowed_body_fields: Vec<String>,
 }

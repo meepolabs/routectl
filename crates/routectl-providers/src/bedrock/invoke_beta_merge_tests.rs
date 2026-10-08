@@ -25,7 +25,6 @@ fn cfg_with_floor(floor: &[&str]) -> BedrockConfig {
         header_extras: Vec::new(),
         anthropic_beta: floor.iter().map(|f| (*f).to_string()).collect(),
         allowed_betas: Vec::new(),
-        allowed_body_fields: Vec::new(),
         additional_model_request_fields: None,
         adaptive_thinking: None,
     }

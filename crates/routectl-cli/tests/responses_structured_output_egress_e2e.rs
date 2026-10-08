@@ -470,7 +470,6 @@ fn bedrock_invoke_cfg() -> BedrockConfig {
         // can be filtered out by operator policy rather than by the
         // translation under test.
         allowed_betas: Vec::new(),
-        allowed_body_fields: Vec::new(),
         additional_model_request_fields: None,
         adaptive_thinking: None,
     }

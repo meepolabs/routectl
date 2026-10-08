@@ -17,7 +17,7 @@ use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 /// Structured `event` field of the repair's not-`false` forward WARN.
 const FORWARD_EVENT: &str = "output_schema_additional_properties_not_false";
 
-fn cfg_with_body_fields(allowed_body_fields: Vec<String>) -> BedrockConfig {
+fn cfg() -> BedrockConfig {
     BedrockConfig {
         id: "bedrock:test-converse".into(),
         region: "us-west-2".into(),
@@ -28,14 +28,9 @@ fn cfg_with_body_fields(allowed_body_fields: Vec<String>) -> BedrockConfig {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: Vec::new(),
-        allowed_body_fields,
         additional_model_request_fields: None,
         adaptive_thinking: None,
     }
-}
-
-fn cfg() -> BedrockConfig {
-    cfg_with_body_fields(Vec::new())
 }
 
 fn req_with_schema(schema: Value) -> ChatRequest {
@@ -255,27 +250,6 @@ fn emits_no_forward_warn_when_every_present_value_is_false() {
     assert!(forward_warns(&events).is_empty(), "got: {events:?}");
 }
 
-#[test]
-fn does_not_repair_an_output_config_dropped_by_allowed_body_fields() {
-    // Arrange: the allowlist omits output_config, so the bag ships without it.
-    let cfg = cfg_with_body_fields(vec!["thinking".into(), "anthropic_beta".into()]);
-    let req = req_with_schema(json!({
-        "type": "object",
-        "properties": {"inner": {"type": "object"}}
-    }));
-
-    // Act
-    let (result, events) = normalized(&cfg, &req);
-    let body = result.unwrap();
-
-    // Assert
-    assert!(
-        !body.to_string().contains("additionalProperties"),
-        "nothing may be injected into a bag that ships no output_config: {body}"
-    );
-    assert!(forward_warns(&events).is_empty(), "got: {events:?}");
-}
-
 /// A schema nested one level past the repair walk's depth limit (256).
 fn over_depth_schema() -> Value {
     let mut schema = json!({"type": "object", "properties": {}});
@@ -300,23 +274,4 @@ fn an_over_bound_schema_fails_locally_with_a_normalize_error() {
     };
     assert!(matches!(err, Error::NormalizeRequest(..)), "got: {err:?}");
     assert!(err.to_string().contains("nests deeper"), "got: {err}");
-}
-
-#[test]
-fn an_over_bound_schema_in_a_dropped_output_config_does_not_fail() {
-    // Arrange: the repair runs on the shipped bag, so a schema the allowlist
-    // removes is never walked and cannot fail the request.
-    let cfg = cfg_with_body_fields(vec!["thinking".into(), "anthropic_beta".into()]);
-    let req = req_with_schema(over_depth_schema());
-
-    // Act
-    let (result, _) = normalized(&cfg, &req);
-
-    // Assert
-    let body = result.expect("a dropped output_config must not be walked");
-    assert!(
-        body["additionalModelRequestFields"]
-            .get("output_config")
-            .is_none()
-    );
 }

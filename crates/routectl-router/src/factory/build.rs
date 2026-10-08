@@ -1,7 +1,5 @@
 //! Per-kind provider construction from config rows.
 
-#[cfg(feature = "bedrock")]
-use super::validate::validate_bedrock_allowlists;
 #[cfg(feature = "openai-responses")]
 use super::validate::validate_openai_responses_account_id;
 use super::validate::{validate_base_url_scheme, validate_managed_oauth_credentials};
@@ -39,13 +37,11 @@ use std::sync::Arc;
 
 /// Convenience wrapper that builds a provider with `BuildOptions::default()`.
 ///
-/// Note for Bedrock providers: `BuildOptions::default()` carries empty
-/// `bedrock_allowed_betas` / `bedrock_allowed_body_fields` lists, which
-/// puts both filters in pass-through mode -- routectl forwards every
-/// flag/field to AWS as-is. That is the correct discovery default; if
-/// you want filtering, populate the lists from
-/// `[bedrock] allowed_betas` / `[bedrock] allowed_body_fields` (see
-/// `examples/bedrock.toml`) and pass them via
+/// Note for Bedrock providers: `BuildOptions::default()` carries an empty
+/// `bedrock_allowed_betas` list, which puts the beta filter in pass-through
+/// mode -- routectl forwards every flag to AWS as-is. That is the correct
+/// discovery default; if you want filtering, populate the list from
+/// `[bedrock] allowed_betas` (see `examples/bedrock.toml`) and pass it via
 /// `build_provider_with_options`. routectl-cli callers (`server`,
 /// `commands::test`) do this automatically.
 pub async fn build_provider(
@@ -79,11 +75,6 @@ pub struct BuildOptions {
     /// flags learned as rejected on the lane); the operator floor or a
     /// `force_supported` override on `beta:<flag>` sends a withheld flag.
     pub bedrock_allowed_betas: Vec<String>,
-    /// Bedrock-accepted top-level body fields / Converse extras keys.
-    /// Sourced from `[bedrock] allowed_body_fields` TOML. Empty list =
-    /// pass-through (no filter applied) -- the same discovery-mode
-    /// default as `bedrock_allowed_betas`.
-    pub bedrock_allowed_body_fields: Vec<String>,
 }
 
 impl Default for BuildOptions {
@@ -92,7 +83,6 @@ impl Default for BuildOptions {
             strict_translation: false,
             normalize_tools: true,
             bedrock_allowed_betas: Vec::new(),
-            bedrock_allowed_body_fields: Vec::new(),
         }
     }
 }
@@ -118,12 +108,6 @@ impl BuildOptions {
     /// Set the Bedrock `anthropic_beta` allowlist.
     pub fn with_bedrock_allowed_betas(mut self, list: Vec<String>) -> Self {
         self.bedrock_allowed_betas = list;
-        self
-    }
-
-    /// Set the Bedrock body-fields allowlist.
-    pub fn with_bedrock_allowed_body_fields(mut self, list: Vec<String>) -> Self {
-        self.bedrock_allowed_body_fields = list;
         self
     }
 }
@@ -625,12 +609,6 @@ async fn build_provider_inner(
             reduction_enabled: _,
             runtime: _,
         } => {
-            validate_bedrock_allowlists(
-                matches!(api_shape, BedrockApiShapeConfig::Invoke),
-                !anthropic_beta.is_empty(),
-                &opts.bedrock_allowed_betas,
-                &opts.bedrock_allowed_body_fields,
-            )?;
             // Reuse already-resolved creds when the caller provided
             // them (per-provider cache in `build_resolved_models`).
             // Otherwise resolve fresh -- the legacy single-provider
@@ -661,7 +639,6 @@ async fn build_provider_inner(
                     .collect(),
                 anthropic_beta: anthropic_beta.clone(),
                 allowed_betas: opts.bedrock_allowed_betas.clone(),
-                allowed_body_fields: opts.bedrock_allowed_body_fields.clone(),
                 additional_model_request_fields: overrides.additional_model_request_fields,
                 adaptive_thinking: overrides.adaptive_thinking,
             };

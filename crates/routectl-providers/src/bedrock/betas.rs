@@ -85,8 +85,8 @@ pub(super) fn feature_implied_betas(
 }
 
 /// Union [`feature_implied_betas`] into `fields["anthropic_beta"]`. Must run
-/// after the beta and body-field filters and every strip that can change
-/// the implying fields, so a restrictive allowlist cannot drop a flag the
+/// after the beta filter and every strip that can change the implying
+/// fields, so a restrictive allowlist cannot drop a flag the
 /// shipped body needs. Idempotent: a present flag is neither duplicated nor
 /// reordered.
 pub(super) fn union_feature_implied_betas(shape: BedrockApiShape, fields: &mut Map<String, Value>) {

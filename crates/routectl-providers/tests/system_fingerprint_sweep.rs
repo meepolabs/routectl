@@ -133,7 +133,6 @@ fn bedrock(shape: BedrockApiShape) -> BedrockProvider {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: Vec::new(),
-        allowed_body_fields: Vec::new(),
         additional_model_request_fields: None,
         adaptive_thinking: None,
     };

@@ -45,7 +45,6 @@ crates/routectl-providers/tests/anthropic_api/sse.rs
 crates/routectl-providers/tests/anthropic_api/system_turns.rs
 crates/routectl-providers/tests/anthropic_api/unified_quota.rs
 crates/routectl-providers/tests/contract_egress_gemini.rs
-crates/routectl-providers/tests/legacy_capability_config_equivalence.rs
 crates/routectl-providers/tests/schema_smoke.rs
 crates/routectl-router/benches/dispatch_clone.rs
 crates/routectl-router/src/capability_detect.rs

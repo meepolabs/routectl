@@ -89,48 +89,13 @@ pub(super) fn build_additional_fields(
     // `super::super::betas` for the full contract.
     filter_anthropic_beta(cfg, req, &mut bag);
 
-    // Warn when the operator's allowed_body_fields list would drop a
-    // routectl-managed key that carries thinking or effort semantics.
-    // The downstream filter logs at DEBUG for all drops; upgrading to
-    // WARN here (before the filter runs) ensures operators can see the
-    // loss without digging through debug logs.
-    if !cfg.allowed_body_fields.is_empty() {
-        for key in ["thinking", "output_config"] {
-            if bag.contains_key(key) && !cfg.allowed_body_fields.iter().any(|k| k == key) {
-                tracing::warn!(
-                    provider = %cfg.id,
-                    field = %sanitize_for_log(key),
-                    surface = "converse_additional_fields",
-                    "allowed_body_fields omits routectl-managed field; it will be \
-                     dropped and thinking/effort semantics will be lost. Add this \
-                     field to [bedrock] allowed_body_fields to preserve Converse behavior."
-                );
-            }
-        }
-    }
-
-    // Filter the bag itself against `[bedrock] allowed_body_fields`.
-    // Anthropic-on-Bedrock rejects unknown body fields with HTTP 400
-    // ("Extra inputs are not permitted"); for Converse those fields
-    // ride in `additionalModelRequestFields` and AWS forwards them
-    // verbatim to Anthropic which performs the schema check. Without
-    // this filter, an Anthropic-ingress forward-compat sweep entry
-    // like `mcp_servers` or `diagnostics` lands in the bag and 400s
-    // every claude-code request to Converse.
-    super::super::body_fields::filter_bedrock_body_fields(
-        &cfg.id,
-        &mut bag,
-        &cfg.allowed_body_fields,
-        super::super::body_fields::FilterContext::ConverseAdditionalFields,
-    );
-
     // Final pass: Anthropic's extended-thinking docs forbid `thinking`
     // alongside a `tool_choice` that forces tool use. Strip thinking
     // from the bag when toolChoice has resolved to `{any:{}}` or
     // `{tool:{name}}`. Runs last so the check operates on the fully
     // composed bag (insert_thinking + provider_extras + operator_extras
-    // + filtered for managed keys + body-field allowlist), matching
-    // the wire body the request will actually carry.
+    // + filtered for managed keys), matching the wire body the request
+    // will actually carry.
     strip_thinking_when_tool_choice_forces_use(cfg, &mut bag, tool_choice);
 
     // Scrub the `output_config.format` keys Anthropic cannot represent from
@@ -752,8 +717,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// Test config with `max_tokens > 1024` so legacy thinking is
-    /// composed onto the bag, and a permissive `allowed_body_fields`
-    /// list so the body-field filter doesn't drop `thinking` on its own.
+    /// composed onto the bag.
     fn fake_cfg() -> BedrockConfig {
         BedrockConfig {
             id: "bedrock:test-converse".into(),
@@ -765,7 +729,6 @@ mod tests {
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             allowed_betas: Vec::new(),
-            allowed_body_fields: Vec::new(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         }

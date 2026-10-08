@@ -123,10 +123,9 @@ fn translate_tallied(
 
     // The sampling clamp must key off whether thinking ACTUALLY survives on
     // the wire, not the provisional build_thinking result: build_additional_fields
-    // strips thinking when toolChoice forces tool use (and the allowlist filters
-    // can drop it too). Build the bag first, then inspect it -- clamping on the
-    // provisional value would force temperature=1.0 / drop top_p for a request
-    // that ships no thinking, diverging from the direct Anthropic path which
+    // strips thinking when toolChoice forces tool use. Build the bag first, then
+    // inspect it -- clamping on the provisional value would force
+    // temperature=1.0 / drop top_p for a request that ships no thinking, diverging from the direct Anthropic path which
     // restores caller sampling after its final thinking strip.
     let thinking_survived = additional_model_request_fields
         .as_ref()
@@ -154,8 +153,7 @@ fn translate_tallied(
 /// Supply the `additionalProperties: false` Anthropic requires on every object
 /// of `output_config.format.schema`; Bedrock forwards the bag verbatim and does
 /// not fill it in. Runs on the FINAL bag so it sees every `output_config`
-/// writer and never touches one the body-field allowlist already removed. A
-/// schema past the walk's bounds fails the request here, before any send.
+/// writer. A schema past the walk's bounds fails the request here, before any send.
 fn repair_output_schema(cfg: &BedrockConfig, bag: Option<&mut Value>) -> Result<()> {
     let Some(bag) = bag.and_then(Value::as_object_mut) else {
         return Ok(());
@@ -178,8 +176,8 @@ fn build_inference_config(
     // clamp drifts.
     //
     // Only clamp when thinking survived into the final bag. `build_thinking`'s
-    // provisional result may be stripped downstream (toolChoice forces a tool,
-    // allowlist filters), and clamping on the provisional value would force
+    // provisional result may be stripped downstream (toolChoice forces a tool),
+    // and clamping on the provisional value would force
     // temperature=1.0 / drop top_p even though no thinking ships -- matching
     // the direct Anthropic path's reconcile_sampling_params, which restores
     // caller sampling from the source request once no thinking survives.

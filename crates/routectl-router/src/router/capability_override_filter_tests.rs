@@ -371,15 +371,13 @@ fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
 ///
 /// One config carrying ALL three legacy capability lists (a per-provider
 /// `unsupported_features`, a per-model `unsupported_features`, and the
-/// `[bedrock]` egress allowlists `allowed_betas` / `allowed_body_fields`
-/// -- inert for routing but present so the whole legacy surface coexists)
+/// `[bedrock]` egress allowlist `allowed_betas` -- inert for routing but
+/// present so the whole legacy surface coexists)
 /// must route away with the SAME `FilterSource` labels the earlier raw
 /// static-list scan produced: a provider-scoped drop reports
 /// `ProviderStatic` (`"provider"`) and a model-scoped drop reports
 /// `ModelStatic` (`"model"`). Absolute expected labels, not a diff
-/// against a rebuilt old binary. The egress-byte half of this acceptance
-/// bar lives in `routectl-providers`
-/// (`tests/legacy_capability_config_equivalence.rs`).
+/// against a rebuilt old binary.
 #[test]
 fn legacy_config_lists_route_away_with_pre_f3_source_labels() {
     // Arrange -- every legacy list in one config.
@@ -394,8 +392,7 @@ fn legacy_config_lists_route_away_with_pre_f3_source_labels() {
              upstream = \"gpt-x\"\n\
              unsupported_features = [\"computer_use\"]\n\
              [bedrock]\n\
-             allowed_betas = [\"some-beta\"]\n\
-             allowed_body_fields = [\"messages\", \"anthropic_version\", \"max_tokens\"]\n",
+             allowed_betas = [\"some-beta\"]\n",
     );
     let target = override_test_target("p", "nick");
 

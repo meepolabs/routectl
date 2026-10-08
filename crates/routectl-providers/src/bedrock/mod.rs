@@ -250,14 +250,6 @@ pub struct BedrockConfig {
     /// withheld in either mode. The provider holds no seed of its own: a
     /// caller that does not fill that set withholds nothing.
     pub allowed_betas: Vec<String>,
-    /// Bedrock-accepted top-level body fields. On Invoke this filters
-    /// the Anthropic-shape body before send; on Converse it filters
-    /// the `additionalModelRequestFields` bag. Sourced from
-    /// `[bedrock] allowed_body_fields` TOML. Empty list = pass-through
-    /// (no filter applied). When non-empty, must include the routectl-
-    /// mandatory keys (`messages`, `anthropic_version`, `max_tokens`);
-    /// startup validation enforces this.
-    pub allowed_body_fields: Vec<String>,
     /// Free-form fields merged into the request body. For `Invoke`,
     /// merged at the top level; for `Converse`, merged into
     /// `additionalModelRequestFields`.
@@ -1217,7 +1209,6 @@ mod tests {
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             allowed_betas: Vec::new(),
-            allowed_body_fields: Vec::new(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
@@ -1245,7 +1236,6 @@ mod tests {
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             allowed_betas: Vec::new(),
-            allowed_body_fields: Vec::new(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         }

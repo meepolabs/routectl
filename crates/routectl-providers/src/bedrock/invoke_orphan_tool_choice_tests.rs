@@ -1,6 +1,6 @@
-//! An `allowed_body_fields` list that keeps `tool_choice` but not `tools`
-//! must never ship a `tool_choice` alone: Anthropic rejects the pairing, so
-//! every such request would fail. Checked on the body Invoke actually ships.
+//! A request carrying a `tool_choice` but an empty tool list must never ship
+//! the `tool_choice` alone: Anthropic rejects the pairing, so every such
+//! request would fail. Checked on the body Invoke actually ships.
 
 use serde_json::{Value, json};
 
@@ -11,12 +11,7 @@ use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 
 const FUNCTION_NAME: &str = "get_weather";
 
-fn cfg_allowing(extra: &[&str]) -> BedrockConfig {
-    let mut allowed: Vec<String> = ["anthropic_version", "max_tokens", "messages"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    allowed.extend(extra.iter().map(|s| (*s).to_string()));
+fn cfg() -> BedrockConfig {
     BedrockConfig {
         id: "bedrock:test".into(),
         region: "us-west-2".into(),
@@ -27,13 +22,24 @@ fn cfg_allowing(extra: &[&str]) -> BedrockConfig {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: Vec::new(),
-        allowed_body_fields: allowed,
         additional_model_request_fields: None,
         adaptive_thinking: None,
     }
 }
 
-fn request_with_choice(tool_choice: Value) -> ChatRequest {
+fn function_tool() -> ToolDef {
+    ToolDef::Custom(CustomTool {
+        name: FUNCTION_NAME.into(),
+        description: None,
+        input_schema: json!({"type": "object"}),
+        cache_control: None,
+        defer_loading: None,
+        strict: None,
+        type_tag: None,
+    })
+}
+
+fn request_with(tools: Vec<ToolDef>, tool_choice: Value) -> ChatRequest {
     ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![Message {
@@ -48,15 +54,7 @@ fn request_with_choice(tool_choice: Value) -> ChatRequest {
         }]
         .into(),
         max_tokens: Some(64),
-        tools: Some(vec![ToolDef::Custom(CustomTool {
-            name: FUNCTION_NAME.into(),
-            description: None,
-            input_schema: json!({"type": "object"}),
-            cache_control: None,
-            defer_loading: None,
-            strict: None,
-            type_tag: None,
-        })]),
+        tools: Some(tools),
         tool_choice: Some(tool_choice),
         ..Default::default()
     }
@@ -70,17 +68,22 @@ fn choices() -> [Value; 2] {
 }
 
 #[test]
-fn an_allowlist_dropping_tools_takes_the_tool_choice_with_it() {
+fn an_empty_tool_list_takes_the_tool_choice_with_it() {
     for choice in choices() {
         // Arrange
-        let cfg = cfg_allowing(&["tool_choice"]);
-        let req = request_with_choice(choice.clone());
+        let cfg = cfg();
+        let req = request_with(Vec::new(), choice.clone());
 
         // Act
         let body = normalize_request(&cfg, &req).expect("invoke body assembles");
 
         // Assert
-        assert!(body.get("tools").is_none(), "{choice}: {body}");
+        assert!(
+            body.get("tools")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty),
+            "{choice}: {body}"
+        );
         assert!(
             body.get("tool_choice").is_none(),
             "{choice}: a tool_choice with no tools must not ship: {body}"
@@ -89,10 +92,13 @@ fn an_allowlist_dropping_tools_takes_the_tool_choice_with_it() {
 }
 
 #[test]
-fn an_allowlist_keeping_both_ships_both() {
-    // Arrange -- control: the same request with `tools` allowed.
-    let cfg = cfg_allowing(&["tools", "tool_choice"]);
-    let req = request_with_choice(json!({"type": "tool", "name": FUNCTION_NAME}));
+fn a_non_empty_tool_list_ships_both() {
+    // Arrange -- control: the same request with a tool to select.
+    let cfg = cfg();
+    let req = request_with(
+        vec![function_tool()],
+        json!({"type": "tool", "name": FUNCTION_NAME}),
+    );
 
     // Act
     let body = normalize_request(&cfg, &req).expect("invoke body assembles");

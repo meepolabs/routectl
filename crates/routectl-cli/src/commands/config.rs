@@ -35,7 +35,7 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
     // `serve` and `test` also run -- both rendered with source lines.
     // Without the suite here, an operator running `routectl config check`
     // against a TOML carrying `thinking = ""`, a chain of unknown
-    // nicknames, or an incoherent `[bedrock] allowed_body_fields` would
+    // nicknames, or a non-Anthropic model on the Bedrock Invoke lane would
     // see "ok" and only discover the failure when starting the server.
     // The bespoke secret-ref resolution above is check-specific and stays
     // here.
@@ -83,9 +83,9 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
 
 /// Longest reported error/warning line, in characters. Every validator
 /// formats operator-written TOML keys into its message, and the longest
-/// legitimate one (a `[bedrock] allowed_body_fields` remediation) runs past
-/// 300 chars -- so the shared 256-char log-field budget would truncate a
-/// benign message. This ceiling bounds the line without reaching any real
+/// legitimate one (the managed-Anthropic containment error) runs past the
+/// shared 256-char log-field budget, which would truncate a benign
+/// message. This ceiling bounds the line without reaching any real
 /// one.
 ///
 /// Shared with the doctor render of the same validator messages so both

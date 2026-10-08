@@ -185,24 +185,9 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // permitted". Strip it here on the Bedrock-Invoke seam.
     obj.remove("model");
 
-    // Filter the assembled body against `[bedrock] allowed_body_fields`
-    // so Anthropic-ingress forward-compat sweeps (`mcp_servers`,
-    // `diagnostics`, `context_hint`, `speed`, ...) drop on the egress
-    // before the request hits AWS. Without this filter, every
-    // claude-code request 400s on the first unrecognized field --
-    // Bedrock validates with strict-schema "Extra inputs are not
-    // permitted". See `super::body_fields` for the full contract.
-    super::body_fields::filter_bedrock_body_fields(
-        &cfg.id,
-        obj,
-        &cfg.allowed_body_fields,
-        super::body_fields::FilterContext::InvokeBody,
-    );
-
-    // The allowlist filter drops keys independently, so a list keeping
-    // `tool_choice` but not `tools` would ship a tool_choice with nothing to
-    // select -- which Anthropic (and Invoke, carrying its body) rejects.
-    // Remove an orphaned tool_choice on the body that actually ships.
+    // Anthropic (and Invoke, carrying its body) rejects a tool_choice with
+    // nothing to select. Remove an orphaned tool_choice on the body that
+    // actually ships.
     super::body_fields::drop_orphan_tool_choice(
         &cfg.id,
         obj,
@@ -231,18 +216,12 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // UNMEASURED, and an older account/model tier may still gate the field,
     // so the union stays; revisit it if Anthropic retires the flag (whether
     // an unknown beta string is itself rejected is also unmeasured).
-    // Deliberately AFTER both Bedrock allowlist filters:
-    //   - after `filter_bedrock_betas`, because the flag is a
-    //     routectl-derived capability signal implied by the shipped body,
-    //     not a client-opted beta, so it bypasses `[bedrock] allowed_betas`
-    //     with the same standing the operator's `cfg.anthropic_beta` floor
-    //     has. Unioning it earlier lets a restrictive allowlist that omits
-    //     the flag drop it again.
-    //   - after `filter_bedrock_body_fields`, so an `allowed_body_fields`
-    //     list that drops `output_config` entirely produces no flag either.
-    //     When `output_config.format` DOES survive that filter, the flag it
-    //     implies survives too, even if the operator's list omits
-    //     `anthropic_beta`.
+    // Deliberately AFTER `filter_bedrock_betas`, because the flag is a
+    // routectl-derived capability signal implied by the shipped body, not a
+    // client-opted beta, so it bypasses `[bedrock] allowed_betas` with the
+    // same standing the operator's `cfg.anthropic_beta` floor has. Unioning
+    // it earlier lets a restrictive allowlist that omits the flag drop it
+    // again.
     // Feature-triggered and idempotent: no `output_config.format` means no
     // flag, and an already-present flag is neither duplicated nor reordered.
     if let Some(obj) = body.as_object_mut() {
@@ -619,7 +598,7 @@ pub fn normalize_response(provider_id: &str, raw: Value) -> Result<ChatResponse>
     crate::anthropic_api::response::normalize(provider_id, raw)
 }
 
-// An allowlist that drops `tools` never leaves a `tool_choice` behind.
+// A `tool_choice` with no tools on the wire never ships.
 #[cfg(test)]
 #[path = "invoke_orphan_tool_choice_tests.rs"]
 mod orphan_tool_choice_tests;
@@ -659,37 +638,12 @@ mod tests {
                 "mcp-client-2025-04-04".into(),
                 "search-results-2025-06-09".into(),
             ],
-            allowed_body_fields: full_body_fields(),
             // `top_p` is canonical and would now be filtered out;
             // use `top_k` here as a real long-tail Anthropic-only
             // knob the allow-list lets through.
             additional_model_request_fields: Some(json!({"top_k": 40})),
             adaptive_thinking: None,
         }
-    }
-
-    /// Empirical 2026-05-12 Bedrock body-field allowlist + `top_k`,
-    /// reused across the Invoke test fixtures so a request lifted from
-    /// the Anthropic ingress survives the body-field filter.
-    fn full_body_fields() -> Vec<String> {
-        vec![
-            "anthropic_version".into(),
-            "anthropic_beta".into(),
-            "max_tokens".into(),
-            "messages".into(),
-            "system".into(),
-            "temperature".into(),
-            "top_p".into(),
-            "top_k".into(),
-            "tools".into(),
-            "tool_choice".into(),
-            "stop_sequences".into(),
-            "thinking".into(),
-            "output_config".into(),
-            "cache_control".into(),
-            "metadata".into(),
-            "context_management".into(),
-        ]
     }
 
     fn user_req() -> ChatRequest {
@@ -1321,7 +1275,6 @@ mod tests {
                 "mcp-client-2025-04-04".into(),
                 "search-results-2025-06-09".into(),
             ],
-            allowed_body_fields: full_body_fields(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         }
@@ -1627,7 +1580,7 @@ mod tests {
         // Bedrock Invoke delegates body construction to the Anthropic-API
         // normalizer, so honoring req.response_format there means the
         // output_config.format field rides through onto the Invoke body
-        // (it survives the anthropic_beta + body-field allowlist passes).
+        // (it survives the anthropic_beta allowlist pass).
         // `name` is NOT carried: Anthropic's format object accepts only
         // `type` and `schema`, and AWS forwards the bag verbatim to the same
         // validator.

@@ -41,12 +41,10 @@ use common::scenarios;
 /// dummy key here is purely structural -- it never crosses any wire in
 /// these tests.
 ///
-/// `allowed_betas` and `allowed_body_fields` are intentionally empty
-/// (pass-through, the "discovery default" per `BedrockConfig` doc) so
-/// the scenarios exercise the unfiltered translator. The filter
-/// surfaces have dedicated coverage in
-/// `bedrock/converse/request_tests*.rs` and
-/// `bedrock/{betas,body_fields}.rs::tests`.
+/// `allowed_betas` is intentionally empty (pass-through, the "discovery
+/// default" per `BedrockConfig` doc) so the scenarios exercise the
+/// unfiltered translator. The filter surface has dedicated coverage in
+/// `bedrock/converse/request_tests*.rs` and `bedrock/betas.rs::tests`.
 fn bedrock_converse_provider() -> BedrockProvider {
     let cfg = BedrockConfig {
         id: "bedrock-converse-test".into(),
@@ -60,7 +58,6 @@ fn bedrock_converse_provider() -> BedrockProvider {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: Vec::new(),
-        allowed_body_fields: Vec::new(),
         additional_model_request_fields: None,
         adaptive_thinking: None,
     };
