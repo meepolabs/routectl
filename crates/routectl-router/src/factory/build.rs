@@ -291,7 +291,6 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             user_agent,
-            allowed_betas: _,
             forward_client_headers,
             context_management,
             max_thinking_entry_bytes,

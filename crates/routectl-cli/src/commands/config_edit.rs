@@ -407,7 +407,7 @@ default = \"gpt\"
 
     #[test]
     fn array_target_leaves_file_unchanged() {
-        assert_no_write(&current_base(), "bedrock.allowed_betas", "429");
+        assert_no_write(&current_base(), "fidelity.prefix_impact_opt_in", "429");
     }
 
     #[test]

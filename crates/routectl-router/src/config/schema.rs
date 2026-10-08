@@ -1204,54 +1204,6 @@ impl<'a> Iterator for NicknameIter<'a> {
     }
 }
 
-/// Bedrock-wide configuration shared by every `[providers.X]` entry of
-/// `kind = "bedrock"`. Both allowlists below are operator-owned and have
-/// no default, so AWS schema drift (Anthropic adds a beta, Bedrock gates a
-/// body field) does not require a routectl release. See
-/// `examples/bedrock.toml` for the empirical 2026-05-12 baseline; copy and
-/// tune as your account's gating evolves.
-///
-/// **Empty list = pass-through.** Either field, when empty (or the
-/// entire `[bedrock]` section omitted), disables that filter -- the
-/// upstream sees the assembled value unchanged, except that the router
-/// withholds the client beta flags it decided this lane must not send
-/// (a small shipped seed of betas Bedrock rejects, plus flags it learned
-/// the lane rejects) and `mcp_servers` is never forwarded. A
-/// `force_supported` override on `beta:<flag>` sends a withheld flag, and
-/// `routectl capability purge` lifts a seeded one on one lane. This
-/// is the discovery-mode default: bring up routectl, observe actual traffic
-/// via `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then
-/// populate the list with what you observe.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct BedrockGlobalConfig {
-    /// Bedrock-accepted `anthropic_beta` flags. AWS validates each
-    /// entry independently and 400s the request on the first
-    /// unsupported flag. No default. **Empty list = pass-through** for
-    /// every client flag the router does not withhold from the lane:
-    /// a shipped seed of betas Bedrock rejects
-    /// (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
-    /// `prompt-caching-scope-2026-01-05`) plus flags learned as rejected
-    /// on that lane are withheld in either mode and even when listed. The
-    /// operator floor (`[providers.X] anthropic_beta` plus
-    /// `header_extras`-pinned betas) or a `force_supported` override on
-    /// `beta:<flag>` sends one anyway; `routectl capability purge` lifts
-    /// a seeded flag on one lane. Populate via TOML to enable filtering.
-    /// `examples/bedrock.toml` ships the empirical 2026-05-12 baseline.
-    ///
-    /// Per-provider `[providers.X] anthropic_beta` is unrelated and
-    /// keeps its existing semantics (operator-asserted floor that is
-    /// always sent and bypasses this filter).
-    #[serde(default)]
-    pub allowed_betas: Vec<String>,
-
-    /// Retired Bedrock body-field allowlist. Still parsed so an existing
-    /// file loads, but no longer read: the Bedrock egress forwards every
-    /// body field except the ones it drops unconditionally (`mcp_servers`
-    /// and a `tool_choice` with no tools).
-    #[serde(default)]
-    pub allowed_body_fields: Vec<String>,
-}
-
 /// Listener bind config: host, port, auth, and request-size / translation
 /// posture for the HTTP server.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1536,11 +1488,6 @@ pub enum ProviderEntry {
         /// Override the outbound User-Agent. Useful for IAM-gated upstreams.
         #[serde(default)]
         user_agent: Option<String>,
-        /// Optional operator-supplied allowlist for `anthropic_beta`
-        /// flags forwarded to api.anthropic.com. Default (empty) is
-        /// pass-through.
-        #[serde(default)]
-        allowed_betas: Vec<String>,
         /// Strict allowlist of inbound `x-claude-code-*` header names
         /// the egress is permitted to forward to api.anthropic.com.
         /// Empty (default) drops every captured `x-claude-code-*`
@@ -2129,10 +2076,10 @@ impl ProviderEntry {
     }
 
     /// Operator-configured `anthropic_beta` floor for this entry: the
-    /// betas the egress always sends, bypassing the client-beta
-    /// allowlist. Only the Bedrock variant carries one today (the
-    /// invoke/converse adapters re-add it on the wire after the
-    /// canonical request build); every other variant has no such floor
+    /// betas the egress always sends, even when the router withholds
+    /// the same flag from client betas. Only the Bedrock variant carries
+    /// one today (the invoke/converse adapters re-add it on the wire
+    /// after the canonical request build); every other variant has no such floor
     /// and returns an empty slice. Read by the dispatch-layer
     /// operator-floor-pin guard so a capability whose beta token the
     /// operator pins is never stripped (a stripped-then-re-added token
@@ -2423,7 +2370,6 @@ impl ProviderEntry {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
-            allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: None,

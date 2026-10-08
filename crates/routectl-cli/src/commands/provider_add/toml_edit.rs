@@ -12,7 +12,7 @@ use crate::commands::edit_pipeline::{
 
 /// Serialize a [`ProviderEntry`] into a standard (non-inline) `toml_edit`
 /// table, dropping the empty collection defaults serde emits (an empty
-/// `header_extras` map, empty `allowed_betas` list) so the written block
+/// `header_extras` map, empty `forward_client_headers` list) so the written block
 /// stays minimal. The re-validate gate is the backstop for anything pruned.
 pub(super) fn provider_table(entry: &ProviderEntry) -> Result<Table> {
     let text = toml::to_string(entry)

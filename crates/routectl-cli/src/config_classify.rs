@@ -36,7 +36,6 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
     "version",
     "aliases",
     "retry",
-    "bedrock",
     "models",
     "registry",
     "cache",

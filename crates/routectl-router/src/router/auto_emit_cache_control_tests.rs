@@ -164,7 +164,6 @@ fn anthropic_entry_provider_disabled() -> ProviderEntry {
         header_extras: BTreeMap::new(),
         payload_extras: None,
         user_agent: None,
-        allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: None,

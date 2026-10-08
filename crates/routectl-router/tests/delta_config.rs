@@ -9,7 +9,7 @@
 //!   an absent leaf inherits the baked class default, a present leaf
 //!   overrides only itself, and each class key is independent
 //!   (`RetryPolicy::resolved_class`);
-//! - plain serde for Vec fields (`bedrock.allowed_betas`) -- a list is one
+//! - plain serde for Vec fields (`fidelity.prefix_impact_opt_in`) -- a list is one
 //!   atomic value taken wholesale from the file, never element-merged.
 //!
 //! Contract rules pinned (config-schema v3, layering section):
@@ -67,20 +67,20 @@ retry = 4
 
 #[test]
 fn vec_field_is_taken_whole_from_the_file_never_element_merged() {
-    // Arrange: two configs that each set bedrock.allowed_betas to a
-    // different whole list, plus one that omits it entirely.
-    let with_pair =
-        parse_config("[bedrock]\nallowed_betas = [\"a\", \"b\"]\n").expect("valid config parses");
+    // Arrange: two configs that each set fidelity.prefix_impact_opt_in to
+    // a different whole list, plus one that omits it entirely.
+    let with_pair = parse_config("[fidelity]\nprefix_impact_opt_in = [\"a\", \"b\"]\n")
+        .expect("valid config parses");
     let with_single =
-        parse_config("[bedrock]\nallowed_betas = [\"c\"]\n").expect("valid config parses");
+        parse_config("[fidelity]\nprefix_impact_opt_in = [\"c\"]\n").expect("valid config parses");
     let omitted = parse_config("[retry]\nmax_attempts = 6\n").expect("valid config parses");
 
     // Assert: each load holds EXACTLY its file's list -- no union with the
     // baked (empty) default, and no accumulation across loads.
-    assert_eq!(with_pair.bedrock.allowed_betas, vec!["a", "b"]);
-    assert_eq!(with_single.bedrock.allowed_betas, vec!["c"]);
+    assert_eq!(with_pair.fidelity.prefix_impact_opt_in, vec!["a", "b"]);
+    assert_eq!(with_single.fidelity.prefix_impact_opt_in, vec!["c"]);
     // An omitted Vec is the baked default (empty), not something merged in.
-    assert!(omitted.bedrock.allowed_betas.is_empty());
+    assert!(omitted.fidelity.prefix_impact_opt_in.is_empty());
 }
 
 #[test]

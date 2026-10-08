@@ -141,9 +141,7 @@ pub use config::{
     preflight_retired_capability_keys, validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
-pub use config::{
-    BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig, BedrockMantleConfig,
-};
+pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
 pub use config_effective::{
     AliasChain, ClassPolicyCell, ClassPolicySource, EffectiveView, ModelCell, ProviderCell,
     derive_effective_view,

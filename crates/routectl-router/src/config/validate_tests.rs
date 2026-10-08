@@ -410,6 +410,39 @@ mod retired_capability_keys_preflight_tests {
         assert_eq!(preflight_retired_capability_keys(&body), Ok(()));
     }
 
+    /// Without the preflight in front of it, the typed parse still refuses
+    /// each retired key as an unknown field rather than silently accepting
+    /// it. Each row's control is the same fixture with the key removed.
+    #[test]
+    fn typed_parse_refuses_each_retired_key_as_an_unknown_field() {
+        let cases = [
+            ("bedrock", "", "[bedrock]\nallowed_betas = [\"x\"]\n"),
+            (
+                "allowed_betas",
+                "[providers.p]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n",
+                "allowed_betas = [\"x\"]\n",
+            ),
+        ];
+
+        for (field, base, retired) in cases {
+            // Arrange
+            let clean = current_with(base);
+            let with_retired = current_with(&format!("{base}{retired}"));
+
+            // Act
+            let control = crate::parse_config(&clean);
+            let err =
+                crate::parse_config(&with_retired).expect_err(&format!("`{field}` must not parse"));
+
+            // Assert
+            assert!(control.is_ok(), "control for `{field}`: {control:?}");
+            assert!(
+                err.contains(&format!("unknown field `{field}`")),
+                "row `{field}`: {err}"
+            );
+        }
+    }
+
     #[test]
     fn malformed_toml_falls_through_to_the_typed_parse() {
         assert_eq!(

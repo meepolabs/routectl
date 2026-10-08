@@ -18,12 +18,12 @@ pub(crate) use schema::default_anthropic_base;
 pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::routectl_config_dir;
 pub use schema::{
-    AliasValue, BedrockGlobalConfig, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability,
-    CacheConfig, CalibrationConfig, CapabilityConfig, CredentialSource, ENVELOPE_QUORUM,
-    FidelityConfig, HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter,
-    OverrideEntry, PREFIX_QUORUM, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
-    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection,
-    ServerAuth, ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
+    AliasValue, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
+    CalibrationConfig, CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, FidelityConfig,
+    HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter, OverrideEntry,
+    PREFIX_QUORUM, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
+    ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection, ServerAuth,
+    ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -99,16 +99,6 @@ pub struct Config {
     /// Default retry policy applied per-provider attempt.
     #[serde(default)]
     pub retry: RetryPolicy,
-
-    /// Bedrock-wide settings that apply to every Bedrock provider.
-    /// Carries the operator-supplied `allowed_betas` list -- it has no
-    /// default, so AWS schema drift does not require a routectl release. Separately,
-    /// the router withholds a small seed of betas Bedrock rejects plus
-    /// any beta flag it learned a lane rejects. See
-    /// `examples/bedrock.toml` for the empirical baseline. Future
-    /// shared knobs (e.g. region-default, retry-default) land here too.
-    #[serde(default)]
-    pub bedrock: BedrockGlobalConfig,
 
     /// v0.6.0 model directory. Each entry binds a logical nickname
     /// (the table key) to a transport (`provider`), an upstream model

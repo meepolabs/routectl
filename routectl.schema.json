@@ -151,28 +151,6 @@
         }
       ]
     },
-    "BedrockGlobalConfig": {
-      "description": "Bedrock-wide configuration shared by every `[providers.X]` entry of\n`kind = \"bedrock\"`. Both allowlists below are operator-owned and have\nno default, so AWS schema drift (Anthropic adds a beta, Bedrock gates a\nbody field) does not require a routectl release. See\n`examples/bedrock.toml` for the empirical 2026-05-12 baseline; copy and\ntune as your account's gating evolves.\n\n**Empty list = pass-through.** Either field, when empty (or the\nentire `[bedrock]` section omitted), disables that filter -- the\nupstream sees the assembled value unchanged, except that the router\nwithholds the client beta flags it decided this lane must not send\n(a small shipped seed of betas Bedrock rejects, plus flags it learned\nthe lane rejects) and `mcp_servers` is never forwarded. A\n`force_supported` override on `beta:<flag>` sends a withheld flag, and\n`routectl capability purge` lifts a seeded one on one lane. This\nis the discovery-mode default: bring up routectl, observe actual traffic\nvia `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then\npopulate the list with what you observe.",
-      "properties": {
-        "allowed_betas": {
-          "default": [],
-          "description": "Bedrock-accepted `anthropic_beta` flags. AWS validates each\nentry independently and 400s the request on the first\nunsupported flag. No default. **Empty list = pass-through** for\nevery client flag the router does not withhold from the lane:\na shipped seed of betas Bedrock rejects\n(`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,\n`prompt-caching-scope-2026-01-05`) plus flags learned as rejected\non that lane are withheld in either mode and even when listed. The\noperator floor (`[providers.X] anthropic_beta` plus\n`header_extras`-pinned betas) or a `force_supported` override on\n`beta:<flag>` sends one anyway; `routectl capability purge` lifts\na seeded flag on one lane. Populate via TOML to enable filtering.\n`examples/bedrock.toml` ships the empirical 2026-05-12 baseline.\n\nPer-provider `[providers.X] anthropic_beta` is unrelated and\nkeeps its existing semantics (operator-asserted floor that is\nalways sent and bypasses this filter).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "allowed_body_fields": {
-          "default": [],
-          "description": "Retired Bedrock body-field allowlist. Still parsed so an existing\nfile loads, but no longer read: the Bedrock egress forwards every\nbody field except the ones it drops unconditionally (`mcp_servers`\nand a `tool_choice` with no tools).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "type": "object"
-    },
     "BedrockMantleConfig": {
       "additionalProperties": false,
       "description": "Shared mantle sub-config for AWS Bedrock's managed inference lane. Its\nPRESENCE on a provider entry selects the mantle lane: the factory\nderives the endpoint base URL from `region` (region is the single\nsource of truth -- no manual `base_url`) and authenticates with\n`creds`. Naming is deliberately lane-neutral so the OpenAI-shape lanes\nreuse this exact type.",
@@ -1031,14 +1009,6 @@
           "additionalProperties": false,
           "description": "Native Anthropic Messages API provider.",
           "properties": {
-            "allowed_betas": {
-              "default": [],
-              "description": "Optional operator-supplied allowlist for `anthropic_beta`\nflags forwarded to api.anthropic.com. Default (empty) is\npass-through.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
             "anthropic_version": {
               "default": "2023-06-01",
               "description": "`anthropic-version` header value sent upstream.",
@@ -2037,14 +2007,6 @@
       "default": {},
       "description": "v0.6.0 alias table. Each key is a wire `model` value (or a\nsuffix-glob pattern like `claude-opus-*`, or the literal\n`default` catch-all key); each value is either a single model\nnickname or an ordered fallback chain of nicknames -- both\nforms reference `[models.X]` table entries. The wire `model`\nfield on incoming requests resolves through this table.\n\nv0.6.0 collapsed the legacy `[aliases.X.chain]` `provider:model`\nliterals AND the `[ingress.X.aliases]` per-dialect maps AND the\n`default_model` field AND the suffix-glob convention (used\nprimarily by Claude Code and the OpenAI SDK over our ingress)\ninto this single table. See the v0.6.0-rc.1 CHANGELOG for the\nmigration guide.",
       "type": "object"
-    },
-    "bedrock": {
-      "$ref": "#/$defs/BedrockGlobalConfig",
-      "default": {
-        "allowed_betas": [],
-        "allowed_body_fields": []
-      },
-      "description": "Bedrock-wide settings that apply to every Bedrock provider.\nCarries the operator-supplied `allowed_betas` list -- it has no\ndefault, so AWS schema drift does not require a routectl release. Separately,\nthe router withholds a small seed of betas Bedrock rejects plus\nany beta flag it learned a lane rejects. See\n`examples/bedrock.toml` for the empirical baseline. Future\nshared knobs (e.g. region-default, retry-default) land here too."
     },
     "cache": {
       "$ref": "#/$defs/CacheConfig",

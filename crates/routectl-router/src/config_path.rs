@@ -338,13 +338,13 @@ mod tests {
 
     #[test]
     fn array_target_is_rejected() {
-        let err = validate_config_path("bedrock.allowed_betas").unwrap_err();
+        let err = validate_config_path("fidelity.prefix_impact_opt_in").unwrap_err();
         assert!(matches!(err, PathError::ArrayTarget { .. }));
     }
 
     #[test]
     fn indexing_into_array_is_rejected() {
-        let err = validate_config_path("bedrock.allowed_betas.0").unwrap_err();
+        let err = validate_config_path("fidelity.prefix_impact_opt_in.0").unwrap_err();
         assert!(matches!(err, PathError::ArrayTarget { .. }));
     }
 

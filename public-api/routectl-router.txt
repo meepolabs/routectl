@@ -1000,7 +1000,6 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::config::NicknameIter<'a>::into_shared(self) -> Shared
 #[non_exhaustive] pub enum routectl_router::config::ProviderEntry
 #[non_exhaustive] pub routectl_router::config::ProviderEntry::AnthropicApi
-pub routectl_router::config::ProviderEntry::AnthropicApi::allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::config::ProviderEntry::AnthropicApi::anthropic_version: alloc::string::String
 pub routectl_router::config::ProviderEntry::AnthropicApi::api_key_ref: alloc::string::String
 pub routectl_router::config::ProviderEntry::AnthropicApi::auth_kind: routectl_providers::anthropic_api::client::AuthKind
@@ -1315,68 +1314,6 @@ impl<T> typenum::type_operators::Same for routectl_router::config::SeatSelection
 pub type routectl_router::config::SeatSelection::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::config::SeatSelection where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::config::SeatSelection::into_shared(self) -> Shared
-pub struct routectl_router::config::BedrockGlobalConfig
-pub routectl_router::config::BedrockGlobalConfig::allowed_betas: alloc::vec::Vec<alloc::string::String>
-pub routectl_router::config::BedrockGlobalConfig::allowed_body_fields: alloc::vec::Vec<alloc::string::String>
-impl core::clone::Clone for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::clone(&self) -> routectl_router::BedrockGlobalConfig
-impl core::default::Default for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::default() -> routectl_router::BedrockGlobalConfig
-impl core::fmt::Debug for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl schemars::JsonSchema for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::inline_schema() -> bool
-pub fn routectl_router::BedrockGlobalConfig::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
-pub fn routectl_router::BedrockGlobalConfig::schema_id() -> alloc::borrow::Cow<'static, str>
-pub fn routectl_router::BedrockGlobalConfig::schema_name() -> alloc::borrow::Cow<'static, str>
-impl serde_core::ser::Serialize for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for routectl_router::BedrockGlobalConfig
-impl core::marker::Send for routectl_router::BedrockGlobalConfig
-impl core::marker::Sync for routectl_router::BedrockGlobalConfig
-impl core::marker::Unpin for routectl_router::BedrockGlobalConfig
-impl core::marker::UnsafeUnpin for routectl_router::BedrockGlobalConfig
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::BedrockGlobalConfig
-impl core::panic::unwind_safe::UnwindSafe for routectl_router::BedrockGlobalConfig
-impl<T, U> core::convert::Into<U> for routectl_router::BedrockGlobalConfig where U: core::convert::From<T>
-pub fn routectl_router::BedrockGlobalConfig::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_router::BedrockGlobalConfig where U: core::convert::Into<T>
-pub type routectl_router::BedrockGlobalConfig::Error = core::convert::Infallible
-pub fn routectl_router::BedrockGlobalConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_router::BedrockGlobalConfig where U: core::convert::TryFrom<T>
-pub type routectl_router::BedrockGlobalConfig::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_router::BedrockGlobalConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_router::BedrockGlobalConfig where T: core::clone::Clone
-pub type routectl_router::BedrockGlobalConfig::Owned = T
-pub fn routectl_router::BedrockGlobalConfig::clone_into(&self, &mut T)
-pub fn routectl_router::BedrockGlobalConfig::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::BedrockGlobalConfig where T: core::clone::Clone
-pub fn routectl_router::BedrockGlobalConfig::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_router::BedrockGlobalConfig where T: 'static + ?core::marker::Sized
-pub fn routectl_router::BedrockGlobalConfig::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_router::BedrockGlobalConfig where T: ?core::marker::Sized
-pub fn routectl_router::BedrockGlobalConfig::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_router::BedrockGlobalConfig where T: ?core::marker::Sized
-pub fn routectl_router::BedrockGlobalConfig::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_router::BedrockGlobalConfig where T: core::clone::Clone
-pub unsafe fn routectl_router::BedrockGlobalConfig::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_router::BedrockGlobalConfig where T: core::clone::Clone
-pub fn routectl_router::BedrockGlobalConfig::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_router::BedrockGlobalConfig
-impl<T> serde_core::de::DeserializeOwned for routectl_router::BedrockGlobalConfig where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::BedrockGlobalConfig where T: ?core::marker::Sized
-pub fn routectl_router::BedrockGlobalConfig::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_router::BedrockGlobalConfig::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_router::BedrockGlobalConfig
-impl<T> tracing::instrument::WithSubscriber for routectl_router::BedrockGlobalConfig
-impl<T> typenum::type_operators::Same for routectl_router::BedrockGlobalConfig
-pub type routectl_router::BedrockGlobalConfig::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BedrockGlobalConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_router::BedrockGlobalConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::config::BedrockMantleConfig
 pub routectl_router::config::BedrockMantleConfig::creds: routectl_router::BedrockCredsConfig
 pub routectl_router::config::BedrockMantleConfig::region: alloc::string::String
@@ -1719,7 +1656,6 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::CapabilityConfig::into_shared(self) -> Shared
 pub struct routectl_router::config::Config
 pub routectl_router::config::Config::aliases: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::AliasValue>
-pub routectl_router::config::Config::bedrock: routectl_router::BedrockGlobalConfig
 pub routectl_router::config::Config::cache: routectl_router::CacheConfig
 pub routectl_router::config::Config::cache_pricing: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>
 pub routectl_router::config::Config::calibration: routectl_router::CalibrationConfig
@@ -8080,7 +8016,6 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::pricing::PricingSource::into_shared(self) -> Shared
 #[non_exhaustive] pub enum routectl_router::ProviderEntry
 #[non_exhaustive] pub routectl_router::ProviderEntry::AnthropicApi
-pub routectl_router::ProviderEntry::AnthropicApi::allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::ProviderEntry::AnthropicApi::anthropic_version: alloc::string::String
 pub routectl_router::ProviderEntry::AnthropicApi::api_key_ref: alloc::string::String
 pub routectl_router::ProviderEntry::AnthropicApi::auth_kind: routectl_providers::anthropic_api::client::AuthKind
@@ -9389,68 +9324,6 @@ impl<T> typenum::type_operators::Same for routectl_router::BareOauthRef
 pub type routectl_router::BareOauthRef::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BareOauthRef where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::BareOauthRef::into_shared(self) -> Shared
-pub struct routectl_router::BedrockGlobalConfig
-pub routectl_router::BedrockGlobalConfig::allowed_betas: alloc::vec::Vec<alloc::string::String>
-pub routectl_router::BedrockGlobalConfig::allowed_body_fields: alloc::vec::Vec<alloc::string::String>
-impl core::clone::Clone for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::clone(&self) -> routectl_router::BedrockGlobalConfig
-impl core::default::Default for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::default() -> routectl_router::BedrockGlobalConfig
-impl core::fmt::Debug for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl schemars::JsonSchema for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::inline_schema() -> bool
-pub fn routectl_router::BedrockGlobalConfig::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
-pub fn routectl_router::BedrockGlobalConfig::schema_id() -> alloc::borrow::Cow<'static, str>
-pub fn routectl_router::BedrockGlobalConfig::schema_name() -> alloc::borrow::Cow<'static, str>
-impl serde_core::ser::Serialize for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for routectl_router::BedrockGlobalConfig
-impl core::marker::Send for routectl_router::BedrockGlobalConfig
-impl core::marker::Sync for routectl_router::BedrockGlobalConfig
-impl core::marker::Unpin for routectl_router::BedrockGlobalConfig
-impl core::marker::UnsafeUnpin for routectl_router::BedrockGlobalConfig
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::BedrockGlobalConfig
-impl core::panic::unwind_safe::UnwindSafe for routectl_router::BedrockGlobalConfig
-impl<T, U> core::convert::Into<U> for routectl_router::BedrockGlobalConfig where U: core::convert::From<T>
-pub fn routectl_router::BedrockGlobalConfig::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_router::BedrockGlobalConfig where U: core::convert::Into<T>
-pub type routectl_router::BedrockGlobalConfig::Error = core::convert::Infallible
-pub fn routectl_router::BedrockGlobalConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_router::BedrockGlobalConfig where U: core::convert::TryFrom<T>
-pub type routectl_router::BedrockGlobalConfig::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_router::BedrockGlobalConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_router::BedrockGlobalConfig where T: core::clone::Clone
-pub type routectl_router::BedrockGlobalConfig::Owned = T
-pub fn routectl_router::BedrockGlobalConfig::clone_into(&self, &mut T)
-pub fn routectl_router::BedrockGlobalConfig::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::BedrockGlobalConfig where T: core::clone::Clone
-pub fn routectl_router::BedrockGlobalConfig::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_router::BedrockGlobalConfig where T: 'static + ?core::marker::Sized
-pub fn routectl_router::BedrockGlobalConfig::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_router::BedrockGlobalConfig where T: ?core::marker::Sized
-pub fn routectl_router::BedrockGlobalConfig::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_router::BedrockGlobalConfig where T: ?core::marker::Sized
-pub fn routectl_router::BedrockGlobalConfig::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_router::BedrockGlobalConfig where T: core::clone::Clone
-pub unsafe fn routectl_router::BedrockGlobalConfig::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_router::BedrockGlobalConfig
-pub fn routectl_router::BedrockGlobalConfig::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_router::BedrockGlobalConfig where T: core::clone::Clone
-pub fn routectl_router::BedrockGlobalConfig::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_router::BedrockGlobalConfig
-impl<T> serde_core::de::DeserializeOwned for routectl_router::BedrockGlobalConfig where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::BedrockGlobalConfig where T: ?core::marker::Sized
-pub fn routectl_router::BedrockGlobalConfig::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_router::BedrockGlobalConfig::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_router::BedrockGlobalConfig
-impl<T> tracing::instrument::WithSubscriber for routectl_router::BedrockGlobalConfig
-impl<T> typenum::type_operators::Same for routectl_router::BedrockGlobalConfig
-pub type routectl_router::BedrockGlobalConfig::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BedrockGlobalConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_router::BedrockGlobalConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::BedrockMantleConfig
 pub routectl_router::BedrockMantleConfig::creds: routectl_router::BedrockCredsConfig
 pub routectl_router::BedrockMantleConfig::region: alloc::string::String
@@ -10750,7 +10623,6 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::ClassPolicyCell::into_shared(self) -> Shared
 pub struct routectl_router::Config
 pub routectl_router::Config::aliases: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::AliasValue>
-pub routectl_router::Config::bedrock: routectl_router::BedrockGlobalConfig
 pub routectl_router::Config::cache: routectl_router::CacheConfig
 pub routectl_router::Config::cache_pricing: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>
 pub routectl_router::Config::calibration: routectl_router::CalibrationConfig

@@ -174,7 +174,6 @@ fn build_router_with_provider_and_retry(provider: Arc<dyn Provider>, retry: Retr
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
-            allowed_betas: vec![],
             forward_client_headers: vec![],
             context_management: false,
             max_thinking_entry_bytes: None,
