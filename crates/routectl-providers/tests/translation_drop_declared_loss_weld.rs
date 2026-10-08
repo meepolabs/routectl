@@ -361,6 +361,13 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "openai_responses/sse.rs",
+        "handle_function_call_delta",
+        "function_call argument delta after done event; dropping",
+        "response-side: refuses a delta that would append to arguments a done event already \
+         settled, which would corrupt the emitted JSON rather than lose caller content",
+    ),
+    (
+        "openai_responses/sse.rs",
         "parse_event",
         "skipping unknown stream event",
         "response-side streaming: skips an unknown upstream event kind at DEBUG, a forward-compat \
