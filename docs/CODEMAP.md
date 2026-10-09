@@ -1535,8 +1535,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   droppable's learned negative from strip to route-away -- tightening-only,
   validated against the known-key set minus `reasoning_replay`)
   drives the learned-capability registry and is hot-reloadable;
-  `WindowGateConfig` (global `[window_gate]`: `enabled`, default true) is the
-  hot-reloadable kill switch for the proactive context-window gate;
+  `WindowGateConfig` (global `[window_gate]`: `enabled`, default false; a
+  missing block is off) is the hot-reloadable switch for the proactive
+  context-window gate;
   `CalibrationConfig` (global `[calibration]`: `enabled`, default true) is the
   hot-reloadable kill switch for APPLYING the learned per-lane token-estimate
   correction (off leaves the static window gate intact and retains collected

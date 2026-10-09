@@ -254,6 +254,34 @@ fn an_unconfirmed_window_keeps_the_target() {
 }
 
 #[test]
+fn a_config_without_a_window_gate_block_keeps_every_target() {
+    // Arrange: no [window_gate] table, so the shipped default applies. The
+    // same chain under `router(true)` skips "small" (see
+    // clear_overflow_is_skipped_while_an_alternative_remains).
+    let config: Config = toml::from_str(
+        "version = 3\n\
+         [providers.p]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"https://x\"\n\
+         api_key_ref = \"literal:k\"\n",
+    )
+    .expect("config parses");
+    let router = Router::new(Arc::new(config));
+    let req = oversized_request();
+    let chain = vec![
+        target_with_window("small", clearly_too_small(&req)),
+        target_with_window("large", comfortably_large(&req)),
+    ];
+
+    // Act
+    let kept = router.filter_chain_by_window(chain, &req);
+
+    // Assert
+    assert_eq!(nicknames(&kept), vec!["small", "large"]);
+    assert_eq!(router.metrics.window_gate_skips_total(), 0);
+}
+
+#[test]
 fn the_kill_switch_leaves_the_chain_untouched() {
     let router = router(false);
     let req = oversized_request();

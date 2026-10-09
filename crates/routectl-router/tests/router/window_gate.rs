@@ -3,7 +3,7 @@
 
 use super::*;
 
-use routectl_router::{CatalogRow, EffectiveRow};
+use routectl_router::{CatalogRow, EffectiveRow, WindowGateConfig};
 
 /// A request whose serialized size is far past any window these tests
 /// configure.
@@ -36,7 +36,8 @@ fn row_with_window(window: u32) -> EffectiveRow {
     }
 }
 
-/// Build a two-entry chain `[m1, m2]` whose models carry the given windows.
+/// Build a two-entry chain `[m1, m2]` whose models carry the given windows,
+/// with the window gate enabled.
 fn router_with_windows(
     first_window: u32,
     second_window: Option<u32>,
@@ -46,9 +47,12 @@ fn router_with_windows(
     let mut aliases = BTreeMap::new();
     let (k, v) = chain_alias("fast", &["m1", "m2"]);
     aliases.insert(k, v);
+    let mut window_gate = WindowGateConfig::default();
+    window_gate.enabled = true;
     let cfg = Config {
         aliases,
         retry: default_test_retry(),
+        window_gate,
         ..Default::default()
     };
     let mut router = Router::new(Arc::new(cfg));

@@ -166,8 +166,8 @@ pub struct Config {
 
     /// Operator-facing `[window_gate]` block. Kill switch for the
     /// proactive context-window gate. A missing block leaves the gate
-    /// enabled; setting `enabled = false` restores the pre-gate routing
-    /// behavior exactly. Hot-reloadable -- the flag is read per chain
+    /// disabled, which is byte-identical to no gate at all; `enabled = true`
+    /// opts in. Hot-reloadable -- the flag is read per chain
     /// resolution, so a live config swap applies without a restart.
     #[serde(default)]
     pub window_gate: WindowGateConfig,

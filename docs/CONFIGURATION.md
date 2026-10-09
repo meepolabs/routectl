@@ -166,8 +166,8 @@ version = 5           # config schema version; see "Config schema version"
                       # 100000 / 20000 / 2 / 6. Advisory only -- never
                       # mutates a dispatched request.
 
-[window_gate]         # proactive context-window gate kill switch
-                      # (enabled). Optional; default on.
+[window_gate]         # proactive context-window gate switch
+                      # (enabled). Optional; default off.
 
 [calibration]         # learned per-lane token-estimate correction kill
                       # switch (enabled). Optional; default on.
@@ -613,7 +613,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `clear_at_least_tokens`        | `[trim]` global                 | u64, default 20000; see `[trim]`                                                                  |
 | `head_keep_messages`           | `[trim]` global                 | usize, default 2; see `[trim]`                                                                    |
 | `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
-| `enabled`                      | `[window_gate]` global          | bool, default true; kill switch for the proactive context-window gate (see `[window_gate]`)       |
+| `enabled`                      | `[window_gate]` global          | bool, default false; master switch for the proactive context-window gate (see `[window_gate]`)    |
 | `enabled`                      | `[calibration]` global          | bool, default true; kill switch for the learned per-lane estimate correction (see `[calibration]`)|
 | `enabled`                      | `[seat_quota]` global           | bool, default true; kill switch for quota-aware seat placement (see `[seat_quota]`)               |
 | `enabled`                      | `[capability]` global           | bool, default true; master switch for the learned-capability subsystem (see `[capability]`)       |
@@ -1662,21 +1662,23 @@ kept (an unknown fact never enables a skip), and a chain whose every
 target overflows is returned unchanged so the caller sees exactly
 today's upstream error rather than a routectl-invented one.
 
-The optional `[window_gate]` block is the **global** kill switch. A
-missing block keeps the default: the gate enabled.
+The optional `[window_gate]` block is the **global** switch. The gate is
+off by default: a missing block, or a block with no `enabled` key,
+leaves it disabled. Opt in with `enabled = true`.
 
 ```toml
 [window_gate]
-# Master switch for the proactive context-window gate. Default true.
+# Master switch for the proactive context-window gate. Default false.
 enabled = true
 ```
 
-- **`enabled`** (bool, default true) -- the master switch. When
+- **`enabled`** (bool, default false) -- the master switch. When
   `false` the gate returns the resolved chain before it computes
   anything: no estimate, no chain reordering, no `window_gate_skip`
   WARN, and no movement in the skip counter. Turning it off is
-  byte-identical to running with no gate at all, which is what makes it
-  a safe first move when you suspect the gate is mis-routing.
+  byte-identical to running with no gate at all, which is what makes
+  switching it back off a safe first move when you suspect the gate is
+  mis-routing.
 
 **The gate is a fast path, not the safety net.** Disabling it leaves
 reactive classification and fallback fully intact: an upstream that

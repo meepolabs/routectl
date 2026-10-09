@@ -310,7 +310,7 @@ const fn default_trim_keep_recent_messages() -> usize {
 /// proactive context-window gate, which de-prioritizes routing targets
 /// whose context window cannot hold the estimated request. A missing
 /// `[window_gate]` table deserializes to `WindowGateConfig::default()`
-/// (enabled), so an existing config needs no migration.
+/// (disabled); an operator opts in with `enabled = true`.
 ///
 /// Off must be byte-identical to no gate at all: no estimate computed, no
 /// chain reordering, no diagnostics movement.
@@ -325,15 +325,19 @@ const fn default_trim_keep_recent_messages() -> usize {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct WindowGateConfig {
-    /// Master switch for the proactive context-window gate. Default on.
-    #[serde(default = "default_true")]
+    /// Master switch for the proactive context-window gate. Default off.
+    #[serde(default = "default_window_gate_enabled")]
     pub enabled: bool,
+}
+
+const fn default_window_gate_enabled() -> bool {
+    false
 }
 
 impl Default for WindowGateConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
+            enabled: default_window_gate_enabled(),
         }
     }
 }

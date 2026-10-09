@@ -1510,12 +1510,21 @@ fn window_row(window: Option<u32>) -> crate::catalog::EffectiveRow {
     }
 }
 
+/// A `[window_gate]` block with the gate switched on; the shipped default
+/// is off, which would make every gate assertion here vacuous.
+fn gate_enabled() -> crate::config::WindowGateConfig {
+    crate::config::WindowGateConfig { enabled: true }
+}
+
 /// A router whose `[aliases] chain` names `models` in the given order, each
 /// nickname resolved onto provider `p` with the stated context window
 /// stamped on its effective row. `aliases` adds further alias keys (used to
 /// pin that a configured `default` is NOT consulted).
 fn router_with_window(models: &[(&str, Option<u32>)], aliases: &[(&str, AliasValue)]) -> Router {
-    let mut config = Config::default();
+    let mut config = Config {
+        window_gate: gate_enabled(),
+        ..Config::default()
+    };
     config
         .providers
         .insert("p".into(), ProviderEntry::anthropic_api("literal:k"));
@@ -1791,7 +1800,10 @@ fn the_gate_and_discovery_read_the_same_overlay_corrected_window() {
     let overlay_window =
         u32::try_from(crate::context_trim::estimate_total_tokens(&req) / 2).expect("fits u32");
 
-    let mut config = Config::default();
+    let mut config = Config {
+        window_gate: gate_enabled(),
+        ..Config::default()
+    };
     config
         .providers
         .insert("p".into(), ProviderEntry::anthropic_api("literal:k"));
