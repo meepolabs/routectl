@@ -28,7 +28,7 @@ const PROMPT_SHUTDOWN: Duration = Duration::from_millis(500);
 async fn a_retained_adapter_holds_the_writer_channel_open_until_it_is_dropped() {
     // Arrange: a live writer, its own handle released, and ONLY the adapter's
     // clone left holding the producer side.
-    let (_dir, _path, handle, writer) = live_writer();
+    let (_dir, _path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     drop(handle);
 
@@ -64,7 +64,7 @@ async fn a_retained_adapter_holds_the_writer_channel_open_until_it_is_dropped() 
 #[tokio::test]
 async fn a_reservation_outstanding_at_teardown_resolves_as_a_refusal() {
     // Arrange
-    let (_dir, _path, handle, writer) = live_writer();
+    let (_dir, _path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     assert_eq!(
         reserve(&ledger, "anthropic", 3).await,

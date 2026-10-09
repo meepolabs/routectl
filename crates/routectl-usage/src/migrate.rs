@@ -631,24 +631,21 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
 /// This is a data step, not a schema step: `user_version` is unchanged, so the
 /// downgrade path and older readers of the same schema are unaffected. The
 /// `meta` marker makes it one-shot -- `None` when it already ran, otherwise
-/// `Some(deleted)`. The marker read, the delete and the marker insert share one
-/// transaction, so a failure leaves neither the deletion nor the marker.
+/// `Some(deleted)`. A marker found by a plain read returns `None` without
+/// taking the write lock; otherwise the marker re-check, the delete and the
+/// marker insert share one transaction, so a failure leaves neither the
+/// deletion nor the marker.
 pub fn purge_legacy_capability_observations(
     conn: &Connection,
 ) -> Result<Option<usize>, rusqlite::Error> {
-    // IMMEDIATE takes the write lock before the marker read, so a concurrent
-    // committer makes this wait on busy_timeout instead of failing the DELETE
-    // with a stale read snapshot.
+    if purge_marker_present(conn)? {
+        return Ok(None);
+    }
+    // IMMEDIATE takes the write lock before the marker re-check, so a
+    // concurrent committer makes this wait on busy_timeout instead of failing
+    // the DELETE with a stale read snapshot.
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let already_ran = tx
-        .query_row(
-            "SELECT 1 FROM meta WHERE key = ?1",
-            rusqlite::params![META_LEGACY_CAPABILITY_PURGE],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if already_ran {
+    if purge_marker_present(&tx)? {
         return Ok(None);
     }
     let deleted = tx.execute(
@@ -664,6 +661,17 @@ pub fn purge_legacy_capability_observations(
     )?;
     tx.commit()?;
     Ok(Some(deleted))
+}
+
+fn purge_marker_present(conn: &Connection) -> Result<bool, rusqlite::Error> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM meta WHERE key = ?1",
+            rusqlite::params![META_LEGACY_CAPABILITY_PURGE],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 #[cfg(test)]

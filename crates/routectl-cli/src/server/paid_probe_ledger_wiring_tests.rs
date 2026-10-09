@@ -50,7 +50,7 @@ fn config_at(db_path: &Path) -> Arc<routectl_router::Config> {
 #[tokio::test]
 async fn an_uninstalled_router_holds_no_accounting() {
     // Arrange
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let router = built_router(&config_at(&path)).await;
     drop(handle);
 
@@ -67,7 +67,7 @@ async fn an_uninstalled_router_holds_no_accounting() {
 #[tokio::test]
 async fn an_installed_router_commits_through_the_real_writer() {
     // Arrange
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let router = install_paid_probe_ledger(built_router(&config_at(&path)).await, &handle);
     let before = control_rows(&path);
 

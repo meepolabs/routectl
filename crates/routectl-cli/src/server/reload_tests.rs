@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::server::serve::build_usage_writer;
-use crate::server::test_support::{drain_usage_writer, isolate_usage_db};
+use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db};
 use routectl_testkit::ScopedEnv;
 
 /// A shutdown receiver that never fires, for reload tests whose subject is not
@@ -436,7 +436,7 @@ async fn config_reload_flips_usage_enabled_gate_live() {
         "config reload must swap the router"
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Shared-loader symmetry: a config reload re-reads
@@ -525,7 +525,7 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
         "a failed reload must keep the previously-installed router",
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Config text for one openai-compat model whose prompt-shaping policy
@@ -617,7 +617,7 @@ async fn a_config_only_reload_advances_the_publication_generation() {
         "negative control: the registry generation does not move here"
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// `ReloadRequest::Config` and `ReloadRequest::CatalogOverlay` both
@@ -698,7 +698,7 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
         .expect("overlay-triggered reload must log a trigger field");
     assert_eq!(overlay_trigger, "overlay change");
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Full-stack proof that `spawn_reload_pipeline` -- the actual
@@ -815,7 +815,7 @@ async fn spawn_reload_pipeline_watches_overlay_and_swaps_router_on_write() {
     for handle in handles {
         handle.await.expect("pipeline task must not panic");
     }
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Hot-reload posture: a candidate whose pool has NO usable member is rejected
@@ -898,7 +898,7 @@ async fn config_reload_rejects_a_candidate_whose_pool_has_no_usable_member() {
         "the previous router must stay live when a candidate is rejected"
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The reload rejection re-logs the build's refusal string verbatim, so a
@@ -987,7 +987,7 @@ async fn the_reload_rejection_warn_neutralizes_control_bytes_in_a_pool_key() {
         "{error}"
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Hot-reload posture: a config edited to a too-new `version`
@@ -1050,7 +1050,7 @@ async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_ro
         "the prior router must stay installed on a rejected reload"
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 // ---- Hot-reload capability tombstone: revision-change replay boundary ----
@@ -1286,7 +1286,7 @@ async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
         "the prior router must stay installed on a rejected reload"
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Minimal on-disk config text with `[reduction] enabled` set explicitly, so
@@ -1384,7 +1384,7 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
     );
     assert_eq!(steady_line.field("reduction_enabled_after"), None);
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Minimal on-disk config text with `[cache] k_gated_emission` set explicitly,
@@ -1494,7 +1494,7 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
     );
     assert_eq!(steady_line.field("k_gated_emission_after"), None);
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A candidate that would turn `[cache] k_gated_emission` ON but cannot parse
@@ -1571,7 +1571,7 @@ async fn failed_reload_logs_no_k_gated_emission_transition() {
         "a rejected reload must not arm the break-even emission gate"
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A reload that flips BOTH kill switches at once stamps all four transition
@@ -1634,7 +1634,7 @@ async fn a_reload_flipping_both_switches_stamps_both_pairs() {
     assert_eq!(line.field("k_gated_emission_before"), Some("false"));
     assert_eq!(line.field("k_gated_emission_after"), Some("true"));
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Same shape as `reduction_config_text` but with an unknown `[server]` field
@@ -1752,7 +1752,7 @@ async fn unparseable_candidate_logs_its_rejection_and_keeps_reduction_on() {
         "a rejected reload must not flip the live reduction kill switch"
     );
     drop(usage);
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Both reload paths must carry the per-seat quota readings onto the

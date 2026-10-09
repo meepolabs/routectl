@@ -263,8 +263,8 @@ struct ComposedProbeRig {
 impl ComposedProbeRig {
     /// Build the rig with `daily_cap` units for the shared provider-day and
     /// `output_ceiling` as the catalog-confirmed output ceiling on both lanes.
-    fn build(daily_cap: u32, output_ceiling: u32) -> Self {
-        let (dir, path, handle, writer) = live_usage_writer();
+    async fn build(daily_cap: u32, output_ceiling: u32) -> Self {
+        let (dir, path, handle, writer) = live_usage_writer().await;
         let acknowledged = Arc::new(AtomicBool::new(false));
         let provider = WireRecordingProvider::new(&path, &acknowledged);
         let mut config = routectl_router::config::Config::default();
@@ -404,7 +404,7 @@ fn priced_row(ceiling: u32) -> routectl_router::EffectiveRow {
 #[tokio::test]
 async fn a_probe_pass_commits_through_the_real_writer_before_its_one_wire_call() {
     // Arrange: a one-unit provider-day, two activated lanes, an empty ledger.
-    let rig = ComposedProbeRig::build(1, GENEROUS_OUTPUT_CEILING);
+    let rig = ComposedProbeRig::build(1, GENEROUS_OUTPUT_CEILING).await;
     let before = usage_control_rows(&rig.path);
     activate_both_lanes(&rig.router, &rig.provider).await;
 
@@ -560,7 +560,7 @@ async fn a_probe_pass_commits_through_the_real_writer_before_its_one_wire_call()
 #[tokio::test]
 async fn a_catalog_ceiling_one_below_the_bodys_allowance_dials_nothing() {
     // Arrange: learn the allowance the composed path actually sends.
-    let generous = ComposedProbeRig::build(1, GENEROUS_OUTPUT_CEILING);
+    let generous = ComposedProbeRig::build(1, GENEROUS_OUTPUT_CEILING).await;
     activate_both_lanes(&generous.router, &generous.provider).await;
     generous.router.run_probe_pass().await;
     let allowance = generous
@@ -571,7 +571,7 @@ async fn a_catalog_ceiling_one_below_the_bodys_allowance_dials_nothing() {
     generous.stop();
 
     // Act: the same path, with the catalog confirming one token less.
-    let starved = ComposedProbeRig::build(1, allowance - 1);
+    let starved = ComposedProbeRig::build(1, allowance - 1).await;
     let before = usage_control_rows(&starved.path);
     activate_both_lanes(&starved.router, &starved.provider).await;
     let summary = starved.router.run_probe_pass().await;

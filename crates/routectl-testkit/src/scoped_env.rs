@@ -16,6 +16,7 @@ use std::ffi::{OsStr, OsString};
 /// Sets or unsets one environment variable for the guard's lifetime and
 /// restores the prior state on drop. See the module docs for the
 /// `#[serial_test::serial]` requirement at call sites.
+#[must_use = "dropping the guard restores the variable immediately"]
 pub struct ScopedEnv {
     key: OsString,
     prev: Option<OsString>,

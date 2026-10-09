@@ -26,7 +26,7 @@ pub(super) fn isolate_usage_db(config: &mut Config) -> tempfile::TempDir {
 /// `UsageWriter::shutdown` blocks, so it runs on the blocking pool rather than
 /// a runtime worker. Every `UsageHandle` clone must be dropped first: a live
 /// handle keeps the channel open and the drain waits out its full deadline.
-pub(super) async fn drain_usage_writer(writer: UsageWriter) {
+pub(super) async fn drain_usage_writer_strict(writer: UsageWriter) {
     tokio::task::spawn_blocking(move || writer.shutdown())
         .await
         .expect("the usage writer drain must not panic");
@@ -122,13 +122,16 @@ pub(super) async fn begin_writer_drain(writer: UsageWriter) -> WriterDrain {
 /// Shared by the accounting-adapter sidecars and the composed end-to-end proof:
 /// both need the same real writer over a real file, and a second copy of this
 /// setup is a second thing that can drift from the schema the writer opens.
-pub(super) fn live_usage_writer() -> (tempfile::TempDir, PathBuf, UsageHandle, UsageWriter) {
+///
+/// The settle cycle's blocking shutdown runs on the blocking pool, so a caller
+/// on a current-thread runtime does not stall its only worker.
+pub(super) async fn live_usage_writer() -> (tempfile::TempDir, PathBuf, UsageHandle, UsageWriter) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
     let (settle_handle, settle_writer) =
         UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
     drop(settle_handle);
-    settle_writer.shutdown();
+    drain_usage_writer_strict(settle_writer).await;
     let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
     (dir, path, handle, writer)
 }
@@ -171,7 +174,7 @@ pub(super) fn added_control_rows(
 /// The drain returns only once a queued row is durable: a reader opening the
 /// database right after it sees the row, with no polling in between.
 #[tokio::test]
-async fn drain_usage_writer_persists_a_queued_row_before_returning() {
+async fn drain_usage_writer_strict_persists_a_queued_row_before_returning() {
     // Arrange: a writer over a database it has not created yet, one row queued,
     // and the only producer handle released so the channel can close.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -185,7 +188,7 @@ async fn drain_usage_writer_persists_a_queued_row_before_returning() {
     drop(handle);
 
     // Act
-    drain_usage_writer(writer).await;
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     let db = routectl_usage::open_readonly(&path).expect("read-only open");

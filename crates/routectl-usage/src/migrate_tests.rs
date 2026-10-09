@@ -232,3 +232,83 @@ fn purge_keeps_the_schema_version_and_the_file_still_downgrades() {
     assert_eq!(version, 17);
     assert!(downgraded.is_ok(), "downgrade refused: {downgraded:?}");
 }
+
+#[test]
+fn purge_waits_for_a_concurrent_writer_instead_of_failing() {
+    // Arrange: a second connection holds the write lock with an uncommitted
+    // insert and commits it shortly after the purge starts.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    let expected_deleted = seed_mixed_ledger(db.conn());
+    let rival = Connection::open(&path).expect("rival open");
+    rival
+        .execute_batch("BEGIN IMMEDIATE; INSERT INTO meta (key, value) VALUES ('t', 'x');")
+        .expect("rival takes the write lock");
+    let committer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        rival.execute_batch("COMMIT").expect("rival commit");
+    });
+
+    // Act
+    let outcome = purge_legacy_capability_observations(db.conn());
+    committer.join().expect("committer thread");
+
+    // Assert
+    assert_eq!(
+        outcome.expect("purge must wait out the rival writer"),
+        Some(usize::try_from(expected_deleted).expect("count"))
+    );
+}
+
+#[test]
+fn a_failed_marker_insert_rolls_back_the_deletion() {
+    // Arrange: a trigger makes the marker insert abort after the delete ran.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    seed_mixed_ledger(db.conn());
+    let before = class_counts(db.conn());
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER fail_marker BEFORE INSERT ON meta \
+             BEGIN SELECT RAISE(ABORT, 'x'); END;",
+        )
+        .expect("create trigger");
+
+    // Act
+    let outcome = purge_legacy_capability_observations(db.conn());
+
+    // Assert
+    assert!(
+        outcome.is_err(),
+        "the aborted insert must surface: {outcome:?}"
+    );
+    db.conn()
+        .execute_batch("DROP TRIGGER fail_marker;")
+        .expect("drop trigger");
+    assert_eq!(class_counts(db.conn()), before);
+    assert_eq!(marker_value(db.conn()), None);
+}
+
+#[test]
+fn a_recorded_purge_returns_without_taking_the_write_lock() {
+    // Arrange: the purge already ran, and a second connection holds the write
+    // lock. A zero busy timeout turns any write-lock attempt into an error.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    seed_mixed_ledger(db.conn());
+    purge_legacy_capability_observations(db.conn()).expect("first purge");
+    let rival = Connection::open(&path).expect("rival open");
+    rival
+        .execute_batch("BEGIN IMMEDIATE;")
+        .expect("rival takes the write lock");
+    db.conn()
+        .busy_timeout(std::time::Duration::from_millis(0))
+        .expect("busy timeout");
+
+    // Act
+    let outcome = purge_legacy_capability_observations(db.conn());
+
+    // Assert
+    assert_eq!(outcome.expect("a recorded purge must not contend"), None);
+    rival.execute_batch("ROLLBACK;").expect("rival rollback");
+}

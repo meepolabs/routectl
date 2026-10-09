@@ -49,7 +49,7 @@ fn stop(ledger: Arc<UsagePaidProbeLedger>, handle: UsageHandle, writer: UsageWri
 #[tokio::test]
 async fn a_committed_unit_is_readable_from_a_second_connection() {
     // Arrange
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     let before = control_rows(&path);
 
@@ -77,7 +77,7 @@ async fn a_committed_unit_is_readable_from_a_second_connection() {
 #[tokio::test]
 async fn one_reservation_spends_exactly_one_unit() {
     // Arrange
-    let (_dir, _path, handle, writer) = live_writer();
+    let (_dir, _path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
 
     // Act
@@ -99,7 +99,7 @@ async fn one_reservation_spends_exactly_one_unit() {
 #[tokio::test]
 async fn a_cap_of_two_commits_twice_then_reports_the_day_spent() {
     // Arrange
-    let (_dir, _path, handle, writer) = live_writer();
+    let (_dir, _path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
 
     // Act
@@ -135,7 +135,7 @@ async fn a_cap_of_two_commits_twice_then_reports_the_day_spent() {
 #[tokio::test]
 async fn each_provider_spends_against_its_own_budget() {
     // Arrange
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     let before = control_rows(&path);
 
@@ -188,7 +188,7 @@ async fn each_provider_spends_against_its_own_budget() {
 #[tokio::test]
 async fn the_caller_cap_reaches_the_accounting_actor_unchanged() {
     // Arrange: spend a small cap out entirely.
-    let (_dir, _path, handle, writer) = live_writer();
+    let (_dir, _path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     assert_eq!(
         reserve(&ledger, "anthropic", 2).await,
@@ -231,7 +231,7 @@ async fn the_caller_cap_reaches_the_accounting_actor_unchanged() {
 #[tokio::test]
 async fn a_zero_cap_refuses_while_a_nonzero_cap_commits() {
     // Arrange
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     let before = control_rows(&path);
 
@@ -265,7 +265,7 @@ async fn a_zero_cap_refuses_while_a_nonzero_cap_commits() {
 async fn malformed_accounting_state_refuses_as_malformed() {
     // Arrange: one real commit, so the key this day's units live under is known
     // from the database rather than from a hardcoded string.
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     let before = control_rows(&path);
     assert_eq!(
@@ -326,7 +326,7 @@ async fn a_writer_without_a_database_reports_a_failed_write() {
 #[tokio::test]
 async fn a_shutting_down_accounting_subsystem_refuses_as_unavailable() {
     // Arrange
-    let (_dir, _path, handle, writer) = live_writer();
+    let (_dir, _path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     assert_eq!(
         reserve(&ledger, "anthropic", 3).await,
@@ -432,7 +432,7 @@ fn every_reportable_refusal_maps_onto_its_own_outcome_and_permits_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_runtime_keeps_running_other_work_while_receipts_are_awaited() {
     // Arrange
-    let (_dir, _path, handle, writer) = live_writer();
+    let (_dir, _path, handle, writer) = live_writer().await;
     let ledger = paid_probe_ledger(&handle);
     let cap = 4_u32;
     let callers = 32_usize;

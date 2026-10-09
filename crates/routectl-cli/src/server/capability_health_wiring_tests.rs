@@ -65,7 +65,7 @@ async fn an_uninstalled_router_reports_writes_as_not_guaranteed() {
     // produced carries no health read, and reads as not guaranteed. So a library
     // embedder, a test, or a boot path that forgot the wiring suspends learned
     // pre-flight rather than permitting it.
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let router = built_router(&config_at(&path)).await;
 
     assert!(
@@ -81,7 +81,7 @@ async fn an_uninstalled_router_reports_writes_as_not_guaranteed() {
 async fn an_installed_router_reports_durable_on_a_healthy_writer() {
     // The positive control for the default above, on a writer that is genuinely
     // healthy: a real database, opened, with nothing having failed.
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let router = install_capability_health(built_router(&config_at(&path)).await, &handle);
 
     assert!(
@@ -352,7 +352,7 @@ async fn the_health_read_survives_a_rebuild() {
     // The reload half: both generations submit capability events to the SAME
     // writer, so its health is one fact. A replacement that lost the read would
     // suspend learned pre-flight on every reload until a boot path reinstalled it.
-    let (_dir, path, handle, writer) = live_writer();
+    let (_dir, path, handle, writer) = live_writer().await;
     let previous = install_capability_health(built_router(&config_at(&path)).await, &handle);
     let mut replacement = built_router(&config_at(&path)).await;
     assert!(
