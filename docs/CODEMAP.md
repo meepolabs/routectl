@@ -8607,19 +8607,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `scripts/drivers/lib/wire_pattern_classification.tsv` through the Rust
   reference logic for the three structural predicates -- the other half of the
   cross-check `scripts/drivers.test.sh` runs in Python
-- `tests/capture_coverage.rs` -- derived coverage view over the committed
-  driver corpus (a report, not a gate: asserts nothing about coverage LEVEL).
-  Resolves cells as `(egress lane, wire pattern)` from the corpus's own
-  directory listing (never `manifest.jsonl`), with the lane axis from
-  `EgressLane::ALL`, the pattern axis from `scripts/drivers/cases/*.json`, and
-  the shippable subset from `scripts/drivers/config/*.toml` file stems; prints
-  the `N of M shippable` / `N of T total` denominators, a structural or
-  wild-evidence citation per uncovered cell, a `MIXED-VERSION` label when one
-  client name shows more than one `meta.client.version`, imports the shared
-  `front_proxy_reachability` rather than re-deriving it, and a regression line
-  that diffs the covered-cell set against a caller-supplied git revision
-  (`ROUTECTL_COVERAGE_BASE_REV`) treating git itself as the prior run --
-  never a silent pass when no baseline is given
 - `tests/client_fingerprint_pin.rs` -- exact-pins the five client-fingerprint
   dimensions the committed `driver/anthropic-api/` corpus carries, each with a
   reviewed `Relation` against routectl's minted values. Only UNPINNED reds
