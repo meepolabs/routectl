@@ -121,9 +121,10 @@ pub use catalog_import_state::{
     persist_baseline as persist_catalog_import_baseline,
 };
 pub use catalog_overlay::{
-    CATALOG_OVERLAY_SCHEMA_VERSION, CatalogOverlay, OverlayCell, OverlayError, OverlaySource,
-    default_path as overlay_default_path, load as load_catalog_overlay, overlay_revision,
-    save as save_catalog_overlay, with_overlay_write_lock,
+    CATALOG_OVERLAY_SCHEMA_VERSION, CatalogOverlay, OverlayCell, OverlayError, OverlaySoftDefect,
+    OverlaySource, default_path as overlay_default_path, load as load_catalog_overlay,
+    log_overlay_soft_defects, overlay_revision, overlay_soft_defects, save as save_catalog_overlay,
+    with_overlay_write_lock,
 };
 pub use catalog_state::{
     ImpactClass, ImpactField, check_drift_and_persist_state, classify_field,

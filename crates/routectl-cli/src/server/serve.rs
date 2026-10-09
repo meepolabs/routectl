@@ -443,6 +443,9 @@ async fn serve_inner(
     }
 
     log_catalog_filled_output_ceilings(&router);
+    routectl_router::log_overlay_soft_defects(&routectl_router::overlay_soft_defects(
+        &catalog_overlay,
+    ));
 
     // Both security refuses below run BEFORE the ledger-reading warms and
     // before the usage writer starts, so a boot that is going to be refused

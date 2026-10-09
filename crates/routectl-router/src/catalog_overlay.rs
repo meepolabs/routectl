@@ -8,10 +8,10 @@
 //! to a standalone crate with a Cargo.toml edit and nothing else. Two
 //! router-crate touch points remain to resolve at that point: [`default_path`]
 //! calls the sibling `config::routectl_config_dir()` (a plain `PathBuf`
-//! helper), and [`load`] calls `catalog::cell_value_defects` (the one shared
-//! home of the cell-value invariants -- see that function) to validate cell
-//! degeneracy on load. Every other function here takes its `path: &Path` as
-//! an argument.
+//! helper), and [`load`] / [`overlay_soft_defects`] call
+//! `catalog::cell_value_defects` (the one shared home of the cell-value
+//! invariants -- see that function) to classify cell degeneracy. Every other
+//! I/O function here takes its `path: &Path` as an argument.
 //!
 //! Semantics of a map value `Option<OverlayCell>` (see [`CatalogOverlay`]):
 //! - `Some(Some(cell))` (JSON object) -> overlay value.
@@ -264,37 +264,77 @@ pub fn load(path: &Path) -> Result<CatalogOverlay, OverlayError> {
     // valid overlay can still carry a degenerate cell (rm <= 0, non-finite
     // wm/rm reachable from an f32-overflowing JSON literal, a zero context
     // window or output ceiling). Run the shared value predicate per cell: any
-    // HARD defect
-    // fails closed, naming the selector and field; the one SOFT defect (a
-    // finite below-sentinel wm) warns and is accepted -- an operator may
-    // knowingly run a cheap write multiplier (settled constraint).
+    // HARD defect fails closed, naming the selector and field. SOFT defects
+    // (a finite below-sentinel wm) are accepted silently here -- an operator
+    // may knowingly run a cheap write multiplier (settled constraint); the
+    // caller decides when to surface them via [`overlay_soft_defects`].
     for (selector, cell) in &overlay.cells {
         let Some(cell) = cell else { continue };
-        for defect in crate::catalog::cell_value_defects(
-            cell.wm,
-            cell.rm,
-            cell.max_context_tokens,
-            cell.max_output_tokens,
-            cell.input_cost_per_token,
-            cell.output_cost_per_token,
-        ) {
-            if defect.is_hard() {
-                return Err(OverlayError::Corrupt {
-                    path: display,
-                    reason: format!("cell {selector}: {}", defect.describe()),
-                });
-            }
-            tracing::warn!(
-                selector = selector.as_str(),
-                field = defect.field(),
-                "catalog overlay cell has a below-sentinel write multiplier; accepting it as \
-                 an intentional operator override (a too-cheap wm can make a cache break look \
-                 falsely profitable)",
-            );
+        if let Some(defect) = cell_defects(cell).into_iter().find(|d| d.is_hard()) {
+            return Err(OverlayError::Corrupt {
+                path: display,
+                reason: format!("cell {selector}: {}", defect.describe()),
+            });
         }
     }
 
     Ok(overlay)
+}
+
+fn cell_defects(cell: &OverlayCell) -> Vec<crate::catalog::CellDefect> {
+    crate::catalog::cell_value_defects(
+        cell.wm,
+        cell.rm,
+        cell.max_context_tokens,
+        cell.max_output_tokens,
+        cell.input_cost_per_token,
+        cell.output_cost_per_token,
+    )
+}
+
+/// A SOFT cell-value defect [`load`] accepted: the cell's selector and the
+/// offending field name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlaySoftDefect {
+    /// Selector (row key) of the cell carrying the defect.
+    pub selector: String,
+    /// Name of the offending field (e.g. `wm`).
+    pub field: &'static str,
+}
+
+/// Every SOFT cell-value defect in `overlay`, in selector order. Pure: it
+/// emits nothing. HARD defects are absent by construction for an overlay
+/// [`load`] returned, and are skipped here for any other overlay.
+#[must_use]
+pub fn overlay_soft_defects(overlay: &CatalogOverlay) -> Vec<OverlaySoftDefect> {
+    overlay
+        .cells
+        .iter()
+        .filter_map(|(selector, cell)| Some((selector, cell.as_ref()?)))
+        .flat_map(|(selector, cell)| {
+            cell_defects(cell)
+                .into_iter()
+                .filter(|d| !d.is_hard())
+                .map(|d| OverlaySoftDefect {
+                    selector: selector.clone(),
+                    field: d.field(),
+                })
+        })
+        .collect()
+}
+
+/// Emit one WARN per defect in `defects`. Callers choose the cadence; this
+/// function keeps no memory of what it already logged.
+pub fn log_overlay_soft_defects(defects: &[OverlaySoftDefect]) {
+    for defect in defects {
+        tracing::warn!(
+            selector = defect.selector.as_str(),
+            field = defect.field,
+            "catalog overlay cell has a below-sentinel write multiplier; accepting it as \
+             an intentional operator override (a too-cheap wm can make a cache break look \
+             falsely profitable)",
+        );
+    }
 }
 
 /// Revision-checked atomic save: read the current on-disk overlay, compare
@@ -833,29 +873,102 @@ mod tests {
     }
 
     #[test]
-    fn load_accepts_below_sentinel_finite_wm_with_a_warn() {
+    fn load_accepts_below_sentinel_finite_wm_silently_and_reports_it_as_data() {
         // Arrange: a finite wm below the sentinel (2.0) is a SOFT defect --
-        // load warns and ACCEPTS (the operator may knowingly run a cheap
-        // write multiplier); it never rejects on this vector.
+        // load ACCEPTS it (the operator may knowingly run a cheap write
+        // multiplier) without logging; the defect is returned as data.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog_overlay.json");
         std::fs::write(&path, one_cell_overlay(r#""wm":1.0"#)).unwrap();
 
         // Act
+        let mut loaded = None;
         let events = routectl_testkit::capture_events(|| {
-            let overlay = load(&path).expect("below-sentinel wm must be accepted");
-            assert_eq!(
-                overlay.cells["openai-compat:grok-*"].as_ref().unwrap().wm,
-                Some(1.0)
-            );
+            loaded = Some(load(&path).expect("below-sentinel wm must be accepted"));
         });
+        let overlay = loaded.unwrap();
 
-        // Assert: a WARN naming the selector was emitted.
-        assert!(
-            events.iter().any(|e| e.level == tracing::Level::WARN
-                && e.field("selector") == Some("openai-compat:grok-*")),
-            "a below-sentinel wm must emit a WARN naming the selector: {events:?}"
+        // Assert
+        assert_eq!(
+            overlay.cells["openai-compat:grok-*"].as_ref().unwrap().wm,
+            Some(1.0)
         );
+        let warns = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .count();
+        assert_eq!(warns, 0, "load must not log soft defects: {events:?}");
+        assert_eq!(
+            overlay_soft_defects(&overlay),
+            vec![OverlaySoftDefect {
+                selector: "openai-compat:grok-*".to_string(),
+                field: "wm",
+            }],
+        );
+    }
+
+    #[test]
+    fn overlay_soft_defects_skips_clean_and_disabled_cells() {
+        // Arrange: a clean cell, a disabled (null) cell, and one soft cell.
+        let mut cells = BTreeMap::new();
+        let mut clean = import_cell();
+        clean.wm = Some(9.5);
+        cells.insert("a:clean".to_string(), Some(clean));
+        cells.insert("a:disabled".to_string(), None);
+        let mut cheap = import_cell();
+        cheap.wm = Some(1.0);
+        cells.insert("a:cheap".to_string(), Some(cheap));
+        let overlay = CatalogOverlay {
+            cells,
+            ..CatalogOverlay::default()
+        };
+
+        // Act
+        let defects = overlay_soft_defects(&overlay);
+
+        // Assert
+        assert_eq!(
+            defects,
+            vec![OverlaySoftDefect {
+                selector: "a:cheap".to_string(),
+                field: "wm",
+            }],
+        );
+    }
+
+    #[test]
+    fn log_overlay_soft_defects_emits_one_warn_per_defect() {
+        // Arrange
+        let defects = [
+            OverlaySoftDefect {
+                selector: "a:one".to_string(),
+                field: "wm",
+            },
+            OverlaySoftDefect {
+                selector: "a:two".to_string(),
+                field: "wm",
+            },
+        ];
+
+        // Act
+        let events = routectl_testkit::capture_events(|| log_overlay_soft_defects(&defects));
+
+        // Assert
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(warns.len(), 2, "one WARN per defect: {events:?}");
+        for (warn, defect) in warns.iter().zip(&defects) {
+            assert_eq!(
+                warn.message,
+                "catalog overlay cell has a below-sentinel write multiplier; accepting it as \
+                 an intentional operator override (a too-cheap wm can make a cache break look \
+                 falsely profitable)"
+            );
+            assert_eq!(warn.field("selector"), Some(defect.selector.as_str()));
+            assert_eq!(warn.field("field"), Some("wm"));
+        }
     }
 
     // -----------------------------------------------------------------------

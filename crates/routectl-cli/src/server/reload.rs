@@ -651,8 +651,10 @@ pub(super) async fn handle_config_reload(
     // A reload that advanced the catalog version or overlay revision moves the
     // replay boundary. Read both revisions before the swap (this coordinator is
     // the sole writer, so the loaded Arc is the router being replaced).
+    let overlay_revision_changed =
+        previous_router.overlay_revision() != new_router.overlay_revision();
     let revision_changed = previous_router.catalog_version() != new_router.catalog_version()
-        || previous_router.overlay_revision() != new_router.overlay_revision();
+        || overlay_revision_changed;
 
     // Moving the boundary makes every row before the new tombstone invisible
     // to every later boot, so the surviving catalog-independent verdicts must
@@ -701,6 +703,14 @@ pub(super) async fn handle_config_reload(
         publish_router(router_swap, boundary_router);
     } else {
         publish_router(router_swap, Arc::new(new_router));
+    }
+
+    // Soft overlay defects are logged once per accepted overlay revision, not
+    // on every reload that happens to re-read an unchanged file.
+    if overlay_revision_changed {
+        routectl_router::log_overlay_soft_defects(&routectl_router::overlay_soft_defects(
+            &new_overlay,
+        ));
     }
 
     // Flip the usage capture gate live. `db_path` and `retention_days` are

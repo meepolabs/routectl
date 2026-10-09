@@ -528,6 +528,101 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
     drain_usage_writer_strict(writer).await;
 }
 
+/// The message `routectl_router::log_overlay_soft_defects` emits per defect.
+const OVERLAY_SOFT_DEFECT_MESSAGE: &str = "catalog overlay cell has a below-sentinel write \
+    multiplier; accepting it as an intentional operator override (a too-cheap wm can make a \
+    cache break look falsely profitable)";
+
+fn overlay_soft_defect_warns(events: &[routectl_testkit::CapturedEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.message == OVERLAY_SOFT_DEFECT_MESSAGE)
+        .count()
+}
+
+/// Soft overlay defects are logged on the reload that installs a new overlay
+/// revision, and NOT again on a later reload that re-reads the same revision.
+/// `#[serial]`: the loader reads the ambient `overlay_default_path()`.
+#[tokio::test]
+#[serial_test::serial]
+async fn config_reload_logs_overlay_soft_defects_only_when_the_overlay_revision_changes() {
+    // Arrange: an isolated config dir and a router booted off an empty
+    // overlay (revision 0); then an overlay at revision 1 carrying one
+    // below-sentinel wm cell.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
+    )
+    .unwrap();
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    let config = Arc::new(config);
+    let (usage, _writer) = build_usage_writer(&config);
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+            .await
+            .expect("initial router build");
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let overlay_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("catalog_overlay.json"),
+        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":1.0}}}"#,
+    )
+    .unwrap();
+
+    // Act 1: the reload that installs overlay revision 1.
+    let (changed_result, changed_events) =
+        routectl_testkit::with_capture(Box::pin(handle_config_reload(
+            Some(&cfg_path),
+            &config,
+            secrets.clone(),
+            &swap,
+            &usage,
+            ReloadTrigger::CatalogOverlay,
+            &mut never_shutdown(),
+        )))
+        .await;
+    let (new_config, _) = changed_result.expect("overlay reload must apply");
+    let revision_after_first = swap.load().overlay_revision();
+
+    // Act 2: a config-only reload that re-reads the same overlay revision.
+    let (same_result, same_events) =
+        routectl_testkit::with_capture(Box::pin(handle_config_reload(
+            Some(&cfg_path),
+            &new_config,
+            secrets,
+            &swap,
+            &usage,
+            ReloadTrigger::ConfigFile,
+            &mut never_shutdown(),
+        )))
+        .await;
+    same_result.expect("config reload must apply");
+
+    // Assert
+    assert_eq!(
+        overlay_soft_defect_warns(&changed_events),
+        1,
+        "a revision-changing reload logs each soft defect once: {changed_events:?}"
+    );
+    assert_eq!(
+        swap.load().overlay_revision(),
+        revision_after_first,
+        "test premise: the second reload kept the overlay revision"
+    );
+    assert_eq!(
+        overlay_soft_defect_warns(&same_events),
+        0,
+        "a same-revision reload must not re-log soft defects: {same_events:?}"
+    );
+}
+
 /// Config text for one openai-compat model whose prompt-shaping policy
 /// (`history_reasoning`) is the only thing a test varies.
 #[cfg(test)]

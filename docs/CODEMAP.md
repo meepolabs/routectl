@@ -2029,13 +2029,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `catalog::cell_value_defects` predicate -- any HARD defect (rm <= 0 or
   non-finite, non-finite wm, `max_context_tokens` or `max_output_tokens` of
   0) fails closed naming
-  the selector + field, the one SOFT below-sentinel `wm` defect warns and is
-  accepted (a hot-reload load failure keeps the prior router live); writer
+  the selector + field, the one SOFT below-sentinel `wm` defect is accepted
+  silently (a hot-reload load failure keeps the prior router live). Soft
+  defects are data: pure `overlay_soft_defects(&overlay) ->
+  Vec<OverlaySoftDefect{selector, field}>`, logged by
+  `log_overlay_soft_defects` (one WARN each, no dedupe) -- the daemon calls it
+  at boot and on reloads that change the overlay revision. Writer
   extends the OAuth credentials-file atomic-write discipline with a
   post-rename parent-directory `fsync`. Designed as an extraction seam: only
   two router-crate touch points remain (`config::routectl_config_dir` via
-  `default_path`, `catalog::cell_value_defects` via `load`), no
-  `routectl_core` type imports
+  `default_path`, `catalog::cell_value_defects` via `load` /
+  `overlay_soft_defects`), no `routectl_core` type imports
 - `src/catalog_import.rs` -- PURE import pipeline: candidate build + diff +
   shrink decision, zero I/O. `build_import_candidate(origin, litellm,
   models_dev, verified_at) -> ImportCandidate{origin, verified_at, cells,

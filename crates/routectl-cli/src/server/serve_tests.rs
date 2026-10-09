@@ -1117,6 +1117,82 @@ async fn a_hostile_nickname_reaches_the_ceiling_fill_line_sanitized() {
     );
 }
 
+/// The message `routectl_router::log_overlay_soft_defects` emits per defect.
+#[cfg(test)]
+const OVERLAY_SOFT_DEFECT_MESSAGE: &str = "catalog overlay cell has a below-sentinel write \
+    multiplier; accepting it as an intentional operator override (a too-cheap wm can make a \
+    cache break look falsely profitable)";
+
+/// Boot logs each soft defect of the overlay it booted with exactly once. The
+/// daemon runs in-process on this test's current-thread runtime with its
+/// shutdown pre-triggered, so the whole boot sequence runs under the capture
+/// subscriber and the daemon returns on its own.
+#[tokio::test]
+async fn boot_logs_each_overlay_soft_defect_once() {
+    // Arrange: an overlay with one below-sentinel wm cell.
+    let mut cells = std::collections::BTreeMap::new();
+    cells.insert(
+        "anthropic-api:claude-opus-4-8*".to_string(),
+        Some(routectl_router::OverlayCell {
+            source: routectl_router::OverlaySource::User,
+            verified_at: "2026-07-01".to_string(),
+            wm: Some(1.0),
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            max_output_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
+            capabilities: None,
+        }),
+    );
+    let overlay = CatalogOverlay {
+        revision: 1,
+        cells,
+        ..CatalogOverlay::default()
+    };
+    assert_eq!(
+        routectl_router::overlay_soft_defects(&overlay).len(),
+        1,
+        "test premise: the overlay carries exactly one soft defect"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral loopback port");
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    let (trigger, shutdown) = tokio::sync::oneshot::channel();
+    trigger.send(()).expect("the receiver is alive");
+
+    // Act
+    let (outcome, events) =
+        routectl_testkit::with_capture(Box::pin(serve_on_listener_with_injected_router(
+            Arc::new(config),
+            Arc::new(overlay),
+            listener,
+            None,
+            None,
+            DaemonTestSeams {
+                shutdown: Some(shutdown),
+                ..DaemonTestSeams::default()
+            },
+        )))
+        .await;
+
+    // Assert
+    outcome.expect("the daemon boots and shuts down cleanly");
+    let soft: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.message == OVERLAY_SOFT_DEFECT_MESSAGE)
+        .collect();
+    assert_eq!(soft.len(), 1, "one WARN per soft defect at boot: {soft:?}");
+    assert_eq!(
+        soft[0].field("selector"),
+        Some("anthropic-api:claude-opus-4-8*")
+    );
+}
+
 /// Build a minimal valid `UsageRecord` with the given id for drain
 /// tests. Mirrors the writer crate's own fixture shape.
 #[cfg(test)]
