@@ -169,6 +169,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
             },
             state.usage_health.capability_writes(),
             FidelityEmission::always(),
+            &FidelityGate::default(),
         );
     });
 

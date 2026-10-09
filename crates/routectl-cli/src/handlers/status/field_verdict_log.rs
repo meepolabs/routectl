@@ -27,11 +27,22 @@
 //! counting lines to estimate poll rate would read double, and two lines from one
 //! request differ in their timestamps while describing one moment. So the
 //! aggregate emits from the first builder and SUPPRESSES the second, while each
-//! standalone panel endpoint still emits exactly once. The choice is an explicit
+//! standalone panel endpoint still emits at most once. The choice is an explicit
 //! argument rather than a heuristic, so no builder has to infer who else ran.
+//!
+//! # Why a change gate on top of the claim
+//!
+//! The surface is poll-driven, and a dashboard polls every few seconds, so one line
+//! per request floods the log with identical snapshots. A daemon-scoped
+//! [`FidelityGate`] therefore admits a line only when its content fingerprint
+//! changed or [`SNAPSHOT_HEARTBEAT`] has passed since the last admitted line. No
+//! poller means no line: nothing emits on a timer of its own.
 
-use std::sync::Arc;
+use std::fmt::Write as _;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use routectl_router::FidelitySnapshot;
 
@@ -77,7 +88,9 @@ pub(crate) struct FidelityEvent {
 #[cfg(test)]
 type EventObserver = std::sync::Mutex<Option<tokio::sync::oneshot::Sender<FidelityEvent>>>;
 
-use super::fidelity_log::{rendered_budgets, rendered_verdicts};
+use super::fidelity_log::{
+    Bounded, RenderedBudget, RenderedVerdict, rendered_budgets, rendered_verdicts,
+};
 use super::paid_probe_budget::{AccountingGlobals, PaidProbeBudget};
 use super::router_view::StatusRouterView;
 
@@ -97,7 +110,7 @@ pub(super) const FIDELITY_SNAPSHOT_MESSAGE: &str = "envelope field verdict snaps
 /// whole observability floor from that request.
 ///
 /// Here every fidelity-carrying builder ATTEMPTS the claim and the first one to
-/// reach the logger wins it. Exactly one line per request, and health failing lets
+/// reach the logger wins it. At most one line per request, and health failing lets
 /// doctor emit.
 ///
 /// A `Clone`d handle rather than a borrow, because the builders run inside
@@ -198,10 +211,12 @@ pub(super) fn log_field_verdict_snapshot(
     budgets: &[PaidProbeBudget],
     globals: AccountingGlobals,
     emission: FidelityEmission,
+    gate: &FidelityGate,
 ) {
-    // The CLAIM decides, not a pre-assigned role: whichever fidelity-carrying
-    // builder reaches this first emits, so a failing sibling cannot take the line
-    // down with it.
+    // The CLAIM decides first, not a pre-assigned role: whichever fidelity-carrying
+    // builder reaches this first may emit, so a failing sibling cannot take the line
+    // down with it, and the gate below can only narrow one request to zero lines,
+    // never widen it to two.
     if !emission.claim() {
         return;
     }
@@ -210,6 +225,31 @@ pub(super) fn log_field_verdict_snapshot(
     // by their documented filters -- never by timing, which a reader reconciling
     // them could not tell apart from a real filter.
     let snapshot: FidelitySnapshot = view.fidelity_snapshot();
+    emit_if_admitted(&snapshot, budgets, globals, &emission, gate, Instant::now());
+}
+
+/// The gated half of [`log_field_verdict_snapshot`], with the clock passed in.
+///
+/// Takes the snapshot rather than the view so a test can vary one field of it at a
+/// time, and `now` so the heartbeat is checkable without waiting an hour.
+fn emit_if_admitted(
+    snapshot: &FidelitySnapshot,
+    budgets: &[PaidProbeBudget],
+    globals: AccountingGlobals,
+    #[cfg_attr(
+        not(test),
+        expect(unused_variables, reason = "read only by the test-build observer")
+    )]
+    emission: &FidelityEmission,
+    gate: &FidelityGate,
+    now: Instant,
+) {
+    let verdicts = rendered_verdicts(&snapshot.verdicts);
+    let rendered_budgets = rendered_budgets(budgets);
+    let fingerprint = line_fingerprint(snapshot, &verdicts, &rendered_budgets, globals);
+    if !gate.admit(fingerprint, now) {
+        return;
+    }
     // The observer event is built ONLY in a test build, and the gate is about cost
     // rather than tidiness: the event owns a whole `FidelitySnapshot`, whose verdict
     // and acting vectors grow with the number of (target, field) identities a
@@ -219,9 +259,7 @@ pub(super) fn log_field_verdict_snapshot(
     // every few seconds. `emit_observer_event` is where the construction lives, so
     // nothing in this function body allocates a second snapshot outside `cfg(test)`.
     #[cfg(test)]
-    emit_observer_event(&emission, &snapshot, budgets);
-    let verdicts = rendered_verdicts(&snapshot.verdicts);
-    let rendered_budgets = rendered_budgets(budgets);
+    emit_observer_event(emission, snapshot, budgets);
     let probes = &snapshot.probes;
     tracing::info!(
         rc_field_repair_attempted_total = snapshot.counters.repair_attempted,
@@ -232,8 +270,8 @@ pub(super) fn log_field_verdict_snapshot(
         rc_field_preflight_actions_total = snapshot.counters.preflight_actions,
         rc_parser_unlocalized_total = snapshot.counters.parser_unlocalized,
         rc_acting_field_verdicts_total = snapshot.acting.len(),
-        rc_acting_field_verdicts = ?bounded_acting(&snapshot),
-        rc_acting_field_verdicts_omitted = acting_omitted(&snapshot),
+        rc_acting_field_verdicts = ?bounded_acting(snapshot),
+        rc_acting_field_verdicts_omitted = acting_omitted(snapshot),
         rc_field_verdict_rows_total = verdicts.total,
         rc_field_verdict_rows_omitted = verdicts.omitted,
         rc_field_verdict_rows = ?verdicts.rows,
@@ -257,6 +295,117 @@ pub(super) fn log_field_verdict_snapshot(
         rc_probe_next_retry_ms = next_retry_ms(probes),
         "{FIDELITY_SNAPSHOT_MESSAGE}",
     );
+}
+
+/// How long an unchanged snapshot stays silent before it is emitted again.
+///
+/// The repeat is what lets an operator tell "nothing changed" from "the poller
+/// stopped" or "the line was lost" by reading the log alone.
+pub(super) const SNAPSHOT_HEARTBEAT: Duration = Duration::from_hours(1);
+
+/// The daemon-scoped change gate on the fidelity line: the fingerprint of the last
+/// admitted line and when it was admitted.
+///
+/// One per daemon, shared by every status request, so the decision spans polls --
+/// a request-scoped value could not tell a repeat from a first sighting.
+#[derive(Debug, Default)]
+pub(super) struct FidelityGate {
+    last: Mutex<Option<GateMark>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GateMark {
+    fingerprint: u64,
+    last_emit: Instant,
+}
+
+impl FidelityGate {
+    /// Whether a line with `fingerprint` is emitted at `now`, recording it if so.
+    ///
+    /// Check and set under ONE lock, so two concurrent polls over the same state
+    /// cannot both observe the old mark and both emit.
+    fn admit(&self, fingerprint: u64, now: Instant) -> bool {
+        // The guarded value is two plain words with no cross-field invariant a
+        // panicking holder could leave half-written, so a poisoned lock is still
+        // a correct one.
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        let due = last.is_none_or(|mark| {
+            mark.fingerprint != fingerprint
+                || now.saturating_duration_since(mark.last_emit) >= SNAPSHOT_HEARTBEAT
+        });
+        if due {
+            *last = Some(GateMark {
+                fingerprint,
+                last_emit: now,
+            });
+        }
+        due
+    }
+}
+
+/// Fingerprint of everything the line carries EXCEPT `rc_probe_next_retry_ms`.
+///
+/// That one field is a countdown: it moves on every poll while nothing an operator
+/// acts on has changed, so including it would admit a line per poll and defeat the
+/// gate. Every other field on the line is a count, a token, or a rendered row with
+/// no clock-derived content. The `?`-rendered fields are hashed through the same
+/// `Debug` rendering the line uses, so a field added to a row type moves the
+/// fingerprint without this function having to learn about it.
+fn line_fingerprint(
+    snapshot: &FidelitySnapshot,
+    verdicts: &Bounded<RenderedVerdict>,
+    budgets: &Bounded<RenderedBudget>,
+    globals: AccountingGlobals,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let counters = &snapshot.counters;
+    for count in [
+        counters.repair_attempted,
+        counters.repair_succeeded,
+        counters.verdicts_learned,
+        counters.outstanding_unconfirmed,
+        counters.disproved_requests,
+        counters.preflight_actions,
+        counters.parser_unlocalized,
+        snapshot.probes.activations_total,
+        globals.consumed_unauthorized_total,
+    ] {
+        count.hash(&mut hasher);
+    }
+    for count in [
+        snapshot.acting.len(),
+        acting_omitted(snapshot),
+        verdicts.total,
+        verdicts.omitted,
+        budgets.total,
+        budgets.omitted,
+        snapshot.probes.queued,
+        snapshot.probes.in_flight,
+        snapshot.probes.backing_off,
+    ] {
+        count.hash(&mut hasher);
+    }
+    globals.writer_degraded.hash(&mut hasher);
+    probe_settlement_token(&snapshot.probes).hash(&mut hasher);
+    hash_debug(&mut hasher, bounded_acting(snapshot));
+    hash_debug(&mut hasher, &verdicts.rows);
+    hash_debug(&mut hasher, &budgets.rows);
+    hasher.finish()
+}
+
+/// Feed `value`'s `Debug` rendering into `hasher` without allocating it.
+fn hash_debug<T: std::fmt::Debug + ?Sized>(hasher: &mut DefaultHasher, value: &T) {
+    struct HashWriter<'a>(&'a mut DefaultHasher);
+    impl std::fmt::Write for HashWriter<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0.write(s.as_bytes());
+            Ok(())
+        }
+    }
+    // Writing into a hasher cannot fail; the `Result` is the trait's shape only.
+    let _ = write!(HashWriter(hasher), "{value:?}");
+    // Terminator, so adjacent renderings cannot trade bytes across the boundary.
+    hasher.write_u8(0xff);
 }
 
 /// Build and deliver the observer event, in a TEST BUILD ONLY.

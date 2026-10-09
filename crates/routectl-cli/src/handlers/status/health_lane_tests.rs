@@ -140,6 +140,7 @@ async fn each_target_learned_lane_is_the_state_key_of_the_row_learned_on_it() {
         &[],
         globals(),
         FidelityEmission::always(),
+        &FidelityGate::default(),
     );
     let wire = serde_json::to_value(&panel).expect("panel serializes");
 

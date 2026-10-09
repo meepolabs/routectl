@@ -171,10 +171,11 @@ fn drain_events(
 
 /// Assert `events` is EXACTLY ONE populated fidelity event, and return it.
 ///
-/// Both halves matter and neither implies the other. The COUNT is the exactly-once
+/// Both halves matter and neither implies the other. The COUNT is the at-most-once
 /// contract: the response body carries no trace of the line, so nothing else in a
 /// request can tell one emission from two, and two identical snapshots per poll make
-/// a reader counting lines read double the poll rate. POPULATED is the vacuity guard:
+/// a reader counting lines read double the poll rate. Every caller polls a freshly
+/// booted daemon once, so the change gate admits that first line. POPULATED is the vacuity guard:
 /// an emitter reached with an empty snapshot satisfies every count assertion while
 /// reporting nothing an operator can use, which is exactly the shape an earlier
 /// version of the log test had.
@@ -402,6 +403,60 @@ async fn the_status_aggregate_emits_exactly_one_fidelity_event_for_both_panels()
          one request: {aggregate}",
     );
     one_populated_event(drain_events(&mut events), "the /status aggregate", 1);
+
+    daemon.shutdown().await;
+}
+
+/// Repeated `/status` polls over UNCHANGED state emit one fidelity event between
+/// them, and a verdict landing afterwards emits exactly one more.
+///
+/// The daemon-scoped change gate, over real requests: the gate lives on the state
+/// every handler shares, so only a running daemon shows it spanning polls rather
+/// than resetting per request. The second half is the paired control -- a gate that
+/// never admitted again after its first line would pass the first half alone.
+///
+/// Mutation check: drop the `gate.admit` early return in `emit_if_admitted` -> red
+/// at five events for the unchanged polls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unchanged_aggregate_polls_emit_once_and_a_new_verdict_emits_once_more() {
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    let config_path = write_config_file(config_dir.path());
+    let (config, dir) = daemon_config(Some(("p0", 3)));
+    let recorder = Arc::new(Recorder::default());
+    let router = router_with(&config, Arc::clone(&recorder));
+    let (hooks, mut events) = crate::handlers::status::test_hooks::StatusTestHooks::observing();
+    let daemon = spawn_daemon_full(config, dir, router, hooks, Some(config_path)).await;
+    let _ = drain_events(&mut events);
+
+    for _ in 0..5 {
+        let aggregate = get_status(&daemon, "/status").await;
+        assert!(
+            aggregate["panels"]["health"]["data"].is_object()
+                && aggregate["panels"]["doctor"]["data"]["report"]["schema_version"].is_number(),
+            "premise: both fidelity-carrying panels built on every poll: {aggregate}",
+        );
+    }
+    let unchanged = drain_events(&mut events);
+    assert_eq!(
+        unchanged.len(),
+        1,
+        "five polls over unchanged state emit ONE fidelity event: the first poll's",
+    );
+    assert_eq!(
+        unchanged[0].verdict_rows_total, 0,
+        "premise: no verdict was resident yet",
+    );
+
+    plant_acting_field_verdict_for_tests(&daemon.live_router(), STATE_KEY, FIELD_PATH, 1);
+    for _ in 0..3 {
+        let _ = get_status(&daemon, "/status").await;
+    }
+
+    one_populated_event(
+        drain_events(&mut events),
+        "the aggregate polled after a verdict landed",
+        1,
+    );
 
     daemon.shutdown().await;
 }

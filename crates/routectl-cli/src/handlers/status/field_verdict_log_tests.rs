@@ -15,6 +15,7 @@
 use super::*;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::super::router_view::StatusRouterHandle;
 use arc_swap::ArcSwap;
@@ -142,7 +143,13 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
     };
 
     let info = captured_snapshot(|| {
-        log_field_verdict_snapshot(&view, &no_budgets(), globals, FidelityEmission::always());
+        log_field_verdict_snapshot(
+            &view,
+            &no_budgets(),
+            globals,
+            FidelityEmission::always(),
+            &FidelityGate::default(),
+        );
     });
 
     // Asserted against what was SEEDED rather than against restated literals: a
@@ -209,7 +216,13 @@ fn the_global_fields_carry_the_globals_values() {
     };
 
     let info = captured_snapshot(|| {
-        log_field_verdict_snapshot(&view, &no_budgets(), globals, FidelityEmission::always());
+        log_field_verdict_snapshot(
+            &view,
+            &no_budgets(),
+            globals,
+            FidelityEmission::always(),
+            &FidelityGate::default(),
+        );
     });
 
     assert_eq!(
@@ -245,6 +258,7 @@ fn every_count_is_reported_even_at_zero() {
             &no_budgets(),
             healthy_globals(),
             FidelityEmission::always(),
+            &FidelityGate::default(),
         );
     });
 
@@ -320,6 +334,7 @@ fn a_planted_resident_verdict_is_emitted_as_one_fully_populated_row() {
             &no_budgets(),
             healthy_globals(),
             FidelityEmission::always(),
+            &FidelityGate::default(),
         );
     });
 
@@ -388,6 +403,7 @@ fn the_acting_row_names_the_verdict_it_reports() {
             &no_budgets(),
             healthy_globals(),
             FidelityEmission::always(),
+            &FidelityGate::default(),
         );
     });
 
@@ -416,7 +432,13 @@ fn a_build_whose_claim_is_taken_emits_no_line() {
     let emission = FidelityEmission::shared();
     // A sibling claims it first.
     let events_first = routectl_testkit::capture_events(|| {
-        log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), emission.clone());
+        log_field_verdict_snapshot(
+            &view,
+            &no_budgets(),
+            healthy_globals(),
+            emission.clone(),
+            &FidelityGate::default(),
+        );
     });
     assert_eq!(
         events_first
@@ -428,7 +450,13 @@ fn a_build_whose_claim_is_taken_emits_no_line() {
     );
 
     let events = routectl_testkit::capture_events(|| {
-        log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), emission);
+        log_field_verdict_snapshot(
+            &view,
+            &no_budgets(),
+            healthy_globals(),
+            emission,
+            &FidelityGate::default(),
+        );
     });
 
     assert!(
@@ -453,6 +481,7 @@ fn an_emitting_build_emits_exactly_one_line() {
             &no_budgets(),
             healthy_globals(),
             FidelityEmission::always(),
+            &FidelityGate::default(),
         );
     });
 
@@ -485,6 +514,7 @@ fn every_count_renders_as_a_bare_integer() {
             &no_budgets(),
             healthy_globals(),
             FidelityEmission::always(),
+            &FidelityGate::default(),
         );
     });
 
@@ -526,8 +556,20 @@ fn two_builders_sharing_a_claim_emit_exactly_one_line() {
     let emission = FidelityEmission::shared();
 
     let events = routectl_testkit::capture_events(|| {
-        log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), emission.clone());
-        log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), emission);
+        log_field_verdict_snapshot(
+            &view,
+            &no_budgets(),
+            healthy_globals(),
+            emission.clone(),
+            &FidelityGate::default(),
+        );
+        log_field_verdict_snapshot(
+            &view,
+            &no_budgets(),
+            healthy_globals(),
+            emission,
+            &FidelityGate::default(),
+        );
     });
 
     assert_eq!(
@@ -564,7 +606,13 @@ fn a_builder_that_never_reaches_the_logger_leaves_the_claim_for_its_sibling() {
     drop(degraded);
 
     let events = routectl_testkit::capture_events(|| {
-        log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), emission);
+        log_field_verdict_snapshot(
+            &view,
+            &no_budgets(),
+            healthy_globals(),
+            emission,
+            &FidelityGate::default(),
+        );
     });
 
     assert_eq!(
@@ -592,6 +640,7 @@ fn a_standalone_builder_always_emits() {
             &no_budgets(),
             healthy_globals(),
             FidelityEmission::always(),
+            &FidelityGate::default(),
         );
     });
 
@@ -648,7 +697,7 @@ fn the_emitter_sends_one_populated_event_through_the_per_call_observer() {
     let mut emission = FidelityEmission::always();
     let mut rx = emission.observe();
 
-    log_field_verdict_snapshot(&view, &[], globals, emission);
+    log_field_verdict_snapshot(&view, &[], globals, emission, &FidelityGate::default());
 
     let event = rx.try_recv().expect("the emitter sent exactly one event");
     assert_eq!(
@@ -678,14 +727,20 @@ fn a_suppressed_builder_sends_no_event_to_the_observer() {
     let mut emission = FidelityEmission::shared();
     let mut rx = emission.observe();
     // First builder takes the claim.
-    log_field_verdict_snapshot(&view, &[], globals, emission.clone());
+    log_field_verdict_snapshot(
+        &view,
+        &[],
+        globals,
+        emission.clone(),
+        &FidelityGate::default(),
+    );
     let first = rx.try_recv();
     assert!(first.is_ok(), "the first builder sent an event");
 
     // Second builder: claim is taken.
     let mut emission2 = emission;
     let mut rx2 = emission2.observe();
-    log_field_verdict_snapshot(&view, &[], globals, emission2);
+    log_field_verdict_snapshot(&view, &[], globals, emission2, &FidelityGate::default());
     assert!(
         rx2.try_recv().is_err(),
         "the second builder found the claim taken and sent nothing",
@@ -719,7 +774,13 @@ fn health_failure_fallback_lets_doctor_emit_through_the_observer() {
     let _ = emission.clone(); // health took a clone and dropped it
 
     // Doctor's builder: it reaches the emitter and finds the claim free.
-    log_field_verdict_snapshot(&view, &no_budgets(), globals, emission);
+    log_field_verdict_snapshot(
+        &view,
+        &no_budgets(),
+        globals,
+        emission,
+        &FidelityGate::default(),
+    );
 
     let event = rx.try_recv().expect(
         "the doctor builder sent the event: it found the claim free because \
@@ -729,6 +790,203 @@ fn health_failure_fallback_lets_doctor_emit_through_the_observer() {
         event.verdict_rows_total > 0,
         "and the event is POPULATED: the planted verdict row is present, so the line \
          carries real data rather than an empty snapshot that passes vacuously",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The change gate
+// ---------------------------------------------------------------------------
+
+/// Snapshot lines `body` emits.
+fn snapshot_lines(body: impl FnOnce()) -> usize {
+    routectl_testkit::capture_events(body)
+        .iter()
+        .filter(|e| e.message == FIDELITY_SNAPSHOT_MESSAGE)
+        .count()
+}
+
+/// One step of a gate scenario: what the poll changes and how far the clock moved.
+struct GateStep {
+    name: &'static str,
+    polls: usize,
+    advance: Duration,
+    change: fn(&mut FidelitySnapshot),
+    expected_lines: usize,
+}
+
+const fn unchanged(_: &mut FidelitySnapshot) {}
+
+/// Polls over one daemon-scoped gate emit only on a content change or the hourly
+/// heartbeat, never on a countdown tick alone.
+///
+/// One scenario over one gate rather than independent cases, because the gate's
+/// whole subject is what came BEFORE: each row's expected count is relative to the
+/// state the previous rows left behind.
+///
+/// Mutation checks: drop the `gate.admit` early return -> red on the unchanged-polls
+/// row (10 lines); hash `rc_probe_next_retry_ms` into the fingerprint -> red on the
+/// next-retry row.
+#[test]
+fn the_gate_emits_on_change_or_heartbeat_and_not_on_unchanged_polls() {
+    let view = fresh_view();
+    let gate = FidelityGate::default();
+    let emission = FidelityEmission::always();
+    let mut now = Instant::now();
+    let mut snapshot = view.fidelity_snapshot();
+    let steps = [
+        GateStep {
+            name: "unchanged state over 10 polls emits once",
+            polls: 10,
+            advance: Duration::from_secs(5),
+            change: unchanged,
+            expected_lines: 1,
+        },
+        GateStep {
+            name: "a counter change emits one more",
+            polls: 1,
+            advance: Duration::from_secs(5),
+            change: |snap| snap.counters.preflight_actions += 1,
+            expected_lines: 1,
+        },
+        GateStep {
+            name: "the changed state, polled again unchanged, emits nothing",
+            polls: 2,
+            advance: Duration::from_secs(5),
+            change: unchanged,
+            expected_lines: 0,
+        },
+        GateStep {
+            name: "a next-retry countdown alone emits nothing",
+            polls: 3,
+            advance: Duration::from_secs(5),
+            change: |snap| {
+                let wait = snap.probes.next_retry_in.unwrap_or(Duration::from_secs(90));
+                snap.probes.next_retry_in = Some(wait.saturating_sub(Duration::from_secs(1)));
+            },
+            expected_lines: 0,
+        },
+        // The last admitted line was the counter change; five 5s polls have
+        // passed since, so this lands one second short of the heartbeat.
+        GateStep {
+            name: "just under the heartbeat with no change emits nothing",
+            polls: 1,
+            advance: SNAPSHOT_HEARTBEAT.saturating_sub(Duration::from_secs(26)),
+            change: unchanged,
+            expected_lines: 0,
+        },
+        GateStep {
+            name: "the clock reaching the heartbeat with no change emits one",
+            polls: 1,
+            advance: Duration::from_secs(1),
+            change: unchanged,
+            expected_lines: 1,
+        },
+    ];
+
+    for step in steps {
+        let lines = snapshot_lines(|| {
+            for _ in 0..step.polls {
+                (step.change)(&mut snapshot);
+                now += step.advance;
+                emit_if_admitted(
+                    &snapshot,
+                    &no_budgets(),
+                    healthy_globals(),
+                    &emission,
+                    &gate,
+                    now,
+                );
+            }
+        });
+        assert_eq!(lines, step.expected_lines, "{}", step.name);
+    }
+}
+
+/// Every content input the line reports moves the fingerprint, so a change to any
+/// of them emits.
+///
+/// Each row changes ONE input over a gate that has just admitted the baseline, so a
+/// row going red names the input the fingerprint dropped.
+///
+/// Mutation check: drop any one input from `line_fingerprint` -> red on its row.
+#[test]
+fn a_change_to_any_reported_input_emits_a_line() {
+    type Change = fn(&mut FidelitySnapshot, &mut Vec<PaidProbeBudget>, &mut AccountingGlobals);
+    let rows: [(&str, Change); 8] = [
+        ("repair counter", |snap, _, _| {
+            snap.counters.repair_attempted += 1;
+        }),
+        ("parser counter", |snap, _, _| {
+            snap.counters.parser_unlocalized += 1;
+        }),
+        ("probe queue depth", |snap, _, _| snap.probes.queued += 1),
+        ("probe activations", |snap, _, _| {
+            snap.probes.activations_total += 1;
+        }),
+        ("writer degraded", |_, _, globals| {
+            globals.writer_degraded = true;
+        }),
+        ("unauthorized units", |_, _, globals| {
+            globals.consumed_unauthorized_total += 1;
+        }),
+        ("budget row", |_, budgets, _| {
+            budgets.push(PaidProbeBudget {
+                provider: "p0".to_string(),
+                daily_cap: 3,
+                committed_today: Some(1),
+                accounting: super::super::paid_probe_budget::AccountingHealth::Healthy,
+            });
+        }),
+        ("verdict row", |snap, _, _| {
+            *snap = view_with_planted_verdict().fidelity_snapshot();
+        }),
+    ];
+
+    for (name, change) in rows {
+        let gate = FidelityGate::default();
+        let emission = FidelityEmission::always();
+        let now = Instant::now();
+        let mut snapshot = fresh_view().fidelity_snapshot();
+        let mut budgets = no_budgets();
+        let mut globals = healthy_globals();
+        let baseline = snapshot_lines(|| {
+            emit_if_admitted(&snapshot, &budgets, globals, &emission, &gate, now);
+            emit_if_admitted(&snapshot, &budgets, globals, &emission, &gate, now);
+        });
+        assert_eq!(baseline, 1, "{name}: premise -- the repeat is suppressed");
+
+        change(&mut snapshot, &mut budgets, &mut globals);
+        let lines = snapshot_lines(|| {
+            emit_if_admitted(&snapshot, &budgets, globals, &emission, &gate, now);
+        });
+
+        assert_eq!(lines, 1, "{name}: a changed input must emit");
+    }
+}
+
+/// A poll the gate suppresses sends no observer event: the event is the emitted
+/// line's witness, so it must not fire for a line that never reached the log.
+///
+/// Mutation check: move `emit_observer_event` above the `gate.admit` check -> red.
+#[test]
+fn a_gate_suppressed_poll_sends_no_observer_event() {
+    let view = fresh_view();
+    let gate = FidelityGate::default();
+
+    let mut first = FidelityEmission::always();
+    let mut first_rx = first.observe();
+    log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), first, &gate);
+    let mut repeat = FidelityEmission::always();
+    let mut repeat_rx = repeat.observe();
+    log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), repeat, &gate);
+
+    assert!(
+        first_rx.try_recv().is_ok(),
+        "control: the first poll emits and sends its event",
+    );
+    assert!(
+        repeat_rx.try_recv().is_err(),
+        "the unchanged repeat is suppressed, so it sends no event",
     );
 }
 
@@ -845,6 +1103,7 @@ fn snapshot_fields_match_the_logging_doc_table_exactly_once() {
             &no_budgets(),
             healthy_globals(),
             FidelityEmission::always(),
+            &FidelityGate::default(),
         );
     });
     let mut emitted: Vec<String> = info.fields.iter().map(|(name, _)| name.clone()).collect();

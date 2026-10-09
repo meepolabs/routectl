@@ -166,6 +166,9 @@ pub struct StatusState {
     /// shared `Arc` the writer holds and exposes only reads, which is what lets the
     /// accounting surface exist without weakening the contract above.
     pub usage_health: paid_probe_budget::UsageHealthView,
+    /// The change gate on the shared fidelity INFO line, held for the daemon's
+    /// lifetime so an unchanged snapshot is not re-emitted on every poll.
+    fidelity_gate: Arc<field_verdict_log::FidelityGate>,
     /// Test-only observation and failure-injection seams for THIS daemon's status
     /// surface. Absent from every release build -- see [`test_hooks`].
     #[cfg(test)]
@@ -192,6 +195,7 @@ impl StatusState {
             observability: PanelObservability::default(),
             builder_capacity: BuilderCapacity::default(),
             usage_health,
+            fidelity_gate: Arc::default(),
             #[cfg(test)]
             test_hooks: test_hooks::StatusTestHooks::default(),
         }

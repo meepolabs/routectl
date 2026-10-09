@@ -21,7 +21,7 @@ use routectl_router::LearnedRegistryEntry;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::CircuitPhase;
 
-use super::field_verdict_log::{FidelityEmission, log_field_verdict_snapshot};
+use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
 use super::paid_probe_budget::{
     AccountingGlobals, PaidProbeBudget, accounting_globals, paid_probe_budgets,
 };
@@ -206,6 +206,7 @@ fn build_from_view(
     budgets: &[PaidProbeBudget],
     globals: AccountingGlobals,
     emission: FidelityEmission,
+    gate: &FidelityGate,
 ) -> HealthPanel {
     // Pin a single monotonic read time and its epoch-ms anchor together, so
     // every target's elapsed-age conversion shares one clock reading.
@@ -217,7 +218,7 @@ fn build_from_view(
         .map(|target| map_target(target, now_ms))
         .collect();
     let entries = view.learned_capabilities();
-    log_field_verdict_snapshot(view, budgets, globals, emission);
+    log_field_verdict_snapshot(view, budgets, globals, emission, gate);
     let learned_negatives = entries
         .into_iter()
         .map(|entry| map_learned(entry, now, now_ms))
@@ -255,6 +256,7 @@ pub(super) async fn build_with_emission(
     // The process-global accounting facts are counter reads, not I/O, so they stay
     // out here beside the router snapshot -- one read time for the whole build.
     let globals = accounting_globals(&state.usage_health);
+    let gate = Arc::clone(&state.fidelity_gate);
     // The snapshot is pinned at `view()`, so request time IS the read time.
     let as_of = now_utc_rfc3339();
     // The daemon's own fidelity observer, when a test installed one. Attached here
@@ -278,7 +280,7 @@ pub(super) async fn build_with_emission(
             assert!(!fail, "injected health-builder failure");
             let budgets =
                 paid_probe_budgets(&caps, &db_path, chrono::Utc::now().timestamp_millis());
-            let dto = build_from_view(&view, &budgets, globals, emission);
+            let dto = build_from_view(&view, &budgets, globals, emission, &gate);
             Panel::available(SCHEMA_VERSION, as_of, dto)
         },
     )
@@ -713,7 +715,13 @@ mod tests {
         let view = state.router.view();
 
         let events = routectl_testkit::capture_events(|| {
-            build_from_view(&view, &[], healthy_globals(), FidelityEmission::always());
+            build_from_view(
+                &view,
+                &[],
+                healthy_globals(),
+                FidelityEmission::always(),
+                &FidelityGate::default(),
+            );
         });
 
         assert!(
@@ -730,7 +738,13 @@ mod tests {
         // the point is that ONE view drives both reads and the DTO builds.
         let state = test_state();
         let view = state.router.view();
-        let panel = build_from_view(&view, &[], healthy_globals(), FidelityEmission::always());
+        let panel = build_from_view(
+            &view,
+            &[],
+            healthy_globals(),
+            FidelityEmission::always(),
+            &FidelityGate::default(),
+        );
         assert!(panel.targets.is_empty());
         assert!(panel.learned_negatives.is_empty());
     }

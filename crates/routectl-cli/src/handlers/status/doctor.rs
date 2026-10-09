@@ -29,7 +29,7 @@ use routectl_core::failure_class::LastOutcome;
 use routectl_router::DoctorReport;
 use routectl_router::router::RouteTargetStatus;
 
-use super::field_verdict_log::{FidelityEmission, log_field_verdict_snapshot};
+use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
 use super::paid_probe_budget::{
     AccountingGlobals, CapabilityWriteCounters, PaidProbeBudget, accounting_globals,
     paid_probe_budgets,
@@ -100,8 +100,9 @@ fn build_panel_data(
     globals: AccountingGlobals,
     capability_writes: CapabilityWriteCounters,
     emission: FidelityEmission,
+    gate: &FidelityGate,
 ) -> DoctorPanel {
-    log_field_verdict_snapshot(view, budgets, globals, emission);
+    log_field_verdict_snapshot(view, budgets, globals, emission, gate);
     let reachability = view
         .route_targets(Instant::now())
         .into_iter()
@@ -133,6 +134,7 @@ async fn build_from_path(
     // Counter reads, not I/O, so these stay out here beside the router snapshot.
     let globals = accounting_globals(&state.usage_health);
     let capability_writes = state.usage_health.capability_writes();
+    let gate = Arc::clone(&state.fidelity_gate);
     let handle = tokio::runtime::Handle::current();
     // The snapshot is pinned now, so request time IS the read time.
     let as_of = now_utc_rfc3339();
@@ -157,6 +159,7 @@ async fn build_from_path(
                 globals,
                 capability_writes,
                 emission,
+                &gate,
             );
             Panel::available(schema_version, as_of, data)
         },
@@ -197,6 +200,7 @@ pub(super) async fn build_with_emission(
                 emission.with_daemon_observer(state),
                 #[cfg(not(test))]
                 emission,
+                &state.fidelity_gate,
             );
             Panel::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH)
         }
