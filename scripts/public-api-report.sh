@@ -7,15 +7,20 @@
 #   clean          ::notice   public-api.sh exited 0
 #   drift          ::warning  exit 1 with at least one `surface drift for
 #                             <crate>` or `missing baseline for <crate>`
-#                             line; names every such crate once
-#   could not run  ::warning  cargo-public-api not on PATH (public-api.sh is
-#                             then never run), or any other outcome; carries
-#                             public-api.sh's last stderr line as the reason
+#                             line; names every such crate once, then every
+#                             crate whose surface could not be listed or
+#                             carried a machine-specific path, as
+#                             "; could not check <crates>"
+#   could not run  ::warning  cargo-public-api not on PATH, or not the
+#                             version PUBLIC_API_TOOL_VERSION pins when that
+#                             is set (public-api.sh is then never run), or
+#                             any other outcome; carries public-api.sh's
+#                             last stderr line as the reason
 #
 # It always exits 0: public-API drift is reported, never enforced. Any
 # argument is a wiring defect, not a report, and exits 2.
 #
-# Usage: public-api-report.sh
+# Usage: [PUBLIC_API_TOOL_VERSION=<x.y.z>] public-api-report.sh
 
 set -uo pipefail
 
@@ -60,10 +65,38 @@ run_check() {
     return "$rc"
 }
 
+# Prints the distinct lines of stdin in first-seen order, comma-separated.
+join_unique() {
+    awk '!seen[$0]++ { printf "%s%s", sep, $0; sep = ", " }'
+}
+
 # Prints the drifted crates named in $1, first-seen order, comma-separated.
 drifted_crates() {
-    sed -nE 's/^public-api: (surface drift|missing baseline) for ([A-Za-z0-9_.-]+).*/\2/p' "$1" \
-        | awk '!seen[$0]++ { printf "%s%s", sep, $0; sep = ", " }'
+    sed -nE 's/^public-api: (surface drift|missing baseline) for ([A-Za-z0-9_.-]+).*/\2/p' "$1" | join_unique
+}
+
+# Prints the crates in $1 whose surface could not be listed or carried a
+# machine-specific path, first-seen order, comma-separated.
+unchecked_crates() {
+    sed -nE \
+        -e 's/^public-api: failed to list surface for ([A-Za-z0-9_.-]+)$/\1/p' \
+        -e 's/^public-api: machine-specific path in ([A-Za-z0-9_.-]+) surface.*/\1/p' \
+        "$1" | join_unique
+}
+
+# Prints why the installed cargo-public-api cannot be used, or nothing when
+# it is on PATH and matches PUBLIC_API_TOOL_VERSION (when that is set).
+tool_problem() {
+    local want="${PUBLIC_API_TOOL_VERSION:-}" got
+    if ! command -v cargo-public-api >/dev/null 2>&1; then
+        printf 'cargo-public-api not installed'
+        return
+    fi
+    [[ -n "$want" ]] || return 0
+    got="$(cargo-public-api --version 2>/dev/null | sed -nE '1s/^cargo-public-api ([^ ]+).*/\1/p')"
+    if [[ "$got" != "$want" ]]; then
+        printf 'cargo-public-api %s, want %s' "${got:-of unknown version}" "$want"
+    fi
 }
 
 # Prints why the check could not run: its last non-blank stderr line.
@@ -74,14 +107,15 @@ failure_reason() {
 }
 
 classify() {
-    local rc="$1" errlog="$2" crates
+    local rc="$1" errlog="$2" crates unchecked
     if [[ "$rc" -eq 0 ]]; then
         report notice "public API baselines match"
         return
     fi
     crates="$(drifted_crates "$errlog")"
     if [[ "$rc" -eq 1 && -n "$crates" ]]; then
-        report warning "drift in $crates"
+        unchecked="$(unchecked_crates "$errlog")"
+        report warning "drift in $crates${unchecked:+; could not check $unchecked}"
         return
     fi
     report warning "could not run ($(failure_reason "$rc" "$errlog"))"
@@ -89,8 +123,9 @@ classify() {
 
 [[ $# -eq 0 ]] || usage
 
-if ! command -v cargo-public-api >/dev/null 2>&1; then
-    report warning "could not run (cargo-public-api not installed)"
+PROBLEM="$(tool_problem)"
+if [[ -n "$PROBLEM" ]]; then
+    report warning "could not run ($PROBLEM)"
     exit 0
 fi
 

@@ -175,6 +175,9 @@ main() {
     export XDG_DATA_HOME="$run_dir/xdg/data"
     export XDG_STATE_HOME="$run_dir/xdg/state"
     mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+    # The repo's .cargo/config.toml forces XDG_CONFIG_HOME for every binary
+    # cargo runs; only this environment form of the [env] entry replaces it.
+    export CARGO_ENV_XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
 
     # Repo-local real-disk build + criterion output (gitignored).
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/.cargo-target-bench}"

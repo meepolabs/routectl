@@ -629,10 +629,12 @@ jobs:
   # continues on error and is deliberately absent from `required.needs`, so
   # neither drift nor a broken toolchain bootstrap can block a merge. Its
   # last step turns the outcome into one annotation and one job-summary
-  # line (clean / drift / could-not-run).
+  # line (clean / drift / could-not-run), and runs even when an earlier
+  # step failed.
   public-api:
     name: public-api report (informational)
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -672,8 +674,13 @@ jobs:
         run: cargo install cargo-public-api --locked --version "${{ steps.pins.outputs.version }}"
 
       # Always exits 0; drift and could-not-run surface as a warning
-      # annotation. See public-api/POLICY.md.
+      # annotation. See public-api/POLICY.md. The pinned version lets the
+      # wrapper refuse a cached cargo-public-api of another version, which
+      # a failed install above would otherwise leave on PATH.
       - name: report public-API drift
+        if: ${{ !cancelled() }}
+        env:
+          PUBLIC_API_TOOL_VERSION: ${{ steps.pins.outputs.version }}
         run: bash scripts/public-api-report.sh
 
   # The fleet-wide dependency gate, and the only one that is identical in

@@ -463,8 +463,9 @@ fi
 # --- leg environment ---------------------------------------------------------
 
 # Runs a checker's run_leg with run_bounded stubbed to record its argv, and
-# prints each problem with the leg's HOME / XDG_CONFIG_HOME / RUSTUP_HOME /
-# CARGO_HOME, or nothing when all four are what the leg needs.
+# prints each problem with the leg's HOME / XDG_CONFIG_HOME /
+# CARGO_ENV_XDG_CONFIG_HOME / RUSTUP_HOME / CARGO_HOME, or nothing when all
+# five are what the leg needs.
 leg_env_problems() {
     local fn
     fn="$(awk '/^run_leg\(\) \{$/ { on = 1 } on { print } on && /^}$/ { exit }' "$1")"
@@ -507,6 +508,8 @@ leg_env_problems() {
                 echo "$var='$value' was not created"
             fi
         done
+        [[ -n "${seen[XDG_CONFIG_HOME]:-}" && "${seen[CARGO_ENV_XDG_CONFIG_HOME]:-}" == "${seen[XDG_CONFIG_HOME]}" ]] ||
+            echo "CARGO_ENV_XDG_CONFIG_HOME='${seen[CARGO_ENV_XDG_CONFIG_HOME]:-<inherited>}' does not override the forced cargo [env] entry"
         [[ "${seen[RUSTUP_HOME]:-}" == "$RUSTUP_HOME" ]] ||
             echo "RUSTUP_HOME='${seen[RUSTUP_HOME]:-<inherited>}' is not the outer value"
         [[ "${seen[CARGO_HOME]:-}" == "$CARGO_HOME" ]] ||
@@ -531,6 +534,17 @@ if m="$(mutant real-home '/^        HOME="\$WORK\/\$name\.home" XDG_CONFIG_HOME=
     fi
 else
     fail "could not build the real-home mutant"
+fi
+
+if m="$(mutant forced-xdg '/^        CARGO_ENV_XDG_CONFIG_HOME=/d')"; then
+    gone="$(leg_env_problems "$m")"
+    if [[ "$gone" == *"CARGO_ENV_XDG_CONFIG_HOME='<inherited>'"* ]]; then
+        pass "control: a leg leaving the forced cargo XDG_CONFIG_HOME in place is caught"
+    else
+        fail "control: a leg without CARGO_ENV_XDG_CONFIG_HOME passed (${gone:-no problem reported})"
+    fi
+else
+    fail "could not build the forced-xdg mutant"
 fi
 
 if ((fails)); then

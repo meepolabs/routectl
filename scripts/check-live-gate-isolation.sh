@@ -64,7 +64,10 @@
 # Every leg runs with HOME and XDG_CONFIG_HOME pointed at its own scratch
 # directories under the run's work dir, so nothing a leg runs can read or
 # write the invoking user's real config or data (a usage ledger resolved
-# from HOME, say). RUSTUP_HOME and CARGO_HOME are taken from the outer
+# from HOME, say). The leg also sets CARGO_ENV_XDG_CONFIG_HOME, because the
+# repo's .cargo/config.toml forces XDG_CONFIG_HOME (to target/test-xdg) for
+# every binary cargo runs, and only cargo's environment form of that [env]
+# entry replaces a forced value. RUSTUP_HOME and CARGO_HOME are taken from the outer
 # environment first and passed through, so the toolchain proxies and the
 # fetched registry cache stay reachable.
 #
@@ -468,7 +471,10 @@ build_planted_env() {
 }
 
 # Runs "$@" in fresh namespaces with the planted environment and a scratch
-# HOME / XDG_CONFIG_HOME, under `deadline` seconds. Sets LEG_LOG (the
+# HOME / XDG_CONFIG_HOME, under `deadline` seconds. The repo's
+# .cargo/config.toml forces XDG_CONFIG_HOME for every process cargo runs;
+# CARGO_ENV_XDG_CONFIG_HOME replaces that forced entry, so test binaries see
+# the leg's scratch directory too. Sets LEG_LOG (the
 # recorder log) and LEG_ERROR (empty when the leg is valid evidence, else
 # why it is not) and LEG_RC (the command's exit status; meaningful only when
 # LEG_ERROR is empty). The scratch assignments follow PLANTED, so they win
@@ -486,6 +492,7 @@ run_leg() {
     run_bounded $((deadline + LEG_KILL_SLACK)) \
         env "${unset_args[@]}" "${PLANTED[@]}" OUTER_UID="$(id -u)" OUTER_GID="$(id -g)" \
         HOME="$WORK/$name.home" XDG_CONFIG_HOME="$WORK/$name.xdg" \
+        CARGO_ENV_XDG_CONFIG_HOME="$WORK/$name.xdg" \
         RUSTUP_HOME="$RUSTUP_HOME" CARGO_HOME="$CARGO_HOME" \
         CANARY_SOCKET="$CANARY_SOCKET" MASK_SOCKET_PATHS="$MASK_SOCKET_PATHS" \
         "${UNSHARE[@]}" \

@@ -135,12 +135,20 @@ final gate, not a tight inner loop.
 
 `.cargo/config.toml` forces `XDG_CONFIG_HOME` to `target/test-xdg`
 (resolved against the workspace root) for every process cargo runs, so
-`cargo test` and `cargo run` read and write config, credentials, and the
-usage db there, never under `~/.config/routectl`.
-`crates/routectl-cli/tests/test_env_isolation.rs` pins it. The path is
-relative to the config file, so each git worktree gets its own sandbox
-under its own `target/`, independent of `CARGO_TARGET_DIR`. Running a
-test binary directly, or `cargo --manifest-path` from outside the repo,
+under `cargo test` and `cargo run` every path resolved from
+`XDG_CONFIG_HOME` -- config, credentials, secrets, the usage db --
+lands there, never under `~/.config/routectl`.
+`crates/routectl-cli/tests/test_env_isolation.rs` pins it. The one
+exception is the OpenAI-responses Cloudflare cookie jar, which resolves
+from `HOME` (`~/.config/routectl/cookies/chatgpt.json`), not from
+`XDG_CONFIG_HOME`; set `ROUTECTL_COOKIE_FILE` to point it elsewhere.
+The path is relative to the config file, so each git worktree gets its
+own sandbox under its own `target/`, independent of `CARGO_TARGET_DIR`.
+The sandbox persists between runs, and `cargo run` and `cargo test`
+share it; reset it with `rm -rf target/test-xdg`. Setting
+`CARGO_ENV_XDG_CONFIG_HOME` (cargo's environment form of the `[env]`
+entry) replaces the forced value for one invocation. Running a test
+binary directly, or `cargo --manifest-path` from outside the repo,
 skips the config file and therefore the sandbox. Against a live config,
 run the installed binary, not `cargo run`.
 

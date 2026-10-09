@@ -7,11 +7,15 @@
 #   - `test-gate.sh --print public-api` is exactly the public-api.sh
 #     --check over every crate, and the subcommand refuses extra arguments;
 #   - public-api-report.sh always exits 0 and classifies a stub check's
-#     outcome as clean / drift / could-not-run, one annotation and one job
+#     outcome as clean / drift (naming crates it could not check) /
+#     could-not-run (including a cargo-public-api of another version than
+#     the pin), one annotation and one job
 #     summary line per run, each case paired with a planted-defect control;
-#   - the CI `public-api` job continues on error and its last step runs the
-#     wrapper, the `required` job does not depend on it, no pre-commit hook
-#     runs it, and the retired pre-push leg script stays deleted -- each
+#   - the CI `public-api` job continues on error with no job-level `if:`
+#     and its last step runs the wrapper even after a failed step, with the
+#     pinned tool version; the `required` job neither depends on it nor
+#     needs any job that runs the check; no pre-commit hook runs it; and the
+#     retired pre-push leg script stays deleted -- each
 #     wiring check holds on the real tree and fails on a stub carrying the
 #     defect it pins.
 #
@@ -84,14 +88,14 @@ printf '#!/bin/sh\necho "cargo-public-api 0.0.0"\n' >"$report_tool_bin/cargo-pub
 chmod +x "$report_tool_bin/cargo-public-api"
 
 # Runs wrapper copy $1 with PATH = $2 plus the system dirs, the stub exiting
-# $3 with stderr $4, and GITHUB_STEP_SUMMARY on a file holding one prior
-# line. Sets OUT, RC, LAST (the last output line) and APPENDED (the summary
-# lines the run added).
+# $3 with stderr $4, PUBLIC_API_TOOL_VERSION = $5 (empty when absent), and
+# GITHUB_STEP_SUMMARY on a file holding one prior line. Sets OUT, RC, LAST
+# (the last output line) and APPENDED (the summary lines the run added).
 run_report() {
     rm -f "$REPORT_LOG"
     printf 'prior summary line\n' >"$SUMMARY"
     OUT="$(PATH="$2:$SYSTEM_PATH" STUB_RC="$3" STUB_STDERR="$4" \
-        GITHUB_STEP_SUMMARY="$SUMMARY" bash "$1" 2>&1)"
+        PUBLIC_API_TOOL_VERSION="${5:-}" GITHUB_STEP_SUMMARY="$SUMMARY" bash "$1" 2>&1)"
     RC=$?
     LAST="$(printf '%s\n' "$OUT" | tail -n 1)"
     APPENDED="$(tail -n +2 "$SUMMARY")"
@@ -126,6 +130,28 @@ case_drift() {
         'public-api: missing baseline for routectl-usage (run: x generate routectl-usage)')"
     report_ok "::warning title=public-api::drift in routectl-core, routectl-usage" \
         "public-api: drift in routectl-core, routectl-usage"
+}
+
+case_drift_unchecked() {
+    run_report "$1" "$report_tool_bin" 1 "$(printf '%s\n' \
+        'public-api: surface drift for routectl-core (see public-api/POLICY.md)' \
+        'public-api: failed to list surface for routectl-router' \
+        'public-api: machine-specific path in routectl-usage surface; aborting' \
+        'public-api: failed to list surface for routectl-router')"
+    report_ok "::warning title=public-api::drift in routectl-core; could not check routectl-router, routectl-usage" \
+        "public-api: drift in routectl-core; could not check routectl-router, routectl-usage"
+}
+
+case_tool_version_match() {
+    run_report "$1" "$report_tool_bin" 0 "" 0.0.0
+    report_ok "::notice title=public-api::public API baselines match" \
+        "public-api: public API baselines match"
+}
+
+case_tool_version_mismatch() {
+    run_report "$1" "$report_tool_bin" 0 "" 9.9.9
+    report_ok "::warning title=public-api::could not run (cargo-public-api 0.0.0, want 9.9.9)" \
+        "public-api: could not run (cargo-public-api 0.0.0, want 9.9.9)" not-run
 }
 
 case_could_not_run() {
@@ -199,7 +225,19 @@ assert_report_case "check exiting 2 gives could-not-run with its reason, exit 0"
 assert_report_case "could-not-run carries the check's last stderr line" case_could_not_run \
     's/tail -n 1\)/head -n 1)/'
 assert_report_case "cargo-public-api absent: could-not-run, the check never runs" case_tool_absent \
-    's/^if ! command -v cargo-public-api /if false \&\& ! command -v cargo-public-api /'
+    's/^    if ! command -v cargo-public-api /    if false \&\& ! command -v cargo-public-api /'
+# shellcheck disable=SC2016  # the sed expressions name the wrapper's own variables literally
+assert_report_case "drift plus unlisted crates names both groups" case_drift_unchecked \
+    's/\$\{unchecked:\+; could not check \$unchecked\}//'
+assert_report_case "a crate whose surface failed to list is named as unchecked" case_drift_unchecked \
+    '/failed to list surface for/d'
+assert_report_case "a crate with a machine-specific path is named as unchecked" case_drift_unchecked \
+    '/machine-specific path in/d'
+assert_report_case "the pinned cargo-public-api version runs the check" case_tool_version_match \
+    's/1s\/\^cargo-public-api /1s\/^cargo-public-xx /'
+# shellcheck disable=SC2016  # the sed expressions name the wrapper's own variables literally
+assert_report_case "another cargo-public-api version: could-not-run, the check never runs" case_tool_version_mismatch \
+    's/^    if \[\[ "\$got" != "\$want" \]\]; then$/    if false; then/'
 # shellcheck disable=SC2016  # the sed expressions name the wrapper's own variables literally
 assert_report_case "exactly one summary line is appended per run" case_clean \
     's/^( *)if ! printf .%s: %s\\n. "\$TITLE" "\$message" >>"\$GITHUB_STEP_SUMMARY"; then/\1printf "x\\n" >>"$GITHUB_STEP_SUMMARY"; &/'
@@ -219,7 +257,17 @@ assert_report_case "any argument is a usage error (exit 2)" case_rejects_args \
 # the real tree and fails on a copy derived from it with one defect planted.
 CI_WORKFLOW="$REPO_ROOT/.github/workflows/ci.yml"
 PRE_COMMIT_CONFIG="$REPO_ROOT/.pre-commit-config.yaml"
-REPORT_RUN="        run: bash scripts/public-api-report.sh"
+# The report step, exactly: it runs even after an earlier step failed and
+# hands the wrapper the pinned tool version.
+# shellcheck disable=SC2016  # the workflow's own expression syntax, literally
+REPORT_STEP_TAIL=(
+    '        if: ${{ !cancelled() }}'
+    '        env:'
+    '          PUBLIC_API_TOOL_VERSION: ${{ steps.pins.outputs.version }}'
+    '        run: bash scripts/public-api-report.sh'
+)
+# A line that runs the public-API check, directly or through the registry.
+PUBLIC_API_RUN_RE='scripts/public-api(-report)?\.sh|test-gate\.sh[[:space:]]+public-api'
 # The retired hook id and leg script, spelled in two pieces so a repo-wide
 # search for either name finds nothing, this file included.
 RETIRED_HOOK_ID="public-api-""baseline"
@@ -235,18 +283,18 @@ ci_job_block() {
 }
 
 # Holds when the `public-api` job sets job-level `continue-on-error: true`
-# exactly once and its last step is exactly a `name:` line plus the wrapper's
-# run line.
+# exactly once, has no job-level `if:`, and its last step is exactly a
+# `name:` line followed by the REPORT_STEP_TAIL lines.
 public_api_job_informational() {
     local job last
     job="$(ci_job_block "$1" public-api)"
     [[ -n "$job" ]] || return 1
     [[ "$(grep -c '^    continue-on-error:' <<<"$job")" -eq 1 ]] || return 1
     grep -qx '    continue-on-error: true' <<<"$job" || return 1
+    ! grep -q '^    if:' <<<"$job" || return 1
     last="$(awk '/^      - / { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' <<<"$job")"
-    [[ "$(wc -l <<<"$last")" -eq 2 ]] || return 1
     [[ "$(sed -n 1p <<<"$last")" =~ ^"      - name: ".+$ ]] || return 1
-    [[ "$(sed -n 2p <<<"$last")" == "$REPORT_RUN" ]]
+    [[ "$(sed -n '2,$p' <<<"$last")" == "$(printf '%s\n' "${REPORT_STEP_TAIL[@]}")" ]]
 }
 
 # Holds when the `required` job has one block-style `needs:` list of bare
@@ -271,13 +319,33 @@ required_skips_public_api() {
     ' <<<"$job"
 }
 
+# Holds when every job the `required` job needs is present in workflow $1
+# and none of their blocks runs the public-API check. An empty or missing
+# needs list fails closed.
+required_needs_do_not_run_public_api() {
+    local needs name block
+    needs="$(ci_job_block "$1" required | awk '
+        /^    needs:$/ { in_list = 1; next }
+        in_list && /^      - / { sub(/^      - /, ""); print; next }
+        in_list { exit }
+    ')"
+    [[ -n "$needs" ]] || return 1
+    while IFS= read -r name; do
+        block="$(ci_job_block "$1" "$name")"
+        [[ -n "$block" ]] || return 1
+        ! grep -qE "$PUBLIC_API_RUN_RE" <<<"$block" || return 1
+    done <<<"$needs"
+}
+
 # Holds when pre-commit config $1 still carries this self-test's own hook
-# (so it is the real config, not an empty file) and names neither the
-# retired hook id nor the retired leg script anywhere.
+# (so it is the real config, not an empty file), names neither the retired
+# hook id nor the retired leg script anywhere, and no hook entry runs the
+# public-API check.
 precommit_has_no_public_api_hook() {
     [[ -f "$1" ]] || return 1
     grep -qx '        entry: bash scripts/test-gate.test.sh' "$1" || return 1
-    ! grep -qF -e "$RETIRED_HOOK_ID" -e "$RETIRED_LEG" "$1"
+    ! grep -qF -e "$RETIRED_HOOK_ID" -e "$RETIRED_LEG" "$1" || return 1
+    ! grep -qE "^[[:space:]]*entry:.*($PUBLIC_API_RUN_RE)" "$1"
 }
 
 # Holds when the scripts/ dir under root $1 exists and lacks the retired leg.
@@ -326,7 +394,12 @@ assert_wiring "the CI public-api job continues on error and ends by running the 
     '/^    continue-on-error: true$/d' \
     's#^        run: bash scripts/public-api-report\.sh$#        run: bash scripts/public-api.sh --check all#' \
     's#^        run: bash scripts/public-api-report\.sh$#&\n      - run: "true"#' \
-    's/^  public-api:$/  public-api-report:/'
+    's/^  public-api:$/  public-api-report:/' \
+    '/^        if: \$\{\{ !cancelled\(\) \}\}$/d' \
+    's/^        if: \$\{\{ !cancelled\(\) \}\}$/        if: always()/' \
+    's/^        if: \$\{\{ !cancelled\(\) \}\}$/&\n        timeout-minutes: 5/' \
+    '/^          PUBLIC_API_TOOL_VERSION: /d' \
+    's/^    continue-on-error: true$/&\n    if: false/'
 
 assert_wiring "the required job does not depend on the public-api job" \
     required_skips_public_api "$CI_WORKFLOW" \
@@ -334,11 +407,21 @@ assert_wiring "the required job does not depend on the public-api job" \
     's/^      - osv-scan$/      - "public-api"/' \
     's/^    needs:$/    needs: [check]/'
 
+assert_wiring "no job the required job needs runs the public-API check" \
+    required_needs_do_not_run_public_api "$CI_WORKFLOW" \
+    's#^        run: osv-scanner scan source -r \.$#&\n      - run: bash scripts/public-api.sh --check all#' \
+    's#^        run: osv-scanner scan source -r \.$#&\n      - run: bash scripts/test-gate.sh public-api#' \
+    's#^        run: osv-scanner scan source -r \.$#&\n      - run: bash scripts/public-api-report.sh#' \
+    's/^      - osv-scan$/&\n      - no-such-job/' \
+    '/^    needs:$/,/^    steps:$/{/^      - /d}'
+
 assert_wiring "no pre-commit hook runs the public-API check" \
     precommit_has_no_public_api_hook "$PRE_COMMIT_CONFIG" \
     "s/^      - id: test-gate-self-test\$/      - id: $RETIRED_HOOK_ID\\n&/" \
     "s#^        entry: bash scripts/test-gate\\.test\\.sh\$#&\\n        args: [scripts/$RETIRED_LEG.sh]#" \
-    '/^        entry: bash scripts\/test-gate\.test\.sh$/d'
+    '/^        entry: bash scripts\/test-gate\.test\.sh$/d' \
+    's#^        entry: bash scripts/test-gate\.sh pre-push$#        entry: bash scripts/test-gate.sh public-api#' \
+    's#^        entry: bash scripts/test-gate\.sh pre-push$#        entry: bash scripts/public-api.sh --check all#'
 
 if retired_leg_absent "$REPO_ROOT"; then
     pass "wiring: the retired pre-push leg script is gone"
