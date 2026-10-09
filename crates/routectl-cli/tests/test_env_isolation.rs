@@ -7,10 +7,13 @@
 //! `CARGO_ENV_XDG_CONFIG_HOME` override (the live-gate isolation script does,
 //! per leg); cargo hands its value to the test as `XDG_CONFIG_HOME`, and the
 //! override variable itself is inherited, so the expected root follows it.
-//! Check the override path with:
+//! The override drops the `force` flag along with the value, so an
+//! `XDG_CONFIG_HOME` already exported in the shell wins over it; set both to
+//! the same directory. Check the override path with:
 //!
 //! ```text
-//! CARGO_ENV_XDG_CONFIG_HOME=<scratch dir> cargo test -p routectl-cli --test test_env_isolation
+//! XDG_CONFIG_HOME=<scratch dir> CARGO_ENV_XDG_CONFIG_HOME=<scratch dir> \
+//!     cargo test -p routectl-cli --test test_env_isolation
 //! ```
 //!
 //! Its own binary: nothing here mutates the environment, and no sibling test

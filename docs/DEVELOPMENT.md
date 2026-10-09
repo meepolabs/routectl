@@ -147,10 +147,12 @@ own sandbox under its own `target/`, independent of `CARGO_TARGET_DIR`.
 The sandbox persists between runs, and `cargo run` and `cargo test`
 share it; reset it with `rm -rf target/test-xdg`. Setting
 `CARGO_ENV_XDG_CONFIG_HOME` (cargo's environment form of the `[env]`
-entry) replaces the forced value for one invocation; the live-gate
-isolation script does this per leg, so the pin test follows the
-override. After touching that test, check the override path with
-`CARGO_ENV_XDG_CONFIG_HOME=<scratch dir> cargo test -p routectl-cli --test test_env_isolation`.
+entry) replaces the forced value for one invocation, but it also drops
+the `force` flag, so an `XDG_CONFIG_HOME` already exported in the shell
+wins: set both to the same directory. The live-gate isolation script
+does this per leg, so the pin test follows the override. After touching
+that test, check the override path with
+`XDG_CONFIG_HOME=<scratch dir> CARGO_ENV_XDG_CONFIG_HOME=<scratch dir> cargo test -p routectl-cli --test test_env_isolation`.
 Running a test
 binary directly, or `cargo --manifest-path` from outside the repo,
 skips the config file and therefore the sandbox. Against a live config,
