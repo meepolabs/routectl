@@ -129,8 +129,11 @@ banner, no retry signal -- silently mislabeled data.
 - The matrix header carries a source badge: `ledger replay` when the panel
   was built from a read-only ledger replay, `resident` when it reflects the
   daemon's in-memory registry. Hover it: the tooltip names that origin.
-- A `resident` panel shows a "warm at boot" line with the boot outcome and,
-  when the warm replay ran, its tally, and no replay line. A `ledger replay`
+- A `resident` panel shows a "warm at boot" line with the boot outcome (an
+  `unreadable` warm adds its failure class in parentheses) and, when the warm
+  replay ran, its tally, and no replay line. Its state line reads "learned
+  registry resident" when entries are present, never "replayed"; an
+  unavailable resident state line ends its code with "(boot warm)". A `ledger replay`
   panel shows the replay line and no warm line. A skip count of 0 reads `0`,
   never `-`.
 - The capability-writes card shows three separate counters, all faint at

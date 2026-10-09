@@ -75,6 +75,10 @@ pub(super) struct GatheredLayers {
     pub(super) config_parse_error: Option<String>,
     /// The already-redacted config-or-overlay load error.
     pub(super) config_load_error: Option<String>,
+    /// The schema version of a config the daemon already accepted; `None`
+    /// when the config came from disk and its version must be read off the
+    /// raw file.
+    pub(super) accepted_config_version: Option<u32>,
     pub(super) overlay: Option<CatalogOverlay>,
     pub(super) capability_matrix: CapabilityMatrixSource,
     pub(super) matrix_origin: MatrixOrigin,
@@ -90,6 +94,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         warm,
     } = *inputs;
     GatheredLayers {
+        accepted_config_version: Some(config.version),
         config: Arc::unwrap_or_clone(config),
         config_parse_error: None,
         config_load_error: None,
@@ -102,6 +107,10 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
 /// Classify the resident registry. An empty registry after a warm that failed
 /// to read the ledger is the warm failure, never an honest empty: the registry
 /// is empty because nothing could be read, not because nothing was learned.
+///
+/// The warm runs once, at daemon boot, so an `Unavailable` here reflects the
+/// BOOT warm for the whole process lifetime: a ledger that became readable
+/// later does not clear it until a live entry lands or the daemon restarts.
 pub(super) fn resident_matrix(
     learned: ResidentLearned,
     warm: &WarmReport,
@@ -136,10 +145,21 @@ pub(super) fn resident_matrix(
     }
 }
 
-/// The boot warm as the matrix panel renders it.
+/// The boot warm as the matrix panel renders it. An `unreadable` warm carries
+/// its failure class alongside the coarse outcome token.
 fn matrix_warm(warm: &WarmReport) -> MatrixWarm {
+    let class = match warm.outcome {
+        WarmOutcome::Unreadable(class) => Some(class.to_string()),
+        WarmOutcome::NotRun
+        | WarmOutcome::Replayed
+        | WarmOutcome::Restated
+        | WarmOutcome::RestateFailed
+        | WarmOutcome::Cold
+        | WarmOutcome::NoTombstone => None,
+    };
     MatrixWarm {
         outcome: warm.outcome.as_str().to_string(),
+        class,
         summary: warm
             .summary
             .as_ref()

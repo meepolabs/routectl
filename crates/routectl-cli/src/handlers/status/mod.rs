@@ -645,6 +645,9 @@ mod tests {
         facade_forbidden.push(format!("{}{}", "-> &", "Router"));
         facade_forbidden.push(format!("{}{}{}", "-> Arc<", "Router", ">"));
         facade_forbidden.push(format!("{}{}", "fn ", "config"));
+        // The shared registry handle is the reload coordinator's write seam;
+        // the facade reads the learned layer through the snapshot delegates.
+        facade_forbidden.push(format!("{}{}", "learned_", "registry"));
 
         let scans: &[(&str, &str, &[String])] = &[
             ("mod.rs", include_str!("mod.rs"), &panel_forbidden),

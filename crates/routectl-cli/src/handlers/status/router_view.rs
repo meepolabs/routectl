@@ -164,7 +164,7 @@ impl StatusRouterView {
     /// holding it can pass it to the gather and nothing else.
     pub(crate) fn served_doctor_inputs(&self, warm: WarmReport) -> ServedInputs {
         let entries = self.router.learned_capability_snapshot();
-        let seed_clears = self.router.learned_registry().seed_clear_snapshot();
+        let seed_clears = self.router.learned_seed_clear_snapshot();
         let learned = ResidentLearned {
             entries,
             seed_clears,

@@ -192,3 +192,93 @@ fn the_served_path_names_no_disk_load_or_replay() {
         );
     }
 }
+
+/// The version finding of a served gather describes the config the daemon
+/// accepted, not the file on disk: a later edit the daemon rejected (here,
+/// broken TOML, which the raw preflight reads as legacy v1) must not turn
+/// into a passing "v1" line. The disk gather of the same file still fails.
+///
+/// Mutation check: make `section_version` preflight `raw_config` even when an
+/// accepted version is set -> the served assertion goes red.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_served_version_finding_reads_the_accepted_config_not_the_disk_file() {
+    use routectl_router::{CURRENT_CONFIG_VERSION, Finding, Status};
+    use routectl_testkit::ScopedEnv;
+
+    use crate::commands::doctor::{build_report_no_network, gather_context_no_network};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
+    let cfg_dir = tmp.path().join("routectl");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let config_path = cfg_dir.join("config.toml");
+    std::fs::write(&config_path, b"version = [unterminated\n").unwrap();
+    let accepted = Config {
+        version: CURRENT_CONFIG_VERSION,
+        ..Config::default()
+    };
+    let inputs = ServedInputs::new(
+        Arc::new(accepted),
+        CatalogOverlay::default(),
+        learned(Vec::new()),
+        warm(WarmOutcome::Replayed),
+    );
+    let version_finding = |findings: Vec<Finding>| {
+        findings
+            .into_iter()
+            .find(|f| f.section == "version")
+            .expect("a version finding")
+    };
+
+    let served = version_finding(
+        build_report_no_network(
+            &gather_context_no_network(&config_path, GatherSources::Served(Box::new(inputs))).await,
+        )
+        .findings,
+    );
+    let disk = version_finding(
+        build_report_no_network(
+            &gather_context_no_network(&config_path, GatherSources::Disk).await,
+        )
+        .findings,
+    );
+
+    assert_eq!(served.status, Status::Pass, "{served:?}");
+    assert!(
+        served
+            .detail
+            .starts_with(&format!("config schema v{CURRENT_CONFIG_VERSION};")),
+        "{served:?}"
+    );
+    assert_eq!(disk.status, Status::Fail, "{disk:?}");
+    assert!(
+        disk.detail.starts_with("config could not be loaded"),
+        "{disk:?}"
+    );
+}
+
+/// An `unreadable` boot warm carries its failure class next to the coarse
+/// outcome token; no other outcome carries one.
+///
+/// Mutation check: drop the class (`None`) in `matrix_warm` -> the
+/// `unreadable` row goes red.
+#[test]
+fn only_an_unreadable_warm_carries_a_failure_class() {
+    let rows: [(&str, WarmOutcome, Option<&str>); 3] = [
+        (
+            "unreadable",
+            WarmOutcome::Unreadable("open_failed"),
+            Some("open_failed"),
+        ),
+        ("restate_failed", WarmOutcome::RestateFailed, None),
+        ("replayed", WarmOutcome::Replayed, None),
+    ];
+
+    for (name, outcome, expected) in rows {
+        let rendered = matrix_warm(&warm(outcome));
+
+        assert_eq!(rendered.outcome, name, "row {name}");
+        assert_eq!(rendered.class.as_deref(), expected, "row {name}");
+    }
+}

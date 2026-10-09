@@ -281,7 +281,7 @@
     wrap.className = 'ovsection';
     var lanes = Array.isArray(panel.lanes) ? panel.lanes : [];
     var columns = Array.isArray(panel.columns) ? panel.columns : [];
-    var head = sectionHead('Capability matrix', matrixStateText(panel.availability));
+    var head = sectionHead('Capability matrix', matrixStateText(panel.availability, panel.source));
     head.appendChild(matrixSourceBadge(panel.source));
     wrap.appendChild(head);
     if (panel.warm) { wrap.appendChild(docText('docmatrix-warm', warmText(panel.warm))); }
@@ -313,12 +313,19 @@
     return wrap;
   }
 
-  function matrixStateText(availability) {
+  // Worded for the source: a resident registry is held live, a ledger replay
+  // was run for this report. A resident registry is unavailable only through
+  // its boot warm, which holds for the daemon's lifetime.
+  function matrixStateText(availability, source) {
     var a = availability || {};
-    if (a.state === 'available') { return 'learned registry replayed'; }
+    var resident = source === 'resident';
+    if (a.state === 'available') {
+      return resident ? 'learned registry resident' : 'learned registry replayed';
+    }
     if (a.state === 'empty') { return 'learned registry empty - nothing learned yet'; }
     if (a.state === 'unavailable') {
-      return 'learned registry unavailable (' + (a.code || 'unknown') + ') - prior, seed and override cells only';
+      return 'learned registry unavailable (' + (a.code || 'unknown') + ')' +
+        (resident ? ' (boot warm)' : '') + ' - prior, seed and override cells only';
     }
     return 'learned registry state unknown';
   }
@@ -344,7 +351,8 @@
   // The boot warm describes how the resident registry was seeded when the
   // daemon started, never its current state.
   function warmText(w) {
-    var text = 'warm at boot: ' + (w.outcome || 'unknown');
+    var text = 'warm at boot: ' + (w.outcome || 'unknown') +
+      (w.class ? ' (' + w.class + ')' : '');
     return w.summary ? text + ' - ' + tallyText(w.summary) : text;
   }
 

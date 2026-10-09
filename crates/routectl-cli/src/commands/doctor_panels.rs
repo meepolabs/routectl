@@ -107,7 +107,7 @@ pub(crate) fn render_would_trim_panel(panel: &WouldTrimPanel) -> String {
 pub(crate) fn render_capability_matrix_panel(panel: &CapabilityMatrixPanel) -> String {
     let mut out = String::new();
     out.push_str("capability matrix: ");
-    out.push_str(&matrix_state_line(&panel.availability));
+    out.push_str(&matrix_state_line(&panel.availability, panel.source));
     out.push('\n');
     out.push_str(&source_line(panel.source));
     out.push('\n');
@@ -184,7 +184,11 @@ fn source_line(source: MatrixSource) -> String {
 /// replay ran, its tally. Labelled "at boot" because it never describes the
 /// registry's current state.
 fn warm_line(warm: &MatrixWarm) -> String {
-    let outcome = routectl_core::sanitize_for_log(&warm.outcome);
+    let token = routectl_core::sanitize_for_log(&warm.outcome);
+    let outcome = match &warm.class {
+        Some(class) => format!("{token} ({})", routectl_core::sanitize_for_log(class)),
+        None => token,
+    };
     match &warm.summary {
         Some(summary) => format!("  warm at boot: {outcome}; {}", tally_text(summary)),
         None => format!("  warm at boot: {outcome}"),
@@ -209,20 +213,29 @@ fn tally_text(replay: &MatrixReplaySummary) -> String {
     )
 }
 
-/// The honest state line for the learned ledger-replay source. Empty and
-/// Unavailable are distinct: an empty source is readable-with-no-rows, an
-/// unavailable one could not be read (its class code is surfaced).
-fn matrix_state_line(availability: &MatrixAvailability) -> String {
-    match availability {
-        MatrixAvailability::Available => {
+/// The honest state line for the learned source, worded for its origin: a
+/// ledger replay's entries were replayed for this report, a resident
+/// registry's are held live. Empty and Unavailable are distinct: an empty
+/// source is readable-with-no-rows, an unavailable one could not be read (its
+/// class code is surfaced). A resident panel is unavailable only through its
+/// boot warm, so its line says so.
+fn matrix_state_line(availability: &MatrixAvailability, source: MatrixSource) -> String {
+    match (availability, source) {
+        (MatrixAvailability::Available, MatrixSource::LedgerReplay) => {
             "learned registry replayed; live/probe cells are current".to_string()
         }
-        MatrixAvailability::Empty => {
+        (MatrixAvailability::Available, MatrixSource::Resident) => {
+            "learned registry resident; live/probe cells are current".to_string()
+        }
+        (MatrixAvailability::Empty, _) => {
             "learned registry empty (no learned rows); prior/seed/override cells only".to_string()
         }
-        MatrixAvailability::Unavailable { code } => {
+        (MatrixAvailability::Unavailable { code }, MatrixSource::LedgerReplay) => {
             format!("learned registry unavailable ({code}); prior/seed/override cells only")
         }
+        (MatrixAvailability::Unavailable { code }, MatrixSource::Resident) => format!(
+            "learned registry unavailable ({code}) (boot warm); prior/seed/override cells only"
+        ),
     }
 }
 
@@ -525,6 +538,7 @@ mod tests {
     fn resident_matrix_renders_source_and_warm_at_boot_line_without_replay() {
         let warm = MatrixWarm {
             outcome: "replayed".into(),
+            class: None,
             summary: Some(MatrixReplaySummary {
                 loaded_rows: 9,
                 replayed: 6,
@@ -552,14 +566,75 @@ mod tests {
     #[test]
     fn resident_matrix_warm_without_tally_renders_outcome_only() {
         let warm = MatrixWarm {
-            outcome: "unreadable".into(),
+            outcome: "cold".into(),
+            class: None,
             summary: None,
         };
 
         let human =
             render_capability_matrix_panel(&matrix_panel(MatrixSource::Resident, None, Some(warm)));
 
-        assert!(human.contains("  warm at boot: unreadable\n"), "{human}");
+        assert!(human.contains("  warm at boot: cold\n"), "{human}");
+    }
+
+    #[test]
+    fn unreadable_resident_warm_renders_its_failure_class() {
+        let warm = MatrixWarm {
+            outcome: "unreadable".into(),
+            class: Some("open_failed".into()),
+            summary: None,
+        };
+
+        let human =
+            render_capability_matrix_panel(&matrix_panel(MatrixSource::Resident, None, Some(warm)));
+
+        assert!(
+            human.contains("  warm at boot: unreadable (open_failed)\n"),
+            "{human}"
+        );
+    }
+
+    /// The state line names the source's own fill: a resident registry is
+    /// never described as replayed, and a resident unavailable is attributed
+    /// to the boot warm while a replay's is not.
+    #[test]
+    fn matrix_state_line_is_worded_for_its_source() {
+        let unavailable = MatrixAvailability::Unavailable { code: "unreadable" };
+        let rows: [(&str, &MatrixAvailability, MatrixSource, &str); 4] = [
+            (
+                "resident_available",
+                &MatrixAvailability::Available,
+                MatrixSource::Resident,
+                "learned registry resident; live/probe cells are current",
+            ),
+            (
+                "replay_available",
+                &MatrixAvailability::Available,
+                MatrixSource::LedgerReplay,
+                "learned registry replayed; live/probe cells are current",
+            ),
+            (
+                "resident_unavailable",
+                &unavailable,
+                MatrixSource::Resident,
+                "learned registry unavailable (unreadable) (boot warm); \
+                 prior/seed/override cells only",
+            ),
+            (
+                "replay_unavailable",
+                &unavailable,
+                MatrixSource::LedgerReplay,
+                "learned registry unavailable (unreadable); prior/seed/override cells only",
+            ),
+        ];
+
+        for (name, availability, source, expected) in rows {
+            assert_eq!(
+                matrix_state_line(availability, source),
+                expected,
+                "row {name}"
+            );
+        }
     }
 
     #[test]

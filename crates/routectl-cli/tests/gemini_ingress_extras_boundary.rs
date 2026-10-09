@@ -136,11 +136,19 @@ fn assert_withheld(upstream_body: &Value, events: &[CapturedEvent], tells: &[&st
             .collect();
         assert!(echoes.is_empty(), "{tell} reached a log event: {echoes:?}");
     }
-    assert!(
-        events
-            .iter()
-            .any(|e| e.level == tracing::Level::WARN && e.message.contains("ingress extras")),
-        "the withhold is reported: {events:?}"
+    let withhold_reports = events
+        .iter()
+        .filter(|e| e.message.contains("ingress extras"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        withhold_reports.len(),
+        1,
+        "the withhold is reported once: {events:?}"
+    );
+    assert_eq!(
+        withhold_reports[0].level,
+        tracing::Level::DEBUG,
+        "the withhold is an expected transform, reported at DEBUG"
     );
 }
 

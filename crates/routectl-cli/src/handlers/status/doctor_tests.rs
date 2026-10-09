@@ -497,3 +497,65 @@ async fn a_served_panel_is_resident_and_carries_the_boot_warm() {
     assert_eq!(matrix["warm"]["outcome"], Value::from("not_run"), "{json}");
     assert!(matrix["replay"].is_null(), "{json}");
 }
+
+/// An unreadable boot warm reaches the wire with its failure class beside the
+/// coarse outcome token, and an empty resident registry after it is
+/// unavailable under that outcome token.
+///
+/// Mutation check: emit `class: None` for `Unreadable` in the served warm
+/// mapping -> red here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn an_unreadable_boot_warm_carries_its_class_on_the_wire() {
+    use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
+
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        served_fixture_config(&dir.path().join("usage.db")),
+    )
+    .unwrap();
+    let router = Router::new(Arc::new(Config::default()));
+    let app_state = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = Arc::new(
+        StatusState::from_app(&app_state, Some(config_path), DaemonMeta::for_test())
+            .with_warm_report(WarmReport {
+                outcome: WarmOutcome::Unreadable("open_failed"),
+                summary: None,
+                loaded_rows: 0,
+            }),
+    );
+    let app = super::super::status_router().with_state(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/status/doctor")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+    let matrix = &json["data"]["report"]["panels"]["capability_matrix"];
+    assert_eq!(
+        matrix["warm"]["outcome"],
+        Value::from("unreadable"),
+        "{json}"
+    );
+    assert_eq!(
+        matrix["warm"]["class"],
+        Value::from("open_failed"),
+        "{json}"
+    );
+    assert_eq!(
+        matrix["availability"],
+        serde_json::json!({"state": "unavailable", "code": "unreadable"}),
+        "{json}"
+    );
+}

@@ -4869,6 +4869,7 @@ pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&
 pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
 pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
 pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
+pub fn routectl_router::router::Router::learned_seed_clear_snapshot(&self) -> alloc::vec::Vec<routectl_router::SeedClearMarker>
 pub fn routectl_router::router::Router::observe_learned_capability(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
 pub fn routectl_router::router::Router::observe_verified_capability(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
 pub fn routectl_router::router::Router::provider_kind_for_state_key(&self, &str) -> &str
@@ -12995,6 +12996,7 @@ pub type routectl_router::MatrixReplaySummary::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixReplaySummary where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::MatrixReplaySummary::into_shared(self) -> Shared
 pub struct routectl_router::MatrixWarm
+pub routectl_router::MatrixWarm::class: core::option::Option<alloc::string::String>
 pub routectl_router::MatrixWarm::outcome: alloc::string::String
 pub routectl_router::MatrixWarm::summary: core::option::Option<routectl_router::MatrixReplaySummary>
 impl core::clone::Clone for routectl_router::MatrixWarm
@@ -15077,6 +15079,7 @@ pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&
 pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
 pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
 pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
+pub fn routectl_router::router::Router::learned_seed_clear_snapshot(&self) -> alloc::vec::Vec<routectl_router::SeedClearMarker>
 pub fn routectl_router::router::Router::observe_learned_capability(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
 pub fn routectl_router::router::Router::observe_verified_capability(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
 pub fn routectl_router::router::Router::provider_kind_for_state_key(&self, &str) -> &str

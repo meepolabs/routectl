@@ -625,6 +625,14 @@ impl Router {
             .owned_snapshot(|state_key| self.provider_kind_for_state_key(state_key))
     }
 
+    /// Read-only snapshot of every resident seed-clear marker, in key order.
+    /// `&self` delegate over the private `learned_capabilities` registry, as
+    /// [`Router::learned_capability_snapshot`] is, so the status surface can
+    /// render cleared seed cells without holding the registry itself.
+    pub fn learned_seed_clear_snapshot(&self) -> Vec<crate::learned_capability::SeedClearMarker> {
+        self.learned_capabilities.seed_clear_snapshot()
+    }
+
     /// The reasoning-replay lifecycle riding on the learned-capability
     /// registry. `&self` delegate over the private field, so the dispatch
     /// arm claims a carry slot and settles it without reaching inside.

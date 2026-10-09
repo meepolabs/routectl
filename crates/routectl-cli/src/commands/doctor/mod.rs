@@ -194,6 +194,11 @@ pub(crate) struct DoctorContext {
     /// -- a toml/serde parse error can inline a `literal:` credential, so the
     /// stored string is never the raw loader error.
     config_load_error: Option<String>,
+    /// The schema version of a config a running daemon accepted. When set,
+    /// the version section reports it instead of preflighting `raw_config`:
+    /// the file on disk may hold a later edit the daemon rejected, and its
+    /// version says nothing about the config being served.
+    accepted_config_version: Option<u32>,
     probes: Vec<(&'static str, LocalProbe)>,
     seats: Vec<(String, TokenRecord)>,
     /// Set when the credential store failed to open (schema mismatch,

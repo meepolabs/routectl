@@ -61,6 +61,7 @@ pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorC
         config,
         raw_config: None,
         config_load_error: None,
+        accepted_config_version: None,
         probes: Vec::new(),
         seats: Vec::new(),
         auth_store_error: None,

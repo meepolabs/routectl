@@ -91,17 +91,23 @@ fn inventory_remediation(id: &str, reason: UnresolvedReason) -> String {
 
 pub(super) fn section_version(ctx: &DoctorContext) -> Vec<Finding> {
     let binary = ctx.binary_version;
-    let Some(raw) = &ctx.raw_config else {
-        return vec![Finding {
-            section: "version",
-            name: "config schema".to_string(),
-            status: Status::Warn,
-            detail: format!("config file could not be read; binary routectl {binary}"),
-            remediation: Some("run `routectl init` to create a config".to_string()),
-        }];
+    // A config the daemon accepted already passed the version preflight at
+    // load, so its own version is the served schema.
+    let version = match (ctx.accepted_config_version, &ctx.raw_config) {
+        (Some(accepted), _) => Ok(accepted),
+        (None, Some(raw)) => preflight_config_version(raw),
+        (None, None) => {
+            return vec![Finding {
+                section: "version",
+                name: "config schema".to_string(),
+                status: Status::Warn,
+                detail: format!("config file could not be read; binary routectl {binary}"),
+                remediation: Some("run `routectl init` to create a config".to_string()),
+            }];
+        }
     };
 
-    let finding = match preflight_config_version(raw) {
+    let finding = match version {
         Ok(found) => {
             if let Some(err) = &ctx.config_load_error {
                 // The preflight only reads the `version` key and returns Ok

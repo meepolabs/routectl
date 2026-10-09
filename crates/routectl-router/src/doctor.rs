@@ -65,22 +65,29 @@ pub struct DoctorPanels {
     pub capability_matrix: Option<CapabilityMatrixPanel>,
 }
 
-/// Availability of the learned-capability matrix's ledger-replay source, a
-/// first-class tri-state: `Available` (at least one learned row replayed),
-/// `Empty` (the source was readable and had zero rows -- an honest,
-/// non-degraded empty), or `Unavailable` with a path-free class code (the
-/// source could not be read for this run's revision). A diagnostic never
+/// Availability of the learned-capability matrix's learned source, whichever
+/// [`MatrixSource`] produced it, as a first-class tri-state: `Available` (at
+/// least one learned entry present -- replayed for a `ledger_replay` panel,
+/// resident for a `resident` one), `Empty` (the source was readable and held
+/// zero entries -- an honest, non-degraded empty), or `Unavailable` with a
+/// path-free class code (the source could not be read). A diagnostic never
 /// silently collapses "could not read" into "nothing learned".
+///
+/// A `ledger_replay` panel's codes describe this report's replay (e.g.
+/// `no_data`, `revision_mismatch`). A `resident` panel is `Unavailable` only
+/// when its registry is empty after a boot warm that failed, and its code is
+/// that warm's outcome token: `unreadable` or `restate_failed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MatrixAvailability {
-    /// The ledger replayed at least one learned entry.
+    /// At least one learned entry is present.
     Available,
-    /// The source was readable and held zero learned rows.
+    /// The source was readable and held zero learned entries.
     Empty,
     /// The source could not be read; `code` is a path-free class token.
     Unavailable {
-        /// Path-free class token (e.g. `no_data`, `revision_mismatch`).
+        /// Path-free class token (e.g. `no_data`, `revision_mismatch`, or a
+        /// resident panel's `unreadable` / `restate_failed`).
         code: &'static str,
     },
 }
@@ -209,12 +216,16 @@ pub enum MatrixSource {
 }
 
 /// How the resident learned registry was warmed at daemon boot: the boot
-/// outcome token and, when the warm replay ran, its tally. It describes the
-/// boot-time warm, not the current state of the registry.
+/// outcome token, the failure class of an `unreadable` warm, and, when the
+/// warm replay ran, its tally. It describes the boot-time warm, not the
+/// current state of the registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixWarm {
     /// The boot warm outcome token (e.g. `replayed`, or a fail-closed class).
     pub outcome: String,
+    /// The path-free failure class of an `unreadable` warm (e.g.
+    /// `open_failed`); `None` for every other outcome.
+    pub class: Option<String>,
     /// The boot warm replay tally, when the warm replay ran.
     pub summary: Option<MatrixReplaySummary>,
 }
@@ -412,6 +423,7 @@ mod tests {
     fn resident_matrix_serializes_source_and_warm_without_replay() {
         let warm = MatrixWarm {
             outcome: "replayed".into(),
+            class: None,
             summary: Some(MatrixReplaySummary {
                 loaded_rows: 7,
                 skipped_owner: 2,
@@ -438,13 +450,30 @@ mod tests {
     fn resident_matrix_warm_without_summary_serializes_null_summary() {
         let warm = MatrixWarm {
             outcome: "unreadable".into(),
+            class: Some("open_failed".into()),
             summary: None,
         };
 
         let json = matrix_panel(MatrixSource::Resident, None, Some(warm));
 
         assert_eq!(json["warm"]["outcome"], serde_json::json!("unreadable"));
+        assert_eq!(json["warm"]["class"], serde_json::json!("open_failed"));
         assert!(json["warm"]["summary"].is_null(), "{json}");
+    }
+
+    #[test]
+    fn resident_matrix_warm_without_class_serializes_null_class() {
+        let warm = MatrixWarm {
+            outcome: "replayed".into(),
+            class: None,
+            summary: None,
+        };
+
+        let json = matrix_panel(MatrixSource::Resident, None, Some(warm));
+
+        let warm = json["warm"].as_object().expect("warm object");
+        assert!(warm.contains_key("class"), "{json}");
+        assert!(warm["class"].is_null(), "{json}");
     }
 
     struct StubProvider {

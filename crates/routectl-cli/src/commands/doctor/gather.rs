@@ -58,7 +58,9 @@ pub(super) async fn gather_context(config_path: &Path) -> DoctorContext {
 /// [`GatherSources::Disk`] loads them through [`disk_layers`];
 /// [`GatherSources::Served`] takes a running daemon's accepted state as-is.
 /// The raw config bytes are read from `config_path` either way, for the
-/// version preflight and the validation findings.
+/// validation findings. The version finding reads them too on the disk path;
+/// a served gather takes it from the accepted config instead, since the file
+/// on disk may hold an edit the daemon rejected.
 pub async fn gather_context_no_network(
     config_path: &Path,
     sources: GatherSources,
@@ -72,6 +74,7 @@ pub async fn gather_context_no_network(
         config,
         config_parse_error,
         config_load_error,
+        accepted_config_version,
         overlay,
         capability_matrix,
         matrix_origin,
@@ -115,6 +118,7 @@ pub async fn gather_context_no_network(
         config,
         raw_config,
         config_load_error,
+        accepted_config_version,
         probes,
         seats,
         auth_store_error,
@@ -178,6 +182,7 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
         config,
         config_parse_error,
         config_load_error,
+        accepted_config_version: None,
         overlay: overlay_layer.ok(),
         capability_matrix,
         matrix_origin: MatrixOrigin::LedgerReplay,
