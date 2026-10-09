@@ -299,7 +299,7 @@ pub fn rebuild_capabilities_into(
         let row = match crate::capability_vocab::map_to_current(row) {
             Ok(row) => row,
             Err(skip) => {
-                tracing::warn!(
+                tracing::debug!(
                     event = "rebuild_skip",
                     reason = skip.reason(),
                     "capability rebuild skipped a row it cannot map to the current vocabulary",
@@ -309,7 +309,7 @@ pub fn rebuild_capabilities_into(
             }
         };
         let Some(lane) = crate::state_key::StateKey::parse(&row.state_key) else {
-            tracing::warn!(
+            tracing::debug!(
                 event = "rebuild_skip",
                 reason = "unparseable_lane",
                 "capability rebuild skipped a row whose lane key is not a learned lane",
@@ -318,7 +318,7 @@ pub fn rebuild_capabilities_into(
             continue;
         };
         if let Some(reason) = owner_decision(&lane, &row.provider_kind, providers).skip_reason() {
-            tracing::warn!(
+            tracing::debug!(
                 event = "rebuild_skip",
                 reason,
                 "capability rebuild skipped a row whose provider entry no longer owns its lane",
@@ -350,7 +350,7 @@ fn replay_row(
     summary: &mut CapabilityRebuildSummary,
 ) {
     let Some(source) = EvidenceSource::parse(&row.source) else {
-        tracing::warn!(
+        tracing::debug!(
             event = "rebuild_skip",
             reason = "unknown_source",
             source = %row.source,
@@ -412,7 +412,7 @@ fn replay_row(
                 return;
             };
             if phase != FailurePhase::F3 {
-                tracing::warn!(
+                tracing::debug!(
                     event = "rebuild_skip",
                     reason = "unexpected_suspect_phase",
                     phase = %phase.as_str(),
@@ -432,7 +432,7 @@ fn replay_row(
             bump_probe(source, summary);
         }
         other => {
-            tracing::warn!(
+            tracing::debug!(
                 event = "rebuild_skip",
                 reason = "unknown_verdict",
                 verdict = %other,
@@ -461,9 +461,9 @@ fn evidence_class_recognized(row: &CapabilityEventRow) -> bool {
         .is_some_and(is_known_evidence_class)
 }
 
-/// Record the shared WARN + counter for a row skipped on its evidence class.
+/// Record the shared skip event + counter for a row skipped on its evidence class.
 fn skip_unknown_evidence_class(row: &CapabilityEventRow, summary: &mut CapabilityRebuildSummary) {
-    tracing::warn!(
+    tracing::debug!(
         event = "rebuild_skip",
         reason = "unknown_evidence_class",
         verdict = %row.verdict,
@@ -472,7 +472,7 @@ fn skip_unknown_evidence_class(row: &CapabilityEventRow, summary: &mut Capabilit
     summary.skipped_unknown += 1;
 }
 
-/// Parse the tier and phase a negative observation needs, warning and
+/// Parse the tier and phase a negative observation needs, logging and
 /// counting a skip on the first missing or unrecognized token. `None` means
 /// the caller must skip the row.
 fn parse_tier_phase(
@@ -480,7 +480,7 @@ fn parse_tier_phase(
     summary: &mut CapabilityRebuildSummary,
 ) -> Option<(SignalTier, FailurePhase)> {
     let Some(tier) = row.tier.as_deref().and_then(SignalTier::parse) else {
-        tracing::warn!(
+        tracing::debug!(
             event = "rebuild_skip",
             reason = "unknown_tier",
             verdict = %row.verdict,
@@ -490,7 +490,7 @@ fn parse_tier_phase(
         return None;
     };
     let Some(phase) = row.phase.as_deref().and_then(FailurePhase::parse) else {
-        tracing::warn!(
+        tracing::debug!(
             event = "rebuild_skip",
             reason = "unknown_phase",
             verdict = %row.verdict,

@@ -1078,3 +1078,156 @@ fn a_cleared_beta_row_from_another_revision_marks_nothing() {
     assert_eq!(summary.skipped_revision, 1);
     assert!(!seed_cleared(&reg, &beta));
 }
+
+/// One malformed row per skip reason the rebuild recognizes, paired with the
+/// reason token it logs and the tally it should produce.
+fn skip_reason_cases() -> Vec<(&'static str, CapabilityEventRow, CapabilityRebuildSummary)> {
+    let base = Instant::now();
+    let future_vocab = crate::capability_vocab::CURRENT_VOCAB_VERSION + 1;
+    let mut nickname_lane = broken(1, base, "web_search");
+    nickname_lane.state_key = "opus".to_string();
+    let mut removed_owner = broken(1, base, "web_search");
+    removed_owner.state_key = "gone#upstream".to_string();
+    let unknown = CapabilityRebuildSummary {
+        skipped_unknown: 1,
+        ..CapabilityRebuildSummary::default()
+    };
+    vec![
+        (
+            "unknown_vocab_version",
+            broken(1, base, "web_search").with_vocab_version(Some(future_vocab)),
+            CapabilityRebuildSummary {
+                skipped_vocab: 1,
+                ..CapabilityRebuildSummary::default()
+            },
+        ),
+        (
+            "unparseable_lane",
+            nickname_lane,
+            CapabilityRebuildSummary {
+                skipped_lane: 1,
+                ..CapabilityRebuildSummary::default()
+            },
+        ),
+        (
+            "owner_entry_removed",
+            removed_owner,
+            CapabilityRebuildSummary {
+                skipped_owner: 1,
+                ..CapabilityRebuildSummary::default()
+            },
+        ),
+        (
+            "unknown_source",
+            row(
+                1,
+                base,
+                "broken",
+                Some("f1"),
+                "martian",
+                Some("self-identifying"),
+                None,
+                "b",
+            ),
+            unknown,
+        ),
+        (
+            "unknown_evidence_class",
+            row(
+                1,
+                base,
+                "verified",
+                None,
+                "live",
+                None,
+                Some("bogus_class"),
+                "f",
+            ),
+            unknown,
+        ),
+        (
+            "unknown_tier",
+            row(
+                1,
+                base,
+                "broken",
+                Some("f1"),
+                "live",
+                Some("psychic"),
+                None,
+                "c",
+            ),
+            unknown,
+        ),
+        (
+            "unknown_phase",
+            row(
+                1,
+                base,
+                "broken",
+                None,
+                "live",
+                Some("self-identifying"),
+                None,
+                "d",
+            ),
+            unknown,
+        ),
+        (
+            "unexpected_suspect_phase",
+            row(
+                1,
+                base,
+                "suspect",
+                Some("f1"),
+                "live",
+                Some("inferred"),
+                Some("schema_mismatch"),
+                "structured_output",
+            ),
+            unknown,
+        ),
+        (
+            "unknown_verdict",
+            row(1, base, "teleported", None, "live", None, None, "a"),
+            unknown,
+        ),
+    ]
+}
+
+/// A skipped row is per-row detail, not an operator action: a vocabulary bump
+/// or a removed provider can skip thousands of rows on one boot, and the
+/// aggregated warm line already carries every count. Each reason must log
+/// exactly one `rebuild_skip` event at DEBUG, nothing at WARN or above, and
+/// still bump its counter.
+#[test]
+fn each_skip_reason_logs_one_debug_event_and_bumps_its_counter() {
+    for (reason, skipped_row, expected) in skip_reason_cases() {
+        // Arrange
+        let reader = FakeReader {
+            tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+            rows: vec![skipped_row],
+        };
+        let reg = registry();
+
+        // Act
+        let mut summary = CapabilityRebuildSummary::default();
+        let events = routectl_testkit::capture_events(|| {
+            summary = rebuild_capabilities_into(&reader, &reg, &providers());
+        });
+
+        // Assert
+        assert_eq!(summary, expected, "{reason}: tally");
+        let skips: Vec<_> = events
+            .iter()
+            .filter(|e| e.field("event") == Some("rebuild_skip"))
+            .collect();
+        assert_eq!(skips.len(), 1, "{reason}: exactly one rebuild_skip event");
+        assert_eq!(skips[0].level, tracing::Level::DEBUG, "{reason}: level");
+        assert_eq!(skips[0].field("reason"), Some(reason), "{reason}: reason");
+        assert!(
+            !events.iter().any(|e| e.level <= tracing::Level::WARN),
+            "{reason}: no WARN or ERROR event: {events:?}",
+        );
+    }
+}
