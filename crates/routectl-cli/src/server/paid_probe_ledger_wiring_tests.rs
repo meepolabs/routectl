@@ -147,7 +147,8 @@ async fn a_config_reload_keeps_the_accounting_installation() {
         &mut never_firing_shutdown(),
     )
     .await
-    .expect("config reload must apply");
+    .expect("config reload must apply")
+    .expect("a successful reload returns its config");
     let replacement = swap.load_full();
     assert!(
         !Arc::ptr_eq(&outgoing, &replacement),

@@ -55,6 +55,7 @@ use super::*;
 use crate::commands::doctor::GatherSources;
 use crate::handlers::status::DaemonMeta;
 use crate::server::AppState;
+use crate::server::reload_failure::ReloadFailure;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -557,5 +558,78 @@ async fn an_unreadable_boot_warm_carries_its_class_on_the_wire() {
         matrix["availability"],
         serde_json::json!({"state": "unavailable", "code": "unreadable"}),
         "{json}"
+    );
+}
+
+/// The `/status/doctor` findings for a served daemon whose meta is `meta`.
+async fn served_findings(meta: Arc<DaemonMeta>) -> Vec<Value> {
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        served_fixture_config(&dir.path().join("usage.db")),
+    )
+    .unwrap();
+    let router = Router::new(Arc::new(Config::default()));
+    let app_state = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = Arc::new(StatusState::from_app(&app_state, Some(config_path), meta));
+    let app = super::super::status_router().with_state(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/status/doctor")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    json["data"]["report"]["findings"]
+        .as_array()
+        .expect("the served report carries findings")
+        .clone()
+}
+
+fn reload_findings(findings: &[Value]) -> Vec<&Value> {
+    findings
+        .iter()
+        .filter(|f| f["section"] == "config" && f["name"] == "reload")
+        .collect()
+}
+
+/// A rejected reload the daemon recorded renders as exactly one Warn finding
+/// naming its class, and the finding carries no path or loader text. The
+/// positive control -- the same daemon with no recorded failure -- renders
+/// none.
+///
+/// Mutation check: drop the `with_reload_failure` call in `build_from_path` ->
+/// red here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_recorded_reload_failure_renders_one_warn_finding_on_the_served_report() {
+    let failed = DaemonMeta::for_test();
+    failed.record_reload_failure(ReloadFailure::OverlayLoadFailed);
+
+    let with_failure = served_findings(failed).await;
+    let without_failure = served_findings(DaemonMeta::for_test()).await;
+
+    let reload = reload_findings(&with_failure);
+    assert_eq!(reload.len(), 1, "{with_failure:?}");
+    assert_eq!(reload[0]["status"], "Warn");
+    let rendered = reload[0].to_string();
+    assert!(rendered.contains("overlay_load_failed"), "{rendered}");
+    for leak in ["/", "catalog_overlay.json", "config.toml", "error:"] {
+        assert!(
+            !rendered.contains(leak),
+            "the reload finding must carry no path or loader text ({leak}): {rendered}"
+        );
+    }
+    assert!(
+        reload_findings(&without_failure).is_empty(),
+        "{without_failure:?}"
     );
 }

@@ -2,6 +2,7 @@ use routectl_router::CURRENT_CONFIG_VERSION;
 use routectl_testkit::ScopedEnv;
 
 use super::*;
+use crate::server::reload_failure::ReloadFailure;
 
 /// A config older than this build writes is REJECTED at load, never
 /// migrated in place. Both the serve/reload loader
@@ -262,7 +263,10 @@ fn hot_reload_parse_error_warn_redacts_literal_secret() {
 
     // Assert: the load rejected (prior config kept).
     assert!(
-        out.expect("closure ran").is_none(),
+        matches!(
+            out.expect("closure ran"),
+            Err(ReloadFailure::ConfigLoadFailed)
+        ),
         "a parse failure must keep the previous config"
     );
 
@@ -445,7 +449,10 @@ fn a_hot_reload_carrying_any_bad_pool_is_declined() {
         });
 
         assert!(
-            loaded.expect("the loader ran").is_none(),
+            matches!(
+                loaded.expect("the loader ran"),
+                Err(ReloadFailure::ConfigLoadFailed)
+            ),
             "a reload carrying `{name}` must be declined so the previous \
              router stays live"
         );
@@ -606,7 +613,10 @@ fn a_hot_reload_of_a_previous_version_config_is_declined() {
         // Assert: a None keeps the running router live, and the rejection is
         // announced rather than silent.
         assert!(
-            loaded.expect("the loader ran").is_none(),
+            matches!(
+                loaded.expect("the loader ran"),
+                Err(ReloadFailure::ConfigLoadFailed)
+            ),
             "a reload of a previous-version config ({name}) must be declined so \
              the running router stays live"
         );
@@ -791,7 +801,10 @@ fn a_hot_reload_carrying_a_retired_key_is_declined() {
 
         // Assert: a None keeps the running router live.
         assert!(
-            loaded.expect("the loader ran").is_none(),
+            matches!(
+                loaded.expect("the loader ran"),
+                Err(ReloadFailure::ConfigLoadFailed)
+            ),
             "a reload carrying `{path}` must be declined so the running router \
              stays live"
         );

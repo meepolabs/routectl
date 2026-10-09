@@ -6,7 +6,9 @@
 //! loaded, re-stamped by the reload coordinator on every successful router
 //! swap). The moving fact is why this is shared state rather than a value
 //! copied into [`super::StatusState`] at construction: a panel built after a
-//! hot-reload must report the NEW load instant, not the boot one.
+//! hot-reload must report the NEW load instant, not the boot one. Beside that
+//! stamp sits the last REJECTED reload (its redacted class and instant), which
+//! the doctor panel reads while no later load has superseded it.
 //!
 //! Same enforcement shape as [`super::router_view`]: the `Arc<DaemonMeta>`
 //! is PRIVATE to [`DaemonMetaHandle`], so a panel module holding a handle can
@@ -15,6 +17,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+
+use parking_lot::Mutex;
+
+use crate::server::reload_failure::{ReloadFailure, ReloadFailureSnapshot};
 
 /// Epoch-ms sentinel for "no config load has been stamped yet". Never
 /// reaches the wire: [`DaemonMetaHandle::snapshot`] maps it to `None` rather
@@ -26,6 +32,8 @@ const UNSTAMPED: i64 = 0;
 pub struct DaemonMeta {
     listen_addr: String,
     config_loaded_at_ms: AtomicI64,
+    /// The last rejected reload's class and epoch-ms instant.
+    last_reload_failure: Mutex<Option<(ReloadFailure, i64)>>,
 }
 
 impl DaemonMeta {
@@ -35,15 +43,28 @@ impl DaemonMeta {
         Self {
             listen_addr,
             config_loaded_at_ms: AtomicI64::new(UNSTAMPED),
+            last_reload_failure: Mutex::new(None),
         }
     }
 
     /// Record that the live config was loaded (or reloaded) now. Called at
     /// bootstrap and after every successful reload-driven router swap, so the
     /// reported age always tracks the config actually in effect.
+    ///
+    /// A load supersedes any earlier rejected reload, so it clears that record.
     pub fn stamp_config_loaded(&self) {
+        let mut failure = self.last_reload_failure.lock();
         self.config_loaded_at_ms
             .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+        *failure = None;
+    }
+
+    /// Record that a config / overlay reload was rejected now, replacing any
+    /// earlier record. Called by the reload coordinator; the previous config
+    /// stays in effect, so the load stamp is left alone.
+    pub fn record_reload_failure(&self, class: ReloadFailure) {
+        let at_ms = chrono::Utc::now().timestamp_millis();
+        *self.last_reload_failure.lock() = Some((class, at_ms));
     }
 }
 
@@ -69,6 +90,19 @@ impl DaemonMetaHandle {
             version: env!("CARGO_PKG_VERSION"),
             config_loaded_age_ms: (stamped != UNSTAMPED).then(|| (now_ms - stamped).max(0)),
         }
+    }
+
+    /// The last rejected reload, when no config load has been stamped since
+    /// it: a later successful reload means the daemon serves a config newer
+    /// than the one it refused. The record is cleared by that stamp rather
+    /// than compared against it, so a failure and a load landing in the same
+    /// millisecond still resolve by their order.
+    pub fn reload_failure(&self, now_ms: i64) -> Option<ReloadFailureSnapshot> {
+        let (class, at_ms) = (*self.inner.last_reload_failure.lock())?;
+        Some(ReloadFailureSnapshot {
+            class,
+            age_ms: (now_ms - at_ms).max(0),
+        })
     }
 }
 
@@ -158,6 +192,54 @@ mod tests {
             handle.snapshot(first + 60_000).config_loaded_age_ms,
             Some(0),
             "the handle must observe the re-stamped load instant"
+        );
+    }
+
+    #[test]
+    fn a_successful_reload_after_a_failure_hides_the_failure() {
+        let meta = Arc::new(DaemonMeta::new("127.0.0.1:9000".to_string()));
+        let handle = DaemonMetaHandle::new(meta.clone());
+        meta.stamp_config_loaded();
+        meta.record_reload_failure(ReloadFailure::OverlayLoadFailed);
+
+        meta.stamp_config_loaded();
+
+        assert_eq!(
+            handle.reload_failure(chrono::Utc::now().timestamp_millis()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failure_after_a_successful_reload_is_reported_with_its_age() {
+        let meta = Arc::new(DaemonMeta::new("127.0.0.1:9000".to_string()));
+        let handle = DaemonMetaHandle::new(meta.clone());
+        meta.stamp_config_loaded();
+        meta.record_reload_failure(ReloadFailure::BoundaryNotDurable);
+        let recorded_at = meta
+            .last_reload_failure
+            .lock()
+            .expect("the failure was recorded")
+            .1;
+
+        let snapshot = handle.reload_failure(recorded_at + 7_000);
+
+        assert_eq!(
+            snapshot,
+            Some(ReloadFailureSnapshot {
+                class: ReloadFailure::BoundaryNotDurable,
+                age_ms: 7_000,
+            })
+        );
+    }
+
+    #[test]
+    fn no_failure_is_reported_before_any_reload_is_rejected() {
+        let handle = DaemonMetaHandle::new(DaemonMeta::for_test());
+
+        assert_eq!(
+            handle.reload_failure(chrono::Utc::now().timestamp_millis()),
+            None
         );
     }
 }

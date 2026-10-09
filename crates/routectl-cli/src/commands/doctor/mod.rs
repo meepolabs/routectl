@@ -34,6 +34,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use routectl_auth::LocalProbe;
+
+use crate::server::reload_failure::ReloadFailureSnapshot;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
@@ -262,6 +264,10 @@ pub(crate) struct DoctorContext {
     /// disables catalog ceilings, so without it no source attribution can be
     /// trusted and the section renders an honest unavailable line instead.
     knobs: Option<Vec<KnobRow>>,
+    /// The running daemon's last rejected config / overlay reload, as a closed
+    /// class and an age. Only a served gather sets it; the CLI reads the files
+    /// itself, so their errors render directly.
+    reload_failure: Option<ReloadFailureSnapshot>,
 }
 
 /// Where one configured model's outbound `max_output_tokens` ceiling comes

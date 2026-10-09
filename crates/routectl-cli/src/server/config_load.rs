@@ -5,6 +5,8 @@ use std::path::Path;
 use routectl_core::Result;
 use routectl_router::{CatalogOverlay, Config};
 
+use super::reload_failure::ReloadFailure;
+
 /// Maximum incoming JSON body size for `/v1/chat/completions` and
 /// `/v1/messages`. Operator-configurable via `[server] max_body_bytes`
 /// (default 32 MiB; see `routectl_router::ServerConfig`). Used by
@@ -27,8 +29,9 @@ pub(super) fn compute_max_body_bytes(config: &Config) -> usize {
 /// SINGLE shared config loader: preflight the schema `version`, parse
 /// `config.toml`, load the catalog overlay (fail-closed per
 /// `routectl_router::load_catalog_overlay`'s matrix), and run the startup
-/// validators. Used by BOTH the CLI's cold-start `load_config` (`main.rs`)
-/// and this module's hot-reload path (`read_parse_validate_config`) --
+/// validators. Used by the CLI's cold-start `load_config` (`main.rs`);
+/// this module's hot-reload path (`read_parse_validate_config`) runs the
+/// same three steps in the same order, one at a time --
 /// PRE-EXISTING split-brain this closed: only the cold-start path used to
 /// merge the sidecar, so a config reload silently dropped sidecar /
 /// `[cache_pricing]` data. A reload now re-reads the overlay from disk too
@@ -160,15 +163,29 @@ fn validate_effective_config(config: &Config) -> Result<(), String> {
     }
 }
 
-/// Read, parse, and validate the config at `path` via the shared
-/// [`load_effective_config`]. Returns `None` and emits a warn on any
-/// failure so the coordinator can keep the previous config installed.
-/// Pulled out of `handle_config_reload` to keep that function focused on
-/// the swap + diff phases.
-pub(super) fn read_parse_validate_config(path: &Path) -> Option<LoadedConfig> {
-    let loaded = match load_effective_config(path) {
-        Ok(c) => c,
-        Err(e) => {
+/// Read, parse, and validate the config at `path` and load the catalog
+/// overlay -- the same steps as [`load_effective_config`], run separately so a
+/// rejection names which file failed. Emits a warn on any failure so the
+/// coordinator can keep the previous config installed.
+pub(super) fn read_parse_validate_config(path: &Path) -> Result<LoadedConfig, ReloadFailure> {
+    let loaded = parse_config_only(path)
+        .map_err(|e| (e, ReloadFailure::ConfigLoadFailed))
+        .and_then(|config| {
+            load_overlay_default()
+                .map(|catalog_overlay| LoadedConfig {
+                    config,
+                    catalog_overlay,
+                })
+                .map_err(|e| (e, ReloadFailure::OverlayLoadFailed))
+        })
+        .and_then(|loaded| {
+            validate_effective_config(&loaded.config)
+                .map(|()| loaded)
+                .map_err(|e| (e, ReloadFailure::ConfigLoadFailed))
+        });
+    let loaded = match loaded {
+        Ok(loaded) => loaded,
+        Err((e, class)) => {
             // The loader error can inline the offending config VALUE (a
             // secret mistyped into a non-string field or a `literal:`
             // credential on the failing source line) plus local paths.
@@ -179,7 +196,7 @@ pub(super) fn read_parse_validate_config(path: &Path) -> Option<LoadedConfig> {
                 error = %crate::commands::parse_error_redaction::redact_config_load_error(&e),
                 "config reload failed; keeping previous config",
             );
-            return None;
+            return Err(class);
         }
     };
 
@@ -195,7 +212,7 @@ pub(super) fn read_parse_validate_config(path: &Path) -> Option<LoadedConfig> {
         warn_if_config_world_readable(path, &loaded.config, &text);
     }
 
-    Some(loaded)
+    Ok(loaded)
 }
 
 /// Emit a one-time WARN when `path` is group/world-readable AND the

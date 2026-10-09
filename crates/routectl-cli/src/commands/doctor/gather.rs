@@ -78,6 +78,7 @@ pub async fn gather_context_no_network(
         overlay,
         capability_matrix,
         matrix_origin,
+        reload_failure,
     } = layers;
 
     let overlay_verified_at = overlay
@@ -136,6 +137,7 @@ pub async fn gather_context_no_network(
         freshness,
         pricing,
         knobs,
+        reload_failure,
     }
 }
 
@@ -186,6 +188,7 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
         overlay: overlay_layer.ok(),
         capability_matrix,
         matrix_origin: MatrixOrigin::LedgerReplay,
+        reload_failure: None,
     }
 }
 

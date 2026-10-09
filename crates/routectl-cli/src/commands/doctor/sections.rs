@@ -13,6 +13,7 @@ use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
 };
+use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::{SecretCheck, SecretPresence};
 use super::{
@@ -173,7 +174,11 @@ const WARNING_REMEDIATION: &str =
 /// no secret value and refreshes no credential; every message names the
 /// scheme, never the value or ref.
 pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
-    let mut findings = Vec::new();
+    let mut findings: Vec<Finding> = ctx
+        .reload_failure
+        .map(reload_failure_finding)
+        .into_iter()
+        .collect();
     if ctx.config_load_error.is_some() {
         findings.push(Finding {
             section: "config",
@@ -226,6 +231,39 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
     }
     findings.extend(ctx.secret_checks.iter().map(secret_finding));
     findings
+}
+
+/// The daemon refused its last config / overlay reload and still serves the
+/// config it loaded before. Names only the closed class and the age: the
+/// loader's own error can carry config values and paths, and the CLI doctor,
+/// which reads the files itself, is where the operator sees it.
+fn reload_failure_finding(failure: ReloadFailureSnapshot) -> Finding {
+    Finding {
+        section: "config",
+        name: "reload".to_string(),
+        status: Status::Warn,
+        detail: format!(
+            "last config reload rejected ({}) {} ago; the daemon is serving the previously loaded config",
+            failure.class.as_str(),
+            format_age(failure.age_ms),
+        ),
+        remediation: Some(
+            "run `routectl doctor` to see why the on-disk config or catalog overlay was refused, \
+             fix it, and save it again to trigger a reload"
+                .to_string(),
+        ),
+    }
+}
+
+/// A coarse human age: whole seconds, minutes, hours, or days.
+fn format_age(age_ms: i64) -> String {
+    let secs = age_ms / 1_000;
+    match secs {
+        ..60 => format!("{secs}s"),
+        60..3_600 => format!("{}m", secs / 60),
+        3_600..86_400 => format!("{}h", secs / 3_600),
+        _ => format!("{}d", secs / 86_400),
+    }
 }
 
 pub(super) fn secret_finding(check: &SecretCheck) -> Finding {

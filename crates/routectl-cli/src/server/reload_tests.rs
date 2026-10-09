@@ -2,6 +2,7 @@ use routectl_router::CURRENT_CONFIG_VERSION;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
+use crate::server::reload_failure::ReloadFailure;
 use crate::server::serve::build_usage_writer;
 use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db};
 use routectl_testkit::ScopedEnv;
@@ -422,7 +423,8 @@ async fn config_reload_flips_usage_enabled_gate_live() {
         &mut never_shutdown(),
     )
     .await
-    .expect("config reload must apply");
+    .expect("config reload must apply")
+    .expect("a successful reload returns its config");
 
     // Assert: gate flipped live (same handle), router swapped.
     assert!(!new_config.usage.enabled);
@@ -491,7 +493,8 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
         &mut never_shutdown(),
     )
     .await
-    .expect("reload with a fresh overlay file must apply");
+    .expect("reload with a fresh overlay file must apply")
+    .expect("a successful reload returns its config");
 
     // Assert: the reload re-read the overlay from disk (not the empty
     // overlay the initial router booted with).
@@ -519,7 +522,11 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
     // Assert: a corrupt overlay fails the reload closed -- no
     // config/overlay update, and the router installed by the LAST GOOD
     // reload stays live.
-    assert!(result.is_none(), "a corrupt overlay must fail the reload");
+    assert_eq!(
+        result.err(),
+        Some(ReloadFailure::OverlayLoadFailed),
+        "a corrupt overlay must fail the reload"
+    );
     assert!(
         Arc::ptr_eq(&swap.load_full(), &router_after_good_reload),
         "a failed reload must keep the previously-installed router",
@@ -588,7 +595,9 @@ async fn config_reload_logs_overlay_soft_defects_only_when_the_overlay_revision_
             &mut never_shutdown(),
         )))
         .await;
-    let (new_config, _) = changed_result.expect("overlay reload must apply");
+    let (new_config, _) = changed_result
+        .expect("overlay reload must apply")
+        .expect("a successful reload returns its config");
     let revision_after_first = swap.load().overlay_revision();
 
     // Act 2: a config-only reload that re-reads the same overlay revision.
@@ -603,7 +612,9 @@ async fn config_reload_logs_overlay_soft_defects_only_when_the_overlay_revision_
             &mut never_shutdown(),
         )))
         .await;
-    same_result.expect("config reload must apply");
+    same_result
+        .expect("config reload must apply")
+        .expect("a successful reload returns its config");
 
     // Assert
     assert_eq!(
@@ -681,7 +692,8 @@ async fn a_config_only_reload_advances_the_publication_generation() {
         &mut never_shutdown(),
     )
     .await
-    .expect("config-only reload applies");
+    .expect("config-only reload applies")
+    .expect("a successful reload returns its config");
     let after = swap.load_full();
     let lane_after = after.opening_lane("glm").expect("lane resolves");
 
@@ -762,7 +774,9 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
             &mut never_shutdown(),
         )))
         .await;
-    config_result.expect("config-triggered reload must apply");
+    config_result
+        .expect("config-triggered reload must apply")
+        .expect("a successful reload returns its config");
 
     let (overlay_result, overlay_events) =
         routectl_testkit::with_capture(Box::pin(handle_config_reload(
@@ -775,7 +789,9 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
             &mut never_shutdown(),
         )))
         .await;
-    overlay_result.expect("overlay-triggered reload must apply");
+    overlay_result
+        .expect("overlay-triggered reload must apply")
+        .expect("a successful reload returns its config");
 
     // Assert: each call's success log names its OWN trigger.
     let success_message = "config reloaded; router rebuilt and swapped";
@@ -983,8 +999,9 @@ async fn config_reload_rejects_a_candidate_whose_pool_has_no_usable_member() {
     .await;
 
     // Assert: the reload rejects and the prior router stays installed.
-    assert!(
-        result.is_none(),
+    assert_eq!(
+        result.err(),
+        Some(ReloadFailure::RouterBuildFailed),
         "a zero-usable pool behind a selectable model must reject the reload"
     );
     let router_after = swap.load_full();
@@ -1063,8 +1080,9 @@ async fn the_reload_rejection_warn_neutralizes_control_bytes_in_a_pool_key() {
 
     // Assert: the reload rejects, and the rejection WARN's error field is one
     // neutral line.
-    assert!(
-        result.is_none(),
+    assert_eq!(
+        result.err(),
+        Some(ReloadFailure::RouterBuildFailed),
         "a zero-usable pool must reject the reload"
     );
     let error = events
@@ -1138,7 +1156,11 @@ async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_ro
     .await;
 
     // Assert: the reload rejects and the prior router stays installed.
-    assert!(result.is_none(), "a too-new version must reject the reload");
+    assert_eq!(
+        result.err(),
+        Some(ReloadFailure::ConfigLoadFailed),
+        "a too-new version must reject the reload"
+    );
     let router_after = swap.load_full();
     assert!(
         Arc::ptr_eq(&router_before, &router_after),
@@ -1217,7 +1239,8 @@ async fn config_reload_revision_change_enqueues_one_new_revision_tombstone() {
         &mut never_shutdown(),
     )
     .await
-    .expect("overlay reload must apply");
+    .expect("overlay reload must apply")
+    .expect("a successful reload returns its config");
 
     // Precondition: the reload actually advanced the overlay revision.
     let new_overlay_revision = swap.load().overlay_revision();
@@ -1294,7 +1317,8 @@ async fn config_reload_without_revision_change_enqueues_no_tombstone() {
         &mut never_shutdown(),
     )
     .await
-    .expect("config reload must apply");
+    .expect("config reload must apply")
+    .expect("a successful reload returns its config");
 
     // The reload still swapped the router (proving it ran), but neither
     // revision moved.
@@ -1371,8 +1395,9 @@ async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
     .await;
 
     // Assert: the reload rejects and the prior router stays installed.
-    assert!(
-        result.is_none(),
+    assert_eq!(
+        result.err(),
+        Some(ReloadFailure::OverlayLoadFailed),
         "a corrupt overlay cell must reject the reload"
     );
     let router_after = swap.load_full();
@@ -1440,7 +1465,9 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
             &mut never_shutdown(),
         )))
         .await;
-    let (flipped_config, _) = flip_result.expect("the flipping reload must apply");
+    let (flipped_config, _) = flip_result
+        .expect("the flipping reload must apply")
+        .expect("a successful reload returns its config");
     assert!(!flipped_config.reduction.enabled);
 
     // Act 2: reload again from the ALREADY-flipped config -- same file, so
@@ -1456,7 +1483,9 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
             &mut never_shutdown(),
         )))
         .await;
-    steady_result.expect("the no-change reload must apply");
+    steady_result
+        .expect("the no-change reload must apply")
+        .expect("a successful reload returns its config");
 
     // Assert: the flip stamped both fields; the no-change reload stamped
     // neither, on the SAME success message.
@@ -1545,7 +1574,9 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
             &mut never_shutdown(),
         )))
         .await;
-    let (flipped_config, _) = flip_result.expect("the flipping reload must apply");
+    let (flipped_config, _) = flip_result
+        .expect("the flipping reload must apply")
+        .expect("a successful reload returns its config");
     assert!(flipped_config.cache.k_gated_emission);
 
     // Act 2: reload again from the ALREADY-flipped config -- same file, so
@@ -1561,7 +1592,9 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
             &mut never_shutdown(),
         )))
         .await;
-    steady_result.expect("the no-change reload must apply");
+    steady_result
+        .expect("the no-change reload must apply")
+        .expect("a successful reload returns its config");
 
     // Assert: the flip stamped both fields; the no-change reload stamped
     // neither, on the SAME success message.
@@ -1646,8 +1679,9 @@ async fn failed_reload_logs_no_k_gated_emission_transition() {
     .await;
 
     // Assert: declined, no success line, prior router retained, gate still off.
-    assert!(
-        result.is_none(),
+    assert_eq!(
+        result.err(),
+        Some(ReloadFailure::ConfigLoadFailed),
         "an unparseable candidate must reject the reload"
     );
     assert!(
@@ -1717,7 +1751,9 @@ async fn a_reload_flipping_both_switches_stamps_both_pairs() {
         &mut never_shutdown(),
     )))
     .await;
-    result.expect("the flipping reload must apply");
+    result
+        .expect("the flipping reload must apply")
+        .expect("a successful reload returns its config");
 
     // Assert: one line, four fields.
     let line = events
@@ -1796,7 +1832,7 @@ async fn unparseable_candidate_logs_its_rejection_and_keeps_reduction_on() {
         loaded = Some(read_parse_validate_config(&cfg_path));
     });
     assert!(
-        loaded.expect("the loader ran").is_none(),
+        loaded.expect("the loader ran").is_err(),
         "an unparseable candidate must not load"
     );
 
@@ -1833,8 +1869,9 @@ async fn unparseable_candidate_logs_its_rejection_and_keeps_reduction_on() {
 
     // The live state survives: reload declined, same router installed,
     // reduction still ON.
-    assert!(
-        result.is_none(),
+    assert_eq!(
+        result.err(),
+        Some(ReloadFailure::ConfigLoadFailed),
         "an unparseable candidate must reject the reload"
     );
     let router_after = swap.load_full();
@@ -2011,7 +2048,9 @@ async fn router_metrics_snapshot_driver_flushes_on_the_periodic_tick() {
 /// anyway. Asserted on the four things a caller could observe -- the return
 /// value, ArcSwap pointer identity, the shared registry's generation, and its
 /// resident entries -- because a partial rollback would satisfy any one of them
-/// alone.
+/// alone. The candidate overlay carries a below-sentinel `wm` cell: its soft
+/// defect belongs to a revision that was never accepted, so the rejected reload
+/// must not log it.
 #[tokio::test]
 #[serial_test::serial]
 async fn config_reload_with_an_unwritable_capability_boundary_keeps_the_previous_router() {
@@ -2047,6 +2086,7 @@ async fn config_reload_with_an_unwritable_capability_boundary_keeps_the_previous
     let generation_before = registry_before.generation();
     let decay_before = registry_before.decay();
     let entries_before = before_router.learned_capability_snapshot().len();
+    let overlay_revision_before = before_router.overlay_revision();
 
     // Act: write an overlay cell so the reload CHANGES the revision, which is
     // what makes a boundary necessary at all.
@@ -2055,10 +2095,10 @@ async fn config_reload_with_an_unwritable_capability_boundary_keeps_the_previous
     std::fs::write(
         overlay_dir.join("catalog_overlay.json"),
         r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+               {"source":"user","verified_at":"2026-07-01","wm":1.0}}}"#,
     )
     .unwrap();
-    let outcome = handle_config_reload(
+    let (outcome, events) = routectl_testkit::with_capture(Box::pin(handle_config_reload(
         Some(&cfg_path),
         &initial_config,
         secrets,
@@ -2066,13 +2106,24 @@ async fn config_reload_with_an_unwritable_capability_boundary_keeps_the_previous
         &usage,
         ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
-    )
+    )))
     .await;
 
     // Assert: rejected, with no success signal for the caller to advance on.
-    assert!(
-        outcome.is_none(),
+    assert_eq!(
+        outcome.err(),
+        Some(ReloadFailure::BoundaryNotAdmitted),
         "a reload whose boundary cannot be written must report failure",
+    );
+    assert_eq!(
+        overlay_soft_defect_warns(&events),
+        0,
+        "a rejected reload must not log the candidate overlay's soft defects: {events:?}"
+    );
+    assert_eq!(
+        swap.load().overlay_revision(),
+        overlay_revision_before,
+        "a rejected reload must not install the candidate overlay revision",
     );
     // The published router is the SAME allocation -- not an equal replacement.
     assert!(
@@ -2100,6 +2151,185 @@ async fn config_reload_with_an_unwritable_capability_boundary_keeps_the_previous
         entries_before,
         "nor prune any entry",
     );
+}
+
+/// Arrange the shared fixture for the boundary-path reload tests: an isolated
+/// config dir holding a minimal config, an initial router booted off an empty
+/// overlay, and an overlay file at revision 1 so the reload must move the
+/// replay boundary.
+async fn revision_changing_reload_rig(
+    dir: &std::path::Path,
+) -> (std::path::PathBuf, Arc<Config>, Arc<ArcSwap<Router>>) {
+    let cfg_path = dir.join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
+    )
+    .unwrap();
+    let config = Arc::new(Config::default());
+    let router = build_router_from_config_with_overlay(
+        config.clone(),
+        &Arc::default(),
+        Arc::new(MemoryStore::new()),
+    )
+    .await
+    .expect("initial router build");
+    let overlay_dir = dir.join("routectl");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("catalog_overlay.json"),
+        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+    )
+    .unwrap();
+    (cfg_path, config, Arc::new(ArcSwap::from_pointee(router)))
+}
+
+/// A boundary the writer admitted but failed to commit rejects the reload as
+/// `boundary_not_durable`, distinct from a boundary refused at admission.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_boundary_that_fails_to_commit_rejects_the_reload_as_not_durable() {
+    // Arrange: a live writer over a migrated ledger whose tombstone insert is
+    // forced to fail, so admission succeeds and the commit does not.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let db_path = dir.path().join("usage.db");
+    routectl_usage::open(&db_path)
+        .expect("migrating open")
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER reject_tombstone BEFORE INSERT ON capability_events \
+             WHEN NEW.verdict = 'tombstone' \
+             BEGIN SELECT RAISE(ABORT, 'forced failure'); END",
+        )
+        .expect("install trigger");
+    let (usage, _writer) = UsageWriter::start(db_path, CHANNEL_CAPACITY, 0, true);
+    let (cfg_path, config, swap) = revision_changing_reload_rig(dir.path()).await;
+    let before = swap.load_full();
+
+    // Act
+    let outcome = Box::pin(handle_config_reload(
+        Some(&cfg_path),
+        &config,
+        Arc::new(MemoryStore::new()),
+        &swap,
+        &usage,
+        ReloadTrigger::CatalogOverlay,
+        &mut never_shutdown(),
+    ))
+    .await;
+
+    // Assert
+    assert_eq!(outcome.err(), Some(ReloadFailure::BoundaryNotDurable));
+    assert!(Arc::ptr_eq(&swap.load_full(), &before));
+}
+
+/// Shutdown abandoning the boundary wait is not a rejected reload: there is
+/// no verdict to record, so the reload reports `Ok(None)`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_reload_abandoned_at_shutdown_is_not_a_failure() {
+    // Arrange: a writer channel that accepts the boundary and never answers,
+    // and a shutdown that has already fired.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let (tx, _rx_held) = tokio::sync::mpsc::channel(8);
+    let usage = routectl_usage::handle_over_channel(tx);
+    let (cfg_path, config, swap) = revision_changing_reload_rig(dir.path()).await;
+    let before = swap.load_full();
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    shutdown_tx.send(()).expect("signal shutdown");
+
+    // Act
+    let outcome = Box::pin(handle_config_reload(
+        Some(&cfg_path),
+        &config,
+        Arc::new(MemoryStore::new()),
+        &swap,
+        &usage,
+        ReloadTrigger::CatalogOverlay,
+        &mut shutdown_rx,
+    ))
+    .await;
+
+    // Assert
+    assert!(matches!(outcome, Ok(None)), "got {outcome:?}");
+    assert!(Arc::ptr_eq(&swap.load_full(), &before));
+}
+
+/// A panic inside the blocking loader rejects the reload as
+/// `loader_panicked`.
+#[tokio::test]
+async fn a_panicking_loader_rejects_the_reload_as_loader_panicked() {
+    let joined = tokio::task::spawn_blocking(|| -> Result<LoadedConfig, ReloadFailure> {
+        panic!("loader panic for the join-error path")
+    })
+    .await;
+
+    let verdict = loader_verdict(joined);
+
+    assert_eq!(verdict.err(), Some(ReloadFailure::LoaderPanicked));
+}
+
+/// The coordinator records a rejected reload's class on the daemon meta, and
+/// the next accepted reload clears it.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_coordinator_records_a_rejected_reload_until_a_later_reload_succeeds() {
+    // Arrange: a closed writer channel, so the revision-changing reload is
+    // refused at the boundary.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let (cfg_path, config, swap) = revision_changing_reload_rig(dir.path()).await;
+    let daemon_meta = crate::handlers::status::DaemonMeta::for_test();
+    let status = crate::handlers::status::StatusState::from_app(
+        &crate::server::AppState::for_test(swap.clone()),
+        None,
+        daemon_meta.clone(),
+    );
+    let ctx = ReloadContext {
+        config_path: Some(cfg_path),
+        oauth_store: None,
+        secrets: Arc::new(MemoryStore::new()),
+        router_swap: swap,
+        activation_swap: Arc::new(ArcSwap::from_pointee(ActivationState::default())),
+        usage: routectl_usage::handle_with_closed_channel(),
+        daemon_meta,
+    };
+    let mut current_config = config;
+    let mut current_overlay: Arc<CatalogOverlay> = Arc::default();
+    let now_ms = || chrono::Utc::now().timestamp_millis();
+
+    // Act 1: the rejected reload.
+    Box::pin(apply_config_reload(
+        &ctx,
+        &mut current_config,
+        &mut current_overlay,
+        ReloadTrigger::CatalogOverlay,
+        &mut never_shutdown(),
+    ))
+    .await;
+    let after_rejection = status.daemon_meta.reload_failure(now_ms());
+
+    // Act 2: remove the overlay so the revision no longer moves, and reload.
+    std::fs::remove_file(dir.path().join("routectl").join("catalog_overlay.json")).unwrap();
+    Box::pin(apply_config_reload(
+        &ctx,
+        &mut current_config,
+        &mut current_overlay,
+        ReloadTrigger::CatalogOverlay,
+        &mut never_shutdown(),
+    ))
+    .await;
+    let after_success = status.daemon_meta.reload_failure(now_ms());
+
+    // Assert
+    assert_eq!(
+        after_rejection.map(|f| f.class),
+        Some(ReloadFailure::BoundaryNotAdmitted)
+    );
+    assert_eq!(after_success, None);
 }
 
 // ---- Probe driver ----

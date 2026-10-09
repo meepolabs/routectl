@@ -5954,7 +5954,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`register_sighup` installs the handler before serving; the generic
   `fan_out_reload_triggers` loop forwards each delivery, cfg(unix)) +
   `run_reload_coordinator`, which drains
-  a `ReloadRequest` channel and fans each into `handle_config_reload` (re-read
+  a `ReloadRequest` channel and fans each config / overlay request through
+  `apply_config_reload` (on `Ok(Some(..))` advance the config + overlay pair,
+  stamp the load, recompute activation; on `Err(ReloadFailure)` record the
+  class via `DaemonMeta::record_reload_failure`; a shutdown-abandoned boundary
+  returns `Ok(None)` and records nothing) into `handle_config_reload` (re-read
   config.toml + overlay via `read_parse_validate_config` off a
   `spawn_blocking` worker, rebuild the live `Router` behind `ArcSwap`, carry
   over per-nickname runtime state, flip the usage capture gate, enqueue one
@@ -6034,6 +6038,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/metrics_driver.rs` -- the periodic router-metrics snapshot driver
   and its `ROUTER_METRICS_SNAPSHOT_INTERVAL`; flushes once more at shutdown so a
   session shorter than one interval still surfaces its totals
+- `src/server/reload_failure.rs` -- `ReloadFailure`, the closed path-free
+  class a rejected config / overlay reload returns and the daemon records
+  (`config_load_failed`, `overlay_load_failed`, `loader_panicked`,
+  `router_build_failed`, `boundary_not_admitted`, `boundary_not_durable`), and
+  `ReloadFailureSnapshot` (class + age) the served doctor renders. Never the
+  loader's error text
 - `src/server/reload_shutdown.rs` -- `await_reload_tasks` and
   `RELOAD_TASK_SHUTDOWN_DEADLINE`: the ownership barrier that aborts and awaits
   an overrunning reload task. Tests in `reload_shutdown_tests.rs`
@@ -6044,7 +6054,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `load_effective_config_unvalidated` composes both, `load_effective_config`
   adds the fail-fast `validate_effective_config` gate, while `doctor` calls
   each independently so its capability panel degrades the two layers
-  separately. `read_parse_validate_config` is the synchronous hot-reload loader;
+  separately. `read_parse_validate_config` is the synchronous hot-reload loader,
+  running the same steps as `load_effective_config` one at a time so a
+  rejection returns `ReloadFailure::{ConfigLoadFailed, OverlayLoadFailed}`;
   `warn_if_config_world_readable` (unix) WARNs on group/world-readable configs
   carrying secrets; `compute_max_body_bytes` maps the zero-means-default
   body-limit knob
@@ -6593,7 +6605,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `snapshot(now_ms) -> DaemonMetaSnapshot{listen_addr, version,
   config_loaded_age_ms}`, so a panel can read the facts but never reach the
   stamp writer. An unstamped load reports `None` (never an epoch sentinel)
-  and a backwards clock step clamps the age to zero (never negative)
+  and a backwards clock step clamps the age to zero (never negative).
+  `record_reload_failure(class)` keeps the last rejected reload beside the
+  stamp; `stamp_config_loaded` clears it, so `DaemonMetaHandle::reload_failure`
+  reports it only until a later load supersedes it
 - `src/handlers/status/usage.rs` --
   `/status/usage?window=today|week|month|all` (default today). Opens the
   ledger read-only PER REQUEST via `open_readonly_fastfail` inside
@@ -8158,7 +8173,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ServedInputs` (built only by the status facade's `served_doctor_inputs`)
   carries the daemon's config + overlay generation pair, the resident learned
   snapshot (`ResidentLearned`, pinned `now` / `now_ms`), and the boot
-  `WarmReport`. `served_layers` folds them into the shared gather's layers with
+  `WarmReport`; `with_reload_failure` attaches the daemon meta's last rejected
+  reload (set at `handlers/status/doctor.rs`, `None` from the disk layers),
+  which the config section renders as one `reload` Warn finding naming the
+  class and age. `served_layers` folds them into the shared gather's layers with
   `MatrixOrigin::Resident` (panel `source: resident`, `warm` set with an
   `unreadable` warm's class, no replay tally) and the accepted config's
   version, which the version finding reports instead of preflighting the

@@ -12,6 +12,7 @@ use std::time::Instant;
 use routectl_router::{CatalogOverlay, Config, LearnedRegistryEntry, MatrixWarm, SeedClearMarker};
 
 use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
+use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::replay_summary;
 use super::{CapabilityMatrixSource, MatrixOrigin};
@@ -34,6 +35,7 @@ pub struct ServedInputs {
     overlay: CatalogOverlay,
     learned: ResidentLearned,
     warm: WarmReport,
+    reload_failure: Option<ReloadFailureSnapshot>,
 }
 
 /// The resident learned registry, read once, with the clock anchors the read
@@ -63,6 +65,16 @@ impl ServedInputs {
             overlay,
             learned,
             warm,
+            reload_failure: None,
+        }
+    }
+
+    /// Attach the daemon's last rejected reload, if one is still current.
+    #[must_use]
+    pub fn with_reload_failure(self, reload_failure: Option<ReloadFailureSnapshot>) -> Self {
+        Self {
+            reload_failure,
+            ..self
         }
     }
 }
@@ -82,6 +94,8 @@ pub(super) struct GatheredLayers {
     pub(super) overlay: Option<CatalogOverlay>,
     pub(super) capability_matrix: CapabilityMatrixSource,
     pub(super) matrix_origin: MatrixOrigin,
+    /// The daemon's last rejected reload; always `None` from disk.
+    pub(super) reload_failure: Option<ReloadFailureSnapshot>,
 }
 
 /// The served layers. The daemon accepted this config and overlay, so neither
@@ -92,6 +106,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         overlay,
         learned,
         warm,
+        reload_failure,
     } = *inputs;
     GatheredLayers {
         accepted_config_version: Some(config.version),
@@ -101,6 +116,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         overlay: Some(overlay),
         capability_matrix: resident_matrix(learned, &warm),
         matrix_origin: MatrixOrigin::Resident(matrix_warm(&warm)),
+        reload_failure,
     }
 }
 

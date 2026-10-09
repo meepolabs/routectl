@@ -128,7 +128,12 @@ async fn build_from_path(
     emission: FidelityEmission,
 ) -> Panel<DoctorPanel> {
     let view = state.router.view();
-    let served = view.served_doctor_inputs(*state.warm_report());
+    let reload_failure = state
+        .daemon_meta
+        .reload_failure(chrono::Utc::now().timestamp_millis());
+    let served = view
+        .served_doctor_inputs(*state.warm_report())
+        .with_reload_failure(reload_failure);
     // Captured here; the ledger OPEN runs inside the blocking closure below, beside
     // the gather's own disk I/O -- SQLite work on an async worker blocks that
     // worker, and `guard_panel` is what puts it on a blocking thread under a

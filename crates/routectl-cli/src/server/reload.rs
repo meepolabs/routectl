@@ -13,7 +13,7 @@ use routectl_usage::UsageHandle;
 use tokio::sync::{mpsc, watch};
 
 use super::build_router_from_config_with_overlay;
-use super::config_load::read_parse_validate_config;
+use super::config_load::{LoadedConfig, read_parse_validate_config};
 use super::file_watch::{self, ReloadRequest, WatchTarget};
 #[cfg(test)]
 use super::metrics_driver::ROUTER_METRICS_SNAPSHOT_INTERVAL;
@@ -21,6 +21,7 @@ use super::metrics_driver::run_router_metrics_snapshot_driver;
 #[cfg(test)]
 use super::probe_driver::PROBE_DRIVER_INTERVAL;
 use super::probe_driver::run_probe_driver;
+use super::reload_failure::ReloadFailure;
 use super::router_publish::publish_router;
 
 #[cfg(test)]
@@ -338,9 +339,8 @@ fn emit_activation_delta(
     }
 }
 
-/// Drain `ReloadRequest`s and apply them. Each request is processed
-/// to completion before the next is read so a Router swap and a
-/// credentials reload do not interleave.
+/// Drain `ReloadRequest`s, each to completion before the next is read so
+/// a Router swap and a credentials reload do not interleave.
 ///
 /// `current_overlay` is a loop variable alongside `current_config`: a
 /// config-path OR catalog-overlay reload re-reads BOTH from disk (the
@@ -372,58 +372,63 @@ async fn run_reload_coordinator(
                         )
                         .await;
                     }
-                    ReloadRequest::Config => {
-                        if let Some((new_config, new_overlay)) = handle_config_reload(
-                            ctx.config_path.as_deref(),
-                            &current_config,
-                            ctx.secrets.clone(),
-                            &ctx.router_swap,
-                            &ctx.usage,
-                            ReloadTrigger::ConfigFile,
+                    ReloadRequest::Config | ReloadRequest::CatalogOverlay => {
+                        let trigger = if matches!(req, ReloadRequest::Config) {
+                            ReloadTrigger::ConfigFile
+                        } else {
+                            ReloadTrigger::CatalogOverlay
+                        };
+                        apply_config_reload(
+                            &ctx,
+                            &mut current_config,
+                            &mut current_overlay,
+                            trigger,
                             &mut shutdown,
-                        ).await {
-                            current_config = new_config;
-                            current_overlay = new_overlay;
-                            ctx.daemon_meta.stamp_config_loaded();
-                            apply_activation(
-                                &ctx.oauth_store,
-                                &current_config,
-                                &ctx.activation_swap,
-                                ActivationTrigger::ConfigChange,
-                            )
-                            .await;
-                        }
-                    }
-                    ReloadRequest::CatalogOverlay => {
-                        // Same loader as `ReloadRequest::Config`:
-                        // `handle_config_reload` re-reads config.toml AND
-                        // the overlay together on every call regardless
-                        // of which watched file changed. Only the
-                        // tracing label differs.
-                        if let Some((new_config, new_overlay)) = handle_config_reload(
-                            ctx.config_path.as_deref(),
-                            &current_config,
-                            ctx.secrets.clone(),
-                            &ctx.router_swap,
-                            &ctx.usage,
-                            ReloadTrigger::CatalogOverlay,
-                            &mut shutdown,
-                        ).await {
-                            current_config = new_config;
-                            current_overlay = new_overlay;
-                            ctx.daemon_meta.stamp_config_loaded();
-                            apply_activation(
-                                &ctx.oauth_store,
-                                &current_config,
-                                &ctx.activation_swap,
-                                ActivationTrigger::ConfigChange,
-                            )
-                            .await;
-                        }
+                        )
+                        .await;
                     }
                 }
             }
         }
+    }
+}
+
+/// Run one config / overlay reload and record its outcome on the daemon meta:
+/// an accepted reload advances the config + overlay pair, stamps the load, and
+/// recomputes activation; a rejected one records its class. An abandoned one
+/// records nothing.
+async fn apply_config_reload(
+    ctx: &ReloadContext,
+    current_config: &mut Arc<Config>,
+    current_overlay: &mut Arc<CatalogOverlay>,
+    trigger: ReloadTrigger,
+    shutdown: &mut watch::Receiver<()>,
+) {
+    let outcome = handle_config_reload(
+        ctx.config_path.as_deref(),
+        current_config,
+        ctx.secrets.clone(),
+        &ctx.router_swap,
+        &ctx.usage,
+        trigger,
+        shutdown,
+    )
+    .await;
+    match outcome {
+        Ok(Some((new_config, new_overlay))) => {
+            *current_config = new_config;
+            *current_overlay = new_overlay;
+            ctx.daemon_meta.stamp_config_loaded();
+            apply_activation(
+                &ctx.oauth_store,
+                current_config,
+                &ctx.activation_swap,
+                ActivationTrigger::ConfigChange,
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(failure) => ctx.daemon_meta.record_reload_failure(failure),
     }
 }
 
@@ -561,12 +566,6 @@ async fn rebuild_router_for_seat_change(
     );
 }
 
-/// Apply a config reload. On any pre-build failure (read, parse,
-/// validate, build) the function emits a warn and returns `None`
-/// (the existing Router stays installed). On success it swaps the
-/// new Router into `router_swap` atomically and returns the new
-/// `Arc<Config>` so the coordinator can diff future reloads against
-/// the live config rather than the original-startup config.
 /// Handle a `ReloadRequest::Config` or `ReloadRequest::CatalogOverlay`:
 /// re-read config.toml + the catalog overlay via the shared loader,
 /// rebuild the Router against BOTH, and swap it in. Both request
@@ -577,7 +576,9 @@ async fn rebuild_router_for_seat_change(
 /// `(config, overlay)` pair on success so the coordinator's loop
 /// variables advance together -- a partial update (new config, stale
 /// overlay or vice versa) would desync the pair the next reload diffs
-/// against.
+/// against. A rejected reload warns, keeps the existing Router, and returns
+/// its [`ReloadFailure`] class; `Ok(None)` means no verdict (no config path,
+/// or shutdown abandoned the replay boundary).
 pub(super) async fn handle_config_reload(
     config_path: Option<&Path>,
     current_config: &Arc<Config>,
@@ -586,32 +587,19 @@ pub(super) async fn handle_config_reload(
     usage: &UsageHandle,
     trigger: ReloadTrigger,
     shutdown: &mut watch::Receiver<()>,
-) -> Option<(Arc<Config>, Arc<CatalogOverlay>)> {
+) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
     let Some(path) = config_path else {
         tracing::debug!("config reload requested but no config path was registered; ignoring",);
-        return None;
+        return Ok(None);
     };
 
-    // `read_parse_validate_config` is fully synchronous (TOML parse, the
-    // v1 -> v2 migration's fsyncs, and the overlay read all hit disk
-    // directly) -- run it off the runtime so a slow disk or a large
-    // migration never stalls every other task sharing this worker
-    // thread. A panic inside the closure (`JoinError`) is treated the
-    // same as any other load failure: reject the reload, keep the prior
-    // router live.
+    // `read_parse_validate_config` hits disk synchronously (TOML parse and
+    // the overlay read) -- run it off the runtime so a slow disk never
+    // stalls every other task sharing this worker thread.
     let path_owned = path.to_path_buf();
-    let loaded =
-        match tokio::task::spawn_blocking(move || read_parse_validate_config(&path_owned)).await {
-            Ok(Some(loaded)) => loaded,
-            Ok(None) => return None,
-            Err(join_err) => {
-                tracing::warn!(
-                    error = %join_err,
-                    "config reload failed: loader task panicked; keeping previous config",
-                );
-                return None;
-            }
-        };
+    let loaded = loader_verdict(
+        tokio::task::spawn_blocking(move || read_parse_validate_config(&path_owned)).await,
+    )?;
     let new_config = Arc::new(loaded.config);
     let new_overlay = Arc::new(loaded.catalog_overlay);
 
@@ -628,7 +616,7 @@ pub(super) async fn handle_config_reload(
                 error = %e,
                 "config reload failed: router rebuild error; keeping previous router",
             );
-            return None;
+            return Err(ReloadFailure::RouterBuildFailed);
         }
     };
 
@@ -677,7 +665,7 @@ pub(super) async fn handle_config_reload(
                 "config reload failed: capability replay boundary not admitted; \
                  keeping previous router",
             );
-            return None;
+            return Err(ReloadFailure::BoundaryNotAdmitted);
         };
         // Observations made from here on carry the PENDING generation, so their
         // events sort after the boundary the writer is about to commit rather
@@ -691,11 +679,11 @@ pub(super) async fn handle_config_reload(
                     "config reload failed: capability replay boundary not durable; \
                      keeping previous router",
                 );
-                return None;
+                return Err(ReloadFailure::BoundaryNotDurable);
             }
             super::capability_boundary::BoundaryOutcomeReport::Abandoned => {
                 tracing::warn!("config reload abandoned at shutdown; keeping previous router",);
-                return None;
+                return Ok(None);
             }
         }
         // Past every failure and abandonment return, so this is the commit
@@ -779,7 +767,21 @@ pub(super) async fn handle_config_reload(
         );
     }
 
-    Some((new_config, new_overlay))
+    Ok(Some((new_config, new_overlay)))
+}
+
+/// Fold the blocking loader's join result into the reload verdict: a loader
+/// panic rejects the reload like any other load failure.
+fn loader_verdict(
+    joined: Result<Result<LoadedConfig, ReloadFailure>, tokio::task::JoinError>,
+) -> Result<LoadedConfig, ReloadFailure> {
+    joined.unwrap_or_else(|join_err| {
+        tracing::warn!(
+            error = %join_err,
+            "config reload failed: loader task panicked; keeping previous config",
+        );
+        Err(ReloadFailure::LoaderPanicked)
+    })
 }
 
 /// Activation-recompute + audit-event tests. Driven on the `#[tokio::test]`

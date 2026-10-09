@@ -79,6 +79,7 @@ fn ctx(
         freshness: sample_freshness(),
         pricing,
         knobs,
+        reload_failure: None,
     }
 }
 
@@ -2402,6 +2403,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         freshness: sample_freshness(),
         pricing: Some(Vec::new()),
         knobs: Some(Vec::new()),
+        reload_failure: None,
     };
     let report = build_report(&context);
 

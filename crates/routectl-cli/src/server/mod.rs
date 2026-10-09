@@ -29,6 +29,7 @@ mod paid_probe_ledger;
 mod probe_driver;
 pub mod purge_settlement;
 mod reload;
+pub mod reload_failure;
 mod reload_shutdown;
 pub mod request_id;
 mod router_build;
