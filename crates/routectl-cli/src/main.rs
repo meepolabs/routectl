@@ -12,8 +12,7 @@
 //!            credentials store.
 //!   test     One-shot completion against an alias or model nickname.
 //!   config   Validate or print the resolved config.
-//!   catalog  Inspect, verify, import, or edit the cache-economics catalog
-//!            (hidden alias: `pricing`).
+//!   catalog  Inspect, verify, import, or edit the cache-economics catalog.
 //!   rc       Print MITM-proxy env vars, or force a CA rotation.
 
 use std::path::PathBuf;
@@ -339,8 +338,6 @@ enum Cmd {
         opening_accuracy: bool,
     },
     /// Inspect, verify, import, or edit the cache-economics catalog.
-    /// Hidden alias `pricing` kept for muscle memory (dropped at 1.0).
-    #[command(alias = "pricing")]
     Catalog {
         #[command(subcommand)]
         action: CatalogCmd,
@@ -1318,19 +1315,29 @@ const fn probe_choice(probe: bool, no_probe: bool) -> Option<bool> {
 mod tests {
     use super::*;
 
-    /// `pricing` is a HIDDEN clap alias for the renamed `catalog` family
-    /// (muscle memory, dropped at 1.0): `routectl pricing list` must still
-    /// parse to the SAME variant as `routectl catalog list`.
+    /// Each row is a command line naming a subcommand that no longer
+    /// exists; clap must reject it as an unknown subcommand rather than
+    /// route it to a surviving family.
     #[test]
-    fn pricing_alias_still_resolves_to_the_catalog_family() {
-        let cli = Cli::parse_from(["routectl", "pricing", "list"]);
-        assert!(matches!(
-            cli.cmd,
-            Cmd::Catalog {
-                action: CatalogCmd::List
-            }
-        ));
+    fn removed_commands_are_rejected() {
+        let removed: &[(&str, &[&str])] = &[("pricing alias", &["routectl", "pricing", "list"])];
 
+        for (name, argv) in removed {
+            let err = Cli::try_parse_from(*argv)
+                .err()
+                .unwrap_or_else(|| panic!("{name}: {argv:?} parsed but must be rejected"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{name}: {argv:?} rejected with the wrong error kind"
+            );
+        }
+    }
+
+    /// Positive control for `removed_commands_are_rejected`: the surviving
+    /// spelling of a removed alias still parses to its family.
+    #[test]
+    fn catalog_list_parses_to_the_catalog_family() {
         let cli = Cli::parse_from(["routectl", "catalog", "list"]);
         assert!(matches!(
             cli.cmd,

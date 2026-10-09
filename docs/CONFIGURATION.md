@@ -2902,9 +2902,6 @@ next to `config.toml`), where the next load picks it up. `catalog import`
 consumes the VENDOR economics snapshots (litellm + models.dev), not an
 overlay dump.
 
-**`pricing` alias.** `routectl pricing ...` is a hidden alias for
-`routectl catalog ...`, kept for muscle memory; it is dropped at 1.0.
-
 ## Inspecting the effective config (`config show --effective`)
 
 `routectl config show` dumps `config.toml` with secrets redacted: inline

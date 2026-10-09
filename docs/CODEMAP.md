@@ -7890,9 +7890,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   defects, unverified counts, cohort and rate, error buckets by source,
   cold-start buckets, lanes, then exactly one `verdict:` line and
   `PROVENANCE_NOTICE`; the title is sanitized to one line
-- `src/commands/catalog/` -- `routectl catalog` (hidden alias `pricing`,
-  dropped at 1.0), split into a command-entry facade plus three concern
-  modules; every original
+- `src/commands/catalog/` -- `routectl catalog`, split into a
+  command-entry facade plus three concern modules; every original
   `commands::catalog::{list,verify,set,disable,export,build_list_data,render_table,print_pickup_note,verify_at,set_at,PricingVerifications,load_verifications,merge_verifications_into,load_and_merge_verifications,CatalogWriteError}`
   path is preserved via re-exports.
   - `mod.rs` -- command entry + module doc (subcommand overview +

@@ -1,8 +1,7 @@
 //! Catalog command entry + shared verified-at helper.
 //!
 //! `routectl catalog` -- inspect, verify, import, and edit the
-//! cache-economics catalog. `pricing` is a hidden alias kept for muscle
-//! memory (dropped at 1.0).
+//! cache-economics catalog.
 //!
 //! Subcommands:
 //!   list    -- print the EFFECTIVE catalog (the two-layer merge of the
