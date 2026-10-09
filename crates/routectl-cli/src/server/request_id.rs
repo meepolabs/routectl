@@ -6,11 +6,15 @@
 //! scanning chronologically see IDs in roughly the same order events
 //! happened). The id is then:
 //!
-//!   1. Set as the `request_id` field on a per-request `info_span!`,
-//!      so every log emitted while processing this request inherits
-//!      it via tracing's parent-child propagation. Operators can grep
+//!   1. Set as the `request_id` field on a per-request span, so every
+//!      log emitted while processing this request inherits it via
+//!      tracing's parent-child propagation. Operators can grep
 //!      `request_id=<id>` to follow one request across fallback hops,
-//!      retries, and provider calls.
+//!      retries, and provider calls. The span is INFO, except for the
+//!      read-only polling paths (see `is_polling_path`), whose span is
+//!      DEBUG so the span-close access line stays out of the default
+//!      INFO log; events inside such a request then carry no
+//!      `request_id` field at INFO.
 //!   2. Stashed on `req.extensions` as a `RequestId` so handlers /
 //!      provider impls that need to thread it into upstream-bound
 //!      headers can pull it back out.
@@ -58,6 +62,12 @@ fn is_safe_request_id(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b':')
 }
 
+/// Read-only polling endpoints: `/health`, `/status`, and everything
+/// under `/status/`. Matched on the raw path, so `/statusx` is not one.
+fn is_polling_path(path: &str) -> bool {
+    path == "/health" || path == "/status" || path.starts_with("/status/")
+}
+
 pub async fn middleware(mut req: Request, next: Next) -> Response {
     let request_id = req
         .headers()
@@ -78,12 +88,22 @@ pub async fn middleware(mut req: Request, next: Next) -> Response {
     // that flows into a tracing field.
     let path = sanitize_for_log(req.uri().path());
 
-    let span = tracing::info_span!(
-        "request",
-        method = %method,
-        path = %path,
-        request_id = %request_id,
-    );
+    // Tracing callsites are static, so each level needs its own macro site.
+    let span = if is_polling_path(req.uri().path()) {
+        tracing::debug_span!(
+            "request",
+            method = %method,
+            path = %path,
+            request_id = %request_id,
+        )
+    } else {
+        tracing::info_span!(
+            "request",
+            method = %method,
+            path = %path,
+            request_id = %request_id,
+        )
+    };
 
     req.extensions_mut().insert(RequestId(request_id.clone()));
 
@@ -105,7 +125,22 @@ pub async fn middleware(mut req: Request, next: Next) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_request_id;
+    use super::{is_polling_path, is_safe_request_id};
+
+    #[test]
+    fn classifies_read_only_polling_paths() {
+        let cases = [
+            ("/status", true),
+            ("/status/doctor", true),
+            ("/health", true),
+            ("/statusx", false),
+            ("/v1/messages", false),
+            ("/", false),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(is_polling_path(path), expected, "path {path:?}");
+        }
+    }
 
     #[test]
     fn accepts_uuid_v7_shape() {

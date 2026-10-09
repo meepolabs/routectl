@@ -6066,7 +6066,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   terminal daemon shutdown, since the daemon then cannot say whether its
   registry agrees with its ledger for that key
 - `src/server/request_id.rs` -- request-id middleware (`x-request-id` echo +
-  `tracing` span field with allowlist sanitization)
+  `tracing` span field with allowlist sanitization); the request span is
+  DEBUG for read-only polling paths (`/health`, `/status`, `/status/*`) and
+  INFO otherwise
 - `src/server/status_gate.rs` -- status-subtree-ONLY middleware (`/v1/*`
   carries none of it). `StatusHostAllowlist` + `host_guard`
   (anti-DNS-rebinding: rejects a claimed authority outside {loopback literals
@@ -8602,6 +8604,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/log_sink.rs` -- byte-exact record-integrity tests for the production
   subscriber builder against a stock `DefaultFields` control and the
   `fixtures/ucd_escape_extract.txt` Unicode oracle
+- `tests/request_access_log.rs` -- request-span access-line level through the
+  production sink: no `/status` span-close line at `info`, exactly one for an
+  inference path, and the `/status` line present at `debug`
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract;
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor
