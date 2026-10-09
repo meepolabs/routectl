@@ -52,11 +52,13 @@ fn the_no_config_branch_still_emits_the_fidelity_snapshot() {
 }
 
 use super::*;
+use crate::commands::doctor::GatherSources;
 use crate::handlers::status::DaemonMeta;
 use crate::server::AppState;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use routectl_router::MatrixAvailability;
 use routectl_router::runtime_state::{CircuitPhase, ProviderGateStatus};
 use routectl_router::{Config, Router};
 use serde_json::Value;
@@ -155,7 +157,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
     .unwrap();
     let state = state_with_config(Some(config_path.clone()));
     let view = state.router.view();
-    let ctx = gather_context_no_network(&config_path).await;
+    let ctx = gather_context_no_network(&config_path, GatherSources::Disk).await;
     let report = build_report_no_network(&ctx);
 
     let events = routectl_testkit::capture_events(|| {
@@ -203,7 +205,7 @@ async fn panel_constant_tracks_the_no_network_report_schema_version() {
     )
     .unwrap();
 
-    let ctx = gather_context_no_network(&config_path).await;
+    let ctx = gather_context_no_network(&config_path, GatherSources::Disk).await;
     let report = build_report_no_network(&ctx);
     assert_eq!(report.schema_version, DOCTOR_SCHEMA_VERSION);
 }
@@ -387,4 +389,111 @@ async fn doctor_json(state: &Arc<StatusState>) -> Value {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+/// A config whose one model resolves to lane `anthropic#claude-sonnet-4-5`,
+/// with its usage ledger pointed at `db_path`.
+fn served_fixture_config(db_path: &std::path::Path) -> String {
+    format!(
+        "version = {}\n\
+         [usage]\n\
+         db_path = \"{}\"\n\
+         [providers.anthropic]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"env://SERVED_FIXTURE_KEY\"\n\
+         [models.sonnet]\n\
+         provider = \"anthropic\"\n\
+         upstream = \"claude-sonnet-4-5\"\n",
+        routectl_router::CURRENT_CONFIG_VERSION,
+        db_path.display(),
+    )
+}
+
+fn matrix_availability(ctx: &crate::commands::doctor::DoctorContext) -> MatrixAvailability {
+    build_report_no_network(ctx)
+        .panels
+        .capability_matrix
+        .expect("the no-network report carries the matrix panel")
+        .availability
+}
+
+/// The served gather reads the learned layer from the daemon's resident
+/// registry, never from the ledger the config names: with that ledger absent,
+/// a resident entry still renders `Available`, while the same config through
+/// the disk gather finds no ledger and renders `Unavailable("no_data")`.
+///
+/// Mutation check: route the `Served` arm of the gather through the disk
+/// layers -> red here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_served_gather_reads_the_resident_registry_not_the_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    let absent_ledger = dir.path().join("absent").join("usage.db");
+    std::fs::write(&config_path, served_fixture_config(&absent_ledger)).unwrap();
+    let config = crate::server::parse_config_only(&config_path).expect("fixture config parses");
+    let router = Router::new(Arc::new(config));
+    routectl_router::plant_acting_field_verdict_for_tests(
+        &router,
+        "anthropic#claude-sonnet-4-5",
+        "thinking.enabled.display",
+        1,
+    );
+    let view =
+        super::super::router_view::StatusRouterHandle::new(Arc::new(ArcSwap::from_pointee(router)))
+            .view();
+    let warm = crate::server::capability_rebuild::WarmReport::not_run();
+
+    let served = gather_context_no_network(
+        &config_path,
+        GatherSources::Served(Box::new(view.served_doctor_inputs(warm))),
+    )
+    .await;
+    let disk = gather_context_no_network(&config_path, GatherSources::Disk).await;
+
+    assert!(
+        !absent_ledger.exists(),
+        "premise: the configured ledger is absent"
+    );
+    assert_eq!(matrix_availability(&served), MatrixAvailability::Available);
+    assert_eq!(
+        matrix_availability(&disk),
+        MatrixAvailability::Unavailable { code: "no_data" }
+    );
+}
+
+/// The served panel names its learned layer `resident` and carries the boot
+/// warm, never a replay tally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_served_panel_is_resident_and_carries_the_boot_warm() {
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        served_fixture_config(&dir.path().join("usage.db")),
+    )
+    .unwrap();
+    let state = state_with_config(Some(config_path));
+    let app = super::super::status_router().with_state(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/status/doctor")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+    let matrix = &json["data"]["report"]["panels"]["capability_matrix"];
+    assert_eq!(matrix["source"], Value::from("resident"), "{json}");
+    assert_eq!(matrix["warm"]["outcome"], Value::from("not_run"), "{json}");
+    assert!(matrix["replay"].is_null(), "{json}");
 }

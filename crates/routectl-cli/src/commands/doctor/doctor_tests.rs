@@ -73,6 +73,7 @@ fn ctx(
         binary_version: "test",
         capability,
         capability_matrix: CapabilityMatrixSource::Unavailable("no_data"),
+        matrix_origin: MatrixOrigin::LedgerReplay,
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
         freshness: sample_freshness(),
         pricing,
@@ -2197,7 +2198,7 @@ async fn full_run_reports_an_orphan_seat_without_touching_the_store() {
     std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let before = snapshot_dir(tmp.path());
-    let context = gather_context_no_network(&config_path).await;
+    let context = gather_context_no_network(&config_path, GatherSources::Disk).await;
     let report = build_report_no_network(&context);
     let after = snapshot_dir(tmp.path());
 
@@ -2394,6 +2395,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
             None,
         ),
         capability_matrix: CapabilityMatrixSource::Unavailable("config_unavailable"),
+        matrix_origin: MatrixOrigin::LedgerReplay,
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
         freshness: sample_freshness(),
         pricing: Some(Vec::new()),
@@ -2522,7 +2524,7 @@ async fn gather_context_no_network_yields_no_probe_results() {
     std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
     std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let context = gather_context_no_network(&config_path).await;
+    let context = gather_context_no_network(&config_path, GatherSources::Disk).await;
     assert!(
         context.probe_results.is_empty(),
         "the no-network gather must not populate probe results"
@@ -2602,7 +2604,7 @@ async fn network_and_no_network_gather_agree_outside_probe() {
     std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let network = gather_context(&config_path).await;
-    let no_network = gather_context_no_network(&config_path).await;
+    let no_network = gather_context_no_network(&config_path, GatherSources::Disk).await;
 
     // Both contexts fed through the no-network builder must agree: the
     // shared gather body produced the same non-probe inputs on both paths.
@@ -3618,7 +3620,7 @@ mod matrix_panel {
                 entries,
                 now,
                 now_ms: 0,
-                replay: MatrixReplaySummary::default(),
+                replay: Some(MatrixReplaySummary::default()),
                 seed_clears: Vec::new(),
             },
             priors,
@@ -3687,7 +3689,7 @@ mod matrix_panel {
                 entries,
                 now,
                 now_ms: 0,
-                replay: MatrixReplaySummary::default(),
+                replay: Some(MatrixReplaySummary::default()),
                 seed_clears: Vec::new(),
             },
             Vec::new(),
@@ -3703,7 +3705,7 @@ mod matrix_panel {
     fn availability_empty_and_unavailable_render_distinctly() {
         let empty = build_capability_matrix_panel(&matrix_ctx(
             CapabilityMatrixSource::Empty {
-                replay: MatrixReplaySummary::default(),
+                replay: Some(MatrixReplaySummary::default()),
                 seed_clears: Vec::new(),
             },
             Vec::new(),
@@ -3753,7 +3755,7 @@ mod matrix_panel {
                 entries,
                 now,
                 now_ms: 0,
-                replay: MatrixReplaySummary::default(),
+                replay: Some(MatrixReplaySummary::default()),
                 seed_clears: Vec::new(),
             },
             priors,
@@ -3785,7 +3787,7 @@ mod matrix_panel {
                 entries,
                 now,
                 now_ms: 0,
-                replay: MatrixReplaySummary::default(),
+                replay: Some(MatrixReplaySummary::default()),
                 seed_clears: Vec::new(),
             },
             Vec::new(),
@@ -4062,7 +4064,7 @@ mod seeded_matrix_surfaces {
 
         let empty = build_report(&DoctorContext {
             capability_matrix: CapabilityMatrixSource::Empty {
-                replay: MatrixReplaySummary::default(),
+                replay: Some(MatrixReplaySummary::default()),
                 seed_clears: Vec::new(),
             },
             ..ctx(

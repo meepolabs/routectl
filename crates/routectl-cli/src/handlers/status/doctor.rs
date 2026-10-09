@@ -10,12 +10,14 @@
 //! the last settled dispatch outcome read once through the read-only facade,
 //! not from a fresh probe.
 //!
-//! The no-network gather is disk I/O (config read, credential-store probe,
-//! usage-ledger read), so it runs inside the `spawn_blocking` builder
-//! [`guard_panel`] wraps it in, driven to completion with a runtime handle.
-//! Config-load/parse errors are ALREADY redacted inside the gather (the shared
-//! parse-error redactor), so this panel adds no second redaction copy and
-//! surfaces no raw loader string.
+//! The gather runs over the daemon's SERVED state
+//! ([`GatherSources::Served`]): the config and catalog overlay the running
+//! router accepted and its resident learned registry, read through the
+//! read-only facade. A poll parses no config file, loads no overlay file, and
+//! replays no ledger. What disk I/O remains (the raw config bytes for the
+//! validation findings, the credential-store probe) runs inside the
+//! `spawn_blocking` builder [`guard_panel`] wraps it in, driven to completion
+//! with a runtime handle.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,7 +39,7 @@ use super::paid_probe_budget::{
 use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
-use crate::commands::doctor::{build_report_no_network, gather_context_no_network};
+use crate::commands::doctor::{GatherSources, build_report_no_network, gather_context_no_network};
 
 /// Wire-shape version of the doctor panel payload. Reuses the no-network
 /// [`DoctorReport`]'s own `schema_version` (15): the panel embeds that report
@@ -115,16 +117,18 @@ fn build_panel_data(
     }
 }
 
-/// Build the panel from an on-disk config path. The gather runs inside the
-/// `spawn_blocking` builder (via a runtime handle) so its disk I/O never blocks
-/// an async worker; reachability is read from the SAME live router snapshot
-/// pinned before the blocking work.
+/// Build the panel for a daemon with an on-disk config path. The gather's
+/// served inputs and reachability are read from the SAME live router snapshot,
+/// pinned before the blocking work; the gather runs inside the
+/// `spawn_blocking` builder (via a runtime handle) so its remaining disk I/O
+/// never blocks an async worker.
 async fn build_from_path(
     state: &StatusState,
     config_path: PathBuf,
     emission: FidelityEmission,
 ) -> Panel<DoctorPanel> {
     let view = state.router.view();
+    let served = view.served_doctor_inputs(*state.warm_report());
     // Captured here; the ledger OPEN runs inside the blocking closure below, beside
     // the gather's own disk I/O -- SQLite work on an async worker blocks that
     // worker, and `guard_panel` is what puts it on a blocking thread under a
@@ -147,7 +151,10 @@ async fn build_from_path(
         DOCTOR_SCHEMA_VERSION,
         codes::DOCTOR_UNAVAILABLE,
         move || {
-            let ctx = handle.block_on(gather_context_no_network(&config_path));
+            let ctx = handle.block_on(gather_context_no_network(
+                &config_path,
+                GatherSources::Served(Box::new(served)),
+            ));
             let report = build_report_no_network(&ctx);
             let schema_version = report.schema_version;
             let budgets =

@@ -6555,7 +6555,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
   loads a snapshot into `StatusRouterView` (also private inner `Arc<Router>`)
-  which exposes ONLY six read methods -- `route_targets(now)`,
+  which exposes ONLY seven read methods -- `route_targets(now)`,
   `learned_capabilities()`, `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
   see `field_verdict_log.rs`), `field_verdict_status()` (the per-verdict
@@ -6566,7 +6566,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cap no reservation is checked against), and `effective_view()` (runs
   `derive_effective_view` against the live config AND the overlay retained on
   the pinned Router, INTERNALLY, so panels never touch raw `Config` and one
-  derivation can never pair mismatched config / overlay generations), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
+  derivation can never pair mismatched config / overlay generations), and
+  `served_doctor_inputs(warm)` (an OWNED `commands::doctor::ServedInputs`:
+  the pinned Router's config + overlay as one generation pair, the resident
+  learned snapshot and seed-clear markers with clock anchors taken after the
+  read, and the boot `WarmReport`; its fields are private to the doctor
+  module), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
   pricing facade over one pinned snapshot whose only method costs an `AggRow`
   through `commands::usage::cost_for_row` (so `/status/query` and the CLI usage
   report price a row through one function, and a hot-swap mid-query cannot make
@@ -6764,9 +6769,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `build`'s daemon-stamp-before-router-view read order
 - `src/handlers/status/doctor.rs` -- `/status/doctor`, strictly NO network.
   Runs only the no-network doctor sections via
-  `commands::doctor::gather_context_no_network(config_path)` +
+  `commands::doctor::gather_context_no_network(config_path,
+  GatherSources::Served(..))` (inputs from the facade's
+  `served_doctor_inputs(*state.warm_report())`, so a poll parses no config,
+  loads no overlay file and replays no ledger) +
   `build_report_no_network(&ctx)` (never
-  `gather_probe_results`/`section_probe`); the async disk-I/O gather runs
+  `gather_probe_results`/`section_probe`); the async gather runs
   under `guard_panel`'s `spawn_blocking` via `Handle::current().block_on`.
   The synchronous fold from the gathered report plus the pinned router
   snapshot into `DoctorPanel` -- including the shared
@@ -8141,6 +8149,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   under a replayed seed-clear marker, cleared (allow). Lane-keyed coverage
   lives in the `#[path]`-included `lane_matrix_tests.rs`, the seed layer's in
   `seed_matrix_tests.rs`
+- `src/commands/doctor/served.rs` -- the served gather's inputs.
+  `GatherSources::{Disk, Served(Box<ServedInputs>)}` selects the layers;
+  `ServedInputs` (built only by the status facade's `served_doctor_inputs`)
+  carries the daemon's config + overlay generation pair, the resident learned
+  snapshot (`ResidentLearned`, pinned `now` / `now_ms`), and the boot
+  `WarmReport`. `served_layers` folds them into the shared gather's layers with
+  `MatrixOrigin::Resident` (panel `source: resident`, `warm` set, no replay
+  tally); `resident_matrix` applies the empty-registry rule: empty after an
+  `unreadable` / `restate_failed` warm -> `Unavailable(<warm token>)`, empty
+  otherwise -> `Empty`, any resident entry -> `Available`. Sidecar
+  `served_tests.rs` also scans that the served arm never names the disk loads
+  or the replay
 - `src/commands/doctor/gather.rs` -- doctor data collection.
   `derive_knob_rows(config, overlay)` resolves one `KnobRow` per `[models.X]`
   entry: config `max_output_tokens` checked FIRST (an operator value wins
@@ -8159,9 +8179,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and `pricing::missing_equivalence_dimensions` into the `EquivalenceBasis`
   tri-state, which is what the row's second clause reports (why the usage
   report's `equivalent_cost_usd` reads absent) and never its price.
-  `gather_context_no_network` is the SINGLE shared gather body (per-layer
+  `gather_context_no_network(config_path, sources)` is the SINGLE shared
+  gather body; `sources` (`served.rs`) picks the config / overlay / learned
+  layers: `Disk` -> `disk_layers` (per-layer
   `server::parse_config_only` + `server::load_overlay_default` so the
-  capability panel degrades one layer without the other, raw-bytes read for
+  capability panel degrades one layer without the other, plus the read-only
+  ledger replay), `Served` -> the daemon's accepted state; then the raw-bytes read for
   the version preflight that never stamps the file, auth, secret checks,
   orphan scan, would-trim panel, and the freshness inputs); `gather_context` =
   that body PLUS one `gather_probe_results` `probe_all` pass (the only

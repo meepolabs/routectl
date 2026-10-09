@@ -26,9 +26,11 @@ use crate::server::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, SliceReader, classify_boundary,
 };
 
+use super::served::{GatherSources, GatheredLayers, served_layers};
 use super::{
     CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, EquivalenceBasis,
-    FreshnessInputs, KnobRow, OutputCeilingSource, PricingRow, PricingRowSource, PriorCell,
+    FreshnessInputs, KnobRow, MatrixOrigin, OutputCeilingSource, PricingRow, PricingRowSource,
+    PriorCell,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -37,7 +39,7 @@ use super::{
 /// drifting -- a new context field is added once and both paths carry it; the
 /// only difference between the paths is this `probe_results` assignment.
 pub(super) async fn gather_context(config_path: &Path) -> DoctorContext {
-    let ctx = gather_context_no_network(config_path).await;
+    let ctx = gather_context_no_network(config_path, GatherSources::Disk).await;
     let probe_results = gather_probe_results(&ctx.config).await;
     DoctorContext {
         probe_results,
@@ -48,43 +50,33 @@ pub(super) async fn gather_context(config_path: &Path) -> DoctorContext {
 /// Gather every read-only input the no-network sections draw from, WITHOUT
 /// any upstream dial: `probe_results` is left empty and
 /// [`gather_probe_results`] (the only caller of `CompositeStore`/`probe_all`)
-/// is never reached. Everything else -- per-layer config/overlay load, auth
-/// via `probe_local` (no network, no refresh), secret presence checks, the
-/// orphan scan, and the would-trim panel -- is retained.
-pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
+/// is never reached. Everything else -- the config/overlay layers, auth via
+/// `probe_local` (no network, no refresh), secret presence checks, the orphan
+/// scan, and the would-trim panel -- is retained.
+///
+/// `sources` decides where the config, overlay, and learned layer come from:
+/// [`GatherSources::Disk`] loads them through [`disk_layers`];
+/// [`GatherSources::Served`] takes a running daemon's accepted state as-is.
+/// The raw config bytes are read from `config_path` either way, for the
+/// version preflight and the validation findings.
+pub async fn gather_context_no_network(
+    config_path: &Path,
+    sources: GatherSources,
+) -> DoctorContext {
     let raw_config = std::fs::read_to_string(config_path).ok();
-    // Read-only, per-layer load: the config and the catalog overlay load
-    // independently so the capability panel can degrade one without the
-    // other. The version section keeps its coupled "config could not be
-    // loaded" semantics -- a config parse error wins, else an overlay error
-    // -- so a present-but-broken config still never reports all-Pass. On a
-    // config failure the other sections run against defaults.
-    let config_layer = crate::server::parse_config_only(config_path);
-    let overlay_layer = crate::server::load_overlay_default();
-
-    let (config, config_parse_error) = match config_layer {
-        Ok(config) => (config, None),
-        Err(e) => (Config::default(), Some(redact_config_load_error(&e))),
+    let layers = match sources {
+        GatherSources::Disk => disk_layers(config_path),
+        GatherSources::Served(inputs) => served_layers(inputs),
     };
-    let config_load_error = config_parse_error.clone().or_else(|| {
-        overlay_layer
-            .as_ref()
-            .err()
-            .map(|e| redact_config_load_error(e))
-    });
+    let GatheredLayers {
+        config,
+        config_parse_error,
+        config_load_error,
+        overlay,
+        capability_matrix,
+        matrix_origin,
+    } = layers;
 
-    // The learned matrix needs this run's revision to match the ledger's
-    // replay boundary. The baked catalog version is fixed; the overlay
-    // revision comes from the same read-only overlay load the priors use
-    // (defaulting to zero when the overlay could not be read -- a foreign
-    // boundary then classifies as unavailable, never a silent empty).
-    let config_parse_failed = config_parse_error.is_some();
-    let overlay_revision = overlay_layer
-        .as_ref()
-        .ok()
-        .map_or(0, routectl_router::overlay_revision);
-
-    let overlay = overlay_layer.ok();
     let overlay_verified_at = overlay
         .as_ref()
         .and_then(|overlay| freshest_overlay_verified_at(&config, overlay));
@@ -112,9 +104,6 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         .as_ref()
         .map(|overlay| derive_knob_rows(&config, overlay));
     let capability = build_capability_inputs(&config, config_parse_error, overlay);
-    let beta_seed = routectl_router::shipped_beta_seed_scope();
-    let capability_matrix =
-        gather_capability_matrix(&config, config_parse_failed, overlay_revision, beta_seed);
 
     let (probes, seats, auth_store_error) = gather_auth().await;
     let secret_checks = gather_secret_checks(&config, &probes);
@@ -138,10 +127,60 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         binary_version: env!("CARGO_PKG_VERSION"),
         capability,
         capability_matrix,
-        beta_seed,
+        matrix_origin,
+        beta_seed: routectl_router::shipped_beta_seed_scope(),
         freshness,
         pricing,
         knobs,
+    }
+}
+
+/// The on-disk layers: a read-only, per-layer load of the config and the
+/// catalog overlay, plus a read-only ledger replay for the learned matrix.
+///
+/// The config and the overlay load independently so the capability panel can
+/// degrade one without the other. The version section keeps its coupled
+/// "config could not be loaded" semantics -- a config parse error wins, else
+/// an overlay error -- so a present-but-broken config still never reports
+/// all-Pass. On a config failure the other sections run against defaults.
+pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
+    let config_layer = crate::server::parse_config_only(config_path);
+    let overlay_layer = crate::server::load_overlay_default();
+
+    let (config, config_parse_error) = match config_layer {
+        Ok(config) => (config, None),
+        Err(e) => (Config::default(), Some(redact_config_load_error(&e))),
+    };
+    let config_load_error = config_parse_error.clone().or_else(|| {
+        overlay_layer
+            .as_ref()
+            .err()
+            .map(|e| redact_config_load_error(e))
+    });
+
+    // The learned matrix needs this run's revision to match the ledger's
+    // replay boundary. The baked catalog version is fixed; the overlay
+    // revision comes from the same read-only overlay load the priors use
+    // (defaulting to zero when the overlay could not be read -- a foreign
+    // boundary then classifies as unavailable, never a silent empty).
+    let overlay_revision = overlay_layer
+        .as_ref()
+        .ok()
+        .map_or(0, routectl_router::overlay_revision);
+    let capability_matrix = gather_capability_matrix(
+        &config,
+        config_parse_error.is_some(),
+        overlay_revision,
+        routectl_router::shipped_beta_seed_scope(),
+    );
+
+    GatheredLayers {
+        config,
+        config_parse_error,
+        config_load_error,
+        overlay: overlay_layer.ok(),
+        capability_matrix,
+        matrix_origin: MatrixOrigin::LedgerReplay,
     }
 }
 
@@ -327,7 +366,7 @@ fn replay_matrix_slice(
     let seed_clears = registry.seed_clear_snapshot();
     if entries.is_empty() {
         CapabilityMatrixSource::Empty {
-            replay,
+            replay: Some(replay),
             seed_clears,
         }
     } else {
@@ -335,7 +374,7 @@ fn replay_matrix_slice(
             entries,
             now: reader.now(),
             now_ms: reader.now_ms(),
-            replay,
+            replay: Some(replay),
             seed_clears,
         }
     }
@@ -352,7 +391,7 @@ fn lane_provider_kind<'c>(config: &'c Config, lane: &str) -> &'c str {
 
 /// Fold the router's rebuild tally into the panel's replay summary.
 /// `replayed` counts every row that reached an admission arm.
-const fn replay_summary(
+pub(super) const fn replay_summary(
     summary: &CapabilityRebuildSummary,
     loaded_rows: usize,
 ) -> MatrixReplaySummary {

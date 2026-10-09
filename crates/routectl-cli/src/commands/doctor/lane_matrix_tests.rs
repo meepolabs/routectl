@@ -73,6 +73,7 @@ pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorC
         binary_version: "test",
         capability,
         capability_matrix: source,
+        matrix_origin: MatrixOrigin::LedgerReplay,
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
         freshness: FreshnessInputs {
             catalog_version: CATALOG_VERSION,
@@ -124,7 +125,7 @@ pub(super) fn available(
         entries,
         now,
         now_ms,
-        replay: MatrixReplaySummary::default(),
+        replay: Some(MatrixReplaySummary::default()),
         seed_clears: Vec::new(),
     }
 }

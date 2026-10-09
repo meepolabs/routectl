@@ -41,7 +41,7 @@ use routectl_router::{
 };
 
 use super::sections::staleness_threshold_days;
-use super::{CapabilityMatrixSource, DoctorContext, PriorCell};
+use super::{CapabilityMatrixSource, DoctorContext, MatrixOrigin, PriorCell};
 
 /// How many observed capability keys outside the well-known set are
 /// rendered as their own columns before the rest collapse into a
@@ -112,7 +112,7 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
                 now: Some((*now, *now_ms)),
                 seed_clears: seed_clears.as_slice(),
             },
-            Some(*replay),
+            *replay,
         ),
         CapabilityMatrixSource::Empty {
             replay,
@@ -124,7 +124,7 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
                 now: None,
                 seed_clears: seed_clears.as_slice(),
             },
-            Some(*replay),
+            *replay,
         ),
         CapabilityMatrixSource::Unavailable(code) => (
             MatrixAvailability::Unavailable { code },
@@ -166,14 +166,18 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
         })
         .collect();
 
+    let (source, warm) = match &ctx.matrix_origin {
+        MatrixOrigin::LedgerReplay => (MatrixSource::LedgerReplay, None),
+        MatrixOrigin::Resident(warm) => (MatrixSource::Resident, Some(warm.clone())),
+    };
     CapabilityMatrixPanel {
         availability,
-        source: MatrixSource::LedgerReplay,
+        source,
         columns,
         other_overflow,
         lanes,
         replay,
-        warm: None,
+        warm,
     }
 }
 

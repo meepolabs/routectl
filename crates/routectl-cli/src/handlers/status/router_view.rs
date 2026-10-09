@@ -23,7 +23,9 @@ use routectl_router::{
 };
 use routectl_usage::{AggRow, RowCost};
 
+use crate::commands::doctor::{ResidentLearned, ServedInputs};
 use crate::commands::usage::cost_for_row;
+use crate::server::capability_rebuild::WarmReport;
 
 /// Owns the live-router read handle for the status surface. Loads a fresh
 /// snapshot per [`view`](Self::view) call so a hot-swap is picked up. The
@@ -78,11 +80,12 @@ impl QueryPricer {
 }
 
 /// A read-only view over one pinned router snapshot. The `router` field is
-/// private, so the only router state a panel can observe is what the six
+/// private, so the only router state a panel can observe is what the seven
 /// methods below expose -- route health, learned negatives, the live
 /// envelope-field repair counters, the per-verdict fidelity rows, the configured
-/// paid-probe caps, and the derived effective config view (which is computed here
-/// so panels never handle raw `Config`).
+/// paid-probe caps, the derived effective config view (which is computed here
+/// so panels never handle raw `Config`), and the doctor's served inputs (an
+/// opaque value only the doctor gather can read).
 pub struct StatusRouterView {
     router: Arc<Router>,
 }
@@ -146,6 +149,35 @@ impl StatusRouterView {
     pub fn effective_view(&self) -> EffectiveView {
         derive_effective_view(&self.router.config, self.router.catalog_overlay())
     }
+
+    /// The served doctor gather's inputs, owned so the gather can run on a
+    /// blocking worker.
+    ///
+    /// The config and the catalog overlay come off this one pinned router, so
+    /// the doctor never pairs a config generation with a foreign overlay
+    /// generation, and neither is re-read from disk. The learned layer is the
+    /// resident registry, read once; its clock anchors are taken after that
+    /// read, so every entry's instants lie at or before them. `warm` is the
+    /// boot warm that filled the registry.
+    ///
+    /// The returned value's fields are private to the doctor module: a panel
+    /// holding it can pass it to the gather and nothing else.
+    pub(crate) fn served_doctor_inputs(&self, warm: WarmReport) -> ServedInputs {
+        let entries = self.router.learned_capability_snapshot();
+        let seed_clears = self.router.learned_registry().seed_clear_snapshot();
+        let learned = ResidentLearned {
+            entries,
+            seed_clears,
+            now: Instant::now(),
+            now_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        ServedInputs::new(
+            Arc::clone(&self.router.config),
+            self.router.catalog_overlay().clone(),
+            learned,
+            warm,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -159,21 +191,23 @@ mod tests {
     }
 
     #[test]
-    fn view_exposes_only_the_six_read_methods() {
+    fn view_exposes_only_the_seven_read_methods() {
         let handle = handle();
         let view = handle.view();
 
         // The full read surface: route health, learned negatives, live
         // field-repair counters, the coherent fidelity snapshot, the configured
-        // paid-probe caps, effective view. If a future edit widens this surface
-        // (e.g. exposes `&Router` or a dispatch method), it lands here in review
-        // against a facade whose contract is these six calls.
+        // paid-probe caps, effective view, the doctor's served inputs. If a
+        // future edit widens this surface (e.g. exposes `&Router` or a dispatch
+        // method), it lands here in review against a facade whose contract is
+        // these seven calls.
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
         let _learned: Vec<LearnedRegistryEntry> = view.learned_capabilities();
         let _counters: FieldRepairCounters = view.field_repair_counters();
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
         let _caps: BTreeMap<String, u32> = view.paid_probe_daily_caps();
         let _effective: EffectiveView = view.effective_view();
+        let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run());
     }
 
     #[test]

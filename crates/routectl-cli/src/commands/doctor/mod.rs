@@ -16,6 +16,7 @@ mod gather;
 mod matrix;
 mod render;
 mod sections;
+mod served;
 
 #[cfg(test)]
 #[path = "doctor_tests.rs"]
@@ -37,7 +38,7 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
     BetaSeedScope, CatalogImportState, Config, DoctorPanels, DoctorReport, Finding,
-    LearnedRegistryEntry, MatrixReplaySummary, PricingSource, SeedClearMarker, Status,
+    LearnedRegistryEntry, MatrixReplaySummary, MatrixWarm, PricingSource, SeedClearMarker, Status,
     WouldTrimPanel, overall_exit,
 };
 
@@ -50,6 +51,7 @@ use self::sections::{
 };
 
 pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_error};
+pub(crate) use self::served::{GatherSources, ResidentLearned, ServedInputs};
 
 /// UNSTABLE report schema version. Bumped on ANY structural or semantic
 /// change a consumer would care about -- including an ADDITIVE one, since the
@@ -232,6 +234,9 @@ pub(crate) struct DoctorContext {
     /// first-class tri-state. Populated in the single gather pass and
     /// consumed by the capability matrix panel builder.
     capability_matrix: CapabilityMatrixSource,
+    /// Where `capability_matrix`'s learned layer came from, and for the
+    /// daemon's resident registry, how it was warmed at boot.
+    matrix_origin: MatrixOrigin,
     /// The shipped beta seed the matrix renders as its own layer: the same
     /// scope the router withholds by and the replay registry bounds its
     /// seed-clear markers with.
@@ -397,19 +402,30 @@ struct PriorCell {
     capabilities: Vec<(String, bool)>,
 }
 
-/// The read-only ledger-replay source the capability matrix panel renders
-/// from, with availability as a first-class tri-state. The matrix is
-/// honest-`Empty` ONLY when the ledger was readable, its tombstone matched
-/// this run's revision, its post-boundary slice was actually read, and the
-/// replay left nothing resident. Every other outcome -- unreadable ledger,
-/// version-too-new, absent or foreign tombstone, a slice read that failed
-/// after the boundary classified, a config that would not parse -- is
-/// `Unavailable` with a path-free class token, NEVER a silent empty: boot's
-/// fail-closed-to-empty is correct for serving but would mislead a
-/// diagnostic into reporting "nothing learned" when the truth is "could not
-/// read".
+/// Where the capability matrix's learned layer came from.
+enum MatrixOrigin {
+    /// A read-only ledger replay run for this report.
+    LedgerReplay,
+    /// The daemon's resident registry, with its boot warm.
+    Resident(MatrixWarm),
+}
+
+/// The learned source the capability matrix panel renders from, with
+/// availability as a first-class tri-state.
+///
+/// For a ledger replay, the matrix is honest-`Empty` ONLY when the ledger was
+/// readable, its tombstone matched this run's revision, its post-boundary
+/// slice was actually read, and the replay left nothing resident. Every other
+/// outcome -- unreadable ledger, version-too-new, absent or foreign tombstone,
+/// a slice read that failed after the boundary classified, a config that would
+/// not parse -- is `Unavailable` with a path-free class token, NEVER a silent
+/// empty: boot's fail-closed-to-empty is correct for serving but would mislead
+/// a diagnostic into reporting "nothing learned" when the truth is "could not
+/// read". For the resident registry the same holds of the boot warm: an empty
+/// registry whose warm could not read the ledger is `Unavailable` with the
+/// warm's outcome token.
 enum CapabilityMatrixSource {
-    /// The ledger replayed at least one learned entry. `now` / `now_ms` are
+    /// At least one learned entry is resident. `now` / `now_ms` are
     /// the single pinned clock anchors the mapped instants were taken
     /// against, so every derived cell age and timestamp shares one
     /// skew-free basis.
@@ -420,22 +436,25 @@ enum CapabilityMatrixSource {
         /// timestamps are `now_ms` offset by the instant's distance from
         /// `now`.
         now_ms: i64,
-        replay: MatrixReplaySummary,
-        /// Every seed-clear marker the replay recorded.
+        /// The replay tally; `None` for the resident registry.
+        replay: Option<MatrixReplaySummary>,
+        /// Every resident seed-clear marker.
         seed_clears: Vec<SeedClearMarker>,
     },
-    /// Readable ledger, matched tombstone, slice read, nothing resident after
-    /// the replay: an honest, non-degraded empty. The tally still says how
-    /// many rows were read and why each was skipped; a seed-clear marker
-    /// leaves no resident entry, so an empty replay may still carry some.
+    /// The source was read and nothing is resident: an honest, non-degraded
+    /// empty. A replay's tally still says how many rows were read and why each
+    /// was skipped; a seed-clear marker leaves no resident entry, so an empty
+    /// source may still carry some.
     Empty {
-        replay: MatrixReplaySummary,
+        /// The replay tally; `None` for the resident registry.
+        replay: Option<MatrixReplaySummary>,
         seed_clears: Vec<SeedClearMarker>,
     },
     /// The source could not be read at this run's revision; the token is a
     /// path-free class (`config_unavailable` / `no_data` / `no_tombstone` /
     /// `revision_mismatch` / `tombstone_read` / `open_failed` /
-    /// `query_failed` / an open-error class such as `version_too_new`).
+    /// `query_failed` / an open-error class such as `version_too_new`, or a
+    /// failed boot warm's `unreadable` / `restate_failed`).
     Unavailable(&'static str),
 }
 

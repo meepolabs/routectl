@@ -51,7 +51,7 @@ fn seed_config() -> Config {
 
 fn empty_source() -> CapabilityMatrixSource {
     CapabilityMatrixSource::Empty {
-        replay: MatrixReplaySummary::default(),
+        replay: Some(MatrixReplaySummary::default()),
         seed_clears: Vec::new(),
     }
 }
@@ -209,7 +209,7 @@ fn a_seed_clear_on_another_lane_leaves_the_seed_withholding() {
         feature_key: beta(SEEDED),
     };
     let source = CapabilityMatrixSource::Empty {
-        replay: MatrixReplaySummary::default(),
+        replay: Some(MatrixReplaySummary::default()),
         seed_clears: vec![marker],
     };
 
