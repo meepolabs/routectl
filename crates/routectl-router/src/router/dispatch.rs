@@ -2328,15 +2328,15 @@ impl Router {
                         // actionable if an operator can correlate the same
                         // triple across lines -- so the key rides as a hash
                         // salted per process. Correlation within a run is all
-                        // the WARN needs, and the per-process salt denies an
+                        // the event needs, and the per-process salt denies an
                         // offline dictionary attack on a client that keys its
                         // session by a stable per-user string.
                         //
                         // `model` renders the served nickname, matching the
                         // dimension the entry is keyed under: an operator
-                        // correlating a WARN against a K window must read one
+                        // correlating an event against a K window must read one
                         // label, not two.
-                        tracing::warn!(
+                        tracing::debug!(
                             session_key_hash = crate::log_hash::salted_log_hash(session_key),
                             provider_kind = provider_kind.unwrap_or(""),
                             model = %routectl_core::sanitize_for_log(served_model),

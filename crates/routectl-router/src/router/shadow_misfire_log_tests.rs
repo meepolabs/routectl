@@ -1,7 +1,7 @@
-//! Log-hygiene guard for the shadow-misfire WARN.
+//! Log-hygiene guard for the shadow-misfire DEBUG event.
 //!
 //! The inbound session key is caller-controlled and the canonical schema
-//! declares it must not be logged raw. The WARN must still identify the
+//! declares it must not be logged raw. The event must still identify the
 //! affected (session, provider_kind, model) triple so an operator can
 //! correlate misfires across lines, so the key rides as a per-process
 //! salted hash: stable within one run, unpredictable across runs.
@@ -117,9 +117,9 @@ fn record(router: &Router, req: &ChatRequest) {
 }
 
 #[test]
-fn shadow_misfire_warn_hashes_session_key_instead_of_logging_it_raw() {
+fn shadow_misfire_debug_hashes_session_key_instead_of_logging_it_raw() {
     // Arrange: prime the shadow store for this triple (FirstSeen emits no
-    // WARN), then perturb the cache-anchored head so the trimmed-prefix
+    // event), then perturb the cache-anchored head so the trimmed-prefix
     // fingerprint shifts and the next record is a Misfire.
     let router = Router::new(Arc::new(Config::default()));
     record_first_seen(&router);
@@ -128,13 +128,19 @@ fn shadow_misfire_warn_hashes_session_key_instead_of_logging_it_raw() {
     let events =
         routectl_testkit::capture_events(|| record(&router, &triggering_req("shifted head XXXX")));
 
-    // Assert: the WARN fired, still identifies the triple, and carries the
-    // session key only as a stable hash.
-    let warn = events
+    // Assert: exactly one DEBUG event fired, it still identifies the triple,
+    // and it carries the session key only as a stable hash.
+    let misfires: Vec<_> = events
         .iter()
-        .find(|e| e.message.starts_with("would_trim_shadow_misfire"))
-        .unwrap_or_else(|| panic!("expected shadow-misfire WARN, got events: {events:?}"));
-    assert_eq!(warn.level, tracing::Level::WARN);
+        .filter(|e| e.message.starts_with("would_trim_shadow_misfire"))
+        .collect();
+    assert_eq!(
+        misfires.len(),
+        1,
+        "expected exactly one shadow-misfire event, got events: {events:?}",
+    );
+    let misfire = misfires[0];
+    assert_eq!(misfire.level, tracing::Level::DEBUG);
 
     for event in &events {
         assert!(
@@ -149,14 +155,14 @@ fn shadow_misfire_warn_hashes_session_key_instead_of_logging_it_raw() {
         }
     }
 
-    assert_eq!(warn.field("provider_kind"), Some(PROVIDER_KIND));
+    assert_eq!(misfire.field("provider_kind"), Some(PROVIDER_KIND));
     assert_eq!(
-        warn.field("model"),
+        misfire.field("model"),
         Some(SERVED_MODEL),
         "the logged model dimension is the served nickname the entry is keyed under",
     );
     assert_eq!(
-        warn.field("session_key_hash"),
+        misfire.field("session_key_hash"),
         Some(
             crate::log_hash::salted_log_hash(RAW_SESSION_KEY)
                 .to_string()
@@ -165,7 +171,7 @@ fn shadow_misfire_warn_hashes_session_key_instead_of_logging_it_raw() {
         "the triple must stay correlatable via a hash that is stable within the run",
     );
     assert_ne!(
-        warn.field("session_key_hash"),
+        misfire.field("session_key_hash"),
         Some(
             crate::context_trim::fnv1a_hash(RAW_SESSION_KEY.as_bytes())
                 .to_string()
@@ -199,7 +205,7 @@ fn record_first_seen(router: &Router) {
 /// render the same `session_key_hash` so an operator can group them. Salting
 /// the hash must not cost that.
 #[test]
-fn misfire_warns_for_one_key_share_a_hash_within_a_run() {
+fn misfire_events_for_one_key_share_a_hash_within_a_run() {
     let hashes: Vec<String> = (0..2)
         .map(|_| {
             let router = Router::new(Arc::new(Config::default()));
@@ -211,7 +217,7 @@ fn misfire_warns_for_one_key_share_a_hash_within_a_run() {
                 .iter()
                 .find(|e| e.message.starts_with("would_trim_shadow_misfire"))
                 .and_then(|e| e.field("session_key_hash"))
-                .unwrap_or_else(|| panic!("expected a hashed misfire WARN, got: {events:?}"))
+                .unwrap_or_else(|| panic!("expected a hashed misfire event, got: {events:?}"))
                 .to_string()
         })
         .collect();
