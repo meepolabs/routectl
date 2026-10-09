@@ -1461,16 +1461,29 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("anthropic", &sample_request("m", true), "req-stream-err");
-    render_stream_task(
+    let ((), logs) = routectl_testkit::with_capture(Box::pin(render_stream_task(
         upstream,
         AnthropicIngress,
         capture,
         tx,
         k_test_router(),
         StreamTurn::unmetered(None, StreamRequestContext::default()),
-    )
+    )))
     .await;
     let events = drain(rx).await;
+
+    // An upstream mid-stream fault is the upstream's verdict, not a
+    // routectl fault: one WARN line, never ERROR.
+    let stream_errors: Vec<_> = logs
+        .iter()
+        .filter(|e| e.message == "upstream stream error -- emitting terminal error event")
+        .collect();
+    assert_eq!(
+        stream_errors.len(),
+        1,
+        "exactly one stream-error line: {logs:?}"
+    );
+    assert_eq!(stream_errors[0].level, tracing::Level::WARN);
 
     // Assert: prefix chunk events + terminal error event.
     let names: Vec<&str> = events
@@ -4797,6 +4810,33 @@ fn map_error_normalize_request_log_caps_long_user_payload_keeps_provider() {
         !detail_field.contains(payload_marker),
         "server log leaked the user payload past the length cap: {detail_field}"
     );
+}
+
+#[test]
+fn map_error_upstream_logs_once_at_warn_not_error() {
+    // An upstream rejection (rate limit, overload, bad request) is the
+    // upstream's verdict, already relayed to the client and recorded on the
+    // usage row; it is not a routectl fault, so it must not log at ERROR.
+    let events = routectl_testkit::capture_events(|| {
+        let err = Error::upstream(
+            LEAK_PROVIDER,
+            429,
+            "{\"error\":{\"type\":\"rate_limit_error\"}}",
+        );
+        let _resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+    });
+
+    let logged: Vec<_> = events
+        .iter()
+        .filter(|e| e.message == "upstream error sanitized in HTTP response")
+        .collect();
+    assert_eq!(
+        logged.len(),
+        1,
+        "exactly one sanitized-upstream line: {events:?}"
+    );
+    assert_eq!(logged[0].level, tracing::Level::WARN);
+    assert_eq!(logged[0].field("status"), Some("429"));
 }
 
 #[tokio::test]

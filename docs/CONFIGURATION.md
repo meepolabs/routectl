@@ -414,8 +414,8 @@ the `max_body_bytes` cap):
     client to send the full conversation `input` each turn.
   - `store: true` without a `previous_response_id` -> **accepted**. The
     current turn is self-contained so the answer is correct; the
-    persistence intent is ignored and logged at WARN (a later
-    retrieval-by-id against this stateless proxy will find nothing).
+    persistence intent is ignored and logged at WARN once per process (a
+    later retrieval-by-id against this stateless proxy will find nothing).
   - `store: false` / absent -> normal stateless path.
 
 On every inference route (including `count_tokens`), a transcript whose

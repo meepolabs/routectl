@@ -1048,7 +1048,7 @@ async fn drive_stream<A: IngressAdapter>(
                 // envelope for structured errors). The full raw body
                 // remains available at DEBUG via `debug_upstream_error_body`
                 // on the egress side.
-                tracing::error!(
+                tracing::warn!(
                     detail = %safe_msg,
                     class = ?class,
                     "upstream stream error -- emitting terminal error event"
@@ -1249,7 +1249,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             upstream_type,
             ..
         } => {
-            tracing::error!(
+            tracing::warn!(
                 provider = %routectl_core::sanitize_for_log(provider),
                 status = *status,
                 upstream_type = ?upstream_type,

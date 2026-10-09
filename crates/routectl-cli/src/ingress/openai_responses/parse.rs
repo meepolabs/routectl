@@ -36,10 +36,12 @@
 //!   client omitted prior context expecting the server to resolve it;
 //!   routectl is stateless and cannot, so answering would be wrong.
 //! - `store: true` (no previous_response_id) -> accepted, persistence
-//!   ignored with a WARN. The full turn is present, so the answer is
+//!   ignored with a WARN (once per process). The full turn is present, so the answer is
 //!   correct; retrieval-by-id later just won't work because routectl
 //!   never stores.
 //! - `store: false` / absent -> normal stateless path.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::http::HeaderMap;
 use serde_json::{Map, Value};
@@ -267,13 +269,23 @@ fn reject_previous_response_id(obj: &Map<String, Value>) -> Result<()> {
     ))
 }
 
+/// Latch for [`warn_on_store`]: a client that sends `store: true` sends it
+/// on every turn, so the heads-up is useful once per process, not per request.
+static STORE_IGNORED_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// Warn when the client asked the server to persist the response
 /// (`store: true`) without a `previous_response_id`. The current turn is
 /// self-contained, so routectl answers it correctly; it simply never
 /// persists, which means a later retrieval-by-id against this proxy would
 /// find nothing. Not an error -- only a heads-up for the operator.
 fn warn_on_store(obj: &Map<String, Value>) {
-    if obj.get("store").and_then(Value::as_bool) == Some(true) {
+    warn_on_store_once(obj, &STORE_IGNORED_WARNED);
+}
+
+pub(super) fn warn_on_store_once(obj: &Map<String, Value>, warned: &AtomicBool) {
+    if obj.get("store").and_then(Value::as_bool) == Some(true)
+        && !warned.swap(true, Ordering::Relaxed)
+    {
         tracing::warn!(
             "openai-responses ingress: store=true ignored (routectl is stateless; the current \
              turn is answered from the full input, but the response is never persisted, so a \

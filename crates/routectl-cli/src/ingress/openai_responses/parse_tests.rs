@@ -2192,6 +2192,53 @@ fn store_true_is_accepted_and_ignored() {
 }
 
 #[test]
+fn store_true_warns_once_per_latch_not_per_request() {
+    // Arrange: a fresh latch, and a client that sends store=true every turn.
+    let warned = std::sync::atomic::AtomicBool::new(false);
+    let store_true = json!({ "store": true });
+    let obj = store_true.as_object().expect("object");
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        for _ in 0..3 {
+            parse::warn_on_store_once(obj, &warned);
+        }
+    });
+
+    // Assert
+    let store_warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.message.contains("store=true ignored"))
+        .collect();
+    assert_eq!(
+        store_warns.len(),
+        1,
+        "store=true must warn once: {events:?}"
+    );
+    assert_eq!(store_warns[0].level, tracing::Level::WARN);
+}
+
+#[test]
+fn store_false_does_not_trip_the_store_latch() {
+    // Arrange
+    let warned = std::sync::atomic::AtomicBool::new(false);
+    let store_false = json!({ "store": false });
+    let obj = store_false.as_object().expect("object");
+
+    // Act
+    let events = routectl_testkit::capture_events(|| parse::warn_on_store_once(obj, &warned));
+
+    // Assert: no line, and the latch stays armed for a later store=true.
+    assert!(
+        events
+            .iter()
+            .all(|e| !e.message.contains("store=true ignored")),
+        "store=false must not warn: {events:?}"
+    );
+    assert!(!warned.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[test]
 fn store_false_is_normal_stateless_path() {
     // Arrange
     let body = json!({ "model": "m", "input": "hi", "store": false });
