@@ -247,3 +247,18 @@ fn the_production_ladder_rejects_versions_outside_its_range() {
         assert_eq!(result.is_ok(), *mapped, "{name}: {result:?}");
     }
 }
+
+#[test]
+fn the_legacy_vocab_step_retires_every_row() {
+    let legacy_step = VOCAB_STEPS
+        .iter()
+        .find(|step| step.from == LEGACY_VOCAB_VERSION)
+        .expect("the production ladder has a step out of the legacy version");
+
+    assert!(
+        legacy_step.retire_all,
+        "the legacy capability-row data step in the usage ledger deletes \
+         pre-boundary NULL-vocab rows because no legacy row can map forward; \
+         revisit that data step before making the legacy vocabulary mappable"
+    );
+}

@@ -879,3 +879,100 @@ async fn a_seed_clear_decides_the_same_across_a_revision_bump_boot_and_the_next_
     assert_eq!(first, vec!["fx-stale".to_string()]);
     assert_eq!(second, first, "the restart after the bump decides the same");
 }
+
+/// Insert one capability observation with no vocabulary stamp, the shape a
+/// legacy-vocabulary router wrote.
+fn seed_unstamped_observation(conn: &rusqlite::Connection, ts: i64, capability: &str) {
+    conn.execute(
+        "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
+         tier, evidence_class, upstream_token, catalog_version, overlay_revision, \
+         provider_kind, vocab_version) \
+         VALUES (?1, 'gpt-nick', ?2, 'broken', 'f1', 'live', 'self-identifying', NULL, NULL, \
+         NULL, NULL, 'openai-compat', NULL)",
+        params![ts, capability],
+    )
+    .expect("seed unstamped observation");
+}
+
+fn unstamped_observation_count(path: &Path) -> i64 {
+    let db = open(path).expect("open ledger");
+    db.conn()
+        .query_row(
+            "SELECT COUNT(*) FROM capability_events \
+             WHERE vocab_version IS NULL AND verdict <> 'tombstone'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count unstamped observations")
+}
+
+/// Rebuild `router` from `ledger` through a throwaway writer at a separate
+/// path, so the rebuild itself never opens a writer on the ledger.
+fn rebuild_keys(tmp: &TempDir, ledger: &Path, router: &Router) -> Vec<String> {
+    let scratch = tmp.path().join("scratch.db");
+    let (handle, writer) = writer_at(&scratch);
+    warm_off_runtime(ledger, router, &handle);
+    drop(handle);
+    writer.shutdown();
+    resident_keys(router)
+}
+
+/// Deleting the unstamped pre-boundary observations is invisible to a warm
+/// rebuild: the registry rebuilt before the writer's legacy data step equals
+/// the one rebuilt after it.
+#[tokio::test]
+async fn the_legacy_observation_purge_leaves_the_rebuilt_registry_unchanged() {
+    // Arrange
+    let tmp = TempDir::new().expect("tempdir");
+    let router = default_router(&tmp).await;
+    let cat = i64::from(router.catalog_version());
+    let overlay = i64::try_from(router.overlay_revision()).unwrap();
+    let ledger = tmp.path().join("usage.db");
+    {
+        let db = open(&ledger).expect("open ledger");
+        seed_unstamped_observation(db.conn(), 50, "web_search");
+        seed_unstamped_observation(db.conn(), 60, "file_search");
+        seed_tombstone(db.conn(), 100, cat, overlay);
+        for (ts, capability) in [(200, "web_search"), (300, "code_interpreter")] {
+            seed_event(
+                db.conn(),
+                ts,
+                "gpt-nick#upstream",
+                capability,
+                "broken",
+                "f1",
+                "live",
+                "self-identifying",
+                cat,
+                overlay,
+            );
+        }
+    }
+    let before = rebuild_keys(&tmp, &ledger, &router);
+    assert_eq!(
+        unstamped_observation_count(&ledger),
+        2,
+        "positive control: the rebuild alone leaves the unstamped rows in place"
+    );
+
+    // Act: a writer cycle on the ledger runs the legacy data step.
+    let (handle, writer) = writer_at(&ledger);
+    drop(handle);
+    writer.shutdown();
+    let after = rebuild_keys(&tmp, &ledger, &default_router(&tmp).await);
+
+    // Assert
+    assert_eq!(
+        unstamped_observation_count(&ledger),
+        0,
+        "the writer's data step deletes the unstamped pre-boundary observations"
+    );
+    assert_eq!(
+        before,
+        vec!["code_interpreter".to_string(), "web_search".to_string()]
+    );
+    assert_eq!(
+        after, before,
+        "the purge leaves the rebuilt registry unchanged"
+    );
+}
