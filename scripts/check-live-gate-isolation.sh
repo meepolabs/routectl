@@ -61,6 +61,13 @@
 # binary cannot stop the run before a later one had its chance to dial.
 # Proxy variables are cleared for the namespaced legs.
 #
+# Every leg runs with HOME and XDG_CONFIG_HOME pointed at its own scratch
+# directories under the run's work dir, so nothing a leg runs can read or
+# write the invoking user's real config or data (a usage ledger resolved
+# from HOME, say). RUSTUP_HOME and CARGO_HOME are taken from the outer
+# environment first and passed through, so the toolchain proxies and the
+# fetched registry cache stay reachable.
+#
 # Needs util-linux `unshare` with unprivileged user namespaces, iproute2
 # `ip`, python3, bash >= 5.1, and a directory under /run the invoking user
 # can write for the canary ($XDG_RUNTIME_DIR, or the sticky /run/lock).
@@ -389,6 +396,8 @@ UNSHARE=(unshare --user --map-root-user --net --pid --mount --fork --kill-child 
 cd "$REPO_ROOT" || exit 1
 
 WORK="$(mktemp -d)"
+RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 RUNNING_PID=""
 CANARY_PID=""
 
@@ -458,10 +467,12 @@ build_planted_env() {
     log "planted ${#PLANTED[@]} synthetic variables: $(tr '\n' ' ' <<<"$names")"
 }
 
-# Runs "$@" in fresh namespaces with the planted environment, under
-# `deadline` seconds. Sets LEG_LOG (the recorder log) and LEG_ERROR (empty
-# when the leg is valid evidence, else why it is not) and LEG_RC (the
-# command's exit status; meaningful only when LEG_ERROR is empty).
+# Runs "$@" in fresh namespaces with the planted environment and a scratch
+# HOME / XDG_CONFIG_HOME, under `deadline` seconds. Sets LEG_LOG (the
+# recorder log) and LEG_ERROR (empty when the leg is valid evidence, else
+# why it is not) and LEG_RC (the command's exit status; meaningful only when
+# LEG_ERROR is empty). The scratch assignments follow PLANTED, so they win
+# over any same-named planted variable.
 run_leg() {
     local name="$1" deadline="$2"
     shift 2
@@ -469,10 +480,13 @@ run_leg() {
     LEG_STATUS="$WORK/$name.status"
     : >"$LEG_LOG"
     : >"$LEG_STATUS"
+    mkdir -p "$WORK/$name.home" "$WORK/$name.xdg"
     local unset_args=() var
     for var in "${PROXY_VARS[@]}" "${HOST_SOCKET_VARS[@]}"; do unset_args+=(-u "$var"); done
     run_bounded $((deadline + LEG_KILL_SLACK)) \
         env "${unset_args[@]}" "${PLANTED[@]}" OUTER_UID="$(id -u)" OUTER_GID="$(id -g)" \
+        HOME="$WORK/$name.home" XDG_CONFIG_HOME="$WORK/$name.xdg" \
+        RUSTUP_HOME="$RUSTUP_HOME" CARGO_HOME="$CARGO_HOME" \
         CANARY_SOCKET="$CANARY_SOCKET" MASK_SOCKET_PATHS="$MASK_SOCKET_PATHS" \
         "${UNSHARE[@]}" \
         bash "$SELF" --inside "$LEG_LOG" "$WORK/$name.ready" "$LEG_STATUS" "$deadline" "$@"

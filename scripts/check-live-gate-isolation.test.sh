@@ -20,7 +20,10 @@
 #   - each live leg's cargo selection is that subcommand's, narrowed only by
 #     --test, so the live legs reuse the standard gate's build;
 #   - the registry's conservation subcommand is that same selection plus
-#     --test conservation, so CI's conservation step reuses it too.
+#     --test conservation, so CI's conservation step reuses it too;
+#   - every leg runs with HOME and XDG_CONFIG_HOME pointed at scratch
+#     directories under the run's work dir, with RUSTUP_HOME and CARGO_HOME
+#     passed through so the toolchain stays reachable.
 #
 # Every "passes" assertion has a control proving the same assertion fails
 # on a copy of the checker planted with the defect.
@@ -455,6 +458,79 @@ if m="$(mutant live-narrow 's|LIVE_COMMAND=(cargo test --workspace --all-feature
     fi
 else
     fail "could not build the live-narrow mutant"
+fi
+
+# --- leg environment ---------------------------------------------------------
+
+# Runs a checker's run_leg with run_bounded stubbed to record its argv, and
+# prints each problem with the leg's HOME / XDG_CONFIG_HOME / RUSTUP_HOME /
+# CARGO_HOME, or nothing when all four are what the leg needs.
+leg_env_problems() {
+    local fn
+    fn="$(awk '/^run_leg\(\) \{$/ { on = 1 } on { print } on && /^}$/ { exit }' "$1")"
+    if [[ -z "$fn" ]]; then
+        echo "no run_leg function"
+        return
+    fi
+    # shellcheck disable=SC2034,SC2329 # read and called by the eval'd run_leg
+    (
+        WORK="$TMP/leg-env-$RANDOM"
+        mkdir -p "$WORK"
+        RUSTUP_HOME="$TMP/outer-rustup"
+        CARGO_HOME="$TMP/outer-cargo"
+        PROXY_VARS=(HTTP_PROXY)
+        HOST_SOCKET_VARS=(SSH_AUTH_SOCK)
+        PLANTED=(SYNTHETIC_KEY=x)
+        UNSHARE=(unshare)
+        SELF=checker CANARY_SOCKET=canary MASK_SOCKET_PATHS="" LEG_KILL_SLACK=0
+        run_bounded() { shift; printf '%s\n' "$@" >"$WORK/argv"; STEP_RC=0; }
+        judge_leg() { :; }
+        eval "$fn"
+        run_leg probe 1 true
+        local -A seen=()
+        local arg in_env=0
+        while IFS= read -r arg; do
+            if [[ "$arg" == env ]]; then
+                in_env=1
+            elif ((in_env)) && [[ "$arg" == unshare ]]; then
+                break
+            elif ((in_env)) && [[ "$arg" == [A-Z_]*=* ]]; then
+                seen[${arg%%=*}]="${arg#*=}"
+            fi
+        done <"$WORK/argv"
+        local var value
+        for var in HOME XDG_CONFIG_HOME; do
+            value="${seen[$var]:-}"
+            if [[ "$value" != "$WORK"/* ]]; then
+                echo "$var='${value:-<inherited>}' is not under the work dir"
+            elif [[ ! -d "$value" ]]; then
+                echo "$var='$value' was not created"
+            fi
+        done
+        [[ "${seen[RUSTUP_HOME]:-}" == "$RUSTUP_HOME" ]] ||
+            echo "RUSTUP_HOME='${seen[RUSTUP_HOME]:-<inherited>}' is not the outer value"
+        [[ "${seen[CARGO_HOME]:-}" == "$CARGO_HOME" ]] ||
+            echo "CARGO_HOME='${seen[CARGO_HOME]:-<inherited>}' is not the outer value"
+    )
+}
+
+gone="$(leg_env_problems "$CHECKER")"
+if [[ -z "$gone" ]]; then
+    pass "every leg runs with a scratch HOME and XDG_CONFIG_HOME and the outer toolchain homes"
+else
+    fail "leg environment: $(tr '\n' ';' <<<"$gone")"
+fi
+
+# shellcheck disable=SC2016 # matches the literal "$WORK" in the checker source
+if m="$(mutant real-home '/^        HOME="\$WORK\/\$name\.home" XDG_CONFIG_HOME=/d')"; then
+    gone="$(leg_env_problems "$m")"
+    if [[ "$gone" == *"HOME='<inherited>'"* && "$gone" == *"XDG_CONFIG_HOME='<inherited>'"* ]]; then
+        pass "control: a leg inheriting the real HOME and XDG_CONFIG_HOME is caught"
+    else
+        fail "control: a leg without the scratch HOME override passed (${gone:-no problem reported})"
+    fi
+else
+    fail "could not build the real-home mutant"
 fi
 
 if ((fails)); then

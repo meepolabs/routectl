@@ -8829,11 +8829,14 @@ new section or a second doc.
 - `check-live-gate-isolation.sh` -- hostile-environment check proving the
   standard all-features gate (`test-gate.sh workspace-all-features`) makes
   zero network attempts under planted credentials inside private network
-  and mount namespaces; CI's only workspace test run
+  and mount namespaces, every leg under a scratch HOME and XDG_CONFIG_HOME;
+  CI's only workspace test run
 - `check-live-gate-isolation.test.sh` -- self-test for that check's static
   contract: deadline budget vs the CI step timeout, the fixed planted
   credential names, run-from-anywhere source resolution, its live-target
-  list matching every live `test = false` target in the crate manifests, and
-  the gate registry's conservation selection matching workspace-all-features
+  list matching every live `test = false` target in the crate manifests,
+  the gate registry's conservation selection matching workspace-all-features,
+  and each leg's scratch HOME / XDG_CONFIG_HOME with the toolchain homes
+  passed through
 - `net-oracle.py` -- the loopback packet-capture attempt recorder (plus DNS
   responder) that check runs inside the namespace
