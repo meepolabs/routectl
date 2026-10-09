@@ -38,7 +38,9 @@ use crate::handlers::control::purge_capability;
 use crate::handlers::usage_capture::drain_capability_events;
 use crate::server::AppState;
 use crate::server::capability_rebuild::warm_capability_registry_from_ledger;
-use crate::server::test_support::{isolate_usage_db, overlay_at_revision};
+use crate::server::test_support::{
+    drain_usage_writer_strict, isolate_usage_db, overlay_at_revision,
+};
 
 const PURGE_PATH: &str = "/control/capability/purge";
 
@@ -172,9 +174,9 @@ fn start_writer(config: &Config) -> (UsageHandle, UsageWriter) {
 /// Stop the writer so every queued row is on disk. The handle goes first: a
 /// live producer clone keeps the channel open and the drain would wait out its
 /// deadline and abandon what is queued.
-fn stop_writer(usage: UsageHandle, writer: UsageWriter) {
+async fn stop_writer(usage: UsageHandle, writer: UsageWriter) {
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The boot warm, off the runtime thread: it commits its boundary through the
@@ -216,7 +218,7 @@ async fn withheld_after_restart(
     let router = boot(config, overlay_revision, Arc::clone(&seat));
     warm_off_runtime(config, &router, &usage);
     let _ = dispatch(&router, flag).await;
-    stop_writer(usage, writer);
+    stop_writer(usage, writer).await;
     let call = seat.only_call();
     assert_eq!(
         call.client_betas,
@@ -275,7 +277,7 @@ async fn first_seed_session(config: &Arc<Config>, lift: bool) {
     if lift {
         lift_seed_through_the_control_route(router, &usage).await;
     }
-    stop_writer(usage, writer);
+    stop_writer(usage, writer).await;
 }
 
 // Every test here joins the default serial group: sibling tests in this crate
@@ -314,7 +316,7 @@ async fn a_learned_beta_negative_survives_a_restart() {
         router.catalog_version(),
         router.overlay_revision(),
     );
-    stop_writer(usage, writer);
+    stop_writer(usage, writer).await;
 
     // Act
     let withheld = withheld_after_restart(&config, 0, LEARNED_FLAG).await;

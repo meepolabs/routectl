@@ -19,6 +19,7 @@
 //! lifecycle, including the probe-settlement (`cleared`) path a live re-probe
 //! success takes.
 
+use crate::server::test_support::drain_usage_writer_strict;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -171,11 +172,15 @@ fn warm_off_runtime_capturing(
     })
 }
 
-fn warm_and_snapshot(db_path: &Path, router: &Router, scratch: &Path) -> Vec<LearnedRegistryEntry> {
+async fn warm_and_snapshot(
+    db_path: &Path,
+    router: &Router,
+    scratch: &Path,
+) -> Vec<LearnedRegistryEntry> {
     let (handle, writer) = writer_at(scratch);
     warm_off_runtime(db_path, router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     router.learned_capability_snapshot()
 }
 
@@ -379,7 +384,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
         );
     }
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Live side: the same stream as in-memory replay rows at one shared live
     // instant, oldest-first by rowid (the tombstone sits at rowid 0).
@@ -417,7 +422,7 @@ async fn live_and_rebuild_registries_match_on_normalized_state() {
     // from the persisted ledger through the real bridge.
     live_router.rebuild_learned_from_ledger(&live_reader);
     let scratch = tmp.path().join("scratch.db");
-    let rebuilt = warm_and_snapshot(&ledger, &rebuild_router, &scratch);
+    let rebuilt = warm_and_snapshot(&ledger, &rebuild_router, &scratch).await;
     let live = live_router.learned_capability_snapshot();
 
     // Assert: identical normalized state, and the concrete outcomes the live
@@ -480,11 +485,11 @@ async fn learned_negative_survives_restart_and_acts_without_a_fresh_attempt() {
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act: a fresh process warms the registry from the ledger.
     let scratch = tmp.path().join("scratch.db");
-    let snap = warm_and_snapshot(&ledger, &router, &scratch);
+    let snap = warm_and_snapshot(&ledger, &router, &scratch).await;
 
     // Assert: the negative is resident and already acts -- a first dispatch
     // routes away without paying a fresh doomed attempt to re-learn it.
@@ -524,7 +529,7 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act 1: restart at a bumped overlay revision. The ledger's tombstone
     // revision no longer matches, so warm fails closed to empty and writes a
@@ -534,7 +539,7 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
     let (h2, w2) = writer_at(&ledger);
     warm_off_runtime(&ledger, &bumped, &h2);
     drop(h2);
-    w2.shutdown();
+    drain_usage_writer_strict(w2).await;
 
     // Assert 1: the pre-bump negative is gone (fail-closed to empty).
     assert!(
@@ -558,12 +563,12 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
         1,
     );
     drop(h3);
-    w3.shutdown();
+    drain_usage_writer_strict(w3).await;
 
     let mut relearned = default_router(&tmp).await;
     relearned.install_catalog_overlay(crate::server::test_support::overlay_at_revision(7));
     let scratch = tmp.path().join("scratch.db");
-    let snap = warm_and_snapshot(&ledger, &relearned, &scratch);
+    let snap = warm_and_snapshot(&ledger, &relearned, &scratch).await;
 
     // Assert 2: the new-revision negative replays; the pre-bump one stays gone.
     assert!(
@@ -617,11 +622,11 @@ async fn stale_event_lapses_to_a_single_reprobe_across_restart() {
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act
     let scratch = tmp.path().join("scratch.db");
-    let snap = warm_and_snapshot(&ledger, &router, &scratch);
+    let snap = warm_and_snapshot(&ledger, &router, &scratch).await;
 
     // Assert: the stale negative is resident but its window has already lapsed,
     // so the next dispatch admits a single re-probe rather than routing away
@@ -682,13 +687,13 @@ async fn reload_then_restart_replays_only_post_reload_negatives() {
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act: restart at the post-reload revision.
     let mut router = default_router(&tmp).await;
     router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(1));
     let scratch = tmp.path().join("scratch.db");
-    let snap = warm_and_snapshot(&ledger, &router, &scratch);
+    let snap = warm_and_snapshot(&ledger, &router, &scratch).await;
 
     // Assert: only the post-reload negative (after the latest tombstone, at the
     // matching revision) replays; the pre-reload one sits before the boundary.
@@ -726,14 +731,14 @@ async fn missing_tombstone_fails_closed_to_empty_registry() {
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act: warm reads the same ledger and must fail closed, writing a fresh
     // boot tombstone into it.
     let (h2, w2) = writer_at(&ledger);
     warm_off_runtime(&ledger, &router, &h2);
     drop(h2);
-    w2.shutdown();
+    drain_usage_writer_strict(w2).await;
 
     // Assert: nothing replayed, and a fresh boundary now stamps this revision.
     assert!(
@@ -820,14 +825,14 @@ async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act: warm under a capture subscriber -- it must not panic on the odd rows.
     let scratch = tmp.path().join("scratch.db");
     let (h2, w2) = writer_at(&scratch);
     let events = warm_off_runtime_capturing(&ledger, &router, &h2);
     drop(h2);
-    w2.shutdown();
+    drain_usage_writer_strict(w2).await;
 
     // Assert: the probe negative and the valid live negative both replayed;
     // the unknown-verdict and unknown-source rows were skipped with counters
@@ -904,12 +909,12 @@ async fn retention_prune_never_crosses_the_tombstone() {
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act 1: a restart with a 30-day retention window runs the startup prune.
     let (h2, w2) = writer_with_retention(&ledger, 30);
     drop(h2);
-    w2.shutdown();
+    drain_usage_writer_strict(w2).await;
 
     // Assert 1: the pre-tombstone old row is gone; the tombstone and the
     // post-tombstone old row survive regardless of age.
@@ -928,7 +933,7 @@ async fn retention_prune_never_crosses_the_tombstone() {
 
     // Act 2: warm still replays the protected survivor.
     let scratch = tmp.path().join("scratch.db");
-    let snap = warm_and_snapshot(&ledger, &router, &scratch);
+    let snap = warm_and_snapshot(&ledger, &router, &scratch).await;
 
     // Assert 2: the survivor is resident (old, so lapsed to re-probe); the
     // pruned pre-tombstone row is absent.
@@ -969,11 +974,11 @@ async fn future_dated_event_clamps_to_now_and_replays_fresh() {
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act
     let scratch = tmp.path().join("scratch.db");
-    let snap = warm_and_snapshot(&ledger, &router, &scratch);
+    let snap = warm_and_snapshot(&ledger, &router, &scratch).await;
 
     // Assert: the clock map clamps the future timestamp to now, so the negative
     // replays as fresh -- resident, within its window, and acting.
@@ -1025,9 +1030,9 @@ async fn a_purged_negative_cannot_be_resurrected_by_a_warm_rebuild() {
     // Bring the negative into the live registry the way a real boot does, so
     // the purge below acts on genuinely resident state.
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     let scratch = tmp.path().join("scratch.db");
-    let resident = warm_and_snapshot(&ledger, &live, &scratch);
+    let resident = warm_and_snapshot(&ledger, &live, &scratch).await;
     assert!(
         find(&resident, "gpt-nick#upstream", WEB_SEARCH).is_some(),
         "premise: the negative must be resident before the purge, else the \
@@ -1081,11 +1086,11 @@ async fn a_purged_negative_cannot_be_resurrected_by_a_warm_rebuild() {
         "the finalize must remove the entry it reserved"
     );
     drop(h2);
-    w2.shutdown();
+    drain_usage_writer_strict(w2).await;
 
     // Act 2: a fresh process warms from that ledger.
     let restarted = default_router(&tmp).await;
-    let snap = warm_and_snapshot(&ledger, &restarted, &tmp.path().join("scratch2.db"));
+    let snap = warm_and_snapshot(&ledger, &restarted, &tmp.path().join("scratch2.db")).await;
 
     // Assert: the purge is durable -- the negative does not come back.
     assert!(
@@ -1121,10 +1126,10 @@ async fn without_a_persisted_settlement_the_warm_rebuild_does_resurrect_it() {
         1,
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Act
-    let snap = warm_and_snapshot(&ledger, &router, &tmp.path().join("scratch.db"));
+    let snap = warm_and_snapshot(&ledger, &router, &tmp.path().join("scratch.db")).await;
 
     // Assert: the negative IS resident, so the sibling scenario's absence is
     // attributable to the settlement and to nothing else.

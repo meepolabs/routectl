@@ -61,7 +61,7 @@ use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 
 use crate::handlers::usage_capture::{UsageCapture, build_usage_draft};
 use crate::server::capability_rebuild;
-use crate::server::test_support::isolate_usage_db;
+use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db};
 
 /// The one grounded row in the closed table -- the field a pre-flight rewrite
 /// drops and a canary restores.
@@ -481,7 +481,7 @@ async fn the_canary_cadence_clears_durably_and_the_next_request_forwards_unchang
     arrange_durable_eligible_verdict(&config, &usage, &router);
     let meta = walk_the_cadence_and_settle_the_canary(&router, &seat).await;
     assert_the_disproof_accounting(&router, &meta);
-    persist_through_the_production_drain(usage, &meta, writer);
+    persist_through_the_production_drain(usage, &meta, writer).await;
     let usage2 = assert_the_clear_survived_a_restart(&config);
     assert_the_next_request_forwards_unchanged(&config, &usage2).await;
 }
@@ -580,7 +580,7 @@ fn assert_the_disproof_accounting(router: &Router, meta: &routectl_router::Dispa
 /// PHASE 4: the production drain, then the writer's own.
 ///
 /// THE seam no other test spans: everything before this is in memory.
-fn persist_through_the_production_drain(
+async fn persist_through_the_production_drain(
     usage: UsageHandle,
     meta: &routectl_router::DispatchMeta,
     writer: UsageWriter,
@@ -594,7 +594,7 @@ fn persist_through_the_production_drain(
     // normally -- so the failure is silent.
     drop(usage);
     let started = std::time::Instant::now();
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     // A CLEAN, TIMELY join rather than a deadline detach. The drain deadline is tens of
     // seconds, so "it returned" proves nothing about whether it flushed; a bound well
     // under that deadline is what distinguishes a real drain from an abandonment.

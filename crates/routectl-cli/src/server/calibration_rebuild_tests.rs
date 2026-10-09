@@ -2,6 +2,7 @@
 //! served-nickname key (with the wire-id negative control), agreement with
 //! live admission, the row-cap warning, and the failed-read posture.
 
+use crate::server::test_support::drain_usage_writer_strict;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
@@ -391,7 +392,7 @@ async fn the_warm_migrates_before_reading_and_the_writer_still_attaches() {
     // would.
     let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     let db = open(&path).expect("reopen after writer");
     seed_balanced_lane(&db, NICKNAME, 12_000);
     drop(db);

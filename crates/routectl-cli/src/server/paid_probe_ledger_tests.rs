@@ -16,8 +16,8 @@ use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 use tempfile::TempDir;
 
 use crate::server::test_support::{
-    added_control_rows as added_rows, begin_writer_drain, live_usage_writer as live_writer,
-    usage_control_rows as control_rows,
+    added_control_rows as added_rows, begin_writer_drain, drain_usage_writer_strict,
+    live_usage_writer as live_writer, usage_control_rows as control_rows,
 };
 
 /// One reservation through the adapter, as the Router would ask for it.
@@ -37,10 +37,10 @@ async fn reserve(
 /// deadline and detach. That ordering is the whole point of
 /// `a_retained_adapter_holds_the_writer_channel_open_until_it_is_dropped`
 /// below, and the reason the serve loop releases the router before draining.
-fn stop(ledger: Arc<UsagePaidProbeLedger>, handle: UsageHandle, writer: UsageWriter) {
+async fn stop(ledger: Arc<UsagePaidProbeLedger>, handle: UsageHandle, writer: UsageWriter) {
     drop(ledger);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The ordering the whole feature rests on, at the CLI boundary: when the
@@ -65,7 +65,7 @@ async fn a_committed_unit_is_readable_from_a_second_connection() {
         "exactly one control row, holding this day's single unit: {added:?}",
     );
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 /// One reservation asks the accounting actor EXACTLY once.
@@ -92,7 +92,7 @@ async fn one_reservation_spends_exactly_one_unit() {
     );
     assert_eq!(second, PaidProbeReservation::CapExhausted);
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 /// A cap of two commits exactly twice and then reports the day spent.
@@ -119,7 +119,7 @@ async fn a_cap_of_two_commits_twice_then_reports_the_day_spent() {
         ],
     );
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 /// The provider the Router named is the provider the unit is spent against, so
@@ -174,7 +174,7 @@ async fn each_provider_spends_against_its_own_budget() {
         "each provider's bucket holds exactly its own one unit: {added:?}",
     );
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 /// The cap the Router passed in reaches the accounting actor UNCHANGED: no
@@ -223,7 +223,7 @@ async fn the_caller_cap_reaches_the_accounting_actor_unchanged() {
         "a cap at the type's ceiling travels unchanged, neither clamped nor converted",
     );
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 /// A cap of zero refuses every reservation, and the SAME adapter commits under
@@ -252,7 +252,7 @@ async fn a_zero_cap_refuses_while_a_nonzero_cap_commits() {
         "the control: the same adapter commits under a nonzero cap",
     );
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 /// Accounting state the writer would never have written is refused as
@@ -297,7 +297,7 @@ async fn malformed_accounting_state_refuses_as_malformed() {
         "unreadable accounting state must never authorize a paid call",
     );
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 /// A writer that could not open its database establishes no accounting state,
@@ -317,7 +317,7 @@ async fn a_writer_without_a_database_reports_a_failed_write() {
     // Assert
     assert_eq!(outcome, PaidProbeReservation::WriteFailed);
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 /// Once the accounting subsystem has begun going away, no reservation is
@@ -486,7 +486,7 @@ async fn the_runtime_keeps_running_other_work_while_receipts_are_awaited() {
         "every refusal here must be an exhausted cap: {outcomes:?}",
     );
 
-    stop(ledger, handle, writer);
+    stop(ledger, handle, writer).await;
 }
 
 include!("paid_probe_ledger_lifetime_tests.rs");

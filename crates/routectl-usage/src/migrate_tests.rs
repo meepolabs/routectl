@@ -4,6 +4,8 @@ use super::*;
 use crate::db::open;
 use crate::downgrade::downgrade_to_v16;
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The vocabulary version stamped on non-legacy fixture rows.
@@ -233,6 +235,24 @@ fn purge_keeps_the_schema_version_and_the_file_still_downgrades() {
     assert!(downgraded.is_ok(), "downgrade refused: {downgraded:?}");
 }
 
+/// Open a second connection that takes the write lock and runs `statements`
+/// uncommitted, then commit from a thread after a delay. The thread returns
+/// the instant taken just before COMMIT, while the lock is still held.
+fn rival_writer_committing_later(path: &Path, statements: &str) -> JoinHandle<Instant> {
+    let rival = Connection::open(path).expect("rival open");
+    rival
+        .execute_batch(&format!("BEGIN IMMEDIATE; {statements}"))
+        .expect("rival takes the write lock");
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        let committed_at = Instant::now();
+        rival.execute_batch("COMMIT").expect("rival commit");
+        committed_at
+    })
+}
+
+const PREMISE: &str = "premise: the purge must start while the rival still holds the lock";
+
 #[test]
 fn purge_waits_for_a_concurrent_writer_instead_of_failing() {
     // Arrange: a second connection holds the write lock with an uncommitted
@@ -240,24 +260,48 @@ fn purge_waits_for_a_concurrent_writer_instead_of_failing() {
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
     let expected_deleted = seed_mixed_ledger(db.conn());
-    let rival = Connection::open(&path).expect("rival open");
-    rival
-        .execute_batch("BEGIN IMMEDIATE; INSERT INTO meta (key, value) VALUES ('t', 'x');")
-        .expect("rival takes the write lock");
-    let committer = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        rival.execute_batch("COMMIT").expect("rival commit");
-    });
+    let committer =
+        rival_writer_committing_later(&path, "INSERT INTO meta (key, value) VALUES ('t', 'x');");
 
     // Act
+    let started = Instant::now();
     let outcome = purge_legacy_capability_observations(db.conn());
-    committer.join().expect("committer thread");
+    let committed_at = committer.join().expect("committer thread");
 
     // Assert
+    assert!(started < committed_at, "{PREMISE}");
     assert_eq!(
         outcome.expect("purge must wait out the rival writer"),
         Some(usize::try_from(expected_deleted).expect("count"))
     );
+}
+
+#[test]
+fn purge_skips_when_a_concurrent_writer_records_the_marker_first() {
+    // Arrange: the marker is absent at the purge's plain read, but a second
+    // connection holding the write lock inserts it and commits while the
+    // purge waits for that lock.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    seed_mixed_ledger(db.conn());
+    let before = class_counts(db.conn());
+    let committer = rival_writer_committing_later(
+        &path,
+        &format!(
+            "INSERT INTO meta (key, value) VALUES ('{META_LEGACY_CAPABILITY_PURGE}', 'rival');"
+        ),
+    );
+
+    // Act
+    let started = Instant::now();
+    let outcome = purge_legacy_capability_observations(db.conn());
+    let committed_at = committer.join().expect("committer thread");
+
+    // Assert
+    assert!(started < committed_at, "{PREMISE}");
+    assert_eq!(outcome.expect("purge must see the rival's marker"), None);
+    assert_eq!(class_counts(db.conn()), before);
+    assert_eq!(marker_value(db.conn()), Some("rival".to_string()));
 }
 
 #[test]

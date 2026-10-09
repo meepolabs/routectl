@@ -1,3 +1,4 @@
+use crate::server::test_support::drain_usage_writer_strict;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -153,7 +154,7 @@ async fn absent_ledger_read_is_silent_and_enqueues_one_boot_tombstone() {
     // Drain the writer, then confirm exactly one boot tombstone reached it,
     // stamped this boot's revision.
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     assert_eq!(
         tombstone_count(&scratch),
         1,
@@ -213,7 +214,7 @@ async fn a_never_migrated_ledger_fails_closed_like_any_unreadable_ledger() {
     assert!(router.learned_capability_snapshot().is_empty());
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     assert_eq!(
         tombstone_count(&scratch),
         1,
@@ -233,7 +234,7 @@ async fn boot_tombstone_reaches_writer_through_the_production_seam() {
     // Act
     warm_off_runtime(&ledger, &router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: exactly one tombstone landed, carrying this boot's revision.
     assert_eq!(tombstone_count(&ledger), 1);
@@ -290,7 +291,7 @@ async fn matching_tombstone_replays_post_boundary_negative() {
     );
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -353,7 +354,7 @@ async fn matching_tombstone_skips_a_stale_revision_straggler() {
     );
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -395,7 +396,7 @@ async fn revision_mismatch_drops_a_stale_catalog_scoped_verdict_behind_a_fresh_t
     );
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // A second, fresh tombstone was written at this boot's revision.
     assert_eq!(
@@ -501,7 +502,7 @@ async fn revision_bump_boot_restates_a_wire_shape_verdict_and_drops_a_catalog_sc
     let restarted = bumped_router(&tmp).await;
     warm_off_runtime(&ledger, &restarted, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: the restatement is durable past a fresh boundary, and the
     // catalog-scoped verdict was never restated.
@@ -552,7 +553,7 @@ async fn revision_bump_boot_boundary_failure_commits_nothing_and_installs_nothin
     // Act
     let events = warm_off_runtime(&ledger, &router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert!(
@@ -614,7 +615,7 @@ async fn revision_bump_boot_with_an_unreadable_slice_commits_nothing_and_install
     // Act
     let events = warm_off_runtime(&ledger, &router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: a path-free ERROR names the failure class, nothing is resident,
     // and the stale tombstone is still the newest row of its kind.
@@ -671,7 +672,7 @@ async fn unreadable_ledger_leaves_registry_empty_and_warns() {
     assert!(router.learned_capability_snapshot().is_empty());
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[test]
@@ -873,7 +874,7 @@ async fn a_seed_clear_decides_the_same_across_a_revision_bump_boot_and_the_next_
     let first = withheld_after_boot(&ledger, &handle).await;
     let second = withheld_after_boot(&ledger, &handle).await;
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(first, vec!["fx-stale".to_string()]);
@@ -908,12 +909,12 @@ fn unstamped_observation_count(path: &Path) -> i64 {
 
 /// Rebuild `router` from `ledger` through a throwaway writer at a separate
 /// path, so the rebuild itself never opens a writer on the ledger.
-fn rebuild_keys(tmp: &TempDir, ledger: &Path, router: &Router) -> Vec<String> {
+async fn rebuild_keys(tmp: &TempDir, ledger: &Path, router: &Router) -> Vec<String> {
     let scratch = tmp.path().join("scratch.db");
     let (handle, writer) = writer_at(&scratch);
     warm_off_runtime(ledger, router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     resident_keys(router)
 }
 
@@ -948,7 +949,7 @@ async fn the_legacy_observation_purge_leaves_the_rebuilt_registry_unchanged() {
             );
         }
     }
-    let before = rebuild_keys(&tmp, &ledger, &router);
+    let before = rebuild_keys(&tmp, &ledger, &router).await;
     assert_eq!(
         unstamped_observation_count(&ledger),
         2,
@@ -958,8 +959,8 @@ async fn the_legacy_observation_purge_leaves_the_rebuilt_registry_unchanged() {
     // Act: a writer cycle on the ledger runs the legacy data step.
     let (handle, writer) = writer_at(&ledger);
     drop(handle);
-    writer.shutdown();
-    let after = rebuild_keys(&tmp, &ledger, &default_router(&tmp).await);
+    drain_usage_writer_strict(writer).await;
+    let after = rebuild_keys(&tmp, &ledger, &default_router(&tmp).await).await;
 
     // Assert
     assert_eq!(

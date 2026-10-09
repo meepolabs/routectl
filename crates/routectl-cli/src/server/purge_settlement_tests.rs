@@ -6,6 +6,7 @@
 //! the whole window these tests exist to cover.
 
 use super::*;
+use crate::server::test_support::drain_usage_writer_strict;
 
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_router::{CapabilityEventRow as ReplayRow, CapabilityLedgerReader, ReplayTombstone};
@@ -204,7 +205,7 @@ async fn a_dropped_caller_still_commits_the_clear_and_finalizes_memory() {
          daemon's obligation, not the client's",
     );
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     let rows = cleared_rows(&ledger);
     assert_eq!(
@@ -270,7 +271,7 @@ async fn a_failed_commit_leaves_the_entry_acting_and_the_ledger_clean() {
         .expect("the sender answers before dropping");
     tracker.close_and_wait(WAIT).await;
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Whichever way this writer answered, the two halves must AGREE: a committed
     // clear removes the entry, a failed one leaves it acting. The bug this guards
@@ -325,7 +326,7 @@ async fn shutdown_waits_for_an_in_flight_settlement_before_the_writer_drains() {
         "and must stop admitting new ones, since a new settlement could outlive the writer",
     );
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A CLOSED tracker refuses a CLAIM, before any batch is admitted.

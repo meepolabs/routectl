@@ -9,6 +9,7 @@
 //! a state the test establishes rather than hopes for.
 
 use super::*;
+use crate::server::test_support::drain_usage_writer_strict;
 
 use routectl_router::{
     Config, ModelEntry, ProviderEntry, Router, field_verdict_event_stamps_for_tests,
@@ -214,7 +215,7 @@ async fn a_dropped_request_future_still_advances_eligibility_in_the_same_process
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -257,7 +258,7 @@ async fn a_stale_incarnation_advance_does_nothing_even_though_its_row_commits() 
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -379,7 +380,7 @@ async fn shutdown_waits_for_an_in_flight_advancement_before_the_writer_drains() 
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -438,7 +439,7 @@ async fn shutdown_abandons_a_stalled_advancement_rather_than_hanging_or_failing(
     // Only now is the writer released, so the stall above was genuine.
     let (writer, _dir) = park.release();
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,9 @@
 
 use super::*;
 use crate::handlers::control::cleared_event;
-use crate::server::test_support::{isolate_usage_db, overlay_at_revision};
+use crate::server::test_support::{
+    drain_usage_writer_strict, isolate_usage_db, overlay_at_revision,
+};
 use crate::server::{capability_rebuild, ledger_reader};
 use routectl_router::Config;
 use routectl_router::Router;
@@ -255,7 +257,7 @@ async fn a_wire_shape_verdict_survives_a_revision_reload_and_two_restarts() {
     // gone. A live handle makes it pay the full drain deadline and then
     // detach the thread.
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A restatement re-states an existing fact, so it must NOT refresh the
@@ -323,7 +325,7 @@ async fn a_restated_survivor_keeps_its_original_observation_age() {
     // gone. A live handle makes it pay the full drain deadline and then
     // detach the thread.
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A reload with no survivors still moves the boundary, and says so -- the
@@ -362,7 +364,7 @@ async fn a_reload_with_no_survivors_still_commits_the_boundary() {
     // gone. A live handle makes it pay the full drain deadline and then
     // detach the thread.
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// An unavailable writer must be reported as a FAILED boundary, so the caller
@@ -453,7 +455,7 @@ async fn a_write_failure_commits_no_row_and_reports_a_failed_boundary() {
     // gone. A live handle makes it pay the full drain deadline and then
     // detach the thread.
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Read every capability row as `(ts, verdict, capability)` in append order.
@@ -565,7 +567,7 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// One capability row, with the fields the evidence assertions need.
@@ -669,7 +671,7 @@ async fn a_stale_boundary_boot_makes_its_own_boundary_durable_while_capture_is_d
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The `(catalog_version, overlay_revision)` of the newest tombstone.
@@ -810,7 +812,7 @@ async fn a_refused_admission_leaves_the_live_state_pointer_identical() {
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The startup warm runs OFF the Tokio worker.
@@ -876,7 +878,7 @@ async fn the_startup_warm_runs_off_the_tokio_worker() {
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A delayed PRE-boundary event is dropped, while a field observation made
@@ -930,7 +932,7 @@ async fn a_delayed_pre_boundary_event_is_dropped_while_a_post_admission_field_ev
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: after the newest tombstone, the field event is present and the
     // stale catalog-scoped straggler is not.
@@ -1015,7 +1017,7 @@ async fn a_write_failure_runs_no_boundary_transition() {
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The PRODUCTION startup site dispatches the warm off the runtime.
@@ -1113,7 +1115,7 @@ async fn a_failed_boundary_leaves_the_shared_tuning_unchanged() {
     assert_eq!(before.learned_registry().max_entries(), cap_before);
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A refused ADMISSION likewise leaves tuning untouched, and rolls back nothing
@@ -1198,7 +1200,7 @@ async fn a_committed_boundary_applies_the_reloads_tuning() {
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// An observation made through the still-published OLD Router while the boundary
@@ -1286,7 +1288,7 @@ async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// THE stamp/boundary/clear regression, end to end on a real ledger.
@@ -1394,7 +1396,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
 
     drop(capture);
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // (6) Two consecutive restarts: the negative must stay ABSENT.
     let (usage2, writer2) = UsageWriter::start(
@@ -1417,7 +1419,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
     );
 
     drop(usage2);
-    writer2.shutdown();
+    drain_usage_writer_strict(writer2).await;
 }
 
 /// Shutdown abandonment rolls the pending generation back, so an operation
@@ -1541,7 +1543,7 @@ async fn an_inferred_survivors_corroboration_survives_a_reload_and_restart() {
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The observation count of one resident entry, or zero when absent.
@@ -1663,7 +1665,7 @@ async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart()
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The generation the LEDGER records and the generation the registry holds stay
@@ -1719,7 +1721,7 @@ async fn the_committed_ledger_generation_equals_the_registry_generation() {
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A second boundary is refused while the first is in flight, at the CLI seam.
@@ -1881,7 +1883,7 @@ async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A purge attempted while a boundary is admitted but unsettled is refused;
@@ -2001,7 +2003,7 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// `owning_config` with the `nick` entry flipped to another kind, plus a `keep`
@@ -2113,7 +2115,7 @@ async fn an_old_kind_write_between_carry_over_and_cut_is_not_restated_as_the_new
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The owner sweep waits for the boundary. A kind flip with a revision move
@@ -2152,7 +2154,7 @@ async fn a_failed_kind_flip_boundary_leaves_the_previous_routers_entries_intact(
     );
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// The other half of deferring the sweep: once the boundary commits, the
@@ -2192,7 +2194,7 @@ async fn a_committed_kind_flip_boundary_sweeps_the_unowned_entries() {
     assert_eq!(resident_lanes(&reloaded), Vec::new());
 
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// Each restated row carries the provider kind its entry recorded, never one

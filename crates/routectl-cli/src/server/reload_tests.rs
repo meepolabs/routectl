@@ -1133,7 +1133,7 @@ async fn config_reload_revision_change_enqueues_one_new_revision_tombstone() {
 
     // Drain the writer, then inspect the ledger.
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     assert_eq!(
         tombstone_count(&db_path),
@@ -1213,7 +1213,7 @@ async fn config_reload_without_revision_change_enqueues_no_tombstone() {
 
     // Drain the writer: no tombstone must have been enqueued.
     drop(usage);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     assert_eq!(
         tombstone_count(&db_path),
         0,

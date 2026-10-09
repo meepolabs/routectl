@@ -8,6 +8,7 @@
 //! otherwise steady verified traffic on one key pushes an older negative out
 //! of the window and a restart silently forgets it.
 
+use crate::server::test_support::drain_usage_writer_strict;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -191,7 +192,7 @@ async fn one_day_of_verified_traffic(router: &Router, handle: &UsageHandle) {
 }
 
 /// Run the blocking startup warm off the runtime thread against `ledger`.
-fn warm(ledger: &Path, router: &Router, scratch: &Path) {
+async fn warm(ledger: &Path, router: &Router, scratch: &Path) {
     let (handle, writer) = UsageWriter::start(scratch.to_path_buf(), CHANNEL_CAPACITY, 0, true);
     std::thread::scope(|scope| {
         scope
@@ -200,7 +201,7 @@ fn warm(ledger: &Path, router: &Router, scratch: &Path) {
             .expect("warm thread");
     });
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -229,9 +230,9 @@ async fn a_month_of_positive_traffic_writes_one_row_and_keeps_older_negatives() 
         one_day_of_verified_traffic(&live, &handle).await;
     }
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     let restarted = router();
-    warm(&ledger, &restarted, &tmp.path().join("scratch.db"));
+    warm(&ledger, &restarted, &tmp.path().join("scratch.db")).await;
 
     // Assert: the negative learned before the traffic still replays and acts,
     // and the positive is restated beside it.

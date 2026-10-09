@@ -38,7 +38,9 @@ use routectl_usage::{UsageHandle, UsageWriter};
 use tempfile::TempDir;
 
 use super::{UsagePaidProbeLedger, paid_probe_ledger};
-use crate::server::test_support::{added_control_rows, live_usage_writer, usage_control_rows};
+use crate::server::test_support::{
+    added_control_rows, drain_usage_writer_strict, live_usage_writer, usage_control_rows,
+};
 
 /// The lanes, their shared `[providers]` key, and the wire id the first lane
 /// resolves to.
@@ -325,10 +327,10 @@ impl ComposedProbeRig {
     /// Release the producer side and drain the writer, in the order the serve
     /// loop uses: the Router holds the adapter, and the adapter holds a producer
     /// clone the drain waits on.
-    fn stop(self) {
+    async fn stop(self) {
         drop(self.router);
         drop(self.handle);
-        self.writer.shutdown();
+        drain_usage_writer_strict(self.writer).await;
     }
 }
 
@@ -546,7 +548,7 @@ async fn a_probe_pass_commits_through_the_real_writer_before_its_one_wire_call()
         "the refusal the accounting layer returned is the pass's settlement",
     );
 
-    rig.stop();
+    rig.stop().await;
 }
 
 /// The allowance on the wire is CATALOG-DERIVED: a ceiling one token below the
@@ -568,7 +570,7 @@ async fn a_catalog_ceiling_one_below_the_bodys_allowance_dials_nothing() {
         .only_probe_body()
         .max_tokens
         .expect("premise: the composed path must send an allowance to derive from");
-    generous.stop();
+    generous.stop().await;
 
     // Act: the same path, with the catalog confirming one token less.
     let starved = ComposedProbeRig::build(1, allowance - 1).await;
@@ -602,5 +604,5 @@ async fn a_catalog_ceiling_one_below_the_bodys_allowance_dials_nothing() {
         "the pass settled as an authorization refusal",
     );
 
-    starved.stop();
+    starved.stop().await;
 }

@@ -14,7 +14,7 @@ use std::path::Path;
 
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 
-use crate::server::test_support::live_usage_writer as live_writer;
+use crate::server::test_support::{drain_usage_writer_strict, live_usage_writer as live_writer};
 
 /// A Router built the way the library and every non-daemon path builds one.
 async fn built_router(config: &Arc<routectl_router::Config>) -> Router {
@@ -74,7 +74,7 @@ async fn an_uninstalled_router_reports_writes_as_not_guaranteed() {
     );
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -91,7 +91,7 @@ async fn an_installed_router_reports_durable_on_a_healthy_writer() {
     );
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -152,7 +152,7 @@ async fn a_real_write_failure_turns_the_read_unhealthy() {
     );
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -369,7 +369,7 @@ async fn the_health_read_survives_a_rebuild() {
     );
 
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[test]
