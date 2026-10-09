@@ -589,7 +589,7 @@ impl<'a> ReasoningSkipTally<'a> {
         self.foreign_format_skipped_count = self.foreign_format_skipped_count.saturating_add(1);
     }
 
-    /// Emit the aggregated WARN(s), if anything was skipped, and bump the
+    /// Emit the aggregated event(s), if anything was skipped, and bump the
     /// per-request translation-drop counters. Called exactly once per
     /// request from `build_messages`, on both the Ok and the Err arm --
     /// which is also why the lane-seen denominator is bumped
@@ -599,7 +599,7 @@ impl<'a> ReasoningSkipTally<'a> {
     fn flush(&self) {
         record_translation_lane_seen(super::LANE);
         if self.skipped_count > 0 {
-            tracing::warn!(
+            tracing::debug!(
                 provider = self.provider,
                 skipped_count = self.skipped_count,
                 turns_affected = self.turns_affected,
@@ -611,7 +611,7 @@ impl<'a> ReasoningSkipTally<'a> {
             record_translation_drop(super::LANE, "reasoning_signature_missing");
         }
         if self.summary_skipped_count > 0 {
-            tracing::warn!(
+            tracing::debug!(
                 provider = self.provider,
                 skipped_count = self.summary_skipped_count,
                 "skipping reasoning details on Converse egress: kind has no Converse \
@@ -620,7 +620,7 @@ impl<'a> ReasoningSkipTally<'a> {
             record_translation_drop(super::LANE, "reasoning_summary_unsupported");
         }
         if self.foreign_format_skipped_count > 0 {
-            tracing::warn!(
+            tracing::debug!(
                 provider = self.provider,
                 skipped_count = self.foreign_format_skipped_count,
                 "skipping reasoning details on Converse egress: detail format is not the \

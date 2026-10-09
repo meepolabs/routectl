@@ -1,4 +1,4 @@
-// The aggregated unsigned-reasoning WARN the Converse egress emits once
+// The aggregated unsigned-reasoning event the Converse egress emits once
 // per outbound request: exact skip count, exact affected-turn count,
 // bounded `(message_index, detail_index)` sample, truncation flag. Mirrors
 // `anthropic_api::messages_reasoning_warn_tests.rs`. Imports live in the
@@ -61,7 +61,7 @@ fn unsigned_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
         .collect()
 }
 
-/// The single aggregated unsigned WARN. Asserting the count here is the
+/// The single aggregated unsigned event. Asserting the count here is the
 /// point of aggregation: a per-message implementation emits one line per
 /// affected turn instead.
 fn find_unsigned_warn(events: &[CapturedEvent]) -> &CapturedEvent {
@@ -69,15 +69,15 @@ fn find_unsigned_warn(events: &[CapturedEvent]) -> &CapturedEvent {
     assert_eq!(
         matches.len(),
         1,
-        "exactly one aggregated unsigned WARN expected per request; got events: {events:?}"
+        "exactly one aggregated unsigned event expected per request; got events: {events:?}"
     );
     let warn = matches[0];
-    assert_eq!(warn.level, tracing::Level::WARN);
+    assert_eq!(warn.level, tracing::Level::DEBUG);
     warn
 }
 
 /// Skips pooled across MORE turns than the sample can hold must still
-/// yield ONE WARN whose `skipped_count` and `turns_affected` are exact
+/// yield ONE event whose `skipped_count` and `turns_affected` are exact
 /// while `skipped_locations` carries only a capped prefix flagged by
 /// `skipped_locations_truncated`. Three turns of four unsigned details
 /// overflow the cap after the second turn, so the sample is the first
@@ -170,7 +170,7 @@ fn unsigned_reasoning_warn_names_every_turn_and_keeps_a_missing_detail_index() {
 }
 
 /// A request whose reasoning details are all signed skips nothing, so the
-/// aggregate WARN must not fire at all -- the flush is conditional on a
+/// aggregate event must not fire at all -- the flush is conditional on a
 /// recorded skip, not on the tally existing.
 #[test]
 fn signed_reasoning_details_emit_no_unsigned_warn() {
@@ -192,7 +192,7 @@ fn signed_reasoning_details_emit_no_unsigned_warn() {
     // Assert
     assert!(
         unsigned_warns(&events).is_empty(),
-        "nothing was skipped, so no aggregate WARN is owed; got events: {events:?}"
+        "nothing was skipped, so no aggregate event is owed; got events: {events:?}"
     );
 }
 
@@ -233,7 +233,7 @@ fn unsigned_reasoning_warn_survives_a_later_turns_translation_error() {
 
 // ---------------------------------------------------------------------------
 // No-wire-shape reasoning kinds (Summary, an unrecognized kind): the
-// aggregated WARN plus the per-request `bedrock-converse` /
+// aggregated event plus the per-request `bedrock-converse` /
 // `reasoning_summary_unsupported` translation-drop counter this category
 // feeds. Serialized against each other and against the no-wire-shape test
 // in the host `messages.rs` inline `mod tests` (which shares this
@@ -275,7 +275,7 @@ fn reasoning_summary_drop_count() -> u64 {
 }
 
 /// Negative control: a turn carrying one `Summary` detail drops it, the
-/// aggregated WARN names the category, and the per-request drop counter
+/// aggregated event names the category, and the per-request drop counter
 /// advances by exactly one.
 #[test]
 #[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
@@ -297,9 +297,9 @@ fn summary_reasoning_detail_warns_and_bumps_the_drop_counter_once() {
     assert_eq!(
         matches.len(),
         1,
-        "exactly one aggregated no-wire-shape WARN expected per request; got events: {events:?}"
+        "exactly one aggregated no-wire-shape event expected per request; got events: {events:?}"
     );
-    assert_eq!(matches[0].level, tracing::Level::WARN);
+    assert_eq!(matches[0].level, tracing::Level::DEBUG);
     assert_eq!(matches[0].field("skipped_count"), Some("1"));
     assert_eq!(
         reasoning_summary_drop_count(),
@@ -341,12 +341,12 @@ fn multiple_no_wire_shape_details_in_one_request_bump_the_drop_counter_once() {
         matches.len(),
         1,
         "three dropped details across two turns must still fold into ONE \
-         aggregated WARN; got events: {events:?}"
+         aggregated event; got events: {events:?}"
     );
     assert_eq!(
         matches[0].field("skipped_count"),
         Some("3"),
-        "the WARN's own count stays exact even though the drop counter \
+        "the event's own count stays exact even though the drop counter \
          below only advances once for the whole request"
     );
     assert_eq!(
@@ -359,7 +359,7 @@ fn multiple_no_wire_shape_details_in_one_request_bump_the_drop_counter_once() {
 
 /// Positive control: a sibling request carrying only `Text`/`Encrypted`
 /// details (both of which DO have a Converse wire shape) survives with no
-/// no-wire-shape WARN and no drop-counter increment.
+/// no-wire-shape event and no drop-counter increment.
 #[test]
 #[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
 fn wire_representable_reasoning_details_emit_no_summary_warn_or_drop() {
@@ -390,7 +390,7 @@ fn wire_representable_reasoning_details_emit_no_summary_warn_or_drop() {
     assert!(
         summary_warns(&events).is_empty(),
         "Text and Encrypted details both have a Converse wire shape, so no \
-         no-wire-shape WARN is owed; got events: {events:?}"
+         no-wire-shape event is owed; got events: {events:?}"
     );
     assert_eq!(
         reasoning_summary_drop_count(),
@@ -440,7 +440,7 @@ fn foreign_format_detail(kind: ReasoningDetailKind, payload: Value) -> Reasoning
 /// NEGATIVE CONTROL, `Text` arm. The format guard had zero tally and zero
 /// log before this: a foreign-format detail vanished with no trace at all,
 /// unlike the signature-empty case a few lines below it in the same arm.
-/// All three assertions run here -- the WARN, the absence from the EMITTED
+/// All three assertions run here -- the event, the absence from the EMITTED
 /// WIRE VALUE, and the surviving sibling.
 #[test]
 #[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
@@ -460,14 +460,14 @@ fn foreign_format_reasoning_detail_warns_and_bumps_the_drop_counter_once() {
     });
     let after = reasoning_drop_count("reasoning_foreign_format_unsupported");
 
-    // Assert 1 -- the WARN fired, with an exact skipped_count field.
+    // Assert 1 -- the event fired, with an exact skipped_count field.
     let matches = foreign_format_warns(&events);
     assert_eq!(
         matches.len(),
         1,
-        "exactly one aggregated foreign-format WARN expected per request; got events: {events:?}"
+        "exactly one aggregated foreign-format event expected per request; got events: {events:?}"
     );
-    assert_eq!(matches[0].level, tracing::Level::WARN);
+    assert_eq!(matches[0].level, tracing::Level::DEBUG);
     assert_eq!(matches[0].field("skipped_count"), Some("1"));
 
     // Assert 2 -- neither the thought text nor its signature reached the
@@ -530,12 +530,12 @@ fn foreign_format_details_across_both_arms_bump_the_drop_counter_once() {
     assert_eq!(
         matches.len(),
         1,
-        "both arms fold into ONE aggregated WARN; got events: {events:?}"
+        "both arms fold into ONE aggregated event; got events: {events:?}"
     );
     assert_eq!(
         matches[0].field("skipped_count"),
         Some("2"),
-        "the WARN's own count stays exact across both arms"
+        "the event's own count stays exact across both arms"
     );
     assert!(
         !wire.to_string().contains("SENTINELFOREIGNOPAQUE"),
@@ -549,7 +549,7 @@ fn foreign_format_details_across_both_arms_bump_the_drop_counter_once() {
 }
 
 /// POSITIVE CONTROL: a detail carrying the format tag this egress DOES
-/// replay survives, emits no foreign-format WARN, and advances no
+/// replay survives, emits no foreign-format event, and advances no
 /// foreign-format counter -- proving the guard keys on the format tag and
 /// not on something incidental to the fixture above.
 #[test]
@@ -577,7 +577,7 @@ fn replayed_format_reasoning_detail_emits_no_foreign_format_drop() {
     // Assert
     assert!(
         foreign_format_warns(&events).is_empty(),
-        "a detail in the replayed format is representable, so no WARN is owed; got: {events:?}"
+        "a detail in the replayed format is representable, so no event is owed; got: {events:?}"
     );
     assert!(
         wire.to_string().contains("SURVIVINGTHOUGHT"),
@@ -589,8 +589,8 @@ fn replayed_format_reasoning_detail_emits_no_foreign_format_drop() {
     );
 }
 
-/// The unsigned-signature skip was already tallied and warned but never
-/// counted. This pins its counter alongside the WARN the tests above
+/// The unsigned-signature skip was already tallied and logged but never
+/// counted. This pins its counter alongside the event the tests above
 /// already cover, and asserts the unsigned thought is absent from the
 /// EMITTED WIRE VALUE rather than merely from the typed block vec.
 #[test]
@@ -611,7 +611,7 @@ fn unsigned_reasoning_skip_bumps_the_drop_counter_once() {
     });
     let after = reasoning_drop_count("reasoning_signature_missing");
 
-    // Assert 1 -- the aggregated WARN fired with an exact count.
+    // Assert 1 -- the aggregated event fired with an exact count.
     let warn = find_unsigned_warn(&events);
     assert_eq!(warn.field("skipped_count"), Some("2"));
 

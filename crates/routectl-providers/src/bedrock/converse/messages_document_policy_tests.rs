@@ -605,7 +605,7 @@ fn malformed_document_errors_never_echo_a_caller_value() {
 
 /// Both per-request tallies are flushed on the error arm. A citation drop
 /// and an unsigned-reasoning skip recorded BEFORE a malformed document are
-/// aggregate WARNs the operator is owed regardless of how the request ends;
+/// aggregate events the operator is owed regardless of how the request ends;
 /// without a flush on the `Err` path both are silently swallowed and only
 /// the translation failure surfaces.
 #[test]
@@ -645,10 +645,12 @@ fn tallies_recorded_before_a_malformed_document_still_flush_on_the_error_path() 
             .any(|e| e.level == tracing::Level::WARN && e.field("dropped_count") == Some("1")),
         "the citations drop recorded before the error must still reach the operator; got: {events:?}"
     );
-    assert!(
+    assert_eq!(
         events
             .iter()
-            .any(|e| e.level == tracing::Level::WARN && e.field("skipped_count") == Some("1")),
+            .filter(|e| e.level == tracing::Level::DEBUG && e.field("skipped_count") == Some("1"))
+            .count(),
+        1,
         "the reasoning skip recorded before the error must still reach the operator; got: {events:?}"
     );
 }

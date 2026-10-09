@@ -68,7 +68,7 @@ pub(super) fn build_system(
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_the_top_level_system_counts_the_policy_action
     if billing_dropped {
         fingerprint.record();
-        tracing::warn!(
+        tracing::debug!(
             model = %routectl_core::sanitize_for_log(&req.model),
             "bedrock-converse egress: Claude Code billing/attribution system block dropped",
         );
@@ -93,7 +93,7 @@ pub(super) fn build_system(
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_system_role_message_counts_the_policy_action
     if legacy_billing_dropped {
         fingerprint.record();
-        tracing::warn!(
+        tracing::debug!(
             model = %routectl_core::sanitize_for_log(&req.model),
             "bedrock-converse egress: Claude Code billing/attribution block \
              dropped from a system-role message",
@@ -534,11 +534,13 @@ mod tests {
             rendered.contains("top-level prompt") && rendered.contains("legacy prompt"),
             "both real system texts must survive the strip, got: {rendered}"
         );
-        assert!(
+        assert_eq!(
             events
                 .iter()
-                .any(|e| e.level == tracing::Level::WARN
-                    && e.message.contains("billing/attribution")),
+                .filter(|e| e.level == tracing::Level::DEBUG
+                    && e.message.contains("billing/attribution"))
+                .count(),
+            1,
             "dropping a fingerprint must be reported, got: {events:?}"
         );
     }

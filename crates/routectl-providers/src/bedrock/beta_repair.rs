@@ -155,7 +155,7 @@ impl BedrockProvider {
             );
             return Err(err);
         }
-        tracing::warn!(
+        tracing::debug!(
             provider = %self.cfg.id,
             carrier,
             count = flags.len(),

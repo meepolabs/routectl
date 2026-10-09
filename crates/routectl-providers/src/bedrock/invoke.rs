@@ -255,7 +255,7 @@ fn strip_billing_system_field(id: &str, obj: &mut serde_json::Map<String, Value>
     };
     // `Some(v)` -> replace `system` with `v`; `None` -> remove `system`.
     // We only reach the assignment when a billing block was found, so the
-    // warn fires exactly when the body actually changes.
+    // event fires exactly when the body actually changes.
     let replacement: Option<Value> = match system {
         Value::String(s) if crate::system_filter::is_billing_attribution_block(s) => None,
         Value::Array(blocks) => {
@@ -280,7 +280,7 @@ fn strip_billing_system_field(id: &str, obj: &mut serde_json::Map<String, Value>
         // to strip.
         _ => return,
     };
-    tracing::warn!(
+    tracing::debug!(
         provider = id,
         "bedrock-invoke egress: Claude Code billing/attribution system block dropped",
     );

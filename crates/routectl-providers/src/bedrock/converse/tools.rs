@@ -101,7 +101,7 @@ pub(super) fn build_tool_config(
         // `toolConfig` the wire requires; otherwise absence is the
         // cleaner wire shape.
         if transcript_requires_tool_config(messages) {
-            tracing::warn!(
+            tracing::debug!(
                 provider = id,
                 "injecting reserved dummy toolSpec: Converse transcript carries a \
                  toolResult but the request offers no tools"
@@ -789,7 +789,7 @@ mod tests {
         // Act
         let _ = build_tool_config(ID, &req(None), &wire_history()).unwrap();
 
-        // Assert: a WARN fires, carrying the provider id and no tool args.
+        // Assert: an event fires, carrying the provider id and no tool args.
         assert!(logs_contain("injecting reserved dummy toolSpec"));
     }
 

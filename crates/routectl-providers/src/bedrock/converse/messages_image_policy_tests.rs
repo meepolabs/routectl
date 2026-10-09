@@ -672,7 +672,7 @@ fn malformed_image_errors_never_echo_a_caller_value() {
 
 /// Both per-request tallies are flushed on the error arm. A citation drop
 /// and an unsigned-reasoning skip recorded BEFORE a malformed image are
-/// aggregate WARNs the operator is owed regardless of how the request
+/// aggregate events the operator is owed regardless of how the request
 /// ends; without a flush on the `Err` path both are silently swallowed and
 /// only the translation failure surfaces.
 #[test]
@@ -710,11 +710,12 @@ fn tallies_recorded_before_a_malformed_image_still_flush_on_the_error_path() {
         citations_warn,
         "the citations drop recorded before the error must still reach the operator; got: {events:?}"
     );
-    let reasoning_warn = events
+    let reasoning_skips = events
         .iter()
-        .any(|e| e.level == tracing::Level::WARN && e.field("skipped_count") == Some("1"));
-    assert!(
-        reasoning_warn,
+        .filter(|e| e.level == tracing::Level::DEBUG && e.field("skipped_count") == Some("1"))
+        .count();
+    assert_eq!(
+        reasoning_skips, 1,
         "the reasoning skip recorded before the error must still reach the operator; got: {events:?}"
     );
 }
