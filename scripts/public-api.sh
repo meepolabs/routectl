@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Public-API change detector: lists each library crate's public surface
-# via cargo-public-api and diffs it against a checked-in baseline. CI runs
-# it unconditionally and a stale baseline FAILS the build. Locally it runs on
-# demand, and at the pre-push stage through scripts/public-api-pre-push.sh
-# once the tooling below is installed (that leg skips where it is not). CI
-# and that leg read both pins from this file: PUBLIC_API_NIGHTLY and the
-# `cargo install` line under Bootstrap -- keep that line's form. A surface diff is
-# expected whenever the author intended to change the API; the author
-# regenerates the touched baselines IN THE SAME COMMIT (see
-# public-api/POLICY.md).
+# via cargo-public-api and diffs it against a checked-in baseline. It is
+# informational: CI runs it through scripts/public-api-report.sh, which
+# reports drift as a warning and never fails the build, and locally it runs
+# on demand once the tooling below is installed. CI reads both pins from
+# this file: PUBLIC_API_NIGHTLY and the `cargo install` line under
+# Bootstrap -- keep that line's form. Baselines are not regenerated per
+# change (see public-api/POLICY.md).
 #
 # Bootstrap (one-time, per machine):
 #   cargo install cargo-public-api --version 0.52.0
@@ -139,7 +137,7 @@ check_one() {
     fi
     if ! diff -u "$baseline" "$live"; then
         rm -f "$live"
-        echo "public-api: surface drift for $crate -- regenerate its baseline in the same commit" >&2
+        echo "public-api: surface drift for $crate (see public-api/POLICY.md)" >&2
         return 1
     fi
     rm -f "$live"

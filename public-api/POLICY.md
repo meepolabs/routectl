@@ -7,44 +7,42 @@ The `scripts/public-api.sh` driver generates and checks them.
 ## What this is
 
 An **informational change detector** for the crates' public API. It makes
-every surface change a visible, reviewable artifact in the same diff that
-causes it.
+surface changes visible without standing in the way of them.
 
-It **IS a CI gate** and fails the build when a baseline is out of date
-with the live surface. It needs `cargo-public-api` and a pinned nightly,
-so CI is the only place it runs for every change. Locally it runs at the
-pre-push stage once that tooling is installed (and is skipped with a
-notice where it is not), or on demand with
-`scripts/public-api.sh --check all`.
+It is **not a gate** and does not fail the build. CI's `public-api` job
+runs `scripts/public-api-report.sh`, which wraps `scripts/public-api.sh
+--check all` and always exits 0, reporting one of three outcomes as an
+annotation and a job-summary line:
 
-A surface diff is expected and fine whenever the change was intended.
-The gate does not object to the change; it objects to the baseline not
-being regenerated alongside it, which is what keeps every surface change
-a visible artifact in the diff that causes it.
+- **clean** -- every baseline matches the live surface;
+- **drift** -- the named crates' surfaces differ from their baselines;
+- **could not run** -- the tooling was unavailable or the check failed,
+  with the reason.
+
+The job continues on error and is not one of the jobs the `required`
+check depends on, so neither drift nor a broken toolchain bootstrap
+blocks a merge. No hook runs it. Locally it runs on demand once
+`cargo-public-api` and the pinned nightly are installed:
+
+```
+scripts/public-api.sh --check all
+```
 
 ## Workflow
 
-- **Author, same commit.** When a change alters a crate's public surface,
-  the author regenerates that crate's baseline in the **same commit** that
-  makes the change:
+- **No per-change regeneration.** A change that alters a crate's public
+  surface does not regenerate that crate's baseline, and drift reported by
+  CI is expected between refreshes. Read the drift report as a list of the
+  surface changes made since the last refresh.
+
+- **One refresh after the 0.10 release.** The baselines are regenerated
+  once, after the 0.10 release, so they describe that release's surface:
 
   ```
-  scripts/public-api.sh generate <crate>   # or: generate all
+  scripts/public-api.sh generate all
   ```
 
-  The regenerated baseline rides along with the surface change, so the
-  reviewer sees the API delta and the code delta together.
-
-- **Validator, feature boundary.** At a feature boundary the validator
-  runs:
-
-  ```
-  scripts/public-api.sh --check all
-  ```
-
-  A non-zero exit means a baseline is out of date with the live surface --
-  i.e. someone changed the API without regenerating its baseline. The fix
-  is to regenerate, not to treat it as a build failure.
+  Any later change to this cadence is a policy change made here.
 
 ## Baseline properties
 

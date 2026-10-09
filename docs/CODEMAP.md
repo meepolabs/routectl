@@ -8764,15 +8764,17 @@ new section or a second doc.
   MITM-seam-header coherence check, the traced-ingress-vs-pin check, and the
   client-version comparison) because a scratch fixture is hand-editable
 - `promote_fixture.test.sh` -- self-test for the promotion script
-- `public-api.sh` -- public-API drift gate: diffs each library crate's
-  cargo-public-api surface against its checked-in baseline (`generate`,
-  `--check` per crate or `all`); CI runs it unconditionally, locally it
-  runs on demand and at pre-push when the tooling is installed
+- `public-api.sh` -- informational public-API drift check: diffs each
+  library crate's cargo-public-api surface against its checked-in baseline
+  (`generate`, `--check` per crate or `all`); CI reports it through
+  `public-api-report.sh` without failing, locally it runs on demand
 - `public-api-report.sh` -- informational wrapper over `public-api.sh
   --check all`: passes its output through, then prints one GitHub Actions
   annotation (and one `GITHUB_STEP_SUMMARY` line when set) classifying the
   run as clean, drift (crates named), or could-not-run (reason); always
-  exits 0. Self-tested in `test-gate.test.sh`
+  exits 0. Self-tested in `test-gate.test.sh`, which also pins that CI's
+  `public-api` job runs it, continues on error, and is not in
+  `required.needs`, and that no hook runs the check
 - `test-inventory.sh` -- named-test enumeration + diff (`dump`, `diff`)
   over `cargo test -- --list` output, for auditing a test-consolidation
   or gate-command change by exact test name (cargo selection and doctest

@@ -503,8 +503,8 @@ jobs:
       - name: live-gate isolation self-test
         run: bash scripts/check-live-gate-isolation.test.sh
 
-      # The gate registry's public-api subcommand and the pre-push leg that
-      # runs it only where the pinned tooling is installed.
+      # The gate registry's public-api subcommand, the informational report
+      # wrapper, and the wiring that keeps the public-api job informational.
       - name: gate registry self-test
         run: bash scripts/test-gate.test.sh
 
@@ -625,23 +625,20 @@ jobs:
       - name: interaction set and driver self-test
         run: bash scripts/drivers.test.sh
 
+  # Informational: public-API drift is reported, never enforced. The job
+  # continues on error and is deliberately absent from `required.needs`, so
+  # neither drift nor a broken toolchain bootstrap can block a merge. Its
+  # last step turns the outcome into one annotation and one job-summary
+  # line (clean / drift / could-not-run).
   public-api:
-    name: public-api baseline
+    name: public-api report (informational)
     runs-on: ubuntu-22.04
+    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: AWS-LC build environment preflight
         run: bash scripts/assert-aws-lc-env.sh
 
-      # The only place this check runs for EVERY change. The local pre-push
-      # leg (scripts/public-api-pre-push.sh) runs it only where
-      # cargo-public-api plus the pinned nightly are installed, and a hook
-      # that skips where that toolchain is absent lets a surface change authored
-      # without it reach the branch with nothing catching it. CI pays that
-      # bootstrap once and reproducibly instead of every contributor paying
-      # it or silently skipping. Contributors can still run the script on
-      # demand (docs/DEVELOPMENT.md).
-      #
       # Both pins are READ from the script rather than duplicated -- the
       # nightly from PUBLIC_API_NIGHTLY, the tool version from its bootstrap
       # install line. A second copy here would drift from the script and the
@@ -668,14 +665,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      # A non-zero exit means a baseline is out of date with the live
-      # surface -- someone changed the public API without regenerating it.
-      # That is the finding, not a wiring defect: regenerate the touched
-      # baseline in the same commit as the change, per public-api/POLICY.md.
-      - name: check public-API baselines
-        run: |
-          cargo install cargo-public-api --locked --version "${{ steps.pins.outputs.version }}"
-          bash scripts/public-api.sh --check all
+      # A failed install must still reach the report step, which then says
+      # the check could not run instead of the job ending silently.
+      - name: install cargo-public-api
+        continue-on-error: true
+        run: cargo install cargo-public-api --locked --version "${{ steps.pins.outputs.version }}"
+
+      # Always exits 0; drift and could-not-run surface as a warning
+      # annotation. See public-api/POLICY.md.
+      - name: report public-API drift
+        run: bash scripts/public-api-report.sh
 
   # The fleet-wide dependency gate, and the only one that is identical in
   # every repo whatever the stack -- it reads Cargo.lock here and other
@@ -728,7 +727,9 @@ jobs:
   # fails unless every one succeeded. `if: always()` makes it report when
   # a dependency failed or was skipped -- otherwise it would be skipped
   # itself, and a skipped required check reads as passing. Adding a job
-  # to this workflow means adding it to `needs` here.
+  # to this workflow means adding it to `needs` here. The one deliberate
+  # exception is `public-api`: it is informational, so it stays out of
+  # `needs` and its outcome never decides this check.
   required:
     name: required
     runs-on: ubuntu-22.04
@@ -742,7 +743,6 @@ jobs:
       - audit
       - deny
       - internal-ids
-      - public-api
       - osv-scan
     steps:
       - name: every required job succeeded

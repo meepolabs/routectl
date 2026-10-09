@@ -22,9 +22,9 @@ crates with feature gates also get reduced-feature legs. The exact gate
 commands live in [`scripts/test-gate.sh`](../scripts/test-gate.sh); run it
 with no
 arguments to list them (`bash scripts/test-gate.sh pre-push` reproduces
-the pre-push test leg; `bash scripts/test-gate.sh public-api` the
-public-API baseline leg, which needs the tooling described under "Commit
-gate").
+the pre-push test leg; `bash scripts/test-gate.sh public-api` runs the
+informational public-API baseline check on demand, which needs the tooling
+described under "Commit gate").
 
 Every change must keep all of the following green:
 
@@ -208,17 +208,16 @@ the fast legs with it. It runs at the `pre-push` stage instead, once
 per push rather than once per commit -- the same protection against
 pushing a broken branch, at a fraction of the cost.
 
-The `pre-push` stage also runs the public-API baseline check
-(`scripts/public-api-pre-push.sh`), but only where its tooling is
-installed: `cargo-public-api` at the version pinned on the Bootstrap line
-of [`scripts/public-api.sh`](../scripts/public-api.sh), and the rustup
-toolchain named by its `PUBLIC_API_NIGHTLY`. Where either is missing the
-leg prints one `public-api: SKIPPED locally (...); CI runs this check.`
-line and passes -- missing tooling never fails a push. Where both are
-present a stale baseline fails the push, the same verdict CI's
-`public-api` job would reach later. `scripts/test-gate.test.sh` is the
-self-test for that leg and the registry's `public-api` subcommand; it
-runs in the commit stage and in CI.
+The public-API baseline check is not a hook at any stage. It is
+informational (see [`public-api/POLICY.md`](../public-api/POLICY.md)):
+CI's `public-api` job runs it through `scripts/public-api-report.sh`,
+which reports clean, drift (crates named) or could-not-run as one warning
+or notice annotation and always exits 0. The job continues on error and
+is not in the `required` job's `needs`, so it never blocks a merge.
+`scripts/test-gate.test.sh` is the self-test for the registry's
+`public-api` subcommand, that wrapper, and this wiring (the CI job runs
+the wrapper, `required` does not depend on it, no hook runs the check);
+it runs in the commit stage and in CI.
 
 The three stages divide by a single rule: a check belongs at the
 earliest stage where it is cheap and the latest stage where it is
@@ -227,12 +226,11 @@ stage and stays there, because catching a secret after it is pushed is
 already too late -- it is in history and needs rotating. The test suite
 is authoritative about a branch, not about one commit, so it sits at
 pre-push. Everything with no local counterpart -- the advisory and
-licence scans -- is authoritative in CI. The public-API baseline is
-authoritative in CI too: its pre-push leg runs only where the tooling is
-installed, so CI's `public-api` job is the one place it runs for every
-change.
+licence scans -- is authoritative in CI. The public-API baseline check
+is authoritative nowhere: CI reports it on every change and nothing fails
+on it.
 
-To get the pre-push public-API leg, install the tooling once per machine
+To run the public-API check locally, install the tooling once per machine
 (the exact lines, with the current pins, are at the top of
 [`scripts/public-api.sh`](../scripts/public-api.sh)):
 
@@ -241,8 +239,8 @@ cargo install cargo-public-api --version <pinned version>
 rustup toolchain install <PUBLIC_API_NIGHTLY> --profile minimal
 ```
 
-To check on demand, or to regenerate a baseline after an intended
-surface change (see [`public-api/POLICY.md`](../public-api/POLICY.md)):
+Then check on demand. Baselines are not regenerated per change; the
+policy file says when they are refreshed with `generate`:
 
 ```bash
 bash scripts/public-api.sh --check all        # or: --check <crate>

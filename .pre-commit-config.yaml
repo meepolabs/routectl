@@ -1,8 +1,7 @@
 # Local commit gate. Mirrors .github/workflows/ci.yml job "fmt + clippy +
 # check", plus a local-only rustdoc-lint leg CI does not run. The
-# public-api baseline check rides the pre-push stage only where its pinned
-# tooling is installed, and skips with a notice elsewhere; CI runs it
-# unconditionally (see docs/DEVELOPMENT.md).
+# public-API baseline check has no hook: it is informational, reported by
+# CI's public-api job and run locally on demand (see docs/DEVELOPMENT.md).
 #
 # WHY pre-commit rather than a hand-rolled hook script: pre-commit stashes
 # unstaged changes and runs every hook against the STAGED tree. The
@@ -248,26 +247,9 @@ repos:
         always_run: true
         pass_filenames: false
 
-      # The public-API baseline check, at pre-push for the same reason as
-      # the suite above: it rebuilds rustdoc JSON per library crate on a
-      # pinned nightly, too slow for every commit. It runs only where
-      # cargo-public-api at the pinned version and that nightly are both
-      # installed; elsewhere it prints one SKIPPED line and passes, never
-      # failing a push for missing tooling, because CI's public-api job runs
-      # it unconditionally. The pins and the presence check live in
-      # scripts/public-api-pre-push.sh, the command in scripts/test-gate.sh
-      # (`public-api`).
-      - id: public-api-baseline
-        name: public-API baseline check (pre-push, when tooling is present)
-        entry: bash scripts/public-api-pre-push.sh
-        language: system
-        stages: [pre-push]
-        always_run: true
-        pass_filenames: false
-        verbose: true
-
-      # Commit stage: cheap, and it guards the registry every pre-push leg
-      # above runs through.
+      # Commit stage: cheap, and it guards the registry the pre-push leg
+      # above runs through, the public-API report wrapper, and the wiring
+      # that keeps that check informational.
       - id: test-gate-self-test
         name: gate-command registry self-test
         entry: bash scripts/test-gate.test.sh

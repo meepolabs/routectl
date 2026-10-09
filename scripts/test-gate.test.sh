@@ -1,27 +1,19 @@
 #!/usr/bin/env bash
-# Self-test for the gate registry's public-api subcommand and the pre-push
-# leg that reaches it. Runs no cargo and no cargo-public-api.
+# Self-test for the gate registry's public-api subcommand, the informational
+# public-API report wrapper, and the wiring that keeps that check
+# informational. Runs no cargo and no cargo-public-api.
 #
 # Pins:
 #   - `test-gate.sh --print public-api` is exactly the public-api.sh
 #     --check over every crate, and the subcommand refuses extra arguments;
-#   - the pre-push leg runs that subcommand only when cargo-public-api at
-#     the pinned version AND the pinned nightly are installed, and
-#     propagates its failure, so a stale baseline fails the push;
-#   - each missing piece of tooling makes the leg print the one skip line
-#     and exit 0 without reaching the registry;
-#   - a pin public-api.sh no longer carries fails the leg instead of
-#     skipping it;
 #   - public-api-report.sh always exits 0 and classifies a stub check's
 #     outcome as clean / drift / could-not-run, one annotation and one job
-#     summary line per run, each case paired with a planted-defect control.
-#
-# The leg is driven from a scratch copy of scripts/ whose test-gate.sh is a
-# stub recording its argv, with stub cargo-public-api, rustup, and rustup's
-# cargo / rustdoc / rustc proxies on a PATH that holds only them and the
-# system directories, so the caller's own toolchain never decides a verdict.
-# Each skip case is paired with the run case it differs from by one missing
-# tool; the rustup-absent case also drops the three proxies rustup provides.
+#     summary line per run, each case paired with a planted-defect control;
+#   - the CI `public-api` job continues on error and its last step runs the
+#     wrapper, the `required` job does not depend on it, no pre-commit hook
+#     runs it, and the retired pre-push leg script stays deleted -- each
+#     wiring check holds on the real tree and fails on a stub carrying the
+#     defect it pins.
 #
 # Run it from anywhere:
 #   bash scripts/test-gate.test.sh
@@ -29,9 +21,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
 REGISTRY="$HERE/test-gate.sh"
-LEG="$HERE/public-api-pre-push.sh"
-PUBLIC_API="$HERE/public-api.sh"
 SYSTEM_PATH=/usr/bin:/bin
 
 fails=0
@@ -43,14 +34,6 @@ fail() {
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-
-NIGHTLY="$(grep -oE '^PUBLIC_API_NIGHTLY=.*' "$PUBLIC_API" | cut -d= -f2)"
-VERSION="$(grep -oE 'cargo-public-api --version [0-9]+\.[0-9]+\.[0-9]+' "$PUBLIC_API" \
-    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-if [[ -z "$NIGHTLY" || -z "$VERSION" ]]; then
-    echo "test-gate.test.sh: cannot read the pins from $PUBLIC_API" >&2
-    exit 1
-fi
 
 # --- registry ---------------------------------------------------------------
 
@@ -67,191 +50,6 @@ if [[ "$rc" -eq 2 ]]; then
     pass "public-api refuses extra arguments (exit 2)"
 else
     fail "public-api with an extra argument exited $rc, want 2"
-fi
-
-# --- pre-push leg -----------------------------------------------------------
-
-# A scratch scripts/ dir: the real leg and public-api.sh, and a test-gate.sh
-# stub that records its argv and exits with $STUB_GATE_RC.
-SCRIPTS="$TMP/scripts"
-GATE_LOG="$TMP/gate-invoked"
-mkdir -p "$SCRIPTS"
-cp "$LEG" "$PUBLIC_API" "$SCRIPTS/"
-cat >"$SCRIPTS/test-gate.sh" <<STUB
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >"$GATE_LOG"
-exit "\${STUB_GATE_RC:-0}"
-STUB
-
-# Writes the tool stubs into a fresh bin dir named $1 and prints its path.
-# Options: --tool-version V, --no-tool, --toolchains "A B" (installed names
-# without the host triple), --no-rustup, --plain-cargo (a cargo that is not
-# the rustup proxy), --no-rustdoc, --no-rust-std (the installed toolchains
-# lack that component).
-make_bin() {
-    local dir="$TMP/bin-$1" tool_version="$VERSION" toolchains="$NIGHTLY" tool=1 rustup=1
-    local plain_cargo=0 rustdoc=1 rust_std=1
-    shift
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --tool-version) tool_version="$2"; shift 2 ;;
-            --toolchains) toolchains="$2"; shift 2 ;;
-            --no-tool) tool=0; shift ;;
-            --no-rustup) rustup=0; shift ;;
-            --plain-cargo) plain_cargo=1; shift ;;
-            --no-rustdoc) rustdoc=0; shift ;;
-            --no-rust-std) rust_std=0; shift ;;
-        esac
-    done
-    mkdir -p "$dir"
-    local libdir="$dir/rustlib/lib"
-    mkdir -p "$libdir"
-    if ((rust_std)); then
-        touch "$libdir/libstd-0000000000000000.rlib"
-    fi
-    if ((tool)); then
-        printf '#!/bin/sh\necho "cargo-public-api %s"\n' "$tool_version" >"$dir/cargo-public-api"
-        chmod +x "$dir/cargo-public-api"
-    fi
-    if ((rustup)); then
-        # Models `rustup which --toolchain T BIN`: T resolves only when it is
-        # an installed name, bare or with the host triple appended.
-        cat >"$dir/rustup" <<STUB
-#!/usr/bin/env bash
-triple=x86_64-unknown-linux-gnu
-installed=(stable $toolchains)
-if [[ "\$1 \$2" == "which --toolchain" ]]; then
-    for t in "\${installed[@]}"; do
-        if [[ "\$3" == "\$t" || "\$3" == "\$t-\$triple" ]]; then
-            echo "/stub/toolchains/\$t-\$triple/bin/\$4"
-            exit 0
-        fi
-    done
-    echo "error: toolchain '\$3' is not installed" >&2
-    exit 1
-fi
-echo "rustup stub: unsupported: \$*" >&2
-exit 1
-STUB
-        chmod +x "$dir/rustup"
-        # Models a rustup proxy invoked as `<proxy> +T ...`: T must be an
-        # installed name and the proxied component present.
-        local proxy present
-        for proxy in cargo rustdoc rustc; do
-            present=1
-            [[ "$proxy" == rustdoc ]] && present=$rustdoc
-            cat >"$dir/$proxy" <<STUB
-#!/usr/bin/env bash
-installed=(stable $toolchains)
-found=0
-for t in "\${installed[@]}"; do
-    [[ "\$1" == "+\$t" ]] && found=1
-done
-if ((!found)); then
-    echo "error: toolchain '\${1#+}' is not installed" >&2
-    exit 1
-fi
-if ((!$present)); then
-    echo "error: '$proxy' is not installed for the toolchain" >&2
-    exit 1
-fi
-if [[ "$proxy \$2 \$3" == "rustc --print target-libdir" ]]; then
-    echo "$libdir"
-    exit 0
-fi
-echo "$proxy 1.0.0-nightly (stub)"
-STUB
-            chmod +x "$dir/$proxy"
-        done
-    fi
-    if ((plain_cargo)); then
-        cat >"$dir/cargo" <<'STUB'
-#!/bin/sh
-case "$1" in +*) echo "error: no such command: $1" >&2; exit 101 ;; esac
-echo "cargo 1.0.0"
-STUB
-        chmod +x "$dir/cargo"
-    fi
-    echo "$dir"
-}
-
-# Runs the scratch leg with PATH = $1 plus the system dirs. Sets OUT and RC.
-run_leg() {
-    rm -f "$GATE_LOG"
-    OUT="$(PATH="$1:$SYSTEM_PATH" STUB_GATE_RC="${2:-0}" bash "$SCRIPTS/public-api-pre-push.sh" 2>&1)"
-    RC=$?
-}
-
-gate_ran() { [[ -f "$GATE_LOG" && "$(cat "$GATE_LOG")" == "public-api" ]]; }
-
-skip_line() { printf '%s\n' "$OUT" | grep -q '^public-api: SKIPPED locally (.*); CI runs this check\.'; }
-
-for bin in cargo-public-api rustup cargo rustdoc rustc; do
-    if [[ -n "$(PATH="$SYSTEM_PATH" command -v "$bin")" ]]; then
-        fail "$bin is in $SYSTEM_PATH, so the absent-tool cases cannot be hermetic"
-    fi
-done
-
-full="$(make_bin full)"
-run_leg "$full"
-if [[ "$RC" -eq 0 ]] && gate_ran && ! skip_line; then
-    pass "tooling present: the leg runs test-gate.sh public-api"
-else
-    fail "tooling present: rc=$RC gate_ran=$(gate_ran && echo yes || echo no) out='$OUT'"
-fi
-
-run_leg "$full" 1
-if [[ "$RC" -ne 0 ]] && gate_ran; then
-    pass "tooling present: a failing baseline check fails the leg (rc=$RC)"
-else
-    fail "tooling present: a failing check exited $RC"
-fi
-
-assert_skip() {
-    local desc="$1" bin="$2" reason="$3"
-    run_leg "$bin"
-    if [[ "$RC" -ne 0 ]]; then
-        fail "$desc: exited $RC, a skip must exit 0 (out='$OUT')"
-    elif gate_ran; then
-        fail "$desc: the registry ran"
-    elif ! skip_line; then
-        fail "$desc: no skip line (out='$OUT')"
-    elif [[ "$(printf '%s\n' "$OUT" | wc -l)" -ne 1 ]]; then
-        fail "$desc: the skip printed more than one line (out='$OUT')"
-    elif ! printf '%s\n' "$OUT" | grep -qF "$reason"; then
-        fail "$desc: skip line lacks '$reason' (out='$OUT')"
-    else
-        pass "$desc: skipped with one line, exit 0"
-    fi
-}
-
-assert_skip "cargo-public-api absent" "$(make_bin no-tool --no-tool)" "cargo-public-api not on PATH"
-assert_skip "cargo-public-api at another version" \
-    "$(make_bin old-tool --tool-version 0.0.1)" "is not the pinned $VERSION"
-assert_skip "pinned nightly absent" \
-    "$(make_bin no-nightly --toolchains "nightly-1999-01-01")" "toolchain $NIGHTLY not installed"
-assert_skip "rustup absent" "$(make_bin no-rustup --no-rustup)" "rustup not on PATH"
-assert_skip "cargo on PATH is not the rustup proxy" \
-    "$(make_bin plain-cargo --plain-cargo)" "not the rustup proxy"
-assert_skip "pinned nightly lacks rustdoc" \
-    "$(make_bin no-rustdoc --no-rustdoc)" "rustdoc for $NIGHTLY unavailable"
-assert_skip "pinned nightly lacks the host rust-std" \
-    "$(make_bin no-rust-std --no-rust-std)" "lacks rust-std for the host"
-
-# The nightly match must not accept a toolchain whose name merely starts
-# with the pin, with or without a separating dash.
-assert_skip "only a longer-named toolchain sharing the pin's prefix" \
-    "$(make_bin prefix-nightly --toolchains "${NIGHTLY}0")" "toolchain $NIGHTLY not installed"
-assert_skip "only a custom toolchain named after the pin" \
-    "$(make_bin custom-nightly --toolchains "${NIGHTLY}-custom")" "toolchain $NIGHTLY not installed"
-
-# A public-api.sh without its version pin is a wiring defect, not a skip.
-sed -i 's/cargo-public-api --version [0-9.]*/cargo-public-api/' "$SCRIPTS/public-api.sh"
-run_leg "$full"
-if [[ "$RC" -eq 1 ]] && ! gate_ran && printf '%s\n' "$OUT" | grep -q 'could not read the pins'; then
-    pass "an unreadable pin fails the leg"
-else
-    fail "an unreadable pin: rc=$RC out='$OUT'"
 fi
 
 # --- public-api report wrapper ---------------------------------------------
@@ -272,8 +70,18 @@ echo "stub-check-stdout"
 [[ -n "\${STUB_STDERR:-}" ]] && printf '%s\n' "\$STUB_STDERR" >&2
 exit "\${STUB_RC:-0}"
 STUB
-report_tool_bin="$(make_bin report-tool)"
-report_no_tool_bin="$(make_bin report-no-tool --no-tool)"
+
+# The wrapper decides could-not-run from `command -v cargo-public-api` alone,
+# so the tool-present PATH holds a stub of it and the tool-absent PATH holds
+# nothing beyond the system dirs.
+if [[ -n "$(PATH="$SYSTEM_PATH" command -v cargo-public-api)" ]]; then
+    fail "cargo-public-api is in $SYSTEM_PATH, so the tool-absent case cannot be hermetic"
+fi
+report_tool_bin="$TMP/bin-report-tool"
+report_no_tool_bin="$TMP/bin-report-no-tool"
+mkdir -p "$report_tool_bin" "$report_no_tool_bin"
+printf '#!/bin/sh\necho "cargo-public-api 0.0.0"\n' >"$report_tool_bin/cargo-public-api"
+chmod +x "$report_tool_bin/cargo-public-api"
 
 # Runs wrapper copy $1 with PATH = $2 plus the system dirs, the stub exiting
 # $3 with stderr $4, and GITHUB_STEP_SUMMARY on a file holding one prior
@@ -313,7 +121,7 @@ case_clean() {
 case_drift() {
     run_report "$1" "$report_tool_bin" 1 "$(printf '%s\n' \
         '+pub fn added()' \
-        'public-api: surface drift for routectl-core -- regenerate its baseline in the same commit' \
+        'public-api: surface drift for routectl-core (see public-api/POLICY.md)' \
         'public-api: routectl-router unchanged' \
         'public-api: missing baseline for routectl-usage (run: x generate routectl-usage)')"
     report_ok "::warning title=public-api::drift in routectl-core, routectl-usage" \
@@ -400,6 +208,155 @@ assert_report_case "no GITHUB_STEP_SUMMARY: still exit 0, no summary file" case_
     's#\$\{GITHUB_STEP_SUMMARY:-\}#${GITHUB_STEP_SUMMARY:-'"$SUMMARY"'}#'
 assert_report_case "any argument is a usage error (exit 2)" case_rejects_args \
     's/^\[\[ \$# -eq 0 \]\] \|\| usage$/true/'
+
+# --- wiring -----------------------------------------------------------------
+
+# The check stays informational only while CI wires it that way and nothing
+# local runs it as a gate. Each predicate walks the canonical block layout of
+# the file it reads (two-space job keys, four-space job fields, six-space
+# step items) and fails closed when that layout is not where it expects it,
+# so a reformatted file reads as a failure rather than a pass. Each holds on
+# the real tree and fails on a copy derived from it with one defect planted.
+CI_WORKFLOW="$REPO_ROOT/.github/workflows/ci.yml"
+PRE_COMMIT_CONFIG="$REPO_ROOT/.pre-commit-config.yaml"
+REPORT_RUN="        run: bash scripts/public-api-report.sh"
+# The retired hook id and leg script, spelled in two pieces so a repo-wide
+# search for either name finds nothing, this file included.
+RETIRED_HOOK_ID="public-api-""baseline"
+RETIRED_LEG="public-api-pre""-push"
+
+# Lines of CI job $2 in workflow $1, minus whole-line comments and blanks.
+ci_job_block() {
+    awk -v head="  $2:" '
+        $0 == head { in_job = 1; next }
+        in_job && /^  [A-Za-z0-9_-]+:$/ { exit }
+        in_job && !/^[[:space:]]*(#.*)?$/ { print }
+    ' "$1"
+}
+
+# Holds when the `public-api` job sets job-level `continue-on-error: true`
+# exactly once and its last step is exactly a `name:` line plus the wrapper's
+# run line.
+public_api_job_informational() {
+    local job last
+    job="$(ci_job_block "$1" public-api)"
+    [[ -n "$job" ]] || return 1
+    [[ "$(grep -c '^    continue-on-error:' <<<"$job")" -eq 1 ]] || return 1
+    grep -qx '    continue-on-error: true' <<<"$job" || return 1
+    last="$(awk '/^      - / { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' <<<"$job")"
+    [[ "$(wc -l <<<"$last")" -eq 2 ]] || return 1
+    [[ "$(sed -n 1p <<<"$last")" =~ ^"      - name: ".+$ ]] || return 1
+    [[ "$(sed -n 2p <<<"$last")" == "$REPORT_RUN" ]]
+}
+
+# Holds when the `required` job has one block-style `needs:` list of bare
+# job names, at least one, none of them `public-api`. Any other shape of the
+# list fails closed.
+required_skips_public_api() {
+    local job
+    job="$(ci_job_block "$1" required)"
+    [[ -n "$job" ]] || return 1
+    awk '
+        /^    needs:$/ { if (seen) bad = 1; seen = 1; in_list = 1; next }
+        /^    needs:/ { bad = 1; next }
+        in_list && /^      - / {
+            if ($0 !~ /^      - [a-z0-9-]+$/) bad = 1
+            if ($0 == "      - public-api") hit = 1
+            n++
+            next
+        }
+        in_list && /^     / { bad = 1; next }
+        in_list { in_list = 0 }
+        END { exit !(seen && !bad && n > 0 && !hit) }
+    ' <<<"$job"
+}
+
+# Holds when pre-commit config $1 still carries this self-test's own hook
+# (so it is the real config, not an empty file) and names neither the
+# retired hook id nor the retired leg script anywhere.
+precommit_has_no_public_api_hook() {
+    [[ -f "$1" ]] || return 1
+    grep -qx '        entry: bash scripts/test-gate.test.sh' "$1" || return 1
+    ! grep -qF -e "$RETIRED_HOOK_ID" -e "$RETIRED_LEG" "$1"
+}
+
+# Holds when the scripts/ dir under root $1 exists and lacks the retired leg.
+retired_leg_absent() {
+    [[ -d "$1/scripts" && ! -e "$1/scripts/$RETIRED_LEG.sh" ]]
+}
+
+WIRING_DIR="$TMP/wiring"
+mkdir -p "$WIRING_DIR"
+
+# Writes file $2 with sed expression $3 applied to $WIRING_DIR/$1 and prints
+# its path; fails when the expression changed nothing, so a stale plant
+# cannot pass as a caught one.
+planted() {
+    local path="$WIRING_DIR/$1"
+    if ! sed -E "$3" "$2" >"$path" || cmp -s "$2" "$path"; then
+        echo "plant '$3' did not apply" >&2
+        return 1
+    fi
+    echo "$path"
+}
+
+# Runs predicate $2 on $3 (must hold), then on the copy of $3 planted with
+# each remaining sed expression (each must fail).
+assert_wiring() {
+    local desc="$1" predicate="$2" real="$3" expr copy
+    shift 3
+    if "$predicate" "$real"; then
+        pass "wiring: $desc"
+    else
+        fail "wiring: $desc: does not hold on ${real#"$REPO_ROOT"/}"
+    fi
+    for expr in "$@"; do
+        if ! copy="$(planted "$predicate.yml" "$real" "$expr")"; then
+            fail "wiring: $desc: plant did not apply: $expr"
+        elif "$predicate" "$copy"; then
+            fail "wiring: $desc: holds on a copy planted with '$expr'"
+        else
+            pass "wiring: $desc: fails on a copy planted with '$expr'"
+        fi
+    done
+}
+
+assert_wiring "the CI public-api job continues on error and ends by running the wrapper" \
+    public_api_job_informational "$CI_WORKFLOW" \
+    '/^    continue-on-error: true$/d' \
+    's#^        run: bash scripts/public-api-report\.sh$#        run: bash scripts/public-api.sh --check all#' \
+    's#^        run: bash scripts/public-api-report\.sh$#&\n      - run: "true"#' \
+    's/^  public-api:$/  public-api-report:/'
+
+assert_wiring "the required job does not depend on the public-api job" \
+    required_skips_public_api "$CI_WORKFLOW" \
+    's/^      - osv-scan$/&\n      - public-api/' \
+    's/^      - osv-scan$/      - "public-api"/' \
+    's/^    needs:$/    needs: [check]/'
+
+assert_wiring "no pre-commit hook runs the public-API check" \
+    precommit_has_no_public_api_hook "$PRE_COMMIT_CONFIG" \
+    "s/^      - id: test-gate-self-test\$/      - id: $RETIRED_HOOK_ID\\n&/" \
+    "s#^        entry: bash scripts/test-gate\\.test\\.sh\$#&\\n        args: [scripts/$RETIRED_LEG.sh]#" \
+    '/^        entry: bash scripts\/test-gate\.test\.sh$/d'
+
+if retired_leg_absent "$REPO_ROOT"; then
+    pass "wiring: the retired pre-push leg script is gone"
+else
+    fail "wiring: scripts/$RETIRED_LEG.sh exists"
+fi
+mkdir -p "$WIRING_DIR/root/scripts"
+touch "$WIRING_DIR/root/scripts/$RETIRED_LEG.sh"
+if retired_leg_absent "$WIRING_DIR/root"; then
+    fail "wiring: the retired-leg check holds on a root that carries the script"
+else
+    pass "wiring: the retired-leg check fails on a root that carries the script"
+fi
+if retired_leg_absent "$WIRING_DIR/no-such-root"; then
+    fail "wiring: the retired-leg check holds on a root with no scripts dir"
+else
+    pass "wiring: the retired-leg check fails closed on a root with no scripts dir"
+fi
 
 if ((fails)); then
     echo "test-gate.test.sh: $fails failure(s)" >&2

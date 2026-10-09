@@ -34,10 +34,10 @@
 #       Accepts no extra arguments.
 #   test-gate.sh public-api
 #       bash scripts/public-api.sh --check all
-#       The public-API baseline check. Needs cargo-public-api and the
-#       nightly pinned in scripts/public-api.sh; the pre-push hook reaches
-#       it through scripts/public-api-pre-push.sh, which skips it when that
-#       tooling is absent. Accepts no extra arguments.
+#       The public-API baseline check, run on demand. Needs
+#       cargo-public-api and the nightly pinned in scripts/public-api.sh.
+#       CI reports it through scripts/public-api-report.sh, never fails on
+#       it, and no hook runs it. Accepts no extra arguments.
 #
 # HARNESS_ARGS are appended after `--`, i.e. passed to the test harness
 # (e.g. a test-name filter or --nocapture), never to cargo.
