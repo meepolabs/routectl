@@ -9,6 +9,7 @@ The first half is for operators (filtering, triage, redaction); the
 "Event catalog" second half is the per-event field reference.
 
 - [Env filter and default level](#env-filter-and-default-level)
+- [Level policy](#level-policy)
 - [Recipes](#recipes)
 - [Request correlation](#request-correlation)
 - [Triage recipes (full bodies on demand)](#triage-recipes-full-bodies-on-demand)
@@ -26,6 +27,8 @@ The first half is for operators (filtering, triage, redaction); the
   [config-reload transitions](#config-reload-transition-fields),
   [stream first-activity](#stream-first-activity-mark),
   [capability intelligence](#capability-intelligence-events)
+- [WARN and ERROR catalog](#warn-and-error-catalog)
+- [Visibility moved to DEBUG](#visibility-moved-to-debug)
 
 ## Env filter and default level
 
@@ -44,7 +47,46 @@ escaped partial text followed by `[field formatting failed]`.
 Default level is `info`. Every log line carries the module path
 (`routectl_router::router`, `routectl_providers::bedrock`, etc.) and,
 inside an HTTP request, the `request_id` field for correlation across
-fallback hops.
+fallback hops (read-only polling requests excepted -- see
+[Request correlation](#request-correlation)).
+
+## Level policy
+
+The default `info` log is meant to be read, so the levels follow one rule set:
+
+1. **WARN and ERROR mean actionable.** Every WARN or ERROR line names a
+   condition an operator can act on: fix a config key, re-login a seat, fix a
+   client, check an upstream, check the disk, or file a bug. Each remaining
+   class and its action is listed in the
+   [WARN and ERROR catalog](#warn-and-error-catalog). A line with no action
+   does not belong at WARN.
+2. **Expected transforms are DEBUG.** A translation routectl performs by
+   design on every matching request -- stripping a field the upstream
+   rejects, withholding a client fingerprint, dropping a cache marker the lane
+   has no slot for, unwrapping its own envelopes -- is working as intended and
+   logs at DEBUG. Where the volume matters, a counter carries it. The
+   distinction from WARN is loss: when a drop loses client intent or content
+   the model never sees (an image, a document, a tool, a structured-output
+   directive), the line stays WARN, because the remedy is to fix the client
+   or route the traffic elsewhere.
+3. **Repeats are logged once or aggregated.** A condition that recurs is
+   latched (once per process, per router incarnation, per saturation
+   episode, or per observed value), sampled (first, then every Nth), or
+   folded into one aggregated line per request, and a counter carries the
+   suppressed volume. Read the line as the existence proof and the counter
+   as the rate; a line count is not an event count.
+4. **Snapshots are logged on change.** A state line produced by polling (the
+   [field-verdict snapshot](#field-verdict-snapshot-info-status--doctor))
+   emits when its content changes, plus an hourly heartbeat. Nothing emits it
+   on a timer of its own: with no poller there is no line.
+5. **Read-only polling access lines are DEBUG.** The request span of
+   `/health`, `/status`, and everything under `/status/` opens at DEBUG, so a
+   dashboard refreshing every few seconds adds no access lines at INFO.
+   Inference request lines -- and `/v1/messages/count_tokens`, which calls the
+   upstream -- stay INFO.
+
+What an operator now needs a debug filter (or a counter) to see is listed in
+[Visibility moved to DEBUG](#visibility-moved-to-debug).
 
 ## Recipes
 
@@ -58,8 +100,8 @@ ROUTECTL_LOG=routectl=info,routectl_providers::bedrock=trace ./routectl serve
 
 # Auth tracing only (secret resolution + credential failures + listener
 # rejections + upstream 401/403).
-ROUTECTL_LOG=routectl_auth=warn,routectl_providers::bedrock::auth=warn,\
-routectl_providers::bedrock::signing=warn,\
+ROUTECTL_LOG=routectl_auth=warn,routectl_providers::bedrock=warn,\
+routectl_providers::upstream_log=warn,\
 routectl_cli::server::auth=warn ./routectl serve
 
 # Quiet -- only warnings and errors.
@@ -81,6 +123,18 @@ ROUTECTL_LOG=info ./routectl serve 2>&1 | grep request_id=probe-1
 shows every event for one specific request: ingress parse, alias
 resolution, fallback hops, retry attempts, upstream calls, response
 shape, errors.
+
+**Polling paths are the exception.** The request span of the read-only
+polling endpoints (`/health`, `/status`, and everything under `/status/`)
+is a DEBUG span, so at the default `info` level it is disabled: no
+span-close access line is written, and an event emitted while serving such
+a request (the field-verdict snapshot INFO included) carries NO `request_id`
+field. The `x-request-id` response header is
+still echoed. To correlate a status request's lines by id, enable the span:
+
+```bash
+ROUTECTL_LOG=info,routectl_cli::server::request_id=debug ./routectl serve
+```
 
 ## Triage recipes (full bodies on demand)
 
@@ -484,21 +538,33 @@ observability floor -- so the repair counters above, every resident field verdic
 the probe scheduler's state, and the paid-cap accounting stay visible without
 polling metrics or reading the response body.
 
-ONE LINE PER REQUEST, not per panel build. A standalone `/status/health` or
-`/status/doctor` request emits exactly one; the `/status` aggregate builds BOTH
-panels and still emits one, because two identical snapshots per poll would make a
-reader counting lines read double the poll rate while the two lines carried
-different timestamps for one moment.
+The line is emitted ON CHANGE, with an HOURLY HEARTBEAT. Building the surface
+(a `/status/health`, `/status/doctor`, or `/status` request) offers a line to a
+daemon-wide gate, which admits it only when the line's content differs from the
+last admitted one, or when an hour has passed since that one. The content
+comparison covers every field on the line except the one clock-derived field
+(`rc_probe_next_retry_ms`), which counts down on every poll while nothing an
+operator acts on has changed. So a dashboard polling every few seconds over a
+quiet daemon yields one line an hour, and a change shows up on the next poll. The
+heartbeat is what tells "nothing changed" apart from "no one is polling".
+
+NO POLLER, NO LINE. The line is driven by status requests only; nothing emits it
+on a timer of its own. A daemon nobody polls writes none, however long it runs, so
+an absent line means no status surface was read -- not that the state is empty.
+
+Within one request, at most one line is offered: the `/status` aggregate builds
+BOTH panels but offers once, because two identical snapshots for one moment would
+carry different timestamps.
 
 The arbitration is a request-scoped CLAIM rather than a pre-assigned emitter, and
 the difference is operationally visible: each panel is built through a guard that
 degrades a failing data source to an unavailable panel, and an unavailable build
 never reaches its logger. With a pre-assigned emitter, a failing health panel took
 the whole line down for that request. With a claim, whichever builder reaches the
-logger first wins it -- so health failing still lets doctor emit. Suppression is
-about the log only; both panels' data is built in full.
+logger first wins it -- so health failing still lets doctor offer the line.
+Suppression is about the log only; both panels' data is built in full.
 
-A daemon serving with NO on-disk config path emits the line from the doctor branch
+A daemon serving with NO on-disk config path offers the line from the doctor branch
 too, with unavailable budget data. There is no report to build there, but the
 observability floor is about the router, not the report: the counters, the verdict
 rows, the probe state, and the writer health all come from state that branch has in
@@ -524,7 +590,7 @@ consume the slots real traffic needs.
 | `rc_acting_field_verdicts` | One entry per acting row: `state_key`, `feature_key`, `phase`, `source` |
 | `rc_field_verdict_rows_total` | Count of resident field verdicts the surface HAS, before the render ceiling. Rows are produced for every resident verdict, ACTING OR NOT: an operator debugging why pre-flight is not firing needs the row whose `blocked_reason` explains it |
 | `rc_field_verdict_rows_omitted` | Rows the render ceiling dropped. Zero in the ordinary case; non-zero says the rows field is a SUBSET, so a truncated line is self-describing rather than silently partial |
-| `rc_field_verdict_rows` | The rows that fit -- the per-verdict floor, detailed below. Capped at a fixed code constant (32), because the count grows with what a deployment has learned while this line is emitted every poll |
+| `rc_field_verdict_rows` | The rows that fit -- the per-verdict floor, detailed below. Capped at a fixed code constant (32), because the count grows with what a deployment has learned while this line is re-emitted on every change |
 | `rc_acting_field_verdicts_omitted` | Same ceiling, same reading, for the acting list |
 | `rc_paid_probe_budgets_total` | Count of providers named in `[fidelity] paid_probe_daily_caps`. Zero on a deployment that configured no cap, which is the default |
 | `rc_paid_probe_budgets_omitted` | Same ceiling, same reading, for the budget rows |
@@ -596,8 +662,8 @@ the signal that a field verdict is live.
   section above.
 - The inbound per-conversation session key, which is client-supplied and
   may be user-identifying. The header-vs-body conflict warning carries
-  only the boolean fact of a mismatch, and the shadow-misfire warning
-  carries a hash rather than the value.
+  only the boolean fact of a mismatch, and the shadow-misfire event
+  (DEBUG) carries a hash rather than the value.
   ACKNOWLEDGED EXCEPTION: the inbound session headers themselves
   (`x-session-id`, `session_id`, `session-id`, `agent-session-id`,
   `x-task-id`) do appear verbatim in the direction-1 ingress header
@@ -682,7 +748,7 @@ the canonical pipeline for the matching Anthropic ingress to re-emit
 verbatim. The capture is bounded per block at 256 KB total bytes
 and 10000 deltas; once either cap trips, the block degrades to
 sink-drain for the rest of its life and the canonical stream keeps
-flowing. The five log emission sites give operators visibility into
+flowing. The six log emission sites give operators visibility into
 what's being passed through, dropped, or capped. A typed delta that
 arrives inside an `Unknown` block is captured opaquely (it surfaces
 through `record_delta`'s "captured opaque delta" DEBUG line, like any
@@ -691,20 +757,25 @@ log site.
 
 | Site | Level | Fields |
 |---|---|---|
-| Unknown block opened (`sse_unknown::open_unknown_block`) | WARN | `provider`, `upstream_index`, `block_type`, `mode="v2_capture"` |
+| Unknown block opened (`sse_unknown::open_unknown_block`) | DEBUG | `provider`, `upstream_index`, `block_type`, `mode="v2_capture"` |
 | Index mismatch (`sse_unknown::index_matches`) | WARN | `provider`, `expected_index`, `got_index`, `event_kind`, `open_block_type` |
+| Per-stream cap exceeded (`sse_unknown`) | WARN | `provider`, `opaque_bytes_total`, `opaque_events_total`, `canonical_chunk_emitted` |
 | Per-delta capture (`sse_opaque::record_delta`) | DEBUG | `provider`, `upstream_index`, `delta_bytes` |
 | Block stop summary (`sse_opaque::record_stop`) | INFO | `provider`, `upstream_index`, `block_type`, `captured_bytes`, `delta_count` |
 | Cap exceeded / degrade (`sse_opaque::degrade`) | WARN | `provider`, `upstream_index`, `block_type`, `reason`, `captured_bytes`, `delta_count` |
+
+Opening an unknown block is the forward-compat capture working as designed
+(`server_tool_use` and friends arrive on ordinary traffic), so it is DEBUG; the
+INFO stop summary below already records each captured block.
 
 Example lines (formatted for readability; real output is one event
 per line and inherits the `request_id` span field):
 
 ```
 WARN routectl_providers::anthropic_api::sse_unknown
-  provider=anthropic-prod upstream_index=1 block_type=server_tool_use
-  mode=v2_capture
-  "anthropic SSE: opening forward-compat opaque content block"
+  provider=anthropic-prod opaque_bytes_total=4194816 opaque_events_total=913
+  canonical_chunk_emitted=true
+  "anthropic SSE: per-stream opaque-capture cap exceeded; degrading stream to sink-drain"
 
 WARN routectl_providers::anthropic_api::sse_unknown
   provider=anthropic-prod expected_index=0 got_index=1
@@ -751,10 +822,10 @@ No secret values, ever:
 | Bedrock SigV4 sign failure | `ERROR routectl_providers::bedrock::signing failure_kind=<kind> ... "bedrock auth failed"` -- where `<kind>` is one of `bearer_header_invalid`, `creds_unavailable`, `body_unbuffered`, `signing_params_build`, `non_ascii_header`, `signable_request_build`, `sigv4_sign`, `signed_header_name_invalid`, `signed_header_value_invalid`, `unexpected_query_params` |
 | Bedrock 403 (IAM denied) | `WARN routectl_providers::bedrock provider=<id> status=403 action=<bedrock-runtime:InvokeModel...> principal_present=<bool> "bedrock IAM access denied"` -- `action` extracted from the AWS error body so you immediately see WHICH IAM action your role lacks |
 | Bedrock in-stream auth event | `WARN routectl_providers::bedrock::eventstream provider=<id> event_type=accessDeniedException\|unauthorizedException\|authentication_error\|permission_error message=... "bedrock in-stream auth/permission exception"` |
-| Anthropic upstream 401/403 | `WARN routectl_providers::anthropic_api provider=<id> status=<401\|403> auth_kind=<ApiKey\|OauthBearer> context=anthropic body_excerpt=... "upstream auth failed"` |
-| OpenAI-compat upstream 401/403 | `WARN routectl_providers::openai_compat provider=<id> status=<401\|403> context=openai-compat body_excerpt=... "upstream auth failed"` |
+| Anthropic upstream 401/403 | `WARN routectl_providers::upstream_log provider=<id> status=<401\|403> auth_kind=<ApiKey\|OauthBearer> context=anthropic body_excerpt=... "upstream auth failed"` |
+| OpenAI-compat upstream 401/403 | `WARN routectl_providers::upstream_log provider=<id> status=<401\|403> context=openai-compat body_excerpt=... "upstream auth failed"` |
 
-Both rows share the message string `"upstream auth failed"`; the `context` field distinguishes the call site.
+Both rows share the message string `"upstream auth failed"` and the target `routectl_providers::upstream_log` (the openai-responses and gemini egresses log through it too); the `context` field distinguishes the call site.
 
 ## Rejected authority claims (anti-DNS-rebinding)
 
@@ -1220,18 +1291,18 @@ Summary (grep the `event` field to isolate a kind):
 
 | `event` | Level | Module target | Message |
 |---|---|---|---|
-| `learn` | WARN | `routectl_router::router` | `learned-capability negative observed` |
-| `observe` | WARN | `routectl_router::router` | `response-evidence capability observation acted` |
+| `learn` | WARN | `routectl_router::router::capability_learn` | `learned-capability negative observed` |
+| `observe` | WARN | `routectl_router::router::capability_observe` / `routectl_router::router::beta_report_learn` | `response-evidence capability observation acted` / `beta re-probe accepted by the upstream; recorded as verified` |
 | `clear` | INFO | `routectl_router::learned_capability` | `learned-capability negative cleared by successful re-probe` |
 | `purge` | INFO | `routectl_router::router::capability_purge` | `operator purged a learned-capability entry` |
 | `expire_probe` | INFO | `routectl_router::learned_capability` | `lapsed learned negative admitted for its single re-probe` |
 | `evict` | WARN | `routectl_router::learned_capability` | `learned-capability registry at capacity; evicted oldest entry` |
-| `route_away` | INFO / WARN | `routectl_router::router` | `learned-capability negative de-prioritized this target to the tail` (INFO) / `... routed this target away; request survives only via the de-prioritized learned tail` (WARN) |
-| `count_tokens` | INFO | `routectl_router::router` | `count_tokens seat terminal; resilience class policy applied` |
-| `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; clearing catalog-scoped learned capabilities` |
-| `strip` | WARN | `routectl_router::router` | `capability_strip_decision` |
-| `suppression` | WARN | `routectl_router::router` | `force_supported override contradicted: masked capability still rejected upstream` |
-| `dead_override_key` | WARN | `routectl_router::override_registry` | `capability override key is rewritten by normalization; ...` |
+| `route_away` | INFO / WARN | `routectl_router::router::feature_filter` | `capability negative de-prioritized this target to the tail` (INFO) / `capability negative routed this target away; request survives only via the de-prioritized tail` (WARN) |
+| `count_tokens` | INFO | `routectl_router::router::count_tokens` | `count_tokens seat terminal; resilience class policy applied` |
+| `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; catalog-scoped learned capabilities are evicted at the replay boundary` |
+| `strip` | WARN | `routectl_router::router::feature_filter` | `capability_strip_decision` |
+| `suppression` | WARN | `routectl_router::router::capability_learn` | `force_supported override contradicted: masked capability still rejected upstream` / `f2 feature-naming negative suppressed: same-chain f1 already observed for this capability` |
+| `dead_override_key` | WARN | `routectl_router::override_registry` | `capability override key normalizes to a form that is not normalization-stable; ...` |
 
 ## Bounded probe-scheduler diagnostics
 
@@ -1254,9 +1325,9 @@ The latch SCOPES differ, because the conditions do:
 
 | Message | Level | Module target | Meaning |
 |---|---|---|---|
-| `probe_activation_refused` | WARN | `routectl_router::router` | The probe queue is at its depth bound, so a lane could not be activated. Carries `queued` / `in_flight` / `backing_off` / `queue_full_total`. |
-| `probe_payload_retention_refused` | WARN | `routectl_router::router` | A lane's beta context breached a payload retention bound or validity rule, so no probe was activated for it. Carries `payload_refusals_total` only -- deliberately no token, value, or identity, since the refusal is precisely that the shape was unacceptable. |
-| `probe_tombstone_capacity_saturated` | WARN | `routectl_router::probe_scheduler` | Terminal-marker capacity is exhausted for this incarnation, so the scheduler fails closed and refuses further activations until a republication. |
+| `probe_activation_refused` | WARN | `routectl_router::router::probe_lifecycle` | The probe queue is at its depth bound, so a lane could not be activated. Carries `queued` / `in_flight` / `backing_off` / `queue_full_total`. |
+| `probe_payload_retention_refused` | WARN | `routectl_router::router::probe_payload_capture` | A lane's beta context breached a payload retention bound or validity rule, so no probe was activated for it. Carries `payload_refusals_total` only -- deliberately no token, value, or identity, since the refusal is precisely that the shape was unacceptable. |
+| `probe_tombstone_capacity_saturated` | WARN | `routectl_router::probe_scheduler::schedule` | Terminal-marker capacity is exhausted for this incarnation, so the scheduler fails closed and refuses further activations until a republication. |
 
 ### Probe counters (`ProbeSchedulerSnapshot`)
 
@@ -1298,7 +1369,7 @@ resolver attributed the fault to (e.g. `web_search`, `structured_output`)
 | `acting` | bool | `true` once the entry is acting (routes away / strips); `false` while still pending. |
 
 ```
-WARN routectl_router::router event=learn state_key=m1
+WARN routectl_router::router::capability_learn event=learn state_key=m1
   lane=openai#gpt-4.1 capability_key=structured_output provider_kind=openai-compat
   upstream_status=400 upstream_code=unsupported_parameter
   upstream_param=response_format signal_tier=self-identifying
@@ -1323,8 +1394,18 @@ entry acts on. A refresh of an already-recorded positive emits nothing.
 | `signal_tier` | string | `self-identifying` or `inferred`. |
 | `source` | string | Always `live`. |
 
+A successful beta re-probe logs the same event from
+`routectl_router::router::beta_report_learn`, with
+`evidence_class=beta_accepted`, `direction=verified`, and the message
+`beta re-probe accepted by the upstream; recorded as verified`. It stays WARN
+for the same reason as the acting observation: it changes what the learned
+registry steers on (a beta flag routectl was withholding on that lane is now
+forwarded). It fires once per settled re-probe, not per request, so it is rare
+by construction. No action is needed when the change is expected; if it flaps,
+review the lane's beta history and pin the flag with an override.
+
 ```
-WARN routectl_router::router event=observe state_key=sonnet
+WARN routectl_router::router::capability_observe event=observe state_key=sonnet
   lane=anthropic#claude-sonnet-4-5 capability_key=web_search
   provider_kind=anthropic-api evidence_class=search_blocks direction=verified
   signal_tier=self-identifying source=live
@@ -1508,16 +1589,17 @@ de-prioritizes a target. The LEVEL distinguishes the two outcomes:
 | `event` | string | Always `route_away`. |
 | `state_key` | string | The demoted target's session/target key. |
 | `capability_key` | string | The normalized capability token that routed the target away. |
+| `source` | string | Where the negative came from: `learned`, `prior` (catalog), or `override`. |
 
 ```
-INFO routectl_router::router event=route_away state_key=front
-  capability_key=web_search
-  "learned-capability negative de-prioritized this target to the tail"
+INFO routectl_router::router::feature_filter event=route_away state_key=front
+  capability_key=web_search source=learned
+  "capability negative de-prioritized this target to the tail"
 
-WARN routectl_router::router event=route_away state_key=only
-  capability_key=web_search
-  "learned-capability negative routed this target away; request survives
-   only via the de-prioritized learned tail"
+WARN routectl_router::router::feature_filter event=route_away state_key=only
+  capability_key=web_search source=learned
+  "capability negative routed this target away; request survives
+   only via the de-prioritized tail"
 ```
 
 ### `count_tokens` (INFO)
@@ -1546,7 +1628,7 @@ advances to the next capable seat) do NOT emit it. Safe dimensions only
 | `debit` | bool | `true` when the class debited the seat's circuit breaker (or parked it on a rate-limit reset hint); `false` when the slot was released without a health debit. |
 
 ```
-INFO routectl_router::router event=count_tokens state_key=haiku
+INFO routectl_router::router::count_tokens event=count_tokens state_key=haiku
   provider=prov status=500 upstream_type= upstream_code=
   effective_class=server_error matched_by=status remapped=false debit=true
   "count_tokens seat terminal; resilience class policy applied"
@@ -1594,11 +1676,14 @@ neither line.
 
 ### `invalidation` (WARN)
 
-Emitted when a catalog or overlay change across a hot reload discards the
-catalog-scoped learned capabilities (fresher config truth wins over
-learned negatives). Entries whose truth does not depend on the catalog --
+Emitted when a catalog or overlay change across a hot reload means the
+catalog-scoped learned capabilities will be evicted (fresher config truth
+wins over learned negatives). The eviction happens when the replay boundary
+commits -- see "Capability replay boundary" above, whose INFO line counts the
+pruned entries (`pruned_catalog_scoped`) and the carried ones
+(`restated_survivors`). Entries whose truth does not depend on the catalog --
 the envelope-field verdicts, keyed `field:<dotted.path>` -- are carried
-across instead, and `carried_catalog_independent` counts them.
+across.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1609,14 +1694,13 @@ across instead, and `carried_catalog_independent` counts them.
 | `catalog_version` | integer | The incoming Router's catalog version. |
 | `previous_overlay_revision` | integer | The outgoing Router's overlay revision. |
 | `overlay_revision` | integer | The incoming Router's overlay revision. |
-| `carried_catalog_independent` | integer | Entries carried across the change because their key is catalog-independent. |
 
 ```
 WARN routectl_router::router event=invalidation catalog_changed=true
   overlay_changed=false previous_catalog_version=7 catalog_version=8
   previous_overlay_revision=0 overlay_revision=0
-  carried_catalog_independent=1
-  "catalog/overlay changed across reload; clearing catalog-scoped learned capabilities"
+  "catalog/overlay changed across reload; catalog-scoped learned capabilities
+   are evicted at the replay boundary"
 ```
 
 ### `owner_sweep` (INFO)
@@ -1649,7 +1733,11 @@ warmed from the usage ledger: `warmed learned-capability registry from
 usage ledger`, on target `routectl_cli::server::capability_rebuild`. The
 per-verdict fields (`replayed_verified`, `replayed_negative`,
 `replayed_cleared`, `cleared_noop`, `replayed_probe`) tally what replayed;
-`loaded_rows` and `row_cap` report the read.
+`loaded_rows` and `row_cap` report the read. When the read hits the cap
+(`loaded_rows == row_cap`), a one-shot WARN precedes it on the same target:
+`capability warm rebuild hit the row cap; warm state may be truncated` (see the
+[catalog](#warn-and-error-catalog) for why this one stays WARN while the
+K-estimator and calibration warm caps are DEBUG).
 
 The skip tallies are deliberately separate, because they answer different
 questions and only their combination distinguishes an empty verdict
@@ -1692,8 +1780,17 @@ A `disabled` kill switch (empty strip verdict) emits NO `strip` event --
 the verdict is skipped entirely, so there is no per-decision context to
 name.
 
+Why `applied` stays WARN although it repeats on every matching request once a
+negative is acting: unlike the fixed wire translations at DEBUG, the strip is
+driven by LEARNED state, and it removes a capability the client asked for. A
+mislearned negative silently degrades every request it touches, and this line
+is the only per-request record that it is happening. The operator action is to
+check `capability_key` on `state_key` and run `routectl capability purge` if
+the negative is wrong. The volume is bounded by the number of acting
+negatives, and `rc_strip_total` on the DEBUG metrics snapshot carries the rate.
+
 ```
-WARN routectl_router::router event=strip state_key=nick
+WARN routectl_router::router::feature_filter event=strip state_key=nick
   capability_key=advisor outcome=applied "capability_strip_decision"
 ```
 
@@ -1710,28 +1807,230 @@ upstream.
 | `capability_key` | string | The normalized capability token the operator forced on. |
 
 ```
-WARN routectl_router::router event=suppression state_key=m1
+WARN routectl_router::router::capability_learn event=suppression state_key=m1
   capability_key=unsupported_parameter
   "force_supported override contradicted: masked capability still rejected upstream"
 ```
 
 ### `dead_override_key` (WARN)
 
-A config-layer event, emitted once per operator override key that
-normalization rewrites: such a key can never match a normalized registry
-key, so the override is dead.
+A config-layer event, emitted once per operator override key whose
+normalized form is not itself normalization-stable: the cell would be stored
+under a key no normalized capability lookup can produce, so the override is
+unreachable. Normalization is idempotent for every key it accepts today, so
+this guard is a bug signal rather than a routine config lint -- a line here
+means the normalizer changed shape; rewrite the key in its `lookup_key` form
+and file a bug.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `dead_override_key`. |
 | `target_spec` | string | The override target (`provider` or `provider:nickname`). |
 | `raw_key` | string | The operator's key as written in config. |
-| `normalized_key` | string | What normalization rewrites it to (use this form instead). |
+| `stored_key` | string | The normalized key the override cell is stored under. |
+| `lookup_key` | string | What a normalized lookup of that stored key produces (use this form instead). |
 
 ```
 WARN routectl_router::override_registry event=dead_override_key
-  target_spec=br raw_key=additionalModelRequestFields.anthropic_beta
-  normalized_key=anthropic_beta
-  "capability override key is rewritten by normalization; it can never
-  match and is dead -- use the normalized form"
+  target_spec=br raw_key=<as written> stored_key=<normalized>
+  lookup_key=<normalized again>
+  "capability override key normalizes to a form that is not
+  normalization-stable; the cell is stored under a key no normalized
+  capability lookup can produce, so the override is unreachable"
 ```
+
+## WARN and ERROR catalog
+
+Every class of line that still logs at WARN or ERROR, grouped by crate, with
+the reason it is actionable and what to do. A row is a CLASS: one row can
+cover several call sites that share a target, a message shape, and a remedy,
+and `{a,b}` in a target lists sibling modules. Messages are prefixes -- grep
+on them, or on the `event` field where one exists. Event-contract details for
+the capability and probe lines are in the sections above; this table is the
+operator index.
+
+Repeat behavior is noted where the line is latched, sampled, or aggregated
+(see [Level policy](#level-policy)). An unmarked row fires once per occurrence.
+
+### routectl-cli: request handling, ingress, MITM proxy
+
+| Level | Target | Message prefix | Why actionable / operator action |
+|---|---|---|---|
+| WARN | `routectl_cli::handlers::ingress_handle` | `upstream error sanitized in HTTP response` | The upstream refused the request; its verdict was relayed to the client and recorded on the usage row. If one provider or status repeats, check that provider's credential, quota, or reachability. |
+| WARN | `routectl_cli::handlers::ingress_handle` | `upstream stream error -- emitting terminal error event` | An upstream stream failed after the response head (overload and the like); the client got a terminal error event. If one provider repeats, check its status and capacity. |
+| ERROR | `routectl_cli::handlers::ingress_handle` | `{auth,config,internal,I/O,JSON} error suppressed in HTTP response` | A routectl-side failure was hidden from the client behind a generic error. Auth: re-login or fix the provider credential. Config: fix config.toml per the error. I/O: check the disk or filesystem. Internal or JSON: file a bug with the `request_id`. |
+| ERROR / WARN | `routectl_cli::handlers::ingress_handle` | `request normalization failed; suppressed`, `response normalization failed; suppressed`, `unknown provider suppressed in HTTP response` (ERROR); `capability not implemented; suppressed`, `local refusal before egress sanitized` (WARN) | Normalization failures are translation bugs or an upstream shape routectl does not know: file a bug with `detail`. Unknown provider: routing names an unconfigured provider, fix the config. Capability or local refusal: the request has no legal shape on that egress, route the alias or client to a capable provider. |
+| ERROR | `routectl_cli::handlers::ingress_handle` | `ingress chunk render failed` | An ingress renderer bug ended a stream with a terminal error: file a bug. |
+| WARN | `routectl_cli::handlers::control` | `capability purge refused ...`, `capability purge superseded ...`, `capability purge could not persist its clear ...` | The purge did not happen. A non-loopback caller or a foreign authority means the control route is exposed or a browser page reached it: check the listen address and find the caller. Busy, stale registry, shutting down, or superseded: retry. Could not persist: check usage-writer health (`outcome`). |
+| ERROR / WARN | `routectl_cli::handlers::usage_capture` | `capability events carried no registry generation` (ERROR); `cache_auto_outcome` (WARN, thrash) | ERROR: an internal invariant broke and capability learning for that request is lost; file a bug. WARN: an auto-emitted cache breakpoint is written on every request and never read; disable auto-emit for that provider (see the `cache_auto_outcome` section). |
+| WARN | `routectl_cli::handlers::pure_proxy_metrics` | `forwarded-mode ingress request rejected at admission` | A forwarded client failed admission: check its credentials or session per `reason`. |
+| WARN | `routectl_cli::handlers::models` | `failed to build the forwarded /v1/models proxy client` (once) | The TLS backend is unavailable, so forwarded `/v1/models` serves the local list until it is fixed. |
+| WARN | `routectl_cli::ingress{::session_key,::anthropic::parse,::openai_responses::parse}` | malformed or conflicting client input dropped, replaced, or saturated (e.g. `inbound session key mismatch between header and body`, `anthropic-beta header is not valid UTF-8`, `unrecognized thinking.type`, `input_image block missing image_url`) | Client intent was lost or overridden before routing. Fix the client named by the request; the message names the field. |
+| WARN | `routectl_cli::ingress::openai_responses::parse` | `store=true ignored (routectl is stateless ...` (once per process) | routectl does not store responses for retrieval by id. Disable `store` in the client if it expects to fetch responses later. |
+| WARN / ERROR | `routectl_cli::ingress::{anthropic,openai_responses}::stream` | upstream stream protocol violations dropped (`dropping chunk ...`, `dropping second finish_reason`, opaque block start/delta/stop without a matching start, `tool_call index exceeds cap`) (WARN); `failed to serialize SSE event` (ERROR) | WARN: the upstream broke its stream protocol and content was dropped from the client; report it with the provider if it recurs. ERROR: a serializer bug; file it. |
+| WARN / ERROR | `routectl_cli::proxy::ca` | `MITM cert ... regenerating` (WARN); `failed to generate the MITM CA and leaf certificate` (ERROR) | WARN: the CA was regenerated, so every MITM client must re-trust the new CA. ERROR: the MITM proxy cannot start; fix the cert directory permissions or disk. |
+| WARN / ERROR | `routectl_cli::proxy::{forward,listener,mitm,split,metrics,cc_version}` | forwarding, tunnel, and handshake faults (`upstream unreachable`, `blind-tunnel target unreachable`, `MITM TLS handshake failed`, `rejecting malformed CONNECT request`, ...) (WARN); semaphore invariants and `MITM const inference path returned 404` (ERROR); `repeated MITM TLS handshake failures` (ERROR, every Nth); `unrecognized proxy request path` and Claude Code version drift (WARN, deduped) | Network faults: check DNS and reachability of the target. Handshake failures: install the CA in the client trust store, fix a host mismatch, or find the scanning peer. Semaphore or path-table ERRORs: an internal invariant broke; restart and file a bug. Unknown path: check whether routectl needs to handle it. Version drift: upgrade routectl to a build tested against that Claude Code version. |
+
+### routectl-cli: daemon, reload, commands
+
+| Level | Target | Message prefix | Why actionable / operator action |
+|---|---|---|---|
+| WARN | `routectl_cli::commands::catalog_import` | `catalog import: fetch result` (`outcome=err`) | A catalog source could not be fetched and was skipped: check the network or the `--file` path per `reason`. |
+| WARN | `routectl_cli::commands::{catalog::verifications,config_migrate_cmd}` | `pricing verification ... malformed date`, `pricing verifications sidecar could not be loaded` | A pricing verification entry was ignored: repair or remove the malformed entry or the unreadable sidecar, then re-verify the affected selector. |
+| WARN | `routectl_cli::server::auth` | `listener auth rejected` | A client sent no token or a wrong one: fix that client's key. Repeated rejections from unknown sources mean the listener is exposed. |
+| WARN | `routectl_cli::server::{calibration_rebuild,k_rebuild,ledger_reader,capability_rebuild}` | `usage ledger read failed during ... startup warm`, `usage ledger not readable during capability startup warm`, `capability event ... read failed after the boundary read` | The usage DB could not be read at boot, so the store starts cold or empty: check the DB file's permissions and integrity (`failure_class` / `reason`). |
+| WARN | `routectl_cli::server::capability_rebuild` | `capability warm rebuild hit the row cap; warm state may be truncated` (once per boot) | The boot replay read only the newest 5000 capability-ledger rows past the replay boundary. Older verdicts were not replayed, and a lost learned NEGATIVE is re-learned only by failing real requests again. Action: shorten the usage `retention_days` (it prunes the capability ledger too) or accept the truncated replay. This differs from the K-estimator and calibration warm caps, which are DEBUG: those stores keep only a short recent window anyway, so a cap there only shortens the warm window and drops nothing an operator would act on. |
+| ERROR | `routectl_cli::server::capability_rebuild` | `capability event slice unreadable after the boundary read`, `capability boot boundary NOT committed`, `capability boot tombstone NOT committed` | A boot-time ledger write or read failed: verdicts learned this session may not survive a restart, or the registry starts empty. Check usage DB writes and disk space. |
+| ERROR / WARN | `routectl_cli::server::capability_boundary` | `capability replay boundary NOT admitted ...`, `... batch not queued`, `... NOT committed ...` (ERROR); `shutdown during a capability boundary write` (WARN) | The reload was refused and the previous router kept. Retry the reload; if it persists, check usage-writer health and DB writes. The WARN means shutdown raced the write: after restart, confirm the reload took effect. |
+| WARN | `routectl_cli::server::cc_pin_drift` | `client self-reports a Claude Code version this build does not mint` (once per version); `Claude Code version dedup set reached its cap` (once) | The outbound fingerprint no longer matches the client: upgrade routectl. A full dedup set means many distinct versions; check for odd user agents. |
+| WARN | `routectl_cli::server::config_load` | `config reload failed; keeping previous config`, `config file is group/world-readable and carries secrets` | Fix config.toml per the redacted error (`routectl config check`); `chmod 600` the config file. |
+| WARN / ERROR | `routectl_cli::server::file_watch` | `watch target has no parent directory`, `failed to install fs watch on parent directory`, `watched file was removed`, `reload coordinator channel closed` (WARN); `fs watcher backend error` (ERROR) | Hot reload for that file is off or degraded: raise inotify limits or reload with SIGHUP. A removed file should be restored (in-memory state is kept). A closed coordinator outside shutdown means the reload pipeline is dead: restart. |
+| WARN | `routectl_cli::server` | `WARNING: routectl bound to {host}, exposing your local LLM credentials` | The listener is reachable beyond loopback: bind to loopback unless public exposure is intended and token-protected. |
+| ERROR | `routectl_cli::server::{purge_settlement,serve}` | `capability purge settlements did not finish before the shutdown deadline`, `a capability purge settlement did not complete ...`, `a capability purge settlement could not be accounted for` | The registry and ledger may disagree for a purged key; the daemon stops on purpose in the terminal cases. Check usage DB health, restart, and re-check the purged keys. |
+| WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `credentials reload failed`, `credentials seat-set changed but router rebuild failed`, `config reload failed: ...`, `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows the last rejected reload), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader. |
+| WARN | `routectl_cli::server::reload_shutdown` | `reload task join failed during shutdown`, `reload task did not stop within deadline` | A reload task panicked or hung at shutdown: file a bug with the preceding lines; check the usage DB if it recurs. |
+| WARN | `routectl_cli::server::router_build` | `class policy warning`, `codex identity warning`, `per-block breakpoint warning`, `thinking budget warning`, `cloud-code host warning`, `cloud-code model warning` (once per build) | A config advisory: adjust or remove the named knob, or accept it. |
+| WARN | `routectl_cli::server::secrets` | `OAuth credentials store unavailable ...`, `OAuth credentials store could not be constructed` | `oauth://` references will fail: set HOME/XDG, or fix the credentials directory per `error`. |
+| ERROR / WARN | `routectl_cli::server::serve` | `MITM proxy failed to start`, `usage writer drain task failed` (ERROR); `graceful drain deadline elapsed`, `failed to install SIGTERM handler` (WARN) | MITM down: fix its port or cert per `error`, restart. Drain task failed: queued usage rows may be lost; file a bug. Drain deadline: in-flight requests were cut, recurring means stuck requests. No SIGTERM handler: graceful stop is unavailable. |
+| WARN | `routectl::status::gate` | `status surface rejected a request with a disallowed authority claim`, `status surface overloaded; shed a request` (both sampled) | A foreign `Host` on `/status*` suggests DNS rebinding: find the page polling it. Shedding means a poller is hammering `/status`: slow it down. |
+
+### routectl-providers
+
+| Level | Target | Message prefix | Why actionable / operator action |
+|---|---|---|---|
+| WARN | `routectl_providers::mantle` | `mantle credential resolution failed` | Fix the AWS credential source named in `error` (expired SSO, missing profile, instance role). |
+| WARN | `routectl_providers::upstream_log` | `upstream auth failed`, `upstream error` | Auth: re-login or rotate the credential for `provider` (`auth_kind` names which). Other: read `status` and `body_excerpt` -- an outage, a quota, or a body shape the upstream rejects (file a bug for a 400). |
+| WARN | `routectl_providers::http_client` | `upstream response body exceeded cap; truncated`, `skipping malformed header name/value`, `ignoring auth-reserved header from header_extras` | Oversized body: check `provider` for a runaway response. Header lines: fix `header_extras` in config; configure auth on the provider instead. |
+| WARN | `routectl_providers::effort` | `effort string is not in the standard rank order` | The client sent a non-standard effort and the upstream will likely reject it: fix the client or the alias. |
+| WARN | `routectl_providers::{tool_calls,anthropic_api::messages}` | `tool_call.arguments not valid JSON; wrapping under _arguments` | The client sent malformed tool arguments; the upstream will likely reject them. Inspect the client. |
+| WARN | `routectl_providers::anthropic_api::parts` | `empty image_url.url`, `data: URI with empty base64 payload`, `data: URI with non-allowlisted media_type` | The request will 400: fix the client's image upload. |
+| WARN | `routectl_providers::anthropic_api` | `anthropic-api stream: upstream closed before message_stop`, `failed to read upstream error body` | The upstream truncated the stream or the error body: check upstream health and any proxy timeouts between routectl and the upstream. |
+| WARN | `routectl_providers::anthropic_api::tools` | `Responses hosted-MCP tool withheld`, `tool_choice with type="function" but missing name` | The MCP tool cannot run on this lane: route that client to a Responses-capable provider. A malformed `tool_choice` will 400: fix the client. |
+| WARN | `routectl_providers::anthropic_api::{cloak,cloak::identity,cloak::tool_rename}` | `cloak system relocation refused; failing the request`, `cloak system relocation: dropping client system blocks ...`, `cloak tool-name rename skipped: renamed form collides` | Client system content was refused or lost under cloak, or a configured rename collides with a client tool: review the cloak config (`strict_mode`, `tool_rename`) and the client shape. |
+| WARN | `routectl_providers::anthropic_api::client` | `anthropic-api oauth 4xx beta decision context`, `anthropic-api 4xx on a body carrying mid-conversation system ...`, `anthropic subscription billing flipped to overage` (on transition) | The 4xx companions say which beta or which system turn the upstream rejected: adjust the alias or model. Overage: the seat is now billed as overage; rebalance or pause it. |
+| WARN | `routectl_providers::anthropic_api::{sse_unknown,sse_opaque}` | `anthropic SSE: content-block index mismatch ...`, `... opaque-capture cap exceeded ...` (block and stream), `failed to re-serialize opaque ...` | Index mismatch: an upstream protocol violation, report it with the provider. Cap exceeded: forward-compat content past the cap is lost to the client; check for runaway server-tool output. Re-serialize: file a bug. |
+| WARN | `routectl_providers::anthropic_api::output_schema` | `output_config.format.schema carries an additionalProperties value other than false ...` | The upstream will reject the caller's schema: fix it at the logged `paths`. |
+| WARN / ERROR | `routectl_providers::anthropic_api::context_management` | `thinking-cache entry exceeds per-entry byte cap` (WARN); `thinking cache RwLock poisoned; recovered` (ERROR) | WARN: the next turn misses the thinking cache; raise `max_thinking_entry_bytes` if it repeats. ERROR: a thread panicked holding the lock; find the earlier panic and file a bug. |
+| WARN | `routectl_providers::anthropic_api::messages` | `cannot translate OpenAI file part ...`, `skipping Thinking blocks on replay: signature missing`, `skipping reasoning blocks on replay: format is not anthropic-claude-v1`, `assistant content assembled empty ...` | File part: expect a 400, the client must send a base64 PDF. Replay skips: reasoning was lost on replay; pin the session to one provider family if it matters. Empty assistant content: a predicate drifted, file a bug. |
+| WARN | `routectl_providers::anthropic_api::request` | `response_format ... dropping structured-output directive` (five shapes) | Structured output was silently lost: fix the client's `response_format`. |
+| WARN | `routectl_providers::bedrock` | `bedrock upstream auth rejected`, `bedrock IAM access denied`, `bedrock validation error`, `bedrock upstream 5xx`, `bedrock upstream error`, `failed to read upstream error body`, `bedrock upstream error-type header unusable` | Auth: rotate the AWS credential or bearer key. IAM: grant the logged `action`. Validation: fix the model id or region, or report the field. 5xx / other (often 429): check AWS health or raise quota. Header unusable: a proxy is garbling `x-amzn-errortype`, so capability learning cannot attribute 400s. |
+| WARN | `routectl_providers::bedrock::{frame,eventstream}` | `bedrock in-stream auth/permission exception`, `... frame decode failed`, `bedrock chunk payload ...; skipping` | Credentials or IAM were revoked mid-stream, or the stream framing is corrupt (check proxies; file a bug with the prelude hex if it recurs). |
+| WARN | `routectl_providers::bedrock::auth` | `bedrock credential resolution failed` | Fix the named AWS profile or provide credentials to the default chain (env, SSO login, instance role). |
+| ERROR | `routectl_providers::bedrock::signing` | `bedrock auth failed` (by `failure_kind`) | The request could not be signed. Invalid bearer or non-ASCII header: re-enter the key or fix the header. Credentials unavailable: refresh them. The remaining kinds are internal invariants: file a bug. |
+| WARN | `routectl_providers::bedrock::{invoke,converse::extras}` | `additional_model_request_fields attempted to override routectl-managed key ...` | Remove the named `key` from the provider's `additional_model_request_fields`. |
+| WARN | `routectl_providers::bedrock::{invoke,converse::extras}` | `... top-level cache_control dropped ...`, `top-level cache_control on Converse path does not produce ...` | The caller's caching request cannot be honored, so expect uncached cost: send per-block markers, or use the Invoke shape for cache-sensitive traffic. |
+| WARN | `routectl_providers::bedrock::beta_repair` | `bedrock beta retry failed; nothing reported` | The retry without the rejected betas also failed: read the accompanying upstream error line. |
+| WARN | `routectl_providers::bedrock::converse::tools` | `dropping Anthropic-builtin tool on Converse egress ...`, `tool_choice ...; dropping ...` | A requested builtin tool is unavailable on Converse (route builtin-tool traffic to an Anthropic provider), or the client sent a malformed `tool_choice` (fix the client). |
+| WARN | `routectl_providers::bedrock::converse::{eventstream,response}` | `converse: model selected the reserved history-compat dummy ...` (once per response), `stream ended after messageStop without metadata ...` | Dummy tool: the client receives a call to a tool it never offered; offer real tools on such transcripts or route elsewhere. No metadata: usage for that request is lost; file a bug if it recurs. |
+| WARN | `routectl_providers::bedrock::converse::messages` | `dropping file part ...`, `dropping ... image ...`, `dropping ... document ...`, `dropping unrecognized document citations value ...` | The model never sees that content: send base64 PDFs, images, and documents in a supported type, or route to a provider that accepts the source. |
+| WARN | `routectl_providers::{gemini,gemini::cloudcode,openai_compat,openai_responses}` | `failed to read upstream error body` | The transport failed mid error body and only the status was reported: check the network path to the upstream. |
+| WARN | `routectl_providers::gemini` | `gemini: upstream rejected the configured cloud project id`, `gemini: persisting the configured cloud project id failed`, `gemini: cloud project cache clear failed` | Fix `cloud_project_id` on the provider; check that the cloud-project cache file is writable. |
+| WARN | `routectl_providers::{gemini::sse,openai_compat,openai_responses}` | `gemini: stream ended with usage but no finishReason`, `openai-compat stream closed ...`, `openai-responses stream: upstream closed before a terminal ...`, `openai-responses non-success terminal event` | The response may be truncated or failed upstream: check upstream health, quota, and proxy timeouts. |
+| WARN | `routectl_providers::gemini::request` | image, file, and document content dropped; tool def or `tool_choice` dropped; `response_format` dropped; `gemini: dropping an unrecognized reasoning effort token`; `gemini: caller schema exceeds the cleaning ceiling; refusing ...`; `gemini: could not recover tool name for functionResponse`; `gemini: payload_extras attempted to override ...` | Client content or intent was lost or the request refused: send base64 media, offer function tools, fix the client's effort or schema, fix the transcript's tool history, or remove the managed key from `payload_extras`. |
+| WARN | `routectl_providers::openai_compat::wire_lift` | `openai-compat egress: dropping unrepresentable shape`, `... tool_choice ...`, `... output format ...` | The named content never reaches the model: route to a capable provider, fix the client, or enable `strict_translation` to fail fast. |
+| WARN | `routectl_providers::openai_compat::request` | `openai-compat egress: assistant reasoning_content stripped ...`, `extras attempted to override routectl-managed key ...`, `openai-compat egress: forward-compat content block is unmodeled ...` | If the upstream 400s on echo-back, set `history_reasoning = "preserve"`. Remove the managed key from `payload_extras`. An unmodeled block may be rejected: file a bug for the block type if a 4xx follows. |
+| WARN | `routectl_providers::openai_responses::{extras,tools}` | `response_format ...; dropping ...`, `... tool_choice ...; dropping ...` | Structured output or tool choice was lost: fix the client. |
+| WARN | `routectl_providers::openai_responses::messages` | `dropping ... content part on Responses egress`, `dropping image part with unknown source kind ...`, `dropping unsupported tool result part ...`, `tool_result content failed to serialize ...` | The named part never reaches the model: route that content to a capable provider or send images as url or base64. A serialize failure is a bug: file it. |
+
+### routectl-router
+
+| Level | Target | Message prefix | Why actionable / operator action |
+|---|---|---|---|
+| WARN | `routectl_router::router::dispatch` | `reasoning_replay_degraded` (once per request) | Carried reasoning was stripped for `target_lane`. If frequent, pin the session to one lane or scheme. |
+| WARN | `routectl_router::router::dispatch` | `cache_volatile_in_caller_prefix` (once per process per kind) | The client marks volatile content cacheable, so each request writes a cache entry nothing reads: fix the client's breakpoint placement. |
+| WARN | `routectl_router::router::dispatch` | `reasoning context/mode dropped ...` (once per request) | The client's `reasoning.context` / `mode` cannot be represented on `provider`: route Responses-dialect clients to an OpenAI Responses target. |
+| WARN | `routectl_router::router::{dispatch,count_tokens}` | `gate blocked`, `stream gate blocked`, `count_tokens gate blocked` | `provider` is rate-limited or its breaker is open: check upstream health or raise `rpm_limit`. |
+| WARN | `routectl_router::router::dispatch` | `fallback to next`, `stream fallback to next` | An upstream failed and the request moved on: investigate `provider` if it persists. |
+| WARN | `routectl_router::router::dispatch` | `chain exhausted ...`, `stream chain exhausted ...` | The request failed with no fallback left: check `provider` health, or add a fallback target. |
+| WARN | `routectl_router::router::dispatch` | `forwarded-token upstream auth failure surfaced verbatim`, `forwarded target has no captured client bearer; refusing` | The client's forwarded credential was rejected or absent: the client must re-authenticate, or fix the forwarded-credential config. |
+| WARN | `routectl_router::router::dispatch` | `unknown failure classification on upstream outcome (fail-closed)` | An upstream `status` / `upstream_type` is unclassified: add a `class_overrides` entry or file a bug. |
+| WARN | `routectl_router::router` | `rejecting invalid alias glob pattern; entry ignored`, `refusing resolved model: its runtime state key is ambiguous` (boot / reload) | Fix the `[aliases]` glob, or rename the model or pool member so its state key is unique. |
+| WARN | `routectl_router::router` | `invalidation` event (reload) | Catalog-scoped learned capabilities are evicted: expect re-learning. No action unless the catalog or overlay change was unintended. |
+| WARN | `routectl_router::router::count_tokens` | `alias chain has no count_tokens-capable provider` | Add a token-count-capable provider to the alias, or expect 501s. |
+| WARN | `routectl_router::router::{field_preflight,field_repair}` | `envelope_field_preflight` (acted), `envelope_field_repaired` (once per request) | A learned verdict rewrote a client request, or an upstream rejected a field that was then dropped: review `field_path` and provenance, and purge the verdict if it is wrong. |
+| WARN | `routectl_router::router::prefix_rewrite` | `cache_prefix_rewritten_in_epoch` (once per process) | A client rewrote its cached prefix mid-session, so later turns pay full price: investigate the client. |
+| WARN | `routectl_router::router::{probe_lifecycle,probe_payload_capture}` | `probe_activation_refused`, `probe_payload_retention_refused` (once per router incarnation) | The probe queue is full (check `queued` / `in_flight` / `backing_off` for a stuck upstream), or a client's beta context breached retention bounds (review `payload_refusals_total`). |
+| WARN | `routectl_router::router::overlays` | `ignoring auth-reserved header from [models.X] header_extras` | Remove the header from `[models.X] header_extras`; put credentials in `api_key_ref` / `auth_kind`. |
+| WARN | `routectl_router::router::window_gate` | `window_gate_skip` (throttled) | Requests exceed the target model's context window: add a larger-window target or reduce request size. |
+| WARN | `routectl_router::router::{capability_learn,capability_observe,beta_report_learn,feature_filter,capability_purge}` | capability events `learn`, `observe`, `route_away` (tail-only arm), `strip`, `suppression`, `purge_abandoned` | Learned state changed which target serves traffic or what a request carries: review `capability_key` on `state_key` and `routectl capability purge` it if wrong. `suppression`: remove a contradicted `force_supported` override. `purge_abandoned`: the purge did not persist; check the capability store writer and retry. See [Capability intelligence events](#capability-intelligence-events). |
+| WARN | `routectl_router::router::capability_learn` | `bedrock_validation_unmatched` (once per request per target) | A Bedrock validation rejection matched no capability template, which means upstream wording drifted: file a bug with the rejection shape. |
+| WARN | `routectl_router::router::feature_filter` | `alias chain filtered to empty by unsupported overrides` | No target supports the requested features per the overrides: add a capable target or relax the `unsupported` override. |
+| WARN | `routectl_router::router::chain` | `alias resolved to empty chain ...` | The alias has no usable target: fix the alias or re-enable a target. |
+| WARN | `routectl_router::catalog` | `cache-pricing override is degenerate; falling back to the baked row` | Config validation normally rejects this at load, so a line here means validation was bypassed: fix the `[cache_pricing]` override and file a bug. |
+| WARN | `routectl_router::catalog` | `cache-pricing override provider_kind is not a known baked kind` | Correct a `provider_kind` typo in the selector, or ignore it for a real custom upstream. |
+| WARN | `routectl_router::catalog` | `baked catalog snapshot is stale ...` | Upgrade routectl or run `routectl catalog import` to refresh pricing. |
+| WARN | `routectl_router::catalog_state` | `catalog_state.json is corrupt, unreadable, or from a newer routectl build` | The file is rebuilt automatically: check `path` / `reason` for a disk fault or a downgrade. |
+| WARN | `routectl_router::catalog_state` | `failed to persist catalog_state.json ...` | Fix write permissions or disk space at `path`. |
+| WARN | `routectl_router::catalog_state` | `catalog baked row changed across a CATALOG_VERSION update` (once per version per in-use selector) | Review the price or capability change for `selector`; pin an overlay cell if the new row is unwanted. |
+| WARN | `routectl_router::catalog_import_state` | `catalog_import_state.json is corrupt, unreadable, or from a newer routectl build` | The shrink guard used the baked baseline for this import: inspect `path` / `reason`. |
+| WARN | `routectl_router::catalog_import_state` | `failed to persist catalog_import_state.json ...` | Fix write permissions or disk space before the next import. |
+| WARN | `routectl_router::catalog_overlay` | `catalog overlay cell has a below-sentinel write multiplier` (at boot and when the overlay revision changes) | Confirm the low write multiplier on `selector` is intended, or fix the overlay cell. |
+| WARN | `routectl_router::config_migrate` | `cache-pricing migration: has_storage_rent/storage_rent/auto_cacher ... dropped` | Operator-written fields were dropped for `selector`: confirm nothing depended on them. |
+| WARN | `routectl_router::override_registry` | `dead_override_key` event | Rewrite the override key in its `lookup_key` form and file a bug (see the event section). |
+| WARN | `routectl_router::learned_capability` | `capability purge lease abandoned without settlement ...` | The purge did not happen and the entry is still acting: re-issue the purge. |
+| ERROR | `routectl_router::learned_capability` | `incarnation_exhausted` | Learned-capability mutations are refused: restart, and file a bug. |
+| ERROR | `routectl_router::learned_capability` | `purge_incarnation_mismatch` | A purge found the entry changed under its lease and removed nothing: file a bug. |
+| WARN | `routectl_router::learned_capability` | `capability boundary rollback ignored ...`, `capability boundary commit ignored ...` | A stale settlement was ignored: file a bug with both receipts if it repeats. |
+| WARN | `routectl_router::learned_capability` | `capability boundary refused: another boundary is admitted ...`, `capability boundary refused: an operator purge holds a key's lease ...` | The reload kept the previous router: retry it once the in-flight boundary or purge settles. |
+| ERROR | `routectl_router::learned_capability` | `capability boundary generation exhausted ...`, `capability boundary receipt counter exhausted`, `pending capability generation did not strictly advance ...` | Reloads that need a boundary are refused: restart, and file a bug. |
+| WARN | `routectl_router::learned_capability` | `evict` event (`registry_cap` / `beta_lane_cap`) | A safety valve fired: raise the registry cap or investigate learn churn or beta-flag churn on `state_key`. |
+| WARN | `routectl_router::factory::build` | `invalid codex_version; falling back to the pinned codex identity` | Fix `codex_version` for `provider`. |
+| WARN | `routectl_router::factory::build` | `max_thinking_entry_bytes` zero / below minimum / above ceiling | Remove the key or set it within the logged bounds. |
+| WARN | `routectl_router::factory::build` | `codex_version changed but requires a daemon restart ...` | Restart the daemon to apply the new `codex_version`. |
+| WARN | `routectl_router::factory::build` | `skipping Bedrock model (...)`, `skipping provider (build failed)` | That provider or model is unavailable: fix its credential or config per `error`. |
+| WARN | `routectl_router::factory::build` | `pool_member_omitted` event (once per build per member) | The pool runs with fewer seats: fix the member's credential or provider config per `reason`. |
+| WARN | `routectl_router::factory::build` | `[models.X] stream_first_byte_timeout_ms = 0 ...`, `[models.X] max_output_tokens = 0 ...` | Remove the key or set it to a positive value. |
+| WARN | `routectl_router::factory::installation_id` | `installation-id file unreadable ...`, `installation-id could not be written ...` | Egress omits the installation header: fix permissions or disk space in the config directory. |
+| WARN | `routectl_router::factory::warnings` | `context_management = true on this anthropic-api provider but history_reasoning is not 'preserve'` | Set `history_reasoning = "preserve"` on that model. |
+| WARN | `routectl_router::probe_scheduler::schedule` | `probe_tombstone_capacity_saturated` (once per saturation episode) | Probe activations are refused until the next reload republishes the scheduler; the counter carries the volume. |
+| WARN | `routectl_router::quota::store` | `quota_observation_rejected` (throttled, 1 per 300s) | Upstream quota headers were untrusted. A steady rise in the rejection totals suggests a header-format change: file a bug. |
+
+### routectl-usage, routectl-auth, routectl-core
+
+| Level | Target | Message prefix | Why actionable / operator action |
+|---|---|---|---|
+| ERROR | `routectl_usage::writer` | `usage writer thread spawn failed -- running degraded` | Usage accounting is off for this process: check thread and resource limits, restart. |
+| ERROR | `routectl_usage::writer` | `usage writer thread panicked during drain` | Queued usage rows were lost at shutdown: file a bug with the panic payload. |
+| WARN | `routectl_usage::writer` | `usage writer drain deadline exceeded -- abandoning queued rows` | Rows were abandoned at shutdown: check disk latency on the usage DB and account for the gap. |
+| ERROR | `routectl_usage::writer` | `usage db open failed -- running degraded` | Fix the usage DB path, permissions, or corruption named in `error`, then restart. |
+| WARN | `routectl_usage::writer` | `usage retention prune failed -- continuing` | The usage DB is growing past retention: inspect `error` (lock, disk, corruption). |
+| WARN | `routectl_usage::writer` | `capability ledger retention prune failed -- continuing` | The capability ledger is growing past retention: inspect `error`. |
+| ERROR | `routectl_usage::writer` | `usage writer insert affected unexpected row count` | Should never fire: file a bug with `rows`. |
+| ERROR | `routectl_usage::writer` | `capability boundary batch failed; no row committed` | A capability boundary was not persisted: inspect `error` (disk full, lock, corruption). |
+| ERROR | `routectl_usage::writer` | `usage writer degraded -- dropping rows it cannot persist` (on the healthy-to-degraded edge) | Usage rows are being dropped: fix the DB fault in `error`. |
+| ERROR | `routectl_usage::writer` | `usage writer still degraded` (every 1024 errors) | The same DB fault is still active: fix it. |
+| WARN | `routectl_usage::paid_probe` | `paid-probe unit committed as shutdown began` | One paid-probe unit was spent with no call: account for it when reconciling the day's budget. |
+| WARN | `routectl_usage::handle` | `usage channel full -- dropping record` (first, then every 1024) | The writer is behind capture: check disk latency. |
+| WARN | `routectl_usage::handle` | `usage writer channel closed -- dropping capability write` (first, then every 1024) | The writer is gone: outside shutdown, look for an earlier writer ERROR. |
+| WARN | `routectl_usage::handle` | `usage channel full -- dropping capability event` (first, then every 1024) | The writer is behind: check disk latency. |
+| WARN | `routectl_auth::memory_store` | `secret resolution failed` (`reason` names the case) | Set the named env var, make the `file://` path absolute and readable, point it at a regular UTF-8 file, or `chmod 600` it. |
+| ERROR | `routectl_auth::oauth::providers::{anthropic,antigravity,codex,xai}` | `<provider> refresh failed` | The seat cannot refresh: per `error_kind`, re-run `routectl login <provider>` or wait out the upstream outage; a parse error means the token endpoint changed shape, file a bug. |
+| WARN | `routectl_auth::oauth::store::refresh` | `oauth_refresh_cooldown_entered` | The seat is backing off refresh: if `consecutive_failures` keeps climbing, re-login the seat. |
+| WARN | `routectl_core::tool_def` | `ToolDef::Other carried a malformed cache_control` | A client sent a built-in tool with an unparseable `cache_control`, which the upstream will likely reject: identify the client. |
+
+## Visibility moved to DEBUG
+
+These lines were WARN (or per-poll INFO) and now log at DEBUG because they
+describe routectl working as designed. Each entry names what still shows the
+condition at the default level, or the filter that brings the line back. The
+translation counters ride the DEBUG metrics snapshot on target
+`routectl_router::router::metrics` (`rc_translation_drop_counts` /
+`rc_translation_policy_action_counts`), so reading them also needs
+`ROUTECTL_LOG=info,routectl_router::router::metrics=debug`.
+
+| What moved | Still visible via |
+|---|---|
+| Sampling-parameter strips: `stripped sampling params the OAuth seat rejects ...` and `sampling fields dropped: not translated onto this egress's wire` | `routectl_providers=debug` only. No counter carries them yet. |
+| Unsigned-thinking strip (`stripping unsigned thinking blocks ...`) and the whole-turn drop that follows it (`dropping assistant turn(s) from outgoing request`) | `routectl_providers::anthropic_api=debug` only. No counter carries them yet. |
+| Other Anthropic-egress expected transforms: adaptive-thinking budget discard, legacy thinking drop on probe-sized requests, legacy budget clamp, text-after-`tool_use` strip, `tool_choice="none"` mapping, flat-text block omission, forward-compat opaque block open, reasoning-envelope unwrap, `output_config.format` key omission, Claude Code billing/attribution strip, context-management cache-miss thinking strip | `routectl_providers::anthropic_api=debug`. The opaque block open is still summarized by the INFO `opaque block closed` line; the billing strip is counted as the `client_fingerprint_stripped` policy action. |
+| Bedrock expected transforms: billing/attribution withhold, reserved dummy `toolSpec` injection, beta-flag self-repair retry, Converse reasoning skips | `routectl_providers::bedrock=debug`. Counters: `client_fingerprint_stripped` (Converse), and the drop classes `reasoning_signature_missing`, `reasoning_summary_unsupported`, `reasoning_foreign_format_unsupported`. A failed beta retry still WARNs. |
+| `cache_control` drops on lanes with no breakpoint surface (openai-responses, gemini, openai-compat) | openai-responses and gemini: the `cache_control_unsupported` drop class. openai-compat: no counter; `routectl_providers::openai_compat=debug`, or `strict_translation` to reject instead. |
+| Fingerprint and metadata withholds on openai-compat, openai-responses, and gemini; gemini ingress-extras withhold; openai-compat `anthropic_beta` flag drop | `client_fingerprint_stripped` and `ingress_extra_withheld` policy actions. The openai-compat `metadata` and `anthropic_beta` drops have no counter: `routectl_providers::openai_compat=debug`. |
+| Gemini schema-keyword lowering and redacted-thinking drop; openai-compat non-text reasoning-detail drop | Gemini: their drop classes. openai-compat: `routectl_providers::openai_compat=debug`. |
+| Would-trim shadow-misfire event (`would_trim_shadow_misfire: ...`) | The usage ledger's `would_trim_shadow_misfire` column; `routectl_router::router::dispatch=debug` for the line with its session-key hash. |
+| Subscription-quota placement fallback (`quota_placement_fallback`) | `rc_quota_placement_*_total` counters on the metrics snapshot. |
+| Feature-naming rejection with no matching template (`feature_naming_unmatched`) | `rc_feature_naming_unmatched_total` on the metrics snapshot. |
+| Per-row capability warm-rebuild skips (`rebuild_skip`) | The `skipped_*` tallies on the INFO `warmed learned-capability registry from usage ledger` line; `routectl_router::capability_rebuild=debug` for the per-row reasons. |
+| K-estimator and calibration warm row-cap notes | `loaded_rows` / `rows_loaded` equal to `row_cap` on their INFO warm lines. |
+| Read-only polling access lines (`/health`, `/status`, `/status/*`) | `routectl_cli::server::request_id=debug`. Unchanged snapshots from those polls are folded by the field-verdict gate (on change plus an hourly heartbeat). |
+| Boot and shutdown housekeeping: `watch target canonicalize failed (file may not exist yet) ...`, `config reload abandoned at shutdown ...`, the DST spring-forward note in `routectl usage` | `routectl_cli=debug`. The shutdown race is still reported once by `shutdown during a capability boundary write` when a boundary was in flight. |
