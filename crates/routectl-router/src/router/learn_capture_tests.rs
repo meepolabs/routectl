@@ -1998,7 +1998,7 @@ fn pending_inferred_f1_does_not_suppress_a_later_f2() {
 
 // --- Feature-naming drift observability ---
 
-fn feature_naming_unmatched_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+fn feature_naming_unmatched_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
     events
         .iter()
         .filter(|e| {
@@ -2030,10 +2030,10 @@ fn generic_anthropic_400_provider() -> Arc<CapabilityRejectingProvider> {
 }
 
 #[tokio::test]
-async fn unmatched_feature_naming_warns_and_counts_once() {
+async fn unmatched_feature_naming_logs_at_debug_and_counts_once() {
     // A deterministic anthropic-api 400 on a feature-carrying request that the
     // shipped-empty feature-naming table cannot attribute: the drift signal
-    // fires exactly once (WARN + counter), carrying only the token-free safe
+    // fires exactly once (DEBUG + counter), carrying only the token-free safe
     // fields, and nothing is learned.
     let router = router_with(ANTHROPIC_P1, generic_anthropic_400_provider());
 
@@ -2046,8 +2046,9 @@ async fn unmatched_feature_naming_warns_and_counts_once() {
     assert!(dispatched.meta.learned_capabilities.is_empty());
     assert!(learn_warns(&events).is_empty());
 
-    let drift = feature_naming_unmatched_warns(&events);
+    let drift = feature_naming_unmatched_events(&events);
     assert_eq!(drift.len(), 1);
+    assert_eq!(drift[0].level, tracing::Level::DEBUG);
     assert_eq!(drift[0].field("event"), Some("feature_naming_unmatched"));
     assert_eq!(drift[0].field("state_key"), Some("m1"));
     assert_eq!(drift[0].field("provider_kind"), Some("anthropic-api"));
@@ -2131,7 +2132,7 @@ async fn unmatched_feature_naming_skips_non_feature_carrying_request() {
         with_capture(router.complete_with_options(req, RouterOptions::default())).await;
 
     assert!(dispatched.result.is_err());
-    assert!(feature_naming_unmatched_warns(&events).is_empty());
+    assert!(feature_naming_unmatched_events(&events).is_empty());
     assert_eq!(router.metrics.feature_naming_unmatched_total(), 0);
 }
 
@@ -2152,9 +2153,9 @@ async fn unmatched_feature_naming_ignores_a_request_that_only_grounds_a_field_ke
 
     assert!(dispatched.result.is_err());
     assert!(
-        feature_naming_unmatched_warns(&events).is_empty(),
+        feature_naming_unmatched_events(&events).is_empty(),
         "a request that grounds only a closed-table field key must not fire the \
-         catalog feature-naming-drift WARN",
+         catalog feature-naming-drift line",
     );
     assert_eq!(
         router.metrics.feature_naming_unmatched_total(),
@@ -2175,7 +2176,7 @@ async fn unmatched_feature_naming_skips_provider_without_a_table() {
     .await;
 
     assert!(dispatched.result.is_err());
-    assert!(feature_naming_unmatched_warns(&events).is_empty());
+    assert!(feature_naming_unmatched_events(&events).is_empty());
     assert_eq!(router.metrics.feature_naming_unmatched_total(), 0);
 }
 

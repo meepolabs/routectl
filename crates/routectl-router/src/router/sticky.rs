@@ -126,7 +126,7 @@ impl Router {
                 "subscription-quota partition chose the birth seat",
             );
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 event = "quota_placement_fallback",
                 model = %routectl_core::sanitize_for_log(nickname),
                 arm = ?decision,

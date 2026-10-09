@@ -1192,7 +1192,7 @@ impl Router {
     /// resolver attributed no capability yet the rejection is a deterministic
     /// request fault on a feature-carrying request against a provider that HAS
     /// a feature-naming table, the shipped-empty template table missed a real
-    /// rejection shape: emit a structured WARN and bump a dedicated counter so
+    /// rejection shape: emit a structured DEBUG line and bump a dedicated counter so
     /// wording drift is visible instead of silently dropping the signal --
     /// exactly the discipline the Bedrock-validation drift observer applies to
     /// the wire-token table. Gated to providers that carry an F2 table so it
@@ -1228,7 +1228,7 @@ impl Router {
             return;
         }
         self.metrics.incr_feature_naming_unmatched();
-        tracing::warn!(
+        tracing::debug!(
             event = "feature_naming_unmatched",
             state_key = %routectl_core::sanitize_for_log(&target.state_key),
             provider_kind,

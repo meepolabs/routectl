@@ -3806,7 +3806,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe_bedrock_validation_drift` (WARN +
   `bedrock_validation_unmatched_total` counter, deduped once per request per
   target, when the matcher attributed no capability yet the rejection was a
-  flat bedrock `ValidationException`), `observe_feature_naming_drift` (WARN +
+  flat bedrock `ValidationException`), `observe_feature_naming_drift` (DEBUG +
   `feature_naming_unmatched_total` counter, deduped once per request per
   target, when a deterministic feature-carrying 400/422 against a provider
   that HAS a feature-naming table matched no template -- gated via
