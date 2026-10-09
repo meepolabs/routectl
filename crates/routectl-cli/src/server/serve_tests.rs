@@ -370,7 +370,7 @@ async fn router_hot_swap_does_not_disturb_usage_handle() {
     config.usage.db_path = dir.path().join("usage.db");
     let config = Arc::new(config);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let (usage, _writer) = build_usage_writer(&config);
+    let (usage, writer) = build_usage_writer(&config);
 
     let r1 = build_router_from_config(config.clone(), secrets.clone())
         .await
@@ -393,6 +393,8 @@ async fn router_hot_swap_does_not_disturb_usage_handle() {
         Arc::as_ptr(usage.counters()),
         "router swap must not rebuild the usage handle's counters"
     );
+    drop(usage);
+    drain_usage_writer(writer).await;
 }
 
 /// Graceful shutdown must drain queued usage rows to the (temp) DB

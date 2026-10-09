@@ -19,6 +19,19 @@ pub(super) fn isolate_usage_db(config: &mut Config) -> tempfile::TempDir {
     dir
 }
 
+/// Shut `writer` down and wait for its drain to finish, so the tempdir guard
+/// returned by [`isolate_usage_db`] can be dropped without racing the writer
+/// thread's database open or its last flush.
+///
+/// `UsageWriter::shutdown` blocks, so it runs on the blocking pool rather than
+/// a runtime worker. Every `UsageHandle` clone must be dropped first: a live
+/// handle keeps the channel open and the drain waits out its full deadline.
+pub(super) async fn drain_usage_writer(writer: UsageWriter) {
+    tokio::task::spawn_blocking(move || writer.shutdown())
+        .await
+        .expect("the usage writer drain must not panic");
+}
+
 /// An otherwise-empty overlay stamped at `revision`, for the reload /
 /// capability-boundary tests that turn on the REVISION a Router was built
 /// against and not on any cell content.
@@ -148,4 +161,36 @@ pub(super) fn added_control_rows(
         .filter(|(key, _)| !before.contains_key(*key))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+/// The drain returns only once a queued row is durable: a reader opening the
+/// database right after it sees the row, with no polling in between.
+#[tokio::test]
+async fn drain_usage_writer_persists_a_queued_row_before_returning() {
+    // Arrange: a writer over a database it has not created yet, one row queued,
+    // and the only producer handle released so the channel can close.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("usage.db");
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    handle.try_send(routectl_usage::UsageRecord {
+        request_id: "drained-row".to_string(),
+        outcome: routectl_usage::Outcome::Ok,
+        ..routectl_usage::UsageRecord::default()
+    });
+    drop(handle);
+
+    // Act
+    drain_usage_writer(writer).await;
+
+    // Assert
+    let db = routectl_usage::open_readonly(&path).expect("read-only open");
+    let ids: Vec<String> = db
+        .conn()
+        .prepare("SELECT request_id FROM requests")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("request ids");
+    assert_eq!(ids, vec!["drained-row".to_string()]);
 }
