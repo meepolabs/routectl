@@ -469,7 +469,7 @@ license.
 - `src/system_filter.rs` -- predicate + strip helpers for the Claude Code
   billing/attribution system block, shared by every egress
 - `src/sampling_drop_guard.rs` -- shared leak-guard
-  (`warn_dropped_sampling_fields`): one DEBUG event per
+  (`log_dropped_sampling_fields`): one DEBUG event per
   request naming which of the canonical sampling knobs (`n`, `seed`,
   `logprobs`, `top_logprobs`, `logit_bias`, `presence_penalty`,
   `frequency_penalty`) an egress received but cannot translate -- names

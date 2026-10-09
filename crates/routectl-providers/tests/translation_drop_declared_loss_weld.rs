@@ -420,12 +420,12 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("gemini/request.rs", "content_part_to_part", 7),
     ("gemini/request.rs", "drop_redacted_thinking", 1),
     ("gemini/request.rs", "flush", 2),
+    ("gemini/request.rs", "log_dropped_cache_control", 1),
     ("gemini/request.rs", "merge_payload_extras", 1),
     ("gemini/request.rs", "reasoning_details_to_thought_parts", 1),
     ("gemini/request.rs", "report_withheld_ingress_extras", 1),
     ("gemini/request.rs", "strip_client_metadata", 1),
     ("gemini/request.rs", "tool_call_to_function_call_part", 1),
-    ("gemini/request.rs", "warn_dropped_cache_control", 1),
     ("openai_compat/request.rs", "project_system", 2),
     (
         "openai_compat/wire_lift/mod.rs",
@@ -460,7 +460,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("openai_responses/messages.rs", "walk_assistant_part", 4),
     (
         "openai_responses/request.rs",
-        "warn_dropped_cache_control",
+        "log_dropped_cache_control",
         1,
     ),
     ("openai_responses/system.rs", "translate_system", 2),

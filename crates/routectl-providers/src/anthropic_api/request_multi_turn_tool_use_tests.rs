@@ -354,7 +354,7 @@ fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
 }
 
 #[test]
-fn emits_warn_when_stripping_occurs() {
+fn emits_debug_event_when_stripping_occurs() {
     // Capture the DEBUG strip event emitted during normalize and assert:
     // - structured fields `provider`, `dropped_blocks`,
     //   `affected_messages_count`, `affected_messages`,

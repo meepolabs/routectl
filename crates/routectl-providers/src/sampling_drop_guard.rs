@@ -68,7 +68,7 @@ fn dropped_sampling_fields(req: &ChatRequest, honored: &[&str]) -> Vec<&'static 
 /// Silent when the request carries none of the dropped ones. Logs field
 /// NAMES and a count only -- no values, since `logit_bias` and friends can
 /// carry caller-shaped data.
-pub fn warn_dropped_sampling_fields(provider_id: &str, req: &ChatRequest, honored: &[&str]) {
+pub fn log_dropped_sampling_fields(provider_id: &str, req: &ChatRequest, honored: &[&str]) {
     let fields = dropped_sampling_fields(req, honored);
     if fields.is_empty() {
         return;
@@ -86,7 +86,7 @@ pub fn warn_dropped_sampling_fields(provider_id: &str, req: &ChatRequest, honore
 #[cfg(test)]
 pub mod test_support {
     /// The drop diagnostic's message text, as emitted by
-    /// [`super::warn_dropped_sampling_fields`].
+    /// [`super::log_dropped_sampling_fields`].
     const SAMPLING_DROP_NEEDLE: &str =
         "sampling fields dropped: not translated onto this egress's wire";
 
@@ -132,7 +132,7 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::{sampling_drops, sole_sampling_drop};
-    use super::{dropped_sampling_fields, warn_dropped_sampling_fields};
+    use super::{dropped_sampling_fields, log_dropped_sampling_fields};
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
     use serde_json::json;
 
@@ -243,8 +243,8 @@ mod tests {
 
         // Act
         let events = routectl_testkit::capture_events(|| {
-            warn_dropped_sampling_fields("prov-test", &r, &["seed", "presence_penalty"]);
-            warn_dropped_sampling_fields(CONTROL_PROVIDER, &control, &[]);
+            log_dropped_sampling_fields("prov-test", &r, &["seed", "presence_penalty"]);
+            log_dropped_sampling_fields(CONTROL_PROVIDER, &control, &[]);
         });
 
         // Assert: the control's event proves the capture saw the callsite.
@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn warns_naming_dropped_fields_without_values() {
+    fn emits_debug_event_naming_dropped_fields_without_values() {
         // Arrange
         let mut r = req();
         r.n = Some(3);
@@ -264,7 +264,7 @@ mod tests {
 
         // Act
         let events =
-            routectl_testkit::capture_events(|| warn_dropped_sampling_fields("prov-test", &r, &[]));
+            routectl_testkit::capture_events(|| log_dropped_sampling_fields("prov-test", &r, &[]));
 
         // Assert
         let warn = sole_sampling_drop(&events, "prov-test");
@@ -288,8 +288,8 @@ mod tests {
 
         // Act
         let events = routectl_testkit::capture_events(|| {
-            warn_dropped_sampling_fields("prov-test", &r, &[]);
-            warn_dropped_sampling_fields(CONTROL_PROVIDER, &control, &[]);
+            log_dropped_sampling_fields("prov-test", &r, &[]);
+            log_dropped_sampling_fields(CONTROL_PROVIDER, &control, &[]);
         });
 
         // Assert: the control's event proves the capture saw the callsite.

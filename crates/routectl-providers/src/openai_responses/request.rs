@@ -37,11 +37,11 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     // omitted the failures would read low for exactly the requests that went
     // worst.
     record_translation_lane_seen(super::LANE);
-    warn_dropped_cache_control(req);
+    log_dropped_cache_control(req);
     // The canonical sampling knobs have no Responses-API home and are gated
-    // out of the provider_extras merge as canonical keys; WARN once so the
-    // loss isn't silent.
-    crate::sampling_drop_guard::warn_dropped_sampling_fields(&cfg.id, req, &[]);
+    // out of the provider_extras merge as canonical keys; log once at DEBUG
+    // (an expected transform).
+    crate::sampling_drop_guard::log_dropped_sampling_fields(&cfg.id, req, &[]);
 
     let mut fingerprint = ClientFingerprintStripTally::default();
     let instructions = translate_system(req, &mut fingerprint).unwrap_or_default();
@@ -224,7 +224,7 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
 /// OpenAI-shape client. Seed per foundations sec 14, deletion-blocked
 /// pending per-lane wire evidence.
 /// TRANSLATION-DROP: lane=openai-responses class=cache_control_unsupported test=cache_control_marker_drops_from_the_wire_and_counts
-fn warn_dropped_cache_control(req: &ChatRequest) {
+fn log_dropped_cache_control(req: &ChatRequest) {
     if !req.cache_breakpoints().is_empty() {
         record_translation_drop(super::LANE, "cache_control_unsupported");
     }

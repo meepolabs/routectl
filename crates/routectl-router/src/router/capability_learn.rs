@@ -1255,7 +1255,8 @@ impl Router {
     /// way -- once per request per target, so a same-request retry or a
     /// per-target re-entry cannot inflate the rate.
     ///
-    /// COUNTED BUT NOT WARNED, unlike its two siblings. Those fire only when a
+    /// COUNTED BUT NOT LOGGED AT ALL, unlike `observe_bedrock_validation_drift`
+    /// (WARN) and `observe_feature_naming_drift` (DEBUG). Those fire only when a
     /// rejection shape a table was built for went unmatched, which is rare and
     /// actionable per occurrence. This one is the ORDINARY case on real traffic
     /// -- most caller-shaped 4xxs are not field rejections at all -- so a WARN

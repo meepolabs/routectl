@@ -112,7 +112,7 @@ fn index_entries(warn: &CapturedEvent, field: &str) -> Vec<String> {
 }
 
 const STRIP_LINE: &str = "stripping unsigned thinking blocks from outgoing request";
-const DROPPED_TURN_WARN: &str = "dropping assistant turn(s) from outgoing request";
+const DROPPED_TURN_LINE: &str = "dropping assistant turn(s) from outgoing request";
 
 /// More affected messages than the log cap must still produce ONE strip
 /// line whose block count and affected-message count stay exact while the
@@ -120,7 +120,7 @@ const DROPPED_TURN_WARN: &str = "dropping assistant turn(s) from outgoing reques
 /// BLOCKS, so the affected-message magnitude is carried by its own field
 /// rather than being inferred from the sample's length.
 #[test]
-fn strip_warn_caps_affected_messages_and_keeps_the_count_exact() {
+fn strip_event_caps_affected_messages_and_keeps_the_count_exact() {
     // Arrange: 12 turns, each losing exactly one unsigned Thinking block.
     let count = MAX_LOGGED_DIAGNOSTIC_ITEMS + 4;
     let req = request_of((0..count).map(|_| partially_stripped_msg()).collect());
@@ -173,7 +173,7 @@ fn dropped_turn_warn_caps_indices_and_keeps_the_turn_count_exact() {
     let events = normalize_capturing(&req);
 
     // Assert
-    let warn = sole_event_containing(&events, DROPPED_TURN_WARN, tracing::Level::DEBUG);
+    let warn = sole_event_containing(&events, DROPPED_TURN_LINE, tracing::Level::DEBUG);
     assert_eq!(
         warn.field("dropped_turns"),
         Some(count.to_string().as_str()),
@@ -203,7 +203,7 @@ fn dropped_turn_warn_caps_indices_and_keeps_the_turn_count_exact() {
 /// truncation flags must read `false` -- so each flag distinguishes a
 /// sample from a whole list in BOTH directions.
 #[test]
-fn both_warns_keep_full_index_lists_when_within_cap() {
+fn both_events_keep_full_index_lists_when_within_cap() {
     // Arrange: 3 partially stripped turns then 3 wholly dropped ones,
     // well under the cap on both lists.
     let mut messages: Vec<Message> = (0..3).map(|_| partially_stripped_msg()).collect();
@@ -229,7 +229,7 @@ fn both_warns_keep_full_index_lists_when_within_cap() {
     );
 
     // Assert: dropped-turn list is whole.
-    let dropped_warn = sole_event_containing(&events, DROPPED_TURN_WARN, tracing::Level::DEBUG);
+    let dropped_warn = sole_event_containing(&events, DROPPED_TURN_LINE, tracing::Level::DEBUG);
     assert_eq!(dropped_warn.field("dropped_turns"), Some("3"));
     assert_eq!(
         dropped_warn.field("dropped_message_indices_truncated"),

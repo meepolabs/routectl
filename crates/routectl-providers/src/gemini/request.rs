@@ -336,12 +336,12 @@ fn build_body(
     tally: &mut GeminiDropTally,
     fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<GenerateContentRequest> {
-    warn_dropped_cache_control(provider_id, req, tally);
+    log_dropped_cache_control(provider_id, req, tally);
     // `seed`, `presence_penalty` and `frequency_penalty` are translated onto
     // `generationConfig`; the remaining canonical sampling knobs have no
     // usable home here and are gated out of the provider_extras merge as
-    // canonical keys, so WARN once naming those so the loss isn't silent.
-    crate::sampling_drop_guard::warn_dropped_sampling_fields(
+    // canonical keys, so log once at DEBUG naming those (an expected transform).
+    crate::sampling_drop_guard::log_dropped_sampling_fields(
         provider_id,
         req,
         HONORED_SAMPLING_FIELDS,
@@ -399,7 +399,7 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
 /// to translate the marker onto. Baked seed verdict: deletion-blocked pending
 /// this lane's own wire evidence, not a permanent design decision.
 /// TRANSLATION-DROP: lane=gemini class=cache_control_unsupported test=cache_control_drop_bumps_the_counter_once_per_request
-fn warn_dropped_cache_control(provider_id: &str, req: &ChatRequest, tally: &mut GeminiDropTally) {
+fn log_dropped_cache_control(provider_id: &str, req: &ChatRequest, tally: &mut GeminiDropTally) {
     let surfaces = dropped_cache_surfaces(req);
     if surfaces.is_empty() {
         return;
@@ -3288,7 +3288,7 @@ mod tests {
     }
 
     #[test]
-    fn all_seven_sampling_knobs_split_between_wire_and_one_warn() {
+    fn all_seven_sampling_knobs_split_between_wire_and_one_debug_event() {
         let mut req = base_req();
         req.n = Some(3);
         req.seed = Some(42);

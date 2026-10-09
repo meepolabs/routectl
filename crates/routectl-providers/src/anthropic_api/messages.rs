@@ -26,8 +26,9 @@
 //! `SystemTurnTally` pools the forwarded-system-turn counts, and
 //! `EnvelopeUnwrapTally` (owned upstream in `request::normalize`, since
 //! cache reinjection also builds `redacted_thinking` blocks) pools the
-//! envelope events, so one request defect costs one WARN line rather than
-//! one per turn.
+//! envelope events, so one request defect costs one line rather than one
+//! per turn. The reasoning-skip tally emits at WARN; the system-turn and
+//! envelope tallies emit at DEBUG.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -1153,7 +1154,7 @@ fn ensure_min_tool_result_content(content: Value) -> Value {
 /// `request::normalize` rather than by this function because the
 /// context-management reinjection path constructs `redacted_thinking`
 /// blocks too, after this returns, and both channels must share one tally
-/// so the aggregated WARN stays at one line per request.
+/// so the aggregated DEBUG event stays at one line per request.
 ///
 /// The reasoning-skip and system-turn tallies, by contrast, are owned
 /// HERE: this walk is their only feeder, so a wider owner would spread

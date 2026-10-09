@@ -1471,7 +1471,7 @@ mod tests {
     /// normalizer, so the shared sampling leak-guard fires here too --
     /// attributed to the Bedrock provider id.
     #[test]
-    fn sampling_fields_warn_once_naming_dropped_fields() {
+    fn sampling_fields_emit_one_debug_event_naming_dropped_fields() {
         use crate::sampling_drop_guard::test_support::sole_sampling_drop;
 
         let cfg = fake_cfg();

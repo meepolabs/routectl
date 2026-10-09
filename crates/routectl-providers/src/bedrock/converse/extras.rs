@@ -94,11 +94,11 @@ pub(super) fn build_additional_fields(
 
     // Scrub the `output_config.format` keys Anthropic cannot represent from
     // the fully composed bag, so every path that can write the field is
-    // covered rather than just the shared converter. One WARN for the request,
+    // covered rather than just the shared converter. One DEBUG line for the request,
     // from whichever path supplied the keys.
     dropped_format_keys
         .merged(crate::anthropic_api::request::drop_unrepresentable_output_format_keys(&mut bag))
-        .warn(&cfg.id);
+        .emit(&cfg.id);
 
     // The display-updates and structured-outputs betas are implied by the
     // final bag rather than opted into by the client, so they union here,

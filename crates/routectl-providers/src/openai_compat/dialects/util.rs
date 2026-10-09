@@ -370,7 +370,7 @@ pub(super) fn preserve_history_reasoning_details(
 
 /// Lower a `reasoning_details` array (Anthropic-aligned typed shape)
 /// to plaintext by joining each entry's `text` (or `payload.text`)
-/// in order. Non-text entries warn + skip.
+/// in order. Non-text entries are logged at DEBUG and skipped.
 fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String {
     let Some(arr) = details.as_array() else {
         return String::new();

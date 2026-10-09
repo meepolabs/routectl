@@ -244,9 +244,10 @@ pub struct MatrixWarm {
 /// and `warm: Some`. A resident view can legitimately differ from a CLI
 /// ledger replay of the same daemon: live positives the daemon holds but
 /// does not persist appear only in the resident view, and each replay reads
-/// at most 5000 ledger rows past the boundary, so on a ledger beyond that cap
-/// the boot warm and a later replay can cover different row windows. The two
-/// are not reconciled.
+/// at most `REBUILD_ROW_LIMIT` ledger rows past the boundary (the replay
+/// row-limit constant in the CLI's server ledger reader), so on a ledger
+/// beyond that cap the boot warm and a later replay can cover different row
+/// windows. The two are not reconciled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CapabilityMatrixPanel {
     /// The learned source availability tri-state.

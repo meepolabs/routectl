@@ -412,7 +412,7 @@ fn no_warn_for_clean_request() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sampling_fields_warn_once_naming_dropped_fields() {
+fn sampling_fields_emit_one_debug_event_naming_dropped_fields() {
     use crate::sampling_drop_guard::test_support::sole_sampling_drop;
 
     // Arrange

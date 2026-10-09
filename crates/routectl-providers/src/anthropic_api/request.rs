@@ -294,7 +294,7 @@ impl DroppedFormatKeys {
     /// NOT claim that output validation was weakened -- Anthropic's format
     /// object has no `strict` member to honor in the first place, so what the
     /// omission changes upstream is not something routectl can assert.
-    pub(crate) fn warn(self, provider: &str) {
+    pub(crate) fn emit(self, provider: &str) {
         if !self.name && !self.strict {
             return;
         }
@@ -352,7 +352,7 @@ impl DeferredOutputConfigDiagnostics {
     /// Emit both aggregated diagnostics. Called exactly once per request, after
     /// every pass that can write `output_config` has run.
     pub(crate) fn warn(&self, provider: &str) {
-        self.dropped_format_keys.warn(provider);
+        self.dropped_format_keys.emit(provider);
         self.repair.warn(provider);
     }
 }
@@ -580,10 +580,10 @@ pub(crate) fn normalize_deferring_format_key_warn(
     hosted_mcp: &mut HostedMcpToolWithholdTally,
 ) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
-    // gated out of the provider_extras merge as canonical keys; WARN once so
-    // the loss isn't silent. Bedrock-Invoke delegates body construction here,
+    // gated out of the provider_extras merge as canonical keys; log once at
+    // DEBUG (an expected transform). Bedrock-Invoke delegates body construction here,
     // so this single call also covers that lane (with its own provider id).
-    crate::sampling_drop_guard::warn_dropped_sampling_fields(id, req, &[]);
+    crate::sampling_drop_guard::log_dropped_sampling_fields(id, req, &[]);
 
     // Prefer canonical req.system; fall back to lifting Role::System
     // messages for direct callers that bypass an ingress.
@@ -1069,7 +1069,7 @@ mod sampling_leak_guard_tests {
     }
 
     #[test]
-    fn sampling_fields_warn_once_naming_dropped_fields() {
+    fn sampling_fields_emit_one_debug_event_naming_dropped_fields() {
         let mut req = user_req();
         req.n = Some(3);
         req.seed = Some(42);

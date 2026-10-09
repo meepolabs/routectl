@@ -4023,7 +4023,7 @@ fn sampling_strip_emits_one_warn_naming_both_dropped_keys() {
 /// `temperature` must not claim `top_p` was dropped.
 #[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
-fn sampling_strip_warn_names_only_present_keys() {
+fn sampling_strip_event_names_only_present_keys() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
     let warns = strip_warns(&provider, &req_with_sampling(Some(0.7), None));
     assert_eq!(warns.len(), 1);
@@ -4085,7 +4085,7 @@ fn sampling_strip_warn_never_carries_the_removed_values() {
 /// field or the message would surface here on the production path.
 #[serial_test::serial(anthropic_api_cloak_split)]
 #[tokio::test]
-async fn real_complete_and_stream_each_emit_exactly_one_strip_warn() {
+async fn real_complete_and_stream_each_emit_exactly_one_strip_event() {
     const HOSTILE_TEMPERATURE: f64 = 0.123_456_789;
     const HOSTILE_TOP_P: f64 = 0.987_654_321;
 

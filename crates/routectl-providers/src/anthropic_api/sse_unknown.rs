@@ -76,7 +76,7 @@ impl SseState {
         // unsanitized CR, LF, or ANSI control sequences would corrupt
         // log output on a text subscriber.
         // Sanitizing here once means every downstream use -- the stored
-        // OpenBlockKind field, the WARN log, and OpaqueCapture -- all
+        // OpenBlockKind field, the DEBUG log line, and OpaqueCapture -- all
         // inherit the clean value without per-site guards.
         let type_tag = routectl_core::sanitize_for_log(
             value
@@ -542,7 +542,7 @@ mod tests {
             .unwrap();
 
         // Assert: the type_tag stored in OpenBlockKind::Unknown is sanitized.
-        // Since block_type = %type_tag in the WARN log reads from the same
+        // Since block_type = %type_tag in the DEBUG log line reads from the same
         // stored string, a clean stored value means a clean logged field.
         let stored_tag = match state.open_block.as_ref().expect("block must be open") {
             OpenBlockKind::Unknown { type_tag, .. } => type_tag.clone(),

@@ -64,7 +64,7 @@ pub(crate) mod bounded_diagnostics;
 #[cfg(feature = "openai-compat")]
 pub(crate) mod model_profile;
 
-// Shared leak-guard: WARN once per request naming which of the canonical
+// Shared leak-guard: log once per request at DEBUG naming which of the canonical
 // sampling knobs (`n`, `seed`, `logprobs`, `top_logprobs`, `logit_bias`,
 // `presence_penalty`, `frequency_penalty`) an egress received but cannot
 // translate; each caller passes the subset it does honor. Gated on the

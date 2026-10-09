@@ -101,7 +101,7 @@ use super::types::{
 /// aggregated WARN instead of one per document (see
 /// `translate_document_citations`). A `ReasoningSkipTally` threads through
 /// the assistant path for the same reason, collapsing unsigned-reasoning
-/// skips across every turn into one WARN.
+/// skips across every turn into one aggregated DEBUG line.
 pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<ConverseMessage>> {
     let mut tally = CitationsDropTally::new(id);
     let mut reasoning = ReasoningSkipTally::new(id);
@@ -109,7 +109,7 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
     let translated =
         translate_messages(id, messages, &mut tally, &mut reasoning, &mut content_drops);
     // Flush on both arms: a request that records a drop and only then
-    // hits a translation error still owes the operator its aggregate WARN.
+    // hits a translation error still owes the operator its aggregate lines.
     tally.flush();
     reasoning.flush();
     content_drops.flush();
@@ -413,9 +413,9 @@ fn message_content_has_tool_use(content: &MessageContent) -> bool {
 /// "invalid reasoning content". Unsigned blocks and kinds with no Converse
 /// wire shape (`Summary`, an unrecognized kind) are both skipped and
 /// recorded on the `ReasoningSkipTally`, which aggregates every turn's
-/// skips into one per-request WARN per category so the operator can
+/// skips into one per-request DEBUG line per category so the operator can
 /// correlate without per-detail log spam. The provider id rides on the
-/// tally, which owns the WARN.
+/// tally, which owns the aggregated event.
 fn emit_reasoning_blocks_converse(
     message_index: usize,
     details: &[ReasoningDetail],
@@ -517,7 +517,7 @@ fn emit_reasoning_blocks_converse(
 /// either because their signature was missing or empty, or because their
 /// kind has no Converse `reasoningContent` wire shape at all. Threaded
 /// through the assistant path from `build_messages` so a history with
-/// several affected turns emits ONE WARN per category instead of one per
+/// several affected turns emits ONE DEBUG line per category instead of one per
 /// turn. Mirrors `anthropic_api::messages::ReasoningSkipTally`.
 ///
 /// Three categories, kept separate because their remediations differ: a

@@ -1237,7 +1237,7 @@ fn keeps_temperature_when_top_p_unset() {
 /// cannot model emits one WARN naming them, and the body ships none of
 /// them.
 #[test]
-fn sampling_fields_warn_once_naming_dropped_fields() {
+fn sampling_fields_emit_one_debug_event_naming_dropped_fields() {
     // Arrange
     let cfg = fake_cfg();
     let req = ChatRequest {
