@@ -68,12 +68,12 @@ fn body_events_and_deltas(
     (body, events, withheld, fingerprint)
 }
 
-fn withheld_warns(
+fn withheld_records(
     events: &[routectl_testkit::CapturedEvent],
 ) -> Vec<&routectl_testkit::CapturedEvent> {
     events
         .iter()
-        .filter(|e| e.level == tracing::Level::WARN && e.message.contains("ingress extras"))
+        .filter(|e| e.level == tracing::Level::DEBUG && e.message.contains("ingress extras"))
         .collect()
 }
 
@@ -117,8 +117,8 @@ fn anthropic_ingress_mcp_servers_never_reach_the_gemini_body_and_count_one_withh
     assert!(!wire.contains(TOKEN_TELL), "{wire}");
     assert_eq!(withheld, 1, "one request, one withhold");
     assert_eq!(fingerprint, 0, "no identity block was withheld");
-    let warns = withheld_warns(&events);
-    assert_eq!(warns.len(), 1, "one WARN per request: {events:?}");
+    let warns = withheld_records(&events);
+    assert_eq!(warns.len(), 1, "one DEBUG per request: {events:?}");
     assert_eq!(field(warns[0], "keys"), Some("mcp_servers"));
     assert_eq!(field(warns[0], "count"), Some("1"));
     assert_no_event_contains(&events, TOKEN_TELL);
@@ -152,7 +152,7 @@ fn openai_ingress_future_and_identity_keys_are_withheld_beside_operator_safety_s
     }
     assert_eq!(withheld, 1, "three withheld keys, one request, one action");
     assert_eq!(fingerprint, 0);
-    let warns = withheld_warns(&events);
+    let warns = withheld_records(&events);
     assert_eq!(warns.len(), 1, "{events:?}");
     assert_eq!(
         field(warns[0], "keys"),
@@ -182,7 +182,7 @@ fn a_key_both_layers_set_forwards_only_the_operator_value_and_counts_the_client_
         withheld, 1,
         "the client contribution under the key was withheld"
     );
-    assert_eq!(field(withheld_warns(&events)[0], "keys"), Some("labels"));
+    assert_eq!(field(withheld_records(&events)[0], "keys"), Some("labels"));
     assert_no_event_contains(&events, CLIENT_SUBKEY_TELL);
 }
 
@@ -204,7 +204,7 @@ fn operator_only_extras_on_an_ingress_request_reach_the_wire_and_count_nothing()
     assert_eq!(body["safetySettings"], operator_safety_settings());
     assert_eq!(withheld, 0, "nothing client-sourced was withheld");
     assert_eq!(fingerprint, 0);
-    assert!(withheld_warns(&events).is_empty(), "{events:?}");
+    assert!(withheld_records(&events).is_empty(), "{events:?}");
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn an_ingress_request_with_no_extras_counts_nothing() {
     assert!(body.get("contents").is_some());
     assert_eq!(withheld, 0);
     assert_eq!(fingerprint, 0);
-    assert!(withheld_warns(&events).is_empty(), "{events:?}");
+    assert!(withheld_records(&events).is_empty(), "{events:?}");
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn operator_metadata_is_restored_on_an_ingress_request_while_the_client_part_is_
     assert_eq!(fingerprint, 1);
     assert_eq!(withheld, 1);
     assert_eq!(
-        field(withheld_warns(&events)[0], "keys"),
+        field(withheld_records(&events)[0], "keys"),
         Some("mcp_servers")
     );
 }
@@ -353,7 +353,7 @@ fn withheld_key_names_are_sanitized_before_they_are_logged() {
     // Assert
     assert!(!rendered(&body).contains(TOKEN_TELL));
     assert_eq!(withheld, 1);
-    let keys = field(withheld_warns(&events)[0], "keys")
+    let keys = field(withheld_records(&events)[0], "keys")
         .expect("keys field")
         .to_string();
     assert!(
@@ -415,7 +415,7 @@ fn library_callers_forward_arbitrary_extras_and_count_no_withhold() {
     assert_eq!(body["safetySettings"], operator_safety_settings());
     assert_eq!(withheld, 0);
     assert_eq!(fingerprint, 0);
-    assert!(withheld_warns(&events).is_empty(), "{events:?}");
+    assert!(withheld_records(&events).is_empty(), "{events:?}");
 }
 
 #[test]

@@ -471,7 +471,7 @@ fn redacted_thinking_drop_bumps_the_counter_once_per_request() {
     let after = gemini_drop_count("redacted_thinking_unsupported");
 
     // Assert
-    assert_warned(&events, "dropping redacted-thinking part");
+    assert_debug_once(&events, "dropping redacted-thinking part");
     let wire = rendered(&body);
     assert!(
         !wire.contains("AAECAwQFRedactedBlob"),
@@ -505,8 +505,10 @@ fn ordinary_thinking_part_survives_and_counts_no_drop() {
         "an un-redacted thinking part must survive: {wire}"
     );
     assert!(
-        !events.iter().any(|e| e.level == tracing::Level::WARN),
-        "an ordinary thinking part must not warn: {events:?}"
+        !events
+            .iter()
+            .any(|e| e.level == tracing::Level::WARN || e.message.contains("redacted-thinking")),
+        "an ordinary thinking part must not warn or report a redacted drop: {events:?}"
     );
     assert_eq!(after - before, 0);
 }
@@ -981,7 +983,7 @@ fn schema_keyword_drop_bumps_the_counter_once_per_request() {
     let after = gemini_drop_count("schema_keyword_unsupported");
 
     // Assert
-    assert_warned(&events, "dropping JSON Schema keywords");
+    assert_debug_once(&events, "dropping JSON Schema keywords");
     let wire = rendered(&body);
     assert!(
         !wire.contains("additionalProperties") && !wire.contains("allOf"),
@@ -1037,8 +1039,9 @@ fn gemini_subset_schema_survives_and_counts_no_drop() {
         "a subset-legal schema must reach the wire whole: {wire}"
     );
     assert!(
-        !events.iter().any(|e| e.level == tracing::Level::WARN),
-        "a subset-legal schema must not warn: {events:?}"
+        !events.iter().any(|e| e.level == tracing::Level::WARN
+            || e.message.contains("dropping JSON Schema keywords")),
+        "a subset-legal schema must not warn or report a keyword drop: {events:?}"
     );
     assert_eq!(after - before, 0, "nothing was lost, nothing counted");
 }
@@ -1207,7 +1210,7 @@ fn required_naming_a_missing_property_reports_a_drop() {
     let after = gemini_drop_count("schema_keyword_unsupported");
 
     // Assert
-    assert_warned(&events, "dropping JSON Schema keywords");
+    assert_debug_once(&events, "dropping JSON Schema keywords");
     let wire = rendered(&body);
     assert!(
         !wire.contains("ghost") && wire.contains("\"required\":[\"a\"]"),
@@ -1599,7 +1602,7 @@ fn cache_control_drop_bumps_the_counter_once_per_request() {
     let after = gemini_drop_count("cache_control_unsupported");
 
     // Assert
-    assert_warned(&events, "cache_control dropped");
+    assert_debug_once(&events, "cache_control dropped");
     let wire = rendered(&body);
     assert!(
         !wire.contains("cache_control") && !wire.contains("ephemeral"),

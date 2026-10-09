@@ -853,6 +853,9 @@ license.
   (system projection, dialect dispatch, extras merge)
 - `src/openai_compat/request_system_tests.rs` -- `include!`d into
   `request.rs`'s `tests` module: system-content wire and count pins
+- `src/openai_compat/request_drop_level_tests.rs` -- `include!`d into
+  `request.rs`'s `tests` module: log-level pin for the Anthropic-only
+  field drops (cache_control, anthropic_beta, metadata)
 - `src/openai_compat/response.rs` -- response normalization; lifts
   `reasoning_content` into `reasoning_details`, strips OpenAI envelope keys
 - `src/openai_compat/sse.rs` -- stateless per-chunk parsing +

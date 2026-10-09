@@ -52,9 +52,9 @@ const LANE: &str = super::PROVIDER_KIND;
 /// one point in this egress every request passes exactly once, dropped
 /// content or not.
 ///
-/// Every drop below already emits its own WARN at the arm that performs it,
-/// EXCEPT `schema_keyword_unsupported`: `clean_schema` is a pure function by
-/// contract, so its aggregated WARN is emitted here instead. A schema over the
+/// Every drop below already emits its own diagnostic at the arm that performs
+/// it, EXCEPT `schema_keyword_unsupported`: `clean_schema` is a pure function
+/// by contract, so its aggregated DEBUG is emitted here instead. A schema over the
 /// cleaner's ceilings is a refusal, not a drop: it is neither tallied nor
 /// counted, and the flush still runs on that Err arm.
 #[derive(Default)]
@@ -86,7 +86,7 @@ impl GeminiDropTally {
             );
         }
         if self.schema_keyword_unsupported {
-            tracing::warn!(
+            tracing::debug!(
                 provider = %provider_id,
                 "gemini: dropping JSON Schema keywords or entries Gemini's Schema proto \
                  cannot carry from a tool or response_format schema; the stated \
@@ -244,7 +244,7 @@ fn withheld_ingress_keys(req: &ChatRequest) -> Vec<&str> {
 }
 
 /// Withheld by routectl, not by the wire: Gemini would accept these keys.
-/// One count and one WARN per request, naming only sanitized keys -- a value
+/// One count and one DEBUG per request, naming only sanitized keys -- a value
 /// may be a credential (`mcp_servers[].authorization_token`), so none is
 /// ever logged.
 /// TRANSLATION-DROP: policy-action class=ingress_extra_withheld test=anthropic_ingress_mcp_servers_never_reach_the_gemini_body_and_count_one_withhold
@@ -254,7 +254,7 @@ fn report_withheld_ingress_extras(provider_id: &str, req: &ChatRequest) {
         return;
     }
     record_translation_policy_action(LANE, "ingress_extra_withheld");
-    tracing::warn!(
+    tracing::debug!(
         provider = %provider_id,
         keys = %sanitize_for_log(&keys.join(",")),
         count = keys.len(),
@@ -301,7 +301,7 @@ fn strip_client_metadata(
         .and_then(|v| v.get(CLIENT_METADATA_KEY));
     if operator != Some(merged) {
         fingerprint.record();
-        tracing::warn!(
+        tracing::debug!(
             provider = %provider_id,
             "gemini egress: client-supplied top-level metadata dropped (third-party upstream)",
         );
@@ -385,7 +385,7 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
     surfaces
 }
 
-/// Emit one WARN naming every cache-prefix surface carrying a caller
+/// Emit one DEBUG naming every cache-prefix surface carrying a caller
 /// `cache_control` marker that the Gemini egress drops. Matches the
 /// openai-compat / openai-responses egress convention so an operator routing
 /// cache-hinted traffic to a Gemini target sees the same breadcrumb on this
@@ -405,7 +405,7 @@ fn warn_dropped_cache_control(provider_id: &str, req: &ChatRequest, tally: &mut 
         return;
     }
     tally.cache_control_unsupported = true;
-    tracing::warn!(
+    tracing::debug!(
         provider = %provider_id,
         dropped_surfaces = ?surfaces,
         dropped_count = surfaces.len(),
@@ -441,7 +441,7 @@ fn build_system_instruction(
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_system_role_message_is_withheld_from_gemini_and_counted
     if message_withheld {
         fingerprint.record();
-        tracing::warn!(
+        tracing::debug!(
             model = %sanitize_for_log(&req.model),
             "gemini egress: Claude Code billing/attribution block dropped from a \
              system-role message",
@@ -464,7 +464,7 @@ fn build_system_instruction(
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_the_top_level_system_is_withheld_from_gemini_and_counted
     if system_withheld {
         fingerprint.record();
-        tracing::warn!(
+        tracing::debug!(
             model = %sanitize_for_log(&req.model),
             "gemini egress: Claude Code billing/attribution system block dropped",
         );
@@ -712,7 +712,7 @@ fn content_to_parts(
 /// TRANSLATION-DROP: lane=gemini class=redacted_thinking_unsupported test=redacted_thinking_drop_bumps_the_counter_once_per_request
 fn drop_redacted_thinking(provider_id: &str, tally: &mut GeminiDropTally) -> Result<Option<Part>> {
     tally.redacted_thinking_unsupported = true;
-    tracing::warn!(
+    tracing::debug!(
         provider = %provider_id,
         "gemini: dropping redacted-thinking part (no wire slot on this egress)"
     );
@@ -3928,6 +3928,25 @@ mod tests {
         );
     }
 
+    /// Assert an expected-transform diagnostic was emitted exactly once, at
+    /// DEBUG: one record per request, kept out of the default WARN stream.
+    fn assert_debug_once(events: &[routectl_testkit::CapturedEvent], needle: &str) {
+        let matching: Vec<_> = events
+            .iter()
+            .filter(|e| e.message.contains(needle))
+            .map(|e| e.level)
+            .collect();
+        assert_eq!(
+            matching,
+            vec![tracing::Level::DEBUG],
+            "expected exactly one DEBUG containing {needle:?}; got {:?}",
+            events
+                .iter()
+                .map(|e| (e.level, e.message.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn file_id_only_file_part_drops_with_warn() {
@@ -4060,7 +4079,7 @@ mod tests {
             parts.is_empty(),
             "a redacted-thinking part has no wire slot"
         );
-        assert_warned(&events, "dropping redacted-thinking part");
+        assert_debug_once(&events, "dropping redacted-thinking part");
     }
 
     #[test]
@@ -4077,8 +4096,9 @@ mod tests {
         // Assert
         assert_eq!(parts.len(), 1, "an ordinary thinking part must survive");
         assert!(
-            !events.iter().any(|e| e.level == tracing::Level::WARN),
-            "an ordinary thinking part must not warn: {events:?}"
+            !events.iter().any(|e| e.level == tracing::Level::WARN
+                || e.message.contains("redacted-thinking")),
+            "an ordinary thinking part must not warn or report a redacted drop: {events:?}"
         );
     }
 

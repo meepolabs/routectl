@@ -401,7 +401,7 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
             Some((boundary, _)) => &kind[..boundary],
             None => kind,
         };
-        tracing::warn!(
+        tracing::debug!(
             provider = provider_id,
             detail_type = kind_for_log,
             "preserve_history_reasoning_content: non-text reasoning detail dropped during lowering",

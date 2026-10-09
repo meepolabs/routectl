@@ -298,7 +298,7 @@ fn a_mid_text_mention_of_the_header_name_is_not_withheld() {
     assert_eq!(delta, 0);
 }
 
-/// Each withhold site reports itself at WARN, without echoing the withheld text.
+/// Each withhold site reports itself once at DEBUG, without echoing the withheld text.
 #[test]
 #[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn each_withhold_site_warns_without_echoing_the_fingerprint() {
@@ -315,11 +315,16 @@ fn each_withhold_site_warns_without_echoing_the_fingerprint() {
     let events = routectl_testkit::capture_events(|| body = wire_body(&req));
 
     // Assert
-    let warns: Vec<_> = events
+    let levels: Vec<_> = events
         .iter()
-        .filter(|e| e.level == tracing::Level::WARN && e.message.contains("billing/attribution"))
+        .filter(|e| e.message.contains("billing/attribution"))
+        .map(|e| e.level)
         .collect();
-    assert_eq!(warns.len(), 2, "one WARN per stripping site: {events:?}");
+    assert_eq!(
+        levels,
+        vec![tracing::Level::DEBUG; 2],
+        "one DEBUG per stripping site: {events:?}"
+    );
     assert!(
         events
             .iter()

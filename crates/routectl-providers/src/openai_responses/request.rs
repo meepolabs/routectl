@@ -202,16 +202,16 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
     surfaces
 }
 
-/// Emit one WARN naming every cache-prefix surface carrying a caller
+/// Emit one DEBUG naming every cache-prefix surface carrying a caller
 /// `cache_control` marker that the Responses egress drops, and count the
 /// drop once for the request. Matches the openai-compat egress convention
-/// (`check_dropped_anthropic_fields`), which WARNs on every dropped
-/// cache_control carrier so an operator routing cache-hinted traffic to a
-/// Responses target sees the same breadcrumb. Logs only the surface
+/// (`check_dropped_anthropic_fields`), which logs every dropped
+/// cache_control carrier at DEBUG: the lane has no breakpoint surface, so
+/// the drop is inherent to routing there and the counter carries the rate. Logs only the surface
 /// name(s) + a count: no message content, no bodies, no secrets.
 ///
-/// The WARN and the COUNTER have deliberately different surface sets. The
-/// WARN excludes `system` because `system.rs` already logs that surface at
+/// The DEBUG and the COUNTER have deliberately different surface sets. The
+/// DEBUG excludes `system` because `system.rs` already logs that surface at
 /// DEBUG and a second record would double-report it. The counter includes
 /// it, because a request whose ONLY marker sat on a system block did have a
 /// marker dropped, and a counter that missed it would understate the lane's
@@ -232,7 +232,7 @@ fn warn_dropped_cache_control(req: &ChatRequest) {
     if surfaces.is_empty() {
         return;
     }
-    tracing::warn!(
+    tracing::debug!(
         dropped_surfaces = ?surfaces,
         dropped_count = surfaces.len(),
         "openai-responses egress: cache_control dropped (Responses API has no \

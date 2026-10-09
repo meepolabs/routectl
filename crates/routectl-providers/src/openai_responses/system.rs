@@ -55,7 +55,7 @@ pub(super) fn translate_system(
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=the_billing_strip_counts_one_policy_action_for_the_request
     if system_withheld {
         fingerprint.record();
-        tracing::warn!(
+        tracing::debug!(
             "openai-responses egress: Claude Code billing/attribution system block dropped",
         );
     }
@@ -66,7 +66,7 @@ pub(super) fn translate_system(
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_system_role_message_is_withheld_and_counted
     if message_withheld {
         fingerprint.record();
-        tracing::warn!(
+        tracing::debug!(
             "openai-responses egress: Claude Code billing/attribution block dropped from a \
              system-role message",
         );

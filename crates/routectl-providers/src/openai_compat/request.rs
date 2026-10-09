@@ -18,7 +18,7 @@
 //! fallible step so a request that later fails translation is still counted.
 
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use routectl_core::{
     ChatRequest, Error, Message, Result, ToolDef, is_canonical_request_key, sanitize_for_log,
@@ -198,7 +198,7 @@ fn project_system(
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_the_top_level_system_is_withheld_from_openai_compat_and_counted
     if system_withheld {
         fingerprint.record();
-        warn!(
+        debug!(
             provider = id,
             "openai-compat egress: Claude Code billing/attribution system block dropped",
         );
@@ -211,7 +211,7 @@ fn project_system(
     // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_system_role_message_is_withheld_from_openai_compat_and_counted
     if messages.is_some() {
         fingerprint.record();
-        warn!(
+        debug!(
             provider = id,
             "openai-compat egress: Claude Code billing/attribution block dropped from a \
              system-role message",
@@ -286,10 +286,10 @@ fn merge_extras(
                 // Anthropic ingress stashes the full inbound `metadata`
                 // object into provider_extras. Strict openai-compat hosts
                 // (NIM, vLLM-strict, DeepSeek-direct) 400 with
-                // `Unsupported parameter(s): metadata`. Warn so an
-                // operator sees the drop; log the key only, never the
+                // `Unsupported parameter(s): metadata`. The drop is by
+                // design on every such request; log the key only, never the
                 // object's contents (may carry PII like user_id).
-                tracing::warn!(
+                tracing::debug!(
                     provider = id,
                     source = source,
                     "openai-compat egress: Anthropic `metadata` object dropped (not valid on OpenAI wire)"
@@ -358,8 +358,9 @@ fn is_routectl_managed_key(key: &str) -> bool {
         )
 }
 
-/// Emit `tracing::warn!` for each canonical field or block the
-/// openai-compat wire cannot represent. Two kinds of finding:
+/// Log each canonical field or block the openai-compat wire cannot
+/// represent: the designed Anthropic-only drops at DEBUG, unmodeled
+/// forward-compat blocks at WARN. Two kinds of finding:
 ///
 /// - Anthropic-only fields (`cache_control` on the request, system,
 ///   tools, or content blocks; `anthropic_beta`) that are dropped
@@ -368,7 +369,7 @@ fn is_routectl_managed_key(key: &str) -> bool {
 ///   NOT dropped: default mode forwards them verbatim for the
 ///   upstream to accept or reject.
 ///
-/// Default mode warns + returns `Ok(())`; strict mode collects both
+/// Default mode logs + returns `Ok(())`; strict mode collects both
 /// kinds of finding and returns an `Error::Validation` (HTTP 400) so
 /// the operator sees them before the upstream does.
 fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> Result<()> {
@@ -380,14 +381,14 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
     };
 
     if req.cache_control.is_some() {
-        warn!(
+        debug!(
             provider = id,
             "openai-compat egress: top-level cache_control dropped (prompt caching not supported)",
         );
         record("top-level cache_control".into());
     }
     if !req.anthropic_beta.is_empty() {
-        warn!(
+        debug!(
             provider = id,
             beta_flags = ?req.anthropic_beta,
             "openai-compat egress: anthropic_beta flags dropped (Anthropic-only)",
@@ -397,7 +398,7 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
     if let Some(routectl_core::SystemContent::Blocks(blocks)) = &req.system {
         let any_cc = blocks.iter().any(|b| b.cache_control.is_some());
         if any_cc {
-            warn!(
+            debug!(
                 provider = id,
                 "openai-compat egress: per-block cache_control on system dropped",
             );
@@ -423,7 +424,7 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
             } else if let ToolDef::Custom(c) = t
                 && c.cache_control.is_some()
             {
-                warn!(
+                debug!(
                     provider = id,
                     tool = %sanitize_for_log(&c.name),
                     "openai-compat egress: tool cache_control dropped (Anthropic-only)",
@@ -447,7 +448,7 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
                     }
                     routectl_core::ContentPart::Known(k) => {
                         if k.cache_control().is_some() {
-                            warn!(
+                            debug!(
                                 provider = id,
                                 message_index = i,
                                 block_type = k.type_tag(),
@@ -1882,4 +1883,5 @@ mod tests {
     }
 
     include!("request_system_tests.rs");
+    include!("request_drop_level_tests.rs");
 }

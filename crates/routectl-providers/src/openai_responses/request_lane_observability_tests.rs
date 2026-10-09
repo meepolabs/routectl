@@ -261,7 +261,7 @@ fn openai_responses_does_not_inject_max_tokens_when_caller_omitted() {
 //
 // The Responses API has no prompt-cache breakpoint surface, so dropping
 // caller `cache_control` markers is CORRECT; these tests pin that the
-// drop is OBSERVABLE (a single WARN naming the surfaces) and that the
+// drop is OBSERVABLE (a single DEBUG naming the surfaces) and that the
 // wire body is UNCHANGED by the diagnostic. `system`-level markers are
 // excluded here -- system.rs already logs that drop at DEBUG.
 // ---------------------------------------------------------------------------
@@ -371,7 +371,7 @@ fn warn_fires_for_top_level_marker_and_wire_is_unchanged() {
 #[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn no_warn_for_clean_request() {
     // Arrange: the marked control proves the capture would see the
-    // diagnostic. The WARN carries no provider field, so each request runs
+    // diagnostic. The record carries no provider field, so each request runs
     // in its own capture.
     let req = req_with(vec![user_text("hi")]);
     let mut control = req_with(vec![user_text("hi")]);

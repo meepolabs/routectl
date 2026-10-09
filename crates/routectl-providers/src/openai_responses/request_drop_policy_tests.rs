@@ -741,15 +741,17 @@ fn cache_control_marker_drops_from_the_wire_and_counts() {
     let (wire, events) = translate_capturing(&cfg(), &req);
     let after = responses_drop_count("cache_control_unsupported");
 
-    // Assert 1: the WARN fired at WARN level, naming both marked surfaces.
-    let record = events
+    // Assert 1: exactly one DEBUG record, naming both marked surfaces.
+    let records: Vec<_> = events
         .iter()
-        .find(|e| {
+        .filter(|e| {
             e.message
                 .contains("openai-responses egress: cache_control dropped")
         })
-        .unwrap_or_else(|| panic!("the cache_control drop must be observable, got: {events:?}"));
-    assert_eq!(record.level, tracing::Level::WARN, "got: {record:?}");
+        .collect();
+    assert_eq!(records.len(), 1, "one record per request, got: {events:?}");
+    let record = records[0];
+    assert_eq!(record.level, tracing::Level::DEBUG, "got: {record:?}");
     let surfaces = record
         .field("dropped_surfaces")
         .unwrap_or_else(|| panic!("the record must name the surfaces, got: {record:?}"));
