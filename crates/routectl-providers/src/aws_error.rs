@@ -113,8 +113,8 @@ pub fn aws_exception_type_is(raw: &str, expected: &str) -> bool {
 /// The bare AWS exception name a Bedrock request-validation 400 carries in
 /// its discriminator (body `__type` or the `x-amzn-errortype` header). Single
 /// source of truth for every consumer gating on a validation rejection, so
-/// the token cannot drift between the provider lift, the capability matcher,
-/// and the envelope-capture harness.
+/// the token cannot drift between the provider lift and the capability
+/// matcher.
 pub const VALIDATION_EXCEPTION_TYPE: &str = "ValidationException";
 
 /// The response header AWS/Bedrock uses to carry the exception

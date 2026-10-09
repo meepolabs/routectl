@@ -33,7 +33,6 @@ use crate::server::CompositeStore;
 
 pub mod canary;
 pub mod capabilities;
-pub mod capture;
 pub mod resolve;
 
 /// UNSTABLE report schema version for `--json`. Bumped only when the JSON

@@ -3,15 +3,8 @@
 //! A probe is scoped to exactly one target, named either by an `--alias`
 //! (a `[models]` nickname, which resolves both the provider and the upstream
 //! model id) or by a bare `--provider` (which resolves the upstream id from
-//! the single selectable model referencing it). Both the envelope-capture
-//! harness and the capability probe scope this way, so the resolution lives
-//! here once.
-//!
-//! Two views over the same resolution:
-//!   - [`resolve_provider_and_model`] returns just `(provider, model_id)` --
-//!     what a bare dispatch needs.
-//!   - [`resolve_probe_target`] additionally carries the `[models]` nickname
-//!     the target was resolved through.
+//! the single selectable model referencing it). [`resolve_probe_target`]
+//! also carries the `[models]` nickname the target was resolved through.
 
 use routectl_router::Config;
 
@@ -72,19 +65,6 @@ pub fn resolve_probe_target(
         provider: provider.to_string(),
         model_id: model.upstream.clone(),
     })
-}
-
-/// Resolve `(provider_name, model_id)` from a scoped target. An alias names
-/// both; a bare provider resolves its model id from the single selectable
-/// model referencing it. A thin view over [`resolve_probe_target`] for
-/// callers that do not need the routing state key.
-pub fn resolve_provider_and_model(
-    config: &Config,
-    provider: Option<&str>,
-    alias: Option<&str>,
-) -> Result<(String, String), String> {
-    let target = resolve_probe_target(config, provider, alias)?;
-    Ok((target.provider, target.model_id))
 }
 
 #[cfg(test)]

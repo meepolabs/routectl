@@ -545,24 +545,6 @@ enum ProviderCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Hidden: env-gated Bedrock envelope-capture harness. Requires
-    /// `ROUTECTL_BEDROCK_ENVELOPE_CAPTURE=1` and exactly one explicit
-    /// `--provider` or `--alias` target. CLI-only; never reachable from
-    /// the serving listener.
-    #[command(hide = true)]
-    CaptureEnvelope {
-        /// Target a Bedrock `[providers.X]` key (model id resolved from the
-        /// single selectable model referencing it).
-        #[arg(long)]
-        provider: Option<String>,
-        /// Target a `[models.X]` nickname (resolves both provider and model
-        /// id).
-        #[arg(long)]
-        alias: Option<String>,
-        /// Directory the byte-exact response bodies are written to.
-        #[arg(long)]
-        out: PathBuf,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -954,19 +936,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let config_path = resolve_config_path(cli.config.as_deref());
                 std::process::exit(commands::probe::run(&config_path, name, json).await);
             }
-            ProviderCmd::CaptureEnvelope {
-                provider,
-                alias,
-                out,
-            } => {
-                let config_path = resolve_config_path(cli.config.as_deref());
-                let args = commands::probe::capture::CaptureArgs {
-                    provider,
-                    alias,
-                    out,
-                };
-                std::process::exit(commands::probe::capture::run(&config_path, args).await);
-            }
         },
         Cmd::PromptSize {
             alias,
@@ -1320,7 +1289,21 @@ mod tests {
     /// route it to a surviving family.
     #[test]
     fn removed_commands_are_rejected() {
-        let removed: &[(&str, &[&str])] = &[("pricing alias", &["routectl", "pricing", "list"])];
+        let removed: &[(&str, &[&str])] = &[
+            ("pricing alias", &["routectl", "pricing", "list"]),
+            (
+                "provider capture-envelope",
+                &[
+                    "routectl",
+                    "provider",
+                    "capture-envelope",
+                    "--provider",
+                    "p",
+                    "--out",
+                    "o",
+                ],
+            ),
+        ];
 
         for (name, argv) in removed {
             let err = Cli::try_parse_from(*argv)
@@ -1343,6 +1326,22 @@ mod tests {
             cli.cmd,
             Cmd::Catalog {
                 action: CatalogCmd::List
+            }
+        ));
+    }
+
+    /// Positive control for `removed_commands_are_rejected`: the `provider`
+    /// family a removed subcommand lived under still parses its survivors.
+    #[test]
+    fn provider_probe_parses_to_the_provider_family() {
+        let cli = Cli::parse_from(["routectl", "provider", "probe"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Provider {
+                action: ProviderCmd::Probe {
+                    name: None,
+                    json: false
+                }
             }
         ));
     }

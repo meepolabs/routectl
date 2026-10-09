@@ -540,8 +540,8 @@ license.
   token) and `aws_exception_type_is(raw, expected)` (namespace-stripping
   comparison, normalizing BOTH operands) -- so every downstream
   `__type` / `x-amzn-errortype` consumer
-  (the router's `is_bedrock_validation_exception`, the CLI envelope-capture
-  harness's `classify_validation`) gates through one reduction and a
+  (the router's `is_bedrock_validation_exception`) gates through one
+  reduction and a
   still-namespaced discriminator is never silently missed by an exact match
   against the bare name; `strip_aws_namespace` itself stays crate-private
 - `src/translation_drop_metrics.rs` -- process-wide `(lane, class)` translation
@@ -1853,8 +1853,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `{bad-request, content-policy, context-window, feature-unsupported}`
   (`ALLOWED_REMAP_TARGETS`) -- a remap may only move a status into a terminal,
   non-retrying class, naming the offending provider/status/target on reject;
-  `validate_managed_anthropic_credential` (public; also called by the factory
-  and the capture harness) confines an `oauth://anthropic` ref, and its
+  `validate_managed_anthropic_credential` (public; also called by the
+  factory) confines an `oauth://anthropic` ref, and its
   crate-private siblings confine `oauth://codex` to the ChatGPT backend host
   and `oauth://antigravity` to the Cloud Code hosts
   (`validate_managed_oauth_credentials` runs all three, in validation and the
@@ -8010,27 +8010,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   defaults, errors on an unknown `<name>`, renders human or `--json`
   (`{schema_version, providers:[{name, outcome}]}`, `SCHEMA_VERSION = 1`,
   UNSTABLE pre-1.0), and returns `overall_exit`
-- `src/commands/probe/capture.rs` -- hidden `routectl provider
-  capture-envelope` (feature `bedrock`): env-gated Bedrock envelope-capture
-  harness, CLI-only, never reachable from the serving listener. Two pre-IO
-  gates: `ROUTECTL_BEDROCK_ENVELOPE_CAPTURE=1` (`capture_enabled`) and exactly
-  one explicit `--provider`/`--alias` target (`require_scoped`). Builds three
-  Invoke-shape canaries (`CanaryKind::{UnknownBeta, UnknownBodyField,
-  AdvisorTool}`), resolves the target (via the shared
-  `probe::resolve::resolve_provider_and_model`) to a Bedrock Invoke provider,
-  signs+sends each via the providers-crate `signing`/`endpoint` seams, and
-  `classify_validation` hard-fails unless each is HTTP 400 with a flat AWS
-  `ValidationException` (`{"__type","message"}`) -- the `__type` check runs
-  through `routectl_providers::aws_exception_type_is`, so the namespaced wire
-  form and the bare token are accepted identically while an unrelated
-  exception whose name merely embeds the target is not. Before persisting,
-  `assert_no_credential_echo` scans each body for the request's own credential
-  material (`configured_secret_material` raw key id/secret/token/bearer key +
-  `signed_header_secrets` Authorization / `x-amz-security-token`) and
-  hard-fails naming the unwritten file if an endpoint echoed any back -- never
-  logging the value. On full success `write_bodies` persists the byte-exact
-  raw response bodies to the operator `--out` directory; writes nothing else
-  (config/catalog/usage DB/breaker state untouched)
 - `src/commands/probe/resolve.rs` -- shared config resolution for the CLI
   probe surfaces. `resolve_probe_target(config, provider, alias) ->
   ResolvedProbeTarget { state_key, provider, model_id }` maps a scoped
@@ -8040,9 +8019,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `state_key` is that runtime identity (the `[models]` nickname), NOT the
   learned lane: `probe --capabilities` takes the lane from the router's
   `LearnedLaneProjection` for that nickname on `provider`, so a capability
-  probe emits on the SAME lane live traffic would. `resolve_provider_and_model(config,
-  provider, alias) -> (provider, model_id)` is the thinner pair view consumed
-  by the envelope-capture harness
+  probe emits on the SAME lane live traffic would
 - `src/commands/probe/capabilities.rs` -- `routectl probe --capabilities`: a
   LIB-SHAPED core (`run_capability_probe`) plus a thin CLI wrapper (`run`).
   The core takes only a `CanaryDispatch` seam (impl'd for `Arc<dyn Provider>`,

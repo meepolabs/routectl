@@ -86,12 +86,3 @@ fn neither_target_is_an_error() {
 
     assert!(err.contains("--provider or --alias"), "err: {err}");
 }
-
-#[test]
-fn resolve_provider_and_model_is_the_pair_view() {
-    let config = config_with_models(&[("opus", ModelEntry::new("anthropic", "claude-opus"))]);
-
-    let pair = resolve_provider_and_model(&config, None, Some("opus")).expect("known alias");
-
-    assert_eq!(pair, ("anthropic".to_string(), "claude-opus".to_string()));
-}
