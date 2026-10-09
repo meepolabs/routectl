@@ -805,7 +805,7 @@ is shaped for the beta-aware edit workflow.
 |---|---|
 | `400 context_management is not allowed` | Provider rejects the body key -- set `context_management = true` |
 | `400 anthropic-beta header not recognised` | Provider rejects the beta header -- set `context_management = true` |
-| WARN `context_management: cache miss for tool_use ids` in logs | Cold-start or TTL gap; thinking was stripped for that turn. The next turn refills the cache and injection resumes. |
+| DEBUG `context_management: cache miss for tool_use ids` in logs | Cold-start or TTL gap; thinking was stripped for that turn. The next turn refills the cache and injection resumes. |
 
 ## Troubleshooting matrix
 

@@ -8,12 +8,13 @@
 //! block types (server_tool_use, web_search_tool_result,
 //! code_execution_tool_result, ...) are accepted on the wire as
 //! `ContentBlock::Other` and dropped from the flat-text output with
-//! a `tracing::warn!` so the client sees what was lost.
+//! a `tracing::debug!` naming each dropped block. The block itself
+//! stays in the structured content parts.
 
 use chrono::Utc;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use tracing::warn;
+use tracing::debug;
 use uuid::Uuid;
 
 use routectl_core::schema::CacheCreation;
@@ -123,7 +124,7 @@ pub(crate) fn walk_content_blocks(
                 // Not expected in a response; skip.
             }
             ContentBlock::Image { source, .. } => {
-                warn!(
+                debug!(
                     provider = id,
                     "image block in response dropped from flat-text output"
                 );
@@ -138,7 +139,7 @@ pub(crate) fn walk_content_blocks(
                 citations,
                 ..
             } => {
-                warn!(
+                debug!(
                     provider = id,
                     "document block in response dropped from flat-text output"
                 );
@@ -152,7 +153,7 @@ pub(crate) fn walk_content_blocks(
             ContentBlock::Other {
                 type_tag, extras, ..
             } => {
-                warn!(
+                debug!(
                     provider = id,
                     block_type = %sanitize_for_log(type_tag),
                     "unknown content block type in response dropped from flat-text output",

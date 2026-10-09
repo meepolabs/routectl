@@ -1562,14 +1562,14 @@ mod tests {
                 .iter()
                 .filter(|l| {
                     l.contains(crate::anthropic_api::request::OUTPUT_FORMAT_KEY_DROP_EVENT)
-                        && l.contains("WARN")
+                        && l.contains("DEBUG")
                 })
                 .count();
             if warns == 1 {
                 return Ok(());
             }
             Err(format!(
-                "one request must produce exactly one dropped-format-key WARN; got {warns}"
+                "one request must produce exactly one dropped-format-key DEBUG line; got {warns}"
             ))
         });
     }

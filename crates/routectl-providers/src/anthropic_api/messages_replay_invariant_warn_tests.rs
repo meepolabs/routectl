@@ -1,5 +1,5 @@
 // The two aggregated diagnostics emitted by `normalize_replay_invariants`
-// (the unsigned-thinking strip at DEBUG, the dropped-turn line at WARN):
+// (the unsigned-thinking strip and the dropped-turn line, both at DEBUG):
 // exact counts, capped index samples, per-list truncation flags. Both
 // lists are sized by the caller-controlled message count, so each one is
 // bounded as it is collected. Imports live in the host
@@ -173,7 +173,7 @@ fn dropped_turn_warn_caps_indices_and_keeps_the_turn_count_exact() {
     let events = normalize_capturing(&req);
 
     // Assert
-    let warn = sole_event_containing(&events, DROPPED_TURN_WARN, tracing::Level::WARN);
+    let warn = sole_event_containing(&events, DROPPED_TURN_WARN, tracing::Level::DEBUG);
     assert_eq!(
         warn.field("dropped_turns"),
         Some(count.to_string().as_str()),
@@ -229,7 +229,7 @@ fn both_warns_keep_full_index_lists_when_within_cap() {
     );
 
     // Assert: dropped-turn list is whole.
-    let dropped_warn = sole_event_containing(&events, DROPPED_TURN_WARN, tracing::Level::WARN);
+    let dropped_warn = sole_event_containing(&events, DROPPED_TURN_WARN, tracing::Level::DEBUG);
     assert_eq!(dropped_warn.field("dropped_turns"), Some("3"));
     assert_eq!(
         dropped_warn.field("dropped_message_indices_truncated"),

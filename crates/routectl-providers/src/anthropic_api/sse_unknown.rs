@@ -67,7 +67,7 @@ impl SseState {
 
     /// Open an `OpenBlockKind::Unknown` block for an unrecognized
     /// `content_block.type` and seed opaque capture with the block's
-    /// start payload. Emits the v2-capture WARN. No canonical chunk
+    /// start payload. Emits the v2-capture DEBUG line. No canonical chunk
     /// is produced at start; the matching ingress reconstructs the
     /// block from `chunk.opaque_events`.
     pub(super) fn open_unknown_block(&mut self, index: u32, value: &Value, provider: &str) {
@@ -107,7 +107,7 @@ impl SseState {
             upstream_index: index,
             type_tag: type_tag.clone(),
         });
-        tracing::warn!(
+        tracing::debug!(
             provider = %provider,
             upstream_index = index,
             block_type = %sanitize_for_log(&type_tag),

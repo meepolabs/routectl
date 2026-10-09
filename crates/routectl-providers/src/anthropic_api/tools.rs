@@ -202,7 +202,7 @@ pub(super) fn translate_tool_choice(tc: Option<&Value>, has_tools: bool) -> Opti
             "required" => Some(serde_json::json!({"type": TOOL_CHOICE_TYPE_ANY})),
             "none" => {
                 if has_tools {
-                    tracing::warn!(
+                    tracing::debug!(
                         "tool_choice=\"none\" with tools present: routectl drops both fields so \
                          Anthropic cannot auto-select (Anthropic has no native equivalent of \
                          OpenAI's \"none\")"

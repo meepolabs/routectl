@@ -310,7 +310,7 @@ fn two_wrapped_blocks_emit_one_warn_carrying_no_envelope_content() {
         "both envelopes must unwrap: {body}"
     );
 
-    // Assert -- exactly one WARN, with the expected field set.
+    // Assert -- exactly one DEBUG line, with the expected field set.
     let warns: Vec<_> = events
         .iter()
         .filter(|e| e.field("event") == Some("reasoning_envelope_unwrapped"))
@@ -321,7 +321,7 @@ fn two_wrapped_blocks_emit_one_warn_carrying_no_envelope_content() {
         "two unwrapped blocks must emit exactly one WARN; got: {events:?}"
     );
     let warn = warns[0];
-    assert_eq!(warn.level, tracing::Level::WARN);
+    assert_eq!(warn.level, tracing::Level::DEBUG);
     assert_eq!(warn.field("provider"), Some("anthropic:test"));
     assert_eq!(warn.field("unwrapped_count"), Some("2"));
 

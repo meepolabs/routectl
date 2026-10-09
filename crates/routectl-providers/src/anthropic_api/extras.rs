@@ -147,7 +147,7 @@ fn derive_effort(req: &ChatRequest) -> String {
 /// shape has no field for an explicit budget -- the model picks its
 /// own from the effort string. If a caller sets both
 /// `reasoning.max_tokens` AND the model is adaptive, the budget is
-/// dropped (with a tracing::warn at the call site). The caller's
+/// dropped (with a tracing::debug at the call site). The caller's
 /// effort string still travels to `output_config.effort`.
 pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
@@ -192,12 +192,11 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         // to top-level output_config (handled by build_output_config).
         // If the caller set both an explicit budget AND the model is
         // adaptive, the budget gets dropped because there's no wire
-        // field for it. Warn so an operator who set both fields
-        // routinely (e.g. a client library that always sends
-        // `reasoning.max_tokens`) can see the discard in logs and
-        // adjust to using `effort` instead.
+        // field for it. Logged at DEBUG: a client library that always
+        // sends `reasoning.max_tokens` trips this on every request, and
+        // the discard is the documented adaptive contract.
         if r.max_tokens.is_some() {
-            tracing::warn!(
+            tracing::debug!(
                 budget_tokens = r.max_tokens,
                 "reasoning.max_tokens dropped on adaptive thinking path; \
                  Anthropic's adaptive shape has no budget field -- \
@@ -215,7 +214,7 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
     // those would 400 upstream. Drop thinking for this one request
     // rather than reshape the caller's `max_tokens`.
     if !legacy_thinking_fits(req) {
-        tracing::warn!(
+        tracing::debug!(
             request_max_tokens = req.max_tokens,
             min_required = ANTHROPIC_MIN_THINKING_BUDGET + 1,
             reasoning_effort = ?r.effort,
@@ -233,8 +232,8 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
     // Every arm runs the budget through `clamp_budget_to_legacy_window`,
     // which enforces BOTH Anthropic invariants:
     //   - `budget_tokens >= 1024` (floor); a sub-1024 explicit budget
-    //     gets raised with a WARN so an operator can see the silent
-    //     promotion. The effort/enabled arms can only land below the
+    //     gets raised with a DEBUG line so the silent promotion is
+    //     visible. The effort/enabled arms can only land below the
     //     floor in the 1025-1279 (effort=high) band; same clamp.
     //   - `budget_tokens < max_tokens` (ceiling); an explicit budget
     //     that exceeds `req.max_tokens` would otherwise produce a
@@ -284,7 +283,7 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
 
 /// Origin of a `budget_tokens` value about to be clamped to
 /// Anthropic's legal `[1024, max_tokens-1]` window. Used to gate
-/// whether a silent floor promotion should WARN: `Explicit` means
+/// whether a silent floor promotion is logged: `Explicit` means
 /// the caller asked for a specific number and we are about to ignore
 /// it -- worth a log line; `Derived` means routectl computed the
 /// number from `effort_ratio` or the `enabled=true` half-of-max
@@ -341,14 +340,14 @@ fn apply_operator_cap(budget: u32, operator_cap: u32) -> u32 {
 /// the legacy `Enabled` wire shape. The gate at the top of
 /// `build_thinking` guarantees `max > 1024`, so `max - 1 >= 1024`
 /// and the window is non-empty. On an explicit caller budget that
-/// gets clamped UP from below the floor, fire a WARN so the operator
+/// gets clamped UP from below the floor, log at DEBUG so the operator
 /// can correlate "I asked for 500 tokens of thinking, why is the
 /// model using 1024" with a single grep.
 fn clamp_budget_to_legacy_window(budget: u32, max: u32, source: BudgetSource) -> u32 {
     let ceiling = max.saturating_sub(1);
     let clamped = budget.max(ANTHROPIC_MIN_THINKING_BUDGET).min(ceiling);
     if matches!(source, BudgetSource::Explicit) && budget < ANTHROPIC_MIN_THINKING_BUDGET {
-        tracing::warn!(
+        tracing::debug!(
             requested_budget = budget,
             clamped_to = clamped,
             "reasoning.max_tokens below Anthropic legacy minimum (1024); \
@@ -895,6 +894,49 @@ mod tests {
             ),
             "expected exact table budget 24576, got {thinking:?}"
         );
+    }
+
+    /// A client library that always sends `reasoning.max_tokens` trips the
+    /// adaptive budget discard on every request, so the line is DEBUG and
+    /// fires exactly once per request.
+    #[test]
+    fn adaptive_budget_discard_logs_once_at_debug() {
+        // Arrange
+        let req = ChatRequest {
+            max_tokens: Some(100_000),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: Some(4096),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Act
+        let mut thinking = None;
+        let events = routectl_testkit::capture_events(|| {
+            thinking = build_thinking(&req, true);
+        });
+
+        // Assert
+        assert!(
+            matches!(thinking, Some(ThinkingConfig::Adaptive { .. })),
+            "adaptive path must still emit adaptive thinking, got {thinking:?}"
+        );
+        let discards: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.message
+                    .contains("reasoning.max_tokens dropped on adaptive thinking path")
+            })
+            .collect();
+        assert_eq!(
+            discards.len(),
+            1,
+            "one discard line expected; got {events:?}"
+        );
+        assert_eq!(discards[0].level, tracing::Level::DEBUG);
+        assert_eq!(discards[0].field("budget_tokens"), Some("4096"));
     }
 
     // -- normalize_claude_sampling helper matrix -----------------------

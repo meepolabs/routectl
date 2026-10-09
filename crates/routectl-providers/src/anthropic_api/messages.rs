@@ -123,13 +123,13 @@ fn render_skipped_format(format: Option<&str>, redact: bool) -> String {
 ///   strand it. Under `Lift` no system turn reaches the wire, so the
 ///   positional rationale does not apply and the drop stands.
 ///
-/// One structured WARN fires per request when stripping occurs,
+/// One structured DEBUG line fires per request when stripping occurs,
 /// carrying the provider id, the exact count of dropped blocks, the
 /// exact count of affected messages, and a bounded sample of the
 /// affected message indices flagged when it is only a sample. Block
 /// content is never logged (could be reasoning over sensitive data).
-/// Preserve strips nothing, so the WARN does not fire under Preserve.
-/// A SECOND aggregated WARN covers the whole-turn drops above (the
+/// Preserve strips nothing, so the line does not fire under Preserve.
+/// A SECOND aggregated DEBUG line covers the whole-turn drops above (the
 /// per-block line counts blocks, not turns), likewise once per request.
 ///
 /// The keep-decision for a reasoning-only turn runs through
@@ -280,12 +280,12 @@ pub(super) fn normalize_replay_invariants<'a>(
          other content pass through unchanged."
     );
 
-    // Separate aggregated WARN when stripping emptied a whole assistant
+    // Separate aggregated DEBUG line when stripping emptied a whole assistant
     // turn (the per-block strip event above only covers individual dropped
     // blocks). Distinct field/message so operators can tell "some blocks
     // stripped" from "an entire turn omitted". No content is logged.
     if dropped_turn_count > 0 {
-        tracing::warn!(
+        tracing::debug!(
             provider = id,
             dropped_turns = dropped_turn_count,
             dropped_message_indices = ?dropped_turn_indices.items(),
@@ -1233,9 +1233,9 @@ pub(super) enum SystemTurnPolicy {
 }
 
 /// Aggregated system-turn diagnostics for ONE outbound attempt: one DEBUG
-/// line naming how many turns were forwarded, and one WARN when the
-/// billing/attribution screen stripped anything. The WARN counts BLOCKS,
-/// so a turn that loses only its billing block is reported as loudly as a
+/// line naming how many turns were forwarded, and one DEBUG line when the
+/// billing/attribution screen stripped anything. That line counts BLOCKS,
+/// so a turn that loses only its billing block is reported the same as a
 /// turn removed wholesale, and it fires at most once per request. No
 /// message content reaches either line.
 struct SystemTurnTally<'a> {
@@ -1277,7 +1277,7 @@ impl<'a> SystemTurnTally<'a> {
             );
         }
         if self.billing_blocks_stripped > 0 {
-            tracing::warn!(
+            tracing::debug!(
                 provider = self.provider,
                 system_blocks_stripped = self.billing_blocks_stripped,
                 system_turns_dropped = self.billing_turns_dropped,
@@ -1502,7 +1502,7 @@ fn screen_forwarded_system_content(
 
 /// Outcome of the forwarded-system screen: the content that survived
 /// (`None` when the whole turn is dropped) and how many blocks the screen
-/// removed, so the aggregated WARN counts partial strips too.
+/// removed, so the aggregated line counts partial strips too.
 struct ScreenedSystemContent {
     content: Option<MessageContent>,
     blocks_stripped: usize,
@@ -2407,7 +2407,7 @@ mod empty_content_backstop_tests {
 
     /// Unsigned-only reasoning, no residual content after the strip, and
     /// no tool_calls: the whole assistant turn is dropped (emitting
-    /// content: [] would 400), and the new aggregated drop WARN fires.
+    /// content: [] would 400), and the aggregated drop DEBUG line fires.
     #[test]
     fn unsigned_only_reasoning_turn_is_dropped_with_aggregated_warn() {
         // Arrange -- Parts hold only an unsigned thinking block (triggers
@@ -2438,12 +2438,18 @@ mod empty_content_backstop_tests {
             );
         });
 
-        // Assert -- the aggregated whole-turn drop WARN fired.
-        let drop_warn = events
+        // Assert -- the aggregated whole-turn drop line fired exactly once, at DEBUG.
+        let drop_lines: Vec<_> = events
             .iter()
-            .find(|e| e.level == tracing::Level::WARN && e.field("dropped_turns").is_some())
-            .expect("aggregated drop WARN must fire");
-        assert_eq!(drop_warn.field("dropped_turns"), Some("1"));
+            .filter(|e| e.field("dropped_turns").is_some())
+            .collect();
+        assert_eq!(
+            drop_lines.len(),
+            1,
+            "one drop line expected; got {events:?}"
+        );
+        assert_eq!(drop_lines[0].level, tracing::Level::DEBUG);
+        assert_eq!(drop_lines[0].field("dropped_turns"), Some("1"));
     }
 
     /// Reasoning details in a non-anthropic format (even with a non-empty

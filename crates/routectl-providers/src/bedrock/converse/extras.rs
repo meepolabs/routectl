@@ -1089,7 +1089,7 @@ mod tests {
             1,
             "expected exactly one dropped-format-key event; captured {events:?}"
         );
-        assert_eq!(drops[0].level, tracing::Level::WARN, "{:?}", drops[0]);
+        assert_eq!(drops[0].level, tracing::Level::DEBUG, "{:?}", drops[0]);
         assert_eq!(drops[0].field("provider"), Some(cfg.id.as_str()));
         assert_eq!(drops[0].field("dropped_name"), Some("true"));
         assert_eq!(drops[0].field("dropped_strict"), Some("true"));

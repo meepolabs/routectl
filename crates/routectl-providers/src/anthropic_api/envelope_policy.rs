@@ -1,15 +1,15 @@
 //! Host-gated reasoning-envelope policy for the `redacted_thinking`
-//! egress, plus its per-request WARN aggregate.
+//! egress, plus its per-request DEBUG aggregate.
 //!
 //! The policy lives in its own module because THREE independent sites
 //! construct a `RedactedThinking` block on this lane -- the content-part
 //! walk and the `reasoning_details` replay channel (both in `messages.rs`)
 //! and the context-management cache reinjection (`context_management.rs`).
 //! A single owner threaded from `request::normalize` is what keeps the
-//! three from drifting, and what keeps the WARN at one per request rather
+//! three from drifting, and what keeps the line at one per request rather
 //! than one per site.
 
-/// Constant event name of the aggregated envelope-unwrap WARN. A fixed
+/// Constant event name of the aggregated envelope-unwrap DEBUG line. A fixed
 /// token so operators can filter on it without the log line ever carrying
 /// request-derived text.
 const ENVELOPE_UNWRAP_EVENT: &str = "reasoning_envelope_unwrapped";
@@ -56,9 +56,9 @@ const ENVELOPE_UNWRAP_EVENT: &str = "reasoning_envelope_unwrapped";
 /// artifact id, and any digest of those NEVER reach a log field at any
 /// level. Scheme and id are client-minted claims that carry no authority
 /// (see the envelope module), so logging them would be both a hygiene
-/// breach and misleading. One aggregated WARN per request carries a
+/// breach and misleading. One aggregated DEBUG line per request carries a
 /// constant event name, the provider id, and a count -- a history can hold
-/// unbounded reasoning blocks, so a per-block WARN would be a log
+/// unbounded reasoning blocks, so a per-block line would be a log
 /// amplifier driven by request content.
 pub struct EnvelopeUnwrapTally<'a> {
     provider: &'a str,
@@ -98,14 +98,14 @@ impl<'a> EnvelopeUnwrapTally<'a> {
         }
     }
 
-    /// Emit the aggregated WARN, if anything was unwrapped. Called exactly
+    /// Emit the aggregated DEBUG line, if anything was unwrapped. Called exactly
     /// once per request, by `request::normalize`, after BOTH message
     /// translation and context-management reinjection have run -- the two
     /// feed the same tally, so flushing between them would emit two lines
     /// for one request.
     pub fn flush(&self) {
         if self.unwrapped > 0 {
-            tracing::warn!(
+            tracing::debug!(
                 provider = self.provider,
                 event = ENVELOPE_UNWRAP_EVENT,
                 unwrapped_count = self.unwrapped,

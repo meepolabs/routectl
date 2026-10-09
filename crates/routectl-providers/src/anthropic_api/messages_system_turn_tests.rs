@@ -287,7 +287,7 @@ fn forwarded_system_turn_keeps_non_billing_other_and_document_blocks() {
 
 /// A mixed turn that loses only its billing block is reported as loudly as
 /// one removed wholesale: the surviving text forwards, the strip is counted
-/// in blocks, and the WARN is one line for the request.
+/// in blocks, and the DEBUG line is one line for the request.
 #[test]
 fn partial_billing_strip_is_counted_and_warns_exactly_once() {
     // Arrange
@@ -312,7 +312,7 @@ fn partial_billing_strip_is_counted_and_warns_exactly_once() {
         .filter(|e| e.field("system_blocks_stripped").is_some())
         .collect();
     assert_eq!(lines.len(), 1, "one WARN per request: {events:?}");
-    assert_eq!(lines[0].level, tracing::Level::WARN);
+    assert_eq!(lines[0].level, tracing::Level::DEBUG);
     assert_eq!(lines[0].field("system_blocks_stripped"), Some("1"));
     assert_eq!(lines[0].field("system_turns_dropped"), Some("0"));
 }

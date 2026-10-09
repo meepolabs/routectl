@@ -184,7 +184,7 @@ pub fn parse_file_document_source(file: &Value) -> Option<(Value, Option<String>
 ///   (`Image`, `Document`, etc.) are extremely unusual but pass
 ///   through unchanged -- only the specific text-after-tool_use case
 ///   trips the upstream validator.
-/// - Emits a `tracing::warn!` per stripped block with
+/// - Emits a `tracing::debug!` per stripped block with
 ///   `dropped_text_len` so operators can correlate strip events to
 ///   model behavior. `request_id` is inherited from the parent span.
 pub fn strip_text_after_tool_use(parts: &[ContentPart]) -> Vec<ContentPart> {
@@ -199,7 +199,7 @@ pub fn strip_text_after_tool_use(parts: &[ContentPart]) -> Vec<ContentPart> {
         if i > last_idx
             && let ContentPart::Known(KnownContentPart::Text { text, .. }) = p
         {
-            tracing::warn!(
+            tracing::debug!(
                 dropped_text_len = text.len(),
                 "stripped text block after tool_use in assistant content (Bedrock/Anthropic reject this shape on echo)",
             );

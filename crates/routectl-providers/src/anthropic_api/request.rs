@@ -285,7 +285,7 @@ impl DroppedFormatKeys {
         }
     }
 
-    /// Emit the aggregated WARN, if either key was omitted. Called exactly
+    /// Emit the aggregated DEBUG line, if either key was omitted. Called exactly
     /// once per normalization, after every path that can carry the keys has
     /// run.
     ///
@@ -299,7 +299,7 @@ impl DroppedFormatKeys {
             return;
         }
         // Never log the caller's `name` VALUE -- it is caller-controlled.
-        tracing::warn!(
+        tracing::debug!(
             provider = provider,
             event = OUTPUT_FORMAT_KEY_DROP_EVENT,
             dropped_name = self.name,
@@ -329,7 +329,7 @@ pub(crate) struct DeferredOutputConfigDiagnostics {
 impl DeferredOutputConfigDiagnostics {
     /// Re-run both `output_config` passes on a body rewritten after assembly
     /// and fold their records into this one, so the request still yields one
-    /// WARN per diagnostic however many times the passes ran.
+    /// line per diagnostic however many times the passes ran.
     ///
     /// Bedrock-gated: `bedrock/invoke.rs` is its only caller.
     #[cfg(feature = "bedrock")]
@@ -349,7 +349,7 @@ impl DeferredOutputConfigDiagnostics {
         Ok(self)
     }
 
-    /// Emit both aggregated WARNs. Called exactly once per request, after
+    /// Emit both aggregated diagnostics. Called exactly once per request, after
     /// every pass that can write `output_config` has run.
     pub(crate) fn warn(&self, provider: &str) {
         self.dropped_format_keys.warn(provider);
@@ -359,7 +359,7 @@ impl DeferredOutputConfigDiagnostics {
 
 /// Remove `name` and `strict` from `output_config.format` on an ASSEMBLED
 /// body (or Converse bag), whatever path put them there. Reports what it
-/// removed; the caller aggregates and emits the single WARN.
+/// removed; the caller aggregates and emits the single line.
 ///
 /// Anthropic's `output_config.format` accepts only `type` and `schema`;
 /// measured 2026-08-11 against the live wire, a body carrying either key is
@@ -544,7 +544,7 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// write path `is_bedrock_invoke_managed_key` does not cover for
 /// `output_config`, so an operator-supplied object can both reintroduce the
 /// unrepresentable keys this pass removed and replace the repaired schema
-/// wholesale. It re-runs both passes on the body it ships and emits ONE WARN
+/// wholesale. It re-runs both passes on the body it ships and emits ONE line
 /// per diagnostic covering both sources. Emitting here as well would
 /// double-warn for a single request.
 ///
@@ -608,7 +608,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         .filter(|s| !s.is_blank())
         .and_then(|s| crate::system_filter::strip_billing_attribution(s, &mut billing_dropped));
     if billing_dropped {
-        tracing::warn!(
+        tracing::debug!(
             provider = id,
             "anthropic-api egress: Claude Code billing/attribution system block dropped",
         );
@@ -676,13 +676,13 @@ pub(crate) fn normalize_deferring_format_key_warn(
         // AnthropicSystem::Text. Filter each message's text through the
         // same billing predicate so the fingerprint never reaches a
         // third-party host via this path either. A separate flag keeps
-        // the WARN one-per-strip: the req.system branch above already
+        // the log line one-per-strip: the req.system branch above already
         // warned if it dropped, and that branch is mutually exclusive
         // with this fallback running at all.
         let mut legacy_dropped = false;
         let lifted_content = lift_legacy_system_stripped(&req.messages, &mut legacy_dropped);
         if legacy_dropped {
-            tracing::warn!(
+            tracing::debug!(
                 provider = id,
                 "anthropic-api egress: Claude Code billing/attribution system block \
                      dropped (legacy Role::System path)",
@@ -724,7 +724,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         vec![]
     };
     // Both channels that can construct a `redacted_thinking` block have
-    // run, so the tally is complete: one WARN per request, never one per
+    // run, so the tally is complete: one line per request, never one per
     // channel.
     envelopes.flush();
 
@@ -815,7 +815,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // caller-supplied output_config rides through provider_extras verbatim and
     // wins over the converter, so this is the only pass that sees that path.
     // The record is RETURNED, not emitted: the emitting wrapper owns the one
-    // WARN per request, so a caller that writes to `output_config` after this
+    // line per request, so a caller that writes to `output_config` after this
     // returns can fold its own scrub in rather than warning twice.
     if let Some(obj) = body.as_object_mut() {
         dropped_format_keys =
@@ -851,14 +851,14 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // the body still has a `thinking` key, the upstream would receive a
     // request that demands thinking tokens but no thinking blocks were
     // injected into history. Non-Anthropic providers 400 on this shape.
-    // Strip `thinking` defensively and emit a structured warning so
-    // operators can diagnose the gap.
+    // Strip `thinking` defensively and emit a structured DEBUG line so
+    // the gap is diagnosable.
     if !clear_thinking_misses.is_empty()
         && let Some(obj) = body.as_object_mut()
         && obj.contains_key("thinking")
     {
         obj.remove("thinking");
-        tracing::warn!(
+        tracing::debug!(
             provider = id,
             missed_tool_ids = ?clear_thinking_misses,
             "context_management: cache miss for tool_use ids; \
@@ -1139,7 +1139,7 @@ mod response_format_tests {
             .collect()
     }
 
-    /// The single WARN-level dropped-format-key event for `provider`.
+    /// The single DEBUG-level dropped-format-key event for `provider`.
     fn sole_format_key_drop<'a>(events: &'a [CapturedEvent], provider: &str) -> &'a CapturedEvent {
         let drops = format_key_drops(events, provider);
         assert_eq!(
@@ -1147,7 +1147,7 @@ mod response_format_tests {
             1,
             "expected exactly one dropped-format-key event for {provider}; captured {events:?}"
         );
-        assert_eq!(drops[0].level, tracing::Level::WARN, "{:?}", drops[0]);
+        assert_eq!(drops[0].level, tracing::Level::DEBUG, "{:?}", drops[0]);
         drops[0]
     }
 
