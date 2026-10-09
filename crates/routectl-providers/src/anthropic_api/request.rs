@@ -1044,7 +1044,7 @@ mod reasoning_leak_guard_tests {
 #[cfg(test)]
 mod sampling_leak_guard_tests {
     use super::normalize;
-    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
+    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_drop};
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
 
     const CONTROL_PROVIDER: &str = "anthropic:sampling-control";
@@ -1088,9 +1088,9 @@ mod sampling_leak_guard_tests {
 
         assert!(body.get("n").is_none());
         assert!(body.get("logprobs").is_none());
-        // This egress honors none of the seven, so the WARN names all of
+        // This egress honors none of the seven, so the event names all of
         // them -- unaffected by any other egress gaining a translation.
-        let warn = sole_sampling_warn(&events, "anthropic:test");
+        let warn = sole_sampling_drop(&events, "anthropic:test");
         assert_eq!(
             warn.field("dropped_fields"),
             Some(
@@ -1112,10 +1112,10 @@ mod sampling_leak_guard_tests {
         });
 
         // The control's dropped `n` proves the capture saw the callsite.
-        sole_sampling_warn(&events, CONTROL_PROVIDER);
+        sole_sampling_drop(&events, CONTROL_PROVIDER);
         assert!(
             sampling_drops(&events, "anthropic:test").is_empty(),
-            "no sampling field must mean no sampling WARN; captured {events:?}"
+            "no sampling field must mean no sampling drop event; captured {events:?}"
         );
     }
 }

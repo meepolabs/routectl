@@ -355,7 +355,7 @@ fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
 
 #[test]
 fn emits_warn_when_stripping_occurs() {
-    // Capture the WARN log emitted during normalize and assert:
+    // Capture the DEBUG strip event emitted during normalize and assert:
     // - structured fields `provider`, `dropped_blocks`,
     //   `affected_messages_count`, `affected_messages`,
     //   `affected_messages_truncated` are present
@@ -398,8 +398,8 @@ fn emits_warn_when_stripping_occurs() {
     let strip_event = captured
         .iter()
         .find(|e| e.message.contains("stripping unsigned thinking blocks"))
-        .unwrap_or_else(|| panic!("expected strip WARN, got events: {captured:?}"));
-    assert_eq!(strip_event.level, tracing::Level::WARN);
+        .unwrap_or_else(|| panic!("expected strip event, got events: {captured:?}"));
+    assert_eq!(strip_event.level, tracing::Level::DEBUG);
 
     // Structured fields present.
     let field_keys: Vec<&str> = strip_event.fields.iter().map(|(k, _)| k.as_str()).collect();
@@ -412,7 +412,7 @@ fn emits_warn_when_stripping_occurs() {
     ] {
         assert!(
             field_keys.contains(key),
-            "expected field `{key}` in WARN, got fields: {:?}",
+            "expected field `{key}` in the strip event, got fields: {:?}",
             strip_event.fields
         );
     }
@@ -1663,12 +1663,12 @@ fn preserve_history_reasoning_keeps_unsigned_thinking_for_anthropic_api() {
     // Unsigned: signature serializes as the empty string, not dropped.
     assert_eq!(thinking["signature"], "");
 
-    // No strip => no WARN.
+    // No strip => no strip event.
     assert!(
         !captured
             .iter()
             .any(|e| e.message.contains("stripping unsigned thinking blocks")),
-        "Preserve must not emit the strip WARN; got events: {captured:?}"
+        "Preserve must not emit the strip event; got events: {captured:?}"
     );
 }
 

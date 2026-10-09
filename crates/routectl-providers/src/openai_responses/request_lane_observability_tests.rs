@@ -413,7 +413,7 @@ fn no_warn_for_clean_request() {
 
 #[test]
 fn sampling_fields_warn_once_naming_dropped_fields() {
-    use crate::sampling_drop_guard::test_support::sole_sampling_warn;
+    use crate::sampling_drop_guard::test_support::sole_sampling_drop;
 
     // Arrange
     let mut req = req_with(vec![user_text("hi")]);
@@ -431,9 +431,9 @@ fn sampling_fields_warn_once_naming_dropped_fields() {
     let wire = wire.expect("translate ran inside the capture");
 
     // Assert
-    // This egress honors none of the seven, so the WARN names all of them --
+    // This egress honors none of the seven, so the event names all of them --
     // unaffected by any other egress gaining a translation.
-    let warn = sole_sampling_warn(&events, &cfg().id);
+    let warn = sole_sampling_drop(&events, &cfg().id);
     assert_eq!(
         warn.field("dropped_fields"),
         Some(
@@ -447,7 +447,7 @@ fn sampling_fields_warn_once_naming_dropped_fields() {
 
 #[test]
 fn no_sampling_warn_when_no_sampling_field_set() {
-    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
+    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_drop};
 
     // Arrange
     let req = req_with(vec![user_text("hi")]);
@@ -463,9 +463,9 @@ fn no_sampling_warn_when_no_sampling_field_set() {
     });
 
     // Assert: the control's dropped `n` proves the capture saw the callsite.
-    sole_sampling_warn(&events, &control_cfg.id);
+    sole_sampling_drop(&events, &control_cfg.id);
     assert!(
         sampling_drops(&events, &cfg().id).is_empty(),
-        "no sampling field must mean no sampling WARN; captured {events:?}"
+        "no sampling field must mean no sampling drop event; captured {events:?}"
     );
 }

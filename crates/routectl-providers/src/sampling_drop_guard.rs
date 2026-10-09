@@ -14,7 +14,7 @@
 //! while the caller believes the sampler is pinned.
 //!
 //! So each caller passes the canonical names IT honors and this guard
-//! reports the remainder: ONE structured WARN per egress invocation naming
+//! reports the remainder: ONE structured DEBUG event per egress invocation naming
 //! the dropped fields the request carried (names only, never values). The
 //! honored list stays with the code that builds the wire body, so the
 //! guard never learns any dialect's wire shape.
@@ -63,7 +63,7 @@ fn dropped_sampling_fields(req: &ChatRequest, honored: &[&str]) -> Vec<&'static 
     fields
 }
 
-/// Emit a single WARN naming every canonical sampling field this egress
+/// Emit a single DEBUG event naming every canonical sampling field this egress
 /// drops, excluding the canonical names in `honored` that it translates.
 /// Silent when the request carries none of the dropped ones. Logs field
 /// NAMES and a count only -- no values, since `logit_bias` and friends can
@@ -73,7 +73,7 @@ pub fn warn_dropped_sampling_fields(provider_id: &str, req: &ChatRequest, honore
     if fields.is_empty() {
         return;
     }
-    tracing::warn!(
+    tracing::debug!(
         provider = %provider_id,
         dropped_fields = ?fields,
         dropped_count = fields.len(),
@@ -87,7 +87,7 @@ pub fn warn_dropped_sampling_fields(provider_id: &str, req: &ChatRequest, honore
 pub mod test_support {
     /// The drop diagnostic's message text, as emitted by
     /// [`super::warn_dropped_sampling_fields`].
-    const SAMPLING_WARN_NEEDLE: &str =
+    const SAMPLING_DROP_NEEDLE: &str =
         "sampling fields dropped: not translated onto this egress's wire";
 
     /// Captured sampling drop diagnostics attributed to `provider`, at any
@@ -98,19 +98,18 @@ pub mod test_support {
     ) -> Vec<&'a routectl_testkit::CapturedEvent> {
         events
             .iter()
-            .filter(|e| e.message.contains(SAMPLING_WARN_NEEDLE))
+            .filter(|e| e.message.contains(SAMPLING_DROP_NEEDLE))
             .filter(|e| e.field("provider") == Some(provider))
             .collect()
     }
 
-    /// The single WARN-level sampling drop diagnostic attributed to
-    /// `provider`. Panics unless exactly one was captured, at WARN:
+    /// The single DEBUG-level sampling drop diagnostic attributed to
+    /// `provider`. Panics unless exactly one was captured, at DEBUG:
     /// at-least-one would stay green if a second guard call or a second
-    /// `warn!` were wired onto an egress, which is the failure this
+    /// emission were wired onto an egress, which is the failure this
     /// one-per-request contract exists to prevent; the level check keeps a
-    /// downgrade to `debug!` -- invisible under production log filtering --
-    /// from passing either.
-    pub fn sole_sampling_warn<'a>(
+    /// per-request expected transform from creeping back to WARN.
+    pub fn sole_sampling_drop<'a>(
         events: &'a [routectl_testkit::CapturedEvent],
         provider: &str,
     ) -> &'a routectl_testkit::CapturedEvent {
@@ -122,8 +121,8 @@ pub mod test_support {
         );
         assert_eq!(
             drops[0].level,
-            tracing::Level::WARN,
-            "the sampling drop diagnostic must stay at WARN: {:?}",
+            tracing::Level::DEBUG,
+            "the sampling drop diagnostic must stay at DEBUG: {:?}",
             drops[0]
         );
         drops[0]
@@ -132,7 +131,7 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{sampling_drops, sole_sampling_warn};
+    use super::test_support::{sampling_drops, sole_sampling_drop};
     use super::{dropped_sampling_fields, warn_dropped_sampling_fields};
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
     use serde_json::json;
@@ -248,8 +247,8 @@ mod tests {
             warn_dropped_sampling_fields(CONTROL_PROVIDER, &control, &[]);
         });
 
-        // Assert: the control's WARN proves the capture saw the callsite.
-        sole_sampling_warn(&events, CONTROL_PROVIDER);
+        // Assert: the control's event proves the capture saw the callsite.
+        sole_sampling_drop(&events, CONTROL_PROVIDER);
         assert!(
             sampling_drops(&events, "prov-test").is_empty(),
             "honored fields must not warn; captured {events:?}"
@@ -268,7 +267,7 @@ mod tests {
             routectl_testkit::capture_events(|| warn_dropped_sampling_fields("prov-test", &r, &[]));
 
         // Assert
-        let warn = sole_sampling_warn(&events, "prov-test");
+        let warn = sole_sampling_drop(&events, "prov-test");
         assert_eq!(warn.field("dropped_fields"), Some(r#"["n", "logit_bias"]"#));
         assert_eq!(warn.field("dropped_count"), Some("2"));
         assert!(
@@ -293,8 +292,8 @@ mod tests {
             warn_dropped_sampling_fields(CONTROL_PROVIDER, &control, &[]);
         });
 
-        // Assert: the control's WARN proves the capture saw the callsite.
-        sole_sampling_warn(&events, CONTROL_PROVIDER);
+        // Assert: the control's event proves the capture saw the callsite.
+        sole_sampling_drop(&events, CONTROL_PROVIDER);
         assert!(
             sampling_drops(&events, "prov-test").is_empty(),
             "a request with no sampling field must not warn; captured {events:?}"

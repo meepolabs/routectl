@@ -3950,7 +3950,7 @@ async fn complete_and_stream_both_strip_sampling_on_the_cloak_lane() {
 
 // -- sampling strip: observability contract ----------------------------
 
-/// Collect the sampling-strip WARNs emitted while assembling `req`.
+/// Collect the sampling-strip events emitted while assembling `req`.
 fn strip_warns(
     provider: &AnthropicApiProvider,
     req: &ChatRequest,
@@ -3960,7 +3960,7 @@ fn strip_warns(
     })
 }
 
-/// Collect the sampling-strip WARNs emitted by stripping `body` directly.
+/// Collect the sampling-strip events emitted by stripping `body` directly.
 /// Needed for the both-keys case: the canonical assembly emits at most ONE
 /// sampling key (temperature wins over top_p) and `merge_provider_extras`
 /// shields both as managed keys, so a two-key body cannot be produced
@@ -3973,11 +3973,28 @@ fn strip_warns_for_body(body: &Value) -> Vec<routectl_testkit::CapturedEvent> {
     })
 }
 
+/// Every captured sampling-strip event, at any level, each asserted to be
+/// DEBUG: filtering on the level instead would let a re-promotion to WARN
+/// read as "no event" and pass the absence checks.
 fn warns_from<F: FnOnce()>(f: F) -> Vec<routectl_testkit::CapturedEvent> {
-    routectl_testkit::capture_events(f)
+    let strips: Vec<_> = routectl_testkit::capture_events(f)
         .into_iter()
-        .filter(|e| e.level == tracing::Level::WARN && e.field("dropped_params").is_some())
-        .collect()
+        .filter(|e| e.field("dropped_params").is_some())
+        .collect();
+    assert_strip_events_at_debug(&strips);
+    strips
+}
+
+fn assert_strip_events_at_debug<'a>(
+    strips: impl IntoIterator<Item = &'a routectl_testkit::CapturedEvent>,
+) {
+    for strip in strips {
+        assert_eq!(
+            strip.level,
+            tracing::Level::DEBUG,
+            "the sampling strip must log at DEBUG: {strip:?}"
+        );
+    }
 }
 
 /// Two removed keys produce exactly ONE event carrying both names, with the
@@ -4013,7 +4030,7 @@ fn sampling_strip_warn_names_only_present_keys() {
     assert_eq!(warns[0].field("dropped_params"), Some("temperature"));
 }
 
-/// No affected key -> no WARN at all. The strip must stay silent on the
+/// No affected key -> no strip event at all. The strip must stay silent on the
 /// overwhelmingly common request shape rather than logging a no-op.
 #[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
@@ -4026,7 +4043,7 @@ fn sampling_strip_emits_no_warn_when_nothing_is_dropped() {
     };
     assert!(
         strip_warns(&provider, &req).is_empty(),
-        "a no-op strip must emit no WARN"
+        "a no-op strip must emit no strip event"
     );
 }
 
@@ -4058,11 +4075,11 @@ fn sampling_strip_warn_never_carries_the_removed_values() {
     }
 }
 
-/// The one-WARN contract on the REAL dispatch paths, not just the emitter.
+/// The one-event contract on the REAL dispatch paths, not just the emitter.
 /// A helper-level assertion cannot see a second call site, so drive
 /// `complete` and `stream` themselves (host-pinned lane -> `FailingTokenSource`
 /// halts each path after the strip, before any network I/O) and assert
-/// exactly ONE strip WARN per path, with the exact static fields and only
+/// exactly ONE DEBUG strip event per path, with the exact static fields and only
 /// the seeded key name. A hostile sampling value is used as the canary so a
 /// regression that interpolated the removed value -- or the body -- into any
 /// field or the message would surface here on the production path.
@@ -4104,12 +4121,13 @@ async fn real_complete_and_stream_each_emit_exactly_one_strip_warn() {
 
             let warns: Vec<_> = events
                 .iter()
-                .filter(|e| e.level == tracing::Level::WARN && e.field("dropped_params").is_some())
+                .filter(|e| e.field("dropped_params").is_some())
                 .collect();
+            assert_strip_events_at_debug(warns.iter().copied());
             assert_eq!(
                 warns.len(),
                 1,
-                "{path} ({expected_names}) must emit exactly ONE strip WARN; got: {warns:?}"
+                "{path} ({expected_names}) must emit exactly ONE strip event; got: {warns:?}"
             );
             let warn = warns[0];
             assert_eq!(warn.field("provider"), Some("test"));
@@ -4136,9 +4154,9 @@ async fn real_complete_and_stream_each_emit_exactly_one_strip_warn() {
 
 /// The count_tokens path deliberately does NOT call the strip:
 /// `build_count_tokens_body` already drops sampling by allowlist, so adding
-/// the call there would only multiply WARNs on a path Claude Code polls
-/// heavily. Pin both halves -- sampling absent from the count_tokens body,
-/// and no strip WARN attributable to building it.
+/// the call there would only multiply strip events on a path Claude Code
+/// polls heavily. Pin both halves -- sampling absent from the count_tokens
+/// body, and no strip event attributable to building it.
 #[serial_test::serial(anthropic_api_cloak_split)]
 #[test]
 fn count_tokens_body_drops_sampling_by_allowlist_without_a_strip_warn() {
@@ -4158,7 +4176,7 @@ fn count_tokens_body_drops_sampling_by_allowlist_without_a_strip_warn() {
     });
     assert!(
         !events.iter().any(|e| e.field("dropped_params").is_some()),
-        "the count_tokens path must not emit a sampling-strip WARN"
+        "the count_tokens path must not emit a sampling-strip event"
     );
 }
 

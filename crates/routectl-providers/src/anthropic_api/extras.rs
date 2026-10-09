@@ -715,7 +715,7 @@ pub(super) fn reconcile_sampling_params(provider_id: &str, req: &ChatRequest, bo
     }
 }
 
-/// Fixed lane label stamped on the sampling-strip WARN. Names the credential
+/// Fixed lane label stamped on the sampling-strip event. Names the credential
 /// lane (routectl's own OAuth seat egressing to api.anthropic.com), not the
 /// cloak state -- the strip is lane-deterministic, so a single static value
 /// correlates every strip event without leaking request-specific content.
@@ -734,13 +734,13 @@ const OAUTH_OWN_ANTHROPIC_LANE: &str = "oauth-own-anthropic";
 /// later pass can re-introduce a stripped key. `stop_sequences` is left
 /// untouched (the seat accepts it). No-op on a non-object body.
 ///
-/// Emits at most ONE structured WARN per affected request, listing only the
+/// Emits at most ONE structured DEBUG event per affected request, listing only the
 /// key names actually present in `dropped_params`. NEVER logs the removed
 /// values or any body content -- the strip is lane-deterministic, so the
 /// key names plus the lane label are the whole diagnostic. The count_tokens
 /// path deliberately does NOT call this: `build_count_tokens_body` drops
 /// sampling by allowlist already, so calling it there would only multiply
-/// WARNs on a path Claude Code polls heavily, breaking the one-WARN-per-
+/// events on a path Claude Code polls heavily, breaking the one-event-per-
 /// request contract.
 pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) {
     let Some(obj) = body.as_object_mut() else {
@@ -756,7 +756,7 @@ pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) {
     if dropped.is_empty() {
         return;
     }
-    tracing::warn!(
+    tracing::debug!(
         provider = provider_id,
         lane = OAUTH_OWN_ANTHROPIC_LANE,
         dropped_params = dropped.join(","),

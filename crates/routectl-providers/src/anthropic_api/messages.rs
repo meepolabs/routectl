@@ -261,11 +261,12 @@ pub(super) fn normalize_replay_invariants<'a>(
         });
     }
 
-    // One structured WARN per request. Block content stays OUT of the
+    // One structured DEBUG event per request: the strip is an expected
+    // transform, not an operator fault. Block content stays OUT of the
     // log line (could be reasoning over sensitive data); only counts
     // and indices reach the operator. Provider id is always present
     // so an operator triaging a noisy upstream can grep by it.
-    tracing::warn!(
+    tracing::debug!(
         provider = id,
         dropped_blocks,
         affected_messages_count = affected_message_count,
@@ -280,7 +281,7 @@ pub(super) fn normalize_replay_invariants<'a>(
     );
 
     // Separate aggregated WARN when stripping emptied a whole assistant
-    // turn (the per-block WARN above only covers individual dropped
+    // turn (the per-block strip event above only covers individual dropped
     // blocks). Distinct field/message so operators can tell "some blocks
     // stripped" from "an entire turn omitted". No content is logged.
     if dropped_turn_count > 0 {

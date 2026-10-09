@@ -1777,7 +1777,7 @@ fn mime_from_filename(filename: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
+    use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_drop};
     use routectl_core::{CacheControl, ChatRequest, Message, MessageContent, Role};
     use routectl_core::{SystemBlock, SystemContent};
     use serde_json::json;
@@ -3332,8 +3332,8 @@ mod tests {
             assert!(body.get(key).is_none(), "body must not carry {key}");
         }
 
-        // One WARN, naming exactly the four dropped knobs and no value.
-        let warn = sole_sampling_warn(&events, "gemini:test");
+        // One event, naming exactly the four dropped knobs and no value.
+        let warn = sole_sampling_drop(&events, "gemini:test");
         assert_eq!(
             warn.field("dropped_fields"),
             Some(r#"["n", "logprobs", "top_logprobs", "logit_bias"]"#)
@@ -3403,10 +3403,10 @@ mod tests {
         });
 
         // The control's dropped `n` proves the capture saw the callsite.
-        sole_sampling_warn(&events, SAMPLING_CONTROL_PROVIDER);
+        sole_sampling_drop(&events, SAMPLING_CONTROL_PROVIDER);
         assert!(
             sampling_drops(&events, "gemini:test").is_empty(),
-            "no dropped knob must mean no sampling WARN; captured {events:?}"
+            "no dropped knob must mean no sampling drop event; captured {events:?}"
         );
     }
 
@@ -3422,10 +3422,10 @@ mod tests {
         });
 
         // The control's dropped `n` proves the capture saw the callsite.
-        sole_sampling_warn(&events, SAMPLING_CONTROL_PROVIDER);
+        sole_sampling_drop(&events, SAMPLING_CONTROL_PROVIDER);
         assert!(
             sampling_drops(&events, "gemini:test").is_empty(),
-            "no dropped knob must mean no sampling WARN; captured {events:?}"
+            "no dropped knob must mean no sampling drop event; captured {events:?}"
         );
     }
 

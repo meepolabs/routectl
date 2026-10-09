@@ -469,7 +469,7 @@ license.
 - `src/system_filter.rs` -- predicate + strip helpers for the Claude Code
   billing/attribution system block, shared by every egress
 - `src/sampling_drop_guard.rs` -- shared leak-guard
-  (`warn_dropped_sampling_fields`): one WARN per
+  (`warn_dropped_sampling_fields`): one DEBUG event per
   request naming which of the canonical sampling knobs (`n`, `seed`,
   `logprobs`, `top_logprobs`, `logit_bias`, `presence_penalty`,
   `frequency_penalty`) an egress received but cannot translate -- names
@@ -734,7 +734,7 @@ license.
   `normalize_claude_sampling`, which drops `temperature`/`top_p` (keeping
   `stop_sequences`) as the LAST body mutation on the own-OAuth
   `api.anthropic.com` lane, called from both `complete` and `stream` and
-  emitting one names-only WARN per affected request; also the two
+  emitting one names-only DEBUG event per affected request; also the two
   capability-beta unions, each gating its flag on the ASSEMBLED body as a
   server requirement rather than a client-opted beta: structured-outputs (`body_has_output_config_format` +
   `union_structured_outputs_beta` for the header carrier; the Bedrock body
@@ -4905,7 +4905,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   own-OAuth Anthropic seat: the first hop receives the caller's sampling
   verbatim and fails fallbackably, the OAuth hop ships a sampling-free body
   with `stop_sequences` intact, the canonical request is unmutated, and one
-  strip WARN correlates to the dispatching request id. Carries a span-aware
+  DEBUG strip event correlates to the dispatching request id. Carries a span-aware
   capture layer (the shared testkit capture is event-only)
 - `tests/cross_lane_system_fingerprint_fallback.rs` -- Gemini -> OpenAI
   Responses fallback against mock upstreams: system-content filtering on each hop

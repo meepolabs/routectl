@@ -56,7 +56,7 @@ const CALLER_STOP: &str = "HALT";
 
 /// One captured event plus the `request_id` inherited from the enclosing
 /// span scope. The shared testkit subscriber is event-only; correlating a
-/// provider-emitted WARN with the request that produced it needs the
+/// provider-emitted event with the request that produced it needs the
 /// ambient span fields, which is what this layer adds.
 #[derive(Debug, Clone)]
 struct ScopedEvent {
@@ -292,11 +292,21 @@ fn sampling_req() -> ChatRequest {
     }
 }
 
+/// Every captured sampling-strip event, at any level, each asserted to be
+/// DEBUG so a re-promotion cannot hide behind a level filter.
 fn strip_warns(events: &[ScopedEvent]) -> Vec<&ScopedEvent> {
-    events
+    let strips: Vec<_> = events
         .iter()
-        .filter(|e| e.level == tracing::Level::WARN && e.field("dropped_params").is_some())
-        .collect()
+        .filter(|e| e.field("dropped_params").is_some())
+        .collect();
+    for strip in &strips {
+        assert_eq!(
+            strip.level,
+            tracing::Level::DEBUG,
+            "the sampling strip must log at DEBUG: {strip:?}"
+        );
+    }
+    strips
 }
 
 fn outgoing_bodies(events: &[ScopedEvent]) -> Vec<&str> {
@@ -312,7 +322,7 @@ fn outgoing_bodies(events: &[ScopedEvent]) -> Vec<&str> {
 /// The whole contract in one dispatch: the first hop sees the caller's
 /// sampling verbatim, fails fallbackably, and the own-OAuth fallback hop
 /// ships a body with sampling stripped -- while the caller's canonical
-/// request is left untouched and the strip WARN correlates to the same
+/// request is left untouched and the strip event correlates to the same
 /// logical request id.
 #[tokio::test]
 async fn cross_lane_fallback_strips_sampling_only_on_the_oauth_hop() {
@@ -386,12 +396,12 @@ async fn cross_lane_fallback_strips_sampling_only_on_the_oauth_hop() {
         Some(&[CALLER_STOP.to_string()][..])
     );
 
-    // -- exactly one strip WARN, correlated to the logical request id.
+    // -- exactly one strip event, correlated to the logical request id.
     let warns = strip_warns(&events);
     assert_eq!(
         warns.len(),
         1,
-        "one WARN for the one stripped hop; got: {warns:?}"
+        "one strip event for the one stripped hop; got: {warns:?}"
     );
     let warn = warns[0];
     assert_eq!(warn.field("provider"), Some("p-oauth"));
@@ -404,7 +414,7 @@ async fn cross_lane_fallback_strips_sampling_only_on_the_oauth_hop() {
     assert_eq!(
         warn.request_id.as_deref(),
         Some(REQUEST_ID),
-        "the strip WARN must inherit the dispatching request's id so a \
+        "the strip event must inherit the dispatching request's id so a \
          grep by request id shows the hop that dropped the knob"
     );
     assert!(

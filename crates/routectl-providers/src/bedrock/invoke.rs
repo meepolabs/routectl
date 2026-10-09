@@ -1472,7 +1472,7 @@ mod tests {
     /// attributed to the Bedrock provider id.
     #[test]
     fn sampling_fields_warn_once_naming_dropped_fields() {
-        use crate::sampling_drop_guard::test_support::sole_sampling_warn;
+        use crate::sampling_drop_guard::test_support::sole_sampling_drop;
 
         let cfg = fake_cfg();
         let mut req = user_req();
@@ -1486,7 +1486,7 @@ mod tests {
         let body = body.expect("normalize ran inside the capture");
 
         assert!(body.get("seed").is_none(), "got: {body}");
-        let warn = sole_sampling_warn(&events, &cfg.id);
+        let warn = sole_sampling_drop(&events, &cfg.id);
         assert_eq!(
             warn.field("dropped_fields"),
             Some(r#"["seed", "top_logprobs"]"#)
@@ -1496,7 +1496,7 @@ mod tests {
 
     #[test]
     fn no_sampling_warn_when_no_sampling_field_set() {
-        use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_warn};
+        use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_drop};
 
         let cfg = fake_cfg();
         let req = user_req();
@@ -1513,10 +1513,10 @@ mod tests {
         });
 
         // The control's dropped `n` proves the capture saw the callsite.
-        sole_sampling_warn(&events, &control_cfg.id);
+        sole_sampling_drop(&events, &control_cfg.id);
         assert!(
             sampling_drops(&events, &cfg.id).is_empty(),
-            "no sampling field must mean no sampling WARN; captured {events:?}"
+            "no sampling field must mean no sampling drop event; captured {events:?}"
         );
     }
 

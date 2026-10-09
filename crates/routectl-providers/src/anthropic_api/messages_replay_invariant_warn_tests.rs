@@ -1,4 +1,5 @@
-// The two aggregated WARNs emitted by `normalize_replay_invariants`:
+// The two aggregated diagnostics emitted by `normalize_replay_invariants`
+// (the unsigned-thinking strip at DEBUG, the dropped-turn line at WARN):
 // exact counts, capped index samples, per-list truncation flags. Both
 // lists are sized by the caller-controlled message count, so each one is
 // bounded as it is collected. Imports live in the host
@@ -67,7 +68,11 @@ fn normalize_capturing(req: &ChatRequest) -> Vec<CapturedEvent> {
     })
 }
 
-fn warn_containing<'a>(events: &'a [CapturedEvent], needle: &str) -> &'a CapturedEvent {
+fn sole_event_containing<'a>(
+    events: &'a [CapturedEvent],
+    needle: &str,
+    level: tracing::Level,
+) -> &'a CapturedEvent {
     let matches: Vec<_> = events
         .iter()
         .filter(|e| e.message.contains(needle))
@@ -75,11 +80,11 @@ fn warn_containing<'a>(events: &'a [CapturedEvent], needle: &str) -> &'a Capture
     assert_eq!(
         matches.len(),
         1,
-        "exactly one WARN containing {needle:?} expected; got events: {events:?}"
+        "exactly one event containing {needle:?} expected; got events: {events:?}"
     );
-    let warn = matches[0];
-    assert_eq!(warn.level, tracing::Level::WARN);
-    warn
+    let event = matches[0];
+    assert_eq!(event.level, level, "{needle:?} logged at the wrong level");
+    event
 }
 
 /// Split a `Debug`-rendered index list into its element strings so the
@@ -106,11 +111,11 @@ fn index_entries(warn: &CapturedEvent, field: &str) -> Vec<String> {
     }))
 }
 
-const STRIP_WARN: &str = "stripping unsigned thinking blocks from outgoing request";
+const STRIP_LINE: &str = "stripping unsigned thinking blocks from outgoing request";
 const DROPPED_TURN_WARN: &str = "dropping assistant turn(s) from outgoing request";
 
-/// More affected messages than the log cap must still produce ONE WARN
-/// whose block count and affected-message count stay exact while the
+/// More affected messages than the log cap must still produce ONE strip
+/// line whose block count and affected-message count stay exact while the
 /// index list carries only a capped sample. `dropped_blocks` counts
 /// BLOCKS, so the affected-message magnitude is carried by its own field
 /// rather than being inferred from the sample's length.
@@ -124,7 +129,7 @@ fn strip_warn_caps_affected_messages_and_keeps_the_count_exact() {
     let events = normalize_capturing(&req);
 
     // Assert
-    let warn = warn_containing(&events, STRIP_WARN);
+    let warn = sole_event_containing(&events, STRIP_LINE, tracing::Level::DEBUG);
     assert_eq!(
         warn.field("dropped_blocks"),
         Some(count.to_string().as_str()),
@@ -168,7 +173,7 @@ fn dropped_turn_warn_caps_indices_and_keeps_the_turn_count_exact() {
     let events = normalize_capturing(&req);
 
     // Assert
-    let warn = warn_containing(&events, DROPPED_TURN_WARN);
+    let warn = sole_event_containing(&events, DROPPED_TURN_WARN, tracing::Level::WARN);
     assert_eq!(
         warn.field("dropped_turns"),
         Some(count.to_string().as_str()),
@@ -209,7 +214,7 @@ fn both_warns_keep_full_index_lists_when_within_cap() {
     let events = normalize_capturing(&req);
 
     // Assert: affected-message list is whole.
-    let strip_warn = warn_containing(&events, STRIP_WARN);
+    let strip_warn = sole_event_containing(&events, STRIP_LINE, tracing::Level::DEBUG);
     assert_eq!(strip_warn.field("dropped_blocks"), Some("6"));
     assert_eq!(strip_warn.field("affected_messages_count"), Some("6"));
     assert_eq!(
@@ -224,7 +229,7 @@ fn both_warns_keep_full_index_lists_when_within_cap() {
     );
 
     // Assert: dropped-turn list is whole.
-    let dropped_warn = warn_containing(&events, DROPPED_TURN_WARN);
+    let dropped_warn = sole_event_containing(&events, DROPPED_TURN_WARN, tracing::Level::WARN);
     assert_eq!(dropped_warn.field("dropped_turns"), Some("3"));
     assert_eq!(
         dropped_warn.field("dropped_message_indices_truncated"),
