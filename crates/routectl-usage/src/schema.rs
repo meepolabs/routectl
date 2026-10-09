@@ -23,6 +23,11 @@ pub const META_CREATED_AT_MS: &str = "created_at_ms";
 /// human-readable convenience for inspection / debugging.
 pub const META_SCHEMA_VERSION: &str = "schema_version";
 
+/// `meta` key recording that the one-time legacy capability-observation purge
+/// has run; its value is the number of rows that purge deleted. Its presence is
+/// what makes the purge run at most once per database.
+pub const META_LEGACY_CAPABILITY_PURGE: &str = "legacy_capability_purge_deleted";
+
 /// DDL for the `requests` table.
 ///
 /// The `outcome` CHECK tokens MUST match `Outcome::as_str()` in

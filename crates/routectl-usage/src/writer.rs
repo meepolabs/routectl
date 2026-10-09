@@ -608,18 +608,41 @@ pub(crate) struct WriterState {
     boundary_generation: u64,
 }
 
+/// Run the one-shot legacy capability purge on a freshly opened DB.
+/// Best-effort: a failure logs a WARN and the writer keeps the connection,
+/// because the rows it would remove are already ignored by replay.
+fn purge_legacy_capability_rows(conn: &Connection) {
+    match crate::migrate::purge_legacy_capability_observations(conn) {
+        Ok(Some(deleted)) => tracing::info!(
+            target: "routectl_usage::writer",
+            deleted,
+            "legacy capability observations purged"
+        ),
+        Ok(None) => {}
+        Err(err) => tracing::warn!(
+            target: "routectl_usage::writer",
+            error = %err,
+            "legacy capability purge failed -- continuing without it"
+        ),
+    }
+}
+
 impl WriterState {
     /// Open the DB, degrading to a no-connection drain loop on failure.
     /// A failed open is logged once and counted; the thread keeps running
     /// so callers are never affected.
     fn open(db_path: PathBuf, counters: &Arc<UsageCounters>) -> Self {
         match db::open(&db_path) {
-            Ok(db) => Self {
-                conn: Some(UsageDb::into_conn(db)),
-                degraded: false,
-                boundary_generation: 0,
-                purge_floors: fresh_purge_floors(),
-            },
+            Ok(db) => {
+                let conn = UsageDb::into_conn(db);
+                purge_legacy_capability_rows(&conn);
+                Self {
+                    conn: Some(conn),
+                    degraded: false,
+                    boundary_generation: 0,
+                    purge_floors: fresh_purge_floors(),
+                }
+            }
             Err(err) => {
                 counters.incr_write_errors();
                 tracing::error!(
@@ -1282,6 +1305,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         true
+    }
+
+    #[test]
+    fn start_purges_legacy_capability_observations_before_the_boundary() {
+        // Arrange: legacy observations on both sides of a tombstone, plus a
+        // versioned row before it.
+        let (_dir, path) = temp_path();
+        {
+            let db = db::open(&path).expect("seed open");
+            let insert = |verdict: &str, vocab: Option<i64>| {
+                db.conn()
+                    .execute(
+                        "INSERT INTO capability_events (ts, lane_key, capability, verdict, \
+                         phase, source, tier, catalog_version, overlay_revision, vocab_version) \
+                         VALUES (1, 'lane', 'tools', ?1, 'observed', 'live', 'paid', 1, 1, ?2)",
+                        rusqlite::params![verdict, vocab],
+                    )
+                    .expect("seed row");
+            };
+            insert("supported", None);
+            insert("supported", None);
+            insert("supported", Some(2));
+            insert(crate::capability_event::TOMBSTONE_VERDICT, None);
+            insert("supported", None);
+        }
+
+        // Act
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        drop(handle);
+        writer.shutdown();
+
+        // Assert: the two pre-boundary legacy observations are gone; the
+        // versioned row, the tombstone and the post-boundary row remain.
+        let conn = Connection::open(&path).expect("read");
+        let pre_boundary_legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM capability_events \
+                 WHERE vocab_version IS NULL AND verdict = 'supported' AND rowid < 4",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count legacy");
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM capability_events", [], |r| r.get(0))
+            .expect("count all");
+        assert_eq!(pre_boundary_legacy, 0);
+        assert_eq!(remaining, 3);
     }
 
     #[tokio::test]

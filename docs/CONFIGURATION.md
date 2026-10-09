@@ -4127,6 +4127,16 @@ older binary wrote in between replay as the legacy vocabulary. Use this
 command rather than editing the version with a hand-run `sqlite3`, which
 can disturb the database's WAL sidecar files.
 
+The first start of a release carrying the legacy capability cleanup runs a
+one-time data migration: it deletes the legacy capability observations
+(rows with no vocabulary version) that precede the newest replay boundary,
+which the replayer already ignores, and logs the count once. Boundary
+markers, rows at or after the newest boundary, and rows carrying a
+vocabulary version are kept. It changes no schema: the file stays v17, the
+previous binary opens it unchanged, and `routectl usage downgrade --to 16`
+still works. The deleted rows can be recovered only from a backup taken
+before the upgrade, so snapshot the database first if they matter.
+
 ## Diagnostics (`routectl doctor` and `routectl provider probe`)
 
 `routectl doctor` and `routectl provider probe` are the two read-only

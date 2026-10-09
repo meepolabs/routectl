@@ -16,7 +16,7 @@ use rusqlite::Connection;
 /// Verdict token stamped on a tombstone row. The read side
 /// (`query::latest_tombstone`) carries its own copy of this literal; the
 /// two are pinned in agreement by the tombstone round-trip test.
-const TOMBSTONE_VERDICT: &str = "tombstone";
+pub const TOMBSTONE_VERDICT: &str = "tombstone";
 
 /// One `capability_events` row bound for insertion (see
 /// `schema::CREATE_CAPABILITY_EVENTS_TABLE`).

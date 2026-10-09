@@ -5436,8 +5436,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the nullable-by-DDL schema) and `TombstoneRow`; holds a private
   tombstone-verdict literal mirroring `capability_event.rs`
 - `src/writer.rs` -- `UsageWriter`: opens the DB once at boot (degrades to a
-  no-op drain loop on open failure), drains the bounded channel on a dedicated
-  thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`. The
+  no-op drain loop on open failure), runs the one-shot legacy capability purge
+  on a successful open (WARN and carry on if it fails), drains the bounded
+  channel on a dedicated thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`. The
   channel carries a `WriterMessage`, an OPAQUE envelope over a crate-private
   `WriterCommand` vocabulary -- nameable out-of-crate (test channel declarations
   spell the item type) but neither constructible nor inspectable there, because a
@@ -5679,7 +5680,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   x2, one transaction with the version bump, no backfill); strictly additive,
   so `downgrade.rs` can hand the file back to a v16 binary
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
-  the `meta` table
+  the `meta` table; also `purge_legacy_capability_observations(conn)`, a
+  one-shot data step (no version bump) that deletes NULL-vocabulary
+  non-tombstone `capability_events` rows below the latest tombstone's rowid,
+  guarded by the `META_LEGACY_CAPABILITY_PURGE` marker (value = deleted count,
+  marker and delete in one transaction); called from the writer's open, not
+  from `db::open`
 - `src/downgrade.rs` -- the ONE backward step: `downgrade_to_v16(path)`
   re-stamps an exactly-additive v17 file (`PRAGMA user_version` and
   `meta.schema_version` to 16, one transaction, no column or row touched) so a

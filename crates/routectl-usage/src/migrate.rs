@@ -6,12 +6,14 @@
 //! DB is a no-op. Add a new step by extending the ladder and bumping
 //! `SCHEMA_VERSION` in `schema.rs`.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
+use crate::capability_event::TOMBSTONE_VERDICT;
 use crate::schema::{
     CREATE_CAPABILITY_EVENTS_TABLE, CREATE_CAPABILITY_EVENTS_TS_INDEX,
     CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_META_TABLE, CREATE_REQUESTS_TABLE,
-    CREATE_TS_START_INDEX, META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION,
+    CREATE_TS_START_INDEX, META_CREATED_AT_MS, META_LEGACY_CAPABILITY_PURGE, META_SCHEMA_VERSION,
+    SCHEMA_VERSION,
 };
 
 /// Errors raised while migrating the usage DB. The caller can degrade
@@ -614,3 +616,53 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
 
     Ok(version)
 }
+
+/// Delete the legacy capability observations that precede the replay
+/// boundary, once per database.
+///
+/// A legacy row (NULL `vocab_version`) keys its lane by a retired naming
+/// scheme, so no vocabulary step maps it forward; one that sits before the
+/// latest tombstone is also never replayed. Such rows are dead weight, and this
+/// step removes them. Tombstones (which are written with a NULL vocabulary by
+/// design), every row at or after the latest tombstone, and every row carrying
+/// a vocabulary version are kept. With no tombstone there is no boundary, so
+/// nothing is deleted.
+///
+/// This is a data step, not a schema step: `user_version` is unchanged, so the
+/// downgrade path and older readers of the same schema are unaffected. The
+/// `meta` marker makes it one-shot -- `None` when it already ran, otherwise
+/// `Some(deleted)`. The marker read, the delete and the marker insert share one
+/// transaction, so a failure leaves neither the deletion nor the marker.
+pub fn purge_legacy_capability_observations(
+    conn: &Connection,
+) -> Result<Option<usize>, rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    let already_ran = tx
+        .query_row(
+            "SELECT 1 FROM meta WHERE key = ?1",
+            rusqlite::params![META_LEGACY_CAPABILITY_PURGE],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if already_ran {
+        return Ok(None);
+    }
+    let deleted = tx.execute(
+        "DELETE FROM capability_events \
+         WHERE vocab_version IS NULL \
+           AND verdict <> ?1 \
+           AND rowid < (SELECT MAX(rowid) FROM capability_events WHERE verdict = ?1)",
+        rusqlite::params![TOMBSTONE_VERDICT],
+    )?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![META_LEGACY_CAPABILITY_PURGE, deleted.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(Some(deleted))
+}
+
+#[cfg(test)]
+#[path = "migrate_tests.rs"]
+mod tests;
