@@ -425,6 +425,8 @@ list with more narrative.
 - **A malformed tool call / tool result transcript is now rejected locally with a 400.** Before any target is selected, every chat completions, messages, responses, and `count_tokens` request is checked so that each tool call is answered by exactly one tool result, matched on its id across every carrier (OpenAI `tool_calls` / `role: "tool"`, Anthropic `tool_use` / `tool_result` blocks, Responses `function_call` / `function_call_output`). A result with no matching call, a result before its call, a result for a call from an earlier closed turn, a duplicate call id or result, and a call left unanswered by the next non-result turn or by the end of the request are all refused. Previously these reached the upstream unrepaired, and most providers rejected them with an error the caller could not trace. The response is the ingress dialect's `invalid_request_error` / `validation_error` envelope, naming the defect class and the offending message index but never a tool id or tool content. The request makes no upstream call, is not retried or failed over, and does not count against provider health. Nothing is synthesized or dropped: a correctly paired transcript is forwarded exactly as before. Parallel calls may be answered in any order; an empty tool id keeps its existing normalization and is not matched.
 
 - **The minted Claude Code identity is scoped to the exact Anthropic API host.** The compiled Stainless header pack, the default Claude Code `User-Agent`, and the session and client request ids are emitted only when an `oauth-bearer` anthropic-api provider's configured base URL is exactly `api.anthropic.com`; the auth kind alone no longer authorizes them, so loopback, lookalike, and third-party bases receive none of it. Explicit `header_extras` and `user_agent` values still reach every host, and the forwarded-client leg is unchanged.
+- **Tests can no longer touch the real user config or usage ledger.** `cargo test` and `cargo run` pin `XDG_CONFIG_HOME` to `target/test-xdg` through `.cargo/config.toml`; CLI tests restore the prior `XDG_CONFIG_HOME` instead of unsetting it; the live Responses-ingress test and every leg of the live-gate isolation check run against scratch config and usage paths; and server tests drain the usage writer before their temporary directory is removed.
+
 - **The `gen-catalog` tests now run in CI.** The two catalog-codegen tests --
   the selectors/snapshot `output_ambiguous` flag weld and the
   `catalog_baked.rs` byte-for-byte drift guard -- are
@@ -455,10 +457,11 @@ list with more narrative.
   single `required` job succeeds only when every other job did, so branch
   protection can require that one check instead of one per job and leg.
 
-- **The public-API baseline check now runs at the pre-push stage when
-  `cargo-public-api` and the pinned nightly are installed**, and skips with a
-  one-line notice otherwise; `scripts/test-gate.sh public-api` runs it
-  directly.
+- **The public-API baseline check is informational.** CI's `public-api` job runs it through `scripts/public-api-report.sh`, which reports the result as clean, drift (naming the crates) or could-not-run in one annotation and one job-summary line; the job never fails and is not part of the `required` check. The pre-push hook that ran it is removed. Baselines are no longer regenerated with each change (see [public-api/POLICY.md](public-api/POLICY.md)); `bash scripts/public-api.sh --check all` and `bash scripts/test-gate.sh public-api` still run it on demand.
+
+- **The proactive context-window gate (`[window_gate]`) is now off by default.** A config without the block, or with an empty block, no longer reorders or skips fallback chain targets. Set `[window_gate] enabled = true` to keep the previous behavior. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#proactive-context-window-gate-window_gate).
+
+- **Usage database: a one-time data migration on first start deletes legacy capability observations that precede the newest replay boundary.** Rows with no vocabulary version written before the latest tombstone are removed; tombstones, rows after the boundary, and versioned rows are kept. The schema stays v17 and `routectl usage downgrade --to 16` still works. The deleted rows are recoverable only from a backup taken before the upgrade.
 
 - **`routectl init`, the capability probe's cost confirmation, and `provider add`'s post-add probe offer now DECLINE on a non-interactive stdin instead of waiting for an answer.** The same class as the egress-defining confirmation above, on the remaining prompt surfaces: the `init` wizard's questions (scaffold-vs-wizard, offer selection, model id, default route, the write ack, and the credential-capture choice), the `proceed with the probe?` confirmation `routectl probe --capabilities` asks after printing its cost estimate, and the `run a capability probe against this provider now?` offer `routectl provider add` asks after a successful add. All three read stdin unconditionally, so a caller whose stdin was an open-but-silent pipe blocked at the prompt indefinitely. With no terminal on stdin each prompt now declines immediately without reading, printing the question (or, for the two probe offers, the cost estimate) so a scripted caller sees exactly what was declined, and naming the non-interactive flag: `routectl init --yes`, `routectl probe --capabilities --yes`, and `routectl provider add --probe`/`--no-probe`. A declined `init` writes nothing and still prints its actionable next steps; a declined probe offer dispatches no calls. All exit 0. A run with a closed stdin already declined and is unaffected, as is any interactive or explicit-flag run.
 - **`routectl doctor` now reports the config validator suite's ADVISORY findings, not just its errors.** The config section consumed the error half only, so a warning `routectl config check` printed -- an `oauth://` reference missing its `auth_kind` selector, a `class_overrides` remap that masks an outage, an empty `[retry.classes.<c>]` block, a per-block-breakpoint or codex-identity advisory -- was invisible in a doctor run, which reported "config passes the static validator suite" on a config the checker had flagged. Each advisory is now its own WARN finding, control-char-filtered through the same render seam as the errors, and the single PASS finding requires both halves empty. Exit codes are unchanged: only FAIL findings move the exit code, so a warnings-only config still exits 0. The doctor report `schema_version` (and the `/status/doctor` panel version that mirrors it) is 8.
@@ -540,6 +543,11 @@ list with more narrative.
   database keeps whatever rows the migration ladder already left in it
   (the historical v9 -> v10 step empties it on databases that old); the
   schema version is unchanged -- no behavior change.
+
+### Removed
+
+- **The hidden `routectl pricing` alias for `routectl catalog`.** Use `routectl catalog ...`.
+- **The hidden `routectl provider capture-envelope` command** and its `ROUTECTL_BEDROCK_ENVELOPE_CAPTURE` environment variable.
 
 ### Fixed
 
