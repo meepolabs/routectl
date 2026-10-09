@@ -11,7 +11,10 @@
 #   - each missing piece of tooling makes the leg print the one skip line
 #     and exit 0 without reaching the registry;
 #   - a pin public-api.sh no longer carries fails the leg instead of
-#     skipping it.
+#     skipping it;
+#   - public-api-report.sh always exits 0 and classifies a stub check's
+#     outcome as clean / drift / could-not-run, one annotation and one job
+#     summary line per run, each case paired with a planted-defect control.
 #
 # The leg is driven from a scratch copy of scripts/ whose test-gate.sh is a
 # stub recording its argv, with stub cargo-public-api, rustup, and rustup's
@@ -250,6 +253,153 @@ if [[ "$RC" -eq 1 ]] && ! gate_ran && printf '%s\n' "$OUT" | grep -q 'could not 
 else
     fail "an unreadable pin: rc=$RC out='$OUT'"
 fi
+
+# --- public-api report wrapper ---------------------------------------------
+
+# The wrapper runs from its own scratch dir beside a public-api.sh stub that
+# records its argv, prints one stdout marker, writes $STUB_STDERR to stderr and
+# exits $STUB_RC. Each case is a predicate over one wrapper copy; it must hold
+# for the real wrapper and fail for a copy planted with the defect it pins.
+REPORT="$HERE/public-api-report.sh"
+REPORT_DIR="$TMP/report"
+REPORT_LOG="$TMP/report-check-invoked"
+SUMMARY="$TMP/step-summary"
+mkdir -p "$REPORT_DIR"
+cat >"$REPORT_DIR/public-api.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$REPORT_LOG"
+echo "stub-check-stdout"
+[[ -n "\${STUB_STDERR:-}" ]] && printf '%s\n' "\$STUB_STDERR" >&2
+exit "\${STUB_RC:-0}"
+STUB
+report_tool_bin="$(make_bin report-tool)"
+report_no_tool_bin="$(make_bin report-no-tool --no-tool)"
+
+# Runs wrapper copy $1 with PATH = $2 plus the system dirs, the stub exiting
+# $3 with stderr $4, and GITHUB_STEP_SUMMARY on a file holding one prior
+# line. Sets OUT, RC, LAST (the last output line) and APPENDED (the summary
+# lines the run added).
+run_report() {
+    rm -f "$REPORT_LOG"
+    printf 'prior summary line\n' >"$SUMMARY"
+    OUT="$(PATH="$2:$SYSTEM_PATH" STUB_RC="$3" STUB_STDERR="$4" \
+        GITHUB_STEP_SUMMARY="$SUMMARY" bash "$1" 2>&1)"
+    RC=$?
+    LAST="$(printf '%s\n' "$OUT" | tail -n 1)"
+    APPENDED="$(tail -n +2 "$SUMMARY")"
+}
+
+check_ran() { [[ -f "$REPORT_LOG" && "$(cat "$REPORT_LOG")" == "--check all" ]]; }
+
+# Holds when the run exited 0, printed annotation $1 as its last line after
+# the check's own output (unless $3 says the check must not run), and added
+# exactly the summary line $2.
+report_ok() {
+    local annotation="$1" summary="$2" ran="${3:-ran}"
+    [[ "$RC" -eq 0 && "$LAST" == "$annotation" && "$APPENDED" == "$summary" ]] || return 1
+    if [[ "$ran" == ran ]]; then
+        check_ran && printf '%s\n' "$OUT" | grep -qx 'stub-check-stdout'
+    else
+        ! check_ran
+    fi
+}
+
+case_clean() {
+    run_report "$1" "$report_tool_bin" 0 ""
+    report_ok "::notice title=public-api::public API baselines match" \
+        "public-api: public API baselines match"
+}
+
+case_drift() {
+    run_report "$1" "$report_tool_bin" 1 "$(printf '%s\n' \
+        '+pub fn added()' \
+        'public-api: surface drift for routectl-core -- regenerate its baseline in the same commit' \
+        'public-api: routectl-router unchanged' \
+        'public-api: missing baseline for routectl-usage (run: x generate routectl-usage)')"
+    report_ok "::warning title=public-api::drift in routectl-core, routectl-usage" \
+        "public-api: drift in routectl-core, routectl-usage"
+}
+
+case_could_not_run() {
+    run_report "$1" "$report_tool_bin" 2 "$(printf '%s\n' 'first line' 'public-api: unknown crate')"
+    report_ok "::warning title=public-api::could not run (public-api: unknown crate)" \
+        "public-api: could not run (public-api: unknown crate)"
+}
+
+case_tool_absent() {
+    run_report "$1" "$report_no_tool_bin" 0 ""
+    report_ok "::warning title=public-api::could not run (cargo-public-api not installed)" \
+        "public-api: could not run (cargo-public-api not installed)" not-run
+}
+
+case_no_summary_env() {
+    rm -f "$REPORT_LOG" "$SUMMARY"
+    OUT="$(PATH="$report_tool_bin:$SYSTEM_PATH" STUB_RC=0 \
+        env -u GITHUB_STEP_SUMMARY bash "$1" 2>&1)"
+    RC=$?
+    [[ "$RC" -eq 0 && ! -e "$SUMMARY" ]] && check_ran
+}
+
+case_rejects_args() {
+    rm -f "$REPORT_LOG"
+    PATH="$report_tool_bin:$SYSTEM_PATH" bash "$1" extra >/dev/null 2>&1
+    RC=$?
+    [[ "$RC" -eq 2 ]] && ! check_ran
+}
+
+# Writes a copy of the wrapper with sed expression $2 applied to
+# $REPORT_DIR/$1 and prints its path; fails when the expression changed
+# nothing, so a stale mutation cannot pass as a caught one.
+mutant() {
+    local path="$REPORT_DIR/$1"
+    if ! sed -E "$2" "$REPORT" >"$path" || cmp -s "$REPORT" "$path"; then
+        echo "mutation '$2' did not apply" >&2
+        return 1
+    fi
+    echo "$path"
+}
+
+# Runs case $2 against the real wrapper (must hold) and against the mutant
+# built by sed expression $3 (must not).
+assert_report_case() {
+    local desc="$1" case_fn="$2" expr="$3" copy
+    cp "$REPORT" "$REPORT_DIR/public-api-report.sh"
+    if "$case_fn" "$REPORT_DIR/public-api-report.sh"; then
+        pass "report: $desc"
+    else
+        fail "report: $desc: rc=$RC last='${LAST:-}' summary='${APPENDED:-}' out='$OUT'"
+    fi
+    if ! copy="$(mutant "$case_fn.sh" "$expr")"; then
+        fail "report: $desc: control mutation did not apply"
+    elif "$case_fn" "$copy"; then
+        fail "report: $desc: control passed on a wrapper planted with '$expr'"
+    else
+        pass "report: $desc: control fails on the planted defect"
+    fi
+}
+
+assert_report_case "check exiting 0 gives the clean notice" case_clean \
+    's/report notice "public API baselines match"/report warning "public API baselines match"/'
+# shellcheck disable=SC2016  # the sed expressions name the wrapper's own variables literally
+assert_report_case "drift for two crates gives one warning naming both, exit 0" case_drift \
+    's/^exit 0$/exit "$rc"/'
+assert_report_case "drift names every crate, not only the first" case_drift \
+    "s/awk '!seen\[\\\$0\]\+\+/awk 'NR == 1/"
+# shellcheck disable=SC2016  # the sed expressions name the wrapper's own variables literally
+assert_report_case "check exiting 2 gives could-not-run with its reason, exit 0" case_could_not_run \
+    's/^exit 0$/exit "$rc"/'
+assert_report_case "could-not-run carries the check's last stderr line" case_could_not_run \
+    's/tail -n 1\)/head -n 1)/'
+assert_report_case "cargo-public-api absent: could-not-run, the check never runs" case_tool_absent \
+    's/^if ! command -v cargo-public-api /if false \&\& ! command -v cargo-public-api /'
+# shellcheck disable=SC2016  # the sed expressions name the wrapper's own variables literally
+assert_report_case "exactly one summary line is appended per run" case_clean \
+    's/^( *)if ! printf .%s: %s\\n. "\$TITLE" "\$message" >>"\$GITHUB_STEP_SUMMARY"; then/\1printf "x\\n" >>"$GITHUB_STEP_SUMMARY"; &/'
+# shellcheck disable=SC2016  # the sed expressions name the wrapper's own variables literally
+assert_report_case "no GITHUB_STEP_SUMMARY: still exit 0, no summary file" case_no_summary_env \
+    's#\$\{GITHUB_STEP_SUMMARY:-\}#${GITHUB_STEP_SUMMARY:-'"$SUMMARY"'}#'
+assert_report_case "any argument is a usage error (exit 2)" case_rejects_args \
+    's/^\[\[ \$# -eq 0 \]\] \|\| usage$/true/'
 
 if ((fails)); then
     echo "test-gate.test.sh: $fails failure(s)" >&2

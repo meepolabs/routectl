@@ -8795,6 +8795,11 @@ new section or a second doc.
   cargo-public-api surface against its checked-in baseline (`generate`,
   `--check` per crate or `all`); CI runs it unconditionally, locally it
   runs on demand and at pre-push when the tooling is installed
+- `public-api-report.sh` -- informational wrapper over `public-api.sh
+  --check all`: passes its output through, then prints one GitHub Actions
+  annotation (and one `GITHUB_STEP_SUMMARY` line when set) classifying the
+  run as clean, drift (crates named), or could-not-run (reason); always
+  exits 0. Self-tested in `test-gate.test.sh`
 - `test-inventory.sh` -- named-test enumeration + diff (`dump`, `diff`)
   over `cargo test -- --list` output, for auditing a test-consolidation
   or gate-command change by exact test name (cargo selection and doctest
