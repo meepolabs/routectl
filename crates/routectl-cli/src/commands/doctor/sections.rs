@@ -1,11 +1,11 @@
 //! Doctor section producers.
 
 use routectl_auth::oauth::types::TokenRecord;
-use routectl_core::sanitize_for_log_with_cap;
+use routectl_core::{sanitize_for_log, sanitize_for_log_with_cap};
 use routectl_router::{
     ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding,
-    PricingSource, Status, UnresolvedReason, compute_activation, epoch_day_age, is_stale_days,
-    preflight_config_version,
+    OverlaySoftDefect, PricingSource, Status, UnresolvedReason, compute_activation, epoch_day_age,
+    is_stale_days, preflight_config_version,
 };
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
@@ -178,6 +178,11 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
         .reload_failure
         .map(reload_failure_finding)
         .into_iter()
+        .chain(
+            ctx.overlay_soft_defects
+                .iter()
+                .map(overlay_soft_defect_finding),
+        )
         .collect();
     if ctx.config_load_error.is_some() {
         findings.push(Finding {
@@ -250,6 +255,28 @@ fn reload_failure_finding(failure: ReloadFailureSnapshot) -> Finding {
         remediation: Some(
             "run `routectl doctor` to see why the on-disk config or catalog overlay was refused, \
              fix it, and save it again to trigger a reload"
+                .to_string(),
+        ),
+    }
+}
+
+/// A soft cell-value defect the overlay loader accepted. The selector is a
+/// row key from a hand-editable file, so it is control-char-filtered before
+/// it reaches the one-line human render.
+fn overlay_soft_defect_finding(defect: &OverlaySoftDefect) -> Finding {
+    Finding {
+        section: "config",
+        name: "catalog overlay".to_string(),
+        status: Status::Warn,
+        detail: format!(
+            "catalog overlay cell {}: `{}` is below its sentinel value",
+            sanitize_for_log(&defect.selector),
+            defect.field,
+        ),
+        remediation: Some(
+            "accepted as an intentional operator override; a too-cheap write multiplier can \
+             make a cache break look falsely profitable, so raise or remove the cell value if \
+             the override is not intended"
                 .to_string(),
         ),
     }

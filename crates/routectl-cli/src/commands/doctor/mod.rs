@@ -40,8 +40,8 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
     BetaSeedScope, CatalogImportState, Config, DoctorPanels, DoctorReport, Finding,
-    LearnedRegistryEntry, MatrixReplaySummary, MatrixWarm, PricingSource, SeedClearMarker, Status,
-    WouldTrimPanel, overall_exit,
+    LearnedRegistryEntry, MatrixReplaySummary, MatrixWarm, OverlaySoftDefect, PricingSource,
+    SeedClearMarker, Status, WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -268,6 +268,11 @@ pub(crate) struct DoctorContext {
     /// class and an age. Only a served gather sets it; the CLI reads the files
     /// itself, so their errors render directly.
     reload_failure: Option<ReloadFailureSnapshot>,
+    /// Every soft cell-value defect of the overlay this gather holds: the
+    /// on-disk overlay for the CLI, the router's own overlay when served.
+    /// Read off the overlay itself, so a hand edit that kept the revision
+    /// still shows here.
+    overlay_soft_defects: Vec<OverlaySoftDefect>,
 }
 
 /// Where one configured model's outbound `max_output_tokens` ceiling comes

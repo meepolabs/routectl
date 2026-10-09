@@ -634,6 +634,110 @@ async fn config_reload_logs_overlay_soft_defects_only_when_the_overlay_revision_
     );
 }
 
+/// The served doctor's `config` findings naming a catalog overlay soft
+/// defect, read off the router `swap` currently publishes.
+async fn served_overlay_defect_findings(swap: &Arc<ArcSwap<Router>>, config_path: &Path) -> usize {
+    let status = crate::handlers::status::StatusState::from_app(
+        &crate::server::AppState::for_test(swap.clone()),
+        None,
+        crate::handlers::status::DaemonMeta::for_test(),
+    );
+    let inputs = status
+        .router
+        .view()
+        .served_doctor_inputs(crate::server::capability_rebuild::WarmReport::not_run());
+    let context = crate::commands::doctor::gather_context_no_network(
+        config_path,
+        crate::commands::doctor::GatherSources::Served(Box::new(inputs)),
+    )
+    .await;
+    crate::commands::doctor::build_report_no_network(&context)
+        .findings
+        .iter()
+        .filter(|f| f.section == "config" && f.name == "catalog overlay")
+        .count()
+}
+
+/// A hand edit that adds a soft cell WITHOUT bumping the overlay revision is
+/// never re-logged by the reload, but the served doctor still reports it: the
+/// finding reads the router's overlay, not its revision.
+///
+/// Mutation check: gather `overlay_soft_defects` as an empty list in
+/// `gather_context_no_network` -> the after-edit assertion goes red.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_same_revision_soft_cell_edit_is_not_logged_but_shows_on_the_served_doctor() {
+    // Arrange: a router booted off a clean overlay at revision 1, then a hand
+    // edit to the file that adds one below-sentinel wm cell and keeps
+    // revision 1.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
+    )
+    .unwrap();
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    let config = Arc::new(config);
+    let (usage, _writer) = build_usage_writer(&config);
+    let router = build_router_from_config_with_overlay(
+        config.clone(),
+        &crate::server::test_support::overlay_at_revision(1),
+        secrets.clone(),
+    )
+    .await
+    .expect("initial router build");
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let before_edit = served_overlay_defect_findings(&swap, &cfg_path).await;
+    let overlay_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("catalog_overlay.json"),
+        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":1.0}}}"#,
+    )
+    .unwrap();
+
+    // Act
+    let (result, events) = routectl_testkit::with_capture(Box::pin(handle_config_reload(
+        Some(&cfg_path),
+        &config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::CatalogOverlay,
+        &mut never_shutdown(),
+    )))
+    .await;
+    result
+        .expect("overlay reload must apply")
+        .expect("a successful reload returns its config");
+    let after_edit = served_overlay_defect_findings(&swap, &cfg_path).await;
+
+    // Assert
+    assert_eq!(
+        swap.load().overlay_revision(),
+        1,
+        "test premise: the edit kept the overlay revision"
+    );
+    assert_eq!(
+        overlay_soft_defect_warns(&events),
+        0,
+        "test premise: a same-revision reload does not log the soft cell: {events:?}"
+    );
+    assert_eq!(
+        before_edit, 0,
+        "the clean overlay carries no defect finding"
+    );
+    assert_eq!(
+        after_edit, 1,
+        "the served doctor reports the soft cell the reload did not log"
+    );
+}
+
 /// Config text for one openai-compat model whose prompt-shaping policy
 /// (`history_reasoning`) is the only thing a test varies.
 #[cfg(test)]

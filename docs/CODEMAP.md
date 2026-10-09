@@ -8265,7 +8265,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Pass` only when both halves are empty; short-circuited to one `Warn`
   "validation skipped" + the secret checks when the typed load failed, so a
   broken file never emits a spurious validation `Pass`) + the leak-safe
-  secret-presence scan, auth (no seats/expired -> WARN, store-open error ->
+  secret-presence scan + one `catalog overlay` Warn per
+  `DoctorContext::overlay_soft_defects` entry (gathered by
+  `routectl_router::overlay_soft_defects` off whichever overlay the gather
+  holds -- the disk file for the CLI, the router's own overlay when served --
+  selector `sanitize_for_log`-filtered), auth (no seats/expired -> WARN, store-open error ->
   FAIL), pools
   (`section_seat_pools` + `pool_finding`: one finding per `[pools.<name>]`
   block from `seat_report::describe_pool` -- Warn naming a member with no

@@ -80,6 +80,7 @@ fn ctx(
         pricing,
         knobs,
         reload_failure: None,
+        overlay_soft_defects: Vec::new(),
     }
 }
 
@@ -2404,6 +2405,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         pricing: Some(Vec::new()),
         knobs: Some(Vec::new()),
         reload_failure: None,
+        overlay_soft_defects: Vec::new(),
     };
     let report = build_report(&context);
 
@@ -4324,4 +4326,137 @@ fn an_unloadable_overlay_reports_knobs_unavailable_never_the_baked_ceiling() {
 
     // Degradation, not failure: the exit code stays the version section's call.
     assert_eq!(overall_exit(&findings), 0);
+}
+
+/// The `config` findings naming a catalog overlay soft defect, in report
+/// order.
+pub(super) fn overlay_defect_findings(findings: &[Finding]) -> Vec<&Finding> {
+    findings
+        .iter()
+        .filter(|f| f.section == "config" && f.name == "catalog overlay")
+        .collect()
+}
+
+/// An overlay with two below-sentinel `wm` cells and one clean cell, or the
+/// clean cell alone.
+pub(super) fn soft_defect_overlay_json(with_defects: bool) -> serde_json::Value {
+    let mut cells = serde_json::json!({
+        "openai-compat:clean-*": {"source": "user", "verified_at": "2026-07-01", "wm": 9.5}
+    });
+    if with_defects {
+        cells["openai-compat:cheap-a*"] =
+            serde_json::json!({"source": "user", "verified_at": "2026-07-01", "wm": 1.0});
+        cells["openai-compat:cheap-b*"] =
+            serde_json::json!({"source": "user", "verified_at": "2026-07-01", "wm": 0.5});
+    }
+    serde_json::json!({"schema_version": 1, "revision": 1, "cells": cells})
+}
+
+/// The CLI doctor reads soft defects off the overlay it loads from disk: one
+/// Warn finding per defect naming its selector and field, and none for a
+/// clean overlay.
+///
+/// Mutation check: drop the `.chain(..overlay_soft_defect_finding)` from
+/// `section_config` -> the `below_sentinel` row goes red.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_disk_gather_renders_one_warn_per_overlay_soft_defect() {
+    let rows: [(&str, bool, &[&str]); 2] = [
+        (
+            "below_sentinel",
+            true,
+            &["openai-compat:cheap-a*", "openai-compat:cheap-b*"],
+        ),
+        ("clean", false, &[]),
+    ];
+
+    for (name, with_defects, expected) in rows {
+        // Arrange
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
+        let cfg_dir = tmp.path().join("routectl");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config_path = cfg_dir.join("config.toml");
+        std::fs::write(&config_path, current_version_stamp()).unwrap();
+        std::fs::write(
+            cfg_dir.join("catalog_overlay.json"),
+            soft_defect_overlay_json(with_defects).to_string(),
+        )
+        .unwrap();
+
+        // Act
+        let context = gather_context_no_network(&config_path, GatherSources::Disk).await;
+        let report = build_report_no_network(&context);
+
+        // Assert
+        let found = overlay_defect_findings(&report.findings);
+        assert_eq!(found.len(), expected.len(), "row {name}: {found:?}");
+        for (finding, selector) in found.iter().zip(expected) {
+            assert_eq!(finding.status, Status::Warn, "row {name}");
+            assert!(
+                finding.detail.contains(selector) && finding.detail.contains("`wm`"),
+                "row {name}: {finding:?}"
+            );
+            assert!(
+                finding
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|r| r.contains("intentional operator override")),
+                "row {name}: {finding:?}"
+            );
+        }
+    }
+}
+
+/// A selector is raw text from a hand-editable file. On the human render a
+/// newline plus an ANSI sequence in it would forge a whole finding line, so
+/// it is control-char-filtered. The raw selector is asserted to CONTAIN those
+/// bytes first (the positive control), so a green assertion means the
+/// sanitizer stripped them rather than the fixture never carrying them.
+///
+/// Mutation check: format `defect.selector` unsanitized in
+/// `overlay_soft_defect_finding` -> red here.
+#[test]
+fn a_hostile_overlay_selector_renders_sanitized_on_the_human_report() {
+    // Arrange
+    let hostile = "opus\n\u{1b}[31m  PASS forged: all clear".to_string();
+    assert!(
+        hostile.contains('\n') && hostile.contains('\u{1b}'),
+        "positive control: the fixture must carry the bytes being filtered"
+    );
+    let context = DoctorContext {
+        overlay_soft_defects: vec![routectl_router::OverlaySoftDefect {
+            selector: hostile,
+            field: "wm",
+        }],
+        ..ctx(
+            Config::default(),
+            Some(&current_version_stamp()),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+
+    // Act
+    let lines = render_human(&build_report(&context));
+
+    // Assert
+    let defect_lines: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("catalog overlay cell"))
+        .collect();
+    assert_eq!(defect_lines.len(), 1, "{lines:?}");
+    let line = defect_lines[0];
+    assert!(
+        !line.contains('\n') && !line.contains('\u{1b}'),
+        "the line must carry no newline or ANSI escape: {line:?}"
+    );
+    assert!(
+        line.starts_with("  WARN catalog overlay: ") && line.contains("opus"),
+        "the sanitized selector must still identify the cell: {line:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("  PASS forged")),
+        "the selector must not forge a finding line: {lines:?}"
+    );
 }

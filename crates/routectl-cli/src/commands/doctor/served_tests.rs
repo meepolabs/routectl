@@ -282,3 +282,60 @@ fn only_an_unreadable_warm_carries_a_failure_class() {
         assert_eq!(rendered.class.as_deref(), expected, "row {name}");
     }
 }
+
+/// The served doctor reads soft defects off the overlay the daemon holds, not
+/// the file on disk: one Warn finding per defect naming its selector and
+/// field, and none for a clean overlay.
+///
+/// Mutation check: gather `overlay_soft_defects` as an empty list in
+/// `gather_context_no_network` -> the `below_sentinel` row goes red.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_served_gather_renders_one_warn_per_overlay_soft_defect() {
+    use routectl_router::Status;
+    use routectl_testkit::ScopedEnv;
+
+    use crate::commands::doctor::tests::{overlay_defect_findings, soft_defect_overlay_json};
+    use crate::commands::doctor::{build_report_no_network, gather_context_no_network};
+
+    let rows: [(&str, bool, &[&str]); 2] = [
+        (
+            "below_sentinel",
+            true,
+            &["openai-compat:cheap-a*", "openai-compat:cheap-b*"],
+        ),
+        ("clean", false, &[]),
+    ];
+
+    for (name, with_defects, expected) in rows {
+        // Arrange: no overlay file on disk, so only the served overlay can
+        // supply a defect.
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
+        let config_path = tmp.path().join("config.toml");
+        let overlay: CatalogOverlay =
+            serde_json::from_value(soft_defect_overlay_json(with_defects)).unwrap();
+        let inputs = ServedInputs::new(
+            Arc::new(Config::default()),
+            overlay,
+            learned(Vec::new()),
+            warm(WarmOutcome::Replayed),
+        );
+
+        // Act
+        let context =
+            gather_context_no_network(&config_path, GatherSources::Served(Box::new(inputs))).await;
+        let report = build_report_no_network(&context);
+
+        // Assert
+        let found = overlay_defect_findings(&report.findings);
+        assert_eq!(found.len(), expected.len(), "row {name}: {found:?}");
+        for (finding, selector) in found.iter().zip(expected) {
+            assert_eq!(finding.status, Status::Warn, "row {name}");
+            assert!(
+                finding.detail.contains(selector) && finding.detail.contains("`wm`"),
+                "row {name}: {finding:?}"
+            );
+        }
+    }
+}

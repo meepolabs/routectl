@@ -107,6 +107,10 @@ pub async fn gather_context_no_network(
     let knobs = overlay
         .as_ref()
         .map(|overlay| derive_knob_rows(&config, overlay));
+    let overlay_soft_defects = overlay
+        .as_ref()
+        .map(routectl_router::overlay_soft_defects)
+        .unwrap_or_default();
     let capability = build_capability_inputs(&config, config_parse_error, overlay);
 
     let (probes, seats, auth_store_error) = gather_auth().await;
@@ -138,6 +142,7 @@ pub async fn gather_context_no_network(
         pricing,
         knobs,
         reload_failure,
+        overlay_soft_defects,
     }
 }
 
