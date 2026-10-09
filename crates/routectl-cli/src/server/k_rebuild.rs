@@ -148,12 +148,12 @@ pub(crate) fn warm_k_store_from_ledger(db_path: &Path, store: &KSessionStore) {
 }
 
 /// Report the rebuild outcome: an `info` with the loaded-row count, the row
-/// cap, and the window size, plus a one-shot `warn` when the load hit the cap
+/// cap, and the window size, plus a one-shot `debug` when the load hit the cap
 /// (warm state may then be truncated to the newest `REBUILD_ROW_LIMIT` rows).
 fn emit_rebuild_log(tracked_sessions: usize, loaded_rows: usize) {
     let window_hours = REBUILD_WINDOW.as_secs() / 3600;
     if loaded_rows == REBUILD_ROW_LIMIT {
-        tracing::warn!(
+        tracing::debug!(
             loaded_rows,
             row_cap = REBUILD_ROW_LIMIT,
             window_hours,
@@ -512,27 +512,28 @@ mod tests {
         assert_eq!(info.field("window_hours"), Some("192"));
         assert_eq!(info.field("tracked_sessions"), Some("4"));
         assert!(
-            !events.iter().any(|e| e.level == tracing::Level::WARN),
-            "no cap-hit warning under the row cap"
+            !events.iter().any(|e| e.message.contains("hit the row cap")),
+            "no cap-hit line under the row cap"
         );
     }
 
     #[test]
-    fn rebuild_log_warns_when_row_cap_hit() {
+    fn rebuild_log_notes_row_cap_hit_once_at_debug() {
         // Arrange + Act: loaded_rows exactly at the cap -- the truncation risk.
         let events = routectl_testkit::capture_events(|| {
             emit_rebuild_log(7, REBUILD_ROW_LIMIT);
         });
 
-        // Assert: a WARN fires carrying the loaded-row count and cap, and the
-        // info line still reports the loaded rows.
-        let warn = events
+        // Assert: exactly one DEBUG cap-hit line carrying the loaded-row count
+        // and cap, and the info line still reports the loaded rows.
+        let cap_hits: Vec<_> = events
             .iter()
-            .find(|e| e.level == tracing::Level::WARN)
-            .expect("cap-hit warning emitted");
-        assert!(warn.message.contains("hit the row cap"));
-        assert_eq!(warn.field("loaded_rows"), Some("5000"));
-        assert_eq!(warn.field("row_cap"), Some("5000"));
+            .filter(|e| e.message.contains("hit the row cap"))
+            .collect();
+        assert_eq!(cap_hits.len(), 1, "exactly one cap-hit line: {cap_hits:?}");
+        assert_eq!(cap_hits[0].level, tracing::Level::DEBUG);
+        assert_eq!(cap_hits[0].field("loaded_rows"), Some("5000"));
+        assert_eq!(cap_hits[0].field("row_cap"), Some("5000"));
         let info = events
             .iter()
             .find(|e| e.level == tracing::Level::INFO)

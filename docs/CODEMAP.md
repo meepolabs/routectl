@@ -5820,7 +5820,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   read-only open rejects an older schema outright. Read failures return
   EMPTY, never partial -- a factor reduced from a half-read slice is one the
   full evidence never supported -- and the tally is logged in one info line
-  with a `warn` when the row cap truncated the read
+  (carrying `row_cap`) with a `debug` when the row cap truncated the read
 - `src/server/canary_span_tests.rs` -- THE spanning canary proof, declared from
   `capability_boundary.rs` because it extends that module's drain-plus-restart
   seam. Walks the whole path in one test: a durably seeded verdict, ninety-nine

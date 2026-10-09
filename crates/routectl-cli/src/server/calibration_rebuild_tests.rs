@@ -349,26 +349,34 @@ fn rebuild_log_reports_the_tally_and_stays_quiet_under_the_cap() {
     assert_eq!(info.field("rejected_pair"), Some("1"));
     assert_eq!(info.field("lanes_calibrated"), Some("3"));
     assert!(
-        !events.iter().any(|e| e.level == tracing::Level::WARN),
-        "no cap-hit warning under the row cap"
+        !events.iter().any(|e| e.message.contains("hit the row cap")),
+        "no cap-hit line under the row cap"
     );
 }
 
 #[test]
-fn rebuild_log_warns_when_the_row_cap_truncated_the_read() {
-    // A silent truncation reads as "we loaded everything", so hitting the cap
-    // must warn rather than pass on the info line alone.
+fn rebuild_log_notes_the_row_cap_truncation_once_at_debug() {
+    // Hitting the cap is a bounded boot read working as designed, so the
+    // truncation note stays out of the default log; the info line still
+    // carries `rows_loaded == row_cap`.
     let summary = CalibrationRebuildSummary::new(REBUILD_ROW_LIMIT, REBUILD_ROW_LIMIT, 0, 0, 5);
 
     let events = routectl_testkit::capture_events(|| emit_rebuild_log(&summary));
 
-    let warn = events
+    let cap_hits: Vec<_> = events
         .iter()
-        .find(|e| e.level == tracing::Level::WARN)
-        .expect("cap-hit warning emitted");
-    assert!(warn.message.contains("hit the row cap"));
-    assert_eq!(warn.field("rows_loaded"), Some("5000"));
-    assert_eq!(warn.field("row_cap"), Some("5000"));
+        .filter(|e| e.message.contains("hit the row cap"))
+        .collect();
+    assert_eq!(cap_hits.len(), 1, "exactly one cap-hit line: {cap_hits:?}");
+    assert_eq!(cap_hits[0].level, tracing::Level::DEBUG);
+    assert_eq!(cap_hits[0].field("rows_loaded"), Some("5000"));
+    assert_eq!(cap_hits[0].field("row_cap"), Some("5000"));
+    let info = events
+        .iter()
+        .find(|e| e.level == tracing::Level::INFO)
+        .expect("info rebuild log emitted");
+    assert_eq!(info.field("rows_loaded"), Some("5000"));
+    assert_eq!(info.field("row_cap"), Some("5000"));
 }
 
 /// The evidence columns exist only after the newest migration, and a

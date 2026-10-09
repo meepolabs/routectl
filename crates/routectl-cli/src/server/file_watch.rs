@@ -148,12 +148,12 @@ pub fn spawn_watcher(
         // real inode's parent directory. If the file does not exist yet
         // (e.g. credentials.json before the first `routectl login`),
         // canonicalize fails; fall back to the textual path and emit a
-        // one-line WARN so operators know the watcher may miss symlinked
-        // targets until the file appears.
+        // one-line DEBUG breadcrumb (an absent target is the normal state
+        // until the file is first written).
         let resolved = if let Ok(p) = std::fs::canonicalize(raw_path) {
             p
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 target = %raw_path.display(),
                 "watch target canonicalize failed (file may not exist yet); \
                  using textual path to derive parent directory",

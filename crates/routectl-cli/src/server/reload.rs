@@ -682,7 +682,7 @@ pub(super) async fn handle_config_reload(
                 return Err(ReloadFailure::BoundaryNotDurable);
             }
             super::capability_boundary::BoundaryOutcomeReport::Abandoned => {
-                tracing::warn!("config reload abandoned at shutdown; keeping previous router",);
+                tracing::debug!("config reload abandoned at shutdown; keeping previous router",);
                 return Ok(None);
             }
         }

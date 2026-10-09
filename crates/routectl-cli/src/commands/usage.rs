@@ -189,7 +189,7 @@ const DST_PROBE_CAP_MIN: i64 = 180;
 /// - `Single` -> that instant.
 /// - `Ambiguous` -> the earliest (a fall-back day has two midnights; the
 ///   earliest is the true day start).
-/// - `None` (spring-forward gap, midnight does not exist) -> warn, then probe
+/// - `None` (spring-forward gap, midnight does not exist) -> debug, then probe
 ///   forward in small steps to the next valid local instant; only if that
 ///   fails within the cap fall back to `now`.
 fn resolve_local_midnight(naive: NaiveDateTime, now: DateTime<Local>) -> DateTime<Local> {
@@ -197,7 +197,7 @@ fn resolve_local_midnight(naive: NaiveDateTime, now: DateTime<Local>) -> DateTim
         LocalResult::Single(t) => t,
         LocalResult::Ambiguous(earliest, _) => earliest,
         LocalResult::None => {
-            tracing::warn!(
+            tracing::debug!(
                 naive_midnight = %naive,
                 "local midnight falls in a DST spring-forward gap; probing forward for the next valid instant"
             );

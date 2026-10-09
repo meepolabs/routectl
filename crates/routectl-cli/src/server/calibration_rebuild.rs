@@ -153,13 +153,13 @@ pub(crate) fn warm_calibration_from_ledger(
     summary
 }
 
-/// Report the rebuild outcome: an `info` with the per-verdict tally, plus a
-/// one-shot `warn` when the load hit the row cap (the warm is then truncated
-/// to the newest `REBUILD_ROW_LIMIT` rows, which a silent info line would
-/// present as "we loaded everything").
+/// Report the rebuild outcome: an `info` with the per-verdict tally and the row
+/// cap, plus a one-shot `debug` when the load hit the row cap (the warm is then
+/// truncated to the newest `REBUILD_ROW_LIMIT` rows; the info line shows it as
+/// `rows_loaded == row_cap`).
 fn emit_rebuild_log(summary: &CalibrationRebuildSummary) {
     if summary.rows_loaded == REBUILD_ROW_LIMIT {
-        tracing::warn!(
+        tracing::debug!(
             rows_loaded = summary.rows_loaded,
             row_cap = REBUILD_ROW_LIMIT,
             "calibration warm rebuild hit the row cap; warm state may be truncated"
