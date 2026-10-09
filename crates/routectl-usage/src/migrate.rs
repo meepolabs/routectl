@@ -6,7 +6,7 @@
 //! DB is a no-op. Add a new step by extending the ladder and bumping
 //! `SCHEMA_VERSION` in `schema.rs`.
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::capability_event::TOMBSTONE_VERDICT;
 use crate::schema::{
@@ -636,7 +636,10 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
 pub fn purge_legacy_capability_observations(
     conn: &Connection,
 ) -> Result<Option<usize>, rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
+    // IMMEDIATE takes the write lock before the marker read, so a concurrent
+    // committer makes this wait on busy_timeout instead of failing the DELETE
+    // with a stale read snapshot.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let already_ran = tx
         .query_row(
             "SELECT 1 FROM meta WHERE key = ?1",

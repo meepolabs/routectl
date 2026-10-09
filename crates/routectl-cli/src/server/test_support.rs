@@ -111,11 +111,13 @@ pub(super) async fn begin_writer_drain(writer: UsageWriter) -> WriterDrain {
 /// A live writer over a fresh database, plus the tempdir guard and the path a
 /// second connection reads through.
 ///
-/// The file is brought to the current schema HERE, before the writer starts, so
-/// a second connection can read it from the first instant. The writer performs
-/// its own migrating open on its thread, which a reader racing it sees as an
-/// absent or older-schema file rather than as an empty one -- so a fixture that
-/// skipped this would fail on the read rather than on the behavior.
+/// The file is brought to its settled state HERE, by a full start-and-drain
+/// cycle of a throwaway writer, before the returned writer starts. The writer
+/// performs its migrating open and its one-time open steps on its own thread,
+/// which a reader racing it sees as an absent, older-schema, or still-changing
+/// file -- so a fixture that skipped this would fail on the read, or count a
+/// row the open wrote as one the behavior under test added. After the cycle,
+/// the returned writer's open changes nothing a second connection can see.
 ///
 /// Shared by the accounting-adapter sidecars and the composed end-to-end proof:
 /// both need the same real writer over a real file, and a second copy of this
@@ -123,7 +125,10 @@ pub(super) async fn begin_writer_drain(writer: UsageWriter) -> WriterDrain {
 pub(super) fn live_usage_writer() -> (tempfile::TempDir, PathBuf, UsageHandle, UsageWriter) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
-    drop(routectl_usage::open(&path).expect("migrating open"));
+    let (settle_handle, settle_writer) =
+        UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    drop(settle_handle);
+    settle_writer.shutdown();
     let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
     (dir, path, handle, writer)
 }
