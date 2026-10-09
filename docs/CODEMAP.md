@@ -8450,6 +8450,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   for a different reason. The unknown-provider cap refusal carries its own paired
   positive for the same reason. Never touches the live daemon's port or the real
   `~/.config` ledger
+- `tests/test_env_isolation.rs` -- pins the workspace `.cargo/config.toml`
+  test sandbox: cargo sets `XDG_CONFIG_HOME` to `<workspace>/target/test-xdg`,
+  and the default usage-db path resolves under it, never under the real
+  `$HOME/.config`
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration
   tests
 - `tests/provider_add.rs` -- integration floor for `provider add`: drives the

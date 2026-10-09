@@ -133,6 +133,17 @@ commands above.
 The live matrix is slow (~30s) and costs cents per run. Use it as a
 final gate, not a tight inner loop.
 
+`.cargo/config.toml` forces `XDG_CONFIG_HOME` to `target/test-xdg`
+(resolved against the workspace root) for every process cargo runs, so
+`cargo test` and `cargo run` read and write config, credentials, and the
+usage db there, never under `~/.config/routectl`.
+`crates/routectl-cli/tests/test_env_isolation.rs` pins it. The path is
+relative to the config file, so each git worktree gets its own sandbox
+under its own `target/`, independent of `CARGO_TARGET_DIR`. Running a
+test binary directly, or `cargo --manifest-path` from outside the repo,
+skips the config file and therefore the sandbox. Against a live config,
+run the installed binary, not `cargo run`.
+
 ## Explicit runs (never in the default gate)
 
 Every `#[ignore]`d test in the workspace is listed here, plus the

@@ -1,0 +1,2 @@
+[env]
+XDG_CONFIG_HOME = { value = "target/test-xdg", relative = true, force = true }
