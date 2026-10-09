@@ -132,7 +132,9 @@ pub(crate) use self::served::{GatherSources, ResidentLearned, ServedInputs};
 /// `resident` for the daemon's in-memory registry) and gains `warm`, the
 /// resident registry's boot warm outcome and tally. A `ledger_replay` panel
 /// carries `replay` and no `warm`; a `resident` panel carries `warm` and no
-/// `replay`.
+/// `replay`. Two additive `config` findings land with it: `reload`, the
+/// daemon's last rejected config / overlay reload (closed class and age), and
+/// one `catalog overlay` finding per soft-defect overlay cell.
 const SCHEMA_VERSION: u32 = 15;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a

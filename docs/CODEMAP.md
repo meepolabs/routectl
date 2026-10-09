@@ -8443,6 +8443,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   hermetic child process; also boots the shipped example
   config (oauth-backed entries removed) in a cleared env, Bedrock default chain
   included, to a serving `/health` and a clean SIGTERM exit
+- `tests/status_poll_log_invariance.rs` -- real-binary log-volume guard: boots
+  a hermetic child daemon over a soft-defect catalog overlay and unmappable
+  ledger rows, polls `/status` and `/status/doctor` repeatedly, and asserts
+  the WARN/ERROR, field-verdict, rebuild-skip and overlay-defect line counts
+  do not grow with the poll count; then corrupts the overlay and asserts the
+  doctor reports the rejected reload while still rendering the served overlay
 - `src/server/preflight_daemon_tests.rs` -- ASSEMBLED-DAEMON verification (a
   `cfg(test)` sidecar declared from `serve.rs`; see item 4 relocation): a real
   `serve_on_listener` daemon, real HTTP inference traffic over loopback, and the
