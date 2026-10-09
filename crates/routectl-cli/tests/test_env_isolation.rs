@@ -3,6 +3,16 @@
 //! cargo runs, so a default config path resolved under `cargo test` lands in
 //! the build tree instead of the operator's real `$HOME/.config/routectl`.
 //!
+//! A caller may replace that forced entry through cargo's
+//! `CARGO_ENV_XDG_CONFIG_HOME` override (the live-gate isolation script does,
+//! per leg); cargo hands its value to the test as `XDG_CONFIG_HOME`, and the
+//! override variable itself is inherited, so the expected root follows it.
+//! Check the override path with:
+//!
+//! ```text
+//! CARGO_ENV_XDG_CONFIG_HOME=<scratch dir> cargo test -p routectl-cli --test test_env_isolation
+//! ```
+//!
 //! Its own binary: nothing here mutates the environment, and no sibling test
 //! can set `XDG_CONFIG_HOME` underneath these reads.
 
@@ -17,7 +27,12 @@ fn workspace_root() -> PathBuf {
 }
 
 fn sandbox_dir() -> PathBuf {
-    workspace_root().join("target").join("test-xdg")
+    std::env::var_os("CARGO_ENV_XDG_CONFIG_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map_or_else(
+            || workspace_root().join("target").join("test-xdg"),
+            PathBuf::from,
+        )
 }
 
 #[test]

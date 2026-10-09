@@ -5084,9 +5084,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   in ONE `unchecked_transaction`, appended in slice order so the caller
   controls rowid ordering -- either every row commits or none does, because a
   boundary tombstone whose survivor restatements were dropped evicts the very
-  verdicts the batch was preserving); the private
-  tombstone-verdict literal mirrors the read side's copy in
-  `query/capability.rs` (agreement pinned by the round-trip test)
+  verdicts the batch was preserving); the crate-internal
+  `TOMBSTONE_VERDICT` literal (`pub` in a private module, not re-exported;
+  also used by `migrate.rs` and the writer) mirrors the read side's own copy
+  in `query/capability.rs` (agreement pinned by the round-trip test)
 - `src/capability_ack.rs` -- the ACKNOWLEDGED SINGLE capability-event write: one
   ordinary event whose outcome the caller awaits. `CapabilityEventWrite`
   (`Committed` / `SupersededByBoundary` / `SupersededByPurge` / `WriteFailed`,
@@ -6001,7 +6002,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   sidecars, plus `paid_probe_end_to_end_tests.rs` as its own `#[path]` module
   (composes the real writer, this adapter, and the daemon's probe pass into one
   wire call; shares the live-writer / control-row fixtures via
-  `src/server/test_support.rs`)
+  `src/server/test_support.rs`: `drain_usage_writer_strict` awaits a writer's
+  full drain, and the async `live_usage_writer` runs one start-and-drain settle
+  cycle on the db before returning a fresh writer)
 - `src/server/router_publish.rs` -- `publish_router`, the publication step every
   reload path shares. STAMPS the replacement's probe incarnation and retires the
   outgoing incarnation's work BEFORE `router_swap.store`: between a store and a
