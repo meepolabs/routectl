@@ -22,6 +22,7 @@ use routectl_cli::commands::provider_add::{self, AddIo, AddResult, ProviderAddAr
 use routectl_cli::server::CompositeStore;
 use routectl_core::Result;
 use routectl_router::{CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config};
+use routectl_testkit::ScopedEnv;
 use tokio::net::TcpListener;
 
 mod common;
@@ -62,9 +63,11 @@ fn unset_env(key: &str) {
 /// Scope `XDG_CONFIG_HOME` at a fresh temp dir for the duration of a test so
 /// the managed secret store (`$XDG/routectl/secrets`) and the OAuth store
 /// (`$XDG/routectl/credentials.json`) resolve inside the tempdir instead of
-/// the developer's real `~/.config/routectl`.
+/// the developer's real `~/.config/routectl`. Dropping the scope restores the
+/// prior `XDG_CONFIG_HOME` rather than unsetting it.
 struct XdgScope {
     tmp: tempfile::TempDir,
+    _xdg_env: ScopedEnv,
 }
 
 impl XdgScope {
@@ -73,16 +76,10 @@ impl XdgScope {
     }
 }
 
-impl Drop for XdgScope {
-    fn drop(&mut self) {
-        unset_env("XDG_CONFIG_HOME");
-    }
-}
-
 fn scope_xdg() -> XdgScope {
     let tmp = tempfile::tempdir().unwrap();
-    set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
-    XdgScope { tmp }
+    let _xdg_env = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
+    XdgScope { tmp, _xdg_env }
 }
 
 /// A non-interactive [`AddIo`] stub: never a real TTY, stdin, prompt, or

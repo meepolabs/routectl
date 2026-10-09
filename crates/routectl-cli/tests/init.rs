@@ -29,6 +29,7 @@ use routectl_cli::commands::init::{self, CredentialCapture, InitArgs, InitIo, Of
 use routectl_cli::commands::provider_add::{self, AddIo, AddResult, ProviderAddArgs};
 use routectl_core::Result;
 use routectl_router::{CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config};
+use routectl_testkit::ScopedEnv;
 use tokio::net::TcpListener;
 
 mod common;
@@ -42,24 +43,15 @@ const MODEL_ID: &str = "claude-sonnet-4-5";
 /// provider and make the `--yes` default route ambiguous).
 const ANTHROPIC_ENV_VAR: &str = "ANTHROPIC_API_KEY";
 
-// SAFETY: every test that mutates the process environment is annotated
-// `#[serial_test::serial]`, so no other thread reads or writes the environment
-// concurrently with these calls.
-fn set_env(key: &str, val: &str) {
-    unsafe { std::env::set_var(key, val) };
-}
-
-fn unset_env(key: &str) {
-    unsafe { std::env::remove_var(key) };
-}
-
 /// Scope `XDG_CONFIG_HOME` at a fresh temp dir for the duration of a test so
 /// the managed secret store (`$XDG/routectl/secrets`) and the OAuth store
 /// (`$XDG/routectl/credentials.json`) resolve inside the tempdir instead of the
-/// developer's real `~/.config/routectl`.
+/// developer's real `~/.config/routectl`. Dropping the scope restores the prior
+/// `XDG_CONFIG_HOME` and `ANTHROPIC_API_KEY` rather than unsetting them.
 struct XdgScope {
     tmp: tempfile::TempDir,
-    prev_anthropic_env: Option<std::ffi::OsString>,
+    _xdg_env: ScopedEnv,
+    _anthropic_env: ScopedEnv,
 }
 
 impl XdgScope {
@@ -79,25 +71,40 @@ impl XdgScope {
     }
 }
 
-impl Drop for XdgScope {
-    fn drop(&mut self) {
-        unset_env("XDG_CONFIG_HOME");
-        match self.prev_anthropic_env.take() {
-            Some(v) => unsafe { std::env::set_var(ANTHROPIC_ENV_VAR, v) },
-            None => unset_env(ANTHROPIC_ENV_VAR),
-        }
+fn scope_xdg() -> XdgScope {
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg_env = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
+    let _anthropic_env = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
+    XdgScope {
+        tmp,
+        _xdg_env,
+        _anthropic_env,
     }
 }
 
-fn scope_xdg() -> XdgScope {
-    let tmp = tempfile::tempdir().unwrap();
-    let prev_anthropic_env = std::env::var_os(ANTHROPIC_ENV_VAR);
-    set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
-    unset_env(ANTHROPIC_ENV_VAR);
-    XdgScope {
-        tmp,
-        prev_anthropic_env,
+#[test]
+#[serial_test::serial]
+fn xdg_scope_restores_the_prior_xdg_config_home_on_drop() {
+    // Arrange: a known prior value, so restore-to-previous and unset differ.
+    let _outer = ScopedEnv::set("XDG_CONFIG_HOME", "/nonexistent/prior-xdg-config-home");
+    let before = std::env::var_os("XDG_CONFIG_HOME");
+
+    // Act
+    {
+        let xdg = scope_xdg();
+        assert_eq!(
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            Some(xdg.tmp.path().as_os_str()),
+            "the scope points XDG_CONFIG_HOME at its tempdir"
+        );
     }
+
+    // Assert
+    assert_eq!(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        before,
+        "dropping the scope must restore the prior XDG_CONFIG_HOME, not unset it"
+    );
 }
 
 /// A non-interactive [`InitIo`] stub: never a real TTY, stdin, prompt, or

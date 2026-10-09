@@ -9,6 +9,7 @@ use super::build::resolve_secret;
 use super::capture::{capture_value, execute_pending};
 use super::toml_edit::{commit, provider_table};
 use crate::commands::provider_env::env_var_for_kind;
+use routectl_testkit::ScopedEnv;
 
 /// A minimal valid config at the version this build writes, rendered from
 /// the const so the next schema bump needs no fixture edit here.
@@ -642,11 +643,11 @@ impl AddIo for FakeIo {
 }
 
 /// Point `default_secret_dir` at a temp XDG root so captures land in an
-/// isolated store. Returns the guard tempdir (keep it alive) and the
-/// secrets dir the store will use.
-fn scoped_secret_dir(tmp: &std::path::Path) -> std::path::PathBuf {
-    set_env("XDG_CONFIG_HOME", tmp.to_str().unwrap());
-    tmp.join("routectl").join("secrets")
+/// isolated store. Returns the env guard (keep it alive; dropping it restores
+/// the prior `XDG_CONFIG_HOME`) and the secrets dir the store will use.
+fn scoped_secret_dir(tmp: &std::path::Path) -> (ScopedEnv, std::path::PathBuf) {
+    let guard = ScopedEnv::set("XDG_CONFIG_HOME", tmp);
+    (guard, tmp.join("routectl").join("secrets"))
 }
 
 #[tokio::test]
@@ -655,7 +656,7 @@ async fn api_key_stdin_captures_to_managed_store_and_writes_only_the_ref() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     let secret_value = "piped-secret-value-not-real";
 
     let mut a = args("openai-compat", "grok");
@@ -693,7 +694,6 @@ async fn api_key_stdin_captures_to_managed_store_and_writes_only_the_ref() {
             & 0o777;
         assert_eq!(mode, 0o600, "captured secret must be 0600");
     }
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -754,7 +754,7 @@ async fn interactive_hidden_prompt_captures_when_tty_and_missing() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     // No conventional var set, so the env-offer is skipped and the prompt
     // fires. Use a kind whose conventional var we can guarantee is unset.
     let var = env_var_for_kind("openai-compat").unwrap();
@@ -784,7 +784,6 @@ async fn interactive_hidden_prompt_captures_when_tty_and_missing() {
     );
 
     restore_env(var, prev_var);
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -826,7 +825,7 @@ async fn interactive_does_not_offer_an_unresolved_env_var() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     let var = env_var_for_kind("anthropic-api").unwrap();
     let prev_var = std::env::var(var).ok();
     unset_env(var);
@@ -854,7 +853,6 @@ async fn interactive_does_not_offer_an_unresolved_env_var() {
     );
 
     restore_env(var, prev_var);
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -863,7 +861,7 @@ async fn interactive_does_not_offer_an_empty_env_var() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     let var = env_var_for_kind("anthropic-api").unwrap();
     let prev_var = std::env::var(var).ok();
     // Set-but-empty must NOT satisfy "resolves non-empty NOW": no offer.
@@ -890,7 +888,6 @@ async fn interactive_does_not_offer_an_empty_env_var() {
     );
 
     restore_env(var, prev_var);
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -1030,7 +1027,7 @@ async fn declined_confirm_captures_no_secret_file() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
 
     let mut a = args("openai-compat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
@@ -1054,7 +1051,6 @@ async fn declined_confirm_captures_no_secret_file() {
         !secrets.join("grok").exists(),
         "a declined confirm must capture no secret file"
     );
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -1063,7 +1059,7 @@ async fn post_capture_config_conflict_persists_secret_and_reports_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
 
     // The fake rewrites config.toml the moment stdin is read -- i.e.
     // AFTER `run` snapshotted it but before the locked commit -- so the
@@ -1094,7 +1090,6 @@ async fn post_capture_config_conflict_persists_secret_and_reports_recovery() {
         secrets.join("grok").exists(),
         "the captured secret must persist across a config-write conflict"
     );
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -1103,7 +1098,7 @@ async fn captured_value_never_appears_in_tracing_events() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let _secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, _secrets) = scoped_secret_dir(xdg.path());
     let secret_value = "tracing-secret-value-not-real";
 
     let (_res, events) = routectl_testkit::with_capture(async {
@@ -1135,7 +1130,6 @@ async fn captured_value_never_appears_in_tracing_events() {
         .collect();
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0].field("credential_source"), Some("file"));
-    unset_env("XDG_CONFIG_HOME");
 }
 
 // -----------------------------------------------------------------
@@ -1158,7 +1152,7 @@ async fn symlinked_ancestor_swap_between_phases_lands_at_original_base() {
     std::fs::create_dir_all(&real_b).unwrap();
     let link = root.path().join("xdg-link");
     std::os::unix::fs::symlink(&real_a, &link).unwrap();
-    set_env("XDG_CONFIG_HOME", link.to_str().unwrap());
+    let _xdg_env = ScopedEnv::set("XDG_CONFIG_HOME", &link);
 
     let a = args("openai-compat", "grok");
 
@@ -1204,7 +1198,6 @@ async fn symlinked_ancestor_swap_between_phases_lands_at_original_base() {
         !swapped.exists(),
         "the swapped symlink target must never receive the secret"
     );
-    unset_env("XDG_CONFIG_HOME");
 }
 
 // -----------------------------------------------------------------
@@ -1240,7 +1233,7 @@ async fn fresh_piped_key_rewrites_secret_and_reports_rotated() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     let config_before = seed_file_backed_grok(&path, "original-key-not-real").await;
     assert_eq!(
         std::fs::read_to_string(secrets.join("grok")).unwrap(),
@@ -1285,7 +1278,6 @@ async fn fresh_piped_key_rewrites_secret_and_reports_rotated() {
             & 0o777;
         assert_eq!(mode, 0o600, "the rotated secret must stay 0600");
     }
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -1295,7 +1287,7 @@ async fn fresh_piped_key_on_existing_provider_requires_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     let config_before = seed_file_backed_grok(&path, "original-key-not-real").await;
 
     // Act: a fresh capture WITHOUT --overwrite on the existing provider.
@@ -1322,7 +1314,6 @@ async fn fresh_piped_key_on_existing_provider_requires_overwrite() {
         config_before,
         "a refused rotation must not write config"
     );
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -1370,7 +1361,7 @@ async fn rotation_secret_write_failure_leaves_old_secret_intact() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     let config_before = seed_file_backed_grok(&path, "durable-old-key-not-real").await;
 
     // Make the store directory read-only so a fresh capture cannot write.
@@ -1381,7 +1372,6 @@ async fn rotation_secret_write_failure_leaves_old_secret_intact() {
     if std::fs::File::create(secrets.join(".probe")).is_ok() {
         let _ = std::fs::remove_file(secrets.join(".probe"));
         std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700)).unwrap();
-        unset_env("XDG_CONFIG_HOME");
         return;
     }
 
@@ -1415,7 +1405,6 @@ async fn rotation_secret_write_failure_leaves_old_secret_intact() {
         config_before,
         "a failed rotation must not write config"
     );
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -1424,7 +1413,7 @@ async fn rotation_emits_one_audit_event_config_unchanged_without_value_or_ref() 
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let xdg = tempfile::tempdir().unwrap();
-    let secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     let secret_value = "rotation-audit-secret-not-real";
     // Seed the existing provider OUTSIDE the capture so only the rotation's
     // event is observed.
@@ -1492,7 +1481,6 @@ async fn rotation_emits_one_audit_event_config_unchanged_without_value_or_ref() 
         std::fs::read_to_string(secrets.join("grok")).unwrap(),
         secret_value
     );
-    unset_env("XDG_CONFIG_HOME");
 }
 
 #[test]
@@ -1514,7 +1502,7 @@ fn rotation_reports_the_pinned_operator_message() {
 async fn failing_post_add_probe_leaves_the_provider_block_intact() {
     let dir = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let _secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, _secrets) = scoped_secret_dir(xdg.path());
 
     // A migrated ledger so the probe's read-write open succeeds and the run
     // reaches an actual dispatch (which then fails on the unreachable lane).
@@ -1569,7 +1557,6 @@ async fn failing_post_add_probe_leaves_the_provider_block_intact() {
     );
 
     unset_env(key);
-    unset_env("XDG_CONFIG_HOME");
 }
 
 fn restore_env(key: &str, prev: Option<String>) {
@@ -1588,7 +1575,7 @@ async fn post_add_probe_offer_skips_when_no_model_routes_to_the_provider() {
     // consent of `true` here would still not dispatch).
     let dir = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let _secrets = scoped_secret_dir(xdg.path());
+    let (_xdg_env, _secrets) = scoped_secret_dir(xdg.path());
     let path = write_config(dir.path(), &current_base());
 
     let mut a = args("openai-compat", "grok");
@@ -1605,7 +1592,6 @@ async fn post_add_probe_offer_skips_when_no_model_routes_to_the_provider() {
     // V3_BASE routes `gpt` -> `fast`, so `grok` has no lane to probe.
     let config = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(config.providers.contains_key("grok"));
-    unset_env("XDG_CONFIG_HOME");
 }
 
 // -----------------------------------------------------------------

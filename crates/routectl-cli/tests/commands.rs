@@ -1391,8 +1391,7 @@ async fn refresh_leaves_a_neighbouring_config_byte_identical() {
     std::fs::write(&config_path, &body).expect("write config");
     let before = std::fs::read(&config_path).expect("read config");
 
-    // SAFETY: env-touching tests are serialized via serial_test.
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
 
     // Act: no credential record, so the refresh fails -- the point is what
     // it did NOT touch on the way.
@@ -1405,7 +1404,6 @@ async fn refresh_leaves_a_neighbouring_config_byte_identical() {
         before,
         "refresh must never write config.toml"
     );
-    unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
 }
 
 #[test]
