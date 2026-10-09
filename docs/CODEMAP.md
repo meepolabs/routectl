@@ -1453,7 +1453,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   lane's nicknames disagree on the verdict or the action; availability
   tri-state available/empty/unavailable so a read failure can never render as
   an empty registry; the replay tally of rows read / replayed / skipped by
-  reason), and `DoctorReport { schema_version, findings, panels }`.
+  reason; `MatrixSource` `resident` / `ledger_replay` naming the learned
+  layer's origin, and `MatrixWarm { outcome, summary }` -- the resident
+  registry's boot warm, carried only by a `resident` panel, which in turn
+  carries no `replay`), and `DoctorReport { schema_version, findings, panels }`.
   `overall_exit(&[Finding]) -> i32` is the STABLE exit-code contract shared by
   both diagnostics surfaces: nonzero iff any finding is `Fail`
   (`Pass`/`Warn`/empty -> 0), pure in the slice and order-independent.
@@ -8283,7 +8286,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`include_str!` also makes a moved docs file a compile error). Also
   `render_capability_matrix_panel` renders the `CapabilityMatrixPanel` as a
   lane-by-capability grid: a distinct honest state line for the learned
-  availability tri-state (Available / Empty / Unavailable(code)), the replay
+  availability tri-state (Available / Empty / Unavailable(code)), a source
+  line, a "warm at boot" line when the panel carries a warm, the replay
   tally line, `render_table` alignment, lane / kind / nicknames leading
   columns (the lane printed exactly as `capability purge` accepts it),
   compact `verdict[source]->action` cells with a `(stale)` marker, an

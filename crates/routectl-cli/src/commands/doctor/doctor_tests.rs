@@ -684,8 +684,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_fourteen() {
-    assert_eq!(SCHEMA_VERSION, 14);
+fn schema_version_is_fifteen() {
+    assert_eq!(SCHEMA_VERSION, 15);
 
     let context = ctx(
         config_with_overrides(),
@@ -694,7 +694,7 @@ fn schema_version_is_fourteen() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 14);
+    assert_eq!(report.schema_version, 15);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2561,7 +2561,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 14);
+    assert_eq!(no_net.schema_version, 15);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"

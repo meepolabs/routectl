@@ -122,7 +122,14 @@ pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_err
 /// action (or verdict `cleared` and action `allow` once a seed-clear marker
 /// lifts it), and a learned negative on a `beta:` key acts as `withhold`
 /// rather than `strip` / `route_away`.
-const SCHEMA_VERSION: u32 = 14;
+///
+/// v14 -> v15: the capability matrix panel names its learned layer's origin
+/// in `source` (`ledger_replay` for a read-only replay run for the report,
+/// `resident` for the daemon's in-memory registry) and gains `warm`, the
+/// resident registry's boot warm outcome and tally. A `ledger_replay` panel
+/// carries `replay` and no `warm`; a `resident` panel carries `warm` and no
+/// `replay`.
+const SCHEMA_VERSION: u32 = 15;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

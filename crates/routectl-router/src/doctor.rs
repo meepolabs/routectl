@@ -195,26 +195,63 @@ pub struct MatrixReplaySummary {
     pub skipped_unknown: usize,
 }
 
+/// Where the matrix's learned layer came from: `ledger_replay` is a
+/// read-only replay of the usage ledger performed for this report;
+/// `resident` is the daemon's in-memory learned registry, warmed once at
+/// boot and updated live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatrixSource {
+    /// The daemon's resident learned registry.
+    Resident,
+    /// A read-only ledger replay run for this report.
+    LedgerReplay,
+}
+
+/// How the resident learned registry was warmed at daemon boot: the boot
+/// outcome token and, when the warm replay ran, its tally. It describes the
+/// boot-time warm, not the current state of the registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MatrixWarm {
+    /// The boot warm outcome token (e.g. `replayed`, or a fail-closed class).
+    pub outcome: String,
+    /// The boot warm replay tally, when the warm replay ran.
+    pub summary: Option<MatrixReplaySummary>,
+}
+
 /// The learned-capability truth matrix panel: lanes (rows) by capability
 /// keys (columns). `columns` is the well-known capability keys followed by
 /// any observed keys outside that set, capped at a fixed render width;
 /// `other_overflow` is the count of observed keys beyond the cap (rendered
 /// as `(+N more)`). `lanes` is empty when `availability` is not `Available`
-/// and no config-derived cell exists. `replay` is present whenever the
-/// ledger replay ran (`Available` or `Empty`), `None` when the source was
-/// unavailable.
+/// and no config-derived cell exists.
+///
+/// `source` names the learned layer's origin and fixes which tally is
+/// carried: a `ledger_replay` panel carries `replay` (present whenever the
+/// replay ran -- `Available` or `Empty` -- and `None` when the source was
+/// unavailable) and `warm: None`; a `resident` panel carries `replay: None`
+/// and `warm: Some`. A resident view can legitimately differ from a CLI
+/// ledger replay of the same daemon: live positives the daemon holds but
+/// does not persist appear only in the resident view, and each replay reads
+/// at most 5000 ledger rows past the boundary, so on a ledger beyond that cap
+/// the boot warm and a later replay can cover different row windows. The two
+/// are not reconciled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CapabilityMatrixPanel {
-    /// The learned ledger-replay source availability tri-state.
+    /// The learned source availability tri-state.
     pub availability: MatrixAvailability,
+    /// The origin of the learned layer.
+    pub source: MatrixSource,
     /// Column keys: the well-known keys, then capped observed others.
     pub columns: Vec<String>,
     /// Count of observed other-column keys beyond the render cap.
     pub other_overflow: u32,
     /// Matrix rows.
     pub lanes: Vec<MatrixLane>,
-    /// The replay tally, when the replay ran.
+    /// The ledger replay tally, when this report's replay ran.
     pub replay: Option<MatrixReplaySummary>,
+    /// The resident registry's boot warm, for a `resident` panel.
+    pub warm: Option<MatrixWarm>,
 }
 
 /// The full doctor report: a flat findings list plus the structured panels.
@@ -333,6 +370,81 @@ mod tests {
             obj["panels"]["would_trim"]["would_trim_tokens"],
             serde_json::json!(60_000)
         );
+    }
+
+    fn matrix_panel(
+        source: MatrixSource,
+        replay: Option<MatrixReplaySummary>,
+        warm: Option<MatrixWarm>,
+    ) -> serde_json::Value {
+        let panel = CapabilityMatrixPanel {
+            availability: MatrixAvailability::Empty,
+            source,
+            columns: Vec::new(),
+            other_overflow: 0,
+            lanes: Vec::new(),
+            replay,
+            warm,
+        };
+        serde_json::to_value(&panel).expect("serialize")
+    }
+
+    #[test]
+    fn ledger_replay_matrix_serializes_source_and_replay_without_warm() {
+        let replay = MatrixReplaySummary {
+            loaded_rows: 4,
+            replayed: 3,
+            ..MatrixReplaySummary::default()
+        };
+
+        let json = matrix_panel(MatrixSource::LedgerReplay, Some(replay), None);
+
+        assert_eq!(json["source"], serde_json::json!("ledger_replay"));
+        assert_eq!(json["replay"]["loaded_rows"], serde_json::json!(4));
+        assert_eq!(json["replay"]["replayed"], serde_json::json!(3));
+        assert!(
+            json["warm"].is_null(),
+            "a replay panel carries no warm: {json}"
+        );
+    }
+
+    #[test]
+    fn resident_matrix_serializes_source_and_warm_without_replay() {
+        let warm = MatrixWarm {
+            outcome: "replayed".into(),
+            summary: Some(MatrixReplaySummary {
+                loaded_rows: 7,
+                skipped_owner: 2,
+                ..MatrixReplaySummary::default()
+            }),
+        };
+
+        let json = matrix_panel(MatrixSource::Resident, None, Some(warm));
+
+        assert_eq!(json["source"], serde_json::json!("resident"));
+        assert!(
+            json["replay"].is_null(),
+            "a resident panel carries no replay: {json}"
+        );
+        assert_eq!(json["warm"]["outcome"], serde_json::json!("replayed"));
+        assert_eq!(json["warm"]["summary"]["loaded_rows"], serde_json::json!(7));
+        assert_eq!(
+            json["warm"]["summary"]["skipped_owner"],
+            serde_json::json!(2)
+        );
+    }
+
+    #[test]
+    fn resident_matrix_warm_without_summary_serializes_null_summary() {
+        let warm = MatrixWarm {
+            outcome: "unreadable".into(),
+            summary: None,
+        };
+
+        let json = matrix_panel(MatrixSource::Resident, None, Some(warm));
+
+        assert_eq!(json["warm"]["outcome"], serde_json::json!("unreadable"));
+        assert!(json["warm"]["summary"].is_null(), "{json}");
     }
 
     struct StubProvider {

@@ -35,8 +35,8 @@ use routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS;
 use routectl_router::{
     ACTION_MIXED, ActionInputs, BetaSeedScope, CapabilityMatrixPanel, DisplayVerdict,
     LearnedActing, LearnedLaneProjection, LearnedRegistryEntry, MatrixAvailability, MatrixCell,
-    MatrixLane, MatrixNicknameAction, ModelEntry, OverrideRegistry, ProviderEntry, SeedCell,
-    SeedClearMarker, StateKey, VERDICT_MIXED, capability_key_is_beta, is_stale_days,
+    MatrixLane, MatrixNicknameAction, MatrixSource, ModelEntry, OverrideRegistry, ProviderEntry,
+    SeedCell, SeedClearMarker, StateKey, VERDICT_MIXED, capability_key_is_beta, is_stale_days,
     lane_strips_capability, resolve_display_action, resolve_display_verdict,
 };
 
@@ -168,10 +168,12 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
 
     CapabilityMatrixPanel {
         availability,
+        source: MatrixSource::LedgerReplay,
         columns,
         other_overflow,
         lanes,
         replay,
+        warm: None,
     }
 }
 

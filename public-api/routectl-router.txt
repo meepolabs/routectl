@@ -7238,6 +7238,67 @@ impl<T> typenum::type_operators::Same for routectl_router::MatrixAvailability
 pub type routectl_router::MatrixAvailability::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixAvailability where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::MatrixAvailability::into_shared(self) -> Shared
+pub enum routectl_router::MatrixSource
+pub routectl_router::MatrixSource::LedgerReplay
+pub routectl_router::MatrixSource::Resident
+impl core::clone::Clone for routectl_router::MatrixSource
+pub fn routectl_router::MatrixSource::clone(&self) -> routectl_router::MatrixSource
+impl core::cmp::Eq for routectl_router::MatrixSource
+impl core::cmp::PartialEq for routectl_router::MatrixSource
+pub fn routectl_router::MatrixSource::eq(&self, &routectl_router::MatrixSource) -> bool
+impl core::fmt::Debug for routectl_router::MatrixSource
+pub fn routectl_router::MatrixSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::MatrixSource
+impl core::marker::StructuralPartialEq for routectl_router::MatrixSource
+impl serde_core::ser::Serialize for routectl_router::MatrixSource
+pub fn routectl_router::MatrixSource::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_router::MatrixSource
+impl core::marker::Send for routectl_router::MatrixSource
+impl core::marker::Sync for routectl_router::MatrixSource
+impl core::marker::Unpin for routectl_router::MatrixSource
+impl core::marker::UnsafeUnpin for routectl_router::MatrixSource
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::MatrixSource
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::MatrixSource
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::MatrixSource where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::MatrixSource::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::MatrixSource where U: core::convert::From<T>
+pub fn routectl_router::MatrixSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::MatrixSource where U: core::convert::Into<T>
+pub type routectl_router::MatrixSource::Error = core::convert::Infallible
+pub fn routectl_router::MatrixSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::MatrixSource where U: core::convert::TryFrom<T>
+pub type routectl_router::MatrixSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::MatrixSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::MatrixSource where T: core::clone::Clone
+pub type routectl_router::MatrixSource::Owned = T
+pub fn routectl_router::MatrixSource::clone_into(&self, &mut T)
+pub fn routectl_router::MatrixSource::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::MatrixSource where T: core::clone::Clone
+pub fn routectl_router::MatrixSource::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::MatrixSource where T: 'static + ?core::marker::Sized
+pub fn routectl_router::MatrixSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::MatrixSource where T: ?core::marker::Sized
+pub fn routectl_router::MatrixSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::MatrixSource where T: ?core::marker::Sized
+pub fn routectl_router::MatrixSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::MatrixSource where T: core::clone::Clone
+pub unsafe fn routectl_router::MatrixSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::MatrixSource
+pub fn routectl_router::MatrixSource::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::MatrixSource where T: core::clone::Clone
+pub fn routectl_router::MatrixSource::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::MatrixSource
+impl<T> outref::AsOut<T> for routectl_router::MatrixSource where T: core::marker::Copy
+pub fn routectl_router::MatrixSource::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::MatrixSource where T: ?core::marker::Sized
+pub fn routectl_router::MatrixSource::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::MatrixSource::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::MatrixSource
+impl<T> tracing::instrument::WithSubscriber for routectl_router::MatrixSource
+impl<T> typenum::type_operators::Same for routectl_router::MatrixSource
+pub type routectl_router::MatrixSource::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixSource where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::MatrixSource::into_shared(self) -> Shared
 pub enum routectl_router::MigrateError
 pub routectl_router::MigrateError::Refused(routectl_router::Refusal)
 pub routectl_router::MigrateError::V1ToV2(routectl_router::MigrationError)
@@ -10182,6 +10243,8 @@ pub routectl_router::CapabilityMatrixPanel::columns: alloc::vec::Vec<alloc::stri
 pub routectl_router::CapabilityMatrixPanel::lanes: alloc::vec::Vec<routectl_router::MatrixLane>
 pub routectl_router::CapabilityMatrixPanel::other_overflow: u32
 pub routectl_router::CapabilityMatrixPanel::replay: core::option::Option<routectl_router::MatrixReplaySummary>
+pub routectl_router::CapabilityMatrixPanel::source: routectl_router::MatrixSource
+pub routectl_router::CapabilityMatrixPanel::warm: core::option::Option<routectl_router::MatrixWarm>
 impl core::clone::Clone for routectl_router::CapabilityMatrixPanel
 pub fn routectl_router::CapabilityMatrixPanel::clone(&self) -> routectl_router::CapabilityMatrixPanel
 impl core::cmp::Eq for routectl_router::CapabilityMatrixPanel
@@ -12931,6 +12994,64 @@ impl<T> typenum::type_operators::Same for routectl_router::MatrixReplaySummary
 pub type routectl_router::MatrixReplaySummary::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixReplaySummary where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::MatrixReplaySummary::into_shared(self) -> Shared
+pub struct routectl_router::MatrixWarm
+pub routectl_router::MatrixWarm::outcome: alloc::string::String
+pub routectl_router::MatrixWarm::summary: core::option::Option<routectl_router::MatrixReplaySummary>
+impl core::clone::Clone for routectl_router::MatrixWarm
+pub fn routectl_router::MatrixWarm::clone(&self) -> routectl_router::MatrixWarm
+impl core::cmp::Eq for routectl_router::MatrixWarm
+impl core::cmp::PartialEq for routectl_router::MatrixWarm
+pub fn routectl_router::MatrixWarm::eq(&self, &routectl_router::MatrixWarm) -> bool
+impl core::fmt::Debug for routectl_router::MatrixWarm
+pub fn routectl_router::MatrixWarm::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::MatrixWarm
+impl serde_core::ser::Serialize for routectl_router::MatrixWarm
+pub fn routectl_router::MatrixWarm::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_router::MatrixWarm
+impl core::marker::Send for routectl_router::MatrixWarm
+impl core::marker::Sync for routectl_router::MatrixWarm
+impl core::marker::Unpin for routectl_router::MatrixWarm
+impl core::marker::UnsafeUnpin for routectl_router::MatrixWarm
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::MatrixWarm
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::MatrixWarm
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::MatrixWarm where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::MatrixWarm::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::MatrixWarm where U: core::convert::From<T>
+pub fn routectl_router::MatrixWarm::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::MatrixWarm where U: core::convert::Into<T>
+pub type routectl_router::MatrixWarm::Error = core::convert::Infallible
+pub fn routectl_router::MatrixWarm::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::MatrixWarm where U: core::convert::TryFrom<T>
+pub type routectl_router::MatrixWarm::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::MatrixWarm::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::MatrixWarm where T: core::clone::Clone
+pub type routectl_router::MatrixWarm::Owned = T
+pub fn routectl_router::MatrixWarm::clone_into(&self, &mut T)
+pub fn routectl_router::MatrixWarm::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::MatrixWarm where T: core::clone::Clone
+pub fn routectl_router::MatrixWarm::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::MatrixWarm where T: 'static + ?core::marker::Sized
+pub fn routectl_router::MatrixWarm::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::MatrixWarm where T: ?core::marker::Sized
+pub fn routectl_router::MatrixWarm::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::MatrixWarm where T: ?core::marker::Sized
+pub fn routectl_router::MatrixWarm::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::MatrixWarm where T: core::clone::Clone
+pub unsafe fn routectl_router::MatrixWarm::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::MatrixWarm
+pub fn routectl_router::MatrixWarm::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::MatrixWarm where T: core::clone::Clone
+pub fn routectl_router::MatrixWarm::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::MatrixWarm
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::MatrixWarm where T: ?core::marker::Sized
+pub fn routectl_router::MatrixWarm::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::MatrixWarm::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::MatrixWarm
+impl<T> tracing::instrument::WithSubscriber for routectl_router::MatrixWarm
+impl<T> typenum::type_operators::Same for routectl_router::MatrixWarm
+pub type routectl_router::MatrixWarm::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixWarm where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::MatrixWarm::into_shared(self) -> Shared
 pub struct routectl_router::MigrationPlan
 pub routectl_router::MigrationPlan::from: u32
 pub routectl_router::MigrationPlan::removed_keys: alloc::vec::Vec<alloc::string::String>

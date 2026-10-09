@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
 use routectl_router::{
     CATALOG_VERSION, CapabilityMatrixPanel, LearnedRegistryEntry, MatrixAvailability, MatrixCell,
-    MatrixLane, ModelEntry, PoolEntry, ProviderEntry,
+    MatrixLane, MatrixSource, ModelEntry, PoolEntry, ProviderEntry,
 };
 use routectl_usage::{CapabilityEvent, insert_capability_event, open};
 use rusqlite::params;
@@ -697,4 +697,40 @@ fn the_replay_tally_counts_replayed_and_each_skip_reason() {
         human.contains("replay: 5 rows read, 2 replayed; skipped: vocab=1 owner=2"),
         "the human render carries the tally: {human}"
     );
+}
+
+#[test]
+fn a_ledger_replay_panel_is_tagged_ledger_replay_and_carries_no_warm() {
+    let current = Some(routectl_router::CURRENT_VOCAB_VERSION);
+    let (_dir, path) = seeded_ledger(&[event("p#up", Some(OPENAI_COMPAT), current)]);
+    let source = gather_capability_matrix(
+        &ledger_config(&path),
+        false,
+        0,
+        routectl_router::BetaSeedScope::EMPTY,
+    );
+
+    let panel = build_capability_matrix_panel(&context(ledger_config(&path), source));
+
+    assert_eq!(panel.source, MatrixSource::LedgerReplay);
+    let json = serde_json::to_value(&panel).expect("serialize");
+    assert_eq!(json["source"], serde_json::json!("ledger_replay"));
+    assert!(json["replay"].is_object(), "the replay ran: {json}");
+    assert!(
+        json["warm"].is_null(),
+        "a replay panel carries no warm: {json}"
+    );
+    let human = render_capability_matrix_panel(&panel);
+    assert!(human.contains("source: ledger_replay"), "{human}");
+    assert!(!human.contains("warm at boot"), "{human}");
+}
+
+#[test]
+fn an_unavailable_ledger_replay_panel_is_still_tagged_ledger_replay() {
+    let source = CapabilityMatrixSource::Unavailable("no_data");
+
+    let panel = build_capability_matrix_panel(&context(lane_config(), source));
+
+    assert_eq!(panel.source, MatrixSource::LedgerReplay);
+    assert!(panel.replay.is_none() && panel.warm.is_none());
 }

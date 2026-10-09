@@ -40,11 +40,11 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::commands::doctor::{build_report_no_network, gather_context_no_network};
 
 /// Wire-shape version of the doctor panel payload. Reuses the no-network
-/// [`DoctorReport`]'s own `schema_version` (14): the panel embeds that report
+/// [`DoctorReport`]'s own `schema_version` (15): the panel embeds that report
 /// verbatim, so it must not invent a parallel number. The panel's own
 /// `capability_writes` block joined at 13 alongside the report's matrix
 /// change.
-pub const DOCTOR_SCHEMA_VERSION: u32 = 14;
+pub const DOCTOR_SCHEMA_VERSION: u32 = 15;
 
 /// The no-network doctor report plus the circuit-derived reachability summary
 /// and the live capability-write counters.

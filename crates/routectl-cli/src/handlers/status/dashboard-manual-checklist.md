@@ -126,6 +126,13 @@ banner, no retry signal -- silently mislabeled data.
   skip count moves.
 - Point the daemon at a ledger whose post-boundary slice cannot be read. The
   matrix state line must say UNAVAILABLE with its code, never "empty".
+- The matrix header carries a source badge: `ledger replay` when the panel
+  was built from a read-only ledger replay, `resident` when it reflects the
+  daemon's in-memory registry. Hover it: the tooltip names that origin.
+- A `resident` panel shows a "warm at boot" line with the boot outcome and,
+  when the warm replay ran, its tally, and no replay line. A `ledger replay`
+  panel shows the replay line and no warm line. A skip count of 0 reads `0`,
+  never `-`.
 - The capability-writes card shows three separate counters, all faint at
   zero on a healthy daemon.
 

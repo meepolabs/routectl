@@ -166,8 +166,8 @@ pub use context_trim::{
 pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, evaluate};
 pub use doctor::{
     CapabilityMatrixPanel, DoctorPanels, DoctorReport, Finding, MatrixAvailability, MatrixCell,
-    MatrixLane, MatrixNicknameAction, MatrixReplaySummary, ProbeOutcome, Status, WouldTrimPanel,
-    overall_exit,
+    MatrixLane, MatrixNicknameAction, MatrixReplaySummary, MatrixSource, MatrixWarm, ProbeOutcome,
+    Status, WouldTrimPanel, overall_exit,
 };
 #[cfg(feature = "bedrock")]
 pub use factory::validate_aws_regions;

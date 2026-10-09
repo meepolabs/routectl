@@ -281,7 +281,10 @@
     wrap.className = 'ovsection';
     var lanes = Array.isArray(panel.lanes) ? panel.lanes : [];
     var columns = Array.isArray(panel.columns) ? panel.columns : [];
-    wrap.appendChild(sectionHead('Capability matrix', matrixStateText(panel.availability)));
+    var head = sectionHead('Capability matrix', matrixStateText(panel.availability));
+    head.appendChild(matrixSourceBadge(panel.source));
+    wrap.appendChild(head);
+    if (panel.warm) { wrap.appendChild(docText('docmatrix-warm', warmText(panel.warm))); }
     if (panel.replay) { wrap.appendChild(docText('docmatrix-replay', replayText(panel.replay))); }
     if (!lanes.length) {
       wrap.appendChild(docText('docmatrix-empty', 'no capability lanes observed'));
@@ -320,11 +323,45 @@
     return 'learned registry state unknown';
   }
 
+  // `resident` is the daemon's in-memory registry; `ledger_replay` is a
+  // read-only replay run for this report. An unrecognized token is shown
+  // verbatim rather than guessed at.
+  function matrixSourceBadge(source) {
+    var chip = document.createElement('span');
+    chip.className = 'hchip';
+    if (source === 'resident') {
+      chip.textContent = 'resident';
+      chip.title = 'the daemon in-memory learned registry, warmed at boot and updated live';
+    } else if (source === 'ledger_replay') {
+      chip.textContent = 'ledger replay';
+      chip.title = 'a read-only replay of the usage ledger run for this report';
+    } else {
+      chip.textContent = source ? String(source) : 'source unknown';
+    }
+    return chip;
+  }
+
+  // The boot warm describes how the resident registry was seeded when the
+  // daemon started, never its current state.
+  function warmText(w) {
+    var text = 'warm at boot: ' + (w.outcome || 'unknown');
+    return w.summary ? text + ' - ' + tallyText(w.summary) : text;
+  }
+
   function replayText(r) {
-    return 'replay: ' + num0(r.loaded_rows) + ' rows read, ' + num0(r.replayed) +
-      ' replayed - skipped vocab ' + num0(r.skipped_vocab) + ', owner ' +
-      num0(r.skipped_owner) + ', revision ' + num0(r.skipped_revision) + ', lane ' +
-      num0(r.skipped_lane) + ', unknown ' + num0(r.skipped_unknown);
+    return 'replay: ' + tallyText(r);
+  }
+
+  // A tally count of 0 is a real reading; an absent one renders '-'.
+  function tallyCount(v) {
+    return (v === null || v === undefined) ? '-' : String(v);
+  }
+
+  function tallyText(r) {
+    return tallyCount(r.loaded_rows) + ' rows read, ' + tallyCount(r.replayed) +
+      ' replayed - skipped vocab ' + tallyCount(r.skipped_vocab) + ', owner ' +
+      tallyCount(r.skipped_owner) + ', revision ' + tallyCount(r.skipped_revision) +
+      ', lane ' + tallyCount(r.skipped_lane) + ', unknown ' + tallyCount(r.skipped_unknown);
   }
 
   // A `mixed` cell is one whose nicknames resolve to different verdicts or

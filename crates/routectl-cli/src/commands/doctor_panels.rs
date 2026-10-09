@@ -11,7 +11,7 @@ use chrono::{DateTime, Local};
 
 use routectl_router::{
     ACTION_MIXED, ACTION_NONE, CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell,
-    MatrixReplaySummary, VERDICT_MIXED, WouldTrimPanel,
+    MatrixReplaySummary, MatrixSource, MatrixWarm, VERDICT_MIXED, WouldTrimPanel,
 };
 use routectl_usage::{OpenError, WouldTrimSummary, open_readonly, would_trim_summary};
 
@@ -97,8 +97,8 @@ pub(crate) fn render_would_trim_panel(panel: &WouldTrimPanel) -> String {
 }
 
 /// Render the capability matrix panel as a human block: a state line for
-/// the learned ledger-replay source, the replay tally when the replay ran,
-/// then an aligned lane-by-capability grid. Each lane renders as its
+/// the learned source, a source line naming its origin, the boot warm line
+/// for a resident panel, the replay tally when the replay ran, then an aligned lane-by-capability grid. Each lane renders as its
 /// `provider_entry#upstream` key -- the exact string `capability purge`
 /// accepts -- followed by its provider kind and the nicknames that map to
 /// it. Empty and Unavailable render a distinct honest state line and still
@@ -109,6 +109,12 @@ pub(crate) fn render_capability_matrix_panel(panel: &CapabilityMatrixPanel) -> S
     out.push_str("capability matrix: ");
     out.push_str(&matrix_state_line(&panel.availability));
     out.push('\n');
+    out.push_str(&source_line(panel.source));
+    out.push('\n');
+    if let Some(warm) = &panel.warm {
+        out.push_str(&warm_line(warm));
+        out.push('\n');
+    }
     if let Some(replay) = &panel.replay {
         out.push_str(&replay_line(replay));
         out.push('\n');
@@ -164,11 +170,35 @@ pub(crate) fn render_capability_matrix_panel(panel: &CapabilityMatrixPanel) -> S
     out
 }
 
+/// The learned layer's origin: the daemon's resident registry, or a ledger
+/// replay run for this report.
+fn source_line(source: MatrixSource) -> String {
+    let label = match source {
+        MatrixSource::Resident => "resident (daemon learned registry)",
+        MatrixSource::LedgerReplay => "ledger_replay (read-only replay for this report)",
+    };
+    format!("  source: {label}")
+}
+
+/// The resident registry's boot warm: its outcome token and, when the warm
+/// replay ran, its tally. Labelled "at boot" because it never describes the
+/// registry's current state.
+fn warm_line(warm: &MatrixWarm) -> String {
+    let outcome = routectl_core::sanitize_for_log(&warm.outcome);
+    match &warm.summary {
+        Some(summary) => format!("  warm at boot: {outcome}; {}", tally_text(summary)),
+        None => format!("  warm at boot: {outcome}"),
+    }
+}
+
 /// The replay tally line: rows read, rows replayed, and every skip reason.
 fn replay_line(replay: &MatrixReplaySummary) -> String {
+    format!("  replay: {}", tally_text(replay))
+}
+
+fn tally_text(replay: &MatrixReplaySummary) -> String {
     format!(
-        "  replay: {} rows read, {} replayed; skipped: vocab={} owner={} revision={} \
-         lane={} unknown={}",
+        "{} rows read, {} replayed; skipped: vocab={} owner={} revision={} lane={} unknown={}",
         replay.loaded_rows,
         replay.replayed,
         replay.skipped_vocab,
@@ -473,5 +503,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn matrix_panel(
+        source: MatrixSource,
+        replay: Option<MatrixReplaySummary>,
+        warm: Option<MatrixWarm>,
+    ) -> CapabilityMatrixPanel {
+        CapabilityMatrixPanel {
+            availability: MatrixAvailability::Empty,
+            source,
+            columns: Vec::new(),
+            other_overflow: 0,
+            lanes: Vec::new(),
+            replay,
+            warm,
+        }
+    }
+
+    #[test]
+    fn resident_matrix_renders_source_and_warm_at_boot_line_without_replay() {
+        let warm = MatrixWarm {
+            outcome: "replayed".into(),
+            summary: Some(MatrixReplaySummary {
+                loaded_rows: 9,
+                replayed: 6,
+                skipped_owner: 3,
+                ..MatrixReplaySummary::default()
+            }),
+        };
+
+        let human =
+            render_capability_matrix_panel(&matrix_panel(MatrixSource::Resident, None, Some(warm)));
+
+        assert!(human.contains("  source: resident"), "{human}");
+        assert!(
+            human.contains(
+                "  warm at boot: replayed; 9 rows read, 6 replayed; skipped: vocab=0 owner=3"
+            ),
+            "{human}"
+        );
+        assert!(
+            !human.contains("replay: "),
+            "a resident panel has no replay line: {human}"
+        );
+    }
+
+    #[test]
+    fn resident_matrix_warm_without_tally_renders_outcome_only() {
+        let warm = MatrixWarm {
+            outcome: "unreadable".into(),
+            summary: None,
+        };
+
+        let human =
+            render_capability_matrix_panel(&matrix_panel(MatrixSource::Resident, None, Some(warm)));
+
+        assert!(human.contains("  warm at boot: unreadable\n"), "{human}");
+    }
+
+    #[test]
+    fn ledger_replay_matrix_renders_source_and_replay_without_warm_line() {
+        let replay = MatrixReplaySummary {
+            loaded_rows: 2,
+            replayed: 2,
+            ..MatrixReplaySummary::default()
+        };
+
+        let human = render_capability_matrix_panel(&matrix_panel(
+            MatrixSource::LedgerReplay,
+            Some(replay),
+            None,
+        ));
+
+        assert!(human.contains("  source: ledger_replay"), "{human}");
+        assert!(
+            human.contains("  replay: 2 rows read, 2 replayed;"),
+            "{human}"
+        );
+        assert!(!human.contains("warm at boot"), "{human}");
     }
 }
