@@ -537,20 +537,20 @@ async fn serve_inner(
     // worker it would stall every task sharing that thread for the duration of
     // a SQLite read plus a transaction, and the boundary wait would block a
     // worker outright.
-    let router = {
+    let (router, warm_report) = {
         let db_path = config.usage.db_path.clone();
         let usage_for_warm = usage_handle.clone();
         match tokio::task::spawn_blocking(move || {
-            capability_rebuild::warm_capability_registry_from_ledger(
+            let report = capability_rebuild::warm_capability_registry_from_ledger(
                 &db_path,
                 &router,
                 &usage_for_warm,
             );
-            router
+            (router, report)
         })
         .await
         {
-            Ok(router) => router,
+            Ok(warmed) => warmed,
             Err(join_err) => {
                 // The warm never fails boot; a panicked warm task means the
                 // router value is gone, so this cannot continue.
@@ -769,6 +769,7 @@ async fn serve_inner(
         config_path.clone(),
         bound,
         daemon_meta,
+        warm_report,
         #[cfg(test)]
         status_hooks,
     );
@@ -1308,6 +1309,14 @@ pub(super) const NON_OBSERVING_ROUTES: &[&str] = &[
 /// `serve_tests.rs` fails on a route registered below that appears in
 /// neither `ANTHROPIC_INFERENCE_PATHS` nor `NON_MITM_INFERENCE_ROUTES`
 /// -- so a new inference route cannot silently miss the const.
+#[cfg_attr(
+    test,
+    expect(
+        clippy::too_many_arguments,
+        reason = "the eighth parameter is the test-only status seam bundle, absent from release \
+                  builds"
+    )
+)]
 fn build_axum_router(
     state: Arc<AppState>,
     token_set: Arc<TokenSet>,
@@ -1315,6 +1324,7 @@ fn build_axum_router(
     config_path: Option<PathBuf>,
     bound: std::net::SocketAddr,
     daemon_meta: Arc<crate::handlers::status::DaemonMeta>,
+    warm_report: capability_rebuild::WarmReport,
     #[cfg(test)] status_hooks: crate::handlers::status::test_hooks::StatusTestHooks,
 ) -> AxumRouter {
     use axum::extract::DefaultBodyLimit;
@@ -1394,7 +1404,8 @@ fn build_axum_router(
     // and keeping it off that budget means an overload sheds status DATA while
     // the operator's incident window (the shell) still loads.
     let status_state =
-        crate::handlers::status::StatusState::from_app(&state, config_path, daemon_meta);
+        crate::handlers::status::StatusState::from_app(&state, config_path, daemon_meta)
+            .with_warm_report(warm_report);
     #[cfg(test)]
     let status_state = status_state.with_test_hooks(status_hooks);
     let status_allowlist = status_gate::StatusHostAllowlist::new(bound);

@@ -866,8 +866,10 @@ async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
         "the unknown-verdict and unknown-source rows both skip"
     );
     assert!(
-        events.iter().any(|e| e.level == tracing::Level::WARN),
-        "an unrecognized token emits a WARN",
+        events
+            .iter()
+            .any(|e| e.level == tracing::Level::DEBUG && e.field("reason").is_some()),
+        "an unrecognized token emits a DEBUG skip event",
     );
 }
 

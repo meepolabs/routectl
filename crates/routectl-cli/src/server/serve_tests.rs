@@ -828,6 +828,7 @@ async fn declared_auth_gated_routes_challenge_unauthenticated_requests() {
         None,
         bound,
         crate::handlers::status::DaemonMeta::for_test(),
+        super::capability_rebuild::WarmReport::not_run(),
         crate::handlers::status::test_hooks::StatusTestHooks::default(),
     );
 
@@ -896,6 +897,7 @@ async fn token_less_loopback_serves_auth_gated_routes_without_credentials() {
         None,
         bound,
         crate::handlers::status::DaemonMeta::for_test(),
+        super::capability_rebuild::WarmReport::not_run(),
         crate::handlers::status::test_hooks::StatusTestHooks::default(),
     );
 

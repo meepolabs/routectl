@@ -60,6 +60,7 @@ pub use daemon_meta::DaemonMeta;
 pub use page::page_router;
 
 use crate::server::AppState;
+use crate::server::capability_rebuild::WarmReport;
 use crate::server::status_gate::STATUS_MAX_INFLIGHT;
 use daemon_meta::DaemonMetaHandle;
 use router_view::StatusRouterHandle;
@@ -169,6 +170,8 @@ pub struct StatusState {
     /// The change gate on the shared fidelity INFO line, held for the daemon's
     /// lifetime so an unchanged snapshot is not re-emitted on every poll.
     fidelity_gate: Arc<field_verdict_log::FidelityGate>,
+    /// What the boot capability warm did; fixed at construction.
+    warm_report: WarmReport,
     /// Test-only observation and failure-injection seams for THIS daemon's status
     /// surface. Absent from every release build -- see [`test_hooks`].
     #[cfg(test)]
@@ -196,9 +199,24 @@ impl StatusState {
             builder_capacity: BuilderCapacity::default(),
             usage_health,
             fidelity_gate: Arc::default(),
+            warm_report: WarmReport::not_run(),
             #[cfg(test)]
             test_hooks: test_hooks::StatusTestHooks::default(),
         }
+    }
+
+    /// Record the boot capability warm's report. A post-construction setter
+    /// for the same reason as `with_test_hooks`: callers that never ran a
+    /// warm keep the `not_run` default without touching `from_app`.
+    #[must_use]
+    pub(crate) const fn with_warm_report(mut self, report: WarmReport) -> Self {
+        self.warm_report = report;
+        self
+    }
+
+    /// The boot capability warm's report.
+    pub const fn warm_report(&self) -> &WarmReport {
+        &self.warm_report
     }
 
     /// Install this daemon's test-only status seams.
@@ -505,6 +523,28 @@ mod tests {
         let router = Router::new(Arc::new(Config::default()));
         let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()))
+    }
+
+    #[test]
+    fn warm_report_defaults_to_not_run_and_keeps_the_installed_report() {
+        let installed = WarmReport {
+            outcome: crate::server::capability_rebuild::WarmOutcome::Replayed,
+            summary: Some(routectl_router::CapabilityRebuildSummary::default()),
+            loaded_rows: 7,
+        };
+
+        let default_state = test_state();
+        let warmed = StatusState::from_app(
+            &AppState::for_test(Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
+                Config::default(),
+            ))))),
+            None,
+            DaemonMeta::for_test(),
+        )
+        .with_warm_report(installed);
+
+        assert_eq!(*default_state.warm_report(), WarmReport::not_run());
+        assert_eq!(*warmed.warm_report(), installed);
     }
 
     /// The GET-only panel paths. `/status/query` is deliberately absent: it

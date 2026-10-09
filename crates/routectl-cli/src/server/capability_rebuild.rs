@@ -47,6 +47,72 @@ use super::ledger_reader::{
     epoch_ms_now,
 };
 
+/// Which exit path the boot capability warm took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmOutcome {
+    /// No warm ran: a status surface built outside the serve bootstrap.
+    NotRun,
+    /// A tombstone matching this boot's revision; its post-slice was replayed.
+    Replayed,
+    /// A stale-revision tombstone; the survivors were restated past a fresh
+    /// boundary that committed.
+    Restated,
+    /// A stale-revision tombstone whose restatement did not commit (slice
+    /// unreadable or batch rejected); the registry was left empty.
+    RestateFailed,
+    /// No ledger yet.
+    Cold,
+    /// A readable ledger carrying no tombstone.
+    NoTombstone,
+    /// The ledger could not be read; carries the path-free failure class.
+    Unreadable(&'static str),
+}
+
+impl WarmOutcome {
+    /// The stable outcome token. An `Unreadable` outcome's failure class is
+    /// carried separately by its payload.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRun => "not_run",
+            Self::Replayed => "replayed",
+            Self::Restated => "restated",
+            Self::RestateFailed => "restate_failed",
+            Self::Cold => "cold",
+            Self::NoTombstone => "no_tombstone",
+            Self::Unreadable(_) => "unreadable",
+        }
+    }
+}
+
+/// What the boot capability warm did, captured once at bootstrap.
+///
+/// `summary` and `loaded_rows` are the values the warm's INFO rebuild line
+/// logs; `summary` is `None` on every path that replayed nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarmReport {
+    /// The exit path taken.
+    pub outcome: WarmOutcome,
+    /// The replay tally, when a replay ran.
+    pub summary: Option<CapabilityRebuildSummary>,
+    /// Post-boundary rows read from the ledger (capped at the replay row limit).
+    pub loaded_rows: usize,
+}
+
+impl WarmReport {
+    /// The report of a warm that never ran.
+    pub const fn not_run() -> Self {
+        Self::without_replay(WarmOutcome::NotRun)
+    }
+
+    const fn without_replay(outcome: WarmOutcome) -> Self {
+        Self {
+            outcome,
+            summary: None,
+            loaded_rows: 0,
+        }
+    }
+}
+
 /// One-shot warm of the router's learned-capability registry from the usage
 /// ledger at serve bootstrap.
 ///
@@ -57,7 +123,8 @@ use super::ledger_reader::{
 /// matching tombstone), restates the surviving verdicts past a fresh boundary
 /// (on a stale-revision tombstone, see `restate_survivors_past_new_boundary`),
 /// or logs the case and commits one fresh tombstone through `usage` (every
-/// fail-closed case). Never fails bootstrap.
+/// fail-closed case). Never fails bootstrap; the returned [`WarmReport`]
+/// records which of those paths ran.
 ///
 /// Unlike its sibling warms this one does NOT run its own migrating open:
 /// doing so would open a second read-write connection against the SAME file
@@ -74,7 +141,7 @@ pub(crate) fn warm_capability_registry_from_ledger(
     db_path: &Path,
     router: &Router,
     usage: &UsageHandle,
-) {
+) -> WarmReport {
     let catalog_version = router.catalog_version();
     let overlay_revision = router.overlay_revision();
 
@@ -82,7 +149,13 @@ pub(crate) fn warm_capability_registry_from_ledger(
         BoundaryOutcome::Replay(tombstone) => {
             let reader = LedgerCapabilityReader::new(db_path.to_path_buf(), tombstone);
             let summary = router.rebuild_learned_from_ledger(&reader);
-            emit_rebuild_log(&summary, reader.loaded_rows());
+            let loaded_rows = reader.loaded_rows();
+            emit_rebuild_log(&summary, loaded_rows);
+            WarmReport {
+                outcome: WarmOutcome::Replayed,
+                summary: Some(summary),
+                loaded_rows,
+            }
         }
         BoundaryOutcome::RevisionMismatch { stale_rowid } => {
             tracing::info!(
@@ -91,11 +164,21 @@ pub(crate) fn warm_capability_registry_from_ledger(
                 "capability tombstone revision differs from this boot; \
                  restating catalog-independent verdicts past a fresh tombstone"
             );
-            restate_survivors_past_new_boundary(db_path, router, usage, stale_rowid);
+            restate_survivors_past_new_boundary(db_path, router, usage, stale_rowid)
         }
         outcome => {
             log_fail_closed(&outcome, db_path, catalog_version, overlay_revision);
             commit_fresh_tombstone(usage, catalog_version, overlay_revision);
+            let warm = match outcome {
+                BoundaryOutcome::Unreadable(class) => WarmOutcome::Unreadable(class),
+                BoundaryOutcome::NoTombstone => WarmOutcome::NoTombstone,
+                // `Replay` and `RevisionMismatch` never reach here (the arms
+                // above take them), listed for exhaustiveness.
+                BoundaryOutcome::Cold
+                | BoundaryOutcome::Replay(_)
+                | BoundaryOutcome::RevisionMismatch { .. } => WarmOutcome::Cold,
+            };
+            WarmReport::without_replay(warm)
         }
     }
 }
@@ -154,7 +237,7 @@ fn restate_survivors_past_new_boundary(
     router: &Router,
     usage: &UsageHandle,
     stale_rowid: i64,
-) {
+) -> WarmReport {
     let catalog_version = router.catalog_version();
     let overlay_revision = router.overlay_revision();
     let boundary = ReplayTombstone::new(stale_rowid, catalog_version, overlay_revision);
@@ -170,7 +253,7 @@ fn restate_survivors_past_new_boundary(
                  committed, registry left empty and the stale tombstone kept so the next boot \
                  retries the restatement"
             );
-            return;
+            return WarmReport::without_replay(WarmOutcome::RestateFailed);
         }
     };
     // Read once and served to both replays, so the scratch replay that decides
@@ -205,16 +288,25 @@ fn restate_survivors_past_new_boundary(
                 restated_survivors = survivors.len(),
                 "committed fresh capability tombstone at boot with survivor restatements"
             );
-            emit_rebuild_log(&summary, reader.loaded_rows());
+            let loaded_rows = reader.loaded_rows();
+            emit_rebuild_log(&summary, loaded_rows);
+            WarmReport {
+                outcome: WarmOutcome::Restated,
+                summary: Some(summary),
+                loaded_rows,
+            }
         }
-        failure => tracing::error!(
-            catalog_version,
-            overlay_revision,
-            pending_survivors = survivors.len(),
-            reason = ?failure,
-            "capability boot boundary NOT committed; registry left empty and the stale \
-             tombstone kept so the next boot retries the restatement"
-        ),
+        failure => {
+            tracing::error!(
+                catalog_version,
+                overlay_revision,
+                pending_survivors = survivors.len(),
+                reason = ?failure,
+                "capability boot boundary NOT committed; registry left empty and the stale \
+                 tombstone kept so the next boot retries the restatement"
+            );
+            WarmReport::without_replay(WarmOutcome::RestateFailed)
+        }
     }
 }
 

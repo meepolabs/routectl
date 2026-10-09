@@ -43,12 +43,23 @@ fn warm_off_runtime(
     router: &Router,
     handle: &UsageHandle,
 ) -> Vec<routectl_testkit::CapturedEvent> {
+    warm_reporting_off_runtime(ledger, router, handle).1
+}
+
+/// [`warm_off_runtime`], also returning the warm's report.
+fn warm_reporting_off_runtime(
+    ledger: &Path,
+    router: &Router,
+    handle: &UsageHandle,
+) -> (WarmReport, Vec<routectl_testkit::CapturedEvent>) {
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                routectl_testkit::capture_events(|| {
-                    warm_capability_registry_from_ledger(ledger, router, handle);
-                })
+                let mut report = None;
+                let events = routectl_testkit::capture_events(|| {
+                    report = Some(warm_capability_registry_from_ledger(ledger, router, handle));
+                });
+                (report.expect("the warm returned"), events)
             })
             .join()
             .expect("warm thread")
@@ -976,4 +987,199 @@ async fn the_legacy_observation_purge_leaves_the_rebuilt_registry_unchanged() {
         after, before,
         "the purge leaves the rebuilt registry unchanged"
     );
+}
+
+/// Assert the report carries exactly the tally and row count the INFO rebuild
+/// line logged.
+fn assert_report_matches_rebuild_log(
+    report: &WarmReport,
+    events: &[routectl_testkit::CapturedEvent],
+) {
+    let info = events
+        .iter()
+        .find(|e| e.message.contains("warmed learned-capability registry"))
+        .expect("the INFO rebuild line fired");
+    let summary = report.summary.expect("a replay reports its summary");
+    let expected = [
+        ("replayed_verified", summary.replayed_verified),
+        ("replayed_negative", summary.replayed_negative),
+        ("replayed_cleared", summary.replayed_cleared),
+        ("cleared_noop", summary.cleared_noop),
+        ("replayed_probe", summary.replayed_probe),
+        ("skipped_unknown", summary.skipped_unknown),
+        ("skipped_revision", summary.skipped_revision),
+        ("skipped_vocab", summary.skipped_vocab),
+        ("skipped_lane", summary.skipped_lane),
+        ("skipped_owner", summary.skipped_owner),
+        ("loaded_rows", report.loaded_rows),
+    ];
+    for (field, value) in expected {
+        assert_eq!(
+            info.field(field),
+            Some(value.to_string().as_str()),
+            "report field {field} differs from the logged value"
+        );
+    }
+}
+
+#[tokio::test]
+async fn warm_report_on_a_matching_tombstone_is_replayed_with_the_logged_tally() {
+    // Arrange: a matching tombstone, one current-revision negative and one
+    // stale-revision straggler, so the tally carries a replay AND a skip.
+    let tmp = TempDir::new().expect("tempdir");
+    let router = default_router(&tmp).await;
+    let cat = i64::from(router.catalog_version());
+    let overlay = i64::try_from(router.overlay_revision()).unwrap();
+    let ledger = tmp.path().join("usage.db");
+    let db = open(&ledger).expect("open ledger");
+    seed_tombstone(db.conn(), 100, cat, overlay);
+    for (ts, stamped) in [(200, cat), (300, cat + 1)] {
+        seed_event(
+            db.conn(),
+            ts,
+            "gpt-nick#upstream",
+            "web_search",
+            "broken",
+            "f1",
+            "live",
+            "self-identifying",
+            stamped,
+            overlay,
+        );
+    }
+    drop(db);
+    let (handle, writer) = writer_at(&tmp.path().join("scratch.db"));
+
+    // Act
+    let (report, events) = warm_reporting_off_runtime(&ledger, &router, &handle);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(report.outcome, WarmOutcome::Replayed);
+    assert_eq!(report.outcome.as_str(), "replayed");
+    assert_eq!(report.loaded_rows, 2);
+    let summary = report.summary.expect("summary");
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(summary.skipped_revision, 1);
+    assert_report_matches_rebuild_log(&report, &events);
+}
+
+#[tokio::test]
+async fn warm_report_on_a_committed_restatement_is_restated_with_the_logged_tally() {
+    // Arrange
+    let tmp = TempDir::new().expect("tempdir");
+    let router = bumped_router(&tmp).await;
+    let ledger = tmp.path().join("usage.db");
+    seed_stale_session(&ledger, i64::from(router.catalog_version()));
+    let (handle, writer) = writer_at(&ledger);
+
+    // Act
+    let (report, events) = warm_reporting_off_runtime(&ledger, &router, &handle);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(report.outcome, WarmOutcome::Restated);
+    assert_eq!(report.outcome.as_str(), "restated");
+    assert_eq!(report.loaded_rows, 2);
+    assert_eq!(report.summary.expect("summary").replayed_negative, 1);
+    assert_report_matches_rebuild_log(&report, &events);
+}
+
+#[tokio::test]
+async fn warm_report_is_restate_failed_when_the_boundary_batch_is_rejected() {
+    // Arrange: a trigger rejects the restatement row inside the batch.
+    let tmp = TempDir::new().expect("tempdir");
+    let router = bumped_router(&tmp).await;
+    let ledger = tmp.path().join("usage.db");
+    seed_stale_session(&ledger, i64::from(router.catalog_version()));
+    open(&ledger)
+        .expect("open ledger")
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER reject_all BEFORE INSERT ON capability_events \
+             BEGIN SELECT RAISE(ABORT, 'forced row failure'); END",
+        )
+        .expect("install trigger");
+    let (handle, writer) = writer_at(&ledger);
+
+    // Act
+    let (report, _) = warm_reporting_off_runtime(&ledger, &router, &handle);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(
+        report,
+        WarmReport::without_replay(WarmOutcome::RestateFailed)
+    );
+    assert_eq!(report.outcome.as_str(), "restate_failed");
+}
+
+#[tokio::test]
+async fn warm_report_is_restate_failed_when_the_stale_slice_is_unreadable() {
+    // Arrange
+    let tmp = TempDir::new().expect("tempdir");
+    let router = bumped_router(&tmp).await;
+    let ledger = tmp.path().join("usage.db");
+    seed_stale_session(&ledger, i64::from(router.catalog_version()));
+    poison_slice(&ledger);
+    let (handle, writer) = writer_at(&ledger);
+
+    // Act
+    let (report, _) = warm_reporting_off_runtime(&ledger, &router, &handle);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(
+        report,
+        WarmReport::without_replay(WarmOutcome::RestateFailed)
+    );
+}
+
+/// The fail-closed paths replay nothing, so each reports its outcome with no
+/// summary and zero loaded rows.
+#[tokio::test]
+async fn warm_report_names_each_fail_closed_outcome() {
+    enum Ledger {
+        Absent,
+        WithoutTombstone,
+        Junk,
+    }
+    let cases = [
+        ("cold", Ledger::Absent, WarmOutcome::Cold),
+        (
+            "no_tombstone",
+            Ledger::WithoutTombstone,
+            WarmOutcome::NoTombstone,
+        ),
+        (
+            "unreadable",
+            Ledger::Junk,
+            WarmOutcome::Unreadable("pragma"),
+        ),
+    ];
+    for (token, shape, expected) in cases {
+        // Arrange
+        let tmp = TempDir::new().expect("tempdir");
+        let router = default_router(&tmp).await;
+        let ledger = tmp.path().join("usage.db");
+        match shape {
+            Ledger::Absent => {}
+            Ledger::WithoutTombstone => drop(open(&ledger).expect("migrated empty ledger")),
+            Ledger::Junk => std::fs::write(&ledger, b"not a sqlite database").expect("junk"),
+        }
+        let (handle, writer) = writer_at(&tmp.path().join("scratch.db"));
+
+        // Act
+        let (report, _) = warm_reporting_off_runtime(&ledger, &router, &handle);
+        drop(handle);
+        writer.shutdown();
+
+        // Assert
+        assert_eq!(report, WarmReport::without_replay(expected), "case {token}");
+        assert_eq!(report.outcome.as_str(), token, "case {token}");
+    }
 }
