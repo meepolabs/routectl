@@ -80,14 +80,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use serde_json::json;
 
 use crate::server::is_loopback;
+use crate::server::request_id::RequestId;
 
 /// Ceiling on concurrent in-flight `/status*` requests across the WHOLE
 /// subtree. The unit is ADMITTED HTTP REQUESTS, and it is equally the ceiling
@@ -386,10 +387,15 @@ pub async fn host_guard(
     };
     let host_403_total = HOST_403_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if should_log_shed(host_403_total) {
+        let request_id = req
+            .extensions()
+            .get::<RequestId>()
+            .map(|r| tracing::field::display(r.0.as_str()));
         tracing::warn!(
             target: SHED_TARGET,
             host_403_total,
             claim_site = claim_site.as_str(),
+            request_id,
             "status surface rejected a request with a disallowed authority claim",
         );
     }
@@ -470,12 +476,19 @@ const fn should_log_shed(count: u64) -> bool {
 /// SAMPLED -- 1st shed + every Nth -- at warn, since a saturated status
 /// surface is genuine degradation. Only the running total is logged, never
 /// the error or any request detail.
-pub async fn handle_status_overload(_err: tower::BoxError) -> Response {
+pub async fn handle_status_overload(
+    request_id: Option<Extension<RequestId>>,
+    _err: tower::BoxError,
+) -> Response {
     let shed_total = STATUS_SHED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if should_log_shed(shed_total) {
+        let request_id = request_id
+            .as_ref()
+            .map(|Extension(r)| tracing::field::display(r.0.as_str()));
         tracing::warn!(
             target: SHED_TARGET,
             shed_total,
+            request_id,
             "status surface overloaded; shed a request",
         );
     }
@@ -1595,7 +1608,8 @@ mod tests {
         let ((), lines) = capture_lines(async {
             for _ in 0..fired {
                 let err: tower::BoxError = secret.into();
-                let resp = handle_status_overload(err).await;
+                let request_id = Extension(RequestId("rid-shed".to_owned()));
+                let resp = handle_status_overload(Some(request_id), err).await;
                 assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
             }
         })
@@ -1617,6 +1631,10 @@ mod tests {
             assert!(
                 line.contains("status surface overloaded"),
                 "unexpected shed line: {line}"
+            );
+            assert!(
+                line.contains("request_id=rid-shed"),
+                "shed log lost its request_id: {line}"
             );
         }
     }
@@ -1968,6 +1986,7 @@ mod tests {
                     .method("GET")
                     .uri("/status")
                     .header(header::HOST, secret_host)
+                    .extension(RequestId("rid-host".to_owned()))
                     .body(Body::empty())
                     .unwrap();
                 let resp = app.clone().oneshot(req).await.unwrap();
@@ -1995,6 +2014,10 @@ mod tests {
             assert!(
                 line.contains("disallowed authority claim"),
                 "unexpected host-403 line: {line}"
+            );
+            assert!(
+                line.contains("request_id=rid-host"),
+                "host-403 log lost its request_id: {line}"
             );
         }
     }

@@ -11,10 +11,11 @@
 //!      tracing's parent-child propagation. Operators can grep
 //!      `request_id=<id>` to follow one request across fallback hops,
 //!      retries, and provider calls. The span is INFO, except for the
-//!      read-only polling paths (see `is_polling_path`), whose span is
+//!      read-only polling paths (see `POLLING_PATHS`), whose span is
 //!      DEBUG so the span-close access line stays out of the default
 //!      INFO log; events inside such a request then carry no
-//!      `request_id` field at INFO.
+//!      `request_id` span field at INFO (rejection WARNs add it
+//!      explicitly).
 //!   2. Stashed on `req.extensions` as a `RequestId` so handlers /
 //!      provider impls that need to thread it into upstream-bound
 //!      headers can pull it back out.
@@ -62,10 +63,22 @@ fn is_safe_request_id(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b':')
 }
 
-/// Read-only polling endpoints: `/health`, `/status`, and everything
-/// under `/status/`. Matched on the raw path, so `/statusx` is not one.
+/// The read-only polling routes, matched exactly: an undeclared path under
+/// `/status/` is a 404 probe, not a poll, and keeps its INFO access line.
+/// `polling_paths_match_the_declared_status_routes` welds this list to the
+/// router's declared route inventory.
+const POLLING_PATHS: &[&str] = &[
+    "/health",
+    "/status",
+    "/status/usage",
+    "/status/health",
+    "/status/config",
+    "/status/doctor",
+    "/status/query",
+];
+
 fn is_polling_path(path: &str) -> bool {
-    path == "/health" || path == "/status" || path.starts_with("/status/")
+    POLLING_PATHS.contains(&path)
 }
 
 pub async fn middleware(mut req: Request, next: Next) -> Response {
@@ -125,7 +138,8 @@ pub async fn middleware(mut req: Request, next: Next) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_polling_path, is_safe_request_id};
+    use super::{POLLING_PATHS, is_polling_path, is_safe_request_id};
+    use crate::server::serve::{AUTH_GATED_ROUTES, PUBLIC_ROUTES};
 
     #[test]
     fn classifies_read_only_polling_paths() {
@@ -133,6 +147,9 @@ mod tests {
             ("/status", true),
             ("/status/doctor", true),
             ("/health", true),
+            ("/status/nonexistent", false),
+            ("/status/../x", false),
+            ("/status/", false),
             ("/statusx", false),
             ("/v1/messages", false),
             ("/", false),
@@ -140,6 +157,24 @@ mod tests {
         for (path, expected) in cases {
             assert_eq!(is_polling_path(path), expected, "path {path:?}");
         }
+    }
+
+    /// The polling list is exactly `/health` plus every declared `/status*`
+    /// route, so a status route added to the router without being named here
+    /// (or a stale entry left behind) fails.
+    #[test]
+    fn polling_paths_match_the_declared_status_routes() {
+        let mut declared: Vec<&str> = PUBLIC_ROUTES
+            .iter()
+            .chain(AUTH_GATED_ROUTES.iter())
+            .copied()
+            .filter(|p| *p == "/health" || *p == "/status" || p.starts_with("/status/"))
+            .collect();
+        declared.sort_unstable();
+        let mut polling = POLLING_PATHS.to_vec();
+        polling.sort_unstable();
+
+        assert_eq!(polling, declared);
     }
 
     #[test]

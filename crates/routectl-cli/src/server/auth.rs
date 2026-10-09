@@ -21,6 +21,7 @@ use serde_json::json;
 use subtle::ConstantTimeEq;
 
 use crate::ingress::ErrorEnvelopeShape;
+use crate::server::request_id::RequestId;
 
 /// Set of valid tokens. `None` (or empty) means "no auth required".
 ///
@@ -140,8 +141,15 @@ pub async fn auth_layer(
         let path = req.uri().path();
         let has_x_api_key = req.headers().contains_key("x-api-key");
         let has_bearer = has_bearer_header(req.headers());
+        // Explicit, not inherited: a polling path's request span is DEBUG,
+        // so at INFO this WARN would otherwise carry no correlation id.
+        let request_id = req
+            .extensions()
+            .get::<RequestId>()
+            .map(|r| tracing::field::display(r.0.as_str()));
         tracing::warn!(
             route = %path,
+            request_id,
             has_x_api_key,
             has_bearer,
             "listener auth rejected",

@@ -2363,17 +2363,41 @@ async fn a_reload_abandoned_at_shutdown_is_not_a_failure() {
 }
 
 /// A panic inside the blocking loader rejects the reload as
-/// `loader_panicked`.
+/// `loader_panicked`, and its WARN names the join-error kind without quoting
+/// the panic payload.
 #[tokio::test]
 async fn a_panicking_loader_rejects_the_reload_as_loader_panicked() {
+    // Arrange
     let joined = tokio::task::spawn_blocking(|| -> Result<LoadedConfig, ReloadFailure> {
-        panic!("loader panic for the join-error path")
+        panic!("loader panic carrying PANIC-PAYLOAD-SECRET")
     })
     .await;
 
-    let verdict = loader_verdict(joined);
+    // Act
+    let mut verdict = None;
+    let events = routectl_testkit::capture_events(|| {
+        verdict = Some(loader_verdict(joined));
+    });
 
-    assert_eq!(verdict.err(), Some(ReloadFailure::LoaderPanicked));
+    // Assert
+    assert_eq!(
+        verdict.expect("closure ran").err(),
+        Some(ReloadFailure::LoaderPanicked)
+    );
+    let warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN)
+        .collect();
+    assert_eq!(warns.len(), 1, "events: {events:?}");
+    let blob = format!("{} {:?}", warns[0].message, warns[0].fields);
+    assert!(blob.contains("is_panic"), "warn: {blob}");
+    for e in &events {
+        let blob = format!("{} {:?}", e.message, e.fields);
+        assert!(
+            !blob.contains("PANIC-PAYLOAD-SECRET"),
+            "loader-panic WARN leaked the panic payload: {blob}"
+        );
+    }
 }
 
 /// The coordinator records a rejected reload's class on the daemon meta, and

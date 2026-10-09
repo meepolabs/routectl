@@ -1,6 +1,7 @@
 //! Access-line level of the per-request span, driven through the
 //! production sink: read-only polling paths close their span at DEBUG,
-//! inference paths at INFO.
+//! inference paths at INFO, and a rejected poll's WARN still carries its
+//! `request_id`.
 //!
 //! Its own integration binary so the request-span callsites are first
 //! registered under the subscribers these cases install.
@@ -13,6 +14,7 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::routing::{get, post};
 use routectl_cli::log_sink::{self, Clock};
+use routectl_cli::server::auth::{TokenSet, auth_layer};
 use routectl_cli::server::request_id;
 use tower::ServiceExt;
 use tracing_subscriber::EnvFilter;
@@ -44,17 +46,36 @@ fn app() -> Router {
         .layer(axum::middleware::from_fn(request_id::middleware))
 }
 
-/// Send one request through the request-id middleware under the
-/// production subscriber at `directive` and return what the sink wrote.
-fn access_log(directive: &str, method: &str, path: &str) -> String {
-    let buffer = Buffer::default();
+/// `/status` behind the listener auth layer, under the request-id
+/// middleware as production stacks them (request id outermost).
+fn authed_status_app() -> Router {
+    Router::new()
+        .route("/status", get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(TokenSet::new(vec!["listener-token".to_owned()])),
+            auth_layer,
+        ))
+        .layer(axum::middleware::from_fn(request_id::middleware))
+}
+
+fn production_subscriber(
+    directive: &str,
+    buffer: &Buffer,
+) -> Box<dyn tracing::Subscriber + Send + Sync> {
     let sink = buffer.clone();
-    let subscriber = log_sink::subscriber(
+    log_sink::subscriber(
         EnvFilter::new(directive),
         move || sink.clone(),
         false,
         Clock::Off,
-    );
+    )
+}
+
+/// Send one request through the request-id middleware under the
+/// production subscriber at `directive` and return what the sink wrote.
+fn access_log(directive: &str, method: &str, path: &str) -> String {
+    let buffer = Buffer::default();
+    let subscriber = production_subscriber(directive, &buffer);
     let request = Request::builder()
         .method(method)
         .uri(path)
@@ -112,4 +133,44 @@ fn status_poll_access_line_appears_at_debug() {
     let lines = span_close_lines(&out, "/status");
     assert_eq!(lines.len(), 1, "{out:?}");
     assert!(lines[0].contains("DEBUG "), "{lines:?}");
+}
+
+#[test]
+fn rejected_status_poll_warn_carries_the_echoed_request_id_at_info() {
+    // Arrange
+    let buffer = Buffer::default();
+    let subscriber = production_subscriber("info", &buffer);
+    let request = Request::builder()
+        .method("GET")
+        .uri("/status")
+        .body(Body::empty())
+        .expect("request");
+
+    // Act
+    let response = tracing::subscriber::with_default(subscriber, || {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(authed_status_app().oneshot(request))
+            .expect("infallible router")
+    });
+
+    // Assert
+    assert_eq!(response.status(), 401);
+    let echoed = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("x-request-id echoed")
+        .to_owned();
+    let out = buffer.text();
+    let warns: Vec<&str> = out
+        .lines()
+        .filter(|line| line.contains(" WARN ") && line.contains("listener auth rejected"))
+        .collect();
+    assert_eq!(warns.len(), 1, "{out:?}");
+    assert!(
+        warns[0].contains(&format!("request_id={echoed}")),
+        "{warns:?}"
+    );
 }

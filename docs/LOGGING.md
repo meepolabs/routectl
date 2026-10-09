@@ -125,12 +125,17 @@ resolution, fallback hops, retry attempts, upstream calls, response
 shape, errors.
 
 **Polling paths are the exception.** The request span of the read-only
-polling endpoints (`/health`, `/status`, and everything under `/status/`)
-is a DEBUG span, so at the default `info` level it is disabled: no
-span-close access line is written, and an event emitted while serving such
-a request (the field-verdict snapshot INFO included) carries NO `request_id`
-field. The `x-request-id` response header is
-still echoed. To correlate a status request's lines by id, enable the span:
+polling endpoints (`/health`, `/status`, and the declared `/status/*`
+routes: `usage`, `health`, `config`, `doctor`, `query`) is a DEBUG span, so
+at the default `info` level it is disabled: no span-close access line is
+written, and an event emitted while serving such a request (the
+field-verdict snapshot INFO included) carries NO `request_id` field. Any
+other path under `/status/` is not a poll and keeps its INFO access line.
+Rejections still carry `request_id` at `info`: the `listener auth
+rejected` WARN and the sampled status-gate WARNs (disallowed authority
+claim, overload shed) add it as an explicit field. The `x-request-id`
+response header is still echoed. To correlate a status request's lines by
+id, enable the span:
 
 ```bash
 ROUTECTL_LOG=info,routectl_cli::server::request_id=debug ./routectl serve
@@ -2032,5 +2037,5 @@ translation counters ride the DEBUG metrics snapshot on target
 | Feature-naming rejection with no matching template (`feature_naming_unmatched`) | `rc_feature_naming_unmatched_total` on the metrics snapshot. |
 | Per-row capability warm-rebuild skips (`rebuild_skip`) | The `skipped_*` tallies on the INFO `warmed learned-capability registry from usage ledger` line; `routectl_router::capability_rebuild=debug` for the per-row reasons. |
 | K-estimator and calibration warm row-cap notes | `loaded_rows` / `rows_loaded` equal to `row_cap` on their INFO warm lines. |
-| Read-only polling access lines (`/health`, `/status`, `/status/*`) | `routectl_cli::server::request_id=debug`. Unchanged snapshots from those polls are folded by the field-verdict gate (on change plus an hourly heartbeat). |
+| Read-only polling access lines (`/health`, `/status`, the declared `/status/*` routes) | `routectl_cli::server::request_id=debug`. Unchanged snapshots from those polls are folded by the field-verdict gate (on change plus an hourly heartbeat). |
 | Boot and shutdown housekeeping: `watch target canonicalize failed (file may not exist yet) ...`, `config reload abandoned at shutdown ...`, the DST spring-forward note in `routectl usage` | `routectl_cli=debug`. The shutdown race is still reported once by `shutdown during a capability boundary write` when a boundary was in flight. |

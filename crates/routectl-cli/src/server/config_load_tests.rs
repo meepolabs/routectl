@@ -840,3 +840,42 @@ fn a_previous_version_file_with_a_retired_key_points_at_config_migrate() {
     assert!(err.contains("predates"), "err: {err}");
     assert!(!err.contains("was retired"), "err: {err}");
 }
+
+/// Cold start and hot reload share one loader, so a corrupt overlay fails both
+/// at the SAME layer: the reload records `OverlayLoadFailed` and the cold-start
+/// error is the overlay loader's own message, not a config one.
+#[test]
+#[serial_test::serial]
+fn cold_start_and_reload_classify_a_corrupt_overlay_identically() {
+    // Arrange: a valid config beside an unparseable overlay.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 4000\n"
+        ),
+    )
+    .expect("write config.toml");
+    let overlay_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&overlay_dir).expect("create overlay dir");
+    std::fs::write(overlay_dir.join("catalog_overlay.json"), b"not json {{{")
+        .expect("write overlay");
+
+    // Act
+    let cold = load_effective_config(&cfg_path).err();
+    let shared = load_classified(&cfg_path).err();
+    let reload = read_parse_validate_config(&cfg_path).err();
+
+    // Assert
+    let shared = shared.expect("a corrupt overlay must fail the shared loader");
+    assert_eq!(shared.class, ReloadFailure::OverlayLoadFailed);
+    assert_eq!(reload, Some(ReloadFailure::OverlayLoadFailed));
+    let cold = cold.expect("a corrupt overlay must fail cold start");
+    assert_eq!(cold, shared.message);
+    assert!(
+        cold.starts_with("catalog overlay load error"),
+        "cold: {cold}"
+    );
+}

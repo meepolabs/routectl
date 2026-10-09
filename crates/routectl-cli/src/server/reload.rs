@@ -776,8 +776,11 @@ fn loader_verdict(
     joined: Result<Result<LoadedConfig, ReloadFailure>, tokio::task::JoinError>,
 ) -> Result<LoadedConfig, ReloadFailure> {
     joined.unwrap_or_else(|join_err| {
+        // The join error's Display carries the panic payload, which can quote
+        // whatever the loader was holding; log only its kind.
         tracing::warn!(
-            error = %join_err,
+            is_panic = join_err.is_panic(),
+            is_cancelled = join_err.is_cancelled(),
             "config reload failed: loader task panicked; keeping previous config",
         );
         Err(ReloadFailure::LoaderPanicked)
