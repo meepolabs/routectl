@@ -23,7 +23,8 @@ list with more narrative.
 - **A Bedrock rejection that names its beta flags is repaired once per lane.** When AWS answers a client beta with a `ValidationException` naming the flags it rejects, routectl retries the request once without exactly those flags, on both carriers and for streaming, non-streaming, and token-count calls. A successful inference retry teaches the lane those flags as learned beta rejections (see Changed), so later requests on the lane withhold them without another 400; a token-count retry teaches nothing. Operator-pinned flags are never stripped or remembered, and no retry is made when the request's own features would re-add a named flag.
 
 - **The envelope-field pre-flight surface is now readable at INFO** -- a
-  status or doctor poll emits one structured line carrying what an
+  status or doctor poll emits one structured line, when its content has
+  changed since the last one or an hour has passed, carrying what an
   operator needs to explain, audit, or distrust every resident wire-shape
   verdict: the capability key and target it applies to, its transform
   class and whether that class rewrites a cache prefix, where the evidence
@@ -54,8 +55,10 @@ list with more narrative.
   upstream text. Reading it mutates nothing: no lane activates, no cadence
   advances, no re-verification slot is claimed, so polling a dashboard
   cannot re-verify verdicts on its refresh interval or consume the slots
-  real traffic needs. One line per request, so the combined `/status`
-  endpoint does not double-report.
+  real traffic needs. At most one line per request, so the combined
+  `/status` endpoint does not double-report, and an unchanged snapshot
+  stays silent between hourly repeats so a polling dashboard does not
+  grow the log.
 
 - **A newly confirmed wire-shape repair now takes effect without a
   restart** -- a learned envelope-field verdict becomes eligible to rewrite
@@ -394,7 +397,7 @@ list with more narrative.
 
 - **Bedrock body fields pass through.** Every body field reaches Bedrock on Invoke and in the Converse `additionalModelRequestFields` bag, except `mcp_servers` and a `tool_choice` left with no non-empty `tools`, which are always dropped. The Bedrock beta allowlist is gone with it: client betas reach Invoke and Converse verbatim apart from the flags the router withholds from the lane (its shipped seed plus learned rejections), and the operator floor (provider `anthropic_beta` and `header_extras`-pinned betas) is never withheld; `[capability.overrides]` on `beta:<flag>` pins either direction.
 
-- **The legacy capability-list startup WARN and doctor nudge are removed.** No version 5 config can carry the lists they pointed at, so the `legacy_deprecation` startup event and the doctor `capability` section's `config migrate` nudge are gone. The doctor JSON schema is unchanged at 14.
+- **The legacy capability-list startup WARN and doctor nudge are removed.** No version 5 config can carry the lists they pointed at, so the `legacy_deprecation` startup event and the doctor `capability` section's `config migrate` nudge are gone. The doctor JSON schema does not change for this removal.
 
 - **Internal:** the library surface follows the retired keys. The routectl-router API drops `OverrideProvenance`, `BedrockGlobalConfig` and `Config.bedrock`, `ModelEntry::with_unsupported_features`, `normalize_capability_overrides`, `validate_bedrock_global_config` and `BuildOptions::with_bedrock_allowed_betas` / `with_bedrock_allowed_body_fields`; `OverrideRegistry::resolve` now returns `Option<OverrideVerdict>`. The routectl-providers API drops `BedrockConfig.allowed_betas` / `allowed_body_fields` and `AnthropicApiConfig.allowed_betas`. `migrate_v4_to_v5`, `PresentAllowlist`, `preflight_retired_capability_keys` / `RetiredCapabilityKeysError`, `Refusal::CapabilityConflict` and `Refusal::OverrideShape` are added, and `Refusal::EgressAllowlist` now carries `allowlists`. A `/status/config` capability cell's `provenance` is always `override`. No change for `routectl` binary users.
 
@@ -509,8 +512,8 @@ list with more narrative.
   `/v1/messages` body carrying either param, so an `auth_kind =
   "oauth-bearer"` provider talking to `api.anthropic.com` (excluding the
   forwarded / pure-proxy leg) now strips both from the outbound body and
-  logs one structured `WARN` per affected request naming only the dropped
-  keys. `stop_sequences` is unaffected. The gate is the LANE, not the
+  logs one structured `DEBUG` line per affected request naming only the
+  dropped keys. `stop_sequences` is unaffected. The gate is the LANE, not the
   cloak setting -- **`cloak.mode = "never"` on such a provider still drops
   these params**, which is intended: the rejection is a property of the
   credential, not of the disguise, so honouring the knob would mean
@@ -544,6 +547,10 @@ list with more narrative.
   database keeps whatever rows the migration ladder already left in it
   (the historical v9 -> v10 step empties it on databases that old); the
   schema version is unchanged -- no behavior change.
+
+- **`/status/doctor` reports the daemon's own state instead of re-reading disk.** A poll no longer parses the config file, loads the catalog overlay, or replays the usage ledger: it renders the config and overlay generation the daemon accepted and its resident learned-capability registry. The capability matrix carries `source` (`resident`, or `ledger_replay` for the offline `routectl doctor`, which keeps its replay) and, on a resident panel, `warm` (`outcome`, `class`, `summary`) describing the boot warm; an empty registry after a failed boot warm shows the warm's failure code rather than an empty matrix. The version finding names the config the daemon accepted. Two new `config` findings: `reload`, the last rejected config or overlay reload (a path-free failure class and its age, cleared by the next successful reload), and one `catalog overlay` finding per overlay cell whose write multiplier is below the sentinel. Doctor report schema 14 -> 15.
+
+- **Routine operation no longer fills the log with WARN lines.** Log levels were reviewed across every crate; [docs/LOGGING.md](docs/LOGGING.md) now states the level policy, catalogs every remaining WARN and ERROR with the operator action it calls for, and lists what moved to DEBUG or to counters. The catalog overlay below-sentinel warning logs once at boot and once per reload that changes the overlay revision (it was every status poll). Capability rebuild skips log at DEBUG under one aggregated INFO tally. Access lines for `/health`, `/status` and `/status/*` log at DEBUG. Expected egress transforms log at DEBUG on every lane: sampling and thinking strips, fingerprint and billing withholds, `cache_control` drops on lanes with no breakpoint surface, reasoning skips, the beta retry, and the placeholder Bedrock `toolSpec`. Also at DEBUG: the would-trim shadow misfire, quota-placement fallbacks, feature-naming template misses, and the boot row-cap notes of the K-estimator and calibration warms. Relayed upstream rejections log at WARN instead of ERROR, and the Responses ingress `store=true ignored` notice logs once per process. A real-daemon test pins that polling `/status` and `/status/doctor` adds no WARN, ERROR, field-verdict, rebuild-skip or overlay-defect lines.
 
 ### Removed
 
@@ -627,7 +634,7 @@ list with more narrative.
 
 - **Mid-conversation `role: "system"` messages are no longer silently discarded on the Anthropic egress.** `role: "system"` inside `messages[]` is a supported Anthropic Messages API shape (position-gated: such a turn must precede an `assistant` turn or end the array; also model-gated), and a client can legitimately send one alongside a populated top-level `system`. The egress computed the wire `system` field as "canonical `system`, else lift the `Role::System` messages" -- an exclusive choice -- while the per-role message walk dropped those same turns on the premise the lift had consumed them. With both present, neither branch owned them: every mid-conversation system turn was deleted, with no log line. Observed on live traffic as 43 of 43 turns removed from one request, taking with them operator interjections, hook context, editor diagnostics, and subagent notifications. Those turns now ride the wire in place at their original index, preserving per-block `cache_control` and forward-compat block types, whenever a canonical top-level `system` is shipping. When no canonical `system` is present the legacy lift still runs and still consumes them, unchanged -- that path is what keeps a direct library caller without an ingress working, and its leading system message would be in an illegal wire position if forwarded. Nothing is capability-gated, probed, or configurable: a model that rejects the shape produces a 400 that surfaces unmodified, because the silent deletion WAS the 400-avoidance mechanism and avoiding the error is what destroyed the content.
 
-  The Claude Code billing/attribution strip now covers the forwarded path too, per block and across every carrier a block can hold text in (typed text, an unrecognized block type carrying a `text` field, a document source), using the same predicate the canonical `system` and the legacy lift already run -- forwarding verbatim would otherwise have opened a third way for the client fingerprint to reach a non-Anthropic host. A turn left with nothing after the strip is skipped, a turn left with only blank text is a local error naming its index, and the stripped-block count rides one contents-free WARN per request. On the OAuth non-Claude-Code lane the identity cloak also relocates forwarded system turns into its `<system-reminder>` block (and drops them under `strict_mode`), the same treatment it already gave the `system` field, so client system directives do not reach the upstream by the new carrier either.
+  The Claude Code billing/attribution strip now covers the forwarded path too, per block and across every carrier a block can hold text in (typed text, an unrecognized block type carrying a `text` field, a document source), using the same predicate the canonical `system` and the legacy lift already run -- forwarding verbatim would otherwise have opened a third way for the client fingerprint to reach a non-Anthropic host. A turn left with nothing after the strip is skipped, a turn left with only blank text is a local error naming its index, and the stripped-block count rides one contents-free DEBUG line per request. On the OAuth non-Claude-Code lane the identity cloak also relocates forwarded system turns into its `<system-reminder>` block (and drops them under `strict_mode`), the same treatment it already gave the `system` field, so client system directives do not reach the upstream by the new carrier either.
 
   Three adjacent gaps closed in the same pass, each of which would have made the fix silently incomplete: a system turn now ENDS a run of tool-result turns rather than being transparent inside one (folding across it would delete or reorder it); the unsigned-thinking whole-turn drop now refuses to remove an `assistant` turn that a FORWARDED system turn legally precedes (lanes that ship no system turn keep their previous drop behavior), since routectl minting a position 400 is the same class of defect; and the message walk carries an accounted-identity ledger -- every position it consumes is either emitted or charged to one named lossy term (the tool-run fold, the lift, the billing strip), and a shortfall fails the request instead of deleting content. One DEBUG line per request reports how many turns were forwarded, and a 4xx whose body carried them earns a dedicated WARN naming the count and the resolved mid-conversation-system beta decision on every auth lane.
 

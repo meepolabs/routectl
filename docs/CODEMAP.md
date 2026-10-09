@@ -669,8 +669,8 @@ license.
 - `src/anthropic_api/envelope_policy.rs` -- host-gated reasoning-envelope
   policy for the `redacted_thinking` egress: `EnvelopeUnwrapTally` owns the
   resolved terminal-host bool, `wire_data` (unwrap to the inner blob on the
-  genuine Anthropic host, verbatim everywhere else), and one aggregated WARN
-  per request carrying only a constant event name, the provider id, and a
+  genuine Anthropic host, verbatim everywhere else), and one aggregated DEBUG
+  line per request carrying only a constant event name, the provider id, and a
   count. Owned by `request::normalize` and threaded into every construction
   site of a `redacted_thinking` block (content parts, the
   `reasoning_details` replay channel, context-management reinjection)
@@ -4608,7 +4608,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   negative-then-cleared is deterministic): the source token is parsed once and
   threaded into the shared admission so probe and live rows run the SAME arms
   -- `verified` -> `observe_positive(source)` (requires a recognized evidence
-  class, else skip + WARN), `broken` -> `observe(tier, phase, source)`,
+  class, else skip + DEBUG), `broken` -> `observe(tier, phase, source)`,
   `suspect` -> `observe(tier, F3, source)` (requires phase `f3` AND a
   recognized evidence class -- the live path always mints suspect at F3 with a
   class, so both fail closed on mismatch), `cleared` -> `remove_keyed` (drops
@@ -4619,7 +4619,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `skipped_revision` (distinct from `skipped_unknown`, which counts an
   unrecognized TOKEN, so an absent verdict history is distinguishable from a
   fully evicted one), unrecognized verdict/source/tier/phase ->
-  skip + WARN, never panic. Each post-boundary row is first mapped to the
+  skip + DEBUG (the caller's aggregated INFO carries the tallies), never panic. Each post-boundary row is first mapped to the
   current vocabulary (`capability_vocab::map_to_current`, the row carrying
   `vocab_version` via `with_vocab_version`); an unmappable row bumps
   `skipped_vocab` and never reaches an arm; a row in any namespace whose lane
@@ -5877,7 +5877,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   capability-ledger read (the reader, clock map, and boundary classification
   live in `ledger_reader.rs`). `warm_capability_registry_from_ledger` (called
   from `serve` on the owned router before the `ArcSwap`, bootstrap-only --
-  never on hot-reload) classifies the boundary via
+  never on hot-reload) returns a `WarmReport { outcome: WarmOutcome, summary,
+  loaded_rows }` (`WarmOutcome::as_str` is the stable token: `not_run`,
+  `replayed`, `restated`, `restate_failed`, `cold`, `no_tombstone`,
+  `unreadable` carrying its path-free class) that `serve` hands to
+  `StatusState::with_warm_report` for the served doctor, and classifies the boundary via
   `ledger_reader::classify_boundary` and either replays the post-boundary
   slice through `Router::rebuild_learned_from_ledger` (matching-revision
   tombstone), restates survivors on a stale-revision tombstone, or fails
@@ -6445,7 +6449,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   carries ONLY read handles (a `StatusRouterHandle` read-only facade over the
   router `ArcSwap` -- see `router_view.rs` -- plus the `activation` `ArcSwap`
   + resolved `usage_db_path`/`config_path`, plus a `DaemonMetaHandle` read
-  facade -- see `daemon_meta.rs`) via `from_app`, so a status
+  facade -- see `daemon_meta.rs`) via `from_app`, plus the daemon-lifetime
+  `FidelityGate` and the boot `WarmReport` (`with_warm_report` at serve,
+  `warm_report()` read by the doctor panel; `not_run` otherwise), so a status
   handler is structurally incapable of mutation, of reaching a raw
   `Router`/`.config`/dispatch, or of touching the forwarding seam;
   `PanelObservability`/`PanelCounters` are the per-panel last-availability +
@@ -6680,7 +6686,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cannot be read as sufficient or short; a used budget without its cap says
   nothing). `budgets` is passed IN rather than read here, because the accounting
   read needs the ledger path and the counters facade and the caller already holds
-  both. ONE LINE PER REQUEST, not per panel build: the `/status` aggregate builds
+  both. AT MOST ONE LINE PER REQUEST, and only when due: the daemon-scoped
+  `FidelityGate` (held on `StatusState`) admits a line when its fingerprint --
+  every field except the `rc_probe_next_retry_ms` countdown -- differs from the
+  last admitted one, or `SNAPSHOT_HEARTBEAT` (1h) has passed since it, checked
+  and set under one lock; an unchanged snapshot stays silent across polls. Not
+  per panel build either: the `/status` aggregate builds
   both fidelity-carrying panels and shares ONE request-scoped CLAIM between them --
   each attempts it, the first to reach the logger wins. A claim rather than a
   pre-assigned emitter because each panel builds through `guard_panel`, which degrades
@@ -6719,7 +6730,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   could not be read (never zero, which would claim nothing was spent). A test pins
   that no real token collides with any of those literals. Both row kinds are also
   BOUNDED here, under one shared `MAX_RENDERED_ROWS` code constant: the row count
-  grows with what a deployment has learned while the line is emitted every poll, so
+  grows with what a deployment has learned while the line is re-emitted on every
+  change, so
   `Bounded { rows, total, omitted }` carries the real total and the dropped count
   alongside the rows -- a truncated line says how much it hides rather than
   presenting a subset as complete
