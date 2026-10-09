@@ -62,14 +62,14 @@ async fn spawn_server(target: &str, base_url: &str) -> String {
     let mut aliases = BTreeMap::new();
     aliases.insert(target.to_string(), AliasValue::Single(nickname));
 
-    let cfg = Arc::new(Config {
+    let cfg = common::isolate_usage_db(Arc::new(Config {
         server: Default::default(),
         providers,
         aliases,
         models,
         retry: Default::default(),
         ..Default::default()
-    });
+    }));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

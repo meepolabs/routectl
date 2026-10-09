@@ -280,6 +280,8 @@ fn alias_nickname(model_id: &str) -> String {
     )
 }
 
+mod common;
+
 #[path = "live_matrix/bedrock_converse.rs"]
 mod bedrock_converse;
 #[path = "live_matrix/bedrock_invoke.rs"]
