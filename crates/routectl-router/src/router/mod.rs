@@ -3245,3 +3245,7 @@ mod field_canary_settlement_tests;
 #[cfg(test)]
 #[path = "probe_pass_tests.rs"]
 mod probe_pass_tests;
+
+#[cfg(test)]
+#[path = "probe_seat_equivalence_tests.rs"]
+mod probe_seat_equivalence_tests;
