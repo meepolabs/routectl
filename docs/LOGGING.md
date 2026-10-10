@@ -352,10 +352,14 @@ the registry.
 ### Envelope-field repair WARN
 
 When an upstream rejects a request by naming a WIRE FIELD PATH the router
-has a grounded repair for, the router DROPS that field and re-dispatches
-the same target once (the reactive L0 field repair). Each such request
-emits ONE WARN PER REPAIR at resolution -- `"envelope_field_repaired"` --
-and none when no repair fired. It fires on all three dispatch walks
+has a grounded repair for, the router applies that row's transform --
+DROP the field, or REWRITE it to the one accepted value the rejection
+names as a replacement -- and re-dispatches the same target once (the
+reactive L0 field repair). A rewrite row whose rejection names no single
+accepted replacement, or names the value the request already carries,
+repairs nothing. Each such request emits ONE WARN PER REPAIR at
+resolution -- `"envelope_field_repaired"` -- and none when no repair
+fired. It fires on all three dispatch walks
 (`complete`, `stream` pre-content, and `count_tokens`), at request
 resolution rather than per attempt. A request whose walk never repairs
 twice (the common case) emits exactly one line, unchanged in shape. A
@@ -413,9 +417,10 @@ Read them as a pair -- a rising attempted count with a flat succeeded
 count means the dropped field was not what the upstream objected to.
 
 `rc_field_repair_lossy_total` is the subset of attempted repairs whose
-rejection refused a VALUE rather than the field. Those repairs never
-commit a verdict, so the same rejection is repaired again on every
-request that carries the value; a lossy count rising with the attempted
+rejection refused a VALUE rather than the field and whose row DROPS it
+(a rewrite row's refused-value repair commits like any other). Those
+lossy drops never commit a verdict, so the same rejection is repaired
+again on every request that carries the value; a lossy count rising with the attempted
 count and a flat learned count is that steady state, not a fault. The
 captured `anthropic-api` `thinking.display` enum rejection is one such
 case today.

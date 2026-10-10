@@ -20,9 +20,14 @@
 //! [`RejectionKind::UnsupportedField`] may justify a learned drop.
 //!
 //! For a row that rewrites rather than drops, the parser also reports the
-//! accepted value the envelope names: a quoted token equal to a member of the
-//! row's closed accepted set. Only exactly ONE named member fills it; none or
-//! several leave it empty, so a rewrite never picks between candidates.
+//! accepted value the envelope names. Candidates come ONLY from the template
+//! position a grounded arm knows to list replacements (the quoted list after
+//! `Input should be `, the quoted token after `Use `), never from a scan of the
+//! whole message: an envelope may also echo the value it refused, and that
+//! echo can be a member of the set. A candidate counts only when it equals a
+//! member of the row's closed accepted set, and only exactly ONE named member
+//! fills it; none or several leave it empty, so a rewrite never picks between
+//! candidates.
 
 use routectl_core::capability::SignalTier;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
@@ -40,13 +45,18 @@ const ANTHROPIC_INVALID_REQUEST: &str = "invalid_request_error";
 /// a Converse rejection may name a field relative to the request root.
 const CONVERSE_FIELD_BAG: &str = "additionalModelRequestFields";
 
-/// Location-prefix suffixes grounded on captured envelopes. A prefix followed
-/// by anything else is still a localization, but only an inferred one.
-const GROUNDED_LOCATION_SUFFIX_PREFIXES: [&str; 1] = ["Input should be "];
-const GROUNDED_LOCATION_SUFFIXES: [&str; 1] = [LOCATION_UNSUPPORTED_FIELD_REASON];
+/// The location-prefix reasons grounded on captured envelopes are this list
+/// lead-in and [`LOCATION_UNSUPPORTED_FIELD_REASON`]. A prefix followed by
+/// anything else is still a localization, but only an inferred one.
+const GROUNDED_VALUE_LIST_PREFIX: &str = "Input should be ";
 
 const QUOTED_NOT_SUPPORTED: &str = " is not supported";
+/// Ends on the opening quote of the replacement it names.
 const QUOTED_GROUNDED_CONTINUATION: &str = " for this model. Use \"";
+
+/// Separators between members of an `Input should be` list, longest first so
+/// `, or ` is not read as `, ` followed by prose.
+const LIST_SEPARATORS: [&str; 3] = [", or ", ", ", " or "];
 
 const OPENAI_UNSUPPORTED_PREFIX: &str = "Unsupported parameter: '";
 const OPENAI_UNSUPPORTED_SUFFIX: &str = "' is not supported with this model.";
@@ -96,35 +106,48 @@ pub(super) fn parse_rejection(
         row,
         tier: localized.tier,
         kind: localized.kind,
-        accepted: named_accepted(row, localized.evidence),
+        accepted: named_accepted(row, &localized.replacements),
     })
 }
 
-/// The one member of `row`'s closed accepted set that `evidence` names as a
-/// quoted token, or `None` for a row that does not rewrite, an envelope
-/// naming no member, and one naming several.
-fn named_accepted(row: &FieldRepairRow, evidence: &str) -> Option<&'static str> {
+/// The one member of `row`'s closed accepted set among `replacements`, or
+/// `None` for a row that does not rewrite, replacements naming no member, and
+/// replacements naming several.
+fn named_accepted(row: &FieldRepairRow, replacements: &[&str]) -> Option<&'static str> {
     let FieldTransform::Rewrite { accepted } = row.transform else {
         return None;
     };
-    let mut named = quoted_tokens(evidence)
-        .filter_map(|token| accepted.iter().copied().find(|member| *member == token));
+    let mut named = replacements
+        .iter()
+        .filter_map(|token| accepted.iter().copied().find(|member| member == token));
     let first = named.next()?;
     named.all(|other| other == first).then_some(first)
 }
 
-/// Every `'...'` or `"..."` span in `text`, in order. An unclosed quote ends
-/// the scan.
-fn quoted_tokens(text: &str) -> impl Iterator<Item = &str> {
+/// The leading run of quoted tokens in `text` joined by a list separator
+/// (`'a', 'b' or 'c'`). The run ends at the first byte that is neither a
+/// closed quote nor a separator followed by one, so trailing prose -- an echo
+/// of the refused input included -- never contributes.
+fn quoted_list(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
     let mut rest = text;
-    std::iter::from_fn(move || {
-        let open = rest.find(['\'', '"'])?;
-        let quote = &rest[open..=open];
-        let after = &rest[open + 1..];
-        let close = after.find(quote)?;
-        rest = &after[close + 1..];
-        Some(&after[..close])
-    })
+    while let Some((token, after)) = leading_quoted(rest) {
+        tokens.push(token);
+        match LIST_SEPARATORS
+            .iter()
+            .find_map(|separator| after.strip_prefix(separator))
+        {
+            Some(next) => rest = next,
+            None => break,
+        }
+    }
+    tokens
+}
+
+/// The `'...'` or `"..."` span `text` starts with, and the text after it.
+fn leading_quoted(text: &str) -> Option<(&str, &str)> {
+    let quote = text.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    text[1..].split_once(quote)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,18 +176,17 @@ struct LocalizedPath<'a> {
     ends_in_index: bool,
     tier: SignalTier,
     kind: RejectionKind,
-    /// The envelope text that may name accepted values: the reason after a
-    /// located path, or the whole message.
-    evidence: &'a str,
+    /// The tokens the envelope's template names as replacements.
+    replacements: Vec<&'a str>,
 }
 
 /// One arm's reading of an envelope: the raw path and what it says about it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Attribution<'a> {
     path: &'a str,
     tier: SignalTier,
     kind: RejectionKind,
-    evidence: &'a str,
+    replacements: Vec<&'a str>,
 }
 
 fn localize<'a>(
@@ -188,7 +210,7 @@ fn localize<'a>(
         ends_in_index: ends_in_index(attribution.path),
         tier: attribution.tier,
         kind: attribution.kind,
-        evidence: attribution.evidence,
+        replacements: attribution.replacements,
     })
 }
 
@@ -212,7 +234,10 @@ fn localize_message(message: &str) -> Option<Attribution<'_>> {
 fn quoted_not_supported(message: &str) -> Option<Attribution<'_>> {
     let (path, tail) = message.strip_prefix('"')?.split_once('"')?;
     let continuation = tail.strip_prefix(QUOTED_NOT_SUPPORTED)?;
-    let tier = if continuation.starts_with(QUOTED_GROUNDED_CONTINUATION) {
+    let replacement = continuation
+        .strip_prefix(QUOTED_GROUNDED_CONTINUATION)
+        .map(|after| after.split_once('"').map(|(token, _)| token));
+    let tier = if replacement.is_some() {
         SignalTier::SelfIdentifying
     } else {
         SignalTier::Inferred
@@ -221,17 +246,15 @@ fn quoted_not_supported(message: &str) -> Option<Attribution<'_>> {
         path,
         tier,
         kind: RejectionKind::UnsupportedField,
-        evidence: continuation,
+        replacements: replacement.flatten().into_iter().collect(),
     })
 }
 
 /// `<dotted.path>: <reason>`, the request-validation location prefix.
 fn location_prefix(message: &str) -> Option<Attribution<'_>> {
     let (path, reason) = message.split_once(": ")?;
-    let grounded = GROUNDED_LOCATION_SUFFIXES.contains(&reason)
-        || GROUNDED_LOCATION_SUFFIX_PREFIXES
-            .iter()
-            .any(|prefix| reason.starts_with(prefix));
+    let listed = reason.strip_prefix(GROUNDED_VALUE_LIST_PREFIX);
+    let grounded = listed.is_some() || reason == LOCATION_UNSUPPORTED_FIELD_REASON;
     let tier = if grounded {
         SignalTier::SelfIdentifying
     } else {
@@ -246,7 +269,7 @@ fn location_prefix(message: &str) -> Option<Attribution<'_>> {
         path,
         tier,
         kind,
-        evidence: reason,
+        replacements: listed.map(quoted_list).unwrap_or_default(),
     })
 }
 
@@ -273,7 +296,7 @@ fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
         path,
         tier: SignalTier::SelfIdentifying,
         kind,
-        evidence: message.unwrap_or(""),
+        replacements: Vec::new(),
     })
 }
 

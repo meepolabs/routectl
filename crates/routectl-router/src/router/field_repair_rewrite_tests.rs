@@ -23,16 +23,18 @@ fn rewrite_value(req: &ChatRequest) -> Option<String> {
 /// A refused-VALUE rejection on the rewrite row whose reason quotes `named`.
 fn rewrite_rejection(named: &[&str]) -> Error {
     let quoted: Vec<String> = named.iter().map(|value| format!("'{value}'")).collect();
+    rejection_saying(&format!(
+        "{}: Input should be {}",
+        super::TEST_REWRITE_PATH,
+        quoted.join(", "),
+    ))
+}
+
+/// An Anthropic invalid-request rejection carrying `message` verbatim.
+fn rejection_saying(message: &str) -> Error {
     let body = json!({
         "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "message": format!(
-                "{}: Input should be {}",
-                super::TEST_REWRITE_PATH,
-                quoted.join(", "),
-            ),
-        },
+        "error": {"type": "invalid_request_error", "message": message},
     });
     Error::upstream("field-mock", 400, body.to_string())
 }
@@ -47,6 +49,11 @@ fn unsupported_rejection() -> Error {
 enum RewriteAnswer {
     /// Name these values, then serve any accepted value.
     Name(&'static [&'static str]),
+    /// Refuse `refused` with `message`, then serve any other value.
+    Says {
+        refused: &'static str,
+        message: fn() -> String,
+    },
     /// Name the first accepted value, then answer the rewritten retry with a
     /// 503 so the walk falls back having repaired.
     RewriteThenWalk,
@@ -80,10 +87,15 @@ impl RewriteSeat {
 
     fn answer(&self, req: &ChatRequest) -> Result<()> {
         self.seen.lock().push(req.clone());
-        let refused = rewrite_value(req).as_deref() == Some(CLIENT_REWRITE_VALUE);
+        let refused_value = match self.answer {
+            RewriteAnswer::Says { refused, .. } => refused,
+            _ => CLIENT_REWRITE_VALUE,
+        };
+        let refused = rewrite_value(req).as_deref() == Some(refused_value);
         match self.answer {
             RewriteAnswer::Name(named) if refused => Err(rewrite_rejection(named)),
-            RewriteAnswer::Name(_) => Ok(()),
+            RewriteAnswer::Says { message, .. } if refused => Err(rejection_saying(&message())),
+            RewriteAnswer::Name(_) | RewriteAnswer::Says { .. } => Ok(()),
             RewriteAnswer::RewriteThenWalk if refused => {
                 Err(rewrite_rejection(&super::TEST_REWRITE_ACCEPTED[..1]))
             }
@@ -155,10 +167,15 @@ fn rewrite_chain(answers: &[RewriteAnswer]) -> (Router, Vec<Arc<RewriteSeat>>) {
 
 /// A request carrying only the rewrite field, holding the client's value.
 fn req_with_rewrite_field() -> ChatRequest {
+    req_with_rewrite_value(CLIENT_REWRITE_VALUE)
+}
+
+/// A request carrying only the rewrite field, holding `value`.
+fn req_with_rewrite_value(value: &str) -> ChatRequest {
     let mut req = req_on(ALIAS);
     req.reasoning = None;
     req.routectl_internal.anthropic_thinking_display = None;
-    req.chat_template_kwargs = Some(json!({ super::TEST_REWRITE_KWARG: CLIENT_REWRITE_VALUE }));
+    req.chat_template_kwargs = Some(json!({ super::TEST_REWRITE_KWARG: value }));
     req
 }
 
@@ -313,4 +330,124 @@ async fn a_rewrite_and_a_drop_share_the_per_request_ceiling() {
         1,
         "seat three: its repairable rejection finds the shared allowance spent",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Which quoted value a live rejection rewrites to
+// ---------------------------------------------------------------------------
+
+const ACCEPTED_A: &str = super::TEST_REWRITE_ACCEPTED[0];
+const ACCEPTED_B: &str = super::TEST_REWRITE_ACCEPTED[1];
+
+/// Lists only an outside value, then echoes the refused member.
+fn echoed_refused_member() -> String {
+    format!(
+        "{}: Input should be 'routectl-test-not-a-member'. Received input: '{ACCEPTED_A}'",
+        super::TEST_REWRITE_PATH,
+    )
+}
+
+/// Lists only the member the request already carries.
+fn listed_current_member() -> String {
+    format!(
+        "{}: Input should be '{ACCEPTED_A}'",
+        super::TEST_REWRITE_PATH
+    )
+}
+
+/// Names the replacement, then the refused member after it.
+fn replacement_then_refused() -> String {
+    format!(
+        "\"{}\" is not supported for this model. Use \"{ACCEPTED_B}\" instead of \"{ACCEPTED_A}\".",
+        super::TEST_REWRITE_PATH,
+    )
+}
+
+/// Lists one member among outside values.
+fn one_member_among_outsiders() -> String {
+    format!(
+        "{}: Input should be 'routectl-test-not-a-member' or '{ACCEPTED_B}'",
+        super::TEST_REWRITE_PATH,
+    )
+}
+
+/// Lists both members.
+fn both_members() -> String {
+    format!(
+        "{}: Input should be '{ACCEPTED_A}' or '{ACCEPTED_B}'",
+        super::TEST_REWRITE_PATH,
+    )
+}
+
+/// Name, value sent, the seat's rejection message, and the value the retry
+/// carries (`None`: no retry).
+type LiveRewriteCase = (
+    &'static str,
+    &'static str,
+    fn() -> String,
+    Option<&'static str>,
+);
+
+/// The value each rejection rewrites to, if any, when the client sent
+/// `sent`: never the refused value itself, whether echoed or listed.
+///
+/// Mutation checks: read candidates from every quoted token in the message
+/// -> red (the mixed row rewrites to the first quoted member); drop the
+/// equal-value refusal in `rewrite_in` -> red (the listed-current row
+/// repairs).
+#[tokio::test]
+async fn a_live_rejection_rewrites_only_to_a_replacement_it_names() {
+    let cases: [LiveRewriteCase; 5] = [
+        (
+            "an echoed current member",
+            ACCEPTED_A,
+            echoed_refused_member,
+            None,
+        ),
+        (
+            "a list naming only the current member",
+            ACCEPTED_A,
+            listed_current_member,
+            None,
+        ),
+        (
+            "a replacement clause before the refused member",
+            ACCEPTED_A,
+            replacement_then_refused,
+            Some(ACCEPTED_B),
+        ),
+        (
+            "a list naming one member",
+            CLIENT_REWRITE_VALUE,
+            one_member_among_outsiders,
+            Some(ACCEPTED_B),
+        ),
+        (
+            "a list naming two members",
+            CLIENT_REWRITE_VALUE,
+            both_members,
+            None,
+        ),
+    ];
+
+    for (name, sent, message, rewritten) in cases {
+        let (router, seats) = rewrite_chain(&[RewriteAnswer::Says {
+            refused: sent,
+            message,
+        }]);
+
+        let dispatched = router
+            .complete_with_options(req_with_rewrite_value(sent), RouterOptions::new())
+            .await;
+
+        let mut expected = vec![Some(sent.to_string())];
+        expected.extend(rewritten.map(|value| Some(value.to_string())));
+        assert_eq!(seats[0].values(), expected, "{name}");
+        assert_eq!(dispatched.result.is_ok(), rewritten.is_some(), "{name}");
+        assert_eq!(
+            router.field_repair_counters().repair_attempted,
+            u64::from(rewritten.is_some()),
+            "{name}",
+        );
+    }
 }

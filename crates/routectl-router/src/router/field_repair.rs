@@ -329,13 +329,23 @@ impl FieldSurface {
         }
     }
 
+    /// True when `req` already carries exactly `value` on this surface.
+    fn carries(&self, req: &ChatRequest, value: &str) -> bool {
+        self.value_in(req).as_deref() == Some(value)
+    }
+
     /// Rewrite this surface's carrier on `req` to `value`, adopting the change
     /// only when the surface then reads back exactly `value`. `false` leaves
-    /// `req` untouched.
+    /// `req` untouched, and is also the answer when `req` already carries
+    /// `value`: the upstream refused the value it would re-send, so the
+    /// retry would repeat the rejection rather than repair it.
     ///
     /// Staged on a clone because [`Self::set_in`] cannot report failure, and a
     /// rewrite that did not take must not leave a half-written body behind.
     fn rewrite_in(&self, req: &mut ChatRequest, value: &str) -> bool {
+        if self.carries(req, value) {
+            return false;
+        }
         let mut scratch = req.clone();
         self.set_in(&mut scratch, value);
         if self.value_in(&scratch).as_deref() != Some(value) {
@@ -980,6 +990,15 @@ impl FieldEdit {
         }
     }
 
+    /// True when this edit would leave `req` as it is: a rewrite to the value
+    /// the surface already carries.
+    fn repeats_current(self, surface: FieldSurface, req: &ChatRequest) -> bool {
+        match self {
+            Self::Drop => false,
+            Self::Rewrite(value) => surface.carries(req, value),
+        }
+    }
+
     const fn rewritten(self) -> Option<&'static str> {
         match self {
             Self::Drop => None,
@@ -1116,9 +1135,10 @@ impl FieldRepairPlan<'_> {
             return None;
         }
         if !edit.apply_to(surface, attempt_req) {
-            // FAIL CLOSED. `present_in` held immediately above and nothing
-            // between touches the request, so reaching here means the two have
-            // diverged -- a bug in this module. The debug assertion names it in
+            // FAIL CLOSED. A rewrite to the value already carried is refused
+            // by design. Otherwise `present_in` held immediately above and
+            // nothing between touches the request, so reaching here means the
+            // two have diverged -- a bug in this module. The debug assertion names it in
             // development, but the RELEASE behavior must not depend on that
             // assertion being compiled: absorbing the inconsistency silently
             // would report a repair the wire never saw, charge the allowance for
@@ -1128,7 +1148,7 @@ impl FieldRepairPlan<'_> {
             // answer: it is still pre-mutation, so refusing here leaves the
             // request exactly as the caller handed it over.
             debug_assert!(
-                false,
+                edit.repeats_current(surface, attempt_req),
                 "a present surface must take the edit; presence and the edit have diverged",
             );
             return None;

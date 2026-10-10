@@ -650,43 +650,92 @@ fn an_anthropic_message_outside_an_invalid_request_error_resolves_to_none() {
     assert!(parse_rejection(ANTHROPIC, 400, body.parsed()).is_none());
 }
 
+/// Mutation check: read candidates from every quoted token in the message
+/// instead of the template's replacement position -> red (the echoed and the
+/// mixed rows).
 #[test]
 fn the_accepted_value_fills_only_for_exactly_one_named_member() {
     use super::super::field_repair::{TEST_REWRITE_ACCEPTED, TEST_REWRITE_PATH};
     let [first, second] = TEST_REWRITE_ACCEPTED else {
         panic!("premise: the test rewrite row's closed set has two members");
     };
-    let repeated = format!("'{first}' or '{first}'");
-    let double_quoted = format!("\"{second}\"");
-    let one = format!("'{first}'");
-    let both = format!("'{first}', '{second}'");
-    let cases: [(&str, &str, Option<&str>); 6] = [
-        ("one single-quoted member", one.as_str(), Some(first)),
+    let outside = "routectl-test-not-a-member";
+    let listed = |reason: &str| format!("{TEST_REWRITE_PATH}: Input should be {reason}");
+    let cases: [(&str, String, RejectionKind, Option<&str>); 11] = [
+        (
+            "one single-quoted member",
+            listed(&format!("'{first}'")),
+            InvalidValue,
+            Some(first),
+        ),
         (
             "one double-quoted member",
-            double_quoted.as_str(),
+            listed(&format!("\"{second}\"")),
+            InvalidValue,
             Some(second),
         ),
-        ("one member named twice", repeated.as_str(), Some(first)),
-        ("two members", both.as_str(), None),
         (
-            "a value outside the set",
-            "'routectl-test-not-a-member'",
+            "one member named twice",
+            listed(&format!("'{first}' or '{first}'")),
+            InvalidValue,
+            Some(first),
+        ),
+        (
+            "a list naming one member among outside values",
+            listed(&format!("'{outside}', '{first}', or '{outside}'")),
+            InvalidValue,
+            Some(first),
+        ),
+        (
+            "two members",
+            listed(&format!("'{first}', '{second}'")),
+            InvalidValue,
             None,
         ),
-        ("an unquoted member", first, None),
+        (
+            "a value outside the set",
+            listed(&format!("'{outside}'")),
+            InvalidValue,
+            None,
+        ),
+        ("an unquoted member", listed(first), InvalidValue, None),
+        (
+            "a member echoed after the list as the refused input",
+            listed(&format!("'{outside}'. Received input: '{first}'")),
+            InvalidValue,
+            None,
+        ),
+        (
+            "a list naming one member, the other echoed as the refused input",
+            listed(&format!("'{second}'. Received input: '{first}'")),
+            InvalidValue,
+            Some(second),
+        ),
+        (
+            "a member echoed in prose with no list",
+            format!("{TEST_REWRITE_PATH}: '{first}' is not a permitted value"),
+            InvalidValue,
+            None,
+        ),
+        (
+            "a replacement clause naming one member after the refused one",
+            format!(
+                "\"{TEST_REWRITE_PATH}\" is not supported for this model. Use \"{second}\" \
+                 instead of \"{first}\"."
+            ),
+            UnsupportedField,
+            Some(second),
+        ),
     ];
 
-    for (name, reason, expected) in cases {
-        let body = UpstreamBody::new(anthropic_body(&format!(
-            "{TEST_REWRITE_PATH}: Input should be {reason}"
-        )));
+    for (name, message, kind, expected) in cases {
+        let body = UpstreamBody::new(anthropic_body(&message));
 
         let named = parse_rejection(ANTHROPIC, 400, body.parsed())
             .unwrap_or_else(|| panic!("{name}: resolves the rewrite row"));
 
         assert_eq!(named.row.path, TEST_REWRITE_PATH, "{name}");
-        assert_eq!(named.kind, InvalidValue, "{name}");
+        assert_eq!(named.kind, kind, "{name}");
         assert_eq!(named.accepted, expected, "{name}");
     }
 }
