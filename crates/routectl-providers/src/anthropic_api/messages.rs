@@ -1235,15 +1235,17 @@ pub(super) enum SystemTurnPolicy {
 
 /// Aggregated system-turn diagnostics for ONE outbound attempt: one DEBUG
 /// line naming how many turns were forwarded, and one DEBUG line when the
-/// billing/attribution screen stripped anything. That line counts BLOCKS,
-/// so a turn that loses only its billing block is reported the same as a
-/// turn removed wholesale, and it fires at most once per request. No
-/// message content reaches either line.
+/// screen stripped a billing/attribution block or omitted an empty turn.
+/// That line counts billing BLOCKS, so a turn that loses only its billing
+/// block is reported the same as a turn removed wholesale, and counts empty
+/// turns separately; it fires at most once per request. No message content
+/// reaches either line.
 struct SystemTurnTally<'a> {
     provider: &'a str,
     forwarded: usize,
     billing_blocks_stripped: usize,
     billing_turns_dropped: usize,
+    empty_turns_dropped: usize,
 }
 
 impl<'a> SystemTurnTally<'a> {
@@ -1253,6 +1255,7 @@ impl<'a> SystemTurnTally<'a> {
             forwarded: 0,
             billing_blocks_stripped: 0,
             billing_turns_dropped: 0,
+            empty_turns_dropped: 0,
         }
     }
 
@@ -1268,6 +1271,10 @@ impl<'a> SystemTurnTally<'a> {
         self.billing_turns_dropped = self.billing_turns_dropped.saturating_add(1);
     }
 
+    const fn record_empty_dropped_turn(&mut self) {
+        self.empty_turns_dropped = self.empty_turns_dropped.saturating_add(1);
+    }
+
     fn flush(&self) {
         if self.forwarded > 0 {
             tracing::debug!(
@@ -1277,14 +1284,15 @@ impl<'a> SystemTurnTally<'a> {
                  top-level system is shipping, so the legacy lift did not consume them"
             );
         }
-        if self.billing_blocks_stripped > 0 {
+        if self.billing_blocks_stripped > 0 || self.empty_turns_dropped > 0 {
             tracing::debug!(
                 provider = self.provider,
                 system_blocks_stripped = self.billing_blocks_stripped,
                 system_turns_dropped = self.billing_turns_dropped,
-                "anthropic-api egress: Claude Code billing/attribution block(s) dropped \
-                 from forwarded Role::System turns; a turn left with no other content \
-                 is omitted entirely",
+                system_turns_dropped_empty = self.empty_turns_dropped,
+                "anthropic-api egress: forwarded Role::System turns screened; Claude Code \
+                 billing/attribution blocks are dropped, and a turn left with no content, \
+                 or arriving empty or blank-text-only, is omitted entirely",
             );
         }
     }
@@ -1292,7 +1300,7 @@ impl<'a> SystemTurnTally<'a> {
 
 /// Accounted-identity ledger over ONE `messages[]` walk. The invariant is
 /// NOT "in == out": the tool-run fold legitimately collapses N turns into
-/// one message, and the two system-turn terms below are deliberate losses.
+/// one message, and the three system-turn terms below are deliberate losses.
 /// Each is counted explicitly, so the identity holds exactly and an
 /// unaccounted drop is a hard error rather than silent deletion.
 #[derive(Default)]
@@ -1302,6 +1310,7 @@ struct MessageLedger {
     tool_runs_emitted: usize,
     system_turns_consumed_by_lift: usize,
     system_turns_dropped_by_billing_strip: usize,
+    system_turns_dropped_as_empty: usize,
 }
 
 impl MessageLedger {
@@ -1316,6 +1325,7 @@ impl MessageLedger {
             .saturating_sub(folded)
             .saturating_sub(self.system_turns_consumed_by_lift)
             .saturating_sub(self.system_turns_dropped_by_billing_strip)
+            .saturating_sub(self.system_turns_dropped_as_empty)
     }
 
     fn verify(&self, id: &str, emitted: usize) -> Result<()> {
@@ -1328,13 +1338,14 @@ impl MessageLedger {
             format!(
                 "message translation lost content: emitted {emitted} wire messages, \
                  accounted for {expected} (consumed {}, tool turns {} folded into {} \
-                 messages, system turns {} consumed by the legacy lift and {} dropped \
-                 by the billing/attribution screen)",
+                 messages, system turns {} consumed by the legacy lift, {} dropped \
+                 by the billing/attribution screen and {} dropped as empty)",
                 self.consumed,
                 self.tool_turns_consumed,
                 self.tool_runs_emitted,
                 self.system_turns_consumed_by_lift,
                 self.system_turns_dropped_by_billing_strip,
+                self.system_turns_dropped_as_empty,
             ),
         ))
     }
@@ -1367,19 +1378,23 @@ fn translate_messages_threaded(
                         ledger.system_turns_consumed_by_lift += 1;
                     }
                     SystemTurnPolicy::Forward => {
-                        let screened = screen_forwarded_system_content(id, i, &msg.content)?;
+                        let screened = screen_forwarded_system_content(&msg.content);
                         system_turns.record_billing_stripped(screened.blocks_stripped);
-                        match screened.content {
-                            Some(content) => {
+                        match screened.verdict {
+                            SystemTurnVerdict::Forward(content) => {
                                 out.push(AnthropicMessage {
                                     role: AnthropicRole::System,
                                     content: translate_simple_content(&content, envelopes),
                                 });
                                 system_turns.record_forwarded();
                             }
-                            None => {
+                            SystemTurnVerdict::DroppedBilling => {
                                 system_turns.record_billing_dropped_turn();
                                 ledger.system_turns_dropped_by_billing_strip += 1;
+                            }
+                            SystemTurnVerdict::DroppedEmpty => {
+                                system_turns.record_empty_dropped_turn();
+                                ledger.system_turns_dropped_as_empty += 1;
                             }
                         }
                     }
@@ -1435,78 +1450,98 @@ fn translate_messages_threaded(
 /// Screen one forwarded `Role::System` turn's content before it reaches
 /// the wire.
 ///
-/// Two rules, in order:
-/// - Content that would translate to an empty system turn (`Null`, `Parts`
-///   carrying no blocks, or a kept set whose every block is blank text) is
-///   a local `Err`: Anthropic rejects a system turn with no content and its
-///   error does not name the message, so the index is surfaced here
-///   instead. The blank test mirrors `SystemContent::is_blank` on the
-///   canonical path.
+/// Two rules:
+/// - Content that would translate to an empty system turn (`Null`, an empty
+///   string, `Parts` carrying no blocks, or a kept set whose every block is
+///   blank text) drops the turn. Anthropic rejects a system turn with no
+///   content, and such a turn carries nothing the model would read, so it
+///   is omitted rather than shipped or refused. The blank test mirrors
+///   `SystemContent::is_blank` on the canonical path; a non-text block is
+///   never blank.
 /// - Every block that can carry text runs through the shared Claude Code
 ///   billing/attribution predicate -- a typed text block, an unrecognized
 ///   block carrying a `text` field, and a document source alike. Forwarding
 ///   verbatim would otherwise open a third bypass of the strip that already
 ///   covers the canonical `system` and the legacy lift, leaking the client
-///   fingerprint to a non-Anthropic host. Matching blocks are dropped;
-///   `content: None` means nothing survived and the caller skips the turn.
+///   fingerprint to a non-Anthropic host. Matching blocks are dropped.
 ///
-/// `blocks_stripped` counts the dropped BLOCKS, so a turn that loses only
-/// part of its content is reported as loudly as one removed wholesale.
-fn screen_forwarded_system_content(
-    id: &str,
-    message_index: usize,
-    content: &MessageContent,
-) -> Result<ScreenedSystemContent> {
+/// `blocks_stripped` counts the dropped billing BLOCKS, so a turn that
+/// loses only part of its content is reported as loudly as one removed
+/// wholesale.
+fn screen_forwarded_system_content(content: &MessageContent) -> ScreenedSystemContent {
     match content {
-        MessageContent::Null => Err(empty_system_turn_error(id, message_index)),
+        MessageContent::Null => ScreenedSystemContent::empty(0),
         MessageContent::Text(text) => {
             if crate::system_filter::is_billing_attribution_block(text) {
-                Ok(ScreenedSystemContent {
-                    content: None,
+                ScreenedSystemContent {
+                    verdict: SystemTurnVerdict::DroppedBilling,
                     blocks_stripped: 1,
-                })
+                }
             } else if text.trim().is_empty() {
-                Err(empty_system_turn_error(id, message_index))
+                ScreenedSystemContent::empty(0)
             } else {
-                Ok(ScreenedSystemContent {
-                    content: Some(MessageContent::Text(text.clone())),
+                ScreenedSystemContent {
+                    verdict: SystemTurnVerdict::Forward(MessageContent::Text(text.clone())),
                     blocks_stripped: 0,
-                })
+                }
             }
         }
-        MessageContent::Parts(parts) => {
-            if parts.is_empty() {
-                return Err(empty_system_turn_error(id, message_index));
-            }
-            let kept: Vec<ContentPart> = parts
-                .iter()
-                .filter(|p| !is_billing_attribution_part(p))
-                .cloned()
-                .collect();
-            let blocks_stripped = parts.len().saturating_sub(kept.len());
-            if kept.is_empty() {
-                return Ok(ScreenedSystemContent {
-                    content: None,
-                    blocks_stripped,
-                });
-            }
-            if kept.iter().all(is_blank_text_part) {
-                return Err(empty_system_turn_error(id, message_index));
-            }
-            Ok(ScreenedSystemContent {
-                content: Some(MessageContent::Parts(kept)),
-                blocks_stripped,
-            })
+        MessageContent::Parts(parts) => screen_forwarded_system_parts(parts),
+    }
+}
+
+fn screen_forwarded_system_parts(parts: &[ContentPart]) -> ScreenedSystemContent {
+    let kept: Vec<ContentPart> = parts
+        .iter()
+        .filter(|p| !is_billing_attribution_part(p))
+        .cloned()
+        .collect();
+    let blocks_stripped = parts.len().saturating_sub(kept.len());
+    if kept.is_empty() && blocks_stripped > 0 {
+        return ScreenedSystemContent {
+            verdict: SystemTurnVerdict::DroppedBilling,
+            blocks_stripped,
+        };
+    }
+    // `all` is vacuously true on an empty set, so an empty `Parts` lands
+    // here as well.
+    if kept.iter().all(is_blank_text_part) {
+        return ScreenedSystemContent::empty(blocks_stripped);
+    }
+    ScreenedSystemContent {
+        verdict: SystemTurnVerdict::Forward(MessageContent::Parts(kept)),
+        blocks_stripped,
+    }
+}
+
+/// Outcome of the forwarded-system screen: what happens to the turn, and how
+/// many billing blocks the screen removed, so the aggregated line counts
+/// partial strips too.
+struct ScreenedSystemContent {
+    verdict: SystemTurnVerdict,
+    blocks_stripped: usize,
+}
+
+impl ScreenedSystemContent {
+    const fn empty(blocks_stripped: usize) -> Self {
+        Self {
+            verdict: SystemTurnVerdict::DroppedEmpty,
+            blocks_stripped,
         }
     }
 }
 
-/// Outcome of the forwarded-system screen: the content that survived
-/// (`None` when the whole turn is dropped) and how many blocks the screen
-/// removed, so the aggregated line counts partial strips too.
-struct ScreenedSystemContent {
-    content: Option<MessageContent>,
-    blocks_stripped: usize,
+/// What the screen decided for one forwarded system turn. The two drop
+/// arms are separate ledger terms because only the billing drop withholds
+/// client content.
+enum SystemTurnVerdict {
+    /// The surviving content ships in place.
+    Forward(MessageContent),
+    /// Every block was the billing/attribution fingerprint.
+    DroppedBilling,
+    /// Nothing non-blank survived: the turn arrived empty or blank, or was
+    /// left blank once its billing block was stripped.
+    DroppedEmpty,
 }
 
 /// True iff `p` is a typed text block whose text is whitespace-only. Any
@@ -1516,16 +1551,6 @@ fn is_blank_text_part(p: &ContentPart) -> bool {
     matches!(
         p,
         ContentPart::Known(KnownContentPart::Text { text, .. }) if text.trim().is_empty()
-    )
-}
-
-fn empty_system_turn_error(id: &str, message_index: usize) -> Error {
-    Error::normalize_request(
-        id,
-        format!(
-            "messages[{message_index}] is a Role::System turn with no content; \
-             Anthropic requires a forwarded system turn to carry at least one block"
-        ),
     )
 }
 

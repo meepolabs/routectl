@@ -350,6 +350,67 @@ async fn unknown_block_type_round_trips_to_upstream() {
     assert_eq!(block["input"]["query"], "rust");
 }
 
+/// After an idle compaction Claude Code sends an in-band system turn with
+/// no content at `messages[1]` -- `content: []` or `content: ""` -- next to a
+/// top-level `system`, which puts the anthropic-api lane on the forward
+/// policy. The request must reach the upstream with that turn omitted, while
+/// a non-blank system turn in the same body still forwards in place.
+#[tokio::test]
+async fn empty_in_band_system_turn_is_omitted_not_refused() {
+    for (name, empty) in [("empty parts", json!([])), ("empty string", json!(""))] {
+        // Arrange
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+            .mount(&upstream)
+            .await;
+        let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+        let base = helpers::spawn(config).await;
+        let body = json!({
+            "model": "heavy",
+            "max_tokens": 16,
+            "system": [{"type": "text", "text": "you are helpful"}],
+            "messages": [
+                {"role": "user", "content": "summary of earlier work"},
+                {"role": "system", "content": empty},
+                {"role": "assistant", "content": "ok"},
+                {"role": "system", "content": "keep-this-sentinel"},
+                {"role": "assistant", "content": "noted"},
+                {"role": "user", "content": "continue"}
+            ]
+        });
+
+        // Act
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/v1/messages"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+
+        // Assert
+        assert_eq!(resp.status(), 200, "{name}: {}", resp.text().await.unwrap());
+        let received = upstream.received_requests().await.unwrap();
+        let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+        let roles: Vec<&str> = up["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "system", "assistant", "user"],
+            "{name}: {up}"
+        );
+        assert!(
+            up["messages"][2].to_string().contains("keep-this-sentinel"),
+            "{name}: the non-blank system turn must forward: {up}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 4-breakpoint cap and TTL ordering rejected at ingress
 // ---------------------------------------------------------------------------

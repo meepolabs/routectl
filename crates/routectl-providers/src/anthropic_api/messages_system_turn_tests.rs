@@ -1,7 +1,7 @@
 // Mid-conversation `Role::System` turns on the anthropic-api egress: the
 // forward-vs-lift split, the billing/attribution screen on the forwarded
 // path, the tool-run boundary, positional legality against the whole-turn
-// drop, the accounted-identity ledger, and the empty-content reject.
+// drop, the accounted-identity ledger, and the empty-turn drop.
 // Imports live in the host `messages_tests.rs` -- do not add `use` lines
 // here.
 
@@ -317,32 +317,6 @@ fn partial_billing_strip_is_counted_and_warns_exactly_once() {
     assert_eq!(lines[0].field("system_turns_dropped"), Some("0"));
 }
 
-/// A forwarded turn whose every surviving text block is whitespace-only
-/// would 400 upstream as an empty system turn, so it is the same local Err
-/// as an empty one -- mirroring the canonical path's blank test.
-#[test]
-fn whitespace_only_forwarded_system_turn_errors_with_its_index() {
-    // Arrange
-    let messages = vec![
-        st_user("hi"),
-        st_system(MessageContent::Parts(vec![st_text_part("   ")])),
-        st_assistant("ok"),
-    ];
-
-    // Act
-    let err = translate_messages_untallied(
-        "anthropic",
-        &messages,
-        SystemTurnPolicy::Forward,
-        &mut passthrough_tally(),
-    )
-    .expect_err("must reject a blank system turn");
-
-    // Assert
-    let rendered = err.to_string();
-    assert!(rendered.contains("messages[1]"), "got: {rendered}");
-}
-
 /// A system turn is a tool-run boundary: two tool results separated by one
 /// stay in separate wire messages, and the system turn keeps its position
 /// between them.
@@ -576,30 +550,150 @@ fn ledger_verify_rejects_an_unaccounted_shortfall() {
     assert!(rendered.contains("accounted for 4"), "got: {rendered}");
 }
 
-/// A forwarded system turn whose content translates to nothing is a local
-/// error naming the message index: Anthropic rejects a system turn with no
-/// content, and its error does not say which message.
+/// The shape Claude Code sends after an idle compaction, derived from the
+/// 2.1.296 client bundle: its wire serializer for an in-band `api_system`
+/// message emits `content: [{type:"text", text, cache_control}]` when the
+/// turn carries a cache breakpoint and `content: <text> || []` otherwise,
+/// and the post-compaction reminder pass rewrites a system message whose
+/// text moved into the ephemeral reminder to `content: ""`. So the turn
+/// reaches the wire as `{"role":"system","content":[]}`, as
+/// `{"role":"system","content":""}`, or as a lone text block with empty
+/// text. The Anthropic ingress deserializes `messages[]` straight into
+/// canonical `Message` (`ingress/anthropic/parse.rs` `translate_request`,
+/// the `serde_json::from_value` into `ChatRequest`), so those land here as
+/// `Parts(vec![])`, `Text("")`, and a blank text part at `messages[1]`.
+/// Each such turn is dropped from the outgoing body rather than refused:
+/// Anthropic rejects an empty system turn, and it carries nothing the model
+/// would read.
 #[test]
-fn null_content_system_turn_on_the_forward_path_errors_with_its_index() {
+fn empty_forwarded_system_turn_after_compaction_is_dropped() {
+    let cases: [(&str, MessageContent); 5] = [
+        ("empty parts", MessageContent::Parts(vec![])),
+        ("empty string", MessageContent::Text(String::new())),
+        ("whitespace string", MessageContent::Text(" \n\t ".into())),
+        (
+            "empty text block",
+            MessageContent::Parts(vec![st_text_part("")]),
+        ),
+        ("null", MessageContent::Null),
+    ];
+    for (name, content) in cases {
+        // Arrange
+        let messages = vec![st_user("hi"), st_system(content), st_assistant("ok")];
+
+        // Act
+        let out = translate_messages_untallied(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Forward,
+            &mut passthrough_tally(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: an empty system turn must not be refused: {e}"));
+
+        // Assert
+        assert_eq!(st_roles(&out), vec!["user", "assistant"], "{name}");
+    }
+}
+
+/// A turn whose every text block is whitespace-only is dropped like an empty
+/// one, including when the blank text is what is left after the billing
+/// block is stripped.
+#[test]
+fn whitespace_only_forwarded_system_turn_is_dropped() {
+    let cases: [(&str, Vec<ContentPart>); 2] = [
+        (
+            "blank blocks",
+            vec![st_text_part("   "), st_text_part("\n")],
+        ),
+        (
+            "blank after billing strip",
+            vec![
+                st_text_part("x-anthropic-billing-header: v=1; fp=abc"),
+                st_text_part("  "),
+            ],
+        ),
+    ];
+    for (name, parts) in cases {
+        // Arrange
+        let messages = vec![
+            st_user("hi"),
+            st_system(MessageContent::Parts(parts)),
+            st_assistant("ok"),
+        ];
+
+        // Act
+        let out = st_forward(&messages);
+
+        // Assert
+        assert_eq!(st_roles(&out), vec!["user", "assistant"], "{name}");
+    }
+}
+
+/// Positive control for the two drop tests above: a non-blank text turn and
+/// a turn carrying only a non-text block both forward unchanged, so the drop
+/// is not a blanket removal of system turns. A non-text block is never
+/// blank, which is where a vacuous `all` over the kept set would mis-fire.
+#[test]
+fn non_blank_and_non_text_forwarded_system_turns_are_kept() {
+    // Arrange
+    let image = ContentPart::Known(KnownContentPart::Image {
+        source: json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
+        cache_control: None,
+    });
+    let messages = vec![
+        st_user("hi"),
+        st_system(MessageContent::Parts(vec![st_text_part("  "), image])),
+        st_assistant("ok"),
+        st_system(MessageContent::Text("be concise".into())),
+        st_assistant("done"),
+    ];
+
+    // Act
+    let out = st_forward(&messages);
+
+    // Assert
+    assert_eq!(
+        st_roles(&out),
+        vec!["user", "system", "assistant", "system", "assistant"]
+    );
+    let AnthropicContent::Blocks(blocks) = &out[1].content else {
+        panic!("expected Blocks content, got {:?}", out[1].content);
+    };
+    assert_eq!(blocks.len(), 2, "the non-text turn forwards unchanged");
+    assert!(
+        matches!(blocks[1], ContentBlock::Image { .. }),
+        "got {:?}",
+        blocks[1]
+    );
+}
+
+/// An omitted empty turn is counted on the screen's one DEBUG line, apart
+/// from billing drops, and does not count as a fingerprint withhold.
+#[test]
+fn dropped_empty_system_turn_is_counted_on_the_screen_line() {
     // Arrange
     let messages = vec![
         st_user("hi"),
-        st_system(MessageContent::Null),
+        st_system(MessageContent::Parts(vec![])),
         st_assistant("ok"),
     ];
 
     // Act
-    let err = translate_messages_untallied(
-        "anthropic",
-        &messages,
-        SystemTurnPolicy::Forward,
-        &mut passthrough_tally(),
-    )
-    .expect_err("must reject an empty system turn");
+    let events = capture_events(|| {
+        let out = st_forward(&messages);
+        assert_eq!(st_roles(&out), vec!["user", "assistant"]);
+    });
 
     // Assert
-    let rendered = err.to_string();
-    assert!(rendered.contains("messages[1]"), "got: {rendered}");
+    let lines: Vec<&CapturedEvent> = events
+        .iter()
+        .filter(|e| e.field("system_turns_dropped_empty").is_some())
+        .collect();
+    assert_eq!(lines.len(), 1, "one line per request: {events:?}");
+    assert_eq!(lines[0].level, tracing::Level::DEBUG);
+    assert_eq!(lines[0].field("system_turns_dropped_empty"), Some("1"));
+    assert_eq!(lines[0].field("system_blocks_stripped"), Some("0"));
+    assert_eq!(lines[0].field("system_turns_dropped"), Some("0"));
 }
 
 /// The same Null-content turn under the lift policy is not an error: the
