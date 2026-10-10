@@ -232,9 +232,7 @@ pub struct MatrixWarm {
 
 /// The learned-capability truth matrix panel: lanes (rows) by capability
 /// keys (columns). `columns` is the well-known capability keys followed by
-/// any observed keys outside that set, capped at a fixed render width;
-/// `other_overflow` is the count of observed keys beyond the cap (rendered
-/// as `(+N more)`). `lanes` is empty when `availability` is not `Available`
+/// every observed key outside that set. `lanes` is empty when `availability` is not `Available`
 /// and no config-derived cell exists.
 ///
 /// `source` names the learned layer's origin and fixes which tally is
@@ -254,10 +252,8 @@ pub struct CapabilityMatrixPanel {
     pub availability: MatrixAvailability,
     /// The origin of the learned layer.
     pub source: MatrixSource,
-    /// Column keys: the well-known keys, then capped observed others.
+    /// Column keys: the well-known keys, then every observed other key.
     pub columns: Vec<String>,
-    /// Count of observed other-column keys beyond the render cap.
-    pub other_overflow: u32,
     /// Matrix rows.
     pub lanes: Vec<MatrixLane>,
     /// The ledger replay tally, when this report's replay ran.
@@ -393,7 +389,6 @@ mod tests {
             availability: MatrixAvailability::Empty,
             source,
             columns: Vec::new(),
-            other_overflow: 0,
             lanes: Vec::new(),
             replay,
             warm,

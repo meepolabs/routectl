@@ -306,10 +306,6 @@
       countText(lanes.length, ' lane', ' lanes') + ' by ' +
         countText(columns.length, ' capability', ' capabilities'),
       tableScroll(tbl)));
-    if (panel.other_overflow) {
-      wrap.appendChild(docText('docmatrix-more',
-        '+' + panel.other_overflow + ' more capability columns'));
-    }
     return wrap;
   }
 

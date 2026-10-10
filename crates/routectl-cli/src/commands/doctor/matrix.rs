@@ -43,11 +43,6 @@ use routectl_router::{
 use super::sections::staleness_threshold_days;
 use super::{CapabilityMatrixSource, DoctorContext, MatrixOrigin, PriorCell};
 
-/// How many observed capability keys outside the well-known set are
-/// rendered as their own columns before the rest collapse into a
-/// `(+N more)` overflow count.
-const OTHER_COLUMN_CAP: usize = 10;
-
 /// Milliseconds per day, for converting a cell's last-seen age to whole days
 /// against the operator staleness hint.
 const MS_PER_DAY: i64 = 86_400_000;
@@ -141,7 +136,7 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
     let priors: &[PriorCell] = ctx.capability.config.as_ref().map_or(&[], |c| &c.priors);
     let lanes_meta = lane_metas(ctx, learned.entries);
     let seeded = seeded_columns(ctx.beta_seed, &lanes_meta);
-    let (columns, other_overflow) = columns_for(learned.entries, priors, &overrides, &seeded);
+    let columns = columns_for(learned.entries, priors, &overrides, &seeded);
     let inputs = CellInputs {
         ctx,
         overrides: &overrides,
@@ -174,7 +169,6 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
         availability,
         source,
         columns,
-        other_overflow,
         lanes,
         replay,
         warm,
@@ -242,15 +236,13 @@ fn seeded_columns(seed: BetaSeedScope, lanes: &[LaneMeta]) -> Vec<String> {
 }
 
 /// The column keys: the well-known keys, then the observed keys outside that
-/// set (from learned entries, priors, overrides, and the seed), sorted and
-/// capped at [`OTHER_COLUMN_CAP`]. The second return value is the count of
-/// observed other keys beyond the cap.
+/// set (from learned entries, priors, overrides, and the seed), sorted.
 fn columns_for(
     entries: &[LearnedRegistryEntry],
     priors: &[PriorCell],
     overrides: &OverrideRegistry,
     seeded: &[String],
-) -> (Vec<String>, u32) {
+) -> Vec<String> {
     let mut others: BTreeSet<String> = BTreeSet::new();
     for key in seeded {
         insert_other(&mut others, key);
@@ -267,13 +259,12 @@ fn columns_for(
         insert_other(&mut others, &row.capability_key);
     }
 
-    let overflow = u32::try_from(others.len().saturating_sub(OTHER_COLUMN_CAP)).unwrap_or(u32::MAX);
     let mut columns: Vec<String> = WELL_KNOWN_CAPABILITY_KEYS
         .iter()
         .map(|key| (*key).to_string())
         .collect();
-    columns.extend(others.into_iter().take(OTHER_COLUMN_CAP));
-    (columns, overflow)
+    columns.extend(others);
+    columns
 }
 
 fn insert_other(set: &mut BTreeSet<String>, key: &str) {

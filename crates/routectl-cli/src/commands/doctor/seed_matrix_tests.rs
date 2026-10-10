@@ -116,7 +116,7 @@ fn no_seed_column_appears_without_a_lane_of_the_seed_kind() {
 }
 
 #[test]
-fn seeded_columns_count_toward_the_other_column_cap() {
+fn every_seeded_flag_renders_as_a_column() {
     const ELEVEN: &[&str] = &[
         "fx-00", "fx-01", "fx-02", "fx-03", "fx-04", "fx-05", "fx-06", "fx-07", "fx-08", "fx-09",
         "fx-10",
@@ -130,8 +130,7 @@ fn seeded_columns_count_toward_the_other_column_cap() {
         .iter()
         .filter(|column| seeded.contains(column))
         .count();
-    assert_eq!(shown, 10);
-    assert_eq!(panel.other_overflow, 1);
+    assert_eq!(shown, ELEVEN.len());
 }
 
 #[test]

@@ -10242,7 +10242,6 @@ pub struct routectl_router::CapabilityMatrixPanel
 pub routectl_router::CapabilityMatrixPanel::availability: routectl_router::MatrixAvailability
 pub routectl_router::CapabilityMatrixPanel::columns: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::CapabilityMatrixPanel::lanes: alloc::vec::Vec<routectl_router::MatrixLane>
-pub routectl_router::CapabilityMatrixPanel::other_overflow: u32
 pub routectl_router::CapabilityMatrixPanel::replay: core::option::Option<routectl_router::MatrixReplaySummary>
 pub routectl_router::CapabilityMatrixPanel::source: routectl_router::MatrixSource
 pub routectl_router::CapabilityMatrixPanel::warm: core::option::Option<routectl_router::MatrixWarm>

@@ -160,13 +160,6 @@ pub(crate) fn render_capability_matrix_panel(panel: &CapabilityMatrixPanel) -> S
         out.push_str(line);
         out.push('\n');
     }
-
-    if panel.other_overflow > 0 {
-        out.push_str(&format!(
-            "  (+{} more capability columns)\n",
-            panel.other_overflow
-        ));
-    }
     out
 }
 
@@ -527,7 +520,6 @@ mod tests {
             availability: MatrixAvailability::Empty,
             source,
             columns: Vec::new(),
-            other_overflow: 0,
             lanes: Vec::new(),
             replay,
             warm,

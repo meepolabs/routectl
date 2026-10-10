@@ -135,7 +135,10 @@ pub(crate) use self::served::{GatherSources, ResidentLearned, ServedInputs};
 /// `replay`. Two additive `config` findings land with it: `reload`, the
 /// daemon's last rejected config / overlay reload (closed class and age), and
 /// one `catalog overlay` finding per soft-defect overlay cell.
-const SCHEMA_VERSION: u32 = 15;
+///
+/// v15 -> v16: the capability matrix renders every observed capability key
+/// as its own column, and the panel drops its overflow count field.
+const SCHEMA_VERSION: u32 = 16;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

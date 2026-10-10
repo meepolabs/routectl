@@ -688,8 +688,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_fifteen() {
-    assert_eq!(SCHEMA_VERSION, 15);
+fn schema_version_is_sixteen() {
+    assert_eq!(SCHEMA_VERSION, 16);
 
     let context = ctx(
         config_with_overrides(),
@@ -698,7 +698,7 @@ fn schema_version_is_fifteen() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 15);
+    assert_eq!(report.schema_version, 16);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2569,7 +2569,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 15);
+    assert_eq!(no_net.schema_version, 16);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -3676,14 +3676,18 @@ mod matrix_panel {
     }
 
     #[test]
-    fn other_columns_cap_at_ten_with_overflow_count() {
+    fn every_observed_other_key_renders_as_a_column() {
         let now = Instant::now();
-        // Twelve distinct non-well-known keys observed on one lane.
-        let entries: Vec<LearnedRegistryEntry> = (0..12)
-            .map(|i| {
-                entry(
+        let now_ms = 1_800_000_000_000;
+        let keys: Vec<String> = (0..12).map(|i| format!("other_{i:02}")).collect();
+        let entries: Vec<LearnedRegistryEntry> = keys
+            .iter()
+            .map(|key| LearnedRegistryEntry {
+                verdict: Verdict::LearnedBroken(FailurePhase::F1),
+                expires_at: now + Duration::from_secs(100),
+                ..entry(
                     LANE_A,
-                    &format!("other_{i:02}"),
+                    key,
                     Verdict::VerifiedWorking,
                     EvidenceSource::Live,
                     now,
@@ -3694,7 +3698,7 @@ mod matrix_panel {
             CapabilityMatrixSource::Available {
                 entries,
                 now,
-                now_ms: 0,
+                now_ms,
                 replay: Some(MatrixReplaySummary::default()),
                 seed_clears: Vec::new(),
             },
@@ -3702,9 +3706,58 @@ mod matrix_panel {
         );
 
         let panel = build_capability_matrix_panel(&ctx);
-        // 7 well-known + 10 rendered other columns.
-        assert_eq!(panel.columns.len(), 17);
-        assert_eq!(panel.other_overflow, 2);
+        let json = serde_json::to_value(&panel).expect("panel serializes");
+        let human = crate::commands::doctor_panels::render_capability_matrix_panel(&panel);
+
+        assert_eq!(
+            panel.columns.len(),
+            WELL_KNOWN_CAPABILITY_KEYS.len() + keys.len()
+        );
+        let fields: Vec<&str> = json
+            .as_object()
+            .expect("panel is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "availability",
+                "columns",
+                "lanes",
+                "replay",
+                "source",
+                "warm"
+            ]
+        );
+        assert!(
+            !human
+                .lines()
+                .any(|line| line.trim_start().starts_with("(+")),
+            "{human}"
+        );
+        let lane_index = panel
+            .lanes
+            .iter()
+            .position(|l| l.lane == LANE_A)
+            .expect("lane A present");
+        for key in &keys {
+            let column = panel
+                .columns
+                .iter()
+                .position(|c| c == key)
+                .unwrap_or_else(|| panic!("column {key} missing"));
+            let cell = find_cell(&panel, LANE_A, key);
+            assert_eq!(cell.source, Some("live"), "{key}");
+            assert_eq!(cell.action, "route_away", "{key}");
+            assert_eq!(cell.expires_at_ms, Some(now_ms + 100_000), "{key}");
+            let wire = &json["lanes"][lane_index]["cells"][column];
+            assert_eq!(json["columns"][column], key.as_str());
+            assert_eq!(wire["source"], "live", "{key}");
+            assert_eq!(wire["action"], "route_away", "{key}");
+            assert_eq!(wire["expires_at_ms"], now_ms + 100_000, "{key}");
+            assert!(human.contains(key.as_str()), "{key} missing from {human}");
+        }
     }
 
     #[test]
