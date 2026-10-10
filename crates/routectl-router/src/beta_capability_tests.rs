@@ -110,6 +110,31 @@ fn the_scan_counts_beta_keys_and_ignores_prose_with_the_same_opening() {
     }
 }
 
+/// Composed spellings the compiler folds into one key: a prefix split across
+/// a literal-only `concat!` and a byte string. The split happens at runtime so
+/// no fixture here holds the prefix whole.
+#[test]
+fn the_scan_counts_beta_keys_composed_by_concat_or_spelled_as_bytes() {
+    let p = BETA_CAPABILITY_PREFIX;
+    let (head, tail) = p.split_at(2);
+    for (label, source) in [
+        (
+            "a prefix split across concat!",
+            format!("const P: &str = concat!(\"{head}\", \"{tail}{DATED_FLAG}\");"),
+        ),
+        (
+            "a byte string key",
+            format!("const P: &[u8] = b\"{p}{DATED_FLAG}\";"),
+        ),
+    ] {
+        assert_eq!(
+            key_literal_scan::count_key_literals_in_source(&source, is_beta_key),
+            1,
+            "{label}: {source}"
+        );
+    }
+}
+
 // --- grammar ---
 
 /// Accept control for the reject table: a dated flag, a short flag, and a

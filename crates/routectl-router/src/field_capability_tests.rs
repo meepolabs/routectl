@@ -278,6 +278,31 @@ fn non_documentation_literals_inside_attributes_still_count() {
     }
 }
 
+/// Composed spellings the compiler folds into one key: a prefix split across
+/// a literal-only `concat!` and a byte string. The split happens at runtime so
+/// no fixture here holds the prefix whole.
+#[test]
+fn the_scan_counts_field_keys_composed_by_concat_or_spelled_as_bytes() {
+    let p = FIELD_CAPABILITY_PREFIX;
+    let (head, tail) = p.split_at(2);
+    for (label, source) in [
+        (
+            "prefix split across concat!",
+            format!("const P: &str = concat!(\"{head}\", \"{tail}{GROUNDED_PATH}\");"),
+        ),
+        (
+            "byte string key",
+            format!("const P: &[u8] = b\"{p}{GROUNDED_PATH}\";"),
+        ),
+    ] {
+        assert_eq!(
+            count_prefix_literals_in_source(&source),
+            1,
+            "a {label} must be detected: {source}"
+        );
+    }
+}
+
 /// A literal that merely OPENS with the prefix is not a key. The suffix is
 /// validated whole against the production grammar, so prose that begins
 /// with the namespace, and a dotted tail the constructor would refuse, are

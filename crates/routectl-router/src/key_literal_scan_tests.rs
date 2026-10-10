@@ -1,10 +1,17 @@
-//! Test-only lexer-backed scan for compiled string literals that spell a
-//! capability key.
+//! Test-only lexer-backed scan for compiled literals that spell a capability
+//! key.
 //!
 //! A permanent key namespace is owned by exactly one module holding its prefix
 //! literal; this scan is how each owner's tests prove no second compiled
 //! spelling exists under `crates/`. The caller supplies the key predicate, so
 //! every namespace reuses one lexer walk and one fail-closed directory walk.
+//!
+//! The forms it proves: a string or raw string literal, a byte or raw byte
+//! string literal whose bytes are UTF-8, and a `concat!` whose arguments are
+//! all single literals, folded into the one value the compiler produces. A
+//! key assembled at runtime (`format!`, `+`, a `concat!` over a const) is out
+//! of scope: a lexical guard cannot evaluate it, so a split spelling such as
+//! a prefix joined from two halves stays legitimate.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,11 +83,10 @@ fn count_key_literals_in_tokens(stream: proc_macro2::TokenStream, is_key: KeyPre
                 count += count_key_literals_in_tokens(group.stream(), is_key);
             }
             proc_macro2::TokenTree::Literal(literal) => {
-                if let syn::Lit::Str(text) = syn::Lit::new(literal)
-                    && is_key(&text.value())
-                {
-                    count += 1;
-                }
+                count += count_literal(literal, is_key);
+            }
+            proc_macro2::TokenTree::Ident(ident) if ident == "concat" => {
+                count += count_folded_concat(&mut trees, is_key);
             }
             proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
         }
@@ -126,6 +132,9 @@ fn count_key_literals_in_attribute(
                     }
                 }
             }
+            proc_macro2::TokenTree::Ident(ident) if ident == "concat" => {
+                count += count_folded_concat(&mut trees, is_key);
+            }
             // `cfg_attr(<predicate>, <attr>, ...)`: only the items AFTER
             // the first comma are attributes, so only they can carry
             // documentation. The predicate is an ordinary meta item and is
@@ -150,16 +159,80 @@ fn count_key_literals_in_attribute(
                 count += count_key_literals_in_attribute(group.stream(), is_doc_position, is_key);
             }
             proc_macro2::TokenTree::Literal(literal) => {
-                if let syn::Lit::Str(text) = syn::Lit::new(literal)
-                    && is_key(&text.value())
-                {
-                    count += 1;
-                }
+                count += count_literal(literal, is_key);
             }
             proc_macro2::TokenTree::Punct(_) => {}
         }
     }
     count
+}
+
+type TokenTrees = std::iter::Peekable<proc_macro2::token_stream::IntoIter>;
+
+/// One if `literal` is a string or UTF-8 byte string whose decoded value
+/// `is_key` accepts. A non-UTF-8 byte string cannot equal any key, which is
+/// text, so it is skipped rather than lossily decoded into a false match.
+fn count_literal(literal: proc_macro2::Literal, is_key: KeyPredicate) -> usize {
+    let value = match syn::Lit::new(literal) {
+        syn::Lit::Str(text) => Some(text.value()),
+        syn::Lit::ByteStr(bytes) => String::from_utf8(bytes.value()).ok(),
+        _ => None,
+    };
+    usize::from(value.is_some_and(|value| is_key(&value)))
+}
+
+/// Called with `concat` just consumed. When `!` and an argument group follow
+/// and every argument folds, consume the group and test the folded value
+/// once, so its parts are never counted separately. Otherwise leave the group
+/// for the caller's walk, which scans the parts as ordinary literals.
+fn count_folded_concat(trees: &mut TokenTrees, is_key: KeyPredicate) -> usize {
+    if !matches!(trees.peek(), Some(proc_macro2::TokenTree::Punct(bang)) if bang.as_char() == '!') {
+        return 0;
+    }
+    trees.next();
+    let Some(proc_macro2::TokenTree::Group(group)) = trees.peek() else {
+        return 0;
+    };
+    let Some(folded) = fold_literal_concat(group.stream()) else {
+        return 0;
+    };
+    trees.next();
+    usize::from(is_key(&folded))
+}
+
+/// The value `concat!` produces over `arguments`, or `None` when any argument
+/// is not a single foldable literal.
+fn fold_literal_concat(arguments: proc_macro2::TokenStream) -> Option<String> {
+    let mut folded = String::new();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        folded.push_str(&concat_argument_text(argument)?);
+        match arguments.next() {
+            None => break,
+            Some(proc_macro2::TokenTree::Punct(comma)) if comma.as_char() == ',' => {}
+            Some(_) => return None,
+        }
+    }
+    Some(folded)
+}
+
+/// The text `concat!` contributes for one argument token: a string, UTF-8
+/// byte string, char, integer (in decimal, as the compiler renders it), or
+/// bool. Floats are excluded because their rendering is not the token text.
+fn concat_argument_text(argument: proc_macro2::TokenTree) -> Option<String> {
+    match argument {
+        proc_macro2::TokenTree::Literal(literal) => match syn::Lit::new(literal) {
+            syn::Lit::Str(text) => Some(text.value()),
+            syn::Lit::ByteStr(bytes) => String::from_utf8(bytes.value()).ok(),
+            syn::Lit::Char(ch) => Some(ch.value().to_string()),
+            syn::Lit::Int(int) => Some(int.base10_digits().to_string()),
+            _ => None,
+        },
+        proc_macro2::TokenTree::Ident(ident) if ident == "true" || ident == "false" => {
+            Some(ident.to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Count matching literals inside a `cfg_attr` argument list, splitting it on
@@ -222,4 +295,122 @@ pub fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+mod tests {
+    use super::*;
+
+    fn is_synthetic_key(value: &str) -> bool {
+        value.starts_with("k:")
+    }
+
+    fn count(source: &str) -> usize {
+        count_key_literals_in_source(source, is_synthetic_key)
+    }
+
+    #[test]
+    fn byte_string_literals_are_counted_by_their_utf8_value() {
+        for (label, source, want) in [
+            ("a byte string", "const K: &[u8] = b\"k:ab\";", 1),
+            ("a raw byte string", "const K: &[u8] = br#\"k:ab\"#;", 1),
+            (
+                "a byte string in a non-doc attribute",
+                "#[some_attribute(key = b\"k:ab\")]\nstruct S;",
+                1,
+            ),
+            (
+                "a non-UTF-8 byte string",
+                "const K: &[u8] = b\"k:\\xff\";",
+                0,
+            ),
+        ] {
+            assert_eq!(count(source), want, "{label}: {source}");
+        }
+    }
+
+    /// The predicate accepts the `"k:"` part on its own, so a fold that also
+    /// counted its parts would report two.
+    #[test]
+    fn a_literal_only_concat_is_folded_and_counted_once() {
+        for (label, source) in [
+            ("two strings", "const K: &str = concat!(\"k\", \":ab\");"),
+            (
+                "a part that is itself a key",
+                "const K: &str = concat!(\"k:\", \"ab\");",
+            ),
+            ("a char argument", "const K: &str = concat!(\"k\", ':');"),
+            ("an integer argument", "const K: &str = concat!(\"k:\", 7);"),
+            ("a bool argument", "const K: &str = concat!(\"k:\", true);"),
+            (
+                "a trailing comma",
+                "const K: &str = concat!(\"k:\", \"ab\",);",
+            ),
+            (
+                "a path-qualified concat",
+                "const K: &str = std::concat!(\"k:\", \"ab\");",
+            ),
+            (
+                "a concat in a non-doc attribute",
+                "#[some_attribute(key = concat!(\"k:\", \"ab\"))]\nstruct S;",
+            ),
+        ] {
+            assert_eq!(count(source), 1, "{label}: {source}");
+        }
+    }
+
+    /// Without the fold none of these values exists as one literal, so the
+    /// parts alone score zero.
+    #[test]
+    fn a_folded_value_is_what_the_predicate_sees() {
+        let exact = |value: &str| value == "k:c16true";
+        let source = "const K: &str = concat!(\"k\", \":\", 'c', 0x10, true);";
+
+        assert_eq!(count_key_literals_in_source(source, exact), 1);
+    }
+
+    #[test]
+    fn a_concat_with_a_non_literal_argument_is_scanned_by_its_parts() {
+        for (label, source, want) in [
+            ("a const argument", "const K: &str = concat!(\"k\", X);", 0),
+            (
+                "parts that are keys around a const",
+                "const K: &str = concat!(\"k:\", X, \"k:\");",
+                2,
+            ),
+            (
+                "a nested macro argument",
+                "const K: &str = concat!(\"k:\", stringify!(x));",
+                1,
+            ),
+            (
+                "a negative integer",
+                "const K: &str = concat!(\"k:\", -1);",
+                1,
+            ),
+            ("a float", "const K: &str = concat!(\"k:\", 1.5);", 1),
+        ] {
+            assert_eq!(count(source), want, "{label}: {source}");
+        }
+    }
+
+    #[test]
+    fn a_concat_in_a_doc_position_is_not_counted() {
+        for (label, source) in [
+            (
+                "a doc attribute",
+                "#[doc = concat!(\"k\", \":ab\")]\nstruct S;",
+            ),
+            (
+                "a doc value nested in cfg_attr",
+                "#[cfg_attr(docsrs, doc = concat!(\"k:\", b\"ab\"))]\nstruct S;",
+            ),
+        ] {
+            assert_eq!(count(source), 0, "{label}: {source}");
+        }
+    }
+
+    #[test]
+    fn an_identifier_named_concat_that_is_not_a_macro_is_walked_past() {
+        assert_eq!(count("fn f() { concat(\"k:\"); x.concat(); }"), 1);
+    }
 }
