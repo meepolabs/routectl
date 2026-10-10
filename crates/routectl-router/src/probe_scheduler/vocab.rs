@@ -33,8 +33,16 @@ impl ProbeValidator {
 /// two come to disagree about whether a step counts as spent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreeValidatorOutcome {
-    /// The question is answered; the job is done.
+    /// The upstream ACCEPTED a body carrying the field under test. The job is
+    /// done only once the negative it re-checked is durably cleared.
     Settled,
+    /// The upstream rejected the body, and the parser attributes the
+    /// rejection to the very field under test as an unsupported field: the
+    /// negative is re-confirmed at `tier`.
+    FieldRejected {
+        /// The attribution tier the parser assigned the rejection.
+        tier: routectl_core::capability::SignalTier,
+    },
     /// Did not answer, and re-running the SAME step could. A transient
     /// upstream fault says nothing about the field under test, so the step
     /// is retried under the attempt cap rather than consumed -- spending a
@@ -343,4 +351,16 @@ pub struct ProbeSchedulerSnapshot {
     /// means a job's backoff has already elapsed and it is leasable on the next
     /// tick -- distinct from `None`, which means there is nothing to wait for.
     pub next_retry_in: Option<std::time::Duration>,
+    /// How long the job that has been leasable the LONGEST has waited, or
+    /// `None` when no job is leasable right now.
+    ///
+    /// Measured from when the job last became due: its activation for a
+    /// queued job, its backoff deadline for one backing off. Growth here with
+    /// `in_flight` at the concurrency bound means the worker is not keeping
+    /// up; growth with nothing in flight means the worker is not ticking.
+    pub oldest_due_age: Option<std::time::Duration>,
+    /// Lifetime accepted re-checks whose clear could not be made durable: no
+    /// acknowledgement is installed, it refused, or it did not answer in
+    /// time. Each one left its negative acting and its job retryable.
+    pub clear_persistence_failures_total: u64,
 }

@@ -559,3 +559,41 @@ pub(super) fn remote_router_with_model_beta(provider: Arc<dyn Provider>, beta: &
     plant_acting_negative(&router, &lane("m1"), RECHECK_PATH, "anthropic-api");
     router
 }
+
+/// How a [`RecordingClearAck`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AckAnswer {
+    /// Reports every clear durable.
+    Durable,
+    /// Reports every clear not durable.
+    Refused,
+    /// Never answers, so the caller's timeout decides.
+    Silent,
+}
+
+/// A probe-clear acknowledgement that records every clear it is handed.
+pub(super) struct RecordingClearAck {
+    pub(super) answer: AckAnswer,
+    pub(super) seen: parking_lot::Mutex<Vec<super::CapabilityClearedEvent>>,
+}
+
+impl RecordingClearAck {
+    pub(super) fn new(answer: AckAnswer) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            seen: parking_lot::Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl super::ProbeClearAcknowledgement for RecordingClearAck {
+    async fn acknowledge_clear(&self, cleared: super::CapabilityClearedEvent) -> bool {
+        self.seen.lock().push(cleared);
+        match self.answer {
+            AckAnswer::Durable => true,
+            AckAnswer::Refused => false,
+            AckAnswer::Silent => std::future::pending().await,
+        }
+    }
+}

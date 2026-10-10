@@ -156,3 +156,36 @@ fn the_snapshot_reports_the_earliest_of_several_backoffs() {
         "premise: both jobs really are backing off, so a minimum was taken over two"
     );
 }
+
+#[test]
+fn the_oldest_due_age_measures_the_longest_wait_among_leasable_jobs() {
+    let scheduler = ProbeScheduler::new();
+    let start = Instant::now();
+    assert_eq!(scheduler.snapshot(start).oldest_due_age, None);
+    scheduler.activate(&key(0), 1, vec![ProbeValidator::CountTokens], payload());
+
+    let later = Instant::now() + Duration::from_secs(5);
+    let age = scheduler
+        .snapshot(later)
+        .oldest_due_age
+        .expect("a queued job is due");
+    assert!(age >= Duration::from_secs(5), "{age:?}");
+
+    let lease = scheduler.lease_due(later).expect("job is due");
+    assert_eq!(
+        scheduler.snapshot(later).oldest_due_age,
+        None,
+        "an in-flight job is not waiting"
+    );
+    let _committed = lease.settle(ProbeSettlement::Retryable, later);
+    assert_eq!(
+        scheduler.snapshot(later).oldest_due_age,
+        None,
+        "a job still backing off is not due"
+    );
+    let due = later + PROBE_BACKOFF_CEILING;
+    assert!(
+        scheduler.snapshot(due).oldest_due_age.is_some(),
+        "an elapsed backoff is due again"
+    );
+}

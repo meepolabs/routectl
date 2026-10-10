@@ -1344,6 +1344,20 @@ worth naming because it is the only signal its condition produces:
   refused. A lane counted here produces no job, no settlement, and no
   tombstone, so without this counter it is indistinguishable from a lane that
   was never admitted.
+- `clear_persistence_failures_total` -- re-checks the upstream accepted whose
+  `cleared` row could not be made durable (no acknowledgement installed, a
+  refusal, or no answer within the acknowledgement timeout). Each left its
+  negative acting and its job retryable.
+- `oldest_due_age` -- how long the longest-waiting leasable job has been due,
+  or absent when none is. Growth with `in_flight` at the concurrency bound
+  means the worker is not keeping up; growth with nothing in flight means it
+  is not ticking.
+
+A re-check that clears a negative logs `"probe_clear"` at INFO from
+`routectl_router::router::probe_lifecycle` (sanitized `state_key`,
+`capability_key`). Two DEBUG lines explain a re-check that did not clear:
+`"probe_clear_stale"` (the negative moved while the probe was in flight) and
+`"probe_clear_not_durable"` (the clear was not acknowledged durable).
 
 ### `learn` (WARN)
 

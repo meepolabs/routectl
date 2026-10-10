@@ -81,3 +81,24 @@ pub(super) fn probe_outcome_for_class(
         _ => FreeValidatorOutcome::ProbeRequestRefused,
     }
 }
+
+/// The attribution tier when `err` rejects the very field a re-check carried
+/// at `field_path`, as an UNSUPPORTED field, or `None` for any other failure.
+///
+/// Read through the same resolver the reactive repair uses, on the NATIVE
+/// class, so a probe re-confirms a negative on exactly the evidence that could
+/// have minted it. A refused VALUE does not re-confirm: it says the field is
+/// accepted, and the negative claims it is not.
+pub(super) fn rechecked_field_rejection(
+    err: &routectl_core::Error,
+    provider_kind: &str,
+    field_path: &str,
+) -> Option<routectl_core::capability::SignalTier> {
+    let row = super::field_repair::closed_table()
+        .iter()
+        .find(|row| row.path == field_path)?;
+    let native = routectl_core::failure_class::classify(err, Some(provider_kind)).class;
+    let named =
+        super::Router::rejection_names_field_surface(row.surface, &native, err, provider_kind)?;
+    (named.kind == super::rejection_parser::RejectionKind::UnsupportedField).then_some(named.tier)
+}

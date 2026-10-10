@@ -49,6 +49,7 @@ mod opening_lookup;
 mod overlays;
 mod precontent;
 mod prefix_rewrite;
+mod probe_clear_ack;
 mod probe_failure_class;
 mod probe_lifecycle;
 mod probe_lifecycle_state;
@@ -94,6 +95,7 @@ pub use opening_lookup::OpeningLane;
 use overlays::apply_layered_overlays;
 pub(crate) use overlays::operator_betas;
 pub use overlays::{merge_header_extras, merge_payload_extras};
+pub use probe_clear_ack::ProbeClearAcknowledgement;
 pub use probe_pass::ProbePassSummary;
 use routectl_core::capability::FailurePhase;
 #[cfg(test)]
@@ -386,6 +388,12 @@ pub struct Router {
     /// that acquired a SECOND read could report a different writer's health than
     /// the one its events go to.
     capability_health: Option<Arc<dyn capability_health::CapabilityPersistenceHealth>>,
+    /// Probe-clear acknowledgement seam -- see [`probe_clear_ack`]. `None` on
+    /// every Router `Router::new` builds, and absent reads as NOT DURABLE, so
+    /// a re-check probe never clears a negative on a build path that installed
+    /// none. Shared across Router generations by `carry_over_learned_from`:
+    /// both generations submit to the one writer it fronts.
+    probe_clear_ack: Option<Arc<dyn probe_clear_ack::ProbeClearAcknowledgement>>,
     /// Edge-trigger latch for the queue-full probe diagnostic, following
     /// the same bounded warn-once pattern as `volatile_prefix_warned`: a
     /// saturated queue refuses every later request, so one line per
@@ -2120,6 +2128,7 @@ impl Router {
             probe_incarnation_ticket: Arc::new(AtomicU64::new(1)),
             probe_lifecycle_state: Arc::default(),
             capability_health: None,
+            probe_clear_ack: None,
             probe_queue_full_warned: Mutex::new(false),
             probe_payload_refused_warned: Mutex::new(false),
             override_registry,
@@ -2828,6 +2837,7 @@ impl Router {
         // reinstalled it, and one that acquired a second read could report a
         // different writer's health than the one its own events go to.
         self.capability_health = previous.capability_persistence_health().cloned();
+        self.probe_clear_ack = previous.probe_clear_acknowledgement().cloned();
         self.registry_generation =
             std::sync::atomic::AtomicU64::new(self.learned_capabilities.generation());
         if catalog_changed || overlay_changed {
@@ -3146,6 +3156,10 @@ mod probe_payload_seat_tests;
 #[cfg(test)]
 #[path = "probe_terminal_state_tests.rs"]
 mod probe_terminal_state_tests;
+
+#[cfg(test)]
+#[path = "probe_clear_ack_tests.rs"]
+mod probe_clear_ack_tests;
 
 #[cfg(test)]
 #[path = "probe_breaker_tests.rs"]

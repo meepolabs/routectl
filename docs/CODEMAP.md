@@ -3388,7 +3388,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `field_repair::transform_class_of_capability_key`, which mints each table row's
   key via the namespace constructor rather than stripping a prefix
 - `src/probe_scheduler/vocab.rs` -- the scheduler's closed vocabularies and its
-  operator-facing `ProbeSchedulerSnapshot`. Beyond the lifetime counters it carries
+  operator-facing `ProbeSchedulerSnapshot`. Beyond the lifetime counters
+  (including `clear_persistence_failures_total`) and `oldest_due_age` (how long
+  the longest-waiting LEASABLE job has been due, `None` when none is) it carries
   two AGGREGATE status fields derived from state the scheduler already holds:
   `last_settlement` (the most recent settled free-probe outcome, recorded at the one
   release site so every outcome is reported whatever its arm goes on to do -- a
@@ -3441,7 +3443,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `probe_scheduler_snapshot()` is PURE and `pub`
   (the reload boundary tests read it across the crate boundary);
   `carry_over_probe_scheduler_from` ATTACHES the scheduler and incarnation
-  TICKET
+  TICKET. SETTLEMENT of a re-check: an ACCEPTED count clears the negative only
+  through `probe_clear_ack.rs` -- the version asked about is stamped before the
+  dial, a negative replaced while the probe was out gets no clear, and the job
+  resolves only after the acknowledgement reports the `cleared` row durable and
+  the incarnation-guarded removal applied; otherwise it is `Retryable` with no
+  tombstone and `clear_persistence_failures_total` counts it. A rejection the
+  parser attributes to the very field under test as UNSUPPORTED
+  (`probe_failure_class::rechecked_field_rejection`) refreshes the negative in
+  place and spends the free step
+- `src/router/probe_clear_ack.rs` -- the CRATE-BOUNDARY contract for persisting
+  a probe-settled clear, on the `capability_health.rs` pattern: the async
+  `ProbeClearAcknowledgement` trait the writer-owning crate implements, the
+  consuming `Router::with_probe_clear_acknowledgement` builder over an `Option`
+  `Router::new` leaves absent (absent reads as NOT DURABLE, so no build path
+  clears a negative in memory only), and the carry-over attach. The router
+  bounds each wait by `PROBE_CLEAR_ACK_TIMEOUT`; expiry reads as not durable
 - (providers) `anthropic_api::is_client_traffic` -- excludes background probes
   from this lane's translation metrics, the unified-quota shared claim/log state,
   and thinking-cache writes; response-local metadata unaffected. Rationale in module docs
@@ -3940,6 +3957,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `context_trim::fnv1a_hash`, which must stay cross-process stable because it
   fingerprints a trimmed prefix; nothing may persist or cross-restart compare
   a value from here
+- `src/learned_capability_probe_clear.rs` -- the field-verdict operations a
+  re-check settles through, keyed by the minted `FieldVerdictKey`:
+  `field_verdict_presence_in_generation` (resident stamp, absent, or unreadable
+  under a purge lease), and the incarnation-guarded
+  `remove_field_verdict_at_incarnation` / `refresh_field_verdict_at_incarnation`.
+  All run on the guarded READ primitive: neither retiring the version a durable
+  clear names nor refreshing the resident one produces a new version, and
+  minting one would orphan the canary state keyed on the old incarnation
 - `src/learned_capability.rs` -- ONE instance is shared across Router
   generations (a reload attaches, never copies), which the generation barrier and
   the retunable tuning both follow from. The resident identity is

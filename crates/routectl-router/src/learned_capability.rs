@@ -61,8 +61,12 @@ use routectl_core::capability::{
 };
 
 use crate::beta_capability::{BetaSeedScope, capability_key_is_beta};
+
+#[path = "learned_capability_probe_clear.rs"]
+mod probe_clear;
 use crate::field_capability::learned_key_enters_field_namespace;
 use crate::field_verdict::FieldVerdictKey;
+pub use probe_clear::{FieldVerdictPresence, FieldVerdictStamp};
 
 /// Default resident-entry ceiling. A safety valve, not a cache policy:
 /// eviction should never fire at solo-local volume.

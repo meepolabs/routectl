@@ -23,6 +23,13 @@ pub const PROBE_MAX_CONCURRENCY: usize = 2;
 /// scheduler itself never expires a lease on a clock.
 pub const PROBE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long an accepted re-check waits for its clear to be acknowledged
+/// durable. Separate from [`PROBE_OPERATION_TIMEOUT`] because the wait starts
+/// after the dial has answered, and an expiry here is a persistence failure
+/// rather than an unanswered probe. The lease keeps its concurrency slot for
+/// the wait, so this also bounds how long one clear can hold that slot.
+pub const PROBE_CLEAR_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Backoff after the first failed attempt. Every later attempt doubles
 /// this, clamped to [`PROBE_BACKOFF_CEILING`].
 pub const PROBE_BACKOFF_BASE: Duration = Duration::from_mins(1);

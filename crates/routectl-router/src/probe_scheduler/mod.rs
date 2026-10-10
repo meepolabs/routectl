@@ -86,9 +86,9 @@ mod vocab;
 pub use lease::{ProbeLease, ReleaseOutcome};
 
 pub use bounds::{
-    PROBE_MAX_ATTEMPTS, PROBE_MAX_CONCURRENCY, PROBE_MAX_DEFERRALS, PROBE_OPERATION_TIMEOUT,
-    PROBE_PAYLOAD_REFUSED_EVENT, PROBE_QUEUE_DEPTH, PROBE_TOMBSTONE_CAPACITY,
-    PROBE_TOMBSTONE_SATURATED_EVENT, backoff_for_attempt,
+    PROBE_CLEAR_ACK_TIMEOUT, PROBE_MAX_ATTEMPTS, PROBE_MAX_CONCURRENCY, PROBE_MAX_DEFERRALS,
+    PROBE_OPERATION_TIMEOUT, PROBE_PAYLOAD_REFUSED_EVENT, PROBE_QUEUE_DEPTH,
+    PROBE_TOMBSTONE_CAPACITY, PROBE_TOMBSTONE_SATURATED_EVENT, backoff_for_attempt,
 };
 // Read only by the test sidecars. Exported alongside the rest rather than
 // cfg-gated, so the module's surface does not differ per build. Each allow
@@ -140,6 +140,9 @@ struct Job {
     /// than guaranteeing priority.
     deferrals: u32,
     phase: JobPhase,
+    /// When the job was queued: the instant a `Queued` job became due, read by
+    /// the snapshot's oldest-due age.
+    queued_at: Instant,
     /// Bumped on every lease. A release whose sequence does not match the
     /// job's current one is from a superseded lease -- an operation its
     /// worker timed out that later returned anyway -- and must not move a
@@ -231,6 +234,21 @@ impl SchedulerInner {
             })
             .min()
     }
+
+    /// How long the longest-waiting LEASABLE job has been due, or `None` when
+    /// none is. Read under the same lock and clock as the queue counts.
+    fn oldest_due_age(&self, now: Instant) -> Option<std::time::Duration> {
+        self.jobs
+            .iter()
+            .filter(|job| job.generation >= self.retired_below && job.validator().is_some())
+            .filter_map(|job| match job.phase {
+                JobPhase::Queued => Some(job.queued_at),
+                JobPhase::BackingOff { due_at } => (due_at <= now).then_some(due_at),
+                JobPhase::InFlight => None,
+            })
+            .map(|due_since| now.saturating_duration_since(due_since))
+            .max()
+    }
 }
 
 impl ProbeScheduler {
@@ -247,7 +265,8 @@ impl ProbeScheduler {
     ///
     /// Takes no clock: a newly queued job is immediately due, so there is
     /// no deadline or backoff to compute here. Only leasing and settling
-    /// need one.
+    /// need one. The instant it is queued is still sampled, for the
+    /// snapshot's oldest-due age; nothing schedules on it.
     ///
     /// Refuses -- without queueing -- when `generation` is retired, when
     /// this identity already has a tracked job (dedupe by lane and
@@ -309,6 +328,7 @@ impl ProbeScheduler {
             attempts: 0,
             deferrals: 0,
             phase: JobPhase::Queued,
+            queued_at: Instant::now(),
             lease_seq: 0,
         });
         inner.counters.activations_total += 1;
@@ -509,6 +529,12 @@ impl ProbeScheduler {
         self.inner.lock().counters.payload_refusals_total += 1;
     }
 
+    /// Record that an accepted re-check's clear could not be made durable, so
+    /// its negative stays acting and its job is settled retryable.
+    pub fn note_clear_persistence_failure(&self) {
+        self.inner.lock().counters.clear_persistence_failures_total += 1;
+    }
+
     /// Current queue state plus the lifetime counters.
     #[must_use]
     pub fn snapshot(&self, now: Instant) -> ProbeSchedulerSnapshot {
@@ -524,6 +550,7 @@ impl ProbeScheduler {
             // one lock this snapshot already holds, so the queue counts above and
             // this deadline describe one consistent moment.
             next_retry_in: inner.next_retry_in(now),
+            oldest_due_age: inner.oldest_due_age(now),
             ..inner.counters
         }
     }

@@ -22,6 +22,7 @@
 
 use super::Router;
 use crate::field_verdict::FieldVerdictKey;
+use crate::learned_capability::{FieldVerdictPresence, FieldVerdictStamp};
 #[cfg(test)]
 use crate::probe_scheduler::validator_plan;
 use crate::probe_scheduler::{
@@ -206,6 +207,9 @@ impl Router {
     /// let real in-flight work exceed the concurrency bound with no counter
     /// showing it.
     async fn execute_leased_probe(&self, lease: ProbeLease<'_>, validator: ProbeValidator) {
+        // Read BEFORE the dial, so the answer is applied only to the version of
+        // the negative the probe actually asked about.
+        let asked = self.recheck_presence(lease.key()).stamp();
         let outcome = tokio::time::timeout(
             crate::probe_scheduler::PROBE_OPERATION_TIMEOUT,
             self.run_free_validator(lease.key(), lease.payload(), validator),
@@ -220,7 +224,12 @@ impl Router {
             // cancellation happened, and a reap keyed on a clock this caller
             // may not share would silently count nothing.
             Err(_elapsed) => ProbeSettlement::TimedOut,
-            Ok(FreeValidatorOutcome::Settled) => ProbeSettlement::Resolved,
+            Ok(FreeValidatorOutcome::Settled) => {
+                self.settle_accepted_recheck(lease.key(), asked).await
+            }
+            Ok(FreeValidatorOutcome::FieldRejected { tier }) => {
+                self.settle_reconfirmed_recheck(lease.key(), asked, tier)
+            }
             Ok(FreeValidatorOutcome::Transient) => ProbeSettlement::Retryable,
             // Neither of these spends a free step. A refused probe REQUEST is
             // a defect in what routectl sent (or a class this build does not
@@ -351,13 +360,20 @@ impl Router {
         // inside a `tokio::time::timeout`.
         let req = build_probe_request(&seat, payload);
         let outcome = match seat.provider.count_tokens(req).await {
-            // A count came back for a body carrying the field under test.
-            // This stage draws no verdict from it -- minting is the reactive
-            // arm's job -- but the question was asked and answered.
+            // A count came back for a body carrying the field under test: the
+            // upstream accepts the field the negative says it refuses.
             Ok(count) if count.input_tokens > 0 => FreeValidatorOutcome::Settled,
             // A well-formed zero establishes nothing about the field.
             Ok(_) => FreeValidatorOutcome::Inconclusive,
-            Err(err) => super::probe_failure_class::classify_probe_failure(&err),
+            Err(err) => super::probe_failure_class::rechecked_field_rejection(
+                &err,
+                key.provider_kind(),
+                payload.field_path(),
+            )
+            .map_or_else(
+                || super::probe_failure_class::classify_probe_failure(&err),
+                |tier| FreeValidatorOutcome::FieldRejected { tier },
+            ),
         };
         // NEVER credit or debit the breaker. It governs CLIENT traffic on a
         // lane and a background probe is not client traffic: a probe
@@ -369,6 +385,114 @@ impl Router {
         // failing probe.
         drop(probe_guard);
         outcome
+    }
+
+    /// What negative is resident for `key` right now.
+    fn recheck_presence(&self, key: &FieldVerdictKey) -> FieldVerdictPresence {
+        self.learned_capabilities
+            .field_verdict_presence_in_generation(self.registry_generation(), key, Instant::now())
+    }
+
+    /// Settle a re-check the upstream ACCEPTED: clear the negative it asked
+    /// about, durably first.
+    ///
+    /// With a negative resident, `Resolved` only once the acknowledgement
+    /// reports the `cleared` row durable AND the in-memory removal of that same
+    /// version applied; a clear that cannot be made durable leaves the negative
+    /// acting and the job retryable, without a tombstone, so the next pass asks
+    /// again. A negative replaced while the probe was out gets no clear: the
+    /// answer is evidence about the version asked about, not its successor.
+    /// With nothing resident (purged while the probe was out) there is nothing
+    /// to retract, so the job resolves without a clear; with the key unreadable
+    /// (a purge holds its lease and may yet be abandoned) it retries.
+    async fn settle_accepted_recheck(
+        &self,
+        key: &FieldVerdictKey,
+        asked: Option<FieldVerdictStamp>,
+    ) -> ProbeSettlement {
+        let current = match self.recheck_presence(key) {
+            FieldVerdictPresence::Resident(current) => current,
+            FieldVerdictPresence::Absent => return ProbeSettlement::Resolved,
+            FieldVerdictPresence::Unreadable => return ProbeSettlement::Retryable,
+        };
+        if asked.map(|asked| asked.incarnation) != Some(current.incarnation) {
+            tracing::debug!(
+                event = "probe_clear_stale",
+                capability_key = %key.capability_key(),
+                "re-check accepted, but the negative it asked about moved while \
+                 the probe was in flight; nothing cleared",
+            );
+            return ProbeSettlement::Retryable;
+        }
+        let cleared = super::CapabilityClearedEvent {
+            persistence_generation: current.persistence_generation,
+            incarnation: current.incarnation,
+            state_key: key.registry_key().to_string(),
+            capability_key: key.capability_key().to_string(),
+            provider_kind: key.provider_kind().to_string(),
+        };
+        if !self.acknowledge_probe_clear(cleared).await {
+            self.probe_scheduler.note_clear_persistence_failure();
+            tracing::debug!(
+                event = "probe_clear_not_durable",
+                capability_key = %key.capability_key(),
+                "re-check accepted, but its clear was not acknowledged durable; \
+                 the negative stays acting and the probe will retry",
+            );
+            return ProbeSettlement::Retryable;
+        }
+        if !self
+            .learned_capabilities
+            .remove_field_verdict_at_incarnation(
+                self.registry_generation(),
+                key,
+                current.incarnation,
+            )
+        {
+            return ProbeSettlement::Retryable;
+        }
+        self.field_verdicts().canaries().reset(key);
+        tracing::info!(
+            event = "probe_clear",
+            state_key = %routectl_core::sanitize_for_log(key.registry_key()),
+            capability_key = %key.capability_key(),
+            "envelope-field verdict cleared: a re-check probe was accepted",
+        );
+        ProbeSettlement::Resolved
+    }
+
+    /// Settle a re-check whose rejection named the field under test: refresh
+    /// the negative it asked about. The free step is spent -- the negative
+    /// stands, and the plan has nothing further to ask this incarnation.
+    fn settle_reconfirmed_recheck(
+        &self,
+        key: &FieldVerdictKey,
+        asked: Option<FieldVerdictStamp>,
+        tier: routectl_core::capability::SignalTier,
+    ) -> ProbeSettlement {
+        let refreshed = asked.is_some_and(|asked| {
+            self.learned_capabilities
+                .refresh_field_verdict_at_incarnation(
+                    self.registry_generation(),
+                    key,
+                    asked.incarnation,
+                    tier,
+                    Instant::now(),
+                )
+        });
+        if refreshed {
+            ProbeSettlement::SpentFreeStep
+        } else {
+            ProbeSettlement::Retryable
+        }
+    }
+
+    /// [`Self::execute_leased_probe`] on a lease the test took itself, so a
+    /// test can drive a job through its backoff without waiting it out.
+    #[cfg(test)]
+    pub(crate) async fn execute_leased_probe_for_tests(&self, lease: ProbeLease<'_>) {
+        let validator = lease.validator();
+        self.execute_leased_probe(lease, validator).await;
     }
 
     /// Lease the next due probe job. Test-only: production leasing goes

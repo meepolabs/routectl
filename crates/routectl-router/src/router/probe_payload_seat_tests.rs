@@ -28,7 +28,11 @@ async fn the_probe_body_carries_the_re_checked_field_the_upstream_model_and_one_
     let provider = Arc::new(BodyAssertingProvider {
         seen: parking_lot::Mutex::new(Vec::new()),
     });
-    let router = remote_router(provider.clone());
+    let router = remote_router(provider.clone()).with_probe_clear_acknowledgement(
+        super::probe_test_support::RecordingClearAck::new(
+            super::probe_test_support::AckAnswer::Durable,
+        ),
+    );
     let _ = router.complete(grounding_request()).await;
 
     let ran = router.run_due_probes().await;
