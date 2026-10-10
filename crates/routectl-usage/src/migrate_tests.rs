@@ -31,7 +31,7 @@ fn insert_observation(conn: &Connection, vocab_version: Option<i64>) -> i64 {
     conn.execute(
         "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
          tier, catalog_version, overlay_revision, vocab_version) \
-         VALUES (1, 'lane', 'tools', 'supported', 'observed', 'live', 'paid', 1, 1, ?1)",
+         VALUES (1, 'lane', 'tools', 'supported', 'observed', 'live', 'inferred', 1, 1, ?1)",
         rusqlite::params![vocab_version],
     )
     .expect("insert observation");

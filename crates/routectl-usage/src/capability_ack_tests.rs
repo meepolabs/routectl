@@ -238,7 +238,6 @@ fn a_full_channel_refuses_at_admission_without_blocking() {
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(true)),
         Arc::clone(&counters),
-        crate::paid_probe_lifecycle::LifecycleGate::running(),
     );
 
     // Fill the one slot, then refuse.
@@ -277,7 +276,6 @@ fn capture_disabled_refuses_rather_than_silently_dropping() {
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::clone(&counters),
-        crate::paid_probe_lifecycle::LifecycleGate::running(),
     );
     assert!(!handle.is_enabled(), "premise: capture is off");
 

@@ -12,11 +12,10 @@
 #![expect(
     clippy::redundant_pub_crate,
     reason = "this module is private, so a crate-wide visibility reads as \
-              redundant -- but the acknowledged-reservation path and this \
-              crate's own tests have to name the transport envelope, the \
-              shutdown flag, and the writer state, and widening any of them to \
-              `pub` would publish the actor's connection and the one value that \
-              authorizes a paid call"
+              redundant -- but the acknowledged capability paths and this \
+              crate's own tests have to name the transport envelope and the \
+              writer state, and widening either to `pub` would publish the \
+              actor's connection"
 )]
 
 use std::path::PathBuf;
@@ -31,7 +30,6 @@ use tokio::sync::mpsc;
 use crate::capability_event::{CapabilityEvent, insert_capability_event};
 use crate::db::{self, UsageDb};
 use crate::handle::{UsageCounters, UsageHandle};
-use crate::paid_probe_lifecycle::LifecycleGate;
 use crate::record::UsageRecord;
 use crate::retention::{self, PruneOutcome};
 
@@ -42,9 +40,9 @@ use crate::retention::{self, PruneOutcome};
 /// payload vocabulary and every payload type are crate-private. That asymmetry
 /// is deliberate. This channel is the actor's transport, and a downstream crate
 /// able to build a variant could forge any write the writer performs --
-/// including a paid-probe reservation, whose whole purpose is to be the one
-/// authority on whether a unit was spent. A type that can be named costs
-/// nothing; a type that can be built hands out the writer's authority.
+/// including an acknowledged boundary batch, which evicts routing state. A type
+/// that can be named costs nothing; a type that can be built hands out the
+/// writer's authority.
 pub struct WriterMessage(WriterCommand);
 
 impl WriterMessage {
@@ -98,15 +96,6 @@ enum WriterCommand {
     /// it, so a partial application would evict live routing state. See the
     /// `capability_batch` module for the acknowledged-commit contract.
     CapabilityBatch(crate::capability_batch::CapabilityBatch),
-    /// An ACKNOWLEDGED paid-probe budget reservation, committed against the
-    /// provider's UTC-day count and reported back to the sender.
-    ///
-    /// Like the batch above this one is not best effort, and for a sharper
-    /// reason: the answer authorizes money. The writer samples the clock and
-    /// runs the reservation before acknowledging, so a committed answer always
-    /// describes a unit that is already on disk -- and nothing is ever given
-    /// back. See the `paid_probe_command` module for the contract.
-    PaidProbeReservation(crate::paid_probe_command::PaidProbeCommand),
 }
 
 impl WriterMessage {
@@ -130,13 +119,6 @@ impl WriterMessage {
     /// An acknowledged atomic capability-event batch.
     pub(crate) const fn capability_batch(batch: crate::capability_batch::CapabilityBatch) -> Self {
         Self::new(WriterCommand::CapabilityBatch(batch))
-    }
-
-    /// An acknowledged paid-probe budget reservation.
-    pub(crate) const fn paid_probe_reservation(
-        command: crate::paid_probe_command::PaidProbeCommand,
-    ) -> Self {
-        Self::new(WriterCommand::PaidProbeReservation(command))
     }
 }
 
@@ -165,11 +147,6 @@ pub struct UsageWriter {
     done: Option<std::sync::mpsc::Receiver<()>>,
     join: Option<std::thread::JoinHandle<()>>,
     counters: Arc<UsageCounters>,
-    /// Marked terminal before the drain begins, so no spend authorization
-    /// outlives the subsystem that issued it. Owned by
-    /// `crate::paid_probe_lifecycle`, which is where the ordering it enforces is
-    /// stated.
-    lifecycle: LifecycleGate,
 }
 
 impl UsageWriter {
@@ -198,20 +175,12 @@ impl UsageWriter {
         rx: mpsc::Receiver<WriterMessage>,
         counters: Arc<UsageCounters>,
     ) -> Self {
-        let lifecycle = LifecycleGate::running();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let thread_counters = Arc::clone(&counters);
-        let thread_lifecycle = lifecycle.clone();
         let join = std::thread::Builder::new()
             .name("routectl-usage-writer".to_string())
             .spawn(move || {
-                run_writer(
-                    db_path,
-                    retention_days,
-                    rx,
-                    thread_counters,
-                    thread_lifecycle,
-                );
+                run_writer(db_path, retention_days, rx, thread_counters);
                 let _ = done_tx.send(());
             })
             .expect("a test fixture must be able to spawn the writer thread");
@@ -223,7 +192,6 @@ impl UsageWriter {
             done: Some(done_rx),
             join: Some(join),
             counters,
-            lifecycle,
         }
     }
 
@@ -244,22 +212,14 @@ impl UsageWriter {
     ) -> (UsageHandle, Self) {
         let counters = Arc::new(UsageCounters::default());
         let enabled = Arc::new(AtomicBool::new(initial_enabled));
-        let lifecycle = LifecycleGate::running();
         let (tx, rx) = mpsc::channel::<WriterMessage>(capacity.max(1));
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
 
         let thread_counters = Arc::clone(&counters);
-        let thread_lifecycle = lifecycle.clone();
         let spawn_result = std::thread::Builder::new()
             .name("routectl-usage-writer".to_string())
             .spawn(move || {
-                run_writer(
-                    db_path,
-                    retention_days,
-                    rx,
-                    thread_counters,
-                    thread_lifecycle,
-                );
+                run_writer(db_path, retention_days, rx, thread_counters);
                 let _ = done_tx.send(());
             });
 
@@ -272,22 +232,16 @@ impl UsageWriter {
                     error = %err,
                     "usage writer thread spawn failed -- running degraded (records will be dropped)"
                 );
-                return Self::degraded(tx, enabled, counters, lifecycle);
+                return Self::degraded(tx, enabled, counters);
             }
         };
 
-        let handle = UsageHandle::new(
-            tx.clone(),
-            enabled,
-            Arc::clone(&counters),
-            lifecycle.clone(),
-        );
+        let handle = UsageHandle::new(tx.clone(), enabled, Arc::clone(&counters));
         let writer = Self {
             sender: Some(tx),
             done: Some(done_rx),
             join: Some(join),
             counters,
-            lifecycle,
         };
         (handle, writer)
     }
@@ -303,15 +257,13 @@ impl UsageWriter {
         sender: mpsc::Sender<WriterMessage>,
         enabled: Arc<AtomicBool>,
         counters: Arc<UsageCounters>,
-        lifecycle: LifecycleGate,
     ) -> (UsageHandle, Self) {
-        let handle = UsageHandle::new(sender, enabled, Arc::clone(&counters), lifecycle.clone());
+        let handle = UsageHandle::new(sender, enabled, Arc::clone(&counters));
         let writer = Self {
             sender: None,
             done: None,
             join: None,
             counters,
-            lifecycle,
         };
         (handle, writer)
     }
@@ -343,12 +295,6 @@ impl UsageWriter {
     }
 
     fn shutdown_inner(&mut self) {
-        // FIRST, before the sender is dropped and before anything drains: from
-        // here on no reservation may be authorized, because the subsystem that
-        // would have to honor it is going away. Ordering matters -- setting this
-        // after the drain would leave exactly the window where a queued
-        // reservation commits and answers a caller that then outlives the writer.
-        self.lifecycle.begin_shutdown();
         // Drop the sender so the consumer's recv loop can terminate.
         self.sender.take();
         // A degraded writer (no thread) has nothing to drain or join.
@@ -404,10 +350,6 @@ impl Drop for UsageWriter {
     /// drain + join lives only in the explicit [`UsageWriter::shutdown`],
     /// so dropping a writer on a runtime worker never stalls it.
     fn drop(&mut self) {
-        // Same reason as the explicit shutdown, and it must happen here too: a
-        // writer dropped without `shutdown` is still a writer going away, and a
-        // reservation authorized on the way out is exactly what must not happen.
-        self.lifecycle.begin_shutdown();
         self.sender.take();
     }
 }
@@ -426,7 +368,6 @@ fn run_writer(
     retention_days: u32,
     mut rx: mpsc::Receiver<WriterMessage>,
     counters: Arc<UsageCounters>,
-    lifecycle: LifecycleGate,
 ) {
     let mut state = WriterState::open(db_path, &counters);
     state.prune_once(retention_days, &counters);
@@ -450,15 +391,6 @@ fn run_writer(
             }
             WriterCommand::CapabilityBatch(batch) => {
                 state.commit_capability_batch(batch, &counters)
-            }
-            WriterCommand::PaidProbeReservation(command) => {
-                crate::paid_probe_lifecycle::reserve_and_answer(
-                    &mut state,
-                    command,
-                    &counters,
-                    &lifecycle,
-                    now_epoch_ms(),
-                )
             }
         }
     }
@@ -923,22 +855,6 @@ impl WriterState {
     }
 }
 
-/// The writer's side of the acknowledged reservation: the connection it owns and
-/// its failure accounting, and nothing else.
-///
-/// The reservation's own sequencing -- the lifecycle gate, the ordering of the
-/// answer against shutdown, the no-recovery-edge rule -- lives in
-/// `crate::paid_probe_lifecycle`, so this actor keeps only what an actor owns.
-impl crate::paid_probe_lifecycle::ReservationHost for WriterState {
-    fn reservation_connection(&mut self) -> Option<&mut Connection> {
-        self.conn.as_mut()
-    }
-
-    fn note_reservation_failure(&mut self, counters: &Arc<UsageCounters>) {
-        self.record_failure(None, counters);
-    }
-}
-
 /// Serialize an optional JSON value column to owned TEXT, or `None` for a
 /// SQL NULL. A serialization failure degrades to NULL rather than failing
 /// the whole row.
@@ -1145,63 +1061,6 @@ INSERT OR IGNORE INTO requests (
     ?64
 )";
 
-/// Crate-private test support for the writer actor.
-///
-/// These seams exist because two contracts are only observable INSIDE the writer
-/// thread's own state: the health edge (a flag the thread owns) and the ordering
-/// between the reservation transaction and its acknowledgement. Driving them
-/// through the channel would make both a timing accident. They are
-/// `#[cfg(test)]` and `pub(crate)`, so nothing outside this crate's tests can
-/// reach the connection or build a reservation command.
-#[cfg(test)]
-impl WriterState {
-    /// Whether the writer currently considers itself degraded.
-    pub(crate) const fn is_degraded_for_tests(&self) -> bool {
-        self.degraded
-    }
-
-    /// Persist one usage row through the production body.
-    pub(crate) fn persist_for_tests(
-        &mut self,
-        record: &UsageRecord,
-        counters: &Arc<UsageCounters>,
-    ) {
-        self.persist(record, counters);
-    }
-}
-
-/// The writer's lifecycle gate, so a test can watch for the exact moment its
-/// shutdown marks terminal instead of approximating it with a sleep or a yield.
-#[cfg(test)]
-impl UsageWriter {
-    pub(crate) const fn lifecycle_for_tests(&self) -> &LifecycleGate {
-        &self.lifecycle
-    }
-}
-
-/// A writer state over a real database at `path`, as the consumer thread builds
-/// one.
-#[cfg(test)]
-pub(crate) fn writer_state_for_tests(path: &std::path::Path) -> WriterState {
-    WriterState::open(path.to_path_buf(), &Arc::new(UsageCounters::default()))
-}
-
-/// A reservation command plus the receiver its answer will arrive on.
-///
-/// The command type is crate-private and holds the ack sender, so this is the
-/// only way a test can hand one to a writer state directly -- and it stays inside
-/// the crate for exactly the reason the type does.
-#[cfg(test)]
-pub(crate) fn paid_probe_command_for_tests(
-    provider: &str,
-    cap: u32,
-) -> (
-    crate::paid_probe_command::PaidProbeCommand,
-    tokio::sync::oneshot::Receiver<crate::paid_probe_command::PaidProbeCommit>,
-) {
-    crate::paid_probe_command::command_for_tests(provider, cap)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1319,7 +1178,7 @@ mod tests {
                     .execute(
                         "INSERT INTO capability_events (ts, lane_key, capability, verdict, \
                          phase, source, tier, catalog_version, overlay_revision, vocab_version) \
-                         VALUES (1, 'lane', 'tools', ?1, 'observed', 'live', 'paid', 1, 1, ?2)",
+                         VALUES (1, 'lane', 'tools', ?1, 'observed', 'live', 'inferred', 1, 1, ?2)",
                         rusqlite::params![verdict, vocab],
                     )
                     .expect("seed row");
@@ -1816,7 +1675,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<WriterMessage>(capacity);
         let counters = Arc::new(UsageCounters::default());
         let enabled = Arc::new(AtomicBool::new(true));
-        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters), LifecycleGate::running());
+        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters));
 
         // Act: send well past capacity, timing the loop to prove try_send
         // never blocks (a blocking send against a full channel would dwarf
@@ -1886,8 +1745,7 @@ mod tests {
         drop(rx);
         let counters = Arc::new(UsageCounters::default());
         let enabled = Arc::new(AtomicBool::new(true));
-        let (handle, writer) =
-            UsageWriter::degraded(tx, enabled, counters, LifecycleGate::running());
+        let (handle, writer) = UsageWriter::degraded(tx, enabled, counters);
 
         // Act: try_send accepts-and-drops (channel closed -> overflow);
         // shutdown returns immediately with no thread to join.
@@ -2043,7 +1901,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<WriterMessage>(capacity);
         let counters = Arc::new(UsageCounters::default());
         let enabled = Arc::new(AtomicBool::new(true));
-        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters), LifecycleGate::running());
+        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters));
 
         // Act: send well past capacity, timing the loop to prove the enqueue
         // never blocks.

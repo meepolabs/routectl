@@ -161,7 +161,6 @@ fn closed_writer_reports_unavailable_rather_than_committed() {
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(true)),
         Arc::new(UsageCounters::default()),
-        crate::paid_probe_lifecycle::LifecycleGate::running(),
     );
 
     // Act
@@ -195,7 +194,6 @@ fn full_channel_reports_channel_full() {
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(true)),
         Arc::new(UsageCounters::default()),
-        crate::paid_probe_lifecycle::LifecycleGate::running(),
     );
 
     // Act: no free slot, so admission itself must fail -- and it must fail
@@ -376,7 +374,6 @@ async fn admission_reports_refusal_without_a_receipt() {
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(true)),
         Arc::new(UsageCounters::default()),
-        crate::paid_probe_lifecycle::LifecycleGate::running(),
     );
 
     let refused = handle

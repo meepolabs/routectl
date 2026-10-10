@@ -269,7 +269,6 @@ pub fn handle_over_channel_with(
         sender,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         counters,
-        crate::paid_probe_lifecycle::LifecycleGate::running(),
     )
 }
 
@@ -281,7 +280,6 @@ pub fn handle_with_closed_channel() -> UsageHandle {
         tx,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         std::sync::Arc::new(crate::handle::UsageCounters::default()),
-        crate::paid_probe_lifecycle::LifecycleGate::running(),
     )
 }
 

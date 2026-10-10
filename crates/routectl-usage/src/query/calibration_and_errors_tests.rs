@@ -24,7 +24,7 @@ fn insert_calib_row(
              requested_model, alias, model, provider, provider_kind, session_id, \
              stream, outcome, latency_ms, tool_count, msg_count, attempt_count, \
              fallback_count, would_trim_k_floor, cache_read) \
-             VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', ?3, 'paid', ?4, ?5, \
+             VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', ?3, 'upstream', ?4, ?5, \
              1, 'ok', 5, 0, 0, 1, 0, ?6, ?7)",
             rusqlite::params![
                 ts_start,

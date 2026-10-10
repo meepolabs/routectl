@@ -1993,7 +1993,6 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | ERROR | `routectl_usage::writer` | `capability boundary batch failed; no row committed` | A capability boundary was not persisted: inspect `error` (disk full, lock, corruption). |
 | ERROR | `routectl_usage::writer` | `usage writer degraded -- dropping rows it cannot persist` (on the healthy-to-degraded edge) | Usage rows are being dropped: fix the DB fault in `error`. |
 | ERROR | `routectl_usage::writer` | `usage writer still degraded` (every 1024 errors) | The same DB fault is still active: fix it. |
-| WARN | `routectl_usage::paid_probe` | `paid-probe unit committed as shutdown began` | One paid-probe unit was spent with no call: account for it when reconciling the day's budget. |
 | WARN | `routectl_usage::handle` | `usage channel full -- dropping record` (first, then every 1024) | The writer is behind capture: check disk latency. |
 | WARN | `routectl_usage::handle` | `usage writer channel closed -- dropping capability write` (first, then every 1024) | The writer is gone: outside shutdown, look for an earlier writer ERROR. |
 | WARN | `routectl_usage::handle` | `usage channel full -- dropping capability event` (first, then every 1024) | The writer is behind: check disk latency. |

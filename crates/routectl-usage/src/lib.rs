@@ -16,17 +16,11 @@ mod cost;
 mod db;
 mod downgrade;
 mod handle;
+#[cfg(test)]
+mod legacy_meta_tests;
 mod migrate;
-mod paid_probe;
-mod paid_probe_command;
-mod paid_probe_lifecycle;
-mod paid_probe_read;
-/// Cross-crate paid-probe test fixtures. Compiled only under `cfg(test)` or the
-/// `test-utils` feature, so the seams never ship in a release build -- one of
-/// them can lower a committed paid-probe count, and a committed unit is never
-/// given back.
-#[cfg(any(test, feature = "test-utils"))]
-mod paid_probe_test_support;
+#[cfg(test)]
+mod production_inventory_tests;
 mod query;
 mod record;
 mod retention;
@@ -56,12 +50,6 @@ pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail, op
 pub use downgrade::{DowngradeError, NotAdditiveReason, downgrade_to_v16};
 pub use handle::{UsageCounters, UsageHandle};
 pub use migrate::MigrateError;
-pub use paid_probe_command::{PaidProbeAdmission, PaidProbeCommit, PaidProbeReceipt};
-pub use paid_probe_read::{PaidProbeUsage, committed_units};
-#[cfg(any(test, feature = "test-utils"))]
-pub use paid_probe_test_support::{
-    plant_paid_probe_units_for_tests, reserve_paid_probe_unit_for_tests,
-};
 pub use query::{
     AggRow, BucketSpec, CacheDecisionSummary, CalibrationSampleRow, CapabilityEventRow, CostStatus,
     DeadlineGuard, GroupDim, GroupKey, KCalibration, NearLosslessAttributionSummary, QueryError,
