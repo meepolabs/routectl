@@ -2306,61 +2306,6 @@ mod collect_config_validation_tests {
             validation.errors[0]
         );
     }
-
-    /// Config surface for a `[fidelity.paid_probe_daily_caps]` table.
-    fn paid_probe_cap_config(entries: &str) -> Config {
-        toml::from_str(&format!(
-            "[providers.anthropic]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"literal:k\"\n\
-             [fidelity.paid_probe_daily_caps]\n\
-             {entries}\n"
-        ))
-        .expect("fixture must parse")
-    }
-
-    #[test]
-    fn collects_the_unknown_provider_paid_probe_cap_error() {
-        let validation = collect_config_validation(&paid_probe_cap_config("ghost = 5\n"));
-        assert_eq!(
-            validation.errors.len(),
-            1,
-            "exactly one validator should fire: {:?}",
-            validation.errors
-        );
-        assert!(
-            validation.errors[0].contains("ghost") && validation.errors[0].contains("unknown"),
-            "error should name the unknown provider: {}",
-            validation.errors[0]
-        );
-    }
-
-    #[test]
-    fn collects_the_model_scoped_paid_probe_cap_key_error() {
-        let validation =
-            collect_config_validation(&paid_probe_cap_config("\"anthropic:sonnet\" = 5\n"));
-        assert_eq!(
-            validation.errors.len(),
-            1,
-            "exactly one validator should fire: {:?}",
-            validation.errors
-        );
-        assert!(
-            validation.errors[0].contains("provider-only"),
-            "error should call out the model-scoped key: {}",
-            validation.errors[0]
-        );
-    }
-
-    #[test]
-    fn accepts_a_known_provider_paid_probe_cap() {
-        let validation = collect_config_validation(&paid_probe_cap_config("anthropic = 5\n"));
-        assert!(
-            validation.errors.is_empty(),
-            "a known provider cap must pass: {:?}",
-            validation.errors
-        );
-    }
 }
 
 #[cfg(all(test, feature = "bedrock"))]

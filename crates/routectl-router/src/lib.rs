@@ -136,9 +136,10 @@ pub use config::{
     CalibrationConfig, CapabilityConfig, Config, ConfigVersionError, HistoryReasoning,
     LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
-    RegistryEntry, RetiredCapabilityKeysError, RetryPolicy, SeatQuotaConfig, ServerAuth,
-    ServerConfig, TrimConfig, UsageConfig, VersionTooNewError, WindowGateConfig,
-    is_config_provider_kind, preflight_config_version, preflight_legacy_mitm_credential_source,
+    RegistryEntry, RemovedPaidProbeCapsError, RetiredCapabilityKeysError, RetryPolicy,
+    SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig, UsageConfig, VersionTooNewError,
+    WindowGateConfig, is_config_provider_kind, preflight_config_version,
+    preflight_legacy_mitm_credential_source, preflight_removed_paid_probe_caps,
     preflight_retired_capability_keys, validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]

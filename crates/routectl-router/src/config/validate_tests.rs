@@ -483,3 +483,47 @@ mod retired_capability_keys_preflight_tests {
         );
     }
 }
+
+mod removed_paid_probe_caps_preflight_tests {
+    use super::preflight_removed_paid_probe_caps;
+
+    #[test]
+    fn refuses_the_key_by_name_without_naming_a_successor() {
+        let err =
+            preflight_removed_paid_probe_caps("[fidelity.paid_probe_daily_caps]\nanthropic = 5\n")
+                .expect_err("the removed key must be refused");
+
+        assert_eq!(
+            err.to_string(),
+            "config carries `[fidelity] paid_probe_daily_caps`: paid probes were removed; \
+             delete this key"
+        );
+    }
+
+    #[test]
+    fn refuses_an_empty_table_and_an_inline_value() {
+        for raw in [
+            "[fidelity.paid_probe_daily_caps]\n",
+            "[fidelity]\npaid_probe_daily_caps = {}\n",
+        ] {
+            assert!(preflight_removed_paid_probe_caps(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn allows_a_fidelity_block_without_the_key() {
+        for raw in [
+            "",
+            "[fidelity]\n",
+            "[fidelity]\nprefix_impact_opt_in = [\"anthropic\"]\n",
+            "[providers.x]\npaid_probe_daily_caps = 1\n",
+        ] {
+            assert!(preflight_removed_paid_probe_caps(raw).is_ok(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn unparseable_toml_falls_through_to_the_typed_deserialize() {
+        assert!(preflight_removed_paid_probe_caps("[fidelity\npaid_probe_daily_caps = 1").is_ok());
+    }
+}

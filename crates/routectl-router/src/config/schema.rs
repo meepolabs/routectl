@@ -500,8 +500,8 @@ const _: () = assert!(
 
 /// Operator-facing `[fidelity]` config block. Fully defaulted: a missing
 /// `[fidelity]` table deserializes to `FidelityConfig::default()`, which
-/// permits no paid probes and no prefix-impacting pre-flight -- current
-/// behavior is unchanged until the operator opts in.
+/// permits no prefix-impacting pre-flight -- current behavior is unchanged
+/// until the operator opts in.
 ///
 /// `prefix_impact_opt_in` reuses the same two-tier target-spec grammar as
 /// `[capability.overrides]`: `"provider_name"` opts in every model on
@@ -513,18 +513,6 @@ const _: () = assert!(
 /// That list is an ACTIVE dispatch gate: the pre-flight planner refuses a
 /// prefix-impacting transform for any target it does not name, so an entry added
 /// here can change what goes upstream.
-///
-/// `paid_probe_daily_caps` is keyed by provider name only (no model
-/// tier -- the daily budget is a provider-account property, not a
-/// per-model one) and caps the number of paid probe calls issued against
-/// that provider per UTC day. A provider absent from this map, or listed
-/// with the default `0`, permits no paid probe calls; only free
-/// validators may still run for it.
-///
-/// Nothing reads the cap at runtime: no probe path spends money, so a value
-/// has no effect. Its KEYS are additionally validated at config load against the configured
-/// providers (a `:`-scoped key, or one naming an unknown provider, fails the
-/// load), so a typo'd entry is rejected at load rather than discovered later.
 ///
 /// The re-verification cadence and confirmation quorum are code constants
 /// ([`CANARY_INTERVAL`], [`PREFIX_QUORUM`]), not config fields: both are
@@ -542,12 +530,6 @@ pub struct FidelityConfig {
     /// `[capability.overrides]`. Default empty -- no target is opted in.
     #[serde(default)]
     pub prefix_impact_opt_in: Vec<String>,
-    /// Per-provider paid-probe daily call cap, keyed by provider name. A
-    /// provider absent from this map defaults to `0` (no paid probes). A
-    /// non-zero value authorizes up to that many BILLABLE upstream completion
-    /// calls per UTC day for that provider; a committed unit is never refunded.
-    #[serde(default)]
-    pub paid_probe_daily_caps: BTreeMap<String, u32>,
 }
 
 /// Operator-facing `[log]` config block. Each field mirrors a

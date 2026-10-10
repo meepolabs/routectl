@@ -72,7 +72,8 @@ use routectl_router::{
     ConfigWriteError, EditOutcome, MigrateError, MigrationPlan, OverlayError, OverlayWrite,
     Refusal, SeatPoolAccount, SeatPoolMove, WriteKind, apply_config_transforms,
     apply_seat_pool_move, bare_oauth_pool_candidates, edit_config_toml, models_routed_at,
-    parse_config, plan_migration, preflight_retired_capability_keys, with_overlay_write_lock,
+    parse_config, plan_migration, preflight_removed_paid_probe_caps,
+    preflight_retired_capability_keys, with_overlay_write_lock,
 };
 use toml_edit::DocumentMut;
 
@@ -447,6 +448,7 @@ pub async fn run_at(
     let doc = parse_document(&snapshot_text)?;
     let from_version = raw_version_of(&doc)?;
     refuse_retired_keys_at_current(&snapshot_text, from_version, config_path, dry_run)?;
+    refuse_removed_paid_probe_caps(&snapshot_text, from_version, config_path, dry_run)?;
 
     // The v1 rung folds the operator's `[cache_pricing]` table (merged with
     // any legacy sidecar) into the catalog overlay; only a v1 file needs it.
@@ -815,6 +817,30 @@ fn refuse_retired_keys_at_current(
         return Ok(());
     }
     preflight_retired_capability_keys(snapshot_text).map_err(|e| {
+        audit_event(
+            config_path,
+            from_version,
+            from_version,
+            dry_run,
+            false,
+            false,
+            "invalid",
+            None,
+        );
+        Error::Config(e.to_string())
+    })
+}
+
+/// No rung removes `[fidelity] paid_probe_daily_caps`, so a file at ANY
+/// version carrying it is refused up front by name; otherwise the ladder would
+/// carry it forward and the shared gate would reject it as an unknown field.
+fn refuse_removed_paid_probe_caps(
+    snapshot_text: &str,
+    from_version: u32,
+    config_path: &Path,
+    dry_run: bool,
+) -> Result<()> {
+    preflight_removed_paid_probe_caps(snapshot_text).map_err(|e| {
         audit_event(
             config_path,
             from_version,
@@ -3126,6 +3152,30 @@ default = \"gpt\"
             );
             assert_eq!(std::fs::read(&f.config).unwrap(), before, "{row}");
             assert!(!f.overlay.exists(), "{row}: no overlay write");
+        }
+    }
+
+    /// No rung removes the key, so a file at the current version and one a
+    /// version behind are both refused by name and left byte-identical.
+    #[tokio::test]
+    async fn a_file_carrying_paid_probe_daily_caps_is_refused_by_name_at_any_version() {
+        let removed = "[fidelity.paid_probe_daily_caps]\nfast = 5\n";
+        let previous = format!("version = {}\n", CURRENT_CONFIG_VERSION - 1) + CLEAN_BODY;
+        for body in [latest_clean() + removed, previous + removed] {
+            // Arrange
+            let f = fixture(&body);
+
+            // Act
+            let err = f.migrate(false, true).await.expect_err(&body);
+
+            // Assert
+            assert_eq!(
+                err.to_string(),
+                "config: config carries `[fidelity] paid_probe_daily_caps`: paid probes were \
+                 removed; delete this key"
+            );
+            assert_eq!(read(&f.config), body);
+            assert!(!f.overlay.exists(), "no overlay write");
         }
     }
 

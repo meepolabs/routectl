@@ -31,8 +31,9 @@ use validate::default_config_version;
 pub(crate) use validate::message_safe_key;
 pub use validate::{
     CURRENT_CONFIG_VERSION, ConfigVersionError, LegacyMitmCredentialSourceError,
-    RetiredCapabilityKeysError, VersionTooNewError, preflight_config_version,
-    preflight_legacy_mitm_credential_source, preflight_retired_capability_keys,
+    RemovedPaidProbeCapsError, RetiredCapabilityKeysError, VersionTooNewError,
+    preflight_config_version, preflight_legacy_mitm_credential_source,
+    preflight_removed_paid_probe_caps, preflight_retired_capability_keys,
     validate_cache_pricing_retired,
 };
 
@@ -193,25 +194,15 @@ pub struct Config {
     pub seat_quota: SeatQuotaConfig,
 
     /// Operator-facing `[fidelity]` block. Opt-in surface for
-    /// prefix-impacting pre-flight repair and per-provider paid-probe
-    /// daily caps. A missing block keeps `FidelityConfig::default()`:
-    /// no target opted into prefix-impacting pre-flight and every
-    /// provider's paid-probe cap at zero, so no config change permits any
-    /// paid probe or prefix-impacting pre-flight action by itself.
+    /// prefix-impacting pre-flight repair. A missing block keeps
+    /// `FidelityConfig::default()`: no target opted into prefix-impacting
+    /// pre-flight, so no config change permits a prefix-impacting pre-flight
+    /// action by itself.
     ///
-    /// The two fields differ in whether anything reads them today:
-    ///
-    /// - `prefix_impact_opt_in` is an ACTIVE dispatch gate. The pre-flight
-    ///   planner refuses a prefix-impacting transform for any target this
-    ///   list does not name, so adding an entry can change what goes
-    ///   upstream (for a target whose verdict also clears the confirmed-
-    ///   repair quorum).
-    /// - `paid_probe_daily_caps` gates both PAID-CANDIDATE ELIGIBILITY and
-    ///   the durable reservation that must commit before a live paid probe
-    ///   call. A non-zero entry authorizes real upstream spend up to that
-    ///   provider's UTC-day cap; the default zero declines every paid call.
-    ///   Keys are validated at config load -- a key carrying a `:` or naming
-    ///   an unconfigured provider fails the load -- so a typo is rejected.
+    /// `prefix_impact_opt_in` is an ACTIVE dispatch gate. The pre-flight
+    /// planner refuses a prefix-impacting transform for any target this list
+    /// does not name, so adding an entry can change what goes upstream (for a
+    /// target whose verdict also clears the confirmed-repair quorum).
     ///
     /// See `FidelityConfig` for the fixed cadence/quorum constants this
     /// block deliberately does not expose.

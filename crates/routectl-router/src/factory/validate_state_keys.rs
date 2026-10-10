@@ -5,17 +5,14 @@
 //! The grammar lives in [`crate::seat_pool`]; this pass enforces it over EVERY
 //! `[models]` and `[providers]` key -- selectable or not, referenced or not --
 //! so no entry can reach that map under a key another identity also composes.
-//! Provider names also key durable paid-probe reservations, which store the
-//! name hex-encoded, so they carry a byte ceiling as well.
+//! Provider names also carry a byte ceiling.
 
 use crate::config::Config;
 use crate::seat_pool::check_state_key_name;
 use routectl_core::{Error, Result};
 
-/// Longest accepted provider name, in bytes. A paid-probe reservation key
-/// carries the name hex-encoded (two bytes per name byte) in durable storage,
-/// so the ceiling bounds that key; it sits far above any name a config author
-/// writes by hand.
+/// Longest accepted provider name, in bytes. It sits far above any name a
+/// config author writes by hand.
 const MAX_PROVIDER_NAME_BYTES: usize = 128;
 
 /// Reject a separator-bearing model nickname or provider name, a provider name

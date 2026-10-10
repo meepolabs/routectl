@@ -6,45 +6,10 @@ fn absent_block_uses_defaults() {
     let config: Config =
         toml::from_str("version = 3\n[server]\nhost = \"127.0.0.1\"\n").expect("parse");
 
-    // Assert: the omitted block resolves to the documented defaults --
-    // no prefix-impact opt-in, no paid-probe budget.
+    // Assert: the omitted block resolves to the documented default --
+    // no prefix-impact opt-in.
     assert_eq!(config.fidelity, FidelityConfig::default());
     assert!(config.fidelity.prefix_impact_opt_in.is_empty());
-    assert!(config.fidelity.paid_probe_daily_caps.is_empty());
-}
-
-#[test]
-fn explicit_values_are_honored() {
-    // Arrange / Act
-    let config: Config = toml::from_str(
-        "version = 3\n[fidelity]\nprefix_impact_opt_in = [\"anthropic\", \"anthropic:sonnet\"]\n\
-             [fidelity.paid_probe_daily_caps]\nanthropic = 5\n",
-    )
-    .expect("parse");
-
-    // Assert
-    assert_eq!(
-        config.fidelity.prefix_impact_opt_in,
-        vec!["anthropic".to_string(), "anthropic:sonnet".to_string()]
-    );
-    assert_eq!(
-        config.fidelity.paid_probe_daily_caps.get("anthropic"),
-        Some(&5)
-    );
-}
-
-#[test]
-fn partial_block_defaults_the_omitted_keys() {
-    // Only the opt-in list set; the paid-probe cap map keeps its default.
-    let config: Config =
-        toml::from_str("version = 3\n[fidelity]\nprefix_impact_opt_in = [\"anthropic\"]\n")
-            .expect("parse");
-
-    assert_eq!(
-        config.fidelity.prefix_impact_opt_in,
-        vec!["anthropic".to_string()]
-    );
-    assert!(config.fidelity.paid_probe_daily_caps.is_empty());
 }
 
 #[test]
@@ -56,16 +21,6 @@ fn unknown_key_is_rejected() {
         err.to_string().contains("prefix_impct_opt_in"),
         "err: {err}"
     );
-}
-
-#[test]
-fn unknown_paid_probe_daily_caps_value_shape_is_rejected() {
-    // The cap value is a u32; a non-numeric value must fail to parse.
-    let err = toml::from_str::<Config>(
-        "version = 3\n[fidelity.paid_probe_daily_caps]\nanthropic = \"five\"\n",
-    )
-    .expect_err("non-numeric cap value must be rejected");
-    assert!(err.to_string().contains("integer") || err.to_string().contains("invalid type"));
 }
 
 /// `config example` prints `examples/config.toml` verbatim; that shipped
@@ -107,23 +62,5 @@ fn two_tier_prefix_impact_opt_in_deserializes_to_expected_list() {
     assert_eq!(
         config.fidelity.prefix_impact_opt_in,
         vec!["anthropic".to_string(), "anthropic:sonnet".to_string()]
-    );
-}
-
-#[test]
-fn paid_probe_daily_caps_table_deserializes_to_expected_map() {
-    let config: Config = toml::from_str(
-        "version = 3\n[fidelity.paid_probe_daily_caps]\nanthropic = 3\nopenai = 10\n",
-    )
-    .expect("parse");
-
-    assert_eq!(config.fidelity.paid_probe_daily_caps.len(), 2);
-    assert_eq!(
-        config.fidelity.paid_probe_daily_caps.get("anthropic"),
-        Some(&3)
-    );
-    assert_eq!(
-        config.fidelity.paid_probe_daily_caps.get("openai"),
-        Some(&10)
     );
 }

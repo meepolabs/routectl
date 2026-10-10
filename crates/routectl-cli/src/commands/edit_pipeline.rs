@@ -17,7 +17,8 @@ use std::io::{IsTerminal as _, Write as _};
 use routectl_core::{Error, Result};
 use routectl_router::{
     Config, ConfigWriteError, parse_config, preflight_config_version,
-    preflight_legacy_mitm_credential_source, preflight_retired_capability_keys,
+    preflight_legacy_mitm_credential_source, preflight_removed_paid_probe_caps,
+    preflight_retired_capability_keys,
 };
 use toml_edit::{DocumentMut, Item, Table};
 
@@ -41,8 +42,9 @@ pub(crate) fn render_write_error(err: ConfigWriteError<RelockValidationError>) -
 
 /// Raw preflights matching the loader: refuse a config whose version is out
 /// of bounds (older or newer than this build writes) before any edit
-/// touches it, then reject the removed `[mitm] credential_source` key and
-/// the keys retired in config version 5, each with its actionable message.
+/// touches it, then reject the removed `[mitm] credential_source` and
+/// `[fidelity] paid_probe_daily_caps` keys and the keys retired in config
+/// version 5, each with its actionable message.
 /// The version check runs first so a version 4 file is pointed at
 /// `config migrate`. The wording is single-sourced in the router's
 /// preflights, so the CLI and the loader never diverge.
@@ -50,6 +52,7 @@ pub(crate) fn preflight(raw_text: &str) -> Result<()> {
     preflight_config_version(raw_text).map_err(|e| Error::Config(e.to_string()))?;
     preflight_legacy_mitm_credential_source(raw_text).map_err(|e| Error::Config(e.to_string()))?;
     preflight_retired_capability_keys(raw_text).map_err(|e| Error::Config(e.to_string()))?;
+    preflight_removed_paid_probe_caps(raw_text).map_err(|e| Error::Config(e.to_string()))?;
     Ok(())
 }
 
@@ -162,6 +165,23 @@ mod tests {
         assert!(
             confirm_high_consequence(&["providers.base_url"], true),
             "--yes must still proceed byte-identically",
+        );
+    }
+    #[test]
+    fn preflight_refuses_paid_probe_daily_caps_by_name() {
+        let clean = format!(
+            "version = {}\n[server]\nhost = \"127.0.0.1\"\n",
+            routectl_router::CURRENT_CONFIG_VERSION
+        );
+        preflight(&clean).expect("control: the file without the key passes");
+
+        let err = preflight(&format!("{clean}[fidelity.paid_probe_daily_caps]\nx = 1\n"))
+            .expect_err("the removed key must be refused");
+
+        assert!(
+            err.to_string()
+                .contains("paid probes were removed; delete this key"),
+            "err: {err}"
         );
     }
 }

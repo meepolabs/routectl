@@ -118,9 +118,9 @@ pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, St
     load_layers(path).map_err(|e| e.message)
 }
 
-/// Parse `config.toml` ONLY -- version preflight, the legacy-mitm and
-/// retired-key preflights, and the typed `deny_unknown_fields` deserialize -- WITHOUT loading the
-/// catalog overlay. Doctor's capability panel uses this so an unreadable
+/// Parse `config.toml` ONLY -- version preflight, the legacy-mitm,
+/// retired-key and removed-key preflights, and the typed
+/// `deny_unknown_fields` deserialize -- WITHOUT loading the catalog overlay. Doctor's capability panel uses this so an unreadable
 /// overlay degrades the catalog priors alone while the config-derived
 /// override rows still render. Produces the SAME wrapped error strings as
 /// the coupled [`load_effective_config_unvalidated`] so callers redact them
@@ -151,6 +151,8 @@ pub fn parse_config_only(path: &Path) -> Result<Config, String> {
     // preflight so a version 4 file is pointed at `config migrate` rather
     // than told to delete keys by hand.
     routectl_router::preflight_retired_capability_keys(&text).map_err(|e| e.to_string())?;
+
+    routectl_router::preflight_removed_paid_probe_caps(&text).map_err(|e| e.to_string())?;
 
     routectl_router::parse_config(&text)
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))
@@ -266,3 +268,7 @@ fn warn_if_config_world_readable(path: &Path, config: &Config, raw_text: &str) {
 #[cfg(test)]
 #[path = "config_load_tests.rs"]
 mod config_load_tests;
+
+#[cfg(test)]
+#[path = "config_load_removed_key_tests.rs"]
+mod config_load_removed_key_tests;

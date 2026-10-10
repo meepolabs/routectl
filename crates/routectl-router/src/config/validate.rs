@@ -182,6 +182,33 @@ pub fn preflight_legacy_mitm_credential_source(
     Ok(())
 }
 
+/// Error from [`preflight_removed_paid_probe_caps`]: the config still
+/// carries the removed `[fidelity] paid_probe_daily_caps` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "config carries `[fidelity] paid_probe_daily_caps`: paid probes were removed; delete this key"
+)]
+pub struct RemovedPaidProbeCapsError;
+
+/// Read the `[fidelity]` table off the RAW TOML text and refuse the removed
+/// `paid_probe_daily_caps` key by name, ahead of the typed deserialize whose
+/// generic "unknown field" error would not say the key has no replacement.
+/// Not part of [`preflight_retired_capability_keys`]: that list tells the
+/// operator `config migrate` converts an older file, and no rung removes this
+/// key. TOML that does not parse falls through as `Ok` so the typed
+/// deserialize reports the real syntax error.
+pub fn preflight_removed_paid_probe_caps(raw_toml: &str) -> Result<(), RemovedPaidProbeCapsError> {
+    let carries_removed_key = toml::from_str::<toml::Value>(raw_toml)
+        .ok()
+        .and_then(|v| v.get("fidelity").and_then(toml::Value::as_table).cloned())
+        .is_some_and(|fidelity| fidelity.contains_key("paid_probe_daily_caps"));
+
+    if carries_removed_key {
+        return Err(RemovedPaidProbeCapsError);
+    }
+    Ok(())
+}
+
 /// The retired per-target capability list, on a provider or a model entry.
 const RETIRED_UNSUPPORTED_FEATURES_KEY: &str = "unsupported_features";
 

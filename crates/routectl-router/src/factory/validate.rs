@@ -1680,8 +1680,7 @@ fn essential_key_near_miss(key: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Reject a config whose `[fidelity]` block names a malformed or unknown
-/// target spec in `prefix_impact_opt_in`, or an unknown provider key in
-/// `paid_probe_daily_caps`.
+/// target spec in `prefix_impact_opt_in`.
 ///
 /// `prefix_impact_opt_in` entries reuse the same two-tier target-spec
 /// GRAMMAR as `[capability.overrides]`: `"provider_name"` or
@@ -1696,29 +1695,12 @@ fn essential_key_near_miss(key: &str) -> Option<(&'static str, &'static str)> {
 /// the model's OWN `provider` field is allowed to name either that same
 /// concrete provider or a pool that has it as a member: pool membership is
 /// what actually dispatches the model, so `<member>:<nickname>` for a
-/// pool-backed model is a real, reachable target. `paid_probe_daily_caps`
-/// is single-tier by design (the daily budget is a provider-account
-/// property, not a per-model one), so a key carrying a `:` or naming an
-/// unconfigured provider is rejected.
+/// pool-backed model is a real, reachable target.
 ///
 /// Returns the first offending entry in config order.
 fn validate_fidelity_config(config: &Config) -> Result<(), String> {
     for spec in &config.fidelity.prefix_impact_opt_in {
         validate_prefix_impact_target_spec(config, spec)?;
-    }
-    for provider_name in config.fidelity.paid_probe_daily_caps.keys() {
-        if provider_name.contains(':') {
-            return Err(format!(
-                "[fidelity] paid_probe_daily_caps key `{provider_name}` is scoped to a \
-                 model, but the paid-probe daily cap is a provider-only budget -- \
-                 use the bare provider name"
-            ));
-        }
-        if !config.providers.contains_key(provider_name) {
-            return Err(format!(
-                "[fidelity] paid_probe_daily_caps names unknown provider `{provider_name}`"
-            ));
-        }
     }
     Ok(())
 }

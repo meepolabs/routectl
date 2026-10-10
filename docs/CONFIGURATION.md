@@ -564,9 +564,8 @@ and `[providers]` key, selectable or not, referenced or not. `config check`,
   A model named after its own provider (`[models.openrouter]` with
   `provider = "openrouter"`, the shape `routectl init` writes) is still
   valid.
-- A provider name is at most 128 bytes (UTF-8). Provider names also key
-  the durable paid-probe budget, so an oversized one is refused rather
-  than stored; the error states the length without echoing the name.
+- A provider name is at most 128 bytes (UTF-8). An oversized one is
+  refused; the error states the length without echoing the name.
 
 Everything else on `[models.X]` is a per-model behavior knob -- reasoning
 declaration, output caps, header and payload extras, response labels --
@@ -3677,10 +3676,8 @@ What it does and does not do:
 ## Fidelity pre-flight opt-in (`[fidelity]`)
 
 The optional `[fidelity]` block is the operator opt-in surface for
-prefix-impacting pre-flight repair and for per-provider paid capability
-probes. A missing block deserializes to the defaults below, which
-permit no paid probe calls and no prefix-impacting pre-flight action --
-an existing config needs no migration.
+prefix-impacting pre-flight repair. A missing block deserializes to the
+default below, which permits no prefix-impacting pre-flight action.
 
 ```toml
 [fidelity]
@@ -3690,11 +3687,6 @@ an existing config needs no migration.
 # (a bare pool name is not accepted -- see below). Default empty -- no
 # target is opted in.
 prefix_impact_opt_in = []
-
-# Per-provider paid-probe daily call cap, keyed by provider name. A
-# provider absent from this map defaults to 0 (no paid probes).
-[fidelity.paid_probe_daily_caps]
-# anthropic = 5
 ```
 
 - **`prefix_impact_opt_in`** (list of target specs, default empty) --
@@ -3715,15 +3707,6 @@ prefix_impact_opt_in = []
   a pool and the named provider is one of that pool's members, because
   pool dispatch always resolves to a concrete member, and that member
   name is exactly what reaches capability-override resolution.
-- **`paid_probe_daily_caps`** (table of provider name to non-negative
-  call count, default empty) -- caps the number of paid probe calls
-  issued against that provider per UTC day. Unlike
-  `prefix_impact_opt_in`, this table is single-tier: it is keyed by bare
-  provider name only, because the daily budget is a provider-account
-  property, not a per-model one. A key carrying a `:` or naming a
-  provider that is not configured fails config load. A provider absent
-  from the table, or present with the value `0`, permits no paid probe
-  call against it.
 - **The re-verification cadence and confirmation quorum are fixed, not
   configurable** -- both are hard safety parameters baked into the
   binary and read from no environment variable, so they cannot drift
@@ -3756,13 +3739,6 @@ prefix_impact_opt_in = []
   it suppresses the action without deleting the learned verdict.
   Envelope-class repair needs neither gate -- it acts on one confirmed
   cycle and no opt-in.
-- **`paid_probe_daily_caps` authorizes and bounds paid probes.** When a
-  lane's free validation runs out of steps, routectl records a paid-probe
-  candidate only if the provider's cap is non-zero. Before a live paid probe
-  call, one unit must commit durably against that provider's UTC-day cap. A
-  non-zero entry therefore authorizes real upstream spend up to the cap; the
-  default `0` declines every paid call.
-
 ## Context reduction (`[reduction]`)
 
 routectl can strip insignificant whitespace from JSON-formatted string

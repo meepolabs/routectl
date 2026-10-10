@@ -1563,18 +1563,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   following `CalibrationConfig` it retains and keeps aging the collected
   readings); `FidelityConfig` (global `[fidelity]`: `prefix_impact_opt_in:
   Vec<String>` reusing the `[capability.overrides]` two-tier target-spec
-  grammar, `paid_probe_daily_caps: BTreeMap<String, u32>` keyed by provider
-  name only) is fully defaulted (empty list, empty map), so a missing block
-  changes nothing -- but the two fields differ in what reads them.
-  `prefix_impact_opt_in` is an ACTIVE dispatch gate: the pre-flight planner
-  refuses a prefix-impacting transform for any target it does not name, so an
-  entry can change what goes upstream. `paid_probe_daily_caps` gates
-  PAID-CANDIDATE ELIGIBILITY and the durable reservation that must commit before
-  a live paid probe call. A non-zero entry authorizes real upstream spend up to
-  that provider's UTC-day cap; the default zero declines every paid call. Its
-  KEYS are validated at config load against the
-  configured providers (`factory::validate`, which rejects a `:`-scoped key and
-  an unknown provider name), so a typo fails the load today. The re-verification
+  grammar) is fully defaulted (empty list), so a missing block changes
+  nothing. `prefix_impact_opt_in` is an ACTIVE dispatch gate: the pre-flight
+  planner refuses a prefix-impacting transform for any target it does not name,
+  so an entry can change what goes upstream. The re-verification
   cadence and the confirmation quorums are the code constants
   `CANARY_INTERVAL` (100), `ENVELOPE_QUORUM` (1) and `PREFIX_QUORUM` (2), never
   read from the environment. The whole
@@ -1598,7 +1590,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   provider `allowed_betas` / `unsupported_features`, model
   `unsupported_features`) by dotted path only, never values; it runs after the
   version and legacy-mitm preflights, in the shared loader, the edit-pipeline
-  preflight and `init`'s `load_existing`
+  preflight and `init`'s `load_existing`;
+  `preflight_removed_paid_probe_caps(raw_toml)` -> `RemovedPaidProbeCapsError`
+  refuses the removed `[fidelity] paid_probe_daily_caps` key by name, naming no
+  successor; it runs last of the raw preflights in the shared loader and the
+  edit-pipeline preflight, and up front in `config migrate` at any version
 - `src/config_error.rs` -- the single production `Config` parse funnel
   `parse_config(text) -> Result<Config, String>` (re-exported from the crate
   root; consumed by `serve`/hot-reload load and every CLI config load) plus
@@ -1947,11 +1943,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   differs from the model's own `provider` is accepted, not rejected, when
   the model's `provider` names a pool and the segment is one of that pool's
   members -- pool dispatch resolves to a concrete member, which is exactly
-  what reaches capability-override resolution) and `[fidelity]
-  paid_probe_daily_caps` keys (rejects a model-scoped key -- the cap is a
-  provider-only budget -- and a key naming an unknown provider; no pool
-  consideration here, since a paid-probe budget is a concrete-provider
-  property)
+  what reaches capability-override resolution)
 - `src/factory/warnings.rs` -- non-fatal config warnings;
   `class_policy_warnings` is the advisory twin of `validate_class_policy` over
   the same surface (never fails): a `class_overrides` remap whose SOURCE
@@ -5668,8 +5660,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   then invokes the callback before returning, all under the short lifecycle
   transition. So a shutdown cannot interleave between the stamp and the store, and
   a post-shutdown publication does not store at all. It waits on nothing that can
-  be slow -- an in-flight paid authorization orders ITSELF against the publication
-  generation rather than this path waiting for it. One helper rather than three
+  be slow. One helper rather than three
   copies, and a source guard asserts `reload.rs` performs no store of its own and
   that this helper routes through the router's callback protocol
 - `src/server/metrics_driver.rs` -- the periodic router-metrics snapshot driver
@@ -8081,10 +8072,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   handler the request never reaches passes all of them. Covers feature-present rewrite
   and feature-absent forward over HTTP, a canary disproof whose clear is visible in the
   daemon's LIVE router and whose next HTTP request forwards unchanged, a populated
-  verdict row on the health panel plus a configured doctor envelope, and a cap-zero lane
-  activating on a real request and running FREE validation with zero reservations and
-  zero paid calls (the probe pass is driven on the daemon's exact live Router, which the
-  daemon publishes through a per-call observer). Also covers the fidelity INFO line at
+  verdict row on the health panel plus a configured doctor envelope, and a lane
+  activating on a real request and running FREE validation (the probe pass is driven
+  on the daemon's exact live Router, which the daemon publishes through a per-call
+  observer). Also covers the fidelity INFO line at
   the REAL endpoints, observed through the daemon-scoped event observer
   (`handlers::status::test_hooks`): `/status/health`, the configured
   `/status/doctor`, the no-config `/status/doctor` branch, and the `/status`
