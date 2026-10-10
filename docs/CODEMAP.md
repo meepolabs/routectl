@@ -3182,21 +3182,31 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/rejection_parser.rs` -- the per-dialect rejection parser:
   `parse_rejection(provider_kind, status, Option<&ParsedErrorBody>) ->
   Option<NamedRejection>`, where `NamedRejection { row: &'static
-  FieldRepairRow, tier: SignalTier, accepted: Option<&'static str> }`. Reads
+  FieldRepairRow, tier: SignalTier, kind: RejectionKind, accepted:
+  Option<&'static str> }`. Reads
   the carried parse (never the body text) on 400 / 422 only, for
   `anthropic-api` (location prefix `<path>: ...` and `"a.b" is not
   supported ... Use "x.y"` inside an `invalid_request_error`), `bedrock`
   (the same two shapes on the flat `{"message"}` body after one Converse
-  errors wrapper is stripped) and `openai-compat` / `openai-responses`
-  (`error.param`, or the exact `Unsupported parameter: '<x>' is not
-  supported with this model.` template). Any other kind, `gemini`
-  included, resolves to nothing. A lifted path must be a bounded ASCII
-  token; it is canonicalized (numeric and `[n]` indices dropped, a leading
-  Converse `additionalModelRequestFields` bag removed on Bedrock) and
-  resolved against `closed_table()`, so only the table's own row ever
-  leaves the module -- a path with no row resolves to `None`. Tiers: a
+  errors wrapper is stripped) and `openai-compat` (`error.param`, or the
+  exact singular `Unsupported parameter: '<x>' is not supported with this
+  model.` template; the plural NIM `Unsupported parameter(s): x` is a
+  pinned near-miss). Any other kind, `gemini` and `openai-responses`
+  included, resolves to nothing -- the tests assert no
+  `rejections/openai-responses/` fixture exists, so grounding one flips
+  them. A lifted path must be a bounded ASCII
+  token; it is canonicalized (interior numeric and `[n]` indices dropped, a
+  leading Converse `additionalModelRequestFields` bag removed on Bedrock)
+  and resolved against `closed_table()`, so only the table's own row ever
+  leaves the module -- a path with no row, or whose last raw segment is an
+  index (`tools.0`, `tools[0]`), resolves to `None`. Tiers: a
   structured param or a message whose reason matches a captured template is
-  `SelfIdentifying`; any other prose localization is `Inferred`. `accepted`
+  `SelfIdentifying`; any other prose localization is `Inferred`.
+  `RejectionKind` (orthogonal to tier, never persisted) is
+  `UnsupportedField` for the location-prefix reason `Extra inputs are not
+  permitted`, the quoted `"a.b" is not supported` form, OpenAI
+  `error.code == "unsupported_parameter"` or the exact singular template;
+  every other reason, and a bare `error.param`, is `InvalidValue`. `accepted`
   is always `None` until rows declare an accepted set. Not yet consumed by
   the field-repair seam (hence the module's non-test `dead_code`
   expectation). `src/router/rejection_parser_tests.rs` welds it to the

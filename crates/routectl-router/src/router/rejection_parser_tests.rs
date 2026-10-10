@@ -11,7 +11,7 @@ use routectl_core::{MAX_ERROR_BODY_BYTES, ParsedErrorBody, UpstreamBody};
 use serde_json::{Value, json};
 
 use super::super::field_repair::{closed_table, grounded_table};
-use super::{LocalizedPath, localize, parse_rejection};
+use super::{LocalizedPath, RejectionKind, localize, parse_rejection};
 
 const BEDROCK_CAPTURE: &str = include_str!("../../tests/fixtures/bedrock_validation_capture.json");
 const FORCED_TOOL_CHOICE_CAPTURE: &str =
@@ -26,15 +26,17 @@ const DISPLAY_PATH: &str = "thinking.enabled.display";
 const DISPLAY_MESSAGE: &str = "thinking.enabled.display: Input should be 'summarized', 'omitted'";
 const CONVERSE_WRAPPER: &str = "The model returned the following errors: ";
 
+use RejectionKind::{InvalidValue, UnsupportedField};
 use SignalTier::{Inferred, SelfIdentifying};
 
 /// What the parser makes of one captured envelope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Outcome {
     /// Resolved to the closed-table row with this path.
-    Row(&'static str, SignalTier),
-    /// Localized a path (shown canonicalized) that has no row.
-    Unresolved(String, SignalTier),
+    Row(&'static str, SignalTier, RejectionKind),
+    /// Localized a path that has no row, shown canonicalized with a trailing
+    /// `[]` when the raw path ended in an index.
+    Unresolved(String, SignalTier, RejectionKind),
     /// No arm localized a path.
     NotLocalized,
 }
@@ -42,16 +44,24 @@ enum Outcome {
 fn outcome(kind: &str, status: u16, body: &str) -> Outcome {
     let body = UpstreamBody::new(body);
     if let Some(named) = parse_rejection(kind, status, body.parsed()) {
-        return Outcome::Row(named.row.path, named.tier);
+        return Outcome::Row(named.row.path, named.tier, named.kind);
     }
     match body.parsed().and_then(|p| localize(kind, status, p)) {
-        Some(LocalizedPath { segments, tier }) => Outcome::Unresolved(segments.join("."), tier),
+        Some(LocalizedPath {
+            segments,
+            ends_in_index,
+            tier,
+            kind,
+        }) => {
+            let marker = if ends_in_index { "[]" } else { "" };
+            Outcome::Unresolved(format!("{}{marker}", segments.join(".")), tier, kind)
+        }
         None => Outcome::NotLocalized,
     }
 }
 
-fn unresolved(path: &str, tier: SignalTier) -> Outcome {
-    Outcome::Unresolved(path.to_string(), tier)
+fn unresolved(path: &str, tier: SignalTier, kind: RejectionKind) -> Outcome {
+    Outcome::Unresolved(path.to_string(), tier, kind)
 }
 
 fn anthropic_body(message: &str) -> String {
@@ -66,6 +76,13 @@ fn bedrock_body(message: &str) -> String {
 fn openai_body(message: &str, param: Option<&str>) -> String {
     json!({"error": {"message": message, "type": "invalid_request_error", "param": param}})
         .to_string()
+}
+
+fn openai_coded_body(message: &str, param: Option<&str>, code: &str) -> String {
+    json!({
+        "error": {"message": message, "type": "invalid_request_error", "param": param, "code": code}
+    })
+    .to_string()
 }
 
 fn rejections_dir() -> PathBuf {
@@ -112,15 +129,15 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
     let expected: BTreeMap<String, Outcome> = [
         (
             "anthropic-api/thinking-display-enum",
-            Outcome::Row(DISPLAY_PATH, SelfIdentifying),
+            Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "bedrock/thinking-type-enabled-unsupported",
-            unresolved("thinking.type.enabled", SelfIdentifying),
+            unresolved("thinking.type.enabled", SelfIdentifying, UnsupportedField),
         ),
         (
             "openai-compat/unsupported-parameter-temperature",
-            unresolved("temperature", SelfIdentifying),
+            unresolved("temperature", SelfIdentifying, UnsupportedField),
         ),
     ]
     .into_iter()
@@ -139,43 +156,51 @@ fn every_bedrock_validation_canary_resolves_to_a_row_or_is_reported_unresolved()
         ("converse-advisor-composed", Outcome::NotLocalized),
         (
             "converse-field-probe",
-            unresolved("thinking.adaptive.routectl_probe_garbage", SelfIdentifying),
+            unresolved(
+                "thinking.adaptive.routectl_probe_garbage",
+                SelfIdentifying,
+                UnsupportedField,
+            ),
         ),
         ("converse-web-search-composed", Outcome::NotLocalized),
         (
             "schema-error-converse-sonnet-4-6",
-            unresolved("output_config.format.schema", Inferred),
+            unresolved("output_config.format.schema", Inferred, InvalidValue),
         ),
         (
             "schema-error-invoke-sonnet-4-6",
-            unresolved("output_config.format.schema", Inferred),
+            unresolved("output_config.format.schema", Inferred, InvalidValue),
         ),
         (
             "structured-output-converse-opus-5-5",
-            unresolved("output_config.format", SelfIdentifying),
+            unresolved("output_config.format", SelfIdentifying, UnsupportedField),
         ),
         (
             "structured-output-invoke-opus-5-5",
-            unresolved("output_config.format", SelfIdentifying),
+            unresolved("output_config.format", SelfIdentifying, UnsupportedField),
         ),
         ("supp-bad-model-id", Outcome::NotLocalized),
         ("tool-changes-sonnet-5", Outcome::NotLocalized),
         (
             "tool-removal-messages-opus-5-5",
-            unresolved("messages.content", Inferred),
+            unresolved("messages.content[]", Inferred, InvalidValue),
         ),
         (
             "toolset-name-opus-5-5",
-            unresolved("tools.computer_toolset_20260801", Inferred),
+            unresolved("tools.computer_toolset_20260801", Inferred, InvalidValue),
         ),
         ("unknown-beta", Outcome::NotLocalized),
         (
             "unknown-body-field",
-            unresolved("routectl_envelope_probe_field", SelfIdentifying),
+            unresolved(
+                "routectl_envelope_probe_field",
+                SelfIdentifying,
+                UnsupportedField,
+            ),
         ),
         (
             "web-search-pydantic-sonnet-4-6",
-            unresolved("tools", Inferred),
+            unresolved("tools[]", Inferred, InvalidValue),
         ),
         ("web-search-template-sonnet-5", Outcome::NotLocalized),
     ]
@@ -194,7 +219,7 @@ fn the_forced_tool_choice_location_prefix_is_an_inferred_unresolved_path() {
 
     let reached = outcome(ANTHROPIC, status, anthropic["body"].as_str().unwrap());
 
-    assert_eq!(reached, unresolved("tool_choice", Inferred));
+    assert_eq!(reached, unresolved("tool_choice", Inferred, InvalidValue));
 }
 
 #[test]
@@ -203,7 +228,7 @@ fn every_grounded_row_is_reached_by_a_committed_fixture() {
         .into_values()
         .chain(bedrock_canary_outcomes().into_values())
         .filter_map(|outcome| match outcome {
-            Outcome::Row(path, _) => Some(path),
+            Outcome::Row(path, ..) => Some(path),
             _ => None,
         })
         .collect();
@@ -301,7 +326,7 @@ fn each_arm_assigns_its_tier() {
         ),
         (
             "structured param",
-            OPENAI_RESPONSES,
+            OPENAI_COMPAT,
             openai_body("anything at all", Some(DISPLAY_PATH)),
             SelfIdentifying,
         ),
@@ -325,6 +350,167 @@ fn each_arm_assigns_its_tier() {
         assert_eq!(named.tier, tier, "{name}");
         assert_eq!(named.accepted, None, "{name}");
     }
+}
+
+#[test]
+fn each_classification_rule_assigns_its_kind() {
+    let template =
+        format!("Unsupported parameter: '{DISPLAY_PATH}' is not supported with this model.");
+    let other_template =
+        "Unsupported parameter: 'temperature' is not supported with this model.".to_string();
+    let cases = [
+        (
+            "location prefix, Input should be (display fixture)",
+            ANTHROPIC,
+            anthropic_body(DISPLAY_MESSAGE),
+            InvalidValue,
+        ),
+        (
+            "location prefix, Extra inputs are not permitted",
+            BEDROCK,
+            bedrock_body(&format!("{DISPLAY_PATH}: Extra inputs are not permitted")),
+            UnsupportedField,
+        ),
+        (
+            "location prefix, any other reason",
+            ANTHROPIC,
+            anthropic_body(&format!(
+                "{DISPLAY_PATH}: is not available for this request"
+            )),
+            InvalidValue,
+        ),
+        (
+            "quoted is not supported, grounded continuation",
+            BEDROCK,
+            bedrock_body(&format!(
+                "{CONVERSE_WRAPPER}\"{DISPLAY_PATH}\" is not supported for this model. Use \
+                 \"thinking.type.adaptive\" instead."
+            )),
+            UnsupportedField,
+        ),
+        (
+            "quoted is not supported, prose continuation",
+            ANTHROPIC,
+            anthropic_body(&format!("\"{DISPLAY_PATH}\" is not supported on this lane")),
+            UnsupportedField,
+        ),
+        (
+            "bare error.param",
+            OPENAI_COMPAT,
+            openai_body("anything at all", Some(DISPLAY_PATH)),
+            InvalidValue,
+        ),
+        (
+            "error.param with another code",
+            OPENAI_COMPAT,
+            openai_coded_body("anything at all", Some(DISPLAY_PATH), "invalid_value"),
+            InvalidValue,
+        ),
+        (
+            "error.param with code unsupported_parameter",
+            OPENAI_COMPAT,
+            openai_coded_body(
+                "anything at all",
+                Some(DISPLAY_PATH),
+                "unsupported_parameter",
+            ),
+            UnsupportedField,
+        ),
+        (
+            "exact singular template, no param",
+            OPENAI_COMPAT,
+            openai_body(&template, None),
+            UnsupportedField,
+        ),
+        (
+            "exact singular template naming error.param",
+            OPENAI_COMPAT,
+            openai_body(&template, Some(DISPLAY_PATH)),
+            UnsupportedField,
+        ),
+        (
+            "exact singular template naming another parameter",
+            OPENAI_COMPAT,
+            openai_body(&other_template, Some(DISPLAY_PATH)),
+            InvalidValue,
+        ),
+    ];
+
+    for (name, provider_kind, body, kind) in cases {
+        let body = UpstreamBody::new(body);
+        let named = parse_rejection(provider_kind, 400, body.parsed())
+            .unwrap_or_else(|| panic!("{name}: resolves the display row"));
+        assert_eq!(named.row.path, DISPLAY_PATH, "{name}");
+        assert_eq!(named.kind, kind, "{name}");
+    }
+}
+
+#[test]
+fn a_path_ending_in_an_index_names_no_row() {
+    let message = |path: &str| anthropic_body(&format!("{path}: Extra inputs are not permitted"));
+    let control = UpstreamBody::new(message("thinking.enabled.0.display"));
+    assert_eq!(
+        parse_rejection(ANTHROPIC, 400, control.parsed()).map(|n| n.row.path),
+        Some(DISPLAY_PATH),
+        "premise: an interior index still canonicalizes onto the row",
+    );
+
+    for path in [
+        "thinking.enabled.display.0",
+        "thinking.enabled.display[0]",
+        "thinking.enabled.display[0][1]",
+    ] {
+        let body = UpstreamBody::new(message(path));
+
+        assert!(
+            parse_rejection(ANTHROPIC, 400, body.parsed()).is_none(),
+            "{path}",
+        );
+        assert_eq!(
+            outcome(ANTHROPIC, 400, body.text()),
+            unresolved(
+                "thinking.enabled.display[]",
+                SelfIdentifying,
+                UnsupportedField
+            ),
+            "{path}: still reported as a localized path",
+        );
+    }
+}
+
+#[test]
+fn the_plural_unsupported_parameters_wording_is_not_localized() {
+    for message in [
+        "Validation: Unsupported parameter(s): system",
+        "Validation: Unsupported parameter(s): thinking.enabled.display",
+    ] {
+        let body = openai_body(message, None);
+
+        assert_eq!(
+            outcome(OPENAI_COMPAT, 400, &body),
+            Outcome::NotLocalized,
+            "{message}",
+        );
+    }
+}
+
+#[test]
+fn openai_responses_has_no_parser_and_no_committed_rejection_fixture() {
+    let structured = UpstreamBody::new(openai_coded_body(
+        "anything at all",
+        Some(DISPLAY_PATH),
+        "unsupported_parameter",
+    ));
+    assert!(
+        parse_rejection(OPENAI_COMPAT, 400, structured.parsed()).is_some(),
+        "premise: the same envelope resolves on openai-compat",
+    );
+
+    assert!(parse_rejection(OPENAI_RESPONSES, 400, structured.parsed()).is_none());
+    assert!(
+        rejections_dir().is_dir() && !rejections_dir().join(OPENAI_RESPONSES).exists(),
+        "a committed Responses rejection fixture must come with a deliberate parser arm",
+    );
 }
 
 #[test]
@@ -386,10 +572,9 @@ fn the_converse_field_bag_is_only_removed_on_bedrock() {
 
 #[test]
 fn a_non_ascii_or_over_long_param_resolves_to_none() {
-    let index_tail = ".0".repeat(30);
-    let over_long = format!("{DISPLAY_PATH}{index_tail}");
+    let over_long = format!("thinking.enabled{}.display", ".0".repeat(30));
     assert!(over_long.len() > routectl_core::MAX_SAFE_TOKEN_LEN);
-    let short_with_index = format!("{DISPLAY_PATH}.0");
+    let short_with_index = "thinking.enabled.0.display";
 
     for param in ["thinking.enabled.displ\u{e9}y", over_long.as_str()] {
         let body = UpstreamBody::new(openai_body("rejected", Some(param)));
@@ -399,7 +584,7 @@ fn a_non_ascii_or_over_long_param_resolves_to_none() {
             "{param:?}",
         );
     }
-    let control = UpstreamBody::new(openai_body("rejected", Some(&short_with_index)));
+    let control = UpstreamBody::new(openai_body("rejected", Some(short_with_index)));
     assert!(
         parse_rejection(OPENAI_COMPAT, 400, control.parsed()).is_some(),
         "the same path, bounded, resolves",
