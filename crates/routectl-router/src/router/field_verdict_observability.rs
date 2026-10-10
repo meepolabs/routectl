@@ -29,6 +29,14 @@ use super::Router;
 pub struct FieldRepairCounters {
     /// Cumulative fired envelope-field repairs.
     pub repair_attempted: u64,
+    /// The subset of `repair_attempted` whose rejection refused the VALUE sent
+    /// in the field rather than the field: the drop served the request on a
+    /// weaker contract than the client set, and learns nothing.
+    ///
+    /// Read beside `verdicts_learned`: a lossy count rising with the attempted
+    /// count while nothing is learned is the steady state of a lane refusing a
+    /// value, not a fault -- and without this count it reads as one.
+    pub repair_lossy: u64,
     /// Cumulative fired repairs whose re-dispatch succeeded.
     pub repair_succeeded: u64,
     /// Cumulative envelope-field verdicts persisted after a confirmed repair.
@@ -72,6 +80,7 @@ impl Router {
         let canaries = self.field_verdicts().canaries();
         FieldRepairCounters {
             repair_attempted: self.metrics.field_repair_attempted_total(),
+            repair_lossy: self.metrics.field_repair_lossy_total(),
             repair_succeeded: self.metrics.field_repair_succeeded_total(),
             verdicts_learned: self.metrics.field_verdicts_learned_total(),
             outstanding_unconfirmed: canaries.outstanding_unconfirmed_total(),

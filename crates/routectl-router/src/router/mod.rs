@@ -1502,15 +1502,23 @@ pub struct DispatchMeta {
     /// closed-set tokens and counts -- never the artifact bytes, an item
     /// id, a hash, the session key, or the upstream body, at any level.
     pub replay_degradation: Option<ReplayDegradation>,
-    /// Envelope-field repair record for the whole walk. `Some` exactly when
-    /// the reactive L0 field repair fired for this request -- an upstream
+    /// Envelope-field repair records for the whole walk, ONE PER REPAIR THAT
+    /// FIRED, in the order they fired. A repair fires when an upstream
     /// rejection named a field in the closed repair table and the mapped
-    /// field was dropped for a same-target re-dispatch. The single
-    /// aggregated field-repair WARN reads it ONCE at request resolution;
-    /// `None` means no repair fired (no WARN). Carries only closed-set
-    /// tokens, a code-authored field path, and booleans -- never the
-    /// upstream body, the rejected value, or the session key.
-    pub field_repair: Option<FieldRepair>,
+    /// field was dropped for a same-target re-dispatch. Each record is
+    /// settled in place by the walk that made it, and the field-repair WARN
+    /// reads every record ONCE at request resolution; empty means no repair
+    /// fired (no WARN).
+    ///
+    /// A list rather than one slot because a fallback walk can repair on two
+    /// targets, and the earlier target's outcome is exactly what a single
+    /// overwritten slot would lose. Bounded by the request's shared repair
+    /// allowance, so it never holds more records than that allowance.
+    ///
+    /// Carries only closed-set tokens, a code-authored field path, and
+    /// booleans -- never the upstream body, the rejected value, or the session
+    /// key.
+    pub field_repairs: Vec<FieldRepair>,
     /// Envelope-field pre-flight records, ONE PER CONSIDERED CLOSED-TABLE ROW
     /// PER TARGET PLANNED, in the order the walk planned them. A fallback chain
     /// therefore reports every target's decisions rather than only the last:
@@ -1533,7 +1541,7 @@ pub struct DispatchMeta {
     /// adds a row changes the count without changing this field's meaning.
     ///
     /// Empty when the walk planned nothing (no target reached the seam).
-    /// Distinct from [`Self::field_repair`]: that field records the REACTIVE
+    /// Distinct from [`Self::field_repairs`]: that field records the REACTIVE
     /// post-rejection repair, these the PROACTIVE pre-dispatch rewrite, and
     /// the two are never conflated into one record or one budget charge.
     pub field_preflight: Vec<FieldPreflight>,
@@ -1615,9 +1623,8 @@ pub struct FieldPreflightAuthorizationRecord {
     pub canary_last_outcome: &'static str,
 }
 
-/// Closed-set facts about a reactive L0 envelope-field repair that fired
-/// during a walk, aggregated onto [`DispatchMeta`] for the single
-/// per-request WARN.
+/// Closed-set facts about one reactive L0 envelope-field repair that fired
+/// during a walk, aggregated onto [`DispatchMeta`] for the per-repair WARN.
 ///
 /// Every field is a stable token, a code-authored literal, or a boolean:
 /// deliberately NO upstream body, no rejected field VALUE, no session key.
@@ -1726,7 +1733,7 @@ impl DispatchMeta {
             capability_observations: Vec::new(),
             cleared_capabilities: Vec::new(),
             replay_degradation: None,
-            field_repair: None,
+            field_repairs: Vec::new(),
             field_preflight: Vec::new(),
         }
     }

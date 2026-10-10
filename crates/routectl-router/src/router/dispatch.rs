@@ -43,7 +43,7 @@ use super::class_observe::{
 };
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::field_preflight::emit_field_preflight;
-use super::field_repair::{FieldSettlementMode, emit_field_repair};
+use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
 use super::overlays::apply_layered_overlays;
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
 use super::repair_budget::RepairBudget;
@@ -438,7 +438,7 @@ impl Router {
             let mut field_canary = field_canary;
             let mut canary_repair_attempted = false;
             let mut canary_reject_status: u16 = 0;
-            let mut canary_repair_lossy = false;
+            let mut canary_lossy_repair: Option<FieldRepairHandle> = None;
             let provider_cfg = self.config.providers.get(provider_name);
             apply_context_reduction(
                 &self.config,
@@ -527,7 +527,7 @@ impl Router {
                 FieldSettlementMode::Settling,
                 now_admit,
             );
-            let mut field_repair_attempted = false;
+            let mut reactive_repair: Option<FieldRepairHandle> = None;
             let mut field_reject_status: u16 = 0;
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
@@ -722,7 +722,7 @@ impl Router {
                         // ride the clear out on the meta, or a warm rebuild
                         // would resurrect a verdict this request disproved.
                         if let Some(plan) = field_plan.take() {
-                            if field_repair_attempted {
+                            if let Some(repair) = reactive_repair {
                                 let features = super::field_repair::request_feature_keys(&req);
                                 // The `learned` claim is derived from what the commit
                                 // actually PERSISTED, never asserted alongside it: a
@@ -733,7 +733,7 @@ impl Router {
                                     plan.commit(field_reject_status, features, Instant::now());
                                 let persisted = learned.is_some();
                                 meta.learned_capabilities.extend(learned);
-                                self.note_field_repair_succeeded(meta, persisted);
+                                self.note_field_repair_succeeded(meta, repair, persisted);
                             } else {
                                 meta.cleared_capabilities.extend(plan.settle_success());
                             }
@@ -750,8 +750,8 @@ impl Router {
                         // refused-VALUE rejection already settled the canary as
                         // inconclusive in that branch, so no plan is left here
                         // and its lossy repair only reports success.
-                        if canary_repair_lossy {
-                            self.note_field_repair_succeeded(meta, false);
+                        if let Some(repair) = canary_lossy_repair {
+                            self.note_field_repair_succeeded(meta, repair, false);
                         }
                         if let Some(plan) = std::mem::take(&mut field_canary).into_canary() {
                             if canary_repair_attempted {
@@ -971,7 +971,7 @@ impl Router {
                         // most once per target and never nests inside the
                         // per-target retry or the fallback walk, so the call
                         // count stays additive.
-                        if !field_repair_attempted
+                        if reactive_repair.is_none()
                             && let Some(plan) = field_plan.as_mut()
                             && let Some(status) = plan.apply(
                                 &mut attempt_req,
@@ -982,9 +982,8 @@ impl Router {
                                 target.provider_kind.unwrap_or(""),
                             )
                         {
-                            field_repair_attempted = true;
                             field_reject_status = status;
-                            self.note_field_repair(meta, state_key, plan);
+                            reactive_repair = Some(self.note_field_repair(meta, state_key, plan));
                             // A repair is a fixed correctness branch, not a
                             // retry policy, so it takes no backoff sleep (the
                             // streaming walk has none to skip).
@@ -1030,8 +1029,8 @@ impl Router {
                             canary_repair_attempted = true;
                             canary_reject_status = repair.status;
                             if let Some(path) = repair.lossy_path {
-                                canary_repair_lossy = true;
-                                self.note_field_repair_at(meta, state_key, path, true);
+                                canary_lossy_repair =
+                                    Some(self.note_field_repair_at(meta, state_key, path, true));
                             }
                             // A re-verification retry is a fixed correctness
                             // branch, not a retry policy, so it takes no
@@ -1509,7 +1508,7 @@ impl Router {
                 FieldSettlementMode::Settling,
                 now_admit,
             );
-            let mut field_repair_attempted = false;
+            let mut reactive_repair: Option<FieldRepairHandle> = None;
             let mut field_reject_status: u16 = 0;
             let attempt_policy = self.compose_attempt_policy(
                 &policy,
@@ -1706,7 +1705,7 @@ impl Router {
                         // ride the clear out on the meta, or a warm rebuild
                         // would resurrect a verdict this request disproved.
                         if let Some(plan) = field_plan.take() {
-                            if field_repair_attempted {
+                            if let Some(repair) = reactive_repair {
                                 let features = super::field_repair::request_feature_keys(&req);
                                 // The `learned` claim is derived from what the commit
                                 // actually PERSISTED, never asserted alongside it: a
@@ -1717,7 +1716,7 @@ impl Router {
                                     plan.commit(field_reject_status, features, Instant::now());
                                 let persisted = learned.is_some();
                                 meta.learned_capabilities.extend(learned);
-                                self.note_field_repair_succeeded(meta, persisted);
+                                self.note_field_repair_succeeded(meta, repair, persisted);
                             } else {
                                 meta.cleared_capabilities.extend(plan.settle_success());
                             }
@@ -1881,7 +1880,7 @@ impl Router {
                         // every other candidate's guard. Fires at most once per
                         // target and never nests inside the per-target retry or
                         // the fallback walk, so the call count stays additive.
-                        if !field_repair_attempted
+                        if reactive_repair.is_none()
                             && let Some(plan) = field_plan.as_mut()
                             && let Some(status) = plan.apply(
                                 &mut attempt_req,
@@ -1892,9 +1891,8 @@ impl Router {
                                 target.provider_kind.unwrap_or(""),
                             )
                         {
-                            field_repair_attempted = true;
                             field_reject_status = status;
-                            self.note_field_repair(meta, state_key, plan);
+                            reactive_repair = Some(self.note_field_repair(meta, state_key, plan));
                             probe_guard.release();
                             // Preserve the genuine rejection as last_err before
                             // re-gating the repaired attempt: if the re-gate

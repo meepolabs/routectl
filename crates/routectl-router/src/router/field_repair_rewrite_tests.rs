@@ -205,8 +205,8 @@ async fn a_rejection_naming_one_accepted_value_rewrites_to_it_and_commits() {
     );
     let summary = dispatched
         .meta
-        .field_repair
-        .as_ref()
+        .field_repairs
+        .first()
         .expect("the repair records a summary");
     assert_eq!(summary.action, super::FIELD_ACTION_REWRITE_REPAIR);
     assert!(summary.repair_succeeded);
@@ -232,7 +232,7 @@ async fn a_rejection_naming_a_value_outside_the_closed_set_repairs_nothing() {
     );
     assert_eq!(seats[0].calls(), 1, "no repaired retry was dispatched");
     assert!(dispatched.meta.learned_capabilities.is_empty());
-    assert!(dispatched.meta.field_repair.is_none());
+    assert!(dispatched.meta.field_repairs.is_empty());
     assert_eq!(router.field_repair_counters().repair_attempted, 0);
 }
 

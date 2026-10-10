@@ -250,6 +250,7 @@ fn emit_if_admitted(
     let probes = &snapshot.probes;
     tracing::info!(
         rc_field_repair_attempted_total = snapshot.counters.repair_attempted,
+        rc_field_repair_lossy_total = snapshot.counters.repair_lossy,
         rc_field_repair_succeeded_total = snapshot.counters.repair_succeeded,
         rc_field_verdicts_learned_total = snapshot.counters.verdicts_learned,
         rc_field_outstanding_unconfirmed_total = snapshot.counters.outstanding_unconfirmed,
@@ -336,6 +337,7 @@ fn line_fingerprint(
     let counters = &snapshot.counters;
     for count in [
         counters.repair_attempted,
+        counters.repair_lossy,
         counters.repair_succeeded,
         counters.verdicts_learned,
         counters.outstanding_unconfirmed,

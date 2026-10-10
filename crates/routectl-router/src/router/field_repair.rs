@@ -1461,31 +1461,34 @@ impl Router {
             && rejected_field(native_class, err, provider_kind).is_none()
     }
 
-    /// Record that the field repair fired for this request, for the single
-    /// aggregated WARN emitted at request resolution, and count it.
+    /// Record that the field repair fired for this request, for the
+    /// field-repair WARN emitted at request resolution, and count it.
     ///
-    /// The WARN is one line per request; the counter is what answers "how
-    /// often does this arm fire" without depending on a log level, so both
-    /// are driven from here and cannot disagree about whether a repair
-    /// happened.
+    /// The WARN reports each repair; the counter is what answers "how often
+    /// does this arm fire" without depending on a log level, so both are driven
+    /// from here and cannot disagree about whether a repair happened.
     ///
     /// A repair answering a refused VALUE is recorded under its own action
     /// token and counted as lossy: it served the attempt by dropping a field
     /// the client set and the lane accepts, and an operator needs to tell that
     /// apart from a drop of a field the lane does not take at all.
+    ///
+    /// Returns the handle the walk settles THIS record through, so a later
+    /// repair elsewhere in the walk cannot take its outcome.
     pub(super) fn note_field_repair(
         &self,
         meta: &mut DispatchMeta,
         state_key: &str,
         plan: &FieldRepairPlan<'_>,
-    ) {
+    ) -> FieldRepairHandle {
         let field_path = plan
             .repaired_path()
             .expect("a reported repair names the row it dropped");
-        self.note_field_repair_at(meta, state_key, field_path, plan.repaired_lossy());
-        if let Some(record) = meta.field_repair.as_mut() {
+        let handle = self.note_field_repair_at(meta, state_key, field_path, plan.repaired_lossy());
+        if let Some(record) = meta.field_repairs.get_mut(handle.0) {
             record.action = plan.repair_action();
         }
+        handle
     }
 
     /// Record a field repair by the path it dropped and whether it was lossy:
@@ -1498,8 +1501,9 @@ impl Router {
         state_key: &str,
         field_path: &'static str,
         lossy: bool,
-    ) {
-        meta.field_repair = Some(super::FieldRepair {
+    ) -> FieldRepairHandle {
+        let handle = FieldRepairHandle(meta.field_repairs.len());
+        meta.field_repairs.push(super::FieldRepair {
             action: if lossy {
                 FIELD_ACTION_LOSSY_DROP_REPAIR
             } else {
@@ -1516,14 +1520,20 @@ impl Router {
         if lossy {
             self.metrics.incr_field_repair_lossy();
         }
+        handle
     }
 
-    /// Record that the repaired retry succeeded, and whether that outcome
-    /// persisted a verdict. Both booleans move together because a committed
-    /// verdict is exactly a succeeded repair -- recording them at separate
-    /// sites is how a summary comes to claim one without the other.
-    pub(super) fn note_field_repair_succeeded(&self, meta: &mut DispatchMeta, learned: bool) {
-        if let Some(record) = meta.field_repair.as_mut() {
+    /// Record that the repaired retry behind `repair` succeeded, and whether
+    /// that outcome persisted a verdict. Both booleans move together because a
+    /// committed verdict is exactly a succeeded repair -- recording them at
+    /// separate sites is how a summary comes to claim one without the other.
+    pub(super) fn note_field_repair_succeeded(
+        &self,
+        meta: &mut DispatchMeta,
+        repair: FieldRepairHandle,
+        learned: bool,
+    ) {
+        if let Some(record) = meta.field_repairs.get_mut(repair.0) {
             record.repair_succeeded = true;
             record.learned = learned;
         }
@@ -1534,30 +1544,35 @@ impl Router {
     }
 }
 
-/// Emit the single aggregated envelope-field repair WARN for a resolved
-/// request. Fires exactly ONCE when the repair fired anywhere in the walk,
-/// and not at all otherwise. Content-free by construction: closed-set
-/// tokens, the closed table's own path literal, and booleans -- never the
-/// upstream body, the rejected field's VALUE, or the session key. The request
-/// span already supplies `request_id` correlation across the hops.
+/// Which of a request's repair records a walk settles: the position the
+/// recorder pushed it at. Records are only ever appended, so a handle stays
+/// valid for the whole request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FieldRepairHandle(usize);
+
+/// Emit the envelope-field repair WARN for a resolved request: one line per
+/// repair that fired, in the order they fired, and none otherwise. Content-free
+/// by construction: closed-set tokens, the closed table's own path literal, and
+/// booleans -- never the upstream body, the rejected field's VALUE, or the
+/// session key. The request span already supplies `request_id` correlation
+/// across the hops.
 pub(super) fn emit_field_repair(meta: &DispatchMeta) {
-    let Some(record) = meta.field_repair.as_ref() else {
-        return;
-    };
-    tracing::warn!(
-        action = record.action,
-        state_key = %sanitize_for_log(&record.state_key),
-        field_path = record.field_path,
-        reason = record.reason,
-        repair_attempted = record.repair_attempted,
-        repair_succeeded = record.repair_succeeded,
-        learned = record.learned,
-        "{FIELD_REPAIR_EVENT}",
-    );
+    for record in &meta.field_repairs {
+        tracing::warn!(
+            action = record.action,
+            state_key = %sanitize_for_log(&record.state_key),
+            field_path = record.field_path,
+            reason = record.reason,
+            repair_attempted = record.repair_attempted,
+            repair_succeeded = record.repair_succeeded,
+            learned = record.learned,
+            "{FIELD_REPAIR_EVENT}",
+        );
+    }
 }
 
-/// Message/event name of the single aggregated field-repair WARN. Stable,
-/// greppable, closed-set.
+/// Message/event name of the field-repair WARN. Stable, greppable,
+/// closed-set.
 const FIELD_REPAIR_EVENT: &str = "envelope_field_repaired";
 
 /// Test-only injection of a field resolution, standing in for the parser.

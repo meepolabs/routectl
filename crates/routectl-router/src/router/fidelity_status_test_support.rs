@@ -104,7 +104,7 @@ impl FieldVerdictStatus {
 /// counter carries a different number, because equal values make any permutation
 /// pass.
 ///
-/// So this sets seven distinct counts. The counters are private to this crate and
+/// So this sets eight distinct counts. The counters are private to this crate and
 /// the consumer is `routectl-cli`, hence the seam; it is gated to test builds, so no
 /// release build can forge a counter.
 ///
@@ -113,7 +113,7 @@ impl FieldVerdictStatus {
 #[cfg(any(test, feature = "test-utils"))]
 #[doc(hidden)]
 pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepairCounters {
-    // Deliberately unequal, and deliberately not 1..=7 in field order either: a
+    // Deliberately unequal, and deliberately not 1..=8 in field order either: a
     // permutation of consecutive values is easier to satisfy by accident than a
     // spread one.
     for _ in 0..3 {
@@ -121,6 +121,9 @@ pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepair
     }
     for _ in 0..11 {
         router.metrics.incr_field_repair_succeeded();
+    }
+    for _ in 0..13 {
+        router.metrics.incr_field_repair_lossy();
     }
     for _ in 0..5 {
         router.metrics.incr_field_verdicts_learned();

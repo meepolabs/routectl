@@ -800,7 +800,7 @@ async fn complete_dispatches_the_planned_body_before_any_upstream_touch() {
     );
     assert_eq!(record.reason, FIELD_PREFLIGHT_ACTION_DROP);
     assert!(
-        dispatched.meta.field_repair.is_none(),
+        dispatched.meta.field_repairs.is_empty(),
         "a pre-flight rewrite is not a reactive repair and must not be recorded as one",
     );
 }
@@ -983,7 +983,7 @@ async fn a_preflight_rewrite_spends_no_reactive_repair_budget() {
     assert!(dispatched.result.is_ok());
     assert_eq!(seen.calls(), 1, "no retry: the first attempt served");
     assert!(
-        dispatched.meta.field_repair.is_none(),
+        dispatched.meta.field_repairs.is_empty(),
         "no reactive repair record, so no budget draw and no settlement",
     );
     assert!(

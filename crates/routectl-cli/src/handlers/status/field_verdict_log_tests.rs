@@ -121,7 +121,8 @@ const WRITER_HEALTHY: bool = false;
 /// alone could see it.
 ///
 /// Mutation checks: swap any two right-hand sides in the `info!` call -> red on both
-/// of their assertions; point one field at a constant -> red on that one.
+/// of their assertions; point one field at a constant -> red on that one; project a
+/// counter as zero in `Router::field_repair_counters` -> red on the nonzero premise.
 #[test]
 fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
     let router = fixture_router();
@@ -141,6 +142,7 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
     // literal here would be a second copy of the fixture's numbers, free to drift.
     for (field, expected) in [
         ("rc_field_repair_attempted_total", seeded.repair_attempted),
+        ("rc_field_repair_lossy_total", seeded.repair_lossy),
         ("rc_field_repair_succeeded_total", seeded.repair_succeeded),
         ("rc_field_verdicts_learned_total", seeded.verdicts_learned),
         (
@@ -165,6 +167,7 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
     // no permutation of them satisfies the loop above.
     let mut values = vec![
         seeded.repair_attempted,
+        seeded.repair_lossy,
         seeded.repair_succeeded,
         seeded.verdicts_learned,
         seeded.outstanding_unconfirmed,
@@ -172,6 +175,11 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
         seeded.preflight_actions,
         seeded.parser_unlocalized,
     ];
+    assert!(
+        values.iter().all(|value| *value != 0),
+        "premise: every seeded counter projects a nonzero value, or a counter the \
+         projection pins to zero would match its own zero seed: {values:?}",
+    );
     let planned = values.len();
     values.sort_unstable();
     values.dedup();
@@ -239,6 +247,7 @@ fn every_count_is_reported_even_at_zero() {
     assert_eq!(info.level, tracing::Level::INFO);
     for field in [
         "rc_field_repair_attempted_total",
+        "rc_field_repair_lossy_total",
         "rc_field_repair_succeeded_total",
         "rc_field_verdicts_learned_total",
         "rc_field_outstanding_unconfirmed_total",
@@ -480,6 +489,7 @@ fn every_count_renders_as_a_bare_integer() {
 
     for field in [
         "rc_field_repair_attempted_total",
+        "rc_field_repair_lossy_total",
         "rc_field_preflight_actions_total",
         "rc_parser_unlocalized_total",
         "rc_acting_field_verdicts_total",
@@ -950,6 +960,11 @@ fn a_change_to_any_reported_input_emits_a_line() {
             name: "repair attempted",
             setup: no_setup,
             change: |i| i.snapshot.counters.repair_attempted += 1,
+        },
+        FingerprintRow {
+            name: "repair lossy",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.repair_lossy += 1,
         },
         FingerprintRow {
             name: "repair succeeded",

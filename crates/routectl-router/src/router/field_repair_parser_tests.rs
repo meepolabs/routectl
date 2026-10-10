@@ -64,8 +64,8 @@ async fn the_captured_display_rejection_repairs_every_walk_and_learns_nothing() 
             "{walk}: a refused value commits no verdict",
         );
         let summary = meta
-            .field_repair
-            .as_ref()
+            .field_repairs
+            .first()
             .unwrap_or_else(|| panic!("{walk}: the repair records a summary"));
         assert_eq!(
             summary.action,
@@ -249,8 +249,8 @@ async fn a_parsed_refused_field_rejection_repairs_and_commits_one_verdict() {
     );
     let summary = dispatched
         .meta
-        .field_repair
-        .as_ref()
+        .field_repairs
+        .first()
         .expect("the repair records a summary");
     assert_eq!(summary.action, super::FIELD_ACTION_DROP_REPAIR);
     assert!(summary.learned, "the summary reports the committed verdict");
@@ -391,7 +391,7 @@ async fn an_unresolved_bedrock_field_rejection_counts_once_and_changes_nothing()
             "{walk}: the request reached the seat with every closed-table carrier the \
              client sent",
         );
-        assert!(meta.field_repair.is_none(), "{walk}: no repair fired");
+        assert!(meta.field_repairs.is_empty(), "{walk}: no repair fired");
         assert!(
             meta.learned_capabilities.is_empty(),
             "{walk}: and nothing was learned",

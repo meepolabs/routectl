@@ -46,7 +46,7 @@ use super::dispatch::{
     replay_rejection_body_free, upstream_status_for_remap, validate_request_transcript,
 };
 use super::field_preflight::emit_field_preflight;
-use super::field_repair::{FieldSettlementMode, emit_field_repair};
+use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::{
@@ -434,7 +434,7 @@ impl Router {
         // Nothing is mutated here -- an acting verdict simply refuses the slot
         // and the attempt dispatches unchanged.
         let mut field_plan = self.plan_field_carry(&target, &attempt_req, mode, now_admit);
-        let mut field_repair_attempted = false;
+        let mut reactive_repair: Option<FieldRepairHandle> = None;
         let mut field_reject_status: u16 = 0;
 
         let mut auth_retry_attempted = false;
@@ -516,7 +516,7 @@ impl Router {
                     //   rebuild would resurrect a verdict this request
                     //   disproved.
                     if let Some(plan) = field_plan.take() {
-                        if field_repair_attempted {
+                        if let Some(repair) = reactive_repair {
                             let features = super::field_repair::request_feature_keys(req);
                             // The `learned` claim is derived from what the commit
                             // actually PERSISTED, never asserted alongside it: a
@@ -527,7 +527,7 @@ impl Router {
                                 plan.commit(field_reject_status, features, Instant::now());
                             let persisted = learned.is_some();
                             meta.learned_capabilities.extend(learned);
-                            self.note_field_repair_succeeded(meta, persisted);
+                            self.note_field_repair_succeeded(meta, repair, persisted);
                         } else {
                             meta.cleared_capabilities.extend(plan.settle_success());
                         }
@@ -663,7 +663,7 @@ impl Router {
                     // never debit the breaker -- a repairable envelope
                     // rejection is a caller-shaped fault, not this seat's
                     // health signal.
-                    if !field_repair_attempted
+                    if reactive_repair.is_none()
                         && let Some(plan) = field_plan.as_mut()
                         && let Some(status) = plan.apply(
                             &mut attempt_req,
@@ -674,9 +674,9 @@ impl Router {
                             target.provider_kind.unwrap_or(""),
                         )
                     {
-                        field_repair_attempted = true;
                         field_reject_status = status;
-                        self.note_field_repair(meta, &target.state_key, plan);
+                        reactive_repair =
+                            Some(self.note_field_repair(meta, &target.state_key, plan));
                         probe_guard.release();
                         continue;
                     }

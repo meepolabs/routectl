@@ -989,7 +989,7 @@ async fn an_unrelated_error_neither_repairs_nor_learns() {
         "an unrelated fault learns nothing",
     );
     assert!(
-        dispatched.meta.field_repair.is_none(),
+        dispatched.meta.field_repairs.is_empty(),
         "and reports no repair",
     );
 }
@@ -1025,7 +1025,7 @@ async fn a_request_that_does_not_carry_the_field_performs_no_repair() {
         "a no-op drop learns nothing",
     );
     assert!(
-        dispatched.meta.field_repair.is_none(),
+        dispatched.meta.field_repairs.is_empty(),
         "and claims no repair in the summary",
     );
 }
@@ -1282,7 +1282,7 @@ async fn a_forwarded_credential_target_performs_no_field_repair() {
         "and no verdict is minted for a credential routectl does not own",
     );
     assert!(
-        dispatched.meta.field_repair.is_none(),
+        dispatched.meta.field_repairs.is_empty(),
         "and the summary claims no repair",
     );
     assert!(dispatched.result.is_err(), "so the rejection stands");
@@ -1466,7 +1466,10 @@ async fn an_operator_remap_of_a_rate_limit_does_not_trigger_a_field_repair() {
         "a remapped 429 must not repair: the upstream said rate limit, not field",
     );
     assert!(!verdict_resident(&router, "m0"), "and must mint nothing");
-    assert!(dispatched.meta.field_repair.is_none(), "and claim nothing");
+    assert!(
+        dispatched.meta.field_repairs.is_empty(),
+        "and claim nothing"
+    );
 }
 
 #[tokio::test]
@@ -1480,7 +1483,7 @@ async fn an_operator_remap_of_an_unavailable_upstream_does_not_trigger_a_field_r
 
     assert_eq!(seen.calls(), 1, "a remapped 503 must not repair either");
     assert!(!verdict_resident(&router, "m0"), "and must mint nothing");
-    assert!(dispatched.meta.field_repair.is_none());
+    assert!(dispatched.meta.field_repairs.is_empty());
 }
 
 #[tokio::test]
@@ -1789,8 +1792,8 @@ async fn the_summary_reports_the_repair_and_its_confirmed_outcome() {
 
     let summary = dispatched
         .meta
-        .field_repair
-        .as_ref()
+        .field_repairs
+        .first()
         .expect("a fired repair records a summary");
     assert_eq!(summary.field_path, REJECTED_PATH, "the closed-table path");
     assert!(summary.repair_attempted, "the arm fired");
@@ -1813,8 +1816,8 @@ async fn the_summary_claims_nothing_learned_when_the_repair_failed() {
 
     let summary = dispatched
         .meta
-        .field_repair
-        .as_ref()
+        .field_repairs
+        .first()
         .expect("the arm fired, so a summary exists");
     assert!(summary.repair_attempted, "the arm fired");
     assert!(

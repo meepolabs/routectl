@@ -354,10 +354,16 @@ the registry.
 When an upstream rejects a request by naming a WIRE FIELD PATH the router
 has a grounded repair for, the router DROPS that field and re-dispatches
 the same target once (the reactive L0 field repair). Each such request
-emits EXACTLY ONE aggregated WARN at resolution --
-`"envelope_field_repaired"` -- and none when no repair fired. It fires on
-all three dispatch walks (`complete`, `stream` pre-content, and
-`count_tokens`), once per request rather than once per walk.
+emits ONE WARN PER REPAIR at resolution -- `"envelope_field_repaired"` --
+and none when no repair fired. It fires on all three dispatch walks
+(`complete`, `stream` pre-content, and `count_tokens`), at request
+resolution rather than per attempt. A request whose walk never repairs
+twice (the common case) emits exactly one line, unchanged in shape. A
+fallback walk can repair on two targets -- for example a re-verification
+canary's refused-value repair on one target and a reactive repair on the
+next -- and then emits one line per repair in the order they fired, each
+carrying its own `state_key`, `field_path`, and outcome. The request
+repair allowance bounds the count, so a request never emits more than two.
 
 The line is content-free by construction. `field_path` is the repair
 table's OWN path literal, not text read out of the rejection, so no
@@ -399,9 +405,8 @@ Four counters ride the router metrics snapshot (DEBUG, target
 `routectl_router::router::metrics`) so the arm is answerable without a
 log level: `rc_field_repair_attempted_total`,
 `rc_field_repair_lossy_total`, `rc_field_repair_succeeded_total`, and
-`rc_field_verdicts_learned_total`. All but the lossy count, plus the
-pre-flight and parser-blindness counters, also ride the INFO snapshot
-below -- the DEBUG snapshot is not readable at a live log level, so an
+`rc_field_verdicts_learned_total`. All four, plus the pre-flight and
+parser-blindness counters, also ride the INFO snapshot below -- the DEBUG snapshot is not readable at a live log level, so an
 observability floor satisfied only there would be a floor no operator can
 read.
 Read them as a pair -- a rising attempted count with a flat succeeded
@@ -591,6 +596,7 @@ consume the slots real traffic needs.
 | Field | Meaning |
 |---|---|
 | `rc_field_repair_attempted_total` | Same counter as the repair WARN section above |
+| `rc_field_repair_lossy_total` | Same counter as the repair WARN section above: the subset of attempted repairs that answered a refused VALUE and learned nothing. Rising with the attempted count while `rc_field_verdicts_learned_total` stays flat is a lane refusing a value, not a fault |
 | `rc_field_repair_succeeded_total` | Same counter as the repair WARN section above |
 | `rc_field_verdicts_learned_total` | Same counter as the repair WARN section above |
 | `rc_field_outstanding_unconfirmed_total` | CURRENT: requests riding on a verdict no canary has re-confirmed yet, summed over every resident identity. Rises and falls -- exposure that MIGHT later be disproved |
@@ -1942,7 +1948,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::router` | `rejecting invalid alias glob pattern; entry ignored`, `refusing resolved model: its runtime state key is ambiguous` (boot / reload) | Fix the `[aliases]` glob, or rename the model or pool member so its state key is unique. |
 | WARN | `routectl_router::router` | `invalidation` event (reload) | Catalog-scoped learned capabilities are evicted: expect re-learning. No action unless the catalog or overlay change was unintended. |
 | WARN | `routectl_router::router::count_tokens` | `alias chain has no count_tokens-capable provider` | Add a token-count-capable provider to the alias, or expect 501s. |
-| WARN | `routectl_router::router::{field_preflight,field_repair}` | `envelope_field_preflight` (acted), `envelope_field_repaired` (once per request) | A learned verdict rewrote a client request, or an upstream rejected a field that was then dropped: review `field_path` and provenance, and purge the verdict if it is wrong. |
+| WARN | `routectl_router::router::{field_preflight,field_repair}` | `envelope_field_preflight` (acted), `envelope_field_repaired` (once per repair) | A learned verdict rewrote a client request, or an upstream rejected a field that was then dropped: review `field_path` and provenance, and purge the verdict if it is wrong. |
 | WARN | `routectl_router::router::prefix_rewrite` | `cache_prefix_rewritten_in_epoch` (once per process) | A client rewrote its cached prefix mid-session, so later turns pay full price: investigate the client. |
 | WARN | `routectl_router::router::{probe_lifecycle,probe_payload_capture}` | `probe_activation_refused`, `probe_payload_retention_refused` (once per router incarnation) | The probe queue is full (check `queued` / `in_flight` / `backing_off` for a stuck upstream), or a client's beta context breached retention bounds (review `payload_refusals_total`). |
 | WARN | `routectl_router::router::overlays` | `ignoring auth-reserved header from [models.X] header_extras` | Remove the header from `[models.X] header_extras`; put credentials in `api_key_ref` / `auth_kind`. |
