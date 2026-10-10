@@ -1975,10 +1975,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `routectl_providers::anthropic_api::egress_reads_max_thinking_budget` rather
   than listing kinds locally (advisory only); `beta_floor_override_warnings`
   flags an `unsupported` `beta:<flag>` override on an anthropic-api provider
-  naming a flag the egress beta floor re-adds (OAuth gate, Claude Code floor,
-  structured outputs, effort, or a provider / model `header_extras`
-  `anthropic-beta` pin), compared case-insensitively and naming every floor
-  class the flag is in (advisory only). Units live in the
+  naming a flag the egress beta floor re-adds (structured outputs, or a
+  provider / model `header_extras` `anthropic-beta` pin, on every such
+  provider; the OAuth gate, Claude Code floor and effort beta only on an
+  oauth-bearer provider on the Anthropic API host), compared
+  case-insensitively and naming every floor class the flag is in (advisory
+  only). Units live in the
   `#[path]`-included `warnings_tests.rs` (gemini-gated),
   `warnings_thinking_budget_tests.rs` (kind-agnostic) and
   `warnings_beta_floor_tests.rs`

@@ -1551,16 +1551,20 @@ INFO routectl_router::learned_capability event=expire_probe
 
 ### `evict` (WARN)
 
-Emitted when inserting a new entry evicts a resident one. Two bounds, told
-apart by `reason`: `registry_cap` when the registry is at capacity and evicts
-its oldest entry, and `beta_lane_cap` when a new beta-flag key arrives on a
-lane (under one provider kind) already holding 32 beta-flag entries, which
-evicts that lane's youngest beta-flag entry (latest first seen) and nothing
-else, so a burst of new flags churns among itself. When every beta-flag entry
-on that full lane is held by a purge lease, `reason=beta_lane_cap_leased`: the
-new key is refused (nothing is stored or evicted) and is learned on a later
-observation once a lease releases. The lane bound is checked first. A safety
-valve, not a routine cache policy.
+The learned-capability registry's capacity-management event, emitted when a
+new entry meets a full bound. One variant evicts nothing:
+`reason=beta_lane_cap_leased` refuses the new key without evicting anything,
+when a new beta-flag key arrives on a lane (under one provider kind) already
+holding 32 beta-flag entries and every one is held by a purge lease. Nothing
+is stored, and the key is learned on a later observation once a lease
+releases.
+
+The other two variants evict a resident entry to admit the new one:
+`registry_cap` when the registry is at capacity, evicting its oldest entry,
+and `beta_lane_cap` when a new beta-flag key arrives on a full lane, evicting
+that lane's youngest beta-flag entry (latest first seen) and nothing else, so
+a burst of new flags churns among itself. The lane bound is checked first. A
+safety valve, not a routine cache policy.
 
 | Field | Type | Meaning |
 |---|---|---|

@@ -482,19 +482,13 @@ fn beta_floor_classes(
     provider: &ProviderEntry,
     model: Option<&crate::config::ModelEntry>,
 ) -> Vec<(String, &'static str)> {
-    use routectl_core::identity::anthropic::{EFFORT_BETA, STRUCTURED_OUTPUTS_BETA};
+    use routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
 
     let empty = std::collections::BTreeMap::new();
-    let mut floor: Vec<(String, &'static str)> = vec![
-        (
-            STRUCTURED_OUTPUTS_BETA.to_string(),
-            "structured outputs: re-added when the body carries output_config.format",
-        ),
-        (
-            EFFORT_BETA.to_string(),
-            "effort: re-added when the body carries output_config.effort",
-        ),
-    ];
+    let mut floor: Vec<(String, &'static str)> = vec![(
+        STRUCTURED_OUTPUTS_BETA.to_string(),
+        "structured outputs: re-added when the body carries output_config.format",
+    )];
     if is_own_oauth_anthropic_host(provider) {
         floor.extend(own_oauth_floor_classes());
     }
@@ -545,18 +539,26 @@ fn is_own_oauth_anthropic_host(provider: &ProviderEntry) -> bool {
     )
 }
 
-/// The OAuth gate and the Claude Code floor, the floor classes the egress
-/// re-adds only on the own-OAuth lane.
+/// The OAuth gate, the effort union, and the Claude Code floor, the floor
+/// classes the egress re-adds only on the own-OAuth lane.
 fn own_oauth_floor_classes() -> impl Iterator<Item = (String, &'static str)> {
     use routectl_core::identity::anthropic::{
-        OAUTH_ANTHROPIC_BETA, default_claude_code_anthropic_betas,
+        EFFORT_BETA, OAUTH_ANTHROPIC_BETA, default_claude_code_anthropic_betas,
     };
 
-    std::iter::once((
-        OAUTH_ANTHROPIC_BETA.to_string(),
-        "OAuth gate: re-added on api.anthropic.com when routectl uses its own OAuth \
-         credential",
-    ))
+    [
+        (
+            OAUTH_ANTHROPIC_BETA.to_string(),
+            "OAuth gate: re-added on api.anthropic.com when routectl uses its own OAuth \
+             credential",
+        ),
+        (
+            EFFORT_BETA.to_string(),
+            "effort: re-added when the body carries output_config.effort, on \
+             api.anthropic.com when routectl uses its own OAuth credential",
+        ),
+    ]
+    .into_iter()
     .chain(default_claude_code_anthropic_betas().iter().map(|flag| {
         (
             (*flag).to_string(),

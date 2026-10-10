@@ -881,15 +881,15 @@ flag has no effect on an `anthropic-api` provider, and `routectl config
 check` warns about it, naming the spec, the flag and why the floor re-adds
 it. The flags it checks on every `anthropic-api` provider:
 `structured-outputs-2025-12-15` (re-added when the body carries
-`output_config.format`), `effort-2025-11-24` (re-added when the body carries
-`output_config.effort`), and the provider's
+`output_config.format`) and the provider's
 `header_extras["anthropic-beta"]` (plus the model's own for a
 `"<provider>:<nickname>"` spec). On an `auth_kind = "oauth-bearer"` provider
 whose `base_url` host is `api.anthropic.com` it also checks
-`oauth-2025-04-20` (OAuth gate) and the Claude Code floor listed below; both
-apply when routectl uses its own OAuth credential, so an `api-key` provider
-or one on another host is not warned about them, and there the override
-does withhold the flag. The comparison ignores ASCII case.
+`oauth-2025-04-20` (OAuth gate), `effort-2025-11-24` (re-added when the body
+carries `output_config.effort`) and the Claude Code floor listed below; all
+three apply only when routectl uses its own OAuth credential, so an
+`api-key` provider or one on another host is not warned about them, and
+there the override does withhold the flag. The comparison ignores ASCII case.
 The warning is advisory: the config still loads and the exit code is
 unchanged.
 

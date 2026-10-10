@@ -968,7 +968,7 @@ mod beta_floor_override_tests {
                          api_key_ref = \"env://ANTHROPIC_KEY\"\n\
                          \n\
                          [capability.overrides.claude]\n\
-                         unsupported = [\"beta:effort-2025-11-24\"]\n";
+                         unsupported = [\"beta:structured-outputs-2025-12-15\"]\n";
         let config: Config = toml::from_str(toml_text).expect("config must parse");
 
         // Act
@@ -979,10 +979,10 @@ mod beta_floor_override_tests {
         let warning = report
             .warnings
             .iter()
-            .find(|w| w.contains("effort-2025-11-24"))
+            .find(|w| w.contains("structured-outputs-2025-12-15"))
             .unwrap_or_else(|| panic!("no floor-flag warning: {:?}", report.warnings));
         assert!(warning.contains("claude"), "{warning}");
-        assert!(warning.contains("output_config.effort"), "{warning}");
+        assert!(warning.contains("output_config.format"), "{warning}");
     }
 }
 

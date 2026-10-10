@@ -94,14 +94,13 @@ fn assert_one_warning_naming(row: &str, warnings: &[String], spec: &str, flag: &
 
 #[test]
 fn an_unsupported_floor_flag_on_anthropic_api_warns_once_naming_its_class() {
-    let rows: [(&str, &str, &str, &str); 4] = [
+    let rows: [(&str, &str, &str, &str); 3] = [
         (
             "structured outputs",
             "p",
             STRUCTURED_OUTPUTS_BETA,
             "structured outputs",
         ),
-        ("effort", "p", EFFORT_BETA, "effort:"),
         (
             "provider header_extras",
             "p",
@@ -125,8 +124,9 @@ fn an_unsupported_floor_flag_on_anthropic_api_warns_once_naming_its_class() {
 
 #[test]
 fn an_own_oauth_floor_flag_on_an_oauth_bearer_anthropic_host_provider_warns() {
-    let rows: [(&str, &str, &str); 2] = [
+    let rows: [(&str, &str, &str); 3] = [
         ("oauth gate", OAUTH_ANTHROPIC_BETA, "OAuth gate"),
+        ("effort", EFFORT_BETA, "effort:"),
         (
             "claude code floor",
             claude_code_only_flag(),
@@ -148,7 +148,15 @@ fn an_own_oauth_floor_flag_on_an_oauth_bearer_anthropic_host_provider_warns() {
 
 #[test]
 fn an_own_oauth_floor_flag_is_silent_off_the_own_oauth_lane() {
-    let rows: [(&str, Config); 3] = [
+    let rows: [(&str, Config); 5] = [
+        (
+            "effort on an api-key provider",
+            anthropic_unsupported("p", EFFORT_BETA),
+        ),
+        (
+            "effort on an oauth-bearer provider off the Anthropic host",
+            oauth_unsupported_at("https://anthropic-proxy.example.test", EFFORT_BETA),
+        ),
         (
             "claude code flag on an api-key provider",
             anthropic_unsupported("p", claude_code_only_flag()),
@@ -190,7 +198,7 @@ fn a_floor_flag_override_on_openai_compat_is_silent() {
         "base_url = \"https://example.test/v1\"\napi_key_ref = \"env://KEY\"\n",
         "p",
         "unsupported",
-        EFFORT_BETA,
+        STRUCTURED_OUTPUTS_BETA,
     );
 
     assert!(beta_floor_override_warnings(&config).is_empty());
@@ -211,7 +219,7 @@ fn a_force_supported_floor_flag_is_silent() {
         "api_key_ref = \"env://KEY\"\n",
         "p",
         "force_supported",
-        EFFORT_BETA,
+        STRUCTURED_OUTPUTS_BETA,
     );
 
     assert!(beta_floor_override_warnings(&config).is_empty());
@@ -221,7 +229,7 @@ fn a_force_supported_floor_flag_is_silent() {
 fn a_case_variant_floor_flag_warns() {
     let variant = EFFORT_BETA.to_ascii_uppercase();
 
-    let warnings = beta_floor_override_warnings(&anthropic_unsupported("p", &variant));
+    let warnings = beta_floor_override_warnings(&oauth_unsupported(&variant));
 
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains(&variant), "{}", warnings[0]);

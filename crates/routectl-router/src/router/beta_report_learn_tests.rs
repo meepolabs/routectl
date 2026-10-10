@@ -656,3 +656,104 @@ fn a_repeated_accepted_beta_settlement_emits_no_second_event() {
         Instant::now()
     ));
 }
+
+/// Fill the fixture lane with its full bound of `beta:` negatives and lease
+/// every one, as a purge in progress would.
+fn fill_and_lease_lane(router: &Router) -> Vec<crate::learned_capability::PurgeLease> {
+    use crate::learned_capability::{MAX_BETA_ENTRIES_PER_LANE, PurgePreparation};
+
+    let registry = &router.learned_capabilities;
+    (0..MAX_BETA_ENTRIES_PER_LANE)
+        .map(|n| {
+            let key = crate::beta_capability::beta_capability_key(&format!("zz-fill-{n}"))
+                .expect("the filler flag is well formed");
+            let _ = registry.observe(
+                LANE,
+                &key,
+                "bedrock",
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+                EvidenceSource::Live,
+                None,
+                Instant::now(),
+            );
+            match registry.prepare_purge(registry.generation(), LANE, &key, "bedrock") {
+                PurgePreparation::Reserved(lease) => lease,
+                other => panic!("expected a reservation, got {other:?}"),
+            }
+        })
+        .collect()
+}
+
+fn flag_resident(router: &Router) -> bool {
+    router
+        .learned_capabilities
+        .export_entries()
+        .iter()
+        .any(|e| e.state_key == LANE && e.feature_key == flag_key())
+}
+
+#[test]
+fn a_lease_refused_beta_is_learned_by_a_same_request_retry_once_a_lease_releases() {
+    // Arrange
+    let provider = ReportingProvider::new(vec![ok_recording(vec![])]);
+    let router = router_with(BEDROCK_P1, provider.clone());
+    let target = router
+        .expand_chain_to_targets(
+            vec![Arc::new(ResolvedModel::new(
+                "m1",
+                "p1",
+                provider,
+                "anthropic.wire-model",
+            ))],
+            None,
+        )
+        .pop()
+        .expect("one target");
+    let mut leases = fill_and_lease_lane(&router);
+    let req = req_with_betas(&[FLAG]);
+    let mut dedupe = HashSet::new();
+    let settle = |dedupe: &mut HashSet<LearnDedupeKey>, meta: &mut DispatchMeta| {
+        let report = routectl_core::BetaRepairReport::default();
+        report.record(&[FLAG.to_string()]);
+        router.settle_attempt_success(
+            &report,
+            &target,
+            &req,
+            dedupe,
+            meta,
+            &mut LearnedProbeGuard::inert(),
+        );
+    };
+
+    // Act -- every resident beta on the lane is leased.
+    let mut refused_meta = DispatchMeta::for_alias("m1");
+    let refused_events =
+        routectl_testkit::capture_events(|| settle(&mut dedupe, &mut refused_meta));
+
+    // Assert
+    assert!(!flag_resident(&router), "the refused key must stay absent");
+    assert!(refused_meta.learned_capabilities.is_empty());
+    assert_eq!(router.metrics.learned_negatives_f1_total(), 0);
+    assert!(
+        !refused_events
+            .iter()
+            .any(|e| e.field("event") == Some("learn")),
+        "a refused observation emits no learn WARN"
+    );
+
+    // Act -- release one lease and retry with the SAME dedupe set.
+    router
+        .learned_capabilities
+        .restore_purge(leases.pop().expect("the lane holds leases"));
+    let mut learned_meta = DispatchMeta::for_alias("m1");
+    settle(&mut dedupe, &mut learned_meta);
+
+    // Assert
+    assert!(flag_resident(&router), "the retry learns the key");
+    assert_one_beta_event(&learned_meta.learned_capabilities);
+    assert_eq!(router.metrics.learned_negatives_f1_total(), 1);
+    for lease in leases {
+        router.learned_capabilities.restore_purge(lease);
+    }
+}
