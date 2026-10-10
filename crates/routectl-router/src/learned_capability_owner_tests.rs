@@ -25,6 +25,10 @@ fn field_key() -> String {
 }
 
 fn plant_negative(reg: &LearnedCapabilityRegistry, capability: &str, kind: &str) {
+    plant_negative_at(reg, capability, kind, Instant::now());
+}
+
+fn plant_negative_at(reg: &LearnedCapabilityRegistry, capability: &str, kind: &str, now: Instant) {
     let outcome = reg.observe_in_generation(
         reg.generation(),
         LANE,
@@ -34,7 +38,7 @@ fn plant_negative(reg: &LearnedCapabilityRegistry, capability: &str, kind: &str)
         FailurePhase::F1,
         EvidenceSource::Live,
         None,
-        Instant::now(),
+        now,
     );
     assert!(outcome.applied().is_some(), "the fixture must plant");
 }
@@ -256,6 +260,52 @@ fn the_owned_snapshot_selects_the_current_kinds_version() {
     assert_eq!(owned.len(), 1);
     assert_eq!(owned[0].verdict, Verdict::VerifiedWorking);
     assert!(reg.owned_snapshot(|_| "bedrock").is_empty());
+}
+
+#[test]
+fn the_owned_snapshot_never_returns_a_row_recorded_with_no_kind() {
+    let reg = registry();
+    plant_negative(&reg, "web_search", "");
+    plant_negative(&reg, "web_search", OLD);
+
+    let kindless = reg.owned_snapshot(|_| "");
+    let owned = reg.owned_snapshot(|_| OLD);
+
+    assert!(kindless.is_empty(), "a reader with no kind sees nothing");
+    assert_eq!(owned.len(), 1);
+    assert_eq!(
+        owned[0],
+        reg.recorded_snapshot()
+            .into_iter()
+            .find(|row| row.provider_kind == OLD)
+            .expect("premise: the kinded row is resident")
+            .entry,
+    );
+}
+
+#[test]
+fn cap_eviction_takes_the_oldest_last_seen_whatever_its_kind() {
+    let reg = LearnedCapabilityRegistry::new(Duration::from_hours(48), Duration::from_hours(1), 2);
+    let t0 = Instant::now();
+    plant_negative_at(&reg, "web_search", NEW, t0);
+    plant_negative_at(&reg, "web_search", OLD, t0 + Duration::from_secs(1));
+
+    plant_negative_at(&reg, "code_execution", NEW, t0 + Duration::from_secs(2));
+
+    let mut resident: Vec<(String, String)> = reg
+        .recorded_snapshot()
+        .into_iter()
+        .map(|row| (row.provider_kind, row.entry.feature_key))
+        .collect();
+    resident.sort();
+    assert_eq!(
+        resident,
+        vec![
+            (NEW.to_string(), "code_execution".to_string()),
+            (OLD.to_string(), "web_search".to_string()),
+        ],
+        "the current kind's older entry goes; the newer stray of another kind stays",
+    );
 }
 
 #[test]

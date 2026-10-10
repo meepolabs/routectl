@@ -774,7 +774,21 @@ async fn learned_capability_snapshot_surfaces_negatives() {
         id: "p-test".into(),
         calls: AtomicUsize::new(0),
     });
-    let router = router_with_resolved(vec![("alpha", "openai-compat", "u1", p.clone())]);
+    let mut config = Config::default();
+    config.providers.insert(
+        "openai-compat".into(),
+        ProviderEntry::openai_compat("https://example.test/v1", "literal:k"),
+    );
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(BTreeMap::from([(
+        "alpha".to_string(),
+        Arc::new(ResolvedModel::new(
+            "alpha",
+            "openai-compat",
+            p.clone(),
+            "u1",
+        )),
+    )]));
     assert!(
         router.learned_capability_snapshot().is_empty(),
         "fresh registry surfaces no negatives",

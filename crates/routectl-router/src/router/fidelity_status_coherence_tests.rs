@@ -191,7 +191,7 @@ fn a_hostile_capability_key_reaches_the_row_sanitized_and_capped() {
 /// two derive from the same learned entries but assign their fields independently.
 #[test]
 fn the_acting_list_sanitizes_both_of_its_keys() {
-    let hostile_state = format!("m0\u{1b}[31m{}", "S".repeat(4096));
+    let hostile_state = format!("anthropic#m0\u{1b}[31m{}", "S".repeat(4096));
     let hostile_key = format!("{}\u{7}{}", grounded_key(), "K".repeat(4096));
     let router = bare_router();
     plant_verdict_on(&router, &hostile_state, hostile_key.clone());

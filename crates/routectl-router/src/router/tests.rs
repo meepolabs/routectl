@@ -1316,6 +1316,10 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     // config-only reload case), so entries ride across.
     let before_cfg: Config = toml::from_str(
         "version = 3\n\
+             [providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
              [capability.overrides.p]\n\
              force_supported = [\"web_search\"]\n",
     )
@@ -1327,7 +1331,7 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     before.learned_capabilities.observe(
         "p",
         "web_search",
-        "",
+        "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
@@ -1337,7 +1341,7 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     before.learned_capabilities.observe(
         "p",
         "computer_use",
-        "",
+        "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         EvidenceSource::Live,
@@ -1345,7 +1349,15 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
         t0,
     );
 
-    let mut after = Router::new(Arc::new(Config::default()));
+    let after_cfg: Config = toml::from_str(
+        "version = 3\n\
+             [providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n",
+    )
+    .expect("config parses");
+    let mut after = Router::new(Arc::new(after_cfg));
     assert_eq!(after.catalog_version, before.catalog_version);
     assert_eq!(after.overlay_revision, before.overlay_revision);
 
@@ -1361,7 +1373,7 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     assert_eq!(
         after
             .learned_capabilities
-            .acting_negative_for("p", "web_search", "", now),
+            .acting_negative_for("p", "web_search", "openai-compat", now),
         RoutingDecision::ProbeAdmitted,
         "an override cell that changed across reload must lapse its entry",
     );
@@ -1369,7 +1381,7 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     assert_eq!(
         after
             .learned_capabilities
-            .acting_negative_for("p", "computer_use", "", now),
+            .acting_negative_for("p", "computer_use", "openai-compat", now),
         RoutingDecision::RouteAway {
             signal: SignalTier::SelfIdentifying,
             phase: FailurePhase::F1,

@@ -1453,6 +1453,10 @@ impl LearnedCapabilityRegistry {
     /// per kind for a `(lane, capability)`, and only the current kind's acts,
     /// so a surface reading [`Self::snapshot`] would report a verdict no
     /// dispatch acts on and could list the same cell twice.
+    ///
+    /// A row recorded under the empty kind is never returned: the empty kind
+    /// is what an unconfigured lane resolves to, so a reader with no kind
+    /// sees nothing rather than a kindless version.
     pub fn owned_snapshot<'k>(
         &self,
         current_kind: impl Fn(&str) -> &'k str,
@@ -1461,7 +1465,9 @@ impl LearnedCapabilityRegistry {
         self.entries
             .read()
             .iter()
-            .filter(|(key, _)| key.provider_kind == current_kind(&key.state_key))
+            .filter(|(key, _)| {
+                !key.provider_kind.is_empty() && key.provider_kind == current_kind(&key.state_key)
+            })
             .map(|(key, entry)| Self::snapshot_row(key, entry))
             .collect()
     }
