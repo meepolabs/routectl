@@ -1,13 +1,13 @@
 //! Excerpt-sanitization tests.
 
-use super::{AuthKind, build_error_excerpt, map_responses_upstream_error};
+use super::{AuthKind, map_responses_upstream_error};
 use reqwest::header::HeaderMap;
-use routectl_core::{Error, sanitize_for_log};
+use routectl_core::{Error, UpstreamBody, sanitize_for_log, upstream_message_or_excerpt};
 
 #[test]
 fn excerpt_sanitizes_crlf_and_ansi() {
-    let body = "boom\r\n[fake INFO] injected\x1b[31mred";
-    let msg = build_error_excerpt(body);
+    let body = UpstreamBody::new("boom\r\n[fake INFO] injected\x1b[31mred");
+    let msg = upstream_message_or_excerpt(body.text(), body.parsed());
     let safe_excerpt = sanitize_for_log(&msg);
     assert!(
         !safe_excerpt.contains('\r'),

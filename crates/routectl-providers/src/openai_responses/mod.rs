@@ -41,9 +41,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result,
-    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
-    trace_outgoing_body, trace_upstream_success_body,
+    ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, ReplayScheme, Result,
+    UpstreamBody, debug_upstream_error_body, sanitize_for_log, trace_outgoing_body,
+    trace_upstream_success_body, upstream_message_or_excerpt,
 };
 
 use crate::stream_completion::StreamCompletion;
@@ -604,18 +604,6 @@ impl Provider for OpenAiResponsesProvider {
     }
 }
 
-fn build_error_excerpt(body_text: &str) -> String {
-    serde_json::from_str::<Value>(body_text)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.pointer("/error/message"))
-        .and_then(|v| v.as_str())
-        .map_or_else(
-            || sanitize_upstream_body(&routectl_core::redact_error_body_text(body_text)),
-            std::string::ToString::to_string,
-        )
-}
-
 /// Map a non-success Responses-API HTTP response into a canonical
 /// `Error::Upstream`. Single source of truth shared by both
 /// `complete()` and `stream()`: computes the rate-limit-gated header
@@ -644,15 +632,17 @@ fn map_responses_upstream_error(
     } else {
         None
     };
-    // Parse the (capped) body once; the codex reset hint and the AWS token
-    // lift both read from the same value. A non-JSON or truncated body yields
-    // `None` and both consumers degrade gracefully.
-    let parsed = serde_json::from_str::<Value>(body_text).ok();
+    // Parse the body once, within the shared error-body cap; the codex reset
+    // hint, the envelope check, the AWS token lift and the excerpt all read
+    // that one parse. A non-JSON, truncated or over-cap body carries no parse
+    // and every consumer degrades gracefully.
+    let body = UpstreamBody::new(body_text);
+    let parsed = body.parsed();
     // The Codex usage-limit body hint wins over the header hint: it carries
     // the 5-hour-cap reset, which Retry-After does not. A truncated body
     // simply fails to parse and falls back to the header hint.
     let codex_hint = parsed
-        .as_ref()
+        .map(ParsedErrorBody::value)
         .and_then(crate::openai_responses::response::codex_reset_hint);
     let retry_after = codex_hint.or(header_hint);
     // A first-party Responses error is a nested `{"error":{...}}` envelope; a
@@ -660,36 +650,39 @@ fn map_responses_upstream_error(
     // or a bare `{"message":...}` -- the AWS exception type often arrives ONLY
     // in the `x-amzn-errortype` header, not the body). The native envelope
     // WINS and is carried unchanged. Any NON-envelope body is treated as a
-    // potential AWS body: its `__type` / `code` tokens are lifted (they were
-    // ALWAYS None before, because this reader only ever built
-    // `upstream_with_retry_after`) and its free text routes through the shared
-    // Bedrock scrub. Gating the scrub on shape (not on a lifted token) closes
-    // the leak class even when AWS omits the top-level tokens.
-    let is_native_envelope = is_json_error_envelope(body_text);
+    // potential AWS body: its `__type` / `code` tokens are lifted and its free
+    // text routes through the shared Bedrock scrub. Gating the scrub on shape
+    // (not on a lifted token) closes the leak class even when AWS omits the
+    // top-level tokens.
+    let is_native_envelope = parsed.is_some_and(ParsedErrorBody::is_error_envelope);
     let (upstream_type, upstream_code) = if is_native_envelope {
         (None, None)
     } else {
-        crate::aws_error::lift_aws_error_tokens(parsed.as_ref())
+        crate::aws_error::lift_aws_error_tokens(parsed.map(ParsedErrorBody::value))
     };
     // Client body + WARN excerpt: on a cap trip the truncated body is
     // untrustworthy, so both collapse to the fixed cap message -- the client
     // never sees the partial body and the prefix never appears at WARN level.
-    // A native envelope is carried RAW so the ingress sanitizer can re-extract
-    // the upstream message. A non-envelope body routes through the shared
-    // Bedrock scrub: a 403 collapses to the IAM action only, while every other
-    // status yields the same sanitized-and-capped excerpt `build_error_excerpt`
-    // already produces for a body with no `/error/message`, so non-403
-    // non-envelope bodies stay byte-unchanged.
-    let (warn_excerpt, err_body) = if hit_cap {
+    // A native envelope is carried RAW with its parse so the ingress can
+    // surface the upstream message. A non-envelope body routes through the
+    // shared Bedrock scrub: a 403 collapses to the IAM action only, while every
+    // other status yields the sanitized-and-capped excerpt of the redacted
+    // body. The carried parse is always the parse of the carried text: the raw
+    // parse rides along only when the scrub left the text unchanged.
+    let (warn_excerpt, carried) = if hit_cap {
         let capped = crate::http_client::body_cap_exceeded_message();
-        (capped.clone(), capped)
+        (capped.clone(), UpstreamBody::new(capped))
     } else if is_native_envelope {
-        let msg = build_error_excerpt(body_text);
-        let excerpt = sanitize_for_log(&msg);
-        (excerpt, body_text.to_string())
+        let excerpt = sanitize_for_log(&upstream_message_or_excerpt(body.text(), parsed));
+        (excerpt, body)
     } else {
-        let scrubbed = crate::aws_error::classify_client_error_message(status, body_text);
-        (sanitize_for_log(&scrubbed), scrubbed)
+        let scrubbed = non_envelope_client_message(status, &body);
+        let excerpt = sanitize_for_log(&scrubbed);
+        if scrubbed == body.text() {
+            (excerpt, body)
+        } else {
+            (excerpt, UpstreamBody::new(scrubbed))
+        }
     };
     crate::upstream_log::warn_upstream_failure(
         provider_id,
@@ -709,13 +702,10 @@ fn map_responses_upstream_error(
         crate::aws_error::sanitized_debug_body(status, body_text)
     };
     debug_upstream_error_body(PROVIDER_KIND, provider_id, status, &debug_body);
-    // Switched from `upstream_with_retry_after` to `upstream_full` so the
-    // lifted AWS classifier tokens carry to the ingress; the retry_after hint
-    // (codex body winning over the header) is preserved unchanged.
-    Error::upstream_full(
+    Error::upstream_with_body(
         provider_id,
         status,
-        err_body,
+        carried,
         retry_after,
         upstream_type,
         upstream_code,
@@ -723,6 +713,20 @@ fn map_responses_upstream_error(
     .with_upstream_request_id(crate::upstream_request_id::parse_upstream_request_id(
         headers,
     ))
+}
+
+/// Client message for a body without a native `{"error":{...}}` envelope,
+/// treated as a potential mantle (AWS) body: a 403 collapses to the IAM
+/// action only; any other status gets the redacted, sanitized excerpt.
+fn non_envelope_client_message(status: u16, body: &UpstreamBody) -> String {
+    match crate::aws_error::classify_bedrock_error(status, body.text()) {
+        crate::aws_error::BedrockErrorClass::AccessDenied { .. } => {
+            crate::aws_error::classify_client_error_message(status, body.text())
+        }
+        crate::aws_error::BedrockErrorClass::Other => {
+            upstream_message_or_excerpt(body.text(), body.parsed())
+        }
+    }
 }
 
 /// Read a Responses-API upstream error body under the shared response-body
@@ -772,6 +776,10 @@ mod redirect_tests;
 #[cfg(test)]
 #[path = "excerpt_tests.rs"]
 mod excerpt_tests;
+
+#[cfg(test)]
+#[path = "parse_once_tests.rs"]
+mod parse_once_tests;
 
 #[cfg(test)]
 #[path = "auth_wiring_tests.rs"]

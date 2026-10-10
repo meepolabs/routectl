@@ -38,9 +38,9 @@ use serde_json::Value;
 use tracing::debug;
 
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, debug_upstream_error_body,
-    extract_upstream_message, is_json_error_envelope, sanitize_for_log, trace_outgoing_body,
-    trace_upstream_success_body,
+    ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, Result, UpstreamBody,
+    debug_upstream_error_body, sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
+    upstream_message_or_excerpt,
 };
 
 use sse::ThinkTagAccumulator;
@@ -945,22 +945,11 @@ fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
     }
 }
 
-/// Best-effort parse of the OpenAI-shape error envelope
-/// (`{"error":{"type":...,"code":...}}`) to lift the upstream
-/// classifier. Returns `(upstream_type, upstream_code)`; either is
-/// `None` when absent or the body is not JSON. `code` is stringified
-/// because the OpenAI wire admits both a string code
-/// (`"context_length_exceeded"`) and a numeric one. The full body is
-/// NOT logged here -- the caller's debug/warn lines already cover that.
-fn parse_openai_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
-    serde_json::from_str::<Value>(body_text).map_or((None, None), |v| classify_error_value(&v))
-}
-
 /// Lift the OpenAI-shape error classifier (`error.type` / `error.code`)
 /// from an already-parsed value. `code` is stringified because the wire
 /// admits both a string code (`"context_length_exceeded"`) and a numeric
-/// one. Single source of truth shared by `parse_openai_error_classifier`
-/// (the non-2xx mapper), the 2xx inline-error detection, and the streaming
+/// one. Single source of truth shared by the non-2xx mapper, the 2xx
+/// inline-error detection, and the streaming
 /// mid-frame detection so all three surface the same classifier tokens.
 pub(super) fn classify_error_value(v: &Value) -> (Option<String>, Option<String>) {
     let upstream_type = v
@@ -1021,23 +1010,22 @@ fn map_openai_compat_upstream_error(
     // gates the scrub on shape (not on a lifted token) so a 403 AccessDenied
     // body cannot leak the principal ARN / account / resource even when AWS
     // omits the top-level `__type` / `code` tokens.
-    let is_native_envelope = is_json_error_envelope(body_text);
+    let body = UpstreamBody::new(body_text);
+    let parsed = body.parsed();
+    let is_native_envelope = parsed.is_some_and(ParsedErrorBody::is_error_envelope);
     let (upstream_type, upstream_code) = if is_native_envelope {
-        parse_openai_error_classifier(body_text)
+        parsed.map_or((None, None), |p| classify_error_value(p.value()))
     } else {
-        let parsed = serde_json::from_str::<Value>(body_text).ok();
-        crate::aws_error::lift_aws_error_tokens(parsed.as_ref())
+        crate::aws_error::lift_aws_error_tokens(parsed.map(ParsedErrorBody::value))
     };
     // A non-envelope body routes its free text through the shared Bedrock
     // scrub: a 403 collapses to the IAM action only, while every other status
-    // yields the same sanitized-and-capped excerpt `extract_upstream_message`
-    // already produces for a body with no `/error/message`, so non-403
-    // non-envelope bodies stay byte-unchanged. A native envelope keeps its
-    // first-party `/error/message` verbatim.
+    // yields the sanitized-and-capped excerpt of the redacted body. A native
+    // envelope keeps its first-party `/error/message` verbatim.
     let client_msg = if is_native_envelope {
-        extract_upstream_message(body_text)
+        upstream_message_or_excerpt(body.text(), parsed)
     } else {
-        crate::aws_error::classify_client_error_message(status, body_text)
+        non_envelope_client_message(status, &body)
     };
     // The upstream-failure WARN fires on every 4xx/5xx -- cap trips included,
     // so an operator sees the same failure signal regardless. On a cap trip
@@ -1070,21 +1058,22 @@ fn map_openai_compat_upstream_error(
     // Client body: on a cap trip the truncated body is untrustworthy, so
     // collapse to the fixed cap message (never an echo of the partial body)
     // while preserving the status + retry_after. A native `{error:...}`
-    // envelope is carried RAW so the ingress sanitizer can re-extract the
+    // envelope is carried RAW with its parse so the ingress can surface the
     // upstream message. A non-envelope body carries the already-scrubbed
     // message -- a raw AWS envelope naming principal identifiers is never
-    // echoed.
-    let err_body = if hit_cap {
-        crate::http_client::body_cap_exceeded_message()
-    } else if is_native_envelope {
-        body_text.to_string()
+    // echoed. The carried parse is always the parse of the carried text: the
+    // raw parse rides along only when the scrub left the text unchanged.
+    let carried = if hit_cap {
+        UpstreamBody::new(crate::http_client::body_cap_exceeded_message())
+    } else if is_native_envelope || client_msg == body.text() {
+        body
     } else {
-        client_msg
+        UpstreamBody::new(client_msg)
     };
-    Error::upstream_full(
+    Error::upstream_with_body(
         provider_id,
         status,
-        err_body,
+        carried,
         retry_after,
         upstream_type,
         upstream_code,
@@ -1092,6 +1081,20 @@ fn map_openai_compat_upstream_error(
     .with_upstream_request_id(crate::upstream_request_id::parse_upstream_request_id(
         headers,
     ))
+}
+
+/// Client message for a body without a native `{"error":{...}}` envelope,
+/// treated as a potential mantle (AWS) body: a 403 collapses to the IAM
+/// action only; any other status gets the redacted, sanitized excerpt.
+fn non_envelope_client_message(status: u16, body: &UpstreamBody) -> String {
+    match crate::aws_error::classify_bedrock_error(status, body.text()) {
+        crate::aws_error::BedrockErrorClass::AccessDenied { .. } => {
+            crate::aws_error::classify_client_error_message(status, body.text())
+        }
+        crate::aws_error::BedrockErrorClass::Other => {
+            upstream_message_or_excerpt(body.text(), body.parsed())
+        }
+    }
 }
 
 /// Detect a top-level `{"error":{...}}` envelope returned inside a
@@ -1181,7 +1184,7 @@ mod helper_tests {
         ChoiceTail, MAX_STREAM_CHOICES, StreamTail, accumulate_choice_text,
         choice_carries_finish_reason, choice_carries_tool_call_delta, choice_tail_mut,
         classify_stream_tail, detect_inline_error_2xx, ensure_stream_options_include_usage,
-        map_openai_compat_upstream_error, parse_openai_error_classifier,
+        map_openai_compat_upstream_error,
     };
     use crate::http_client::body_cap_exceeded_message;
     use reqwest::header::HeaderMap;
@@ -1626,42 +1629,41 @@ mod helper_tests {
     }
 
     #[test]
-    fn parse_classifier_lifts_string_type_and_code() {
-        // Arrange
-        let body = r#"{"error":{"type":"rate_limit_exceeded","code":"rate_limited","message":"slow down"}}"#;
+    fn map_upstream_error_lifts_envelope_classifier_per_body_shape() {
+        let cases: [(&str, &str, Option<&str>, Option<&str>); 3] = [
+            (
+                "string type and code",
+                r#"{"error":{"type":"rate_limit_exceeded","code":"rate_limited","message":"slow down"}}"#,
+                Some("rate_limit_exceeded"),
+                Some("rate_limited"),
+            ),
+            (
+                "numeric code stringified",
+                r#"{"error":{"type":"invalid_request_error","code":429}}"#,
+                Some("invalid_request_error"),
+                Some("429"),
+            ),
+            (
+                "plain-text body",
+                "503 Service Unavailable (plain text from a proxy)",
+                None,
+                None,
+            ),
+        ];
+        for (name, body, want_type, want_code) in cases {
+            let err = map_openai_compat_upstream_error("p", 400, &HeaderMap::new(), body, false);
 
-        // Act
-        let (upstream_type, upstream_code) = parse_openai_error_classifier(body);
-
-        // Assert
-        assert_eq!(upstream_type.as_deref(), Some("rate_limit_exceeded"));
-        assert_eq!(upstream_code.as_deref(), Some("rate_limited"));
-    }
-
-    #[test]
-    fn parse_classifier_stringifies_numeric_code() {
-        // Arrange
-        let body = r#"{"error":{"type":"invalid_request_error","code":429}}"#;
-
-        // Act
-        let (upstream_type, upstream_code) = parse_openai_error_classifier(body);
-
-        // Assert
-        assert_eq!(upstream_type.as_deref(), Some("invalid_request_error"));
-        assert_eq!(upstream_code.as_deref(), Some("429"));
-    }
-
-    #[test]
-    fn parse_classifier_returns_none_on_non_json_body() {
-        // Arrange
-        let body = "503 Service Unavailable (plain text from a proxy)";
-
-        // Act
-        let (upstream_type, upstream_code) = parse_openai_error_classifier(body);
-
-        // Assert
-        assert!(upstream_type.is_none());
-        assert!(upstream_code.is_none());
+            let Error::Upstream {
+                upstream_type,
+                upstream_code,
+                ..
+            } = err
+            else {
+                panic!("{name}: expected Error::Upstream, got: {err:?}");
+            };
+            assert_eq!(upstream_type.as_deref(), want_type, "{name}");
+            assert_eq!(upstream_code.as_deref(), want_code, "{name}");
+        }
     }
 
     /// The shared mapper lifts the upstream classifier
@@ -2080,6 +2082,10 @@ mod helper_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "parse_once_tests.rs"]
+mod parse_once_tests;
 
 #[cfg(all(test, feature = "bedrock"))]
 mod mantle_header_tests {

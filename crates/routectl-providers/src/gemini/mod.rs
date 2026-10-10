@@ -19,8 +19,8 @@ use serde_json::Value;
 use routectl_core::identity::antigravity::antigravity_user_agent;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, CloudProjectCache, Error, Provider, Result, StaticToken,
-    TokenSource, debug_upstream_error_body, extract_upstream_message, is_json_error_envelope,
-    sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
+    TokenSource, UpstreamBody, debug_upstream_error_body, sanitize_for_log, trace_outgoing_body,
+    trace_upstream_success_body, upstream_message_or_excerpt,
 };
 
 pub(crate) mod auth;
@@ -743,25 +743,31 @@ fn map_gemini_upstream_error(
         None
     };
     debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
-    let (upstream_type, upstream_code) = parse_gemini_error_classifier(body_text);
-    let msg = extract_upstream_message(body_text);
+    let body = UpstreamBody::new(body_text);
+    let (upstream_type, upstream_code) = body
+        .parsed()
+        .map_or((None, None), |p| classify_gemini_error_value(p.value()));
+    let msg = upstream_message_or_excerpt(body.text(), body.parsed());
     let safe_excerpt = if hit_cap {
         crate::http_client::body_cap_exceeded_message()
     } else {
         sanitize_for_log(&msg)
     };
     crate::upstream_log::warn_upstream_failure(provider_id, status, None, &safe_excerpt, "gemini");
-    let err_body = if hit_cap {
-        crate::http_client::body_cap_exceeded_message()
-    } else if is_json_error_envelope(body_text) {
-        body_text.to_string()
+    let is_envelope = body
+        .parsed()
+        .is_some_and(routectl_core::ParsedErrorBody::is_error_envelope);
+    let carried = if hit_cap {
+        UpstreamBody::new(crate::http_client::body_cap_exceeded_message())
+    } else if is_envelope || msg == body.text() {
+        body
     } else {
-        msg
+        UpstreamBody::new(msg)
     };
-    Error::upstream_full(
+    Error::upstream_with_body(
         provider_id,
         status,
-        err_body,
+        carried,
         header_hint,
         upstream_type,
         upstream_code,
@@ -848,6 +854,10 @@ mod host_tests {
 // ---------------------------------------------------------------------------
 // End-to-end tests (wiremock-driven complete path)
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "parse_once_tests.rs"]
+mod parse_once_tests;
 
 #[cfg(test)]
 #[path = "redirect_tests.rs"]

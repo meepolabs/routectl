@@ -244,7 +244,7 @@ pub(crate) fn read_error_json_body(body: &str) -> ErrorJsonBody {
     }
     let parsed = (body.len() <= crate::MAX_ERROR_BODY_BYTES)
         .then(|| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             CAPPED_PARSE_COUNT.with(|n| n.set(n.get() + 1));
             serde_json::from_str::<serde_json::Value>(trimmed).ok()
         })
@@ -262,14 +262,14 @@ pub(crate) fn read_error_json_body(body: &str) -> ErrorJsonBody {
 // `.await` a multi-threaded runtime can resume the task on another thread, so
 // an async test that counts parses needs a synchronized counter or an
 // injected hook instead.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     static CAPPED_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// How many times [`read_error_json_body`] has invoked the JSON parser on
 /// this thread.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn capped_parse_count() -> usize {
     CAPPED_PARSE_COUNT.with(std::cell::Cell::get)
 }

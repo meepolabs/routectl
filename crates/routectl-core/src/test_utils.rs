@@ -80,6 +80,13 @@ pub fn get_weather_tool() -> ToolDef {
     })
 }
 
+/// How many times the capped error-body JSON parse has run on this thread.
+/// Thread-local: compare two reads taken around a synchronous span on one
+/// thread, never across an `.await`.
+pub fn capped_parse_count() -> usize {
+    crate::log_safe::capped_parse_count()
+}
+
 /// Canonical fixtures, one builder per cross-crate contract scenario.
 pub mod scenarios {
     use super::{
