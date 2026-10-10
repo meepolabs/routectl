@@ -274,24 +274,6 @@ pub(crate) fn capped_parse_count() -> usize {
     CAPPED_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
-/// True when `body_text` parses as JSON carrying a top-level `error`
-/// object -- the shape OpenAI Chat Completions, OpenAI Responses, and
-/// Anthropic Messages all use for 4xx/5xx error bodies.
-///
-/// Provider error readers use this to decide whether to carry the RAW
-/// upstream body in `Error::Upstream.body` (so the ingress sanitizer can
-/// re-extract the upstream's own top-level `error.message` for the
-/// client) versus a pre-sanitized excerpt. A non-`{error}` body (HTML
-/// page, plain-text gateway error, or JSON with no top-level `error`)
-/// returns `false`, so the reader carries the sanitized excerpt and the
-/// client sees a status-only message -- never a raw body dump or a
-/// sibling key. The parse follows [`crate::UpstreamBody::new`]: a
-/// body over [`crate::MAX_ERROR_BODY_BYTES`] is never parsed and returns
-/// `false`.
-pub fn is_json_error_envelope(body_text: &str) -> bool {
-    crate::ParsedErrorBody::parse(body_text).is_some_and(|p| p.is_error_envelope())
-}
-
 /// Collapse an HTML error page to a short byte-count marker. Returns
 /// `Some` only when the (trimmed) body opens like markup -- a misconfigured
 /// base_url landing on a CDN / marketing 404 page -- so multi-KB markup

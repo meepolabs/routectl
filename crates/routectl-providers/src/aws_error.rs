@@ -17,8 +17,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std::borrow::Cow;
+
 use reqwest::header::HeaderMap;
-use routectl_core::sanitize_for_log;
+use routectl_core::{ParsedErrorBody, UpstreamBody, sanitize_for_log};
 use serde_json::Value;
 
 /// Lift AWS/Bedrock error-envelope tokens from an already-parsed error body,
@@ -264,24 +266,21 @@ pub fn lift_aws_error_type_from_headers(headers: &HeaderMap) -> Option<String> {
 
 /// Whether a request-fault (400/422) body may be carried RAW (byte-capped)
 /// into [`routectl_core::Error::Upstream`]'s `body` for the capability
-/// matcher to re-parse, versus collapsed to the short sanitized excerpt.
+/// matcher to read, versus collapsed to the short sanitized excerpt.
 ///
 /// True ONLY for the flat AWS envelope shape the matcher reads -- a
 /// top-level `__type` (via [`lift_aws_error_tokens`]) and/or a top-level
-/// string `message` -- AND when the whole body is within `max_bytes`. Any
-/// other 400/422 shape returns false: a NESTED `{"error":{"message":...}}`
-/// body (a reverse proxy or custom endpoint fronting Bedrock), an HTML
-/// page, or plain text has no top-level `message` / `__type`, so it stays
-/// on the short excerpt and the widened body cap can never reflect an
-/// arbitrary large or nested-shaped body up to the caller via the ingress
-/// `error.message` reader.
+/// string `message` -- read from the body's capped parse. Any other 400/422
+/// shape returns false: a NESTED `{"error":{"message":...}}` body (a reverse
+/// proxy or custom endpoint fronting Bedrock), an HTML page, or plain text
+/// has no top-level `message` / `__type`, so it stays on the short excerpt
+/// and the widened body cap can never reflect an arbitrary large or
+/// nested-shaped body up to the caller via the ingress `error.message`
+/// reader.
 ///
-/// The `max_bytes` gate bounds BOTH the JSON parse this performs on the
-/// routing path (the matcher's own cap prevents a large parse; this
-/// mirrors it) AND the carried `message` -- which is a substring of the
-/// body and so is itself bounded once the body is. Reuses
-/// [`lift_aws_error_tokens`] for the `__type` detection rather than
-/// hand-rolling a second envelope parser.
+/// A body over [`routectl_core::MAX_ERROR_BODY_BYTES`] carries no parse and
+/// is never carryable, which bounds the carried `message` too (it is a
+/// substring of the body).
 ///
 /// A genuine flat AWS error envelope carries only SCALAR top-level fields
 /// (`__type` / `code` / `message` strings). Any container-valued top-level
@@ -290,11 +289,8 @@ pub fn lift_aws_error_type_from_headers(headers: &HeaderMap) -> Option<String> {
 /// pass the top-level-`message` check yet smuggle a large nested body into
 /// the raw stored envelope -- stays on the short excerpt.
 #[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
-pub fn is_carryable_flat_envelope(body: &str, max_bytes: usize) -> bool {
-    if body.len() > max_bytes {
-        return false;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(body) else {
+pub fn is_carryable_flat_envelope(parsed: Option<&ParsedErrorBody>) -> bool {
+    let Some(value) = parsed.map(ParsedErrorBody::value) else {
         return false;
     };
     let Some(obj) = value.as_object() else {
@@ -304,8 +300,39 @@ pub fn is_carryable_flat_envelope(body: &str, max_bytes: usize) -> bool {
         return false;
     }
     let has_message = obj.get("message").and_then(Value::as_str).is_some();
-    let (upstream_type, _) = lift_aws_error_tokens(Some(&value));
+    let (upstream_type, _) = lift_aws_error_tokens(Some(value));
     upstream_type.is_some() || has_message
+}
+
+/// [`routectl_core::redact_error_body_text`] for a body that was already
+/// parsed: the redaction runs over the carried parse instead of parsing the
+/// text again. A body with no parse (not JSON, over the cap, unparseable)
+/// goes through the text redactor, which never parses an over-cap body.
+#[cfg_attr(not(feature = "anthropic-api"), allow(dead_code))]
+pub fn redacted_body_text(body: &UpstreamBody) -> Cow<'_, str> {
+    let Some(parsed) = body.parsed().map(ParsedErrorBody::value) else {
+        return routectl_core::redact_error_body_text(body.text());
+    };
+    let redacted = routectl_core::redact_prompts_in(parsed);
+    if &redacted == parsed {
+        Cow::Borrowed(body.text())
+    } else {
+        Cow::Owned(redacted.to_string())
+    }
+}
+
+/// The body to carry on the client-facing error when the reader carries
+/// `text` in place of the raw upstream body. The raw parse is reused only
+/// when `text` is byte-identical to the raw text; any other text gets its
+/// own parse, so a parse of the raw AWS body never rides under scrubbed
+/// text.
+#[cfg_attr(not(feature = "anthropic-api"), allow(dead_code))]
+pub fn carried_body(raw: UpstreamBody, text: String) -> UpstreamBody {
+    if text == raw.text() {
+        raw
+    } else {
+        UpstreamBody::new(text)
+    }
 }
 
 /// Shared 403-vs-other classification for an AWS/Bedrock upstream error.
@@ -402,14 +429,30 @@ pub fn sanitized_debug_body(status: u16, body: &str) -> String {
 ///   with the extracted IAM action. NEVER the principal ARN, account
 ///   id, or resource ARN.
 /// - **other** -> sanitized body excerpt capped at `MAX_LOG_BODY_EXCERPT`.
+#[cfg_attr(
+    not(any(feature = "openai-compat", feature = "openai-responses")),
+    allow(dead_code)
+)]
 pub fn classify_client_error_message(status: u16, body: &str) -> String {
     match classify_bedrock_error(status, body) {
         BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
-        BedrockErrorClass::Other => routectl_core::sanitize_upstream_body_with_cap(
-            &routectl_core::redact_error_body_text(body),
-            routectl_core::MAX_LOG_BODY_EXCERPT,
-        ),
+        BedrockErrorClass::Other => client_excerpt(&routectl_core::redact_error_body_text(body)),
     }
+}
+
+/// [`classify_client_error_message`] for a body that was already parsed:
+/// the non-403 excerpt is redacted from the carried parse
+/// ([`redacted_body_text`]) rather than a second parse of the text.
+#[cfg_attr(not(feature = "anthropic-api"), allow(dead_code))]
+pub fn classify_parsed_client_error_message(status: u16, body: &UpstreamBody) -> String {
+    match classify_bedrock_error(status, body.text()) {
+        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
+        BedrockErrorClass::Other => client_excerpt(&redacted_body_text(body)),
+    }
+}
+
+fn client_excerpt(redacted: &str) -> String {
+    routectl_core::sanitize_upstream_body_with_cap(redacted, routectl_core::MAX_LOG_BODY_EXCERPT)
 }
 
 /// Extract the IAM action name from an AWS error message of the form
@@ -449,6 +492,10 @@ fn extract_iam_action(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn carryable(body: &str) -> bool {
+        is_carryable_flat_envelope(UpstreamBody::new(body).parsed())
+    }
 
     /// `strip_aws_namespace` reduces a namespaced AWS exception token to its
     /// bare name and leaves an already-bare token untouched.
@@ -825,22 +872,13 @@ mod tests {
     fn carryable_accepts_flat_aws_envelope() {
         let with_both =
             r#"{"__type":"com.amazon.coral.validate#ValidationException","message":"bad field"}"#;
-        assert!(is_carryable_flat_envelope(
-            with_both,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(carryable(with_both));
         // Top-level message alone (no __type) still counts as the flat shape.
         let message_only = r#"{"message":"bad field"}"#;
-        assert!(is_carryable_flat_envelope(
-            message_only,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(carryable(message_only));
         // __type alone (a tokenless throttle-style body) still counts.
         let type_only = r#"{"__type":"com.amazonaws.bedrock#ThrottlingException"}"#;
-        assert!(is_carryable_flat_envelope(
-            type_only,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(carryable(type_only));
     }
 
     /// A NESTED `{"error":{"message":...}}` envelope (proxy / custom endpoint),
@@ -850,25 +888,13 @@ mod tests {
     #[test]
     fn carryable_rejects_non_flat_shapes() {
         let nested = r#"{"error":{"message":"leaked detail"}}"#;
-        assert!(!is_carryable_flat_envelope(
-            nested,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(!carryable(nested));
         let html = "<!DOCTYPE html><html>error</html>";
-        assert!(!is_carryable_flat_envelope(
-            html,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(!carryable(html));
         let plain = "gateway timeout";
-        assert!(!is_carryable_flat_envelope(
-            plain,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(!carryable(plain));
         let array = r#"["message","__type"]"#;
-        assert!(!is_carryable_flat_envelope(
-            array,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(!carryable(array));
     }
 
     /// A wrapper carrying a top-level string `message` AND a container-valued
@@ -879,17 +905,11 @@ mod tests {
     #[test]
     fn carryable_rejects_wrapper_with_container_field() {
         let wrapper = r#"{"message":"x","error":{"message":"large nested body"}}"#;
-        assert!(!is_carryable_flat_envelope(
-            wrapper,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(!carryable(wrapper));
         // A flat envelope whose `message` is itself an OBJECT (not a string)
         // is likewise rejected.
         let object_message = r#"{"__type":"ValidationException","message":{"detail":"x"}}"#;
-        assert!(!is_carryable_flat_envelope(
-            object_message,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(!carryable(object_message));
     }
 
     /// A flat envelope whose whole body runs past the byte ceiling is NOT
@@ -900,10 +920,7 @@ mod tests {
         let oversized = "x".repeat(routectl_core::MAX_ERROR_BODY_BYTES);
         let body = format!(r#"{{"__type":"ValidationException","message":"{oversized}"}}"#);
         assert!(body.len() > routectl_core::MAX_ERROR_BODY_BYTES);
-        assert!(!is_carryable_flat_envelope(
-            &body,
-            routectl_core::MAX_ERROR_BODY_BYTES
-        ));
+        assert!(!carryable(&body));
     }
 
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};

@@ -67,7 +67,7 @@ pub(super) fn repairable_rejected_betas(
     floor_betas: &[String],
 ) -> Option<Vec<String>> {
     let message = validation_400_message(err)?;
-    let named = parse_rejected_beta_envelope(&message)?;
+    let named = parse_rejected_beta_envelope(message)?;
     let sent = |flag: &str| client_betas.iter().any(|b| b == flag);
     let floor = |flag: &str| floor_betas.iter().any(|b| b == flag);
     if let Some(refused) = named.iter().find(|flag| !sent(flag) || floor(flag)) {
@@ -91,11 +91,11 @@ pub(super) fn repairable_rejected_betas(
 }
 
 /// The flat-envelope `message` of a 400 `ValidationException`, or `None` for
-/// any other error. The body was already bounded when the error was built.
-fn validation_400_message(err: &Error) -> Option<String> {
+/// any other error. Read from the parse the error carries; a body with no
+/// parse (over the cap, not JSON) names no flags.
+fn validation_400_message(err: &Error) -> Option<&str> {
     let Error::Upstream {
         status: 400,
-        body,
         upstream_type: Some(upstream_type),
         ..
     } = err
@@ -105,8 +105,7 @@ fn validation_400_message(err: &Error) -> Option<String> {
     if !aws_exception_type_is(upstream_type, VALIDATION_EXCEPTION_TYPE) {
         return None;
     }
-    let parsed: Value = serde_json::from_str(body).ok()?;
-    parsed.get("message")?.as_str().map(str::to_string)
+    err.parsed_body()?.value().get("message")?.as_str()
 }
 
 /// `req` with every client-lifted beta in `flags` removed.

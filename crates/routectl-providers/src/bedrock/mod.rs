@@ -60,12 +60,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, TokenCount, sanitize_for_log,
+    ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, Result, TokenCount,
+    UpstreamBody, sanitize_for_log,
 };
 
 use crate::aws_error::{
     BedrockErrorClass, access_denied_message, classify_bedrock_error,
-    classify_client_error_message, sanitized_debug_body,
+    classify_parsed_client_error_message, sanitized_debug_body,
 };
 
 pub mod auth;
@@ -368,7 +369,7 @@ impl BedrockProvider {
                 &self.cfg.id,
                 status,
                 retry_after,
-                &prefix,
+                prefix,
                 hit_cap,
                 upstream_type,
                 upstream_code,
@@ -468,7 +469,7 @@ impl BedrockProvider {
                 &self.cfg.id,
                 status,
                 retry_after,
-                &prefix,
+                prefix,
                 hit_cap,
                 upstream_type,
                 upstream_code,
@@ -556,7 +557,7 @@ impl BedrockProvider {
                 &self.cfg.id,
                 status,
                 retry_after,
-                &prefix,
+                prefix,
                 hit_cap,
                 upstream_type,
                 upstream_code,
@@ -824,8 +825,10 @@ fn probe_outcome_for_resolve_error(err: &Error) -> routectl_core::ProbeOutcome {
 /// identically.
 ///
 /// The flat AWS envelope carries no first-party `error.type` / `error.code`,
-/// so the body is parsed once here and the bounded classifier tokens are
-/// lifted via [`lift_error_tokens`]. When the body carries no `__type` (the
+/// so the body is parsed once here ([`UpstreamBody::new`], within
+/// [`routectl_core::MAX_ERROR_BODY_BYTES`]) and the bounded classifier
+/// tokens are lifted via [`lift_error_tokens`]. The returned prefix carries
+/// that parse into [`build_client_error`]. When the body carries no `__type` (the
 /// native lane's minimal `{"message":...}` shape), the discriminator is
 /// lifted from the `x-amzn-errortype` response header instead, read before
 /// the body consumes `resp`. Those TYPE/CODE tokens are safe to carry
@@ -850,7 +853,7 @@ async fn read_error_body(
     provider_kind: &str,
     provider: &str,
     resp: reqwest::Response,
-) -> (String, bool, Option<String>, Option<String>) {
+) -> (UpstreamBody, bool, Option<String>, Option<String>) {
     let status = resp.status().as_u16();
     let content_length = resp.content_length();
     // Read the AWS exception discriminator from the response headers BEFORE
@@ -887,8 +890,33 @@ async fn read_error_body(
     if hit_cap {
         crate::http_client::warn_body_cap(provider, status, content_length, "error_body");
     }
-    let body_text = String::from_utf8_lossy(&bytes);
-    let (body_type, upstream_code) = lift_error_tokens(&body_text);
+    let body = UpstreamBody::new(String::from_utf8_lossy(&bytes));
+    let (upstream_type, upstream_code) = classify_and_log_error_body(
+        provider_kind,
+        provider,
+        status,
+        &body,
+        hit_cap,
+        header_type,
+        header_unusable_reason,
+    );
+    (body, hit_cap, upstream_type, upstream_code)
+}
+
+/// The synchronous half of [`read_error_body`]: lift the classifier tokens
+/// from the body's parse (falling back to the header-lifted discriminator),
+/// and emit the WARN and DEBUG lines. Returns `(upstream_type,
+/// upstream_code)`.
+fn classify_and_log_error_body(
+    provider_kind: &str,
+    provider: &str,
+    status: u16,
+    body: &UpstreamBody,
+    hit_cap: bool,
+    header_type: Option<String>,
+    header_unusable_reason: Option<&'static str>,
+) -> (Option<String>, Option<String>) {
+    let (body_type, upstream_code) = lift_error_tokens(body);
     // The flat native envelope carries no body `__type`, so fall back to the
     // header-lifted discriminator; a present body `__type` (mantle shapes)
     // wins. On a request-fault status (400/422) the discriminator is what the
@@ -910,7 +938,7 @@ async fn read_error_body(
         );
     }
     let upstream_type = body_type.or(header_type);
-    log_bedrock_upstream_error(provider, status, &body_text, hit_cap);
+    log_bedrock_upstream_error(provider, status, body, hit_cap);
     // Emit the full (capped) upstream error body at debug level alongside
     // the status-specific WARN above. The WARN excerpt (cap via
     // sanitize_for_log) keeps `routectl-warn.log` scannable; DEBUG gives
@@ -921,26 +949,19 @@ async fn read_error_body(
     // substitute an action-only string derived from the existing
     // classifier (the IAM action is the actionable bit; ARNs/account are
     // dropped). Non-403 statuses log the sanitized raw body as before.
-    let debug_body = sanitized_debug_body(status, &body_text);
+    let debug_body = sanitized_debug_body(status, body.text());
     routectl_core::debug_upstream_error_body(provider_kind, provider, status, &debug_body);
-
-    (
-        body_text.into_owned(),
-        hit_cap,
-        upstream_type,
-        upstream_code,
-    )
+    (upstream_type, upstream_code)
 }
 
-/// Parse a Bedrock error body once and lift the bounded AWS-envelope
-/// classifier tokens (`__type` namespace-stripped, top-level `code`) via
-/// [`crate::aws_error::lift_aws_error_tokens`]. Best-effort: a body that is
-/// not JSON or carries neither token yields `(None, None)`. Inert on a native
-/// nested `{"error": {...}}` shape, so it never overrides a first-party
-/// classifier.
-fn lift_error_tokens(body: &str) -> (Option<String>, Option<String>) {
-    let parsed = serde_json::from_str::<Value>(body).ok();
-    crate::aws_error::lift_aws_error_tokens(parsed.as_ref())
+/// Lift the bounded AWS-envelope classifier tokens (`__type`
+/// namespace-stripped, top-level `code`) from a Bedrock error body's parse
+/// via [`crate::aws_error::lift_aws_error_tokens`]. Best-effort: a body with
+/// no parse or carrying neither token yields `(None, None)`. Inert on a
+/// native nested `{"error": {...}}` shape, so it never overrides a
+/// first-party classifier.
+fn lift_error_tokens(body: &UpstreamBody) -> (Option<String>, Option<String>) {
+    crate::aws_error::lift_aws_error_tokens(body.parsed().map(ParsedErrorBody::value))
 }
 
 /// Map a non-streaming success body `(bytes, hit_cap)` to the parsed JSON.
@@ -962,7 +983,7 @@ fn map_success_body(provider_id: &str, status: u16, bytes: &[u8], hit_cap: bool)
 }
 
 /// Bedrock upstream statuses whose flat AWS envelope is a request fault the
-/// capability matcher re-parses to attribute a rejected capability. These
+/// capability matcher reads to attribute a rejected capability. These
 /// carry a `ValidationException` (never a 403 `AccessDenied`), so the body
 /// names a rejected request field, not a principal ARN / account id /
 /// resource ARN -- safe to carry raw (sanitized, capped at the matcher's
@@ -994,27 +1015,29 @@ const fn is_request_fault_status(status: u16) -> bool {
 /// ([`log_bedrock_upstream_error`]) keeps its own 512-char excerpt
 /// independently, so the operator log surface is unchanged. A 403 stays
 /// scrubbed on the `Other`/`AccessDenied` split below.
-fn map_error_message(status: u16, prefix: &str, hit_cap: bool) -> String {
+fn map_error_message(status: u16, prefix: &UpstreamBody, hit_cap: bool) -> String {
     if hit_cap {
-        match classify_bedrock_error(status, prefix) {
+        match classify_bedrock_error(status, prefix.text()) {
             BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
             BedrockErrorClass::Other => crate::http_client::body_cap_exceeded_message(),
         }
     } else if is_request_fault_status(status)
-        && crate::aws_error::is_carryable_flat_envelope(prefix, routectl_core::MAX_ERROR_BODY_BYTES)
+        && crate::aws_error::is_carryable_flat_envelope(prefix.parsed())
     {
         routectl_core::sanitize_upstream_body_with_byte_cap(
-            &routectl_core::redact_error_body_text(prefix),
+            &crate::aws_error::redacted_body_text(prefix),
             routectl_core::MAX_ERROR_BODY_BYTES,
         )
     } else {
-        classify_client_error_message(status, prefix)
+        classify_parsed_client_error_message(status, prefix)
     }
 }
 
 /// Assemble the final client-facing `Error` for an upstream error response,
 /// preserving the caller-captured `status` and `retry_after` while deriving
-/// the message from the (possibly truncated) body prefix. The lifted
+/// the message from the (possibly truncated) body prefix. The error carries
+/// the parse of the message it carries: the prefix's own parse when the
+/// message is the prefix verbatim, else a parse of the message. The lifted
 /// `upstream_type` / `upstream_code` ride onto the `Error` on every status
 /// class -- they are bounded exception tokens, not free-form body text, so
 /// they are safe even where the body/message is scrubbed (403, cap trip).
@@ -1022,15 +1045,16 @@ fn build_client_error(
     provider_id: &str,
     status: u16,
     retry_after: Option<std::time::Duration>,
-    prefix: &str,
+    prefix: UpstreamBody,
     hit_cap: bool,
     upstream_type: Option<String>,
     upstream_code: Option<String>,
 ) -> Error {
-    Error::upstream_full(
+    let message = map_error_message(status, &prefix, hit_cap);
+    Error::upstream_with_body(
         provider_id,
         status,
-        map_error_message(status, prefix, hit_cap),
+        crate::aws_error::carried_body(prefix, message),
         retry_after,
         upstream_type,
         upstream_code,
@@ -1062,7 +1086,7 @@ fn build_client_error(
 /// bytes reach WARN level. The 403 IAM action (classifier-derived,
 /// shape-checked) still lifts -- it is a bounded token, not free-form
 /// body text.
-fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: bool) {
+fn log_bedrock_upstream_error(provider: &str, status: u16, body: &UpstreamBody, hit_cap: bool) {
     // sanitize_upstream_body_with_cap trims edges, collapses HTML pages to
     // a short marker, and caps length. It does NOT filter mid-string control
     // characters (\n, \r, ANSI escapes). sanitize_for_log applied next
@@ -1071,7 +1095,7 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: 
         crate::http_client::body_cap_exceeded_message()
     } else {
         let excerpt = routectl_core::sanitize_upstream_body_with_cap(
-            &routectl_core::redact_error_body_text(body),
+            &crate::aws_error::redacted_body_text(body),
             routectl_core::MAX_LOG_BODY_EXCERPT,
         );
         sanitize_for_log(&excerpt)
@@ -1092,7 +1116,7 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: 
             let BedrockErrorClass::AccessDenied {
                 action,
                 principal_present,
-            } = classify_bedrock_error(status, body)
+            } = classify_bedrock_error(status, body.text())
             else {
                 unreachable!("classify_bedrock_error returns AccessDenied for status 403")
             };
@@ -1137,8 +1161,43 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: 
 mod redirect_tests;
 
 #[cfg(test)]
+#[path = "error_parse_tests.rs"]
+mod error_parse_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aws_error::classify_client_error_message;
+
+    // Text-taking shims over the reader helpers, which take an already-parsed
+    // body; they shadow the glob import so these tests feed plain text.
+    fn build_client_error(
+        provider_id: &str,
+        status: u16,
+        retry_after: Option<std::time::Duration>,
+        prefix: &str,
+        hit_cap: bool,
+        upstream_type: Option<String>,
+        upstream_code: Option<String>,
+    ) -> Error {
+        super::build_client_error(
+            provider_id,
+            status,
+            retry_after,
+            UpstreamBody::new(prefix),
+            hit_cap,
+            upstream_type,
+            upstream_code,
+        )
+    }
+
+    fn lift_error_tokens(body: &str) -> (Option<String>, Option<String>) {
+        super::lift_error_tokens(&UpstreamBody::new(body))
+    }
+
+    fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: bool) {
+        super::log_bedrock_upstream_error(provider, status, &UpstreamBody::new(body), hit_cap);
+    }
 
     #[test]
     fn excerpt_sanitizes_crlf_and_ansi() {
@@ -1823,7 +1882,7 @@ mod tests {
             "prov",
             400,
             None,
-            &prefix,
+            prefix.text(),
             false,
             upstream_type,
             upstream_code,
@@ -1893,7 +1952,7 @@ mod tests {
             routectl_testkit::with_capture(read_error_body("bedrock-invoke", "prov", resp)).await;
 
         assert!(!hit_cap, "an under-cap error body must not trip the cap");
-        assert!(prefix.contains("upstream boom detail"));
+        assert!(prefix.text().contains("upstream boom detail"));
         assert!(
             events.iter().all(|e| e.field("path").is_none()),
             "no cap-trip WARN (carrying `path`) may fire under cap",

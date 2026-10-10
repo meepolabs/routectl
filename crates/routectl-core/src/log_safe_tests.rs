@@ -6,8 +6,8 @@
 
 use super::{
     MAX, MAX_DEBUG_BODY_BYTES, clean_upstream_error_body, extract_upstream_message,
-    is_json_error_envelope, redact_prompts_with_flag, sanitize_capped, sanitize_detail_with_flag,
-    sanitize_for_log, sanitize_for_log_with_cap, sanitize_upstream_body,
+    redact_prompts_with_flag, sanitize_capped, sanitize_detail_with_flag, sanitize_for_log,
+    sanitize_for_log_with_cap, sanitize_upstream_body,
 };
 use serde_json::json;
 
@@ -36,32 +36,6 @@ fn detail_redacted_collapses_to_length_marker() {
         redacted,
         format!("<redacted len={}>", detail.chars().count())
     );
-}
-
-#[test]
-fn is_json_error_envelope_true_for_top_level_error_object() {
-    assert!(is_json_error_envelope(
-        r#"{"error":{"type":"invalid_request_error","message":"x"}}"#
-    ));
-}
-
-#[test]
-fn is_json_error_envelope_false_for_non_json() {
-    assert!(!is_json_error_envelope("<html>gateway timeout</html>"));
-    assert!(!is_json_error_envelope("plain text error"));
-}
-
-#[test]
-fn is_json_error_envelope_false_for_json_without_error_key() {
-    assert!(!is_json_error_envelope(r#"{"detail":"tenant-7 trace"}"#));
-}
-
-#[test]
-fn is_json_error_envelope_false_for_over_cap_error_body() {
-    let filler = "x".repeat(crate::MAX_ERROR_BODY_BYTES);
-    let body = format!(r#"{{"error":{{"message":"{filler}"}}}}"#);
-
-    assert!(!is_json_error_envelope(&body));
 }
 
 const ENVELOPE_FIXTURES: &[&str] = &[
@@ -94,7 +68,7 @@ fn parsed_body_helpers_agree_with_string_helpers() {
 
         assert_eq!(
             p.is_some_and(crate::ParsedErrorBody::is_error_envelope),
-            is_json_error_envelope(body),
+            serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| v.get("error").is_some()),
             "envelope: {body}"
         );
         assert_eq!(
