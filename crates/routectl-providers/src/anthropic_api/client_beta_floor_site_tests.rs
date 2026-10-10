@@ -216,6 +216,15 @@ fn oauth_gate_rows() -> Vec<Row> {
             true,
         ),
         Row {
+            cloak_mode: CloakMode::Always,
+            ..row(
+                "S3 OAuth gate, own oauth-bearer, cloak always",
+                Lane::OwnOauth,
+                gate,
+                true,
+            )
+        },
+        Row {
             cloak_mode: CloakMode::Never,
             ..row(
                 "S3 OAuth gate, own oauth-bearer, cloak never",
@@ -337,6 +346,16 @@ fn context_management_rows() -> Vec<Row> {
             provider_pin: true,
             ..row("S5 strip off, provider pin", Lane::ApiKey, cm, true)
         },
+        Row {
+            context_management: true,
+            provider_pin: true,
+            ..row(
+                "S5 strip on, provider pin, forwarded",
+                Lane::Forwarded,
+                cm,
+                false,
+            )
+        },
     ]
 }
 
@@ -376,6 +395,16 @@ fn body_union_rows() -> Vec<Row> {
             body: Some(effort.clone()),
             ..row(
                 "S7 effort, own oauth-bearer, effort",
+                Lane::OwnOauth,
+                EFFORT_BETA,
+                true,
+            )
+        },
+        Row {
+            cloak_mode: CloakMode::Always,
+            body: Some(effort.clone()),
+            ..row(
+                "S7 effort, own oauth-bearer, cloak always, effort",
                 Lane::OwnOauth,
                 EFFORT_BETA,
                 true,
