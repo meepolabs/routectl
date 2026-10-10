@@ -314,16 +314,19 @@ pub(super) fn annotate_host_rejection(err: Error, effective_host: &str) -> Error
             retry_after,
             upstream_type: Some(upstream_type),
             upstream_code,
-            upstream_request_id,
-        } if is_host_sensitive_class(&upstream_type) => Error::upstream_full(
-            provider,
-            status,
-            annotated_rejection_body(&body, effective_host),
-            retry_after,
-            Some(String::from(upstream_type)),
-            upstream_code.map(String::from),
-        )
-        .with_upstream_request_id(upstream_request_id.map(String::from)),
+            extras,
+        } if is_host_sensitive_class(&upstream_type) => {
+            let upstream_request_id = extras.request_id().map(String::from);
+            Error::upstream_full(
+                provider,
+                status,
+                annotated_rejection_body(&body, effective_host),
+                retry_after,
+                Some(String::from(upstream_type)),
+                upstream_code.map(String::from),
+            )
+            .with_upstream_request_id(upstream_request_id)
+        }
         other => other,
     }
 }
@@ -946,6 +949,7 @@ mod tests {
             let annotated = annotate_host_rejection(err, "daily-cloudcode-pa.googleapis.com");
 
             // Assert
+            assert_eq!(annotated.upstream_request_id(), Some("req-abc"));
             match annotated {
                 Error::Upstream {
                     provider,
@@ -954,7 +958,7 @@ mod tests {
                     retry_after,
                     upstream_type: got_type,
                     upstream_code,
-                    upstream_request_id,
+                    ..
                 } => {
                     assert_eq!(provider, "gemini:test");
                     assert_eq!(got_status, status, "status must survive the rebuild");
@@ -965,7 +969,6 @@ mod tests {
                     );
                     assert_eq!(got_type.as_deref(), Some(upstream_type));
                     assert_eq!(upstream_code.as_deref(), Some(status.to_string().as_str()));
-                    assert_eq!(upstream_request_id.as_deref(), Some("req-abc"));
 
                     let parsed: serde_json::Value = serde_json::from_str(&body).expect(
                         "the annotated body must stay parseable JSON -- the client-facing \

@@ -478,17 +478,15 @@ async fn openai_envelope_forwards_upstream_param_when_present() {
     // Arrange: a proxied OpenAI 400 whose upstream body named the
     // offending request parameter. routectl must forward that param
     // rather than collapsing it to null.
-    let err = Error::Upstream {
-        provider: "openai_prod".into(),
-        status: 400,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "{\"error\":{\"type\":\"invalid_request_error\",\
-               \"message\":\"unsupported value\",\"param\":\"temperature\"}}"
-            .into(),
-    };
+    let err = Error::upstream_full(
+        "openai_prod",
+        400,
+        "{\"error\":{\"type\":\"invalid_request_error\",\
+               \"message\":\"unsupported value\",\"param\":\"temperature\"}}",
+        None,
+        None,
+        None,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
@@ -505,17 +503,15 @@ async fn openai_envelope_forwards_upstream_param_when_present() {
 async fn openai_envelope_param_null_when_upstream_omits_it() {
     // Arrange: an upstream JSON error body with no `param` key. The
     // envelope must emit `param: null`, not fabricate one.
-    let err = Error::Upstream {
-        provider: "openai_prod".into(),
-        status: 400,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "{\"error\":{\"type\":\"invalid_request_error\",\
-               \"message\":\"bad request\"}}"
-            .into(),
-    };
+    let err = Error::upstream_full(
+        "openai_prod",
+        400,
+        "{\"error\":{\"type\":\"invalid_request_error\",\
+               \"message\":\"bad request\"}}",
+        None,
+        None,
+        None,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
@@ -563,15 +559,14 @@ async fn openai_envelope_survives_the_cloud_code_host_annotation() {
         }
     })
     .to_string();
-    let err = Error::Upstream {
-        provider: "gemini_cloudcode".into(),
-        status: 403,
-        retry_after: None,
-        upstream_type: Some("PERMISSION_DENIED".into()),
-        upstream_code: Some("403".into()),
-        upstream_request_id: None,
-        body: annotated,
-    };
+    let err = Error::upstream_full(
+        "gemini_cloudcode",
+        403,
+        annotated,
+        None,
+        Some("PERMISSION_DENIED".to_string()),
+        Some("403".to_string()),
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
@@ -595,15 +590,14 @@ async fn openai_envelope_survives_the_cloud_code_host_annotation() {
 async fn anthropic_envelope_ignores_upstream_param() {
     // The Anthropic envelope has no `param` field even when the upstream
     // body carried one.
-    let err = Error::Upstream {
-        provider: "p".into(),
-        status: 400,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "{\"error\":{\"message\":\"bad\",\"param\":\"temperature\"}}".into(),
-    };
+    let err = Error::upstream_full(
+        "p",
+        400,
+        "{\"error\":{\"message\":\"bad\",\"param\":\"temperature\"}}",
+        None,
+        None,
+        None,
+    );
 
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
     let body = body_to_value(resp).await;
@@ -785,17 +779,15 @@ async fn map_error_upstream_strips_provider_name_and_raw_body() {
     // Arrange: an Upstream error whose Display string carries the
     // internal config section name and a raw body with tenant detail
     // in a sibling key the upstream did not intend for the client.
-    let err = Error::Upstream {
-        provider: "anthropic_oauth_prod".into(),
-        status: 429,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"},\
-               \"internal_quota\":\"tenant-12345 exceeded 4000/min\"}"
-            .into(),
-    };
+    let err = Error::upstream_full(
+        "anthropic_oauth_prod",
+        429,
+        "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"},\
+               \"internal_quota\":\"tenant-12345 exceeded 4000/min\"}",
+        None,
+        None,
+        None,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
@@ -827,17 +819,15 @@ async fn map_error_upstream_surfaces_top_level_error_message_from_json_body() {
     // `error.message`. The sanitizer may surface that short message
     // (it is the upstream's own client-facing text) but never the
     // provider config name.
-    let err = Error::Upstream {
-        provider: "openai_prod".into(),
-        status: 400,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "{\"error\":{\"type\":\"invalid_request_error\",\
-               \"message\":\"max_tokens is too large\"}}"
-            .into(),
-    };
+    let err = Error::upstream_full(
+        "openai_prod",
+        400,
+        "{\"error\":{\"type\":\"invalid_request_error\",\
+               \"message\":\"max_tokens is too large\"}}",
+        None,
+        None,
+        None,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
@@ -865,15 +855,14 @@ async fn map_error_upstream_non_json_body_yields_status_only_message() {
     // plain-text gateway error). There is no top-level error.message
     // to surface, so the sanitizer falls back to a status-only message
     // and drops the body entirely.
-    let err = Error::Upstream {
-        provider: "bedrock_prod".into(),
-        status: 502,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "<html><body>upstream-host-name gateway timeout</body></html>".into(),
-    };
+    let err = Error::upstream_full(
+        "bedrock_prod",
+        502,
+        "<html><body>upstream-host-name gateway timeout</body></html>",
+        None,
+        None,
+        None,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
@@ -903,17 +892,15 @@ async fn map_error_upstream_non_json_body_yields_status_only_message() {
 async fn map_error_upstream_anthropic_envelope_also_sanitizes_message() {
     // Arrange: the Anthropic envelope path must sanitize the message
     // too -- both dialects funnel through the same `public_message`.
-    let err = Error::Upstream {
-        provider: "anthropic_oauth_prod".into(),
-        status: 529,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "{\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"},\
-               \"x-internal\":\"tenant-99 burst\"}"
-            .into(),
-    };
+    let err = Error::upstream_full(
+        "anthropic_oauth_prod",
+        529,
+        "{\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"},\
+               \"x-internal\":\"tenant-99 burst\"}",
+        None,
+        None,
+        None,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
@@ -1029,15 +1016,14 @@ async fn map_error_surfaces_anthropic_thinking_block_message_to_client() {
                 \"message\":\"messages.23.content.5: `thinking` or `redacted_thinking` \
                 blocks in the latest assistant message cannot be modified. These blocks \
                 must remain as they were in the original response.\"}}";
-    let err = Error::Upstream {
-        provider: "anthropic_oauth_prod".into(),
-        status: 400,
-        retry_after: None,
-        upstream_type: Some("invalid_request_error".into()),
-        upstream_code: None,
-        upstream_request_id: None,
-        body: raw.into(),
-    };
+    let err = Error::upstream_full(
+        "anthropic_oauth_prod",
+        400,
+        raw,
+        None,
+        Some("invalid_request_error".to_string()),
+        None,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
@@ -1065,15 +1051,14 @@ async fn map_error_non_json_upstream_body_stays_status_only() {
     // a sanitized excerpt (not raw JSON) in `.body` for this case, so the
     // ingress sanitizer must fall back to a status-only client message and
     // never echo the raw body.
-    let err = Error::Upstream {
-        provider: "anthropic_oauth_prod".into(),
-        status: 502,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "<html>upstream-host gateway timeout</html>".into(),
-    };
+    let err = Error::upstream_full(
+        "anthropic_oauth_prod",
+        502,
+        "<html>upstream-host gateway timeout</html>",
+        None,
+        None,
+        None,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
@@ -1305,15 +1290,7 @@ fn sanitize_stream_error_surfaces_top_level_error_message_like_non_stream() {
     let body = "{\"error\":{\"type\":\"invalid_request_error\",\
                 \"message\":\"max_tokens is too large\"},\
                 \"internal_quota\":\"tenant-12345 exceeded\"}";
-    let err = Error::Upstream {
-        provider: "openai_prod".into(),
-        status: 400,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: body.into(),
-    };
+    let err = Error::upstream_full("openai_prod", 400, body, None, None, None);
 
     // Act
     let safe = sanitize_stream_error_for_client(&err);
@@ -1349,15 +1326,14 @@ fn sanitize_stream_error_falls_back_to_status_only_without_message() {
     // Arrange: a non-JSON body has no top-level error.message to
     // surface, so the stream sanitizer falls back to status-only and
     // never forwards the raw body.
-    let err = Error::Upstream {
-        provider: "bedrock_prod".into(),
-        status: 502,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: "<html><body>upstream-host-name gateway timeout</body></html>".into(),
-    };
+    let err = Error::upstream_full(
+        "bedrock_prod",
+        502,
+        "<html><body>upstream-host-name gateway timeout</body></html>",
+        None,
+        None,
+        None,
+    );
 
     // Act
     let safe = sanitize_stream_error_for_client(&err);
@@ -1376,15 +1352,14 @@ fn sanitize_stream_error_does_not_forward_oversized_raw_body() {
     // error.message. The stream path must bound it exactly as the
     // non-stream path does -- never reflect the full body verbatim.
     let huge = "A".repeat(MAX_UPSTREAM_DETAIL_CHARS + 500);
-    let err = Error::Upstream {
-        provider: "p".into(),
-        status: 400,
-        retry_after: None,
-        upstream_type: None,
-        upstream_code: None,
-        upstream_request_id: None,
-        body: format!("{{\"error\":{{\"message\":\"{huge}\"}}}}"),
-    };
+    let err = Error::upstream_full(
+        "p",
+        400,
+        format!("{{\"error\":{{\"message\":\"{huge}\"}}}}"),
+        None,
+        None,
+        None,
+    );
 
     // Act
     let safe = sanitize_stream_error_for_client(&err);

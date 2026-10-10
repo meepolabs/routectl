@@ -223,6 +223,9 @@ license.
   prompt and credential-key redaction (`redact_error_body_text` for upstream
   error bodies), structural-summary extractor, `[log]`-block override
   seeding
+- `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
+  of an upstream error body carried on `Error::Upstream`, plus its
+  envelope / `error.*` accessors and `upstream_message_or_excerpt`
 - `src/test_utils.rs` -- single source of truth for the cross-crate
   contract-test fixture builders (`scenarios::*`, `user_msg`,
   `get_weather_tool`); gated behind `#[cfg(any(test, feature =

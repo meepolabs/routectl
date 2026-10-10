@@ -201,15 +201,23 @@ pub fn redact_error_body_text(body: &str) -> std::borrow::Cow<'_, str> {
     match read_error_json_body(body) {
         ErrorJsonBody::NotJson => Cow::Borrowed(body),
         ErrorJsonBody::Unreadable(marker) => Cow::Owned(marker),
-        ErrorJsonBody::Parsed(parsed) => {
-            let mut redacted = parsed.clone();
-            redact_in_place(&mut redacted, redact_enabled());
-            if redacted == parsed {
-                Cow::Borrowed(body)
-            } else {
-                Cow::Owned(redacted.to_string())
-            }
-        }
+        ErrorJsonBody::Parsed(parsed) => redact_parsed_error_body(body, &parsed),
+    }
+}
+
+/// The [`redact_error_body_text`] result for a `body` already parsed into
+/// `parsed`: `body` itself when redaction changes nothing, else the
+/// re-serialized redacted value.
+pub(crate) fn redact_parsed_error_body<'a>(
+    body: &'a str,
+    parsed: &serde_json::Value,
+) -> std::borrow::Cow<'a, str> {
+    let mut redacted = parsed.clone();
+    redact_in_place(&mut redacted, redact_enabled());
+    if &redacted == parsed {
+        std::borrow::Cow::Borrowed(body)
+    } else {
+        std::borrow::Cow::Owned(redacted.to_string())
     }
 }
 
@@ -235,7 +243,11 @@ pub(crate) fn read_error_json_body(body: &str) -> ErrorJsonBody {
         return ErrorJsonBody::NotJson;
     }
     let parsed = (body.len() <= crate::MAX_ERROR_BODY_BYTES)
-        .then(|| serde_json::from_str::<serde_json::Value>(trimmed).ok())
+        .then(|| {
+            #[cfg(test)]
+            CAPPED_PARSE_COUNT.with(|n| n.set(n.get() + 1));
+            serde_json::from_str::<serde_json::Value>(trimmed).ok()
+        })
         .flatten();
     match parsed {
         Some(value) => ErrorJsonBody::Parsed(value),
@@ -243,6 +255,18 @@ pub(crate) fn read_error_json_body(body: &str) -> ErrorJsonBody {
             ErrorJsonBody::Unreadable(format!("(json body, {} bytes, not excerpted)", body.len()))
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CAPPED_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times [`read_error_json_body`] has invoked the JSON parser on
+/// this thread.
+#[cfg(test)]
+pub(crate) fn capped_parse_count() -> usize {
+    CAPPED_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
 /// True when `body_text` parses as JSON carrying a top-level `error`
@@ -256,13 +280,11 @@ pub(crate) fn read_error_json_body(body: &str) -> ErrorJsonBody {
 /// page, plain-text gateway error, or JSON with no top-level `error`)
 /// returns `false`, so the reader carries the sanitized excerpt and the
 /// client sees a status-only message -- never a raw body dump or a
-/// sibling key.
+/// sibling key. The parse follows [`crate::ParsedErrorBody::parse`]: a
+/// body over [`crate::MAX_ERROR_BODY_BYTES`] is never parsed and returns
+/// `false`.
 pub fn is_json_error_envelope(body_text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body_text)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.get("error"))
-        .is_some()
+    crate::ParsedErrorBody::parse(body_text).is_some_and(|p| p.is_error_envelope())
 }
 
 /// Collapse an HTML error page to a short byte-count marker. Returns

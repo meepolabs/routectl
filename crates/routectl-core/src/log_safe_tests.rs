@@ -57,6 +57,71 @@ fn is_json_error_envelope_false_for_json_without_error_key() {
 }
 
 #[test]
+fn is_json_error_envelope_false_for_over_cap_error_body() {
+    let filler = "x".repeat(crate::MAX_ERROR_BODY_BYTES);
+    let body = format!(r#"{{"error":{{"message":"{filler}"}}}}"#);
+
+    assert!(!is_json_error_envelope(&body));
+}
+
+const ENVELOPE_FIXTURES: &[&str] = &[
+    r#"{"error":{"type":"invalid_request_error","message":"x"}}"#,
+    "<html>gateway timeout</html>",
+    "plain text error",
+    r#"{"detail":"tenant-7 trace"}"#,
+    r#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}"#,
+    r#"{"detail":"tenant-7 trace","status":503}"#,
+    r#"{"error":{"message":123}}"#,
+    r#"{"error":{"message":"bad","param":"temperature","code":429}}"#,
+];
+
+fn pointer_str(body: &str, path: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .pointer(path)
+        .and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) if path == "/error/code" => Some(n.to_string()),
+            _ => None,
+        })
+}
+
+#[test]
+fn parsed_body_helpers_agree_with_string_helpers() {
+    for body in ENVELOPE_FIXTURES {
+        let parsed = crate::ParsedErrorBody::parse(body);
+        let p = parsed.as_ref();
+
+        assert_eq!(
+            p.is_some_and(crate::ParsedErrorBody::is_error_envelope),
+            is_json_error_envelope(body),
+            "envelope: {body}"
+        );
+        assert_eq!(
+            crate::upstream_message_or_excerpt(body, p),
+            extract_upstream_message(body),
+            "message: {body}"
+        );
+        let read = |f: fn(&crate::ParsedErrorBody) -> Option<String>| p.and_then(f);
+        assert_eq!(
+            read(|v| v.error_type().map(str::to_string)),
+            pointer_str(body, "/error/type"),
+            "type: {body}"
+        );
+        assert_eq!(
+            read(crate::ParsedErrorBody::error_code),
+            pointer_str(body, "/error/code"),
+            "code: {body}"
+        );
+        assert_eq!(
+            read(|v| v.error_param().map(str::to_string)),
+            pointer_str(body, "/error/param"),
+            "param: {body}"
+        );
+    }
+}
+
+#[test]
 fn ascii_printable_passes_through_unchanged() {
     let s = "claude-sonnet-4-5-20250929";
     assert_eq!(sanitize_for_log(s), s);

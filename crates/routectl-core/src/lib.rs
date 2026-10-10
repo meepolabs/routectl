@@ -18,6 +18,7 @@ pub mod error;
 pub mod failure_class;
 pub mod identity;
 pub mod log_safe;
+pub mod parsed_error_body;
 pub(crate) mod provider;
 pub(crate) mod reasoning_dialect;
 pub mod reasoning_envelope;
@@ -71,6 +72,7 @@ pub use log_safe::{
     trace_stream_summary, trace_structural_summary, trace_upstream_response_headers,
     trace_upstream_success_body, wrap_stream_with_summary,
 };
+pub use parsed_error_body::{ParsedErrorBody, upstream_message_or_excerpt};
 pub use provider::{ProbeOutcome, Provider};
 pub use reasoning_dialect::{
     HistoryReasoning as CoreHistoryReasoning, ReasoningDialect as CoreReasoningDialect,

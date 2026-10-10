@@ -9,13 +9,17 @@ use std::fmt;
 
 use thiserror::Error;
 
+use crate::ParsedErrorBody;
+
 /// Convenience alias defaulting the error type to [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 // `Error` is returned pervasively as `Result<_, Error>`, so its size is the
-// success slot's size too. The three upstream diagnostic strings are
-// `Box<str>` (16 bytes) rather than `String` (24) to keep the enum within
-// clippy's 128-byte `result_large_err` threshold without a lint suppression.
+// success slot's size too. The two upstream classifier strings are
+// `Box<str>` (16 bytes) rather than `String` (24), and the request id and
+// parsed body share one boxed `UpstreamExtras`, to keep the enum below
+// clippy's `result_large_err` threshold (it fires AT 128 bytes) without a
+// lint suppression.
 const _: () = assert!(std::mem::size_of::<Error>() <= 128);
 
 /// The crate-wide error type spanning caller errors, configuration
@@ -59,15 +63,10 @@ pub enum Error {
         /// envelope; numeric codes are stringified). `None` when absent.
         /// NOT surfaced in the Display string.
         upstream_code: Option<Box<str>>,
-        /// The upstream provider's own correlation id lifted from the
-        /// response headers (first present of `x-request-id`,
-        /// `x-oai-request-id`, `cf-ray`). Surfaced by the ingress on a
-        /// client-facing `x-upstream-request-id` header so a caller can
-        /// quote it to vendor support when correlating a failed request.
-        /// `None` when the upstream sent no such header or the error was
-        /// built without an upstream HTTP response. NOT surfaced in the
-        /// Display string.
-        upstream_request_id: Option<Box<str>>,
+        /// The upstream correlation id and the parsed body; read them
+        /// through [`Error::upstream_request_id`] and
+        /// [`Error::parsed_body`]. NOT surfaced in the Display string.
+        extras: UpstreamExtras,
     },
 
     /// Request could not be normalized into the canonical shape for the
@@ -189,7 +188,7 @@ impl fmt::Debug for Error {
                 retry_after,
                 upstream_type,
                 upstream_code,
-                upstream_request_id,
+                extras,
             } => f
                 .debug_struct("Upstream")
                 .field("provider", provider)
@@ -199,7 +198,7 @@ impl fmt::Debug for Error {
                 .field("retry_after", retry_after)
                 .field("upstream_type", upstream_type)
                 .field("upstream_code", upstream_code)
-                .field("upstream_request_id", upstream_request_id)
+                .field("upstream_request_id", &extras.request_id())
                 .finish(),
             Self::NormalizeRequest(a, b) => {
                 f.debug_tuple("NormalizeRequest").field(a).field(b).finish()
@@ -227,6 +226,46 @@ impl fmt::Debug for Error {
             Self::Io(e) => f.debug_tuple("Io").field(e).finish(),
             Self::Json(e) => f.debug_tuple("Json").field(e).finish(),
         }
+    }
+}
+
+/// Boxed tail of [`Error::Upstream`]: the upstream correlation id and the
+/// parsed body, one pointer wide, allocated only when either is present.
+/// Built only by the `Error::upstream*` constructors -- it has no public
+/// constructor, so no struct literal outside this crate can build the variant
+/// -- and a carried parse therefore always describes the variant's `body`.
+/// Its `Debug` prints the request id only, never the parse.
+pub struct UpstreamExtras(Option<Box<UpstreamExtrasInner>>);
+
+struct UpstreamExtrasInner {
+    request_id: Option<Box<str>>,
+    parsed: Option<ParsedErrorBody>,
+}
+
+impl UpstreamExtras {
+    fn new(request_id: Option<Box<str>>, parsed: Option<ParsedErrorBody>) -> Self {
+        if request_id.is_none() && parsed.is_none() {
+            return Self(None);
+        }
+        Self(Some(Box::new(UpstreamExtrasInner { request_id, parsed })))
+    }
+
+    /// The upstream correlation id; see [`Error::upstream_request_id`].
+    pub fn request_id(&self) -> Option<&str> {
+        self.0.as_ref()?.request_id.as_deref()
+    }
+
+    /// The parsed body; see [`Error::parsed_body`].
+    pub fn parsed(&self) -> Option<&ParsedErrorBody> {
+        self.0.as_ref()?.parsed.as_ref()
+    }
+}
+
+impl fmt::Debug for UpstreamExtras {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpstreamExtras")
+            .field("request_id", &self.request_id())
+            .finish_non_exhaustive()
     }
 }
 
@@ -276,15 +315,7 @@ fn excerpt_chars(body: &str) -> String {
 impl Error {
     /// Construct an `Upstream` error with no reset hint or classifiers.
     pub fn upstream(provider: impl Into<String>, status: u16, body: impl Into<String>) -> Self {
-        Self::Upstream {
-            provider: provider.into(),
-            status,
-            body: body.into(),
-            retry_after: None,
-            upstream_type: None,
-            upstream_code: None,
-            upstream_request_id: None,
-        }
+        Self::upstream_full(provider, status, body, None, None, None)
     }
 
     /// Construct an `Upstream` error carrying a reset hint (e.g. a
@@ -297,15 +328,7 @@ impl Error {
         body: impl Into<String>,
         retry_after: Option<std::time::Duration>,
     ) -> Self {
-        Self::Upstream {
-            provider: provider.into(),
-            status,
-            body: body.into(),
-            retry_after,
-            upstream_type: None,
-            upstream_code: None,
-            upstream_request_id: None,
-        }
+        Self::upstream_full(provider, status, body, retry_after, None, None)
     }
 
     /// Construct an `Upstream` error carrying the full classifier set:
@@ -323,14 +346,67 @@ impl Error {
         upstream_type: Option<String>,
         upstream_code: Option<String>,
     ) -> Self {
-        Self::Upstream {
-            provider: provider.into(),
+        let body = body.into();
+        let parsed_body = ParsedErrorBody::parse(&body);
+        Self::upstream_parts(
+            provider.into(),
             status,
-            body: body.into(),
+            body,
+            parsed_body,
+            retry_after,
+            upstream_type,
+            upstream_code,
+        )
+    }
+
+    /// [`Error::upstream_full`] for a caller that already holds the result
+    /// of `ParsedErrorBody::parse(&body)`: a `Some` parse is attached as-is,
+    /// so `body` is not parsed again. A parse produced from any other string
+    /// is discarded and `body` is parsed instead, and `None` parses `body`
+    /// too (cheap unless `body` is in-cap JSON that fails to parse), so the
+    /// carried parse always describes `body`.
+    pub fn upstream_with_parsed_body(
+        provider: impl Into<String>,
+        status: u16,
+        body: impl Into<String>,
+        parsed_body: Option<ParsedErrorBody>,
+        retry_after: Option<std::time::Duration>,
+        upstream_type: Option<String>,
+        upstream_code: Option<String>,
+    ) -> Self {
+        let body = body.into();
+        let parsed_body = match parsed_body {
+            Some(parsed) if parsed.describes(&body) => Some(parsed),
+            _ => ParsedErrorBody::parse(&body),
+        };
+        Self::upstream_parts(
+            provider.into(),
+            status,
+            body,
+            parsed_body,
+            retry_after,
+            upstream_type,
+            upstream_code,
+        )
+    }
+
+    fn upstream_parts(
+        provider: String,
+        status: u16,
+        body: String,
+        parsed_body: Option<ParsedErrorBody>,
+        retry_after: Option<std::time::Duration>,
+        upstream_type: Option<String>,
+        upstream_code: Option<String>,
+    ) -> Self {
+        Self::Upstream {
+            provider,
+            status,
+            body,
             retry_after,
             upstream_type: upstream_type.map(Into::into),
             upstream_code: upstream_code.map(Into::into),
-            upstream_request_id: None,
+            extras: UpstreamExtras::new(None, parsed_body),
         }
     }
 
@@ -343,14 +419,36 @@ impl Error {
     /// populate it; every other construction site stays `None` untouched.
     #[must_use]
     pub fn with_upstream_request_id(mut self, id: Option<String>) -> Self {
-        if let Self::Upstream {
-            upstream_request_id,
-            ..
-        } = &mut self
-        {
-            *upstream_request_id = id.map(Into::into);
+        if let Self::Upstream { extras, .. } = &mut self {
+            let parsed = extras.0.take().and_then(|inner| inner.parsed);
+            *extras = UpstreamExtras::new(id.map(Into::into), parsed);
         }
         self
+    }
+
+    /// The upstream provider's own correlation id lifted from the response
+    /// headers (first present of `x-request-id`, `x-oai-request-id`,
+    /// `cf-ray`). Surfaced by the ingress on a client-facing
+    /// `x-upstream-request-id` header so a caller can quote it to vendor
+    /// support. `None` on any other variant, when the upstream sent no such
+    /// header, or when the error was built without an upstream HTTP response.
+    pub fn upstream_request_id(&self) -> Option<&str> {
+        match self {
+            Self::Upstream { extras, .. } => extras.request_id(),
+            _ => None,
+        }
+    }
+
+    /// The single capped JSON parse of an `Upstream` error's `body`
+    /// ([`ParsedErrorBody::parse`]), attached by every `upstream*`
+    /// constructor so consumers never parse `body` again. `None` on any other
+    /// variant, or when `body` is not JSON, is over
+    /// [`crate::MAX_ERROR_BODY_BYTES`], or does not parse.
+    pub fn parsed_body(&self) -> Option<&ParsedErrorBody> {
+        match self {
+            Self::Upstream { extras, .. } => extras.parsed(),
+            _ => None,
+        }
     }
 
     /// Construct a `NormalizeRequest` error for the named provider.
@@ -571,6 +669,114 @@ mod tests {
         }
     }
 
+    type UpstreamCtor = fn(&str) -> Error;
+
+    const UPSTREAM_CTORS: &[(&str, UpstreamCtor)] = &[
+        ("upstream", |body| Error::upstream("prov", 400, body)),
+        ("upstream_with_retry_after", |body| {
+            Error::upstream_with_retry_after("prov", 400, body, None)
+        }),
+        ("upstream_full", |body| {
+            Error::upstream_full("prov", 400, body, None, None, None)
+        }),
+        ("upstream_with_parsed_body without a parse", |body| {
+            Error::upstream_with_parsed_body("prov", 400, body, None, None, None, None)
+        }),
+    ];
+
+    fn parses_during(build: impl FnOnce() -> Error) -> (Error, usize) {
+        let before = crate::log_safe::capped_parse_count();
+        let err = build();
+        (err, crate::log_safe::capped_parse_count() - before)
+    }
+
+    #[test]
+    fn each_upstream_ctor_parses_an_in_cap_json_body_exactly_once() {
+        let body = r#"{"error":{"type":"invalid_request_error","message":"bad"}}"#;
+        for (name, ctor) in UPSTREAM_CTORS {
+            let (err, parses) = parses_during(|| ctor(body));
+
+            assert_eq!(parses, 1, "{name}");
+            let parsed = err
+                .parsed_body()
+                .unwrap_or_else(|| panic!("{name}: no parse"));
+            assert_eq!(parsed.error_type(), Some("invalid_request_error"), "{name}");
+        }
+    }
+
+    #[test]
+    fn each_upstream_ctor_carries_no_parse_for_an_over_cap_body() {
+        let filler = "x".repeat(crate::MAX_ERROR_BODY_BYTES);
+        let body = format!(r#"{{"error":{{"message":"{filler}"}}}}"#);
+        for (name, ctor) in UPSTREAM_CTORS {
+            let (err, parses) = parses_during(|| ctor(&body));
+
+            assert!(err.parsed_body().is_none(), "{name}");
+            assert_eq!(parses, 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn upstream_with_parsed_body_attaches_a_matching_parse_without_reparsing() {
+        let body = r#"{"error":{"type":"overloaded_error"}}"#;
+        let parsed = crate::ParsedErrorBody::parse(body);
+
+        let (err, parses) = parses_during(|| {
+            Error::upstream_with_parsed_body("prov", 529, body, parsed, None, None, None)
+        });
+
+        assert_eq!(parses, 0);
+        let carried = err.parsed_body().expect("parse attached");
+        assert_eq!(carried.error_type(), Some("overloaded_error"));
+    }
+
+    #[test]
+    fn upstream_with_parsed_body_replaces_a_parse_of_a_different_body() {
+        let stale = crate::ParsedErrorBody::parse(r#"{"error":{"type":"stale"}}"#);
+        let body = r#"{"error":{"type":"fresh"}}"#;
+
+        let (err, parses) = parses_during(|| {
+            Error::upstream_with_parsed_body("prov", 400, body, stale, None, None, None)
+        });
+
+        assert_eq!(parses, 1);
+        let carried = err.parsed_body().expect("body re-parsed");
+        assert_eq!(carried.error_type(), Some("fresh"));
+    }
+
+    #[test]
+    fn with_upstream_request_id_keeps_the_parse() {
+        let err = Error::upstream("prov", 400, r#"{"error":{"type":"t"}}"#)
+            .with_upstream_request_id(Some("req-1".to_string()));
+
+        assert_eq!(err.upstream_request_id(), Some("req-1"));
+        let parsed = err.parsed_body().expect("parse survives");
+        assert_eq!(parsed.error_type(), Some("t"));
+    }
+
+    #[test]
+    fn parsed_body_is_none_off_the_upstream_variant() {
+        assert!(Error::Validation("bad".to_string()).parsed_body().is_none());
+    }
+
+    /// The body itself renders (Display raw, Debug as a redacted excerpt),
+    /// so the planted key appears exactly once per rendering; a rendered
+    /// parse would add a second occurrence or a `ParsedErrorBody` marker.
+    #[test]
+    fn upstream_debug_and_display_never_render_the_parse() {
+        let sentinel = "SENTINEL_PARSED_KEY";
+        let body = format!(r#"{{"error":{{"type":"t","{sentinel}":"v"}}}}"#);
+        let err =
+            Error::upstream("prov", 400, body).with_upstream_request_id(Some("req-9".to_string()));
+        assert!(err.parsed_body().is_some(), "fixture must carry a parse");
+
+        for rendered in [format!("{err:?}"), err.to_string()] {
+            assert_eq!(rendered.matches(sentinel).count(), 1, "{rendered}");
+            assert!(!rendered.contains("ParsedErrorBody"), "{rendered}");
+            assert!(!rendered.contains("UpstreamExtras"), "{rendered}");
+        }
+    }
+
     /// Non-`Upstream` variants keep the derived Debug shape (tuple form).
     #[test]
     fn non_upstream_variant_debug_unchanged() {
@@ -587,27 +793,18 @@ mod tests {
         let err = err.with_upstream_request_id(Some("req-123".to_string()));
 
         // Assert
-        match err {
-            Error::Upstream {
-                upstream_request_id,
-                ..
-            } => {
-                assert_eq!(upstream_request_id.as_deref(), Some("req-123"));
-            }
-            other => panic!("expected Error::Upstream, got {other:?}"),
-        }
+        assert_eq!(err.upstream_request_id(), Some("req-123"));
     }
 
     #[test]
     fn with_upstream_request_id_defaults_none_and_is_noop_off_variant() {
         // Arrange: the plain ctor leaves the id unset.
-        match Error::upstream("test", 500, "boom") {
-            Error::Upstream {
-                upstream_request_id,
-                ..
-            } => assert!(upstream_request_id.is_none(), "ctor must default to None"),
-            other => panic!("expected Error::Upstream, got {other:?}"),
-        }
+        assert!(
+            Error::upstream("test", 500, "boom")
+                .upstream_request_id()
+                .is_none(),
+            "ctor must default to None"
+        );
 
         // Act + Assert: chaining on a non-Upstream variant is a no-op.
         let other = Error::Validation("bad".to_string()).with_upstream_request_id(Some("x".into()));

@@ -1354,13 +1354,13 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             upstream_type,
             upstream_code,
             retry_after,
-            upstream_request_id,
+            extras,
             ..
         } => (
             upstream_type.as_deref(),
             upstream_code.as_deref(),
             *retry_after,
-            upstream_request_id.as_deref(),
+            extras.request_id(),
         ),
         Error::LocalRefusal { .. } => (Some(LOCAL_REFUSAL_TYPE), None, None, None),
         _ => (None, None, None, None),
