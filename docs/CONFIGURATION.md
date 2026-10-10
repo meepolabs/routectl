@@ -867,6 +867,14 @@ client flag the floor also carries keeps its client position. A request on
 a forwarded credential withholds nothing. Each withheld flag is logged at
 `debug` (see [LOGGING.md](LOGGING.md)).
 
+A `beta:<flag>` override matches the client flag case-insensitively
+(ASCII): `beta:context-1m-2025-08-07` withholds a client
+`Context-1M-2025-08-07`, and an `unsupported` / `force_supported` pair that
+differs only in the flag's case is a contradictory override and fails
+validation. Matching never rewrites the flag: a forwarded flag keeps the
+client's spelling, and learned and seeded `beta:` verdicts stay
+case-sensitive.
+
 At ingress, client flags from the body and the `anthropic-beta` header are
 split on commas, trimmed and deduplicated; a flag holding any byte outside
 visible ASCII is dropped, and a request with more than 64 distinct flags is

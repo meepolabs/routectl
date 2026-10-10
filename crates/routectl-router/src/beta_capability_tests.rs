@@ -281,3 +281,36 @@ fn a_seed_scope_lists_the_keys_of_its_well_formed_flags_in_order() {
     assert_eq!(keys, want);
     assert_eq!(scope.provider_kind(), "kind-x");
 }
+
+// --- override matching ---
+
+#[test]
+fn the_override_key_lowercases_only_the_flag_of_a_beta_key() {
+    let p = BETA_CAPABILITY_PREFIX;
+    let rows = [
+        (
+            "mixed-case beta flag",
+            format!("{p}Context-1M-2025-08-07"),
+            format!("{p}{DATED_FLAG}"),
+        ),
+        (
+            "lowercase beta flag",
+            format!("{p}{DATED_FLAG}"),
+            format!("{p}{DATED_FLAG}"),
+        ),
+        (
+            "non-beta key",
+            "web_search".to_string(),
+            "web_search".to_string(),
+        ),
+        (
+            "mixed-case non-beta key",
+            "Web_Search".to_string(),
+            "Web_Search".to_string(),
+        ),
+    ];
+
+    for (label, key, want) in rows {
+        assert_eq!(beta_override_key(&key), want, "{label}");
+    }
+}

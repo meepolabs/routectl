@@ -13,8 +13,9 @@
 //!
 //! The spec is either a provider name or `provider:nickname`. Every key is
 //! normalized at build via [`normalize_capability_key`]
-//! with the target's provider kind, so a stored override and a later
-//! normalized lookup meet on identical strings.
+//! with the target's provider kind, then a `beta:` key's flag is
+//! lowercased via [`beta_override_key`] (beta flags match in any case), so a
+//! stored override and a later normalized lookup meet on identical strings.
 //!
 //! # Precedence
 //!
@@ -40,6 +41,7 @@ use std::collections::HashMap;
 
 use routectl_core::capability::normalize_capability_key;
 
+use crate::beta_capability::beta_override_key;
 use crate::config::Config;
 
 /// Verdict a resolved override cell carries.
@@ -134,7 +136,7 @@ impl OverrideRegistry {
         capability_raw: &str,
         provider_kind: &str,
     ) -> Option<OverrideVerdict> {
-        let capability_key = normalize_capability_key(capability_raw, provider_kind);
+        let capability_key = override_cell_key(capability_raw, provider_kind);
         let model_spec = format!("{provider_name}:{nickname}");
         let model_key = CellKey {
             target_spec: model_spec,
@@ -195,7 +197,7 @@ fn collect_contributions(config: &Config) -> Vec<Contribution> {
         for raw in &override_entry.unsupported {
             out.push(Contribution {
                 target_spec: spec.clone(),
-                capability_key: normalize_capability_key(raw, kind),
+                capability_key: override_cell_key(raw, kind),
                 verdict: OverrideVerdict::RouteAway,
                 source: format!("[capability.overrides.{spec}].unsupported"),
             });
@@ -203,7 +205,7 @@ fn collect_contributions(config: &Config) -> Vec<Contribution> {
         for raw in &override_entry.force_supported {
             out.push(Contribution {
                 target_spec: spec.clone(),
-                capability_key: normalize_capability_key(raw, kind),
+                capability_key: override_cell_key(raw, kind),
                 verdict: OverrideVerdict::ForceSupported,
                 source: format!("[capability.overrides.{spec}].force_supported"),
             });
@@ -211,6 +213,12 @@ fn collect_contributions(config: &Config) -> Vec<Contribution> {
     }
 
     out
+}
+
+/// The cell key an override entry is stored under and a lookup is matched
+/// on. Build and lookup both call this, so the two cannot drift.
+fn override_cell_key(raw: &str, provider_kind: &str) -> String {
+    beta_override_key(&normalize_capability_key(raw, provider_kind))
 }
 
 /// Split a two-tier target spec (`"provider_name"` or
@@ -530,6 +538,24 @@ mod tests {
         let err = validate_capability_overrides(&config)
             .expect_err("self-contradictory entry must fail validation");
         assert!(err.contains("computer_use"), "got: {err}");
+    }
+
+    #[test]
+    fn beta_overrides_differing_only_in_flag_case_conflict() {
+        // Arrange
+        let config = config(&format!(
+            "{OPENAI_P}\
+             [capability.overrides.p]\n\
+             unsupported = [\"beta:X-Flag\"]\n\
+             force_supported = [\"beta:x-flag\"]\n"
+        ));
+
+        // Act
+        let err = validate_capability_overrides(&config)
+            .expect_err("case variants of one beta flag must conflict");
+
+        // Assert
+        assert!(err.contains("x-flag"), "got: {err}");
     }
 
     /// A dotted Bedrock request-bag override key normalizes to its

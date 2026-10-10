@@ -944,3 +944,57 @@ fn a_seed_lift_on_an_upstream_no_model_routes_is_absent() {
     assert!(matches!(outcome, super::super::PurgeOutcome::Absent));
     assert!(markers_on(&router).is_empty());
 }
+
+const MIXED_CASE_FLAG: &str = "Context-1M-2025-08-07";
+
+fn unsupported_on_bed(flag: &str) -> Router {
+    router(&format!(
+        "{}[capability.overrides.bed]\nunsupported = [\"{}\"]\n",
+        capability(true),
+        key(flag),
+    ))
+}
+
+#[test]
+fn a_lowercase_override_withholds_a_mixed_case_client_flag_in_its_client_spelling() {
+    // Arrange
+    let router = unsupported_on_bed(&MIXED_CASE_FLAG.to_ascii_lowercase());
+    let target = target_on(&router, "bed");
+
+    // Act
+    let out = withheld(&router, &target, &[MIXED_CASE_FLAG]);
+
+    // Assert
+    assert_eq!(out, vec![MIXED_CASE_FLAG.to_string()]);
+}
+
+#[test]
+fn an_uppercase_override_withholds_the_lowercase_client_flag() {
+    // Arrange
+    let lowercase = MIXED_CASE_FLAG.to_ascii_lowercase();
+    let router = unsupported_on_bed(&MIXED_CASE_FLAG.to_ascii_uppercase());
+    let target = target_on(&router, "bed");
+
+    // Act
+    let out = withheld(&router, &target, &[lowercase.as_str()]);
+
+    // Assert
+    assert_eq!(out, vec![lowercase]);
+}
+
+#[tokio::test]
+async fn without_an_override_a_mixed_case_flag_is_forwarded_as_sent() {
+    // Arrange
+    let (router, provider) = dispatch_router(true);
+
+    // Act
+    Box::pin(router.complete(betas(&[MIXED_CASE_FLAG])))
+        .await
+        .expect("complete succeeds");
+
+    // Assert
+    let seen = provider.seen.lock();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].routectl_internal.withheld_betas.is_empty());
+    assert_eq!(seen[0].anthropic_beta, vec![MIXED_CASE_FLAG.to_string()]);
+}

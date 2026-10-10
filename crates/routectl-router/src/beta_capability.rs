@@ -11,7 +11,8 @@
 //! append-only ledger and read back on every later boot. A second copy of the
 //! prefix literal anywhere else could drift from this one and re-partition
 //! history, so the prefix is private to this module: the only way to obtain a
-//! key is [`beta_capability_key`], and the only ways to read one are
+//! key is [`beta_capability_key`] (or its override-matching form,
+//! [`beta_override_key`]), and the only ways to read one are
 //! [`beta_flag_of`] and [`capability_key_is_beta`].
 //!
 //! Beta keys are catalog-scoped facts: they sit outside the envelope-field
@@ -65,6 +66,19 @@ pub fn beta_flag_of(key: &str) -> Option<&str> {
 /// True when `key` sits inside the beta-flag namespace.
 pub fn capability_key_is_beta(key: &str) -> bool {
     beta_flag_of(key).is_some()
+}
+
+/// The form an operator override cell and its lookup both key on: a beta key
+/// with its flag ASCII-lowercased, any other key unchanged.
+///
+/// Upstreams treat beta flags case-insensitively, so an override must match a
+/// client flag in any spelling. Only override matching goes through here: the
+/// forwarded flag, learned keys and seed matching keep their exact spelling.
+pub fn beta_override_key(key: &str) -> String {
+    match beta_flag_of(key) {
+        Some(flag) => format!("{BETA_CAPABILITY_PREFIX}{}", flag.to_ascii_lowercase()),
+        None => key.to_string(),
+    }
 }
 
 /// The beta flags a shipped seed withholds on one provider kind.
