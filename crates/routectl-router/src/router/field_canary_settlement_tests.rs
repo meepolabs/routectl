@@ -1240,3 +1240,5 @@ async fn a_straggler_forwards_unchanged_instead_of_stranding_on_a_rejection() {
         "premise: the request actually reached the seat",
     );
 }
+
+include!("field_canary_invalid_value_tests.rs");

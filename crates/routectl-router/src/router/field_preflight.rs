@@ -92,6 +92,8 @@ use super::class_observe::DispatchSurface;
 use super::field_repair::{
     ANTHROPIC_API_KIND, FieldRepairRow, FieldSurface, TransformClass, present_rows,
 };
+use super::rejection_parser::RejectionKind;
+use super::repair_budget::RepairBudget;
 use super::{
     CapabilityClearedEvent, CapabilityLearnEvent, DispatchTarget, FieldPreflight,
     FieldPreflightAuthorizationRecord, Router,
@@ -381,12 +383,10 @@ impl Router {
     /// its own cadence -- it simply cannot claim a second canary, and a trip it
     /// cannot claim stays DUE for the next request rather than being postponed.
     ///
-    /// Deliberately takes NO repair budget. Neither a pre-flight rewrite nor a
-    /// canary draws from the caller's reactive ceiling -- both act on a verdict
-    /// already resident and settled, and the canary's own repaired retry is the
-    /// re-verification itself rather than a reactive repair of a fresh
-    /// rejection -- so a threaded-but-unread parameter would be a false
-    /// signal that some invariant here consults it.
+    /// Deliberately takes NO repair budget: neither a pre-flight rewrite nor a
+    /// canary restoration re-dispatches anything, so planning has nothing to
+    /// charge. A canary's later repaired retry is charged where it happens, in
+    /// [`Router::canary_repaired_retry`].
     pub(super) fn plan_field_preflight<'a>(
         &'a self,
         original_req: &ChatRequest,
@@ -799,56 +799,69 @@ impl Router {
             })
     }
 
-    /// Whether `plan`'s canary may repair and re-dispatch over the rejection
-    /// `err`, and if so drop the tested field from `attempt_req` -- all or
-    /// nothing, mirroring the reactive `FieldRepairPlan::apply`.
+    /// Answer a rejection the CANARY request drew: settle what it proves about
+    /// the restored field, then repair the attempt if the request may still pay
+    /// for one -- all or nothing, mirroring the reactive `FieldRepairPlan::apply`.
+    ///
+    /// Only a rejection naming the SAME row the canary restored is the canary's
+    /// own, compared on the surface rather than the path string: the surface is
+    /// what the drop acts on. What it proves depends on what was refused:
+    ///
+    /// - a refused FIELD is the rejection the verdict predicts, so the repaired
+    ///   retry's later success re-confirms it (the caller settles that);
+    /// - a refused VALUE proves the upstream recognizes the field, which is
+    ///   exactly what an unsupported-field verdict denies. The verdict is
+    ///   settled as disproved HERE, before any repair, because the evidence is
+    ///   the rejection itself and does not depend on whether a retry is paid
+    ///   for or what it returns. The repaired retry then only serves the
+    ///   request, and the canary is gone from `plan`, so no success can confirm.
+    ///
+    /// The repair draws the request's shared allowance like every other repair:
+    /// availability is checked before the drop and the charge follows it, so an
+    /// exhausted allowance leaves the request untouched and the rejection on its
+    /// ordinary path.
     ///
     /// `Some(status)` means the field is gone, the estimate describes the new
-    /// payload, and the caller must re-dispatch this same target and later
-    /// settle the plan as CONFIRMED on success. `None` means the rejection did
-    /// not name the tested field, or the drop removed nothing: nothing was
-    /// mutated and the caller must leave the rejection on its ordinary path.
-    ///
-    /// Deliberately draws NO repair budget, unlike the reactive arm. The two
-    /// spend for different things: a reactive repair pays for the chance that a
-    /// fresh rejection is repairable, while this retry is the second half of a
-    /// re-verification routectl itself scheduled. Charging it would let a
-    /// request that happened to carry the canary silently lose the reactive
-    /// allowance it is separately entitled to, and would make the canary's
-    /// completion depend on a ceiling unrelated to re-verification.
+    /// payload, one repair was charged, and the caller must re-dispatch this
+    /// same target. `None` means nothing was mutated or charged.
     ///
     /// The NATIVE class is the input, never the operator-remapped one, for the
     /// same reason the reactive arm reads it: a `[class_overrides]` entry states
     /// how a status should be ROUTED, not what the upstream said, so reading it
     /// would let an override turn a 429 into a canary confirmation.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn canary_repaired_retry(
-        plan: &FieldPreflightPlan<'_>,
+        &self,
+        plan: &mut FieldPreflightPlan<'_>,
         attempt_req: &mut ChatRequest,
         meta: &mut super::DispatchMeta,
+        budget: &mut RepairBudget,
         native_class: &routectl_core::failure_class::FailureClass,
         err: &routectl_core::Error,
         provider_kind: &str,
     ) -> Option<u16> {
         let surface = plan.canary_surface()?;
-        // The rejection must name the SAME row the canary restored, compared on
-        // the surface rather than the path string: the surface is what the drop
-        // acts on, and two rows sharing one surface would be the same mutation
-        // under two identities. And it must refuse the FIELD: the retry's
-        // success confirms the verdict, and a refused value is evidence the
-        // lane accepts the field, not that it refuses it.
         let kind = Self::rejection_names_field_surface(surface, native_class, err, provider_kind)?;
-        if kind != super::rejection_parser::RejectionKind::UnsupportedField {
-            return None;
+        if kind == RejectionKind::InvalidValue
+            && let Some(canary) = plan.canary.take()
+        {
+            meta.cleared_capabilities
+                .extend(canary.settle_disproved(self.field_verdicts()));
         }
         // Presence is re-read here rather than assumed from the restoration:
         // the request has been through a dispatch since, and a drop that
         // removes nothing must not be reported as a repair.
-        if !surface.present_in(attempt_req) {
+        if !surface.present_in(attempt_req) || !budget.can_draw() {
             return None;
         }
         if !surface.drop_from(attempt_req) {
             return None;
         }
+        let charged = budget.draw();
+        debug_assert!(
+            charged,
+            "can_draw held before the mutation, so the draw after it cannot fail",
+        );
         super::dispatch::restamp_calibration_estimate(attempt_req, meta);
         Some(
             super::class_observe::upstream_facts(err)

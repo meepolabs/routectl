@@ -81,12 +81,14 @@ const FIELD_PATH: &str = "thinking.enabled.display";
 /// change should produce.
 const EXPECTED_CADENCE: u32 = 100;
 
-/// A rejection body shaped like the captured envelope. Carries no secret. The
-/// parser reads it as a refused VALUE, which cannot confirm a verdict, so the
-/// canary that draws it settles INCONCLUSIVE -- exactly the property the
-/// contention fixture needs (an inconclusive settlement leaves the verdict
-/// resident).
-const FIELD_REJECT_BODY: &str = r#"{"error":{"type":"invalid_request_error","message":"thinking.enabled.display: Input should be 'summarized', 'omitted'"}}"#;
+/// A caller-error rejection that names no field. Carries no secret. The parser
+/// localizes nothing from it, so the canary that draws it neither confirms nor
+/// disproves and settles INCONCLUSIVE -- exactly the property the contention
+/// fixture needs (an inconclusive settlement leaves the verdict resident). A
+/// rejection naming the restored field would not do: a refused value proves
+/// the field is recognized and clears the verdict.
+const UNATTRIBUTED_REJECT_BODY: &str =
+    r#"{"error":{"type":"invalid_request_error","message":"max_tokens is required"}}"#;
 
 /// A remote-looking base URL, so the attributability gate admits the lane.
 /// Nothing is ever sent here: the seat below answers in-process.
@@ -172,7 +174,7 @@ impl Provider for Seat {
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         self.record(&req);
         if self.reject_carried && Self::carries_field(&req) {
-            return Err(Error::upstream("p0", 400, FIELD_REJECT_BODY));
+            return Err(Error::upstream("p0", 400, UNATTRIBUTED_REJECT_BODY));
         }
         Ok(ChatResponse {
             model: "claude-sonnet-4-5".to_string(),

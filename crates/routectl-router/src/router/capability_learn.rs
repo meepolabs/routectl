@@ -776,10 +776,8 @@ impl Router {
         // capability and still name no field of the envelope, so hanging this on
         // the resolver's `None` branch (where the two matcher-drift observers
         // sit) would under-count exactly the traffic where the parser is blind
-        // while the matcher is not. Every gate above has already excluded a
-        // remapped class, a forwarded credential, and a status no request fault
-        // can carry.
-        self.observe_field_parser_blindness(provider_kind, cf, err, target, dedupe);
+        // while the matcher is not.
+        self.observe_unlocalized_field_rejection(err, cf, remapped, target, dedupe);
         let Some(resolved) = resolve_requested_capability(provider_kind, err, cf) else {
             self.observe_bedrock_validation_drift(provider_kind, err, target, dedupe);
             self.observe_feature_naming_drift(provider_kind, cf, target, req, dedupe);
@@ -1261,6 +1259,40 @@ impl Router {
         );
     }
 
+    /// The parser-blindness observation with its own eligibility gates, for a
+    /// walk that reaches a field-eligible rejection without the learn path.
+    ///
+    /// The gates are the learn path's: the kill switch, a request-fault status
+    /// (400/422), an unremapped class, a target that does not dispatch on a
+    /// forwarded credential, and a known provider kind. A rejection failing any
+    /// of them is not one this build could have attributed, so it says nothing
+    /// about the parser either.
+    pub(super) fn observe_unlocalized_field_rejection(
+        &self,
+        err: &Error,
+        cf: &ClassifiedFailure,
+        remapped: bool,
+        target: &DispatchTarget,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+    ) {
+        if !self.config.capability.enabled || remapped || target.use_forwarded_credential {
+            return;
+        }
+        if !matches!(
+            err,
+            Error::Upstream {
+                status: 400 | 422,
+                ..
+            }
+        ) {
+            return;
+        }
+        let Some(provider_kind) = target.provider_kind else {
+            return;
+        };
+        self.observe_field_parser_blindness(provider_kind, cf, err, target, dedupe);
+    }
+
     /// Blindness observability for the envelope-field rejection parser. When a
     /// rejection's CLASS could have named a field of the request envelope and
     /// the parser localized no path from it, this build could not attribute a
@@ -1293,8 +1325,9 @@ impl Router {
         dedupe: &mut HashSet<LearnDedupeKey>,
     ) {
         // The NATIVE class is not available here, so the remap is refused
-        // explicitly by the caller before this is reached -- see
-        // `observe_for_learning`. What arrives is an unremapped class.
+        // explicitly before this is reached -- see
+        // `observe_unlocalized_field_rejection`. What arrives is an unremapped
+        // class.
         if !Self::rejection_localizes_no_field(&cf.class, err, provider_kind) {
             return;
         }

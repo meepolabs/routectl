@@ -31,11 +31,13 @@
 //!   first making the class reachable: a behavioral test of an unreachable
 //!   arm passes with the arm deleted.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use routectl_core::failure_class::{LastOutcome, classify, classify_with_attempt};
 use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
+use super::capability_learn::LearnDedupeKey;
 use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
 use super::dispatch::{
     REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap, class_debits,
@@ -437,6 +439,9 @@ impl Router {
 
         let mut auth_retry_attempted = false;
         let mut attempts_made: u32 = 0;
+        // Per seat is per target: seats are single-visit, so this dedupes the
+        // seat's own retries exactly as the messages walks' per-request set does.
+        let mut learn_dedupe: HashSet<LearnDedupeKey> = HashSet::new();
         loop {
             // Per-attempt gate: rate limit + circuit breaker. Runs on THIS
             // seat before its upstream is touched (and again on the 401
@@ -675,6 +680,16 @@ impl Router {
                         probe_guard.release();
                         continue;
                     }
+                    // The repair arms declined, so a field-eligible rejection
+                    // the parser could not localize is counted here: this walk
+                    // never reaches the learn path that counts it elsewhere.
+                    self.observe_unlocalized_field_rejection(
+                        &e,
+                        &cf,
+                        remapped,
+                        &target,
+                        &mut learn_dedupe,
+                    );
                     // The repair arm declined (already repaired this seat, not
                     // a replay rejection, or the request's budget is spent), so
                     // this error can now reach the CALLER. A replay rejection's

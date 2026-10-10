@@ -314,12 +314,12 @@ impl Provider for BedrockCanarySeat {
     }
 }
 
-/// The committed Bedrock `unknown-body-field` canary localizes a path the
-/// closed table has no row for: it counts once as parser-unlocalized,
-/// dispatches once, mutates nothing, and learns nothing.
+/// A one-seat Bedrock router whose seat answers with the committed canary.
+///
+/// The upstream id is Anthropic-family so the token-count walk admits the seat;
+/// a non-family id would never be dialed there and the row would pass vacuously.
 #[cfg(feature = "bedrock")]
-#[tokio::test]
-async fn an_unresolved_bedrock_field_rejection_counts_once_and_changes_nothing() {
+fn bedrock_canary_router() -> (Router, Arc<BedrockCanarySeat>) {
     let mut config: Config = toml::from_str(
         "\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
          [providers.p0]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
@@ -339,32 +339,68 @@ async fn an_unresolved_bedrock_field_rejection_counts_once_and_changes_nothing()
             "m0".to_string(),
             "p0".to_string(),
             Arc::clone(&seat) as Arc<dyn Provider>,
-            "wire-0".to_string(),
+            "anthropic.claude-sonnet-4-5-20250929-v1:0".to_string(),
         )),
     )]));
-    let sent = req_on(ALIAS);
+    (router, seat)
+}
 
-    let dispatched = router
-        .complete_with_options(sent.clone(), RouterOptions::new())
-        .await;
+/// The committed Bedrock `unknown-body-field` canary localizes a path the
+/// closed table has no row for: on every walk that can reach it, it counts once
+/// as parser-unlocalized, dispatches once, mutates nothing, and learns nothing.
+///
+/// The token-count row is the one that matters most: that walk never reaches
+/// the learn path, so the count there comes from its own call site.
+///
+/// Mutation check: delete the observer call in `count_tokens_try_seat` -> the
+/// `count_tokens` row reds on the count (0, not 1).
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn an_unresolved_bedrock_field_rejection_counts_once_and_changes_nothing() {
+    for walk in ["complete", "count_tokens"] {
+        let (router, seat) = bedrock_canary_router();
+        let sent = req_on(ALIAS);
 
-    assert!(dispatched.result.is_err(), "premise: the seat rejects");
-    assert_eq!(
-        router.field_repair_counters().parser_unlocalized,
-        1,
-        "the unresolved field-eligible rejection counts once",
-    );
-    let calls = seat.calls.lock();
-    assert_eq!(calls.len(), 1, "no repaired retry was dispatched");
-    assert!(
-        carries_field(&sent) && carries_field(&calls[0]),
-        "the request reached the seat with every closed-table carrier the client sent",
-    );
-    assert!(dispatched.meta.field_repair.is_none(), "no repair fired");
-    assert!(
-        dispatched.meta.learned_capabilities.is_empty(),
-        "and nothing was learned",
-    );
+        let meta = match walk {
+            "complete" => {
+                let dispatched = router
+                    .complete_with_options(sent.clone(), RouterOptions::new())
+                    .await;
+                assert!(
+                    dispatched.result.is_err(),
+                    "{walk}: premise: the seat rejects"
+                );
+                dispatched.meta
+            }
+            _ => {
+                let counted = router.count_tokens_with_meta(sent.clone()).await;
+                assert!(counted.result.is_err(), "{walk}: premise: the seat rejects");
+                counted.meta
+            }
+        };
+
+        assert_eq!(
+            router.field_repair_counters().parser_unlocalized,
+            1,
+            "{walk}: the unresolved field-eligible rejection counts once",
+        );
+        let calls = seat.calls.lock();
+        assert_eq!(calls.len(), 1, "{walk}: no repaired retry was dispatched");
+        assert!(
+            carries_field(&sent) && carries_field(&calls[0]),
+            "{walk}: the request reached the seat with every closed-table carrier the \
+             client sent",
+        );
+        assert!(meta.field_repair.is_none(), "{walk}: no repair fired");
+        assert!(
+            meta.learned_capabilities.is_empty(),
+            "{walk}: and nothing was learned",
+        );
+        assert!(
+            router.learned_capability_snapshot().is_empty(),
+            "{walk}: and the store holds no verdict",
+        );
+    }
 }
 
 /// A rejection the parser DID name a row from does not bump the blind counter.

@@ -745,7 +745,9 @@ impl Router {
                         // retry re-confirms it. The `canary_repair_attempted`
                         // flag is the only thing that separates them, which is
                         // why it is set exclusively by the repair branch below
-                        // and never inferred from the request's shape.
+                        // and never inferred from the request's shape. A
+                        // refused-VALUE rejection already settled the canary as
+                        // disproved in that branch, so no plan is left here.
                         if let Some(plan) = std::mem::take(&mut field_canary).into_canary() {
                             if canary_repair_attempted {
                                 let features = super::field_repair::request_feature_keys(&req);
@@ -1006,12 +1008,15 @@ impl Router {
                         // fires only when the rejection names the SAME closed-
                         // table surface the canary restored, so an unrelated
                         // caller error stays terminal exactly as it is for any
-                        // other request.
+                        // other request. The retry draws the shared request
+                        // allowance, so an exhausted one leaves the rejection on
+                        // the ordinary path below.
                         if !canary_repair_attempted
-                            && let Some(status) = Self::canary_repaired_retry(
-                                &field_canary,
+                            && let Some(status) = self.canary_repaired_retry(
+                                &mut field_canary,
                                 &mut attempt_req,
                                 meta,
+                                &mut repair_budget,
                                 &original_class,
                                 &e,
                                 target.provider_kind.unwrap_or(""),
