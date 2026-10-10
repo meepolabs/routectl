@@ -202,6 +202,76 @@ fn a_leased_beta_is_never_the_lane_victim() {
 }
 
 #[test]
+fn a_new_beta_on_a_fully_leased_lane_is_refused_until_a_lease_releases() {
+    // Arrange -- the global cap holds exactly the full lane plus one unrelated
+    // fact, which is the global cap's oldest (and so its next victim).
+    let reg = LearnedCapabilityRegistry::new(DECAY, WINDOW, MAX_BETA_ENTRIES_PER_LANE + 1);
+    let base = Instant::now();
+    learn(&reg, OTHER_LANE, KIND, "web_search", base);
+    fill_betas(&reg, LANE, KIND, MAX_BETA_ENTRIES_PER_LANE, base + secs(1));
+    let leases: Vec<PurgeLease> = (0..MAX_BETA_ENTRIES_PER_LANE)
+        .map(
+            |n| match reg.prepare_purge(reg.generation(), LANE, &beta(n), KIND) {
+                PurgePreparation::Reserved(lease) => lease,
+                other => panic!("expected a reservation, got {other:?}"),
+            },
+        )
+        .collect();
+    let newcomer = beta(MAX_BETA_ENTRIES_PER_LANE);
+
+    // Act
+    let mut outcome = None;
+    let events = routectl_testkit::capture_events(|| {
+        outcome = Some(reg.observe(
+            LANE,
+            &newcomer,
+            KIND,
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            base + secs(100),
+        ));
+    });
+
+    // Assert
+    assert_eq!(outcome, Some(ObserveOutcome::Refused));
+    let keys = resident(&reg, LANE, KIND);
+    assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
+    assert!(
+        !keys.contains(&newcomer),
+        "the refused key must stay absent"
+    );
+    assert_eq!(
+        resident(&reg, OTHER_LANE, KIND),
+        vec!["web_search".to_string()],
+        "a refused insert must not reach the global cap's victim"
+    );
+    let evicts: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.field("event") == Some("evict"))
+        .collect();
+    assert_eq!(evicts.len(), 1, "only the refusal WARN, no eviction");
+    assert_eq!(evicts[0].field("reason"), Some("beta_lane_cap_leased"));
+    assert_eq!(evicts[0].field("capability_key"), Some(newcomer.as_str()));
+
+    // Act -- release the leases and observe again.
+    for lease in leases {
+        reg.restore_purge(lease);
+    }
+    learn(&reg, LANE, KIND, &newcomer, base + secs(200));
+
+    // Assert
+    let keys = resident(&reg, LANE, KIND);
+    assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
+    assert!(keys.contains(&newcomer), "the next observation learns it");
+    assert_eq!(
+        resident(&reg, OTHER_LANE, KIND),
+        vec!["web_search".to_string()]
+    );
+}
+
+#[test]
 fn refreshing_a_resident_beta_at_the_bound_evicts_nothing() {
     // Arrange
     let reg = registry();

@@ -1,7 +1,8 @@
 //! The shipped beta seed as its own matrix layer: seeded columns on lanes of
 //! the seed's kind, the seed cell's source and action, a cleared seed from a
 //! replayed marker, a learned beta negative's withhold action, and an
-//! override in another spelling of a flag folding into that flag's column.
+//! override in another spelling of a flag folding into every learned spelling
+//! of that flag.
 
 use std::time::{Duration, Instant};
 
@@ -286,4 +287,40 @@ fn an_override_with_no_other_spelling_renders_its_own_column() {
     let overridden = cell(&panel, OTHER_LANE, &beta(OVERRIDE_SPELLING));
     assert_eq!(overridden.verdict, "forced_unsupported");
     assert_eq!(overridden.source, Some("override"));
+}
+
+#[test]
+fn learned_spellings_differing_in_case_keep_their_own_columns_under_one_override() {
+    const SHOUTED_SPELLING: &str = "CONTEXT-1M-2025-08-07";
+    let now = Instant::now();
+    let learned = |flag: &str| {
+        negative(
+            OTHER_LANE,
+            &beta(flag),
+            FailurePhase::F1,
+            now,
+            now + Duration::from_mins(1),
+        )
+    };
+
+    let panel = panel_with(
+        config_overriding(OVERRIDE_SPELLING),
+        available(
+            vec![learned(LEARNED_SPELLING), learned(SHOUTED_SPELLING)],
+            now,
+            1_000_000,
+        ),
+        BetaSeedScope::EMPTY,
+    );
+
+    let mut expected = vec![beta(LEARNED_SPELLING), beta(SHOUTED_SPELLING)];
+    expected.sort();
+    let mut shown = columns_for_flag(&panel, OVERRIDE_SPELLING);
+    shown.sort();
+    assert_eq!(shown, expected);
+    for flag in [LEARNED_SPELLING, SHOUTED_SPELLING] {
+        let overridden = cell(&panel, OTHER_LANE, &beta(flag));
+        assert_eq!(overridden.verdict, "forced_unsupported", "{flag}");
+        assert_eq!(overridden.source, Some("override"), "{flag}");
+    }
 }

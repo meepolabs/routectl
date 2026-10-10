@@ -1058,18 +1058,23 @@ impl Router {
         // dedupe entry installed either -- the mutation this request attempted
         // never happened, so the entry must not block a same-request retry once
         // the refusal condition clears (a released lease, a caught-up
-        // generation); undo the speculative insert above on every refusal arm.
-        let crate::learned_capability::GenerationOutcome::Applied {
-            value: (observe_outcome, observations),
-            generation: persistence_generation,
-            incarnation,
-        } = outcome
-        else {
-            dedupe.remove(&LearnDedupeKey::Capability {
-                learned_key,
-                feature_key,
-            });
-            return;
+        // generation, a beta lane with an unleased entry again); undo the
+        // speculative insert above on every refusal arm.
+        let (observe_outcome, observations, persistence_generation, incarnation) = match outcome {
+            crate::learned_capability::GenerationOutcome::Applied {
+                value: (observe_outcome, observations),
+                generation,
+                incarnation,
+            } if observe_outcome != crate::learned_capability::ObserveOutcome::Refused => {
+                (observe_outcome, observations, generation, incarnation)
+            }
+            _ => {
+                dedupe.remove(&LearnDedupeKey::Capability {
+                    learned_key,
+                    feature_key,
+                });
+                return;
+            }
         };
         let acting = matches!(
             observe_outcome,
