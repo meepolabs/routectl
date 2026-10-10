@@ -2621,3 +2621,81 @@ fn key_debug_renders_capability_and_provider_but_never_the_state_key() {
         }
     }
 }
+
+// --- value-aware corroboration ---
+
+const VALUE_A: VerdictValue = VerdictValue::Shape("routectl-test-value-a");
+const VALUE_B: VerdictValue = VerdictValue::Shape("routectl-test-value-b");
+
+/// Commit one repair for `k` at `t` carrying `value`.
+fn commit_valued(
+    reg: &FieldVerdictRegistry,
+    k: &FieldVerdictKey,
+    value: Option<VerdictValue>,
+    t: Instant,
+) -> CapabilityLearnEvent {
+    reg.admit_provisional(k, REMOTE_BASE, 1, t)
+        .expect("a lapsed or absent verdict admits one repair")
+        .commit(SignalTier::SelfIdentifying, value, 400, vec![], t)
+        .expect("a live commit emits its row")
+}
+
+/// A confirmation counts only when the key AND the value match: the same value
+/// corroborates the resident verdict (+1 observation, value kept), while a
+/// different value retires it and starts a new incarnation at one observation
+/// carrying the new value. The old incarnation's value is never answered again.
+///
+/// Each commit lands past the previous one's decay, so the lapsed verdict
+/// admits its single re-verifying repair.
+///
+/// Mutation check: make `retire_on_value_change` return early unconditionally
+/// -> red (the changed value inherits the observation count).
+#[test]
+fn a_confirmation_counts_only_when_key_and_value_match() {
+    let reg = registry();
+    let k = key("t");
+    let t0 = Instant::now();
+    let lapse = DECAY + Duration::from_secs(1);
+
+    let first = commit_valued(&reg, &k, Some(VALUE_A), t0);
+    let same = commit_valued(&reg, &k, Some(VALUE_A), t0 + lapse);
+    let value_after_same = reg.verdict_value(&k, same.incarnation);
+    let changed = commit_valued(&reg, &k, Some(VALUE_B), t0 + lapse * 2);
+
+    assert_eq!(first.observations, 1);
+    assert_eq!(same.observations, 2, "same key and value: observations +1");
+    assert_eq!(
+        value_after_same,
+        Some(VALUE_A),
+        "the corroborated incarnation keeps its value",
+    );
+    assert_eq!(
+        changed.observations, 1,
+        "a new value restarts at one observation"
+    );
+    assert!(
+        changed.incarnation > same.incarnation,
+        "and a new incarnation"
+    );
+    assert_eq!(changed.value, Some(VALUE_B));
+    assert_eq!(reg.verdict_value(&k, changed.incarnation), Some(VALUE_B));
+    assert_eq!(
+        reg.verdict_value(&k, same.incarnation),
+        None,
+        "the superseded incarnation's value is gone",
+    );
+}
+
+/// A verdict recorded without a value (a drop) keeps corroborating as before:
+/// `None` matches `None`.
+#[test]
+fn a_valueless_verdict_corroborates_another_valueless_commit() {
+    let reg = registry();
+    let k = key("t");
+    let t0 = Instant::now();
+
+    let _ = commit_valued(&reg, &k, None, t0);
+    let again = commit_valued(&reg, &k, None, t0 + DECAY + Duration::from_secs(1));
+
+    assert_eq!(again.observations, 2);
+}

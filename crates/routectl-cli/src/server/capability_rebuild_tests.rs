@@ -1012,6 +1012,7 @@ fn assert_report_matches_rebuild_log(
         ("skipped_lane", summary.skipped_lane),
         ("skipped_owner", summary.skipped_owner),
         ("skipped_namespace", summary.skipped_namespace),
+        ("degraded_value", summary.degraded_value),
         ("loaded_rows", report.loaded_rows),
     ];
     for (field, value) in expected {

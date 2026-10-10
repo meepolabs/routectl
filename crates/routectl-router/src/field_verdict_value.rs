@@ -14,9 +14,13 @@
 //! text: a decoded shape is the row's own `&'static str` member, so a token can
 //! only ever select a value the code already ships.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use parking_lot::Mutex;
 use routectl_core::sanitize_for_log;
+
+use crate::field_verdict::FieldVerdictKey;
 
 const SHAPE_PREFIX: &str = "shape:";
 const CEILING_PREFIX: &str = "ceiling:";
@@ -149,6 +153,70 @@ fn parse_ceiling(digits: &str) -> Result<u32, Malformed> {
     match digits.parse::<u32>() {
         Ok(0) | Err(_) => Err(Malformed::CeilingOutOfRange),
         Ok(ceiling) => Ok(ceiling),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The resident value of each field verdict
+// ---------------------------------------------------------------------------
+//
+// The learned-capability registry stores a verdict's lifecycle (tier, decay,
+// observations) but has no notion of a value, so a rewrite verdict's value
+// lives here, beside it. Every mutation of the learned row mints a new
+// incarnation, and a value is answered only for the exact incarnation it was
+// recorded against: a lookup naming any other lifecycle -- a cleared, purged,
+// or relearned verdict -- answers nothing.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoredValue {
+    incarnation: u64,
+    value: VerdictValue,
+}
+
+/// Per-identity value of the resident field verdict. One entry per identity:
+/// recording a new incarnation replaces the previous one.
+#[derive(Debug, Default)]
+pub struct FieldValueStore {
+    values: Mutex<HashMap<FieldVerdictKey, StoredValue>>,
+}
+
+impl FieldValueStore {
+    /// The value recorded for `key` at exactly `incarnation`, or `None`.
+    #[must_use]
+    pub fn value_at(&self, key: &FieldVerdictKey, incarnation: u64) -> Option<VerdictValue> {
+        self.values
+            .lock()
+            .get(key)
+            .filter(|stored| stored.incarnation == incarnation)
+            .map(|stored| stored.value)
+    }
+
+    /// The most recently recorded value for `key`, whatever incarnation it was
+    /// recorded at: what a new observation is compared against to decide
+    /// whether it continues the same lifecycle or starts a new one.
+    #[must_use]
+    pub fn latest(&self, key: &FieldVerdictKey) -> Option<VerdictValue> {
+        self.values.lock().get(key).map(|stored| stored.value)
+    }
+
+    /// Record `value` as `key`'s value at `incarnation`; `None` forgets any
+    /// value, because a verdict minted without one must not inherit its
+    /// predecessor's.
+    pub fn record(&self, key: &FieldVerdictKey, incarnation: u64, value: Option<VerdictValue>) {
+        let mut values = self.values.lock();
+        match value {
+            Some(value) => {
+                values.insert(key.clone(), StoredValue { incarnation, value });
+            }
+            None => {
+                values.remove(key);
+            }
+        }
+    }
+
+    /// Drop any value for `key`.
+    pub fn forget(&self, key: &FieldVerdictKey) {
+        self.values.lock().remove(key);
     }
 }
 

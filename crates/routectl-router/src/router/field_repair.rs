@@ -43,7 +43,7 @@ use routectl_core::failure_class::FailureClass;
 use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey};
-use crate::field_verdict_value::VerdictValue;
+use crate::field_verdict_value::{ValueSlot, VerdictValue};
 
 use super::rejection_parser::{
     NamedRejection, OPENAI_UNSUPPORTED_CODE, RejectionKind, parse_rejection,
@@ -348,7 +348,7 @@ impl FieldSurface {
     }
 
     /// True when `req` already carries exactly `value` on this surface.
-    fn carries(&self, req: &ChatRequest, value: &str) -> bool {
+    pub(super) fn carries(&self, req: &ChatRequest, value: &str) -> bool {
         self.value_in(req).as_deref() == Some(value)
     }
 
@@ -360,7 +360,7 @@ impl FieldSurface {
     ///
     /// Staged on a clone because [`Self::set_in`] cannot report failure, and a
     /// rewrite that did not take must not leave a half-written body behind.
-    fn rewrite_in(&self, req: &mut ChatRequest, value: &str) -> bool {
+    pub(super) fn rewrite_in(&self, req: &mut ChatRequest, value: &str) -> bool {
         if self.carries(req, value) {
             return false;
         }
@@ -543,6 +543,18 @@ pub(super) enum FieldTransform {
         )
     )]
     Ceiling,
+}
+
+impl FieldTransform {
+    /// The closed set a persisted value for a row with this transform is
+    /// decoded against, or `None` for a transform that carries no value.
+    const fn value_slot(self) -> Option<ValueSlot> {
+        match self {
+            Self::Drop => None,
+            Self::Rewrite { accepted } => Some(ValueSlot::Shape(accepted)),
+            Self::Ceiling => Some(ValueSlot::Ceiling),
+        }
+    }
 }
 
 /// One row of the closed path-to-surface table: the qualified dotted path,
@@ -857,6 +869,18 @@ pub(super) fn transform_class_of_capability_key(key: &str) -> Option<TransformCl
     closed_table().iter().find_map(|row| {
         (crate::field_capability::field_capability_key(row.path).as_deref() == Some(key))
             .then_some(row.class)
+    })
+}
+
+/// The value slot of the closed-table row a `field:`-namespaced capability key
+/// names, or `None` when no row of this build's table names it or the row's
+/// transform carries no value. What decides whether a persisted value token is
+/// read at all: every other key's token is ignored.
+pub fn value_slot_for_capability_key(key: &str) -> Option<ValueSlot> {
+    closed_table().iter().find_map(|row| {
+        (crate::field_capability::field_capability_key(row.path).as_deref() == Some(key))
+            .then(|| row.transform.value_slot())
+            .flatten()
     })
 }
 

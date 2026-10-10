@@ -24,7 +24,7 @@
 //! (insertion order), so the negative-then-cleared ordering is
 //! deterministic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use routectl_core::capability::{
@@ -34,6 +34,7 @@ use routectl_core::capability::{
 
 use crate::capability_owner::owner_decision;
 use crate::config::ProviderEntry;
+use crate::field_verdict_value::{ValueSlot, VerdictValue};
 use crate::learned_capability::LearnedCapabilityRegistry;
 
 /// The replay boundary: the latest tombstone's ledger `rowid` plus the
@@ -108,6 +109,10 @@ pub struct CapabilityEventRow {
     /// is the legacy v1 vocabulary. Replay maps the tokens forward to the
     /// current vocabulary before decoding them.
     pub vocab_version: Option<i64>,
+    /// Raw persisted value token. Read only for a `field:` row whose
+    /// code-owned repair row declares a value (a rewrite or a ceiling), and
+    /// decoded strictly against that row; ignored on every other row.
+    pub upstream_token: Option<String>,
 }
 
 impl CapabilityEventRow {
@@ -146,6 +151,7 @@ impl CapabilityEventRow {
             catalog_version,
             overlay_revision,
             vocab_version: None,
+            upstream_token: None,
         }
     }
 
@@ -155,6 +161,14 @@ impl CapabilityEventRow {
     #[must_use]
     pub const fn with_vocab_version(mut self, vocab_version: Option<i64>) -> Self {
         self.vocab_version = vocab_version;
+        self
+    }
+
+    /// Stamp the persisted value token. Separate from [`Self::new`] for the
+    /// same reason as [`Self::with_vocab_version`].
+    #[must_use]
+    pub fn with_upstream_token(mut self, upstream_token: Option<String>) -> Self {
+        self.upstream_token = upstream_token;
         self
     }
 }
@@ -268,6 +282,47 @@ pub struct CapabilityRebuildSummary {
     /// the row's source is not live. Replaying one would make a resident field
     /// verdict out of evidence the field-repair guard never produced.
     pub skipped_namespace: usize,
+    /// Field rows whose persisted value token was refused by the strict
+    /// decode: each still replayed, as a plain negative carrying no value, so
+    /// pre-flight can never apply it as a rewrite.
+    pub degraded_value: usize,
+}
+
+/// The value each replayed field identity's LATEST row carried, keyed by the
+/// identity the learned registry stores it under. Only identities whose
+/// code-owned repair row declares a value are tracked.
+#[derive(Debug, Default)]
+pub struct ReplayedFieldValues {
+    latest: HashMap<FieldIdentity, Option<VerdictValue>>,
+}
+
+type FieldIdentity = (String, String, String);
+
+impl ReplayedFieldValues {
+    /// The value the latest replayed row for this identity carried, or `None`
+    /// when it carried none, carried a refused one, or was never replayed.
+    #[must_use]
+    pub fn value_for(
+        &self,
+        state_key: &str,
+        capability: &str,
+        provider_kind: &str,
+    ) -> Option<VerdictValue> {
+        let identity = (
+            state_key.to_string(),
+            capability.to_string(),
+            provider_kind.to_string(),
+        );
+        self.latest.get(&identity).copied().flatten()
+    }
+
+    fn identity(row: &CapabilityEventRow) -> FieldIdentity {
+        (
+            row.state_key.clone(),
+            row.capability.clone(),
+            row.provider_kind.clone(),
+        )
+    }
 }
 
 /// Replay a ledger slice into `registry` through the live stage-2 admission
@@ -290,9 +345,20 @@ pub fn rebuild_capabilities_into(
     registry: &LearnedCapabilityRegistry,
     providers: &BTreeMap<String, ProviderEntry>,
 ) -> CapabilityRebuildSummary {
+    rebuild_capabilities_with_values(reader, registry, providers).0
+}
+
+/// [`rebuild_capabilities_into`], additionally returning the value each
+/// replayed field identity carries, for the caller that owns the value store.
+pub fn rebuild_capabilities_with_values(
+    reader: &dyn CapabilityLedgerReader,
+    registry: &LearnedCapabilityRegistry,
+    providers: &BTreeMap<String, ProviderEntry>,
+) -> (CapabilityRebuildSummary, ReplayedFieldValues) {
     let mut summary = CapabilityRebuildSummary::default();
+    let mut values = ReplayedFieldValues::default();
     let Some(tombstone) = reader.tombstone() else {
-        return summary;
+        return (summary, values);
     };
 
     let mut rows: Vec<CapabilityEventRow> = Vec::new();
@@ -354,9 +420,9 @@ pub fn rebuild_capabilities_into(
             summary.skipped_namespace += 1;
             continue;
         }
-        replay_row(row, registry, &mut summary);
+        replay_row(row, registry, &mut values, &mut summary);
     }
-    summary
+    (summary, values)
 }
 
 /// Why a row the registry would store under a field-namespace key is not a
@@ -382,6 +448,7 @@ fn field_namespace_skip(row: &CapabilityEventRow) -> Option<&'static str> {
 fn replay_row(
     row: &CapabilityEventRow,
     registry: &LearnedCapabilityRegistry,
+    values: &mut ReplayedFieldValues,
     summary: &mut CapabilityRebuildSummary,
 ) {
     let Some(source) = EvidenceSource::parse(&row.source) else {
@@ -431,6 +498,7 @@ fn replay_row(
         }
         "broken" => {
             if let Some((tier, phase)) = parse_tier_phase(row, summary) {
+                reconcile_field_value(row, registry, values, summary);
                 mint_negative(row, registry, tier, phase, source, summary);
             }
         }
@@ -459,6 +527,7 @@ fn replay_row(
             mint_negative(row, registry, tier, phase, source, summary);
         }
         "cleared" => {
+            values.latest.remove(&ReplayedFieldValues::identity(row));
             if registry.replay_cleared(&row.state_key, &row.capability, &row.provider_kind) {
                 summary.replayed_cleared += 1;
             } else {
@@ -476,6 +545,50 @@ fn replay_row(
             summary.skipped_unknown += 1;
         }
     }
+}
+
+/// Track the value a field row carries and, when it differs from the value the
+/// identity's previous row carried, retire the resident entry first so the row
+/// starts a new lifecycle rather than corroborating one recorded for another
+/// value -- the same rule a live commit applies.
+///
+/// A row whose key no value-declaring repair row owns (every catalog key, and
+/// every field row whose transform is a drop) is left alone: its token is
+/// never read.
+fn reconcile_field_value(
+    row: &CapabilityEventRow,
+    registry: &LearnedCapabilityRegistry,
+    values: &mut ReplayedFieldValues,
+    summary: &mut CapabilityRebuildSummary,
+) {
+    let Some(slot) = crate::router::value_slot_for_capability(&row.capability) else {
+        return;
+    };
+    let value = decode_row_value(row, slot, summary);
+    let previous = values
+        .latest
+        .insert(ReplayedFieldValues::identity(row), value);
+    if previous.is_some_and(|previous| previous != value)
+        && let Some(key) = field_verdict_key(row)
+    {
+        registry.remove_field_verdict(&key);
+    }
+}
+
+/// The value `row` carries against `slot`. A missing token is a verdict
+/// recorded without a value; a refused one degrades the row to the same and
+/// is counted (the decode itself logs the WARN).
+fn decode_row_value(
+    row: &CapabilityEventRow,
+    slot: ValueSlot,
+    summary: &mut CapabilityRebuildSummary,
+) -> Option<VerdictValue> {
+    let token = row.upstream_token.as_deref()?;
+    let value = VerdictValue::decode(token, slot);
+    if value.is_none() {
+        summary.degraded_value += 1;
+    }
+    value
 }
 
 /// Bump the by-source probe tally when the replayed row carried probe
@@ -576,6 +689,17 @@ fn mint_negative(
     bump_probe(source, summary);
 }
 
+/// The field-verdict identity an exact field-namespace row is stored under, or
+/// `None` when the row's lane is not a learned lane.
+fn field_verdict_key(row: &CapabilityEventRow) -> Option<crate::field_verdict::FieldVerdictKey> {
+    let lane = crate::state_key::StateKey::parse(&row.state_key)?;
+    Some(crate::field_verdict::FieldVerdictKey::from_capability_key(
+        lane,
+        row.capability.clone(),
+        row.provider_kind.clone(),
+    ))
+}
+
 /// Replay an exact field-namespace negative through the registry's
 /// field-verdict entry. `false` when the row's lane is not a learned lane.
 fn mint_field_negative(
@@ -585,14 +709,9 @@ fn mint_field_negative(
     phase: FailurePhase,
     source: EvidenceSource,
 ) -> bool {
-    let Some(lane) = crate::state_key::StateKey::parse(&row.state_key) else {
+    let Some(key) = field_verdict_key(row) else {
         return false;
     };
-    let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-        lane,
-        row.capability.clone(),
-        row.provider_kind.clone(),
-    );
     registry.observe_field_verdict(
         &key,
         tier,

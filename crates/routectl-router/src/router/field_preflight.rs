@@ -89,6 +89,7 @@ use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_canary::{CanaryClaimGuard, CanaryOutcome, ModifiedRequestGuard};
 use crate::field_verdict::{FieldVerdictKey, PreflightAuthorization};
+use crate::field_verdict_value::VerdictValue;
 
 use super::class_observe::DispatchSurface;
 use super::field_repair::{
@@ -183,6 +184,10 @@ pub(super) const FIELD_PREFLIGHT_AMBIGUOUS_MUTATION: &str = "ambiguous_mutation"
 /// Neither applied nor canaried.
 pub(super) const FIELD_PREFLIGHT_NO_STORED_VALUE: &str = "no_stored_value";
 
+/// Reason token: the verdict is authorized and carries a stored value, but the
+/// request already sends exactly that value, so there is nothing to rewrite.
+pub(super) const FIELD_PREFLIGHT_VALUE_ALREADY_SENT: &str = "value_already_sent";
+
 /// Reason token: this request is the re-verification canary. The verdict was
 /// eligible and the cadence came due, so the tested field was RESTORED rather
 /// than dropped -- the planner deliberately did not act, and the outcome the
@@ -192,6 +197,27 @@ pub(super) const FIELD_PREFLIGHT_CANARY_RESTORED: &str = "canary_restored";
 /// Action token: the pre-flight planner dropped the mapped envelope field
 /// from the per-target request before first dispatch.
 pub(super) const FIELD_PREFLIGHT_ACTION_DROP: &str = "field_preflight_drop";
+
+/// Action token: the pre-flight planner rewrote the mapped envelope field to
+/// the verdict's stored value before first dispatch.
+pub(super) const FIELD_PREFLIGHT_ACTION_REWRITE: &str = "field_preflight_rewrite";
+
+/// The edit an authorized verdict makes to its row's surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreflightEdit {
+    Drop,
+    /// Rewrite to this member of the row's closed accepted set.
+    Rewrite(&'static str),
+}
+
+impl PreflightEdit {
+    const fn action_token(self) -> &'static str {
+        match self {
+            Self::Drop => FIELD_PREFLIGHT_ACTION_DROP,
+            Self::Rewrite(_) => FIELD_PREFLIGHT_ACTION_REWRITE,
+        }
+    }
+}
 
 /// What one planning call leaves the dispatch arm holding, beyond the
 /// per-target request and its records.
@@ -509,30 +535,70 @@ impl Router {
         // Before the canary claim: a row this planner cannot apply has no
         // pre-flight action for a canary to withhold, so restoring it would
         // re-verify nothing.
-        if row.transform != FieldTransform::Drop {
-            return refuse(FIELD_PREFLIGHT_NO_STORED_VALUE);
-        }
-        let claim = self.try_claim_canary(
-            key,
-            row,
-            surface,
-            can_claim_canary,
-            authorization,
-            generation,
-        );
-        let key = match claim {
-            // RESTORED, not rewritten: THIS row's surface is left exactly as
-            // the client sent it, expressed as "decline to transform this
-            // surface" rather than as a revert of an already-planned body --
-            // which is what leaves every OTHER row's adopted rewrite standing
-            // on the accumulated body. A canary re-verifies one identity, so
-            // unrelated eligible repairs remain applied.
-            Err(canary) => return restored_decision(target, row, canary, authorization),
-            Ok(key) => key,
+        let edit = match self.preflight_edit(planned, row, &key, authorization) {
+            Ok(edit) => edit,
+            Err(reason) => return refuse(reason),
         };
-        match self.adopt_row(planned, target, row, &key, authorization) {
+        // Only a DROP is canaried. The canary's repaired retry can only drop
+        // the restored field, and a rewrite verdict's canary is always answered
+        // with a refused value, so it could never confirm and would drop a
+        // field the client set; a rewrite verdict re-verifies through decay.
+        let key = if edit == PreflightEdit::Drop {
+            let claim = self.try_claim_canary(
+                key,
+                row,
+                surface,
+                can_claim_canary,
+                authorization,
+                generation,
+            );
+            match claim {
+                // RESTORED, not rewritten: THIS row's surface is left exactly as
+                // the client sent it, expressed as "decline to transform this
+                // surface" rather than as a revert of an already-planned body --
+                // which is what leaves every OTHER row's adopted rewrite standing
+                // on the accumulated body. A canary re-verifies one identity, so
+                // unrelated eligible repairs remain applied.
+                Err(canary) => return restored_decision(target, row, canary, authorization),
+                Ok(key) => key,
+            }
+        } else {
+            key
+        };
+        match self.adopt_row(planned, target, row, edit, &key, authorization) {
             Ok(decision) => decision,
             Err(reason) => refuse(reason),
+        }
+    }
+
+    /// The edit `row`'s authorized verdict makes, or the refusal reason when it
+    /// makes none.
+    ///
+    /// A rewrite needs the value recorded for the SAME incarnation the
+    /// authorization rests on: a value from any other lifecycle never applies.
+    /// A ceiling is never applied: no repair writes one yet.
+    fn preflight_edit(
+        &self,
+        planned: &ChatRequest,
+        row: FieldRepairRow,
+        key: &FieldVerdictKey,
+        authorization: PreflightAuthorization,
+    ) -> Result<PreflightEdit, &'static str> {
+        match row.transform {
+            FieldTransform::Drop => Ok(PreflightEdit::Drop),
+            FieldTransform::Ceiling => Err(FIELD_PREFLIGHT_NO_STORED_VALUE),
+            FieldTransform::Rewrite { .. } => {
+                let Some(VerdictValue::Shape(value)) = self
+                    .field_verdicts()
+                    .verdict_value(key, authorization.incarnation)
+                else {
+                    return Err(FIELD_PREFLIGHT_NO_STORED_VALUE);
+                };
+                if row.surface.carries(planned, value) {
+                    return Err(FIELD_PREFLIGHT_VALUE_ALREADY_SENT);
+                }
+                Ok(PreflightEdit::Rewrite(value))
+            }
         }
     }
 
@@ -551,14 +617,15 @@ impl Router {
         planned: &mut ChatRequest,
         target: &DispatchTarget,
         row: FieldRepairRow,
+        edit: PreflightEdit,
         key: &FieldVerdictKey,
         authorization: PreflightAuthorization,
     ) -> Result<RowDecision<'a>, &'static str> {
         // The transform is applied through the ONE production helper below,
         // so the scratch-clone-and-adopt discipline has a single
         // implementation rather than a copy per caller.
-        let adopted =
-            apply_transform(planned, row.surface).ok_or(FIELD_PREFLIGHT_AMBIGUOUS_MUTATION)?;
+        let adopted = apply_transform(planned, row.surface, edit)
+            .ok_or(FIELD_PREFLIGHT_AMBIGUOUS_MUTATION)?;
         // The request is now counted against this identity's wrong-repair
         // exposure, RAII: the guard's Drop clears its in-flight half on every
         // exit, and the tally half stands until a canary vouches for it or
@@ -590,7 +657,7 @@ impl Router {
                 state_key: sanitize_for_log(&target.state_key),
                 field_path: Some(row.path),
                 transform_class: Some(row.class.as_str()),
-                reason: FIELD_PREFLIGHT_ACTION_DROP,
+                reason: edit.action_token(),
                 // The EXACT authorization this rewrite rested on, carried rather
                 // than re-read: the identity's state can move after the gates
                 // clear, and a record assembled from a later read would report a
@@ -1012,13 +1079,26 @@ include!("field_preflight_provenance.rs");
 /// success while its own surface is still readable; the ambiguous scratch is
 /// DROPPED here rather than returned, so no caller can hand back a
 /// half-mutated body by reading the wrong half of a result.
-fn apply_transform(original_req: &ChatRequest, surface: FieldSurface) -> Option<ChatRequest> {
+///
+/// A REWRITE has the same contract through [`FieldSurface::rewrite_in`], whose
+/// own post-condition is that the surface reads back exactly the value.
+fn apply_transform(
+    original_req: &ChatRequest,
+    surface: FieldSurface,
+    edit: PreflightEdit,
+) -> Option<ChatRequest> {
     let mut scratch = original_req.clone();
-    if !surface.drop_from(&mut scratch) {
-        return None;
-    }
-    if surface.present_in(&scratch) {
-        return None;
+    match edit {
+        PreflightEdit::Drop => {
+            if !surface.drop_from(&mut scratch) || surface.present_in(&scratch) {
+                return None;
+            }
+        }
+        PreflightEdit::Rewrite(value) => {
+            if !surface.rewrite_in(&mut scratch, value) {
+                return None;
+            }
+        }
     }
     Some(scratch)
 }
@@ -1037,7 +1117,7 @@ pub(super) fn plan_transform_for_tests(
 ) -> (ChatRequest, FieldPreflight) {
     let path = "thinking.enabled.display";
     let class = Some(TransformClass::Envelope.as_str());
-    match apply_transform(original_req, surface) {
+    match apply_transform(original_req, surface, PreflightEdit::Drop) {
         Some(planned) => (
             planned,
             FieldPreflight {
@@ -1131,7 +1211,7 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
         if record.acted {
             tracing::debug!(
                 event = FIELD_PREFLIGHT_EVENT,
-                action = FIELD_PREFLIGHT_ACTION_DROP,
+                action = record.reason,
                 acted = true,
                 state_key = %sanitize_for_log(&record.state_key),
                 field_path = record.field_path.unwrap_or(FIELD_PATH_NONE),
@@ -1187,7 +1267,7 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
     let provenance = RenderedAuthorization::of(headline.authorization);
     tracing::warn!(
         event = FIELD_PREFLIGHT_EVENT,
-        action = FIELD_PREFLIGHT_ACTION_DROP,
+        action = headline.reason,
         state_key = %sanitize_for_log(&headline.state_key),
         field_path = headline.field_path.unwrap_or(FIELD_PATH_NONE),
         transform_class = headline.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),

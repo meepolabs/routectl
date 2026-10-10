@@ -476,7 +476,7 @@ therefore emits one DEBUG per row per target it planned.
 | Field | Meaning |
 |---|---|
 | `event` | `envelope_field_preflight` on both tiers |
-| `action` | `field_preflight_drop`, attached ONLY to a record that acted -- labelling a fail-open with it would name an action the walk did not take |
+| `action` | `field_preflight_drop` or `field_preflight_rewrite` (the acting decision's own reason token), attached ONLY to a record that acted -- labelling a fail-open with it would name an action the walk did not take |
 | `acted` | DEBUG only: whether this decision rewrote the request |
 | `state_key` | Sanitized `[providers]` state key of the target the decision was planned for |
 | `field_path` | The closed-table qualified dotted path the decision considered, or `none` when the request carried no grounded field |
@@ -532,6 +532,7 @@ the whole information content of a fail-open:
 | `reason` | Meaning |
 |---|---|
 | `field_preflight_drop` | ACTED: the mapped field was dropped from the per-target request before dispatch |
+| `field_preflight_rewrite` | ACTED: the mapped field was rewritten to the verdict's stored value (a member of the row's closed accepted set) before dispatch. A rewrite verdict is never canaried: it re-verifies through decay |
 | `no_grounded_field` | The request carries no closed-table field at all |
 | `unsupported_lane` | The capability kill switch is off, or the target's provider kind is not one field repair acts on (`anthropic-api`, `bedrock`, `openai-compat`) |
 | `unattributable_target` | A rejection from this target could not be attributed to a routectl-owned seat: it authenticates with a forwarded client credential, is on a provider kind outside the admitted set (`anthropic-api`, `bedrock`, `openai-compat`) or one that no longer matches the target's, has no classifiable egress base URL (a Bedrock Mantle sub-lane reports none), or names a local hop |
@@ -541,7 +542,8 @@ the whole information content of a fail-open:
 | `below_quorum` | The verdict IS eligible, but its acknowledged confirmation count is below the quorum this transform class requires. A prefix-impacting rewrite needs two confirmed cycles; one is not enough |
 | `no_target_opt_in` | A prefix-impacting transform whose quorum is satisfied but whose target is not named in `[fidelity] prefix_impact_opt_in`. A content rewrite stays dormant until the operator opts the target in |
 | `ambiguous_mutation` | The transform was authorized but removed nothing, or reported success while its field was still present. Fails open to a byte-equivalent original |
-| `no_stored_value` | The verdict is authorized, but its field is repaired by writing a value rather than by dropping it, and the verdict carries no stored value to write. Neither applied nor canaried |
+| `no_stored_value` | The verdict is authorized, but its field is repaired by writing a value rather than by dropping it, and the verdict carries no stored value for the incarnation it acts on (none was recorded, or the ledger token was refused on replay). Neither applied nor canaried |
+| `value_already_sent` | The verdict is authorized and carries a stored value, but the request already sends exactly that value. Nothing to rewrite |
 | `canary_restored` | This request is the re-verification canary: the tested field was RESTORED rather than dropped, and the upstream's answer re-verifies or disproves the verdict |
 | `capability_writer_unhealthy` | Durable capability-event persistence cannot currently be guaranteed, so learned pre-flight is suspended for EVERY verdict. Not a verdict gate: it says nothing about whether the verdict is right, only that a wrong one could not be durably retracted (the clear, the purge, and the confirmation are all capability-event writes). Held while ANY of three monotonic failure counters is nonzero -- a store fault, a capability write the channel refused as full, or one it refused as closed -- so a SINGLE failure holds it for the life of the process, including one that happened at boot before the gate was wired. Ordinary usage-record drops are excluded: telemetry falling behind says nothing about capability persistence. Reactive forward-and-repair is unaffected and still serves every request -- see the status token of the same name |
 
@@ -1756,6 +1758,7 @@ history from a fully evicted one:
 | `skipped_vocab` | integer | Rows skipped whole before decoding because their stored vocabulary version is unknown to this build (for example a row a newer build wrote) or a vocabulary step retires one of their tokens. Stored rows are never rewritten; a known older vocabulary is mapped forward on read. Each skip also emits a `rebuild_skip` DEBUG event with `reason` `unknown_vocab_version` or `retired_vocab_token`. |
 | `skipped_lane` | integer | Rows skipped because their lane key does not parse as a learned lane (`provider_entry#upstream`), in any capability namespace: such a row names no provider entry to check ownership against. Checked before ownership and revision, so these rows count nowhere else. Each skip also emits a `rebuild_skip` DEBUG event with `reason` `unparseable_lane`. |
 | `skipped_owner` | integer | Lane-keyed rows skipped because the provider entry their lane names no longer owns them: the entry is absent from the current config, it now has a different `kind` than the row recorded, or the row recorded no kind. Each skip also emits a `rebuild_skip` DEBUG event with `reason` `owner_entry_removed`, `owner_kind_changed`, or `owner_kind_unrecorded`. A same-kind `base_url` change keeps ownership. |
+| `degraded_value` | integer | NOT a skip: envelope-field rows that replayed, but whose persisted value token (`upstream_token`, read only for a row whose repair transform writes a value) the strict decode refused. Each replays as a plain negative carrying no value, so pre-flight never applies it as a rewrite (`no_stored_value`). Each refusal also emits a `field_verdict_value_malformed` WARN. |
 
 ### `strip` (WARN)
 

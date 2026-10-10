@@ -351,3 +351,40 @@ fn reader_carries_the_persisted_provider_kind_and_maps_null_to_empty() {
     let kinds: Vec<&str> = rows.iter().map(|r| r.provider_kind.as_str()).collect();
     assert_eq!(kinds, vec!["anthropic-api", ""]);
 }
+
+/// Mutation check: drop the `with_upstream_token` call in `map_row` -> red
+/// (the replay row carries no token, so replay could never restore a value).
+#[test]
+fn reader_carries_the_persisted_value_token_and_maps_null_to_none() {
+    let tmp = TempDir::new().expect("tempdir");
+    let ledger = tmp.path().join("usage.db");
+    let db = open(&ledger).expect("open ledger");
+    seed_tombstone(db.conn(), 100, i64::from(CAT), i64::try_from(OV).unwrap());
+    for (ts, token) in [(200, Some("shape:summarized")), (300, None)] {
+        db.conn()
+            .execute(
+                "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, \
+                 source, tier, evidence_class, upstream_token, catalog_version, \
+                 overlay_revision, provider_kind, vocab_version) \
+                 VALUES (?1, 'p#u', 'field:a.b', 'broken', 'f1', 'live', \
+                 'self-identifying', NULL, ?2, ?3, ?4, 'anthropic-api', ?5)",
+                params![
+                    ts,
+                    token,
+                    i64::from(CAT),
+                    i64::try_from(OV).unwrap(),
+                    routectl_router::CURRENT_VOCAB_VERSION
+                ],
+            )
+            .expect("seed capability event");
+    }
+    drop(db);
+    let BoundaryOutcome::Replay(tombstone) = classify_boundary(&ledger, CAT, OV) else {
+        panic!("a matching tombstone must classify as Replay");
+    };
+
+    let rows = LedgerCapabilityReader::new(ledger, tombstone).read_events();
+
+    let tokens: Vec<Option<&str>> = rows.iter().map(|r| r.upstream_token.as_deref()).collect();
+    assert_eq!(tokens, vec![Some("shape:summarized"), None]);
+}

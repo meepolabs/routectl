@@ -386,6 +386,7 @@ fn emit_rebuild_log(summary: &CapabilityRebuildSummary, loaded_rows: usize) {
         skipped_lane = summary.skipped_lane,
         skipped_owner = summary.skipped_owner,
         skipped_namespace = summary.skipped_namespace,
+        degraded_value = summary.degraded_value,
         loaded_rows,
         row_cap = REBUILD_ROW_LIMIT,
         "warmed learned-capability registry from usage ledger"

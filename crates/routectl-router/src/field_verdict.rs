@@ -69,7 +69,7 @@ use routectl_core::capability::{
 
 use crate::field_canary::FieldCanaryRegistry;
 use crate::field_capability::field_capability_key;
-use crate::field_verdict_value::VerdictValue;
+use crate::field_verdict_value::{FieldValueStore, VerdictValue};
 use crate::learned_capability::{LearnedCapabilityRegistry, NegativeState};
 use crate::router::{CapabilityClearedEvent, CapabilityLearnEvent};
 use crate::state_key::StateKey;
@@ -292,6 +292,11 @@ pub struct FieldVerdictRegistry {
     /// visible to the replacement facade, or a reload would silently admit a
     /// second concurrent canary or double-count an eligible request.
     canaries: Arc<FieldCanaryRegistry>,
+    /// The value each resident verdict applies, scoped to the incarnation it
+    /// was recorded for. Shared behind an `Arc` for the same reason as the two
+    /// above: a commit settling through the outgoing facade records the value
+    /// the replacement's pre-flight reads.
+    values: Arc<FieldValueStore>,
 }
 
 impl FieldVerdictRegistry {
@@ -302,6 +307,7 @@ impl FieldVerdictRegistry {
             learned,
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             canaries: Arc::new(FieldCanaryRegistry::new()),
+            values: Arc::new(FieldValueStore::default()),
         }
     }
 
@@ -317,6 +323,7 @@ impl FieldVerdictRegistry {
             learned,
             in_flight: Arc::clone(&self.in_flight),
             canaries: Arc::clone(&self.canaries),
+            values: Arc::clone(&self.values),
         }
     }
 
@@ -341,6 +348,26 @@ impl FieldVerdictRegistry {
     #[must_use]
     pub const fn canaries(&self) -> &Arc<FieldCanaryRegistry> {
         &self.canaries
+    }
+
+    /// The value the verdict on `key` applies at `incarnation`, or `None` when
+    /// none was recorded for that exact lifecycle. Pre-flight passes the
+    /// incarnation its authorization rests on, so a value can only ever be
+    /// applied by the lifecycle that recorded it.
+    #[must_use]
+    pub fn verdict_value(&self, key: &FieldVerdictKey, incarnation: u64) -> Option<VerdictValue> {
+        self.values.value_at(key, incarnation)
+    }
+
+    /// Record the value a warm rebuild restored for `key`'s resident verdict at
+    /// `incarnation`.
+    pub(crate) fn seed_value_from_rebuild(
+        &self,
+        key: &FieldVerdictKey,
+        incarnation: u64,
+        value: Option<VerdictValue>,
+    ) {
+        self.values.record(key, incarnation, value);
     }
 
     /// Whether `key` is currently pre-flight eligible at all, discarding the
@@ -730,6 +757,7 @@ impl FieldVerdictRegistry {
         // tally its disproof charged -- must stay exactly where the settlement
         // put them.
         self.canaries.reset(key);
+        self.values.forget(key);
         tracing::info!(
             event = "field_canary_disproved",
             state_key = %routectl_core::sanitize_for_log(key.registry_key()),
@@ -1050,7 +1078,11 @@ impl FieldRepairGuard<'_> {
     /// reserved for the registry's own re-probe path.
     ///
     /// `value` is what the verdict applies -- `Some` for a rewrite, `None` for a
-    /// drop -- and rides out on the event, which persists it encoded.
+    /// drop -- and rides out on the event, which persists it encoded. It is part
+    /// of the verdict's identity for corroboration: a commit whose value matches
+    /// the resident verdict's refreshes it, while one carrying a DIFFERENT value
+    /// retires the resident entry first, so the verdict restarts from one
+    /// observation rather than inheriting evidence gathered for another value.
     ///
     /// `request_features` is the request's derived in-flight feature set; no
     /// request body can enter the row.
@@ -1077,6 +1109,7 @@ impl FieldRepairGuard<'_> {
     ) -> Option<CapabilityLearnEvent> {
         self.settled = true;
         let key = self.key.clone();
+        self.retire_on_value_change(&key, value);
         // Through the generation barrier with the admission's own generation.
         // The persistence_generation comes from the Applied outcome, atomically
         // paired with the mutation it describes. `observations` rides out of
@@ -1146,6 +1179,7 @@ impl FieldRepairGuard<'_> {
             }
         };
         self.registry.release_slot(&key);
+        self.registry.values.record(&key, incarnation, value);
         // This admission is IN-MEMORY only: `Applied` means the shared
         // registry accepted the mutation through the generation barrier,
         // not that the event below has been durably written. The
@@ -1178,6 +1212,22 @@ impl FieldRepairGuard<'_> {
             source: EvidenceSource::Live,
             value,
         })
+    }
+
+    /// Retire `key`'s resident entry when the value it was recorded for is not
+    /// `value`. Runs under the single-flight slot this guard holds, so no
+    /// sibling repair can commit in between. A refused removal leaves the
+    /// entry; the observation that follows is refused by the same barrier.
+    fn retire_on_value_change(&self, key: &FieldVerdictKey, value: Option<VerdictValue>) {
+        if self.registry.values.latest(key) == value {
+            return;
+        }
+        let _ = self
+            .registry
+            .learned
+            .remove_field_verdict_in_generation(self.generation, key);
+        self.registry.canaries.reset(key);
+        self.registry.values.forget(key);
     }
 
     /// The field was ACCEPTED: drop any resident verdict so the request shape
@@ -1256,6 +1306,7 @@ impl FieldRepairGuard<'_> {
         // so a later re-learn starts a clean incarnation rather than
         // inheriting a stale cadence, claim, or confirmation count.
         self.registry.canaries.reset(&self.key);
+        self.registry.values.forget(&self.key);
         if !cleared {
             return None;
         }

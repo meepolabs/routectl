@@ -220,7 +220,8 @@ impl LedgerCapabilityReader {
                 catalog_version,
                 overlay_revision,
             )
-            .with_vocab_version(row.vocab_version),
+            .with_vocab_version(row.vocab_version)
+            .with_upstream_token(row.upstream_token),
         )
     }
 }

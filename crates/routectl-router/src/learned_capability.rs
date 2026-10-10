@@ -1750,6 +1750,15 @@ impl LearnedCapabilityRegistry {
         Self::remove_keyed_in(&mut self.entries.write(), &key)
     }
 
+    /// [`Self::remove_keyed`] for a field verdict, keyed by its minted identity.
+    pub(crate) fn remove_field_verdict(&self, key: &FieldVerdictKey) -> bool {
+        self.remove_keyed(
+            key.registry_key(),
+            key.capability_key(),
+            key.provider_kind(),
+        )
+    }
+
     /// [`Self::remove_keyed`]'s body, operating on an already-held `entries`
     /// write guard.
     fn remove_keyed_in(
@@ -2965,6 +2974,21 @@ impl LearnedCapabilityRegistry {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
                 Self::remove_keyed_in(entries, &key)
             },
+        )
+    }
+
+    /// [`Self::remove_keyed_in_generation`] for a field verdict, keyed by its
+    /// minted identity.
+    pub(crate) fn remove_field_verdict_in_generation(
+        &self,
+        generation: u64,
+        key: &FieldVerdictKey,
+    ) -> GenerationOutcome<bool> {
+        self.remove_keyed_in_generation(
+            generation,
+            key.registry_key(),
+            key.capability_key(),
+            key.provider_kind(),
         )
     }
 

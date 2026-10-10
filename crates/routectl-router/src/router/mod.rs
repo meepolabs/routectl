@@ -83,6 +83,7 @@ pub use fidelity_status::{
     observe_field_verdict_for_tests, plant_acting_field_verdict_for_tests,
     seed_distinct_fidelity_counters_for_tests,
 };
+pub(crate) use field_repair::value_slot_for_capability_key as value_slot_for_capability;
 #[cfg(any(test, feature = "test-utils"))]
 pub use field_repair::{TEST_RECHECK_KWARG, TEST_RECHECK_PATH};
 pub use field_verdict_observability::{
@@ -2681,12 +2682,12 @@ impl Router {
         &self,
         reader: &dyn crate::capability_rebuild::CapabilityLedgerReader,
     ) -> crate::capability_rebuild::CapabilityRebuildSummary {
-        let summary = crate::capability_rebuild::rebuild_capabilities_into(
+        let (summary, values) = crate::capability_rebuild::rebuild_capabilities_with_values(
             reader,
             &self.learned_capabilities,
             &self.config.providers,
         );
-        self.seed_field_canaries_from_ledger();
+        self.seed_field_canaries_from_ledger(&values);
         summary
     }
 
@@ -2702,7 +2703,14 @@ impl Router {
     /// forced due on the very next eligible request (countdown of one) --
     /// the identity is already routing traffic away, so a cold boot must
     /// not wait a full cadence cycle before re-verifying it.
-    fn seed_field_canaries_from_ledger(&self) {
+    ///
+    /// Each identity's replayed VALUE is seeded alongside, at the incarnation
+    /// the replay left resident, so pre-flight applies a restored rewrite only
+    /// for the lifecycle the ledger recorded it with.
+    fn seed_field_canaries_from_ledger(
+        &self,
+        values: &crate::capability_rebuild::ReplayedFieldValues,
+    ) {
         for entry in self.learned_capabilities.field_seed_snapshot() {
             // Replay admits only lane-keyed field rows, so a resident field
             // entry always names a lane; one that does not has no identity to
@@ -2710,11 +2718,18 @@ impl Router {
             let Some(lane) = crate::state_key::StateKey::parse(&entry.state_key) else {
                 continue;
             };
+            let value = values.value_for(
+                &entry.state_key,
+                &entry.capability_key,
+                &entry.provider_kind,
+            );
             let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
                 lane,
                 entry.capability_key,
                 entry.provider_kind,
             );
+            self.field_verdicts
+                .seed_value_from_rebuild(&key, entry.incarnation, value);
             self.field_verdicts.canaries().seed_from_rebuild(
                 &key,
                 entry.incarnation,
@@ -3190,6 +3205,10 @@ mod state_key_rpm_isolation_tests;
 #[cfg(test)]
 #[path = "learned_lane_tests.rs"]
 mod learned_lane_tests;
+
+#[cfg(test)]
+#[path = "field_value_replay_tests.rs"]
+mod field_value_replay_tests;
 
 #[cfg(all(test, feature = "bedrock"))]
 #[path = "field_namespace_learn_guard_tests.rs"]
