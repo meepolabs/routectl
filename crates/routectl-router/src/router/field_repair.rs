@@ -179,7 +179,7 @@ pub(super) enum FieldSurface {
     /// Test-only surface for a REWRITE row: the [`TEST_REWRITE_KWARG`] key of
     /// `chat_template_kwargs`. A key no other fixture sets, so the row stays
     /// confined to the tests that opt into it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     RewriteFieldForTests,
     /// Test-only surface for a CEILING row: `max_tokens` holding exactly
     /// [`TEST_CEILING_SENTINEL`].
@@ -226,7 +226,7 @@ impl FieldSurface {
             Self::UnsupportedFieldForTests => {
                 req.user.as_deref() == Some(TEST_UNSUPPORTED_SENTINEL)
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             Self::RewriteFieldForTests => req
                 .chat_template_kwargs
                 .as_ref()
@@ -289,7 +289,7 @@ impl FieldSurface {
             | Self::ClaimsRemovalForTests
             | Self::UnsupportedFieldForTests
             | Self::CeilingFieldForTests => None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             Self::RewriteFieldForTests => {
                 Self::test_kwarg(req, TEST_REWRITE_KWARG).map(str::to_string)
             }
@@ -340,7 +340,7 @@ impl FieldSurface {
             | Self::ClaimsRemovalForTests
             | Self::UnsupportedFieldForTests
             | Self::CeilingFieldForTests => {}
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             Self::RewriteFieldForTests => Self::set_test_kwarg(req, TEST_REWRITE_KWARG, value),
             #[cfg(any(test, feature = "test-utils"))]
             Self::RecheckFieldForTests => Self::set_test_kwarg(req, TEST_RECHECK_KWARG, value),
@@ -419,7 +419,7 @@ impl FieldSurface {
                 }
                 req.user.take().is_some()
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             Self::RewriteFieldForTests => req
                 .chat_template_kwargs
                 .as_mut()
@@ -526,7 +526,7 @@ pub(super) enum FieldTransform {
     /// rejection names. A rejection naming none, or several, repairs nothing:
     /// the substituted value is always the upstream's own answer.
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "test-utils")),
         expect(
             dead_code,
             reason = "no grounded row rewrites yet; the test table carries one"
@@ -620,18 +620,21 @@ pub(in crate::router) const TEST_UNSUPPORTED_SENTINEL: &str =
     "routectl-test-only-unsupported-field-sentinel";
 
 /// The qualified dotted path of the test-only rewrite row.
-#[cfg(test)]
-pub(in crate::router) const TEST_REWRITE_PATH: &str = "routectl_test_rewrite_field";
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub const TEST_REWRITE_PATH: &str = "routectl_test_rewrite_field";
 
 /// The `chat_template_kwargs` key the test-only rewrite surface reads and
 /// writes.
-#[cfg(test)]
-pub(in crate::router) const TEST_REWRITE_KWARG: &str = "routectl_test_rewrite_kwarg";
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub const TEST_REWRITE_KWARG: &str = "routectl_test_rewrite_kwarg";
 
 /// The test-only rewrite row's closed accepted set. Two members, so a
 /// rejection can name both.
-#[cfg(test)]
-pub(in crate::router) const TEST_REWRITE_ACCEPTED: &[&str] =
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub const TEST_REWRITE_ACCEPTED: &[&str] =
     &["routectl-test-accepted-a", "routectl-test-accepted-b"];
 
 /// The qualified dotted path of the test-only row a free count validates.
@@ -679,15 +682,6 @@ const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[
         count_tokens_validates: false,
     },
     FieldRepairRow {
-        path: TEST_REWRITE_PATH,
-        surface: FieldSurface::RewriteFieldForTests,
-        transform: FieldTransform::Rewrite {
-            accepted: TEST_REWRITE_ACCEPTED,
-        },
-        class: TransformClass::Envelope,
-        count_tokens_validates: true,
-    },
-    FieldRepairRow {
         path: TEST_CEILING_PATH,
         surface: FieldSurface::CeilingFieldForTests,
         transform: FieldTransform::Ceiling,
@@ -695,6 +689,20 @@ const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[
         count_tokens_validates: false,
     },
 ];
+
+/// The test-only rewrite row, which a `test-utils` build appends too: no
+/// grounded row writes a value, so this is the only row a valued verdict can be
+/// learned, persisted, or restated through in another crate's tests.
+#[cfg(any(test, feature = "test-utils"))]
+const TEST_REWRITE_FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
+    path: TEST_REWRITE_PATH,
+    surface: FieldSurface::RewriteFieldForTests,
+    transform: FieldTransform::Rewrite {
+        accepted: TEST_REWRITE_ACCEPTED,
+    },
+    class: TransformClass::Envelope,
+    count_tokens_validates: true,
+}];
 
 /// The test-only row a free token count validates, which a `test-utils` build
 /// appends too: no grounded row is count-validated, so this is the only row a
@@ -721,7 +729,8 @@ pub(super) const fn closed_table() -> &'static [FieldRepairRow] {
 }
 
 /// Test build: the grounded rows, then [`TEST_FIELD_REPAIRS`] (unit tests
-/// only), then [`TEST_RECHECK_FIELD_REPAIRS`], in that order, so a grounded row
+/// only), then [`TEST_REWRITE_FIELD_REPAIRS`] and
+/// [`TEST_RECHECK_FIELD_REPAIRS`], in that order, so a grounded row
 /// keeps its production precedence and the added rows sit behind it.
 ///
 /// The divergent surface is deliberately NOT a row here: its presence predicate
@@ -736,7 +745,10 @@ pub(super) fn closed_table() -> &'static [FieldRepairRow] {
         let rows = FIELD_REPAIRS.iter();
         #[cfg(test)]
         let rows = rows.chain(TEST_FIELD_REPAIRS);
-        rows.chain(TEST_RECHECK_FIELD_REPAIRS).copied().collect()
+        rows.chain(TEST_REWRITE_FIELD_REPAIRS)
+            .chain(TEST_RECHECK_FIELD_REPAIRS)
+            .copied()
+            .collect()
     });
     &ROWS
 }
@@ -1905,8 +1917,11 @@ mod table_tests {
 
     #[test]
     fn the_test_table_carries_one_row_per_transform() {
-        let transforms: Vec<FieldTransform> =
-            TEST_FIELD_REPAIRS.iter().map(|row| row.transform).collect();
+        let transforms: Vec<FieldTransform> = TEST_FIELD_REPAIRS
+            .iter()
+            .chain(TEST_REWRITE_FIELD_REPAIRS)
+            .map(|row| row.transform)
+            .collect();
         assert!(transforms.contains(&FieldTransform::Drop));
         assert!(transforms.contains(&FieldTransform::Ceiling));
         assert!(transforms.contains(&FieldTransform::Rewrite {

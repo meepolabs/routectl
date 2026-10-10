@@ -37,7 +37,7 @@ use std::path::Path;
 
 use routectl_router::{
     CapabilityRebuildSummary, LearnedCapabilityRegistry, ReplayTombstone, Router,
-    rebuild_capabilities_into,
+    rebuild_capabilities_with_values,
 };
 use routectl_usage::{BatchCommit, CapabilityEvent, UsageHandle};
 
@@ -273,8 +273,12 @@ fn restate_survivors_past_new_boundary(
     let scratch =
         LearnedCapabilityRegistry::new(live.decay(), live.inferred_window(), live.max_entries());
     scratch.set_seed_scope(live.seed_scope());
-    let _ = rebuild_capabilities_into(&slice, &scratch, &router.config.providers);
-    let survivors = scratch.recorded_snapshot();
+    let (_, values) = rebuild_capabilities_with_values(&slice, &scratch, &router.config.providers);
+    let survivors: Vec<_> = scratch
+        .recorded_snapshot()
+        .into_iter()
+        .map(|survivor| values.attach(survivor))
+        .collect();
     // Seed clears stamped with this boot's revision survive the replay like any
     // entry of that revision, so they are restated too: otherwise the live
     // replay below honors them now and the next boot, starting past the fresh

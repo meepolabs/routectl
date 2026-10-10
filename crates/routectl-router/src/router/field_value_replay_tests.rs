@@ -240,3 +240,54 @@ fn replay_corroborates_only_rows_carrying_the_same_value() {
         "new value: restarts at one"
     );
 }
+
+/// A boot restatement fills each survivor's value from what replay restored:
+/// the rewrite row carries its value, while a drop row and a catalog row whose
+/// ledger rows carry a well-formed token restate with none.
+///
+/// Mutation check: make `ReplayedFieldValues::attach` return `recorded`
+/// unchanged -> red on the rewrite row.
+#[test]
+fn a_replayed_survivor_carries_only_the_value_its_repair_row_writes() {
+    let base = Instant::now();
+    let member = super::field_repair::TEST_REWRITE_ACCEPTED[0];
+    let planted = format!("shape:{member}");
+    let rewrite = field_key(super::field_repair::TEST_REWRITE_PATH);
+    let drop = field_key(super::field_repair::TEST_UNSUPPORTED_PATH);
+    let reader = FakeReader {
+        rows: vec![
+            valued(
+                1,
+                base,
+                super::field_repair::TEST_REWRITE_PATH,
+                Some(&planted),
+            ),
+            valued(
+                2,
+                base,
+                super::field_repair::TEST_UNSUPPORTED_PATH,
+                Some(&planted),
+            ),
+            broken(3, base, "web_search").with_upstream_token(Some(planted.clone())),
+        ],
+    };
+    let reg = registry();
+    let (summary, values) = rebuild_capabilities_with_values(&reader, &reg, &providers());
+    assert_eq!(summary.replayed_negative, 3, "premise: all three replayed");
+
+    let attached: std::collections::BTreeMap<String, Option<VerdictValue>> = reg
+        .recorded_snapshot()
+        .into_iter()
+        .map(|recorded| values.attach(recorded))
+        .map(|recorded| (recorded.entry.feature_key, recorded.value))
+        .collect();
+
+    assert_eq!(
+        attached,
+        std::collections::BTreeMap::from([
+            (rewrite, Some(VerdictValue::Shape(member))),
+            (drop, None),
+            ("web_search".to_string(), None),
+        ]),
+    );
+}

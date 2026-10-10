@@ -126,6 +126,7 @@ pub(crate) fn admit_capability_boundary(
                 .iter()
                 .filter(|survivor| router.owns_learned_entry(survivor))
                 .cloned()
+                .map(|survivor| router.with_restated_value(survivor))
                 .collect();
             // No markers: the transition this batch settles prunes every one,
             // since a beta key is catalog-scoped.
@@ -201,7 +202,9 @@ pub(crate) fn admit_capability_boundary(
 /// boundary, for every caller that moves one. `now_ms` is the wall-clock
 /// instant the batch is built at; each restated row is stamped from its
 /// entry's own age relative to it, and with the provider kind the entry
-/// recorded.
+/// recorded. A survivor's `value` is persisted in the same encoding the live
+/// write uses; the caller fills it only for a field verdict whose repair row
+/// writes one, so every other row restates with no token.
 pub(crate) fn boundary_batch(
     survivors: &[RecordedLearnedEntry],
     seed_clears: &[SeedClearMarker],
@@ -242,6 +245,10 @@ pub(crate) fn boundary_batch(
         let survivor = &recorded.entry;
         let provider_kind =
             crate::handlers::usage_capture::persisted_provider_kind(&recorded.provider_kind);
+        let value_token = recorded
+            .value
+            .as_ref()
+            .map(routectl_router::VerdictValue::encode);
         // An INFERRED negative acts only once corroborated, and its
         // corroborating observation must arrive INSIDE the inferred
         // window -- a later one RESETS the entry to a fresh pending
@@ -291,7 +298,9 @@ pub(crate) fn boundary_batch(
                 // `suspect` row without a recognized class, so omitting it
                 // would make the next boot skip the row and evict the verdict.
                 evidence_class: survivor.evidence_class.clone(),
-                upstream_token: None,
+                // Without it a restated rewrite replays as a verdict with no
+                // value, which pre-flight refuses to apply until relearned.
+                upstream_token: value_token.clone(),
                 // Stamped truthfully with the POST-reload revision: the row is
                 // appended now, under this revision. The read side decides
                 // relevance per key class; no sentinel stamp is involved.
@@ -418,3 +427,10 @@ mod tests;
 #[cfg(test)]
 #[path = "canary_span_tests.rs"]
 mod canary_span_tests;
+
+/// A rewrite verdict's value across the boot and reload boundaries, through to
+/// the pre-flight rewrite after a restart. Its own sidecar because it needs a
+/// dispatching seat the tests above do not carry.
+#[cfg(test)]
+#[path = "restated_value_boundary_tests.rs"]
+mod restated_value_boundary_tests;

@@ -99,7 +99,7 @@ pub use capability_display::{
 pub use capability_matcher::resolve_requested_capability;
 pub use capability_rebuild::{
     CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, ReplayTombstone,
-    rebuild_capabilities_into,
+    ReplayedFieldValues, rebuild_capabilities_into, rebuild_capabilities_with_values,
 };
 pub use capability_vocab::CURRENT_VOCAB_VERSION;
 pub use catalog::{
@@ -226,5 +226,8 @@ pub use router::{
     seed_distinct_fidelity_counters_for_tests,
 };
 #[cfg(any(test, feature = "test-utils"))]
-pub use router::{TEST_RECHECK_KWARG, TEST_RECHECK_PATH};
+pub use router::{
+    TEST_RECHECK_KWARG, TEST_RECHECK_PATH, TEST_REWRITE_ACCEPTED, TEST_REWRITE_KWARG,
+    TEST_REWRITE_PATH,
+};
 pub use state_key::StateKey;

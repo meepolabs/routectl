@@ -86,7 +86,10 @@ pub use fidelity_status::{
 };
 pub(crate) use field_repair::value_slot_for_capability_key as value_slot_for_capability;
 #[cfg(any(test, feature = "test-utils"))]
-pub use field_repair::{TEST_RECHECK_KWARG, TEST_RECHECK_PATH};
+pub use field_repair::{
+    TEST_RECHECK_KWARG, TEST_RECHECK_PATH, TEST_REWRITE_ACCEPTED, TEST_REWRITE_KWARG,
+    TEST_REWRITE_PATH,
+};
 pub use field_verdict_observability::{
     ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,
 };

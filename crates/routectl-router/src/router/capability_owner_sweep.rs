@@ -11,6 +11,11 @@
 //! itself. Neither the outgoing nor the replacement config can stand in for
 //! it: a request still holding an older Router can write a lane after a
 //! sweep, so the outgoing config's kind is not necessarily the writer's.
+//!
+//! The same boundary cut that asks who owns an entry also restates it, and a
+//! field verdict that rewrites a value is only restated whole with that value:
+//! [`Router::with_restated_value`] reads it from the value store at the
+//! incarnation the cut snapshotted.
 
 use super::Router;
 use crate::capability_owner::{OwnerDecision, owner_decision};
@@ -27,6 +32,26 @@ impl Router {
     pub fn owns_learned_entry(&self, recorded: &RecordedLearnedEntry) -> bool {
         self.owner_of(recorded)
             .is_none_or(|(_, decision)| decision == OwnerDecision::Owned)
+    }
+
+    /// `recorded` carrying the value its field verdict applies, read at the
+    /// exact incarnation the snapshot captured: what pre-flight would apply for
+    /// that lifecycle. A row whose repair row writes no value -- every catalog
+    /// key, every drop -- carries none, whatever the store holds.
+    #[must_use]
+    pub fn with_restated_value(&self, recorded: RecordedLearnedEntry) -> RecordedLearnedEntry {
+        let value = super::value_slot_for_capability(&recorded.entry.feature_key)
+            .and(StateKey::parse(&recorded.entry.state_key))
+            .and_then(|lane| {
+                let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
+                    lane,
+                    recorded.entry.feature_key.clone(),
+                    recorded.provider_kind.clone(),
+                );
+                self.field_verdicts
+                    .verdict_value(&key, recorded.incarnation)
+            });
+        RecordedLearnedEntry { value, ..recorded }
     }
 
     fn owner_of(&self, recorded: &RecordedLearnedEntry) -> Option<(StateKey, OwnerDecision)> {
@@ -124,3 +149,7 @@ impl Router {
 #[cfg(test)]
 #[path = "capability_owner_sweep_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "restated_value_tests.rs"]
+mod restated_value_tests;

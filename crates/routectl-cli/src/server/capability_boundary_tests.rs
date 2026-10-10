@@ -2211,6 +2211,8 @@ fn a_restatement_is_stamped_with_the_entrys_recorded_kind() {
             source: routectl_core::capability::EvidenceSource::Live,
         },
         provider_kind: "openai-compat".to_string(),
+        incarnation: 0,
+        value: None,
     };
 
     let batch = boundary_batch(&[survivor], &[], 1_000, 7, 2);

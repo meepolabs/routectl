@@ -66,6 +66,7 @@ use crate::beta_capability::{BetaSeedScope, capability_key_is_beta};
 mod probe_clear;
 use crate::field_capability::learned_key_enters_field_namespace;
 use crate::field_verdict::FieldVerdictKey;
+use crate::field_verdict_value::VerdictValue;
 pub use probe_clear::{FieldVerdictPresence, FieldVerdictStamp};
 
 /// Default resident-entry ceiling. A safety valve, not a cache policy:
@@ -400,6 +401,13 @@ pub struct RecordedLearnedEntry {
     /// The provider kind the entry was written under; empty when the writer
     /// had none.
     pub provider_kind: String,
+    /// The incarnation of the entry this row was read from: what a value
+    /// recorded for that exact lifecycle is looked up by.
+    pub incarnation: u64,
+    /// The value the verdict applies, which a restatement persists beside it.
+    /// Always `None` out of the registry, which holds no values; filled only
+    /// for a field verdict whose repair row writes one.
+    pub value: Option<VerdictValue>,
 }
 
 /// One cleared seed cell: a `beta:` key on a lane whose shipped seed no longer
@@ -1585,6 +1593,8 @@ impl LearnedCapabilityRegistry {
         RecordedLearnedEntry {
             entry: Self::snapshot_row(key, entry),
             provider_kind: key.provider_kind.clone(),
+            incarnation: entry.incarnation,
+            value: None,
         }
     }
 
