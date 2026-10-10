@@ -29,6 +29,7 @@ use std::time::Instant;
 
 use routectl_core::capability::{
     BETA_ACCEPTED, EvidenceSource, FailurePhase, SignalTier, is_known_evidence_class,
+    normalize_capability_key,
 };
 
 use crate::capability_owner::owner_decision;
@@ -261,6 +262,11 @@ pub struct CapabilityRebuildSummary {
     /// row recorded, or the row recorded no kind: the fact belongs to an
     /// owner the current config no longer egresses to.
     pub skipped_owner: usize,
+    /// Events skipped because their capability key lands in the envelope-field
+    /// namespace only once the lane's key normalization runs: the stored string
+    /// is not itself a field key, so no field-repair guard minted it. Replaying
+    /// one would make a resident field verdict out of upstream text.
+    pub skipped_namespace: usize,
 }
 
 /// Replay a ledger slice into `registry` through the live stage-2 admission
@@ -335,9 +341,31 @@ pub fn rebuild_capabilities_into(
     rows.sort_by_key(|row| row.rowid);
 
     for row in &rows {
+        if normalizes_into_field_namespace(row) {
+            tracing::warn!(
+                event = "rebuild_skip",
+                reason = "normalized_field_namespace",
+                state_key = %routectl_core::sanitize_for_log(&row.state_key),
+                provider_kind = %row.provider_kind,
+                "capability rebuild skipped a row whose key enters the field namespace only \
+                 after normalization",
+            );
+            summary.skipped_namespace += 1;
+            continue;
+        }
         replay_row(row, registry, &mut summary);
     }
     summary
+}
+
+/// True when the registry would store `row` under a field-namespace key that
+/// differs from the row's own capability string. A field-repair guard writes
+/// the exact key it minted, which normalization returns unchanged; anything
+/// else reaching the namespace came from a non-field producer.
+fn normalizes_into_field_namespace(row: &CapabilityEventRow) -> bool {
+    let normalized = normalize_capability_key(&row.capability, &row.provider_kind);
+    crate::field_capability::capability_key_is_field_verdict(&normalized)
+        && normalized != row.capability
 }
 
 /// Replay one surviving row through the matching admission call. The parsed

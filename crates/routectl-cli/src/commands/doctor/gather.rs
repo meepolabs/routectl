@@ -419,6 +419,7 @@ pub(super) const fn replay_summary(
         skipped_revision: summary.skipped_revision,
         skipped_lane: summary.skipped_lane,
         skipped_unknown: summary.skipped_unknown,
+        skipped_namespace: summary.skipped_namespace,
     }
 }
 

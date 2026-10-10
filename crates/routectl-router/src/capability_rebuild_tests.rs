@@ -1232,3 +1232,59 @@ fn each_skip_reason_logs_one_debug_event_and_bumps_its_counter() {
         );
     }
 }
+
+/// A `[providers]` table owning [`LANE`] as a bedrock entry.
+#[cfg(feature = "bedrock")]
+fn bedrock_providers() -> BTreeMap<String, crate::config::ProviderEntry> {
+    let config: crate::config::Config = toml::from_str(
+        "[providers.nn]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
+         creds = { kind = \"default-chain\" }\n",
+    )
+    .expect("valid test toml");
+    config.providers
+}
+
+/// A bedrock `broken` row on [`LANE`].
+#[cfg(feature = "bedrock")]
+fn bedrock_broken(rowid: i64, at: Instant, capability: &str) -> CapabilityEventRow {
+    let mut row = broken(rowid, at, capability);
+    row.provider_kind = "bedrock".to_string();
+    row
+}
+
+/// A row whose capability string enters the field namespace only after the
+/// lane's normalization did not come from a field-repair guard, which writes
+/// the exact key it minted. It is skipped, counted, and logged at WARN; a row
+/// carrying an exact field key on the same lane still replays.
+///
+/// Mutation check: remove the `normalizes_into_field_namespace` skip -> red
+/// (the poisoned row is resident as a field key and nothing is counted).
+#[cfg(feature = "bedrock")]
+#[test]
+fn a_row_normalized_into_the_field_namespace_is_skipped_and_counted() {
+    let base = Instant::now();
+    let field_key =
+        crate::field_capability::field_capability_key("thinking.enabled.display").expect("path");
+    let poisoned = bedrock_broken(2, base, &format!("toolConfig.{field_key}"));
+    let legitimate = bedrock_broken(3, base, &field_key);
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(1, CV, OV)),
+        rows: vec![poisoned, legitimate],
+    };
+    let reg = registry();
+
+    let mut summary = CapabilityRebuildSummary::default();
+    let events = routectl_testkit::capture_events(|| {
+        summary = rebuild_capabilities_into(&reader, &reg, &bedrock_providers());
+    });
+
+    assert_eq!(summary.skipped_namespace, 1);
+    assert_eq!(summary.replayed_negative, 1);
+    let resident: Vec<String> = reg.snapshot().into_iter().map(|e| e.feature_key).collect();
+    assert_eq!(resident, vec![field_key]);
+    let skip = events
+        .iter()
+        .find(|e| e.field("reason") == Some("normalized_field_namespace"))
+        .expect("the skip is logged");
+    assert_eq!(skip.level, tracing::Level::WARN);
+}

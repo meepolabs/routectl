@@ -195,7 +195,8 @@ fn replay_line(replay: &MatrixReplaySummary) -> String {
 
 fn tally_text(replay: &MatrixReplaySummary) -> String {
     format!(
-        "{} rows read, {} replayed; skipped: vocab={} owner={} revision={} lane={} unknown={}",
+        "{} rows read, {} replayed; skipped: vocab={} owner={} revision={} lane={} unknown={} \
+         namespace={}",
         replay.loaded_rows,
         replay.replayed,
         replay.skipped_vocab,
@@ -203,6 +204,7 @@ fn tally_text(replay: &MatrixReplaySummary) -> String {
         replay.skipped_revision,
         replay.skipped_lane,
         replay.skipped_unknown,
+        replay.skipped_namespace,
     )
 }
 
