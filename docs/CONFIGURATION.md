@@ -1378,8 +1378,9 @@ unsupported = ["web_search"]
 Feature keys come from the request's `tools` array: a trailing
 `-YYYYMMDD` or `_YYYYMMDD` suffix on a built-in tool's `type` is
 stripped, so `web_search_20250305` and a future `web_search_20251102`
-both reduce to `web_search`; user-defined custom tools contribute no
-key. If every chain entry is skipped this way, the router returns
+both reduce to `web_search`; the computer tool (`computer_20250124`)
+keys as `computer_use`, while `computer_toolset_*` keeps its own
+`computer_toolset` key; user-defined custom tools contribute no key. If every chain entry is skipped this way, the router returns
 `501 not_implemented` with the message `no provider in chain supports
 features: <keys>`. Config version 5 retired the per-provider and
 per-model `unsupported_features` lists this used to be written as;

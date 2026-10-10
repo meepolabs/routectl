@@ -32,15 +32,17 @@
 //! enforce it.
 
 use routectl_core::ToolDef;
+use routectl_core::capability::COMPUTER_USE;
 pub use routectl_core::capability::FORCED_TOOL_CHOICE;
 use routectl_core::capability::STRUCTURED_OUTPUT as STRUCTURED_OUTPUT_KEY;
 use serde_json::Value;
 
 /// Derive feature keys from the request's `tools` array and
 /// `provider_extras`. Tool-type keys come from `ToolDef::Other(v)
-/// ["type"]` strings with a trailing `-YYYYMMDD` / `_YYYYMMDD` suffix
-/// stripped so `web_search_20250305` and `web_search_20251102` both
-/// reduce to `web_search`. Returns a deduped list in first-seen order.
+/// ["type"]` strings canonicalized by [`canonical_tool_key`], so
+/// `web_search_20250305` and `web_search_20251102` both reduce to
+/// `web_search` and `computer_20250124` keys as `computer_use`. Returns a
+/// deduped list in first-seen order.
 ///
 /// Skips `ToolDef::Custom` and `Other` entries without a string `type`
 /// for tool-type derivation. Additionally appends the request-derived
@@ -63,7 +65,7 @@ pub fn derive_feature_keys(
                 let Some(type_str) = v.get("type").and_then(|t| t.as_str()) else {
                     continue;
                 };
-                let key = strip_date_suffix(type_str);
+                let key = canonical_tool_key(type_str);
                 if seen.insert(key.to_string()) {
                     keys.push(key.to_string());
                 }
@@ -156,6 +158,18 @@ fn named_force(name: Option<&Value>) -> Option<ToolChoiceForce<'_>> {
     name.and_then(Value::as_str)
         .filter(|name| !name.is_empty())
         .map(ToolChoiceForce::Named)
+}
+
+/// The capability key for a built-in tool `type`: the type with its date
+/// suffix stripped ([`strip_date_suffix`]), except that the bare `computer`
+/// type keys as [`COMPUTER_USE`], the name operator overrides, `essential`
+/// lists and catalog priors already use. Every other type, including
+/// `computer_toolset`, keys as itself.
+pub fn canonical_tool_key(tool_type: &str) -> &str {
+    match strip_date_suffix(tool_type) {
+        "computer" => COMPUTER_USE,
+        key => key,
+    }
 }
 
 /// Strip a trailing `-YYYYMMDD` or `_YYYYMMDD` suffix if present.
@@ -270,15 +284,41 @@ mod tests {
     }
 
     #[test]
-    fn derive_extracts_computer_use() {
+    fn derive_keys_the_dated_computer_type_as_computer_use() {
         let tools = vec![ToolDef::Other(json!({
-            "type": "computer_use_20250124",
+            "type": "computer_20250124",
             "name": "computer"
         }))];
         assert_eq!(
             derive_feature_keys(&tools, None, None),
             vec!["computer_use"]
         );
+    }
+
+    #[test]
+    fn derive_keeps_computer_toolset_as_its_own_key() {
+        let tools = vec![ToolDef::Other(json!({
+            "type": "computer_toolset_20260801",
+            "name": "computer"
+        }))];
+        assert_eq!(
+            derive_feature_keys(&tools, None, None),
+            vec!["computer_toolset"]
+        );
+    }
+
+    #[test]
+    fn canonical_tool_key_maps_only_the_bare_computer_type() {
+        for (tool_type, expected) in [
+            ("computer_20250124", "computer_use"),
+            ("computer", "computer_use"),
+            ("computer_use_20250124", "computer_use"),
+            ("computer_toolset_20260801", "computer_toolset"),
+            ("web_search_20250305", "web_search"),
+            ("advisor", "advisor"),
+        ] {
+            assert_eq!(canonical_tool_key(tool_type), expected, "{tool_type}");
+        }
     }
 
     #[test]

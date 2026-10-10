@@ -57,7 +57,7 @@ use routectl_core::error::Error;
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::{is_safe_token, strip_converse_errors_prefix};
 
-use crate::feature_keys::{FORCED_TOOL_CHOICE, strip_date_suffix};
+use crate::feature_keys::{FORCED_TOOL_CHOICE, canonical_tool_key};
 
 /// The openai-compat provider `kind` string. For this family the
 /// `FeatureUnsupported` class carries an `error.code` token rather than a
@@ -292,14 +292,14 @@ fn resolve_openai_param(
 
 /// Resolve a raw openai `error.param` surface against the closed set: an
 /// explicit translation row first, then a well-known tool-type passthrough
-/// (canonicalized via `strip_date_suffix` + `normalize_capability_key`),
+/// (canonicalized via `canonical_tool_key` + `normalize_capability_key`),
 /// else `None`. The set is closed so an arbitrary rejected wire param never
 /// learns a key the act side cannot look up.
 fn resolve_openai_param_surface(param: &str) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     // Share one date-stripped input across both closed-set paths so a dated
     // variant of a translated surface (`response_format_20250305`) still
     // resolves rather than silently falling through to no-learn.
-    let base = strip_date_suffix(param);
+    let base = canonical_tool_key(param);
     if let Some((_, canonical)) = OPENAI_PARAM_TRANSLATIONS
         .iter()
         .find(|(surface, _)| *surface == base)
@@ -653,8 +653,8 @@ fn extract_bedrock_capability(
     Some((capability, SignalTier::SelfIdentifying, FailurePhase::F1))
 }
 
-/// The capability key for a tool type an upstream rejected: the type with its
-/// trailing date suffix removed ([`strip_date_suffix`]), exactly the key
+/// The capability key for a tool type an upstream rejected:
+/// [`canonical_tool_key`] of the type, exactly the key
 /// `derive_feature_keys` emits for a `tools[]` entry of that type, so the
 /// request-membership gate admits it. Open set by design; an unsafe token, or
 /// one that is nothing but a date suffix, yields `None`.
@@ -663,7 +663,7 @@ fn tool_type_key(token: &str) -> Option<FeatureKey> {
     if !is_safe_token(token) {
         return None;
     }
-    let key = strip_date_suffix(token);
+    let key = canonical_tool_key(token);
     (!key.is_empty()).then(|| key.to_string())
 }
 
@@ -1457,7 +1457,7 @@ mod tests {
     /// lifted discriminator, resolves to its expected outcome: the
     /// advisor-tool rejection, bare or inside one Converse wrapper, to the
     /// `advisor` capability at SelfIdentifying; the middle-anchored pydantic
-    /// and AWS tool-type rejections to `web_search` / `computer`;
+    /// and AWS tool-type rejections to `web_search` / `computer_use`;
     /// the two must-not-learn controls (unknown beta flag, bad model id --
     /// same flat shape, same valid header) and the untranslated field-name
     /// rejections (bare or Converse-wrapped) and the tool-change and toolset
@@ -1636,7 +1636,8 @@ mod tests {
     fn tool_type_step_keys_a_type_as_the_request_side_does() {
         for (token, expected) in [
             ("web_search_20250305", "web_search"),
-            ("computer_20250124", "computer"),
+            ("computer_20250124", "computer_use"),
+            ("computer_toolset_20260801", "computer_toolset"),
             ("advisor", "advisor"),
             ("future_tool_20991231", "future_tool"),
         ] {
@@ -1650,7 +1651,12 @@ mod tests {
 
     #[test]
     fn tool_type_step_matches_derive_feature_keys_for_the_same_type() {
-        for token in ["web_search_20250305", "computer_20250124", "advisor"] {
+        for token in [
+            "web_search_20250305",
+            "computer_20250124",
+            "computer_toolset_20260801",
+            "advisor",
+        ] {
             let derived = derive_feature_keys(
                 &[ToolDef::Other(serde_json::json!({ "type": token }))],
                 None,

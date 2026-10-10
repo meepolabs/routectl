@@ -632,3 +632,7 @@ mod strip_wire_egress_tests;
 #[cfg(test)]
 #[path = "capability_precedence_matrix_tests.rs"]
 mod capability_precedence_matrix_tests;
+
+#[cfg(test)]
+#[path = "computer_tool_key_tests.rs"]
+mod computer_tool_key_tests;
