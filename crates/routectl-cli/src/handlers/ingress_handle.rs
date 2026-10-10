@@ -20,6 +20,7 @@ use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use routectl_core::Error;
 use routectl_core::ForwardedBearer;
+use routectl_core::ParsedErrorBody;
 use routectl_router::{DispatchedStream, RouterOptions};
 use routectl_usage::{Outcome, UsageHandle, UsageRecord};
 use serde_json::{Value, json};
@@ -1127,7 +1128,7 @@ fn stamp_opening(capture: &mut UsageCapture, meter: Option<&OpeningMeter>) {
 /// caller-actionable validation detail and is appropriate to surface.
 fn sanitize_stream_error_for_client(e: &Error) -> String {
     match e {
-        Error::Upstream { status, body, .. } => match upstream_error_detail(body) {
+        Error::Upstream { status, .. } => match upstream_error_detail(e.parsed_body()) {
             Some(detail) => format!("upstream stream error (HTTP {status}): {detail}"),
             None => format!("upstream stream error (HTTP {status})"),
         },
@@ -1244,7 +1245,6 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         // streaming path's discipline.
         Error::Upstream {
             status,
-            body,
             provider,
             upstream_type,
             ..
@@ -1255,7 +1255,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
                 upstream_type = ?upstream_type,
                 "upstream error sanitized in HTTP response"
             );
-            sanitize_upstream_for_client(*status, body)
+            sanitize_upstream_for_client(*status, e.parsed_body())
         }
         // Normalization failures embed the internal provider config id
         // and raw serialization/translation detail in their Display
@@ -1370,10 +1370,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
     // reads the same field the upstream authored. Only `Error::Upstream`
     // can carry one; every other class leaves it absent so the envelope
     // emits `param: null`.
-    let upstream_param = match &e {
-        Error::Upstream { body, .. } => upstream_error_param(body),
-        _ => None,
-    };
+    let upstream_param = upstream_error_param(e.parsed_body());
     error_response(
         shape,
         status,
@@ -1400,19 +1397,22 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
 /// non-streaming path can afford the upstream's own top-level
 /// `error.message` because the egress already parsed it from the wire,
 /// but never a sibling key or the raw dump.
-fn sanitize_upstream_for_client(status: u16, body: &str) -> String {
-    if let Some(detail) = upstream_error_detail(body) {
+fn sanitize_upstream_for_client(status: u16, parsed: Option<&ParsedErrorBody>) -> String {
+    if let Some(detail) = upstream_error_detail(parsed) {
         format!("upstream error (HTTP {status}): {detail}")
     } else {
         format!("upstream error (HTTP {status})")
     }
 }
 
-/// Extract the upstream's own top-level `error.message` (preferred) or
-/// `error.type` from a JSON error body. Returns `None` for non-JSON
-/// bodies or JSON without a top-level `error` object carrying one of
-/// those string fields, so the caller falls back to a status-only
-/// message rather than leaking sibling keys or the raw body.
+/// Read the upstream's own top-level `error.message` (preferred) or
+/// `error.type` from the error's carried body parse. Returns `None` when
+/// there is no parse (non-JSON, unparseable, or over
+/// [`routectl_core::MAX_ERROR_BODY_BYTES`] -- an over-cap body is never
+/// parsed, so nothing in it reaches the client) or the parse has no
+/// top-level `error` object carrying one of those string fields, so the
+/// caller falls back to a status-only message rather than leaking sibling
+/// keys or the raw body.
 ///
 /// The extracted detail is length-bounded ([`MAX_UPSTREAM_DETAIL_CHARS`])
 /// before it reaches the client: a legitimate upstream classifier is short,
@@ -1420,30 +1420,25 @@ fn sanitize_upstream_for_client(status: u16, body: &str) -> String {
 /// proxy or custom endpoint) could otherwise reflect an oversized message
 /// verbatim. This is the client-facing sink counterpart to the
 /// provider-side cap on what a request-fault body may carry raw.
-fn upstream_error_detail(body: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(body).ok()?;
-    let err_obj = parsed.get("error")?;
-    let detail = err_obj
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| err_obj.get("type").and_then(Value::as_str))?;
+fn upstream_error_detail(parsed: Option<&ParsedErrorBody>) -> Option<String> {
+    let parsed = parsed?;
+    let detail = parsed.error_message().or_else(|| parsed.error_type())?;
     Some(bound_upstream_detail(detail))
 }
 
-/// Extract the upstream's own top-level `error.param` from a JSON error
-/// body -- the offending request parameter name an OpenAI-dialect 400
-/// carries (e.g. `"temperature"`). Returns `None` for non-JSON bodies,
-/// a missing/`null` `param`, or a non-string value, so the OpenAI
+/// Read the upstream's own top-level `error.param` from the error's
+/// carried body parse -- the offending request parameter name an
+/// OpenAI-dialect 400 carries (e.g. `"temperature"`). Returns `None` with
+/// no parse (as [`upstream_error_detail`]), a missing/`null` `param`, or a
+/// non-string value, so the OpenAI
 /// envelope emits `param: null` unless the upstream genuinely named one.
 ///
 /// Length-bounded through the same [`bound_upstream_detail`] cap the
 /// message extractor uses: a real `param` is a short field name, but a
 /// proxied or abusive envelope could otherwise reflect an oversized
 /// string verbatim.
-fn upstream_error_param(body: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(body).ok()?;
-    let param = parsed.get("error")?.get("param")?.as_str()?;
-    Some(bound_upstream_detail(param))
+fn upstream_error_param(parsed: Option<&ParsedErrorBody>) -> Option<String> {
+    Some(bound_upstream_detail(parsed?.error_param()?))
 }
 
 /// Upper bound on the upstream-authored detail surfaced verbatim in a
@@ -1712,3 +1707,7 @@ mod opening_accuracy_boundary_tests;
 #[cfg(test)]
 #[path = "local_refusal_envelope_tests.rs"]
 mod local_refusal_envelope_tests;
+
+#[cfg(test)]
+#[path = "upstream_parse_cap_tests.rs"]
+mod upstream_parse_cap_tests;

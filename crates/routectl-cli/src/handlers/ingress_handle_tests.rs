@@ -22,7 +22,7 @@
 
 use super::*;
 use axum::body::to_bytes;
-use routectl_core::Error;
+use routectl_core::{Error, UpstreamBody};
 use routectl_router::config::CredentialSource;
 use routectl_usage::{CHANNEL_CAPACITY, Outcome, UsageWriter};
 
@@ -927,10 +927,10 @@ async fn map_error_upstream_anthropic_envelope_also_sanitizes_message() {
 #[test]
 fn sanitize_upstream_for_client_prefers_top_level_error_message() {
     // Arrange + Act
-    let out = sanitize_upstream_for_client(
-        400,
+    let body = UpstreamBody::new(
         "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad field\"}}",
     );
+    let out = sanitize_upstream_for_client(400, body.parsed());
 
     // Assert
     assert!(out.contains("400"), "status present: {out:?}");
@@ -941,7 +941,10 @@ fn sanitize_upstream_for_client_prefers_top_level_error_message() {
 fn sanitize_upstream_for_client_falls_back_to_error_type() {
     // Arrange: a body with a top-level error.type but no message.
     // Act
-    let out = sanitize_upstream_for_client(503, "{\"error\":{\"type\":\"overloaded_error\"}}");
+    let out = sanitize_upstream_for_client(
+        503,
+        UpstreamBody::new("{\"error\":{\"type\":\"overloaded_error\"}}").parsed(),
+    );
 
     // Assert
     assert!(out.contains("503"), "status present: {out:?}");
@@ -951,7 +954,10 @@ fn sanitize_upstream_for_client_falls_back_to_error_type() {
 #[test]
 fn sanitize_upstream_for_client_status_only_for_non_json() {
     // Arrange + Act
-    let out = sanitize_upstream_for_client(502, "raw gateway page with host names");
+    let out = sanitize_upstream_for_client(
+        502,
+        UpstreamBody::new("raw gateway page with host names").parsed(),
+    );
 
     // Assert
     assert!(out.contains("502"), "status present: {out:?}");
@@ -965,7 +971,10 @@ fn sanitize_upstream_for_client_status_only_for_non_json() {
 fn sanitize_upstream_for_client_status_only_for_json_without_error_object() {
     // Arrange: valid JSON but no top-level `error` object to mine.
     // Act
-    let out = sanitize_upstream_for_client(500, "{\"detail\":\"tenant-7 internal trace\"}");
+    let out = sanitize_upstream_for_client(
+        500,
+        UpstreamBody::new("{\"detail\":\"tenant-7 internal trace\"}").parsed(),
+    );
 
     // Assert
     assert!(out.contains("500"), "status present: {out:?}");
@@ -985,7 +994,7 @@ fn sanitize_upstream_for_client_bounds_oversized_nested_message() {
     let long_message = "leak_".repeat(4_000); // ~20 KB, well past any cap
     let nested = serde_json::json!({ "error": { "message": long_message } }).to_string();
 
-    let out = sanitize_upstream_for_client(400, &nested);
+    let out = sanitize_upstream_for_client(400, UpstreamBody::new(nested).parsed());
 
     assert!(out.contains("400"), "status present: {out:?}");
     assert!(
@@ -1299,7 +1308,8 @@ fn sanitize_stream_error_surfaces_top_level_error_message_like_non_stream() {
     // path, only the leading kind tag differs.
     assert_eq!(
         safe,
-        sanitize_upstream_for_client(400, body).replace("upstream error", "upstream stream error"),
+        sanitize_upstream_for_client(400, UpstreamBody::new(body).parsed())
+            .replace("upstream error", "upstream stream error"),
         "stream detail matches the non-stream extractor output"
     );
     assert!(

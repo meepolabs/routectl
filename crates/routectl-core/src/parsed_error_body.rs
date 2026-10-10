@@ -2,8 +2,11 @@
 //! [`crate::Error::Upstream`] so consumers read the envelope without parsing
 //! the body again.
 //!
-//! [`ParsedErrorBody::parse`] is the only producer. It applies the same rules
-//! as the log-redaction reader: a body opens like JSON after leading
+//! [`UpstreamBody::new`] is the only public producer: it owns the body text
+//! together with the parse of exactly that text, and
+//! [`crate::Error::upstream_with_body`] consumes the pair whole, so a parse
+//! can never be attached to a different body. The parse applies the same
+//! rules as the log-redaction reader: a body opens like JSON after leading
 //! whitespace and an optional UTF-8 BOM, and a body over
 //! [`crate::MAX_ERROR_BODY_BYTES`] is never parsed. HTML, plain-text, over-cap
 //! and unparseable bodies yield no parse.
@@ -23,19 +26,50 @@ use crate::log_safe::{ErrorJsonBody, read_error_json_body};
 /// A successful capped parse of an upstream error body. Pointer-sized and
 /// cheap to clone.
 #[derive(Clone)]
-pub struct ParsedErrorBody(Arc<Parsed>);
+pub struct ParsedErrorBody(Arc<Value>);
 
-struct Parsed {
-    value: Value,
-    source_len: usize,
-    source_hash: u64,
+/// An upstream error body and the capped parse of that same text, produced
+/// together so the pair always agrees. Fields are private: the only way to
+/// build one is [`UpstreamBody::new`].
+///
+/// ```compile_fail,E0451
+/// let body = routectl_core::UpstreamBody { text: String::new(), parsed: None };
+/// ```
+pub struct UpstreamBody {
+    text: String,
+    parsed: Option<ParsedErrorBody>,
 }
 
-fn body_fingerprint(body: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::hash::DefaultHasher::new();
-    body.hash(&mut hasher);
-    hasher.finish()
+impl UpstreamBody {
+    /// Take ownership of `text` and parse it once.
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let parsed = ParsedErrorBody::parse(&text);
+        Self { text, parsed }
+    }
+
+    /// The body text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The parse of [`UpstreamBody::text`], if it parsed within the cap.
+    pub const fn parsed(&self) -> Option<&ParsedErrorBody> {
+        self.parsed.as_ref()
+    }
+
+    pub(crate) fn into_parts(self) -> (String, Option<ParsedErrorBody>) {
+        (self.text, self.parsed)
+    }
+}
+
+impl fmt::Debug for UpstreamBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpstreamBody")
+            .field("len", &self.text.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for ParsedErrorBody {
@@ -47,26 +81,15 @@ impl fmt::Debug for ParsedErrorBody {
 impl ParsedErrorBody {
     /// Parse `body` once, or return `None` when it does not open like JSON,
     /// is over [`crate::MAX_ERROR_BODY_BYTES`], or does not parse.
-    #[must_use]
-    pub fn parse(body: &str) -> Option<Self> {
+    pub(crate) fn parse(body: &str) -> Option<Self> {
         match read_error_json_body(body) {
-            ErrorJsonBody::Parsed(value) => Some(Self(Arc::new(Parsed {
-                value,
-                source_len: body.len(),
-                source_hash: body_fingerprint(body),
-            }))),
+            ErrorJsonBody::Parsed(value) => Some(Self(Arc::new(value))),
             ErrorJsonBody::NotJson | ErrorJsonBody::Unreadable(_) => None,
         }
     }
 
-    /// True when this parse was produced from `body` (same length and
-    /// content fingerprint), checked without parsing `body` again.
-    pub(crate) fn describes(&self, body: &str) -> bool {
-        self.0.source_len == body.len() && self.0.source_hash == body_fingerprint(body)
-    }
-
     fn error_object(&self) -> Option<&Value> {
-        self.0.value.get("error")
+        self.0.get("error")
     }
 
     /// True when the body carries a top-level `error` key -- the envelope
@@ -102,13 +125,14 @@ impl ParsedErrorBody {
     /// The whole parsed body, for dialect readers whose envelope differs
     /// from the `{"error":{...}}` shape. Never log it unredacted.
     pub fn value(&self) -> &Value {
-        &self.0.value
+        &self.0
     }
 }
 
 /// The upstream's `error.message` from `parsed`, or else a redacted,
-/// sanitized excerpt of `body`. `parsed` must be [`ParsedErrorBody::parse`]
-/// of `body`; with that parse it answers as
+/// sanitized excerpt of `body`. `parsed` must be the parse of `body` (as
+/// [`UpstreamBody::parsed`] or [`crate::Error::parsed_body`] return); with
+/// that parse it answers as
 /// [`crate::extract_upstream_message`] does for an in-cap body without a BOM,
 /// without parsing `body` again.
 pub fn upstream_message_or_excerpt(body: &str, parsed: Option<&ParsedErrorBody>) -> String {

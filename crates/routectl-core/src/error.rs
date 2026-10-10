@@ -9,7 +9,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::ParsedErrorBody;
+use crate::{ParsedErrorBody, UpstreamBody};
 
 /// Convenience alias defaulting the error type to [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -359,26 +359,19 @@ impl Error {
         )
     }
 
-    /// [`Error::upstream_full`] for a caller that already holds the result
-    /// of `ParsedErrorBody::parse(&body)`: a `Some` parse is attached as-is,
-    /// so `body` is not parsed again. A parse produced from any other string
-    /// is discarded and `body` is parsed instead, and `None` parses `body`
-    /// too (cheap unless `body` is in-cap JSON that fails to parse), so the
-    /// carried parse always describes `body`.
-    pub fn upstream_with_parsed_body(
+    /// [`Error::upstream_full`] for a caller that already parsed the body:
+    /// `body` carries its own parse ([`UpstreamBody::new`]), which is
+    /// attached as-is, so the text is not parsed again and the carried parse
+    /// is always the parse of the carried text.
+    pub fn upstream_with_body(
         provider: impl Into<String>,
         status: u16,
-        body: impl Into<String>,
-        parsed_body: Option<ParsedErrorBody>,
+        body: UpstreamBody,
         retry_after: Option<std::time::Duration>,
         upstream_type: Option<String>,
         upstream_code: Option<String>,
     ) -> Self {
-        let body = body.into();
-        let parsed_body = match parsed_body {
-            Some(parsed) if parsed.describes(&body) => Some(parsed),
-            _ => ParsedErrorBody::parse(&body),
-        };
+        let (body, parsed_body) = body.into_parts();
         Self::upstream_parts(
             provider.into(),
             status,
@@ -440,7 +433,7 @@ impl Error {
     }
 
     /// The single capped JSON parse of an `Upstream` error's `body`
-    /// ([`ParsedErrorBody::parse`]), attached by every `upstream*`
+    /// (the one [`UpstreamBody::new`] makes), attached by every `upstream*`
     /// constructor so consumers never parse `body` again. `None` on any other
     /// variant, or when `body` is not JSON, is over
     /// [`crate::MAX_ERROR_BODY_BYTES`], or does not parse.
@@ -464,7 +457,7 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::Error;
+    use super::{Error, UpstreamBody};
     use std::time::Duration;
 
     #[test]
@@ -679,8 +672,8 @@ mod tests {
         ("upstream_full", |body| {
             Error::upstream_full("prov", 400, body, None, None, None)
         }),
-        ("upstream_with_parsed_body without a parse", |body| {
-            Error::upstream_with_parsed_body("prov", 400, body, None, None, None, None)
+        ("upstream_with_body", |body| {
+            Error::upstream_with_body("prov", 400, UpstreamBody::new(body), None, None, None)
         }),
     ];
 
@@ -717,13 +710,11 @@ mod tests {
     }
 
     #[test]
-    fn upstream_with_parsed_body_attaches_a_matching_parse_without_reparsing() {
-        let body = r#"{"error":{"type":"overloaded_error"}}"#;
-        let parsed = crate::ParsedErrorBody::parse(body);
+    fn upstream_with_body_attaches_the_bundled_parse_without_reparsing() {
+        let body = UpstreamBody::new(r#"{"error":{"type":"overloaded_error"}}"#);
 
-        let (err, parses) = parses_during(|| {
-            Error::upstream_with_parsed_body("prov", 529, body, parsed, None, None, None)
-        });
+        let (err, parses) =
+            parses_during(|| Error::upstream_with_body("prov", 529, body, None, None, None));
 
         assert_eq!(parses, 0);
         let carried = err.parsed_body().expect("parse attached");
@@ -731,17 +722,20 @@ mod tests {
     }
 
     #[test]
-    fn upstream_with_parsed_body_replaces_a_parse_of_a_different_body() {
-        let stale = crate::ParsedErrorBody::parse(r#"{"error":{"type":"stale"}}"#);
-        let body = r#"{"error":{"type":"fresh"}}"#;
+    fn upstream_with_body_carries_the_parse_of_its_own_text() {
+        let raw = UpstreamBody::new(r#"{"error":{"type":"raw","message":"secret"}}"#);
+        let scrubbed = UpstreamBody::new(r#"{"error":{"type":"scrubbed"}}"#);
+        assert_eq!(raw.parsed().and_then(|p| p.error_type()), Some("raw"));
 
-        let (err, parses) = parses_during(|| {
-            Error::upstream_with_parsed_body("prov", 400, body, stale, None, None, None)
-        });
+        let err = Error::upstream_with_body("prov", 400, scrubbed, None, None, None);
 
-        assert_eq!(parses, 1);
-        let carried = err.parsed_body().expect("body re-parsed");
-        assert_eq!(carried.error_type(), Some("fresh"));
+        let Error::Upstream { body, .. } = &err else {
+            panic!("expected Error::Upstream, got {err:?}");
+        };
+        assert_eq!(body, r#"{"error":{"type":"scrubbed"}}"#);
+        let carried = err.parsed_body().expect("parse attached");
+        assert_eq!(carried.error_type(), Some("scrubbed"));
+        assert_eq!(carried.error_message(), None);
     }
 
     #[test]

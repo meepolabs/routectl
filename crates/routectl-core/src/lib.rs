@@ -73,7 +73,7 @@ pub use log_safe::{
     trace_stream_summary, trace_structural_summary, trace_upstream_response_headers,
     trace_upstream_success_body, wrap_stream_with_summary,
 };
-pub use parsed_error_body::{ParsedErrorBody, upstream_message_or_excerpt};
+pub use parsed_error_body::{ParsedErrorBody, UpstreamBody, upstream_message_or_excerpt};
 pub use provider::{ProbeOutcome, Provider};
 pub use reasoning_dialect::{
     HistoryReasoning as CoreHistoryReasoning, ReasoningDialect as CoreReasoningDialect,

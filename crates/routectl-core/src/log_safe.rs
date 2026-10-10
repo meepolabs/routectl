@@ -257,6 +257,11 @@ pub(crate) fn read_error_json_body(body: &str) -> ErrorJsonBody {
     }
 }
 
+// Thread-local so concurrently running tests never see each other's parses.
+// That makes it valid only for a synchronous span on one thread: across an
+// `.await` a multi-threaded runtime can resume the task on another thread, so
+// an async test that counts parses needs a synchronized counter or an
+// injected hook instead.
 #[cfg(test)]
 thread_local! {
     static CAPPED_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -280,7 +285,7 @@ pub(crate) fn capped_parse_count() -> usize {
 /// page, plain-text gateway error, or JSON with no top-level `error`)
 /// returns `false`, so the reader carries the sanitized excerpt and the
 /// client sees a status-only message -- never a raw body dump or a
-/// sibling key. The parse follows [`crate::ParsedErrorBody::parse`]: a
+/// sibling key. The parse follows [`crate::UpstreamBody::new`]: a
 /// body over [`crate::MAX_ERROR_BODY_BYTES`] is never parsed and returns
 /// `false`.
 pub fn is_json_error_envelope(body_text: &str) -> bool {
