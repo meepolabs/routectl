@@ -41,6 +41,7 @@ use routectl_providers::anthropic_api::{
 };
 use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, ResolvedModel, Router, RouterOptions,
+    TEST_RECHECK_KWARG, TEST_RECHECK_PATH, plant_acting_field_verdict_for_tests,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -167,6 +168,9 @@ async fn canonical_requests(
     }
     models.insert("m1".to_string(), Arc::new(resolved));
     router.install_resolved_models(models);
+    // A probe only ever re-checks a field the lane already holds an acting
+    // negative on.
+    plant_acting_field_verdict_for_tests(&router, "p1#claude-sonnet-4-5", TEST_RECHECK_PATH, 0);
 
     let _ = router
         .complete_with_options(
@@ -247,7 +251,7 @@ async fn wire_header(
     seen[before].clone()
 }
 
-/// An admitted request grounding the closed-table field, carrying
+/// An admitted request carrying the count-validated closed-table field, plus
 /// `client_betas` on the ingress carrier and optionally a CC session capture.
 fn admitted_request(client_betas: &[&str], cc_session: bool) -> ChatRequest {
     let mut req = ChatRequest {
@@ -267,7 +271,7 @@ fn admitted_request(client_betas: &[&str], cc_session: bool) -> ChatRequest {
         max_tokens: Some(2048),
         ..Default::default()
     };
-    req.routectl_internal.anthropic_thinking_display = Some(GROUNDED_DISPLAY.to_string());
+    req.chat_template_kwargs = Some(serde_json::json!({ TEST_RECHECK_KWARG: GROUNDED_DISPLAY }));
     if cc_session {
         req.routectl_internal.claude_code_headers =
             vec![("x-claude-code-session-id".to_string(), "sess-1".to_string())];

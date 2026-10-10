@@ -42,7 +42,9 @@ use super::field_preflight::{
     FIELD_PREFLIGHT_UNSUPPORTED_LANE, FIELD_PREFLIGHT_WRITER_UNHEALTHY,
 };
 use super::field_repair::FieldSettlementMode;
-use super::probe_test_support::{OkProvider, grounding_request};
+use super::probe_test_support::{
+    OkProvider, RECHECK_PATH, grounding_request, plant_acting_negative,
+};
 use super::{DispatchTarget, Router};
 use crate::config::{AliasValue, Config, CredentialSource, ModelEntry, ProviderEntry};
 use crate::resolved::ResolvedModel;
@@ -348,16 +350,23 @@ fn preflight_admits(shape: &Shape, req: &ChatRequest) -> bool {
 
 /// Whether probe ACTIVATION admitted the lane, driven through the same
 /// per-target facts the dispatch walk hands it.
+///
+/// The lane holds an acting negative on the re-check row first: activation only
+/// ever re-checks one, so without it every shape would read as refused and the
+/// row would measure the missing negative rather than attributability.
 fn activation_admits(shape: &Shape, req: &ChatRequest) -> bool {
     let (router, target) = fixture(shape);
+    let lane = target
+        .learned_lane
+        .as_ref()
+        .expect("a fixture target mints a lane");
+    plant_acting_negative(&router, lane, RECHECK_PATH, "anthropic-api");
     router.activate_probe_lanes_for_admitted_request(
-        target
-            .learned_lane
-            .as_ref()
-            .expect("a fixture target mints a lane"),
+        lane,
         &target.provider_name,
         target.provider_kind,
         target.use_forwarded_credential,
+        &super::probe_payload_capture::ProbeFieldCapture::of(req),
         req,
     );
     router.probe_scheduler_snapshot().activations_total > 0
@@ -368,7 +377,7 @@ fn activation_admits(shape: &Shape, req: &ChatRequest) -> bool {
 /// why its answer has to match the other three.
 fn pre_dial_recheck_admits(shape: &Shape, _req: &ChatRequest) -> bool {
     let (router, target) = fixture(shape);
-    router.probe_entry_is_attributable(&target.provider_name)
+    router.probe_entry_is_attributable(&target.provider_name, &target.upstream)
 }
 
 /// One stage's verdict for one shape: does this stage consider the target

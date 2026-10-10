@@ -46,6 +46,7 @@ use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
 use super::overlays::apply_layered_overlays;
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
+use super::probe_payload_capture::ProbeFieldCapture;
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::runtime_gate::{
@@ -423,6 +424,10 @@ impl Router {
             // reactive repair has touched it yet at this point in the
             // loop, so it is exactly the base every fallback target
             // plans from independently.
+            // Captured BEFORE pre-flight: an acting negative is what makes
+            // pre-flight drop the field, and it is that field a re-check asks
+            // about.
+            let probe_fields = ProbeFieldCapture::of(&attempt_req);
             let (preflighted_req, preflight_records, field_canary) =
                 self.plan_field_preflight(&attempt_req, target, DispatchSurface::Complete);
             attempt_req = preflighted_req;
@@ -616,15 +621,14 @@ impl Router {
                 // Deliberately NOT the success arm: a lane whose upstream is
                 // erroring is exactly the one a probe should investigate, so
                 // requiring a 2xx would keep the scheduler dark on the traffic
-                // that most needs it. Reads `attempt_req`, the post-overlay /
-                // post-strip / post-pre-flight per-target body actually being
-                // sent, so the probed identity describes the bytes the upstream
-                // will see -- a row a pre-flight rewrite already dropped is
-                // absent here and activates nothing. Pure bookkeeping: it
-                // enqueues at most one bounded job per lane and capability and
-                // returns without dialing or awaiting, so this request is not
-                // delayed and its outcome does not depend on it.
-                self.on_admitted_request(target, &attempt_req);
+                // that most needs it. The fields come from the pre-flight
+                // capture, so a field pre-flight dropped on an acting negative
+                // is still the one re-checked; the beta context comes from
+                // `attempt_req`, the per-target body actually being sent. Pure
+                // bookkeeping: it enqueues at most one bounded job per lane and
+                // capability and returns without dialing or awaiting, so this
+                // request is not delayed and its outcome does not depend on it.
+                self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
                 let result = run_with_timeout(
@@ -1440,6 +1444,8 @@ impl Router {
             // whole chain iteration; a stream never claims a canary (the
             // surface is excluded upstream of the cadence tick), so there is
             // no settlement to owe here.
+            // Captured before pre-flight -- see `complete_inner`.
+            let probe_fields = ProbeFieldCapture::of(&attempt_req);
             let (preflighted_req, preflight_records, _field_preflight_plan) =
                 self.plan_field_preflight(&attempt_req, target, DispatchSurface::Stream);
             attempt_req = preflighted_req;
@@ -1589,11 +1595,11 @@ impl Router {
                 );
                 // Lazy probe activation at the same ADMITTED boundary as the
                 // complete walk (see there for why it is not the success arm),
-                // reading the same post-overlay / post-strip / post-pre-flight
+                // reading the same pre-flight capture and per-target
                 // `attempt_req`. Deduped against the other walks by the shared
                 // lane/capability identity, so a session mixing surfaces still
                 // queues one job.
-                self.on_admitted_request(target, &attempt_req);
+                self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
                 let r = try_stream_with_first_content(

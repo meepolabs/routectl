@@ -70,8 +70,8 @@ async fn the_daemon_status_and_doctor_surfaces_report_a_populated_snapshot() {
 // Free validation, through the daemon
 // ---------------------------------------------------------------------------
 
-/// A daemon activates its lane on a real HTTP request and its probe pass runs the
-/// FREE validation that activation queued.
+/// A daemon whose lane holds an acting negative re-checks it on a real HTTP request,
+/// and its probe pass runs the FREE validation that activation queued.
 ///
 /// The probe pass is driven on the daemon's EXACT live Router, after an HTTP request
 /// has activated it -- the activation is non-blocking for the user request, so the
@@ -82,6 +82,7 @@ async fn a_daemon_request_activates_its_lane_and_the_pass_runs_free_validation()
     let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
+    plant_acting_field_verdict_for_tests(&router, STATE_KEY, routectl_router::TEST_RECHECK_PATH, 0);
     let daemon = spawn_daemon(config, dir, router).await;
     assert_eq!(
         daemon
@@ -92,8 +93,10 @@ async fn a_daemon_request_activates_its_lane_and_the_pass_runs_free_validation()
         0,
         "premise: nothing has activated before the first admitted request",
     );
+    let mut body = body_with_field();
+    body["chat_template_kwargs"] = json!({ routectl_router::TEST_RECHECK_KWARG: "summarized" });
 
-    let status = post_inference(&daemon, &body_with_field()).await;
+    let status = post_inference(&daemon, &body).await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let live = daemon.live_router();
     let count_tokens_before = recorder.count_tokens_calls();

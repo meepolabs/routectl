@@ -78,7 +78,7 @@ use crate::anthropic_family::{AnthropicFamily, anthropic_family};
 /// The `bedrock` arm needs no feature gate: it matches a plain string
 /// literal, so a build without that egress compiled in simply never
 /// produces a seat that reaches it.
-fn seat_can_count_tokens(kind: Option<&str>, upstream: &str) -> bool {
+pub(super) fn seat_can_count_tokens(kind: Option<&str>, upstream: &str) -> bool {
     match kind {
         Some("anthropic-api") => true,
         Some("bedrock") => matches!(anthropic_family(upstream), AnthropicFamily::Yes),
@@ -413,6 +413,8 @@ impl Router {
         // accounting guard lives for this seat's whole attempt loop; a token
         // count never claims a canary (the surface is excluded upstream of the
         // cadence tick), so there is no settlement to owe here.
+        // Captured before pre-flight -- see `complete_inner`.
+        let probe_fields = super::probe_payload_capture::ProbeFieldCapture::of(&attempt_req);
         let (preflighted_req, preflight_records, _field_preflight_plan) =
             self.plan_field_preflight(&attempt_req, &target, DispatchSurface::CountTokens);
         attempt_req = preflighted_req;
@@ -470,9 +472,9 @@ impl Router {
             // the gate has cleared, every request-shaping step has run, and
             // this seat is about to be dialed. A count_tokens request is
             // real admitted traffic on this lane, so a lane that only ever
-            // sees counting still activates -- and it reads `attempt_req`,
-            // the per-target post-pre-flight body actually being sent.
-            self.on_admitted_request(&target, &attempt_req);
+            // sees counting still activates -- reading the pre-flight
+            // capture and the per-target body actually being sent.
+            self.on_admitted_request(&target, &probe_fields, &attempt_req);
             let result = provider.count_tokens(attempt_req.clone()).await;
             attempts_made += 1;
             match result {

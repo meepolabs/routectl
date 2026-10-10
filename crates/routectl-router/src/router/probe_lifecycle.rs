@@ -312,7 +312,7 @@ impl Router {
         // that changed a lane's attributability slip a queued job through:
         // the job was admitted against the old entry and nothing else looks
         // again.
-        if !self.probe_entry_is_attributable(&seat.provider_name) {
+        if !self.probe_entry_is_attributable(&seat.provider_name, &seat.upstream) {
             return FreeValidatorOutcome::Unavailable;
         }
         // The SAME per-attempt gate every real dispatch passes, in its PROBE

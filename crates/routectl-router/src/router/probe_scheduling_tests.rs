@@ -8,13 +8,16 @@ use routectl_core::ChatRequest;
 
 use super::Router;
 use super::probe_lifecycle::PROBE_ACTIVATION_REFUSED_EVENT;
-use super::probe_test_support::{GROUNDED_PATH, grounding_request};
+use super::probe_test_support::{
+    GROUNDED_PATH, RECHECK_PATH, grounding_request, plant_acting_negative,
+};
 use crate::config::{AliasValue, Config, ModelEntry, ProviderEntry};
 use crate::field_verdict::FieldVerdictKey;
 use crate::probe_scheduler::{PROBE_QUEUE_DEPTH, ProbeActivation, ProbeValidator};
 
 /// A router over one anthropic-api provider reachable through an alias --
-/// the shape a real admitted request dispatches against.
+/// the shape a real admitted request dispatches against -- whose lane holds an
+/// acting negative on the re-check row.
 fn router() -> Router {
     let mut config = Config::default();
     config.providers.insert(
@@ -29,7 +32,9 @@ fn router() -> Router {
         "default".to_string(),
         AliasValue::Single("sonnet".to_string()),
     );
-    Router::new(Arc::new(config))
+    let router = Router::new(Arc::new(config));
+    plant_acting_negative(&router, &sonnet_lane(), RECHECK_PATH, "anthropic-api");
+    router
 }
 
 /// The lane `router()`'s `sonnet` dispatches.
@@ -305,6 +310,7 @@ fn an_admitted_request_grounding_the_closed_table_activates_its_lane() {
         "anthropic",
         Some("anthropic-api"),
         false,
+        &super::probe_payload_capture::ProbeFieldCapture::of(&req),
         &req,
     );
 
@@ -327,6 +333,7 @@ fn a_burst_of_admitted_requests_on_one_lane_activates_exactly_once() {
             "anthropic",
             Some("anthropic-api"),
             false,
+            &super::probe_payload_capture::ProbeFieldCapture::of(&req),
             &req,
         );
     }
@@ -349,6 +356,7 @@ fn an_admitted_request_grounding_nothing_activates_no_lane() {
         "anthropic",
         Some("anthropic-api"),
         false,
+        &super::probe_payload_capture::ProbeFieldCapture::of(&ChatRequest::default()),
         &ChatRequest::default(),
     );
 
@@ -369,6 +377,7 @@ fn a_forwarded_credential_target_activates_no_lane() {
         "anthropic",
         Some("anthropic-api"),
         true,
+        &super::probe_payload_capture::ProbeFieldCapture::of(&grounding_request()),
         &grounding_request(),
     );
 
@@ -388,6 +397,7 @@ fn a_target_off_the_acting_lane_activates_no_lane() {
             "anthropic",
             kind,
             false,
+            &super::probe_payload_capture::ProbeFieldCapture::of(&grounding_request()),
             &grounding_request(),
         );
     }
@@ -408,6 +418,7 @@ fn an_admitted_request_activates_a_free_validator_first() {
         "anthropic",
         Some("anthropic-api"),
         false,
+        &super::probe_payload_capture::ProbeFieldCapture::of(&grounding_request()),
         &grounding_request(),
     );
     let lease = router.lease_due_probe(now).expect("the queued job is due");
@@ -457,6 +468,7 @@ fn a_body_an_acting_preflight_already_stripped_activates_no_lane() {
         "anthropic",
         Some("anthropic-api"),
         false,
+        &super::probe_payload_capture::ProbeFieldCapture::of(&req),
         &req,
     );
 

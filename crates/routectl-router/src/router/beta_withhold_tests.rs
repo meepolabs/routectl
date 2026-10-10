@@ -483,6 +483,12 @@ async fn a_probe_payload_never_carries_a_withheld_client_beta() {
     let provider = RecordingProvider::new();
     let model = ResolvedModel::new("m1", "p1", provider.clone(), "claude-sonnet-4-5");
     router.install_resolved_models(std::iter::once(("m1".to_string(), Arc::new(model))).collect());
+    super::super::probe_test_support::plant_acting_negative(
+        &router,
+        &crate::state_key::StateKey::new("p1", "claude-sonnet-4-5").expect("lane"),
+        super::super::probe_test_support::RECHECK_PATH,
+        "anthropic-api",
+    );
     let mut admitted = super::super::probe_test_support::grounding_request();
     admitted.model = "m1".into();
     admitted.anthropic_beta = vec!["fx-withheld".to_string(), "fx-kept".to_string()];

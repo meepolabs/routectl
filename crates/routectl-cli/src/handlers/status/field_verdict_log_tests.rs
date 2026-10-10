@@ -922,8 +922,13 @@ fn settled_probe_state() -> routectl_router::ProbeSchedulerSnapshot {
         )),
     );
     router.install_resolved_models(models);
-    let mut request = routectl_core::ChatRequest::default();
-    request.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+    plant_acting_field_verdict_for_tests(&router, STATE_KEY, routectl_router::TEST_RECHECK_PATH, 0);
+    let request = routectl_core::ChatRequest {
+        chat_template_kwargs: Some(serde_json::json!({
+            routectl_router::TEST_RECHECK_KWARG: "summarized",
+        })),
+        ..Default::default()
+    };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

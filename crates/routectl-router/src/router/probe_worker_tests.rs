@@ -16,7 +16,7 @@ use super::Router;
 use super::probe_lifecycle::PROBE_ACTIVATION_REFUSED_EVENT;
 use super::probe_test_support::{
     BoxStreamAlias, FailingProvider, GROUNDED_PATH, OkProvider, ZeroCountProvider,
-    grounding_request, remote_router,
+    grounding_request, remote_router, with_recheck_field,
 };
 use crate::config::Config;
 use crate::field_verdict::FieldVerdictKey;
@@ -574,8 +574,7 @@ async fn an_unknown_display_value_refuses_the_payload_and_tombstones_nothing() {
         count_calls: AtomicUsize::new(0),
     });
     let router = remote_router(provider.clone());
-    let mut admitted = grounding_request();
-    admitted.routectl_internal.anthropic_thinking_display = Some("junk".to_string());
+    let admitted = with_recheck_field(ChatRequest::default(), "junk");
     assert!(
         !crate::probe_scheduler::PROBE_MODELED_DISPLAY_VALUES.contains(&"junk"),
         "premise: the value must be outside the modeled vocabulary"
@@ -607,9 +606,7 @@ async fn an_unknown_display_value_refuses_the_payload_and_tombstones_nothing() {
 
     // And the identity IS still probeable: the same lane, with a modeled value,
     // activates and dials. This is what makes "no tombstone" mean something.
-    let mut modeled = grounding_request();
-    modeled.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
-    let _ = router.complete(modeled).await;
+    let _ = router.complete(grounding_request()).await;
     assert_eq!(
         router.probe_scheduler_snapshot().activations_total,
         1,

@@ -46,7 +46,8 @@ use routectl_core::{
     ReasoningConfig, Result, Role, TokenCount, Usage,
 };
 use routectl_router::{
-    AliasValue, Config, ModelEntry, ResolvedModel, Router, plant_acting_field_verdict_for_tests,
+    AliasValue, Config, ModelEntry, ResolvedModel, Router, TEST_RECHECK_KWARG, TEST_RECHECK_PATH,
+    plant_acting_field_verdict_for_tests,
 };
 
 /// The one grounded closed-table path, and the field a pre-flight rewrite drops.
@@ -427,8 +428,8 @@ async fn the_captured_display_rejection_is_repaired_and_teaches_nothing() {
 // Free validation runs on the first admitted request
 // ---------------------------------------------------------------------------
 
-/// A lane activates on its first admitted real request and the probe pass runs
-/// its free validation.
+/// A lane holding an acting negative re-checks it on its next admitted real
+/// request, and the probe pass runs that free validation.
 ///
 /// Asserted on both halves, because each alone is vacuous: an activation that
 /// queued nothing runnable would pass the first, and a pass over an empty
@@ -437,12 +438,15 @@ async fn the_captured_display_rejection_is_repaired_and_teaches_nothing() {
 async fn a_lane_activates_and_runs_free_validation() {
     let seat = Seat::new(false);
     let router = router_with(Arc::clone(&seat));
+    plant_acting_field_verdict_for_tests(&router, STATE_KEY, TEST_RECHECK_PATH, 0);
     assert!(
         router.fidelity_snapshot().probes.activations_total.eq(&0),
         "premise: nothing has activated before the first admitted request",
     );
+    let mut req = req_with_field();
+    req.chat_template_kwargs = Some(serde_json::json!({ TEST_RECHECK_KWARG: "summarized" }));
 
-    let served = router.complete(req_with_field()).await;
+    let served = router.complete(req).await;
     assert!(served.is_ok(), "the admitted request serves: {served:?}");
     // The activation is non-blocking for the user request, so the pass runs on the
     // driver's tick rather than inline. Run one tick, exactly as the daemon does.

@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicUsize;
 
 use super::probe_test_support::{
     BodyAssertingProvider, GROUNDED_PATH, OkProvider, grounding_request, remote_router,
+    with_recheck_field,
 };
 use crate::field_verdict::FieldVerdictKey;
 use crate::probe_scheduler::{
@@ -36,9 +37,10 @@ async fn an_unmodeled_display_value_skips_activation_and_is_never_retained() {
         seen: parking_lot::Mutex::new(Vec::new()),
     });
     let router = remote_router(provider.clone());
-    let mut admitted = grounding_request();
-    admitted.routectl_internal.anthropic_thinking_display =
-        Some(UNMODELED_DISPLAY_VALUE.to_string());
+    let admitted = with_recheck_field(
+        routectl_core::ChatRequest::default(),
+        UNMODELED_DISPLAY_VALUE,
+    );
     assert!(
         !PROBE_MODELED_DISPLAY_VALUES.contains(&UNMODELED_DISPLAY_VALUE),
         "premise: the fixture value must be outside the modeled vocabulary"
@@ -69,8 +71,7 @@ async fn every_modeled_display_value_still_activates() {
             count_calls: AtomicUsize::new(0),
         });
         let router = remote_router(provider);
-        let mut admitted = grounding_request();
-        admitted.routectl_internal.anthropic_thinking_display = Some(token.to_string());
+        let admitted = with_recheck_field(routectl_core::ChatRequest::default(), token);
 
         let _ = router.complete(admitted).await;
 
@@ -297,17 +298,51 @@ async fn retained_payload_bytes_are_bounded_by_depth_times_the_largest_payload()
 }
 
 #[test]
-fn a_test_only_closed_table_row_can_be_neither_captured_nor_applied_by_a_probe() {
-    // The probe path resolves against the GROUNDED table on both sides, so a
-    // test-only row is unproduceable AND unconsumable. This matters because a
-    // TEST build appends `TEST_FIELD_REPAIRS` to `closed_table()`: an
-    // application routed through that table would accept a path no production
-    // capture could ever have emitted, and the asymmetry would hide a real
-    // mis-wiring behind a green suite.
-    //
-    // CONSUMPTION: a payload naming the test-only path sets nothing.
-    let payload = ProbePayload::new(
-        super::field_repair::TEST_PREFIX_IMPACTING_PATH,
+fn only_a_row_a_token_count_validates_is_captured_for_a_probe() {
+    // A count that does not see a field proves nothing about it, so a row
+    // without `count_tokens_validates` must never be captured -- whatever else
+    // the request carries.
+    let validated = super::field_repair::closed_table()
+        .iter()
+        .find(|row| row.path == super::field_repair::TEST_RECHECK_PATH)
+        .expect("premise: the test build carries the re-check row");
+    assert!(
+        validated.count_tokens_validates,
+        "premise: the row is count-validated"
+    );
+
+    let mut req = grounding_request();
+    req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+    req.system = Some(routectl_core::SystemContent::Text(
+        super::field_repair::TEST_PREFIX_SENTINEL.to_string(),
+    ));
+    let present: Vec<&str> = super::field_repair::present_rows(&req)
+        .map(|row| row.path)
+        .collect();
+    assert!(
+        present.contains(&GROUNDED_PATH)
+            && present.contains(&super::field_repair::TEST_PREFIX_IMPACTING_PATH),
+        "premise: the request carries un-validated rows too: {present:?}"
+    );
+
+    let captured: Vec<(&str, String)> = super::field_repair::recheck_payloads(&req).collect();
+
+    assert_eq!(
+        captured,
+        vec![(
+            super::field_repair::TEST_RECHECK_PATH,
+            "summarized".to_string()
+        )],
+        "exactly the count-validated row is captured, with its value"
+    );
+}
+
+#[test]
+fn a_probe_payload_applies_its_own_row_and_nothing_else() {
+    // The probe body is built by applying the payload's row; a path outside the
+    // closed table must set nothing, so no probe assembles an arbitrary field.
+    let unknown = ProbePayload::new(
+        "routectl_test_no_such_row",
         "summarized".to_string(),
         &[],
         &[],
@@ -316,48 +351,28 @@ fn a_test_only_closed_table_row_can_be_neither_captured_nor_applied_by_a_probe()
     .expect("the payload constructor bounds VALUES, not paths");
     let mut req = routectl_core::ChatRequest::default();
     let before = serde_json::to_value(&req).expect("serializable");
-    super::field_repair::apply_probe_payload(&mut req, &payload);
+    super::field_repair::apply_probe_payload(&mut req, &unknown);
     assert_eq!(
         serde_json::to_value(&req).expect("serializable"),
         before,
-        "a test-only path must set nothing on a probe body"
+        "a path outside the closed table sets nothing"
     );
-    // The serialized comparison cannot see `routectl_internal` (the whole
-    // carrier is `#[serde(skip)]`), so the two internal carriers a probe could
-    // possibly touch are checked directly.
     assert!(req.routectl_internal.anthropic_thinking_display.is_none());
-    assert!(req.system.is_none());
 
-    // And the POSITIVE CONTROL on the same call: the grounded path DOES apply,
-    // so the silence above is about the path rather than about
-    // `apply_probe_payload` being inert.
-    let grounded = ProbePayload::new(GROUNDED_PATH, "summarized".to_string(), &[], &[], false)
-        .expect("grounded payload");
+    // POSITIVE CONTROL on the same call: the re-check row's payload sets its
+    // own carrier, so the silence above is about the path.
+    let recheck = ProbePayload::new(
+        super::field_repair::TEST_RECHECK_PATH,
+        "summarized".to_string(),
+        &[],
+        &[],
+        false,
+    )
+    .expect("a modeled value");
     let mut req = routectl_core::ChatRequest::default();
-    super::field_repair::apply_probe_payload(&mut req, &grounded);
+    super::field_repair::apply_probe_payload(&mut req, &recheck);
     assert_eq!(
-        req.routectl_internal.anthropic_thinking_display.as_deref(),
-        Some("summarized"),
-        "the grounded path must still apply"
-    );
-
-    // CAPTURE: a request carrying ONLY the test-only surface grounds no probe
-    // payload, even in this test build where the row is in `closed_table()`.
-    let test_row_only = routectl_core::ChatRequest {
-        system: Some(routectl_core::SystemContent::Text(
-            super::field_repair::TEST_PREFIX_SENTINEL.to_string(),
-        )),
-        ..Default::default()
-    };
-    assert!(
-        super::field_repair::present_rows(&test_row_only)
-            .any(|row| row.path == super::field_repair::TEST_PREFIX_IMPACTING_PATH),
-        "premise: the test row must actually be present in a test build, or \
-         this proves nothing"
-    );
-    assert_eq!(
-        super::field_repair::grounded_closed_table_payloads(&test_row_only).count(),
-        0,
-        "a test-only row must ground no probe payload"
+        req.chat_template_kwargs,
+        Some(serde_json::json!({ super::field_repair::TEST_RECHECK_KWARG: "summarized" })),
     );
 }

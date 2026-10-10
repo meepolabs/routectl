@@ -15,8 +15,8 @@ use routectl_core::{ChatRequest, ChatResponse, Error, Provider, Result, TokenCou
 
 use super::Router;
 use super::probe_test_support::{
-    BodyAssertingProvider, BoxStreamAlias, GROUNDED_PATH, OkProvider, grounding_request,
-    remote_router, remote_router_with_model_beta,
+    BodyAssertingProvider, BoxStreamAlias, GROUNDED_PATH, OkProvider, RECHECK_VALUE,
+    grounding_request, recheck_value, remote_router, remote_router_with_model_beta,
 };
 use crate::config::{AliasValue, Config, ModelEntry, ProviderEntry};
 use crate::field_verdict::FieldVerdictKey;
@@ -24,14 +24,12 @@ use crate::probe_scheduler::ProbeValidator;
 use crate::resolved::ResolvedModel;
 
 #[tokio::test]
-async fn the_probe_body_carries_the_grounded_field_the_upstream_model_and_one_message() {
+async fn the_probe_body_carries_the_re_checked_field_the_upstream_model_and_one_message() {
     let provider = Arc::new(BodyAssertingProvider {
         seen: parking_lot::Mutex::new(Vec::new()),
     });
     let router = remote_router(provider.clone());
-    let mut admitted = grounding_request();
-    admitted.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
-    let _ = router.complete(admitted).await;
+    let _ = router.complete(grounding_request()).await;
 
     let ran = router.run_due_probes().await;
     assert_eq!(ran, 1);
@@ -42,11 +40,8 @@ async fn the_probe_body_carries_the_grounded_field_the_upstream_model_and_one_me
     // carried -- a probe naming the field but sending a different value
     // would ask about a shape the upstream never saw.
     assert_eq!(
-        probe
-            .routectl_internal
-            .anthropic_thinking_display
-            .as_deref(),
-        Some("summarized"),
+        recheck_value(probe),
+        Some(RECHECK_VALUE),
         "the probe must carry the capability field/value under test"
     );
     // The seat's WIRE model, not the nickname: this body goes straight to
@@ -60,46 +55,14 @@ async fn the_probe_body_carries_the_grounded_field_the_upstream_model_and_one_me
         1,
         "one minimal message, so count_tokens is well-formed"
     );
-    // The minimal canonical reasoning state the Anthropic normalizer
-    // requires, without which `build_thinking` returns early and the wire
-    // body carries no `thinking` object at all -- the probe would then ask a
-    // plain token count and read its success as evidence about a field it
-    // never sent. The serializer-level pin lives in routectl-providers
-    // (`a_probe_shaped_body_serializes_both_thinking_type_and_display`);
-    // this asserts the router produces exactly that shape.
-    let reasoning = probe
-        .reasoning
-        .as_ref()
-        .expect("the probe body must carry a reasoning state");
-    assert!(
-        reasoning.enabled == Some(true)
-            || reasoning.effort.is_some()
-            || reasoning.max_tokens.is_some(),
-        "the reasoning state must make thinking ACTIVE, or the normalizer emits nothing: \
-         {reasoning:?}"
-    );
-    assert!(
-        probe.max_tokens.is_some(),
-        "the legacy thinking shape needs a budget window to clamp into"
-    );
     // And the run SETTLED, which it only can if the field was present.
     assert_eq!(router.probe_scheduler_snapshot().resolved_total, 1);
 }
 
 #[tokio::test]
-async fn the_generated_probe_body_serializes_a_thinking_object_through_the_real_normalizer() {
-    // WELDED, not asserted about. The two assertions above describe the
-    // router's canonical `ChatRequest`; whether that shape actually reaches the
-    // wire as a `thinking` object is a fact about the ANTHROPIC NORMALIZER, and
-    // a router-side assertion about `reasoning.enabled` is a claim about the
-    // normalizer rather than a measurement of it. `build_thinking` returns
-    // early on several conditions, so the budget/reasoning state the probe sets
-    // is only load-bearing if the real normalizer emits the field given it.
-    //
-    // So: take the REAL generated probe body and run it through the REAL
-    // provider's `normalize_request`. No private provider constant is exported
-    // for this -- the `Provider` trait method is the production seam, and a
-    // hand-built body here would reintroduce exactly the claim being removed.
+async fn the_probe_preserves_the_admitted_requests_beta_context_from_both_sources() {
+    // A beta-gated field must be tested in the header context the upstream was
+    // about to see. Removing the capture makes both of these empty.
     let provider = Arc::new(BodyAssertingProvider {
         seen: parking_lot::Mutex::new(Vec::new()),
     });
@@ -109,8 +72,6 @@ async fn the_generated_probe_body_serializes_a_thinking_object_through_the_real_
     // since the overlay RECOMPUTES the field per target and would overwrite it.
     let router = remote_router_with_model_beta(provider.clone(), "context-1m-2025-08-07");
     let mut admitted = grounding_request();
-    admitted.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
-    // A client/ingress beta alongside it, so both sources are represented.
     admitted.anthropic_beta = vec!["interleaved-thinking-2025-05-14".to_string()];
     let _ = router.complete(admitted).await;
     assert_eq!(router.run_due_probes().await, 1);
@@ -122,26 +83,6 @@ async fn the_generated_probe_body_serializes_a_thinking_object_through_the_real_
         .cloned()
         .expect("the worker dialed count_tokens");
 
-    let real = routectl_providers::anthropic_api::AnthropicApiProvider::new(
-        routectl_providers::anthropic_api::AnthropicApiConfig::new("p1", "literal-key"),
-    );
-    let body = real
-        .normalize_request(&probe)
-        .expect("the generated probe body must normalize");
-
-    assert_eq!(
-        body["thinking"]["type"], "enabled",
-        "the generated probe body must reach the wire as an ACTIVE thinking object"
-    );
-    assert_eq!(
-        body["thinking"]["display"], "summarized",
-        "and it must carry the display value under test"
-    );
-
-    // Beta fidelity: the probe must preserve the admitted request's effective
-    // beta context, from both sources, so a beta-gated field is tested in the
-    // header context the upstream was about to see. Removing the capture makes
-    // both of these empty.
     assert!(
         probe
             .anthropic_beta
@@ -156,6 +97,55 @@ async fn the_generated_probe_body_serializes_a_thinking_object_through_the_real_
             .contains(&"context-1m-2025-08-07".to_string()),
         "the probe must carry the operator beta floor: {:?}",
         probe.routectl_internal.operator_betas
+    );
+}
+
+#[test]
+fn a_display_probe_body_serializes_an_active_thinking_object_through_the_real_normalizer() {
+    // WELDED, not asserted about. The display carrier alone does not reach the
+    // wire: `build_thinking` returns early without an active reasoning state, so
+    // a display probe body is only meaningful if the real normalizer emits the
+    // field given what `apply_probe_payload` sets. The display row is not
+    // count-validated today, so no capture produces this payload; the body
+    // builder is driven directly so the shape stays pinned for the row that
+    // becomes one.
+    let provider: Arc<dyn Provider> = Arc::new(OkProvider {
+        count_calls: AtomicUsize::new(0),
+    });
+    let router = remote_router(provider);
+    let key = FieldVerdictKey::new(
+        &super::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
+    let seat = router
+        .probe_seat_for(&key)
+        .expect("the lane resolves a seat");
+    let payload = crate::probe_scheduler::ProbePayload::new(
+        GROUNDED_PATH,
+        "summarized".to_string(),
+        &[],
+        &[],
+        false,
+    )
+    .expect("a modeled display value");
+
+    let probe = super::probe_lifecycle::build_probe_request(&seat, &payload);
+
+    let real = routectl_providers::anthropic_api::AnthropicApiProvider::new(
+        routectl_providers::anthropic_api::AnthropicApiConfig::new("p1", "literal-key"),
+    );
+    let body = real
+        .normalize_request(&probe)
+        .expect("the generated probe body must normalize");
+    assert_eq!(
+        body["thinking"]["type"], "enabled",
+        "the generated probe body must reach the wire as an ACTIVE thinking object"
+    );
+    assert_eq!(
+        body["thinking"]["display"], "summarized",
+        "and it must carry the display value under test"
     );
 }
 

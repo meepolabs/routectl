@@ -41,59 +41,61 @@ impl std::fmt::Debug for ProbeSeat {
 }
 
 impl Router {
-    /// Whether a rejection from `provider_name`'s CURRENT entry would be
-    /// attributable to a routectl-owned seat.
+    /// The provider kind a probe on `provider_name`'s CURRENT entry, sending
+    /// `upstream`, would act on -- or `None` when this stage may not probe it.
     ///
     /// THE refusal predicate both probe stages call: activation, and the
     /// recheck immediately before the dial. A recheck NARROWER than activation
     /// is the gap a reload slips through, since the queued job was admitted
     /// against the OLD entry and nothing else looks again -- which is why both
-    /// read one set rather than each carrying its own.
+    /// read one decision rather than each carrying its own.
     ///
-    /// Three ways to be unattributable, all read from the operator's own entry
-    /// rather than from a dispatch target:
+    /// Two halves, both required:
     ///
-    /// - no entry at all (removed by a reload);
-    /// - a FORWARDED credential, where the target authenticates with the
-    ///   CLIENT's bearer, so one client's rejection must not mint a permanent
-    ///   verdict steering every other client. Read through the same accessor
-    ///   the chain derives `DispatchTarget::use_forwarded_credential` from, so
-    ///   this cannot disagree with the flag activation refuses on;
-    /// - no classifiable egress base URL, which is how the Bedrock Mantle
-    ///   shape is excluded (its entry reads `anthropic-api` while egressing
-    ///   through Mantle, and the accessor answers `None` for it), a base URL
-    ///   naming a LOOPBACK destination, or a kind other than `anthropic-api`
-    ///   (the only lane probes act on). All through
-    ///   `field_repair::attributable_field_lane`, the same
-    ///   entry-and-base-url read the reactive arm and the pre-flight planner
-    ///   attribute through.
+    /// - the shared attributability decision
+    ///   (`field_repair::attributable_field_lane`): the entry exists, does not
+    ///   authenticate with a FORWARDED client credential, is of a kind field
+    ///   repair acts on, egresses to a classifiable base URL (which excludes a
+    ///   Mantle sub-lane), and that base is not LOOPBACK -- the same read the
+    ///   reactive arm and the pre-flight planner attribute through;
+    /// - a FREE token count for that kind and upstream (the count walk's own
+    ///   `seat_can_count_tokens`): a kind with none has no validator to ask, so
+    ///   the probe could only no-op.
     ///
-    /// What is CHECKED is that every stage reaches the same VERDICT on the
-    /// provider shapes a parity test varies: base URL, credential source, entry
-    /// presence, and -- where the build can construct one -- a Mantle sub-lane,
-    /// the shape a raw base-url read gets wrong rather than merely narrow. A
-    /// stage that narrows or widens on one of those reds on that row. A decision
-    /// keyed on another entry fact needs a new discriminating row first, and a
-    /// local check that merely restates part of the shared set changes no
-    /// verdict; calling through is a maintenance convention here, not an
-    /// enforced one.
-    pub(super) fn probe_entry_is_attributable(&self, provider_name: &str) -> bool {
-        // The probe stages have no dispatch target, so the forwarded fact is
-        // read off the operator's ENTRY -- through the same accessor the chain
-        // derives `DispatchTarget::use_forwarded_credential` from, so the two
-        // sources cannot disagree about the same provider. It then feeds the
-        // SHARED decision, which owns every other refusal.
+    /// `use_forwarded_credential` is the caller's own fact: activation reads it
+    /// off the dispatch target, the recheck off the entry (see
+    /// [`Self::probe_entry_is_attributable`]).
+    pub(super) fn probe_lane_kind(
+        &self,
+        provider_name: &str,
+        use_forwarded_credential: bool,
+        upstream: &str,
+    ) -> Option<&'static str> {
+        let lane = super::field_repair::attributable_field_lane(
+            &self.config,
+            provider_name,
+            use_forwarded_credential,
+        )?;
+        super::count_tokens::seat_can_count_tokens(Some(lane.provider_kind), upstream)
+            .then_some(lane.provider_kind)
+    }
+
+    /// Whether a probe on `provider_name`'s CURRENT entry, sending `upstream`,
+    /// is one [`Self::probe_lane_kind`] admits, reading the forwarded fact off
+    /// the entry.
+    ///
+    /// The pre-dial recheck has no dispatch target, so the forwarded fact comes
+    /// from the operator's ENTRY -- through the same accessor the chain derives
+    /// `DispatchTarget::use_forwarded_credential` from, so the two sources
+    /// cannot disagree about the same provider.
+    pub(super) fn probe_entry_is_attributable(&self, provider_name: &str, upstream: &str) -> bool {
         let use_forwarded_credential = self
             .config
             .providers
             .get(provider_name)
             .is_some_and(|entry| entry.forwarded_base_url().is_some());
-        super::field_repair::attributable_field_lane(
-            &self.config,
-            provider_name,
-            use_forwarded_credential,
-        )
-        .is_some_and(|lane| lane.provider_kind == super::field_repair::ANTHROPIC_API_KIND)
+        self.probe_lane_kind(provider_name, use_forwarded_credential, upstream)
+            .is_some()
     }
 
     /// The resolved seat a probe identity's lane names.

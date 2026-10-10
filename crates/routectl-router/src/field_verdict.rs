@@ -930,15 +930,19 @@ impl FieldVerdictRegistry {
         }
     }
 
-    /// Whether an acting verdict currently applies to this identity,
-    /// independent of any in-flight repair. Read-only: it never claims the
-    /// slot. Test-only, because the dispatch path settles through
-    /// `admit_provisional`, which reads the same state while claiming.
-    #[cfg(test)]
-    pub fn is_negative_acting(&self, key: &FieldVerdictKey, now: Instant) -> bool {
+    /// Whether an acting verdict currently applies to this identity, read as
+    /// `generation`, independent of any in-flight repair. Read-only: it never
+    /// claims the repair slot, so asking does not refuse a sibling request's
+    /// repair.
+    pub fn is_negative_acting_in_generation(
+        &self,
+        key: &FieldVerdictKey,
+        generation: u64,
+        now: Instant,
+    ) -> bool {
         matches!(
             self.learned.negative_state_in_generation(
-                self.learned.generation(),
+                generation,
                 key.registry_key(),
                 &key.capability_key,
                 &key.provider_kind,
@@ -946,6 +950,13 @@ impl FieldVerdictRegistry {
             ),
             Some((NegativeState::Acting, _))
         )
+    }
+
+    /// [`Self::is_negative_acting_in_generation`] at the registry's current
+    /// generation.
+    #[cfg(test)]
+    pub fn is_negative_acting(&self, key: &FieldVerdictKey, now: Instant) -> bool {
+        self.is_negative_acting_in_generation(key, self.learned.generation(), now)
     }
 
     /// The wrapped registry as a shared handle, so a rebuild can be constructed

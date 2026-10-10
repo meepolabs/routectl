@@ -225,4 +225,6 @@ pub use router::{
     observe_field_verdict_for_tests, plant_acting_field_verdict_for_tests,
     seed_distinct_fidelity_counters_for_tests,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use router::{TEST_RECHECK_KWARG, TEST_RECHECK_PATH};
 pub use state_key::StateKey;

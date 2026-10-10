@@ -52,9 +52,8 @@ use super::repair_budget::RepairBudget;
 
 use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
 
-/// `anthropic-api`, as `ProviderEntry::kind_str` spells it: the lane the
-/// probe stages act on, and one of the kinds field repair admits
-/// ([`field_repair_admits_kind`]).
+/// `anthropic-api`, as `ProviderEntry::kind_str` spells it: one of the kinds
+/// field repair admits ([`field_repair_admits_kind`]).
 pub(super) const ANTHROPIC_API_KIND: &str = "anthropic-api";
 
 /// Action token for the field-repair WARN: the L0 repair dropped the mapped
@@ -186,6 +185,13 @@ pub(super) enum FieldSurface {
     /// [`TEST_CEILING_SENTINEL`].
     #[cfg(test)]
     CeilingFieldForTests,
+    /// Test-only surface for a DROP row a free token count validates: the
+    /// [`TEST_RECHECK_KWARG`] key of `chat_template_kwargs`. The grounded row
+    /// does not validate on a count, so without this the re-check trigger has
+    /// no row to fire on. Also compiled under `test-utils`, so the probe tests
+    /// of other crates can drive a re-check end to end.
+    #[cfg(any(test, feature = "test-utils"))]
+    RecheckFieldForTests,
 }
 
 impl FieldSurface {
@@ -227,6 +233,30 @@ impl FieldSurface {
                 .is_some_and(|kwargs| kwargs.get(TEST_REWRITE_KWARG).is_some()),
             #[cfg(test)]
             Self::CeilingFieldForTests => req.max_tokens == Some(TEST_CEILING_SENTINEL),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::RecheckFieldForTests => Self::test_kwarg(req, TEST_RECHECK_KWARG).is_some(),
+        }
+    }
+
+    /// The string value of `chat_template_kwargs[kwarg]`, for the test-only
+    /// kwarg surfaces.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn test_kwarg<'r>(req: &'r ChatRequest, kwarg: &str) -> Option<&'r str> {
+        req.chat_template_kwargs
+            .as_ref()
+            .and_then(|kwargs| kwargs.get(kwarg))
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// Set `chat_template_kwargs[kwarg]` to `value`, for the test-only kwarg
+    /// surfaces.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn set_test_kwarg(req: &mut ChatRequest, kwarg: &str, value: &str) {
+        let kwargs = req
+            .chat_template_kwargs
+            .get_or_insert_with(|| serde_json::json!({}));
+        if let Some(object) = kwargs.as_object_mut() {
+            object.insert(kwarg.to_string(), value.into());
         }
     }
 
@@ -260,12 +290,13 @@ impl FieldSurface {
             | Self::UnsupportedFieldForTests
             | Self::CeilingFieldForTests => None,
             #[cfg(test)]
-            Self::RewriteFieldForTests => req
-                .chat_template_kwargs
-                .as_ref()
-                .and_then(|kwargs| kwargs.get(TEST_REWRITE_KWARG))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
+            Self::RewriteFieldForTests => {
+                Self::test_kwarg(req, TEST_REWRITE_KWARG).map(str::to_string)
+            }
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::RecheckFieldForTests => {
+                Self::test_kwarg(req, TEST_RECHECK_KWARG).map(str::to_string)
+            }
         }
     }
 
@@ -310,14 +341,9 @@ impl FieldSurface {
             | Self::UnsupportedFieldForTests
             | Self::CeilingFieldForTests => {}
             #[cfg(test)]
-            Self::RewriteFieldForTests => {
-                let kwargs = req
-                    .chat_template_kwargs
-                    .get_or_insert_with(|| serde_json::json!({}));
-                if let Some(object) = kwargs.as_object_mut() {
-                    object.insert(TEST_REWRITE_KWARG.to_string(), value.into());
-                }
-            }
+            Self::RewriteFieldForTests => Self::set_test_kwarg(req, TEST_REWRITE_KWARG, value),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::RecheckFieldForTests => Self::set_test_kwarg(req, TEST_RECHECK_KWARG, value),
         }
     }
 
@@ -407,6 +433,13 @@ impl FieldSurface {
                 }
                 req.max_tokens.take().is_some()
             }
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::RecheckFieldForTests => req
+                .chat_template_kwargs
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|object| object.remove(TEST_RECHECK_KWARG))
+                .is_some(),
         }
     }
 }
@@ -523,8 +556,8 @@ pub(super) struct FieldRepairRow {
     pub(super) transform: FieldTransform,
     pub(super) class: TransformClass,
     /// Whether the upstream's token-count endpoint rejects this field the way
-    /// a completion does, so a free count can re-check a verdict on it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no re-check gates on it yet"))]
+    /// a completion does, so a free count can re-check a verdict on it. Only
+    /// such a row is ever probed.
     pub(super) count_tokens_validates: bool,
 }
 
@@ -589,6 +622,17 @@ pub(in crate::router) const TEST_REWRITE_KWARG: &str = "routectl_test_rewrite_kw
 pub(in crate::router) const TEST_REWRITE_ACCEPTED: &[&str] =
     &["routectl-test-accepted-a", "routectl-test-accepted-b"];
 
+/// The qualified dotted path of the test-only row a free count validates.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub const TEST_RECHECK_PATH: &str = "routectl_test_recheck_field";
+
+/// The `chat_template_kwargs` key the test-only re-check surface reads and
+/// writes.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub const TEST_RECHECK_KWARG: &str = "routectl_test_recheck_kwarg";
+
 /// The qualified dotted path of the test-only ceiling row.
 #[cfg(test)]
 pub(in crate::router) const TEST_CEILING_PATH: &str = "routectl_test_ceiling_field";
@@ -640,6 +684,18 @@ const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[
     },
 ];
 
+/// The test-only row a free token count validates, which a `test-utils` build
+/// appends too: no grounded row is count-validated, so this is the only row a
+/// re-check probe can be built from in any test, in this crate or another.
+#[cfg(any(test, feature = "test-utils"))]
+const TEST_RECHECK_FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
+    path: TEST_RECHECK_PATH,
+    surface: FieldSurface::RecheckFieldForTests,
+    transform: FieldTransform::Drop,
+    class: TransformClass::Envelope,
+    count_tokens_validates: true,
+}];
+
 /// The grounded rows alone, without the rows a test build appends.
 #[cfg(test)]
 pub(super) const fn grounded_table() -> &'static [FieldRepairRow] {
@@ -647,29 +703,28 @@ pub(super) const fn grounded_table() -> &'static [FieldRepairRow] {
 }
 
 /// The whole closed table this build scans, grounded rows first.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-utils")))]
 pub(super) const fn closed_table() -> &'static [FieldRepairRow] {
     FIELD_REPAIRS
 }
 
-/// Test build: the grounded rows plus [`TEST_FIELD_REPAIRS`], in that order, so
-/// a grounded row keeps its production precedence and the added row sits behind
-/// it.
+/// Test build: the grounded rows, then [`TEST_FIELD_REPAIRS`] (unit tests
+/// only), then [`TEST_RECHECK_FIELD_REPAIRS`], in that order, so a grounded row
+/// keeps its production precedence and the added rows sit behind it.
 ///
 /// The divergent surface is deliberately NOT a row here: its presence predicate
 /// answers `true` unconditionally, so a row for it would make every request in
 /// a test build carry it. It reaches `apply`'s fail-closed branch through
 /// [`FieldRepairPlan::apply_candidate`] instead.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(super) fn closed_table() -> &'static [FieldRepairRow] {
     use std::sync::LazyLock;
 
     static ROWS: LazyLock<Vec<FieldRepairRow>> = LazyLock::new(|| {
-        FIELD_REPAIRS
-            .iter()
-            .chain(TEST_FIELD_REPAIRS)
-            .copied()
-            .collect()
+        let rows = FIELD_REPAIRS.iter();
+        #[cfg(test)]
+        let rows = rows.chain(TEST_FIELD_REPAIRS);
+        rows.chain(TEST_RECHECK_FIELD_REPAIRS).copied().collect()
     });
     &ROWS
 }
@@ -683,47 +738,35 @@ const PROBE_THINKING_MAX_TOKENS: u32 = 2048;
 
 /// Apply a probe payload's closed-table field and value onto `req`.
 ///
-/// Routed through the GROUNDED table -- the same `FIELD_REPAIRS` that
-/// [`grounded_closed_table_payloads`] captures from -- so the lookup that
-/// applies a payload accepts exactly the paths the lookup that produces one
-/// can emit. Resolving against the test-inclusive `closed_table()` instead
-/// would let a test-only row be applied here while no production path could
-/// ever have captured it, which is the asymmetry that hides a real
-/// mis-wiring. A payload naming a path outside the grounded table sets
-/// nothing, so no probe can assemble an arbitrary envelope field.
+/// Resolved against the closed table, so a payload naming a path outside it
+/// sets nothing and no probe can assemble an arbitrary envelope field. Which
+/// rows a probe may ASK about is decided where payloads are captured
+/// ([`recheck_payloads`]), the only production source of one.
 pub(super) fn apply_probe_payload(
     req: &mut ChatRequest,
     payload: &crate::probe_scheduler::ProbePayload,
 ) {
-    let Some(row) = grounded_table_row(payload.field_path()) else {
+    let Some(row) = closed_table()
+        .iter()
+        .find(|row| row.path == payload.field_path())
+    else {
         return;
     };
     row.surface.set_in(req, payload.field_value());
 }
 
-/// The GROUNDED table's row for `path`, or `None`.
-///
-/// Resolves against `FIELD_REPAIRS` alone, never the TEST-INCLUSIVE
-/// [`closed_table`] (a test build appends `TEST_FIELD_REPAIRS`), and the
-/// difference is load-bearing. The probe path uses this one on BOTH sides -- capture through
-/// [`grounded_closed_table_payloads`] and application through
-/// [`apply_probe_payload`] -- so a test-only row can be neither produced nor
-/// consumed by a probe, in any build.
-fn grounded_table_row(path: &str) -> Option<&'static FieldRepairRow> {
-    FIELD_REPAIRS.iter().find(|row| row.path == path)
-}
-
-/// The grounded closed-table rows `req` carries, each with the VALUE it
-/// carries for that row -- the bounded payload a probe is built from.
+/// The count-validated closed-table rows `req` carries, each with the VALUE it
+/// carries for that row -- the bounded capture a re-check probe is built from.
 ///
 /// One accessor rather than a path list plus a separate value lookup: the
 /// two must describe the same carrier, and splitting them is how a probe
 /// comes to name one field while sending another's value.
-pub(super) fn grounded_closed_table_payloads(
+pub(super) fn recheck_payloads(
     req: &ChatRequest,
 ) -> impl Iterator<Item = (&'static str, String)> + use<'_> {
-    FIELD_REPAIRS
+    closed_table()
         .iter()
+        .filter(|row| row.count_tokens_validates)
         .filter_map(|row| row.surface.value_in(req).map(|value| (row.path, value)))
 }
 

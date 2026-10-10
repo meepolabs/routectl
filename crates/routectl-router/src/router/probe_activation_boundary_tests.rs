@@ -2,7 +2,9 @@
 //!
 //! The boundary under test is ADMITTED traffic: past the gate, every
 //! request-shaping step run, about to dial. Each test names that boundary
-//! rather than the function it calls.
+//! rather than the function it calls. What activates is a RE-CHECK: a field
+//! the lane already holds an acting negative on, whose row a free count
+//! validates, on a kind with such a count.
 //!
 //! Every negative assertion here is paired with a positive control on the
 //! same fixture -- `an_admitted_anthropic_target_on_a_remote_base_activates`
@@ -17,89 +19,109 @@ use std::time::Duration;
 use routectl_core::{ChatRequest, Provider};
 
 use super::Router;
+use super::probe_payload_capture::ProbeFieldCapture;
 use super::probe_test_support::{
-    FailingProvider, GROUNDED_PATH, OkProvider, grounding_request, plant_eligible_verdict,
-    remote_router, router_on_base, router_on_base_with_failure_threshold,
+    BodyAssertingProvider, FailingProvider, GROUNDED_PATH, OkProvider, RECHECK_PATH, RECHECK_VALUE,
+    grounding_request, plant_acting_negative, plant_eligible_verdict, recheck_value, remote_router,
+    remote_router_without_negative, router_on_base, router_on_base_with_failure_threshold,
 };
 use crate::config::Config;
 use crate::field_verdict::FieldVerdictKey;
 use crate::probe_scheduler::ProbeValidator;
 
 #[tokio::test]
-async fn an_acting_preflight_strips_before_activation_on_a_real_dispatch_walk() {
-    // THE composition, end to end through `complete_with_options` rather than
-    // by calling the activation seam directly. The two arms meet on one walk:
-    // the pre-flight planner rewrites the per-target body first, and activation
-    // reads THAT body. So an eligible verdict strips the closed-table surface
-    // and the lane must activate nothing -- a probe asking about a field this
-    // request no longer sends would produce evidence about bytes the upstream
-    // never saw.
-    //
-    // A source-text guard already pins that each call site passes
-    // `attempt_req`. It cannot pin ORDER: moving activation above
-    // `plan_field_preflight`, or handing it a clone taken before the rewrite,
-    // still passes the per-target variable and still reads the guard as
-    // satisfied. Only driving the real walk distinguishes those.
-    let provider = Arc::new(OkProvider {
-        count_calls: AtomicUsize::new(0),
+async fn a_field_preflight_dropped_on_an_acting_negative_is_re_checked_from_the_pre_preflight_capture()
+ {
+    // THE composition, end to end through `complete_with_options`. An acting,
+    // confirmed negative makes pre-flight DROP the field from the attempt -- and
+    // that same negative is what a re-check exists to revisit. So the payload
+    // must come from the request as it stood BEFORE pre-flight: read after it,
+    // the field is gone and the lane would never be re-checked.
+    let provider = Arc::new(BodyAssertingProvider {
+        seen: parking_lot::Mutex::new(Vec::new()),
     });
-    // Durable persistence is ASSUMED here, and only here among this file's
-    // fixtures: learned pre-flight suspends unless a capability-persistence health
-    // read reports durable writes, and this is the one test whose premise requires
-    // the planner to ACT. Opting in at the site rather than in the shared fixture
-    // keeps every other test in this file on the production default.
-    let router = remote_router(provider).with_capability_writes_assumed_durable_for_tests();
-    plant_eligible_verdict(&router, "m1");
+    let router = remote_router_without_negative(provider.clone())
+        .with_capability_writes_assumed_durable_for_tests();
+    plant_eligible_verdict(&router, "m1", RECHECK_PATH);
 
     let dispatched = router
         .complete_with_options(grounding_request(), Default::default())
         .await;
 
-    // THE PREMISE, asserted rather than assumed: the pre-flight planner must
-    // actually have ACTED on this walk. A fixture whose planting silently
-    // failed, or a planner that declined for any of its own gates, would leave
-    // the surface intact -- and then zero activations would be measuring a
-    // broken activation path while claiming to measure the composition.
+    // THE PREMISE, asserted rather than assumed: the pre-flight planner acted,
+    // so the attempt went upstream WITHOUT the field.
     assert!(
         dispatched
             .meta
             .field_preflight
             .iter()
             .any(|record| record.acted),
-        "premise: the pre-flight planner must have acted, or zero activations \
-         proves nothing about the composition: {:?}",
+        "premise: the pre-flight planner must have acted: {:?}",
         dispatched.meta.field_preflight
     );
+    let snap = router.probe_scheduler_snapshot();
+    assert_eq!(snap.activations_total, 1, "exactly one re-check is queued");
+    assert_eq!(snap.queued, 1);
+
+    assert_eq!(router.run_due_probes().await, 1);
+    let probe = provider
+        .seen
+        .lock()
+        .last()
+        .cloned()
+        .expect("the worker dialed count_tokens");
+    assert_eq!(
+        recheck_value(&probe),
+        Some(RECHECK_VALUE),
+        "the probe carries the field pre-flight removed from the attempt"
+    );
+}
+
+#[tokio::test]
+async fn a_request_carrying_a_grounded_field_on_a_lane_with_no_negative_queues_nothing() {
+    // Discovery is gone: a field the lane has learned nothing about is the
+    // reactive arm's business, not a probe's. Paired with
+    // `an_admitted_anthropic_target_on_a_remote_base_activates`, the same walk
+    // on the same fixture with the negative planted.
+    let provider = Arc::new(OkProvider {
+        count_calls: AtomicUsize::new(0),
+    });
+    let router = remote_router_without_negative(provider);
+    let mut req = grounding_request();
+    req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+
+    let _ = router.complete(req).await;
 
     let snap = router.probe_scheduler_snapshot();
-    assert_eq!(
-        snap.activations_total, 0,
-        "an acting pre-flight strips the surface, so the walk grounds no lane"
-    );
+    assert_eq!(snap.activations_total, 0, "no negative, no re-check");
     assert_eq!(snap.queued, 0);
 }
 
 #[tokio::test]
-async fn the_same_dispatch_walk_without_an_eligible_verdict_activates_exactly_one_lane() {
-    // The POSITIVE CONTROL for the test above, on the same walk and the same
-    // fixture with the ONE difference that no verdict is planted: nothing
-    // strips, so the surface survives to activation and exactly one lane
-    // enters the queue. Without this, the silence above would pass on a router
-    // whose activation is broken outright.
+async fn an_acting_negative_on_a_row_a_count_does_not_validate_queues_nothing() {
+    // The grounded display row is not count-validated: a count accepting the
+    // field proves nothing about a completion. An acting negative on it, with
+    // the request carrying it, must still queue nothing.
     let provider = Arc::new(OkProvider {
         count_calls: AtomicUsize::new(0),
     });
-    let router = remote_router(provider);
-
-    let _ = router
-        .complete_with_options(grounding_request(), Default::default())
-        .await;
-
-    assert_eq!(
-        router.probe_scheduler_snapshot().activations_total,
-        1,
-        "with nothing stripping the surface, the walk activates its lane"
+    let router = remote_router_without_negative(provider);
+    plant_acting_negative(
+        &router,
+        &super::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
     );
+    let mut req = routectl_core::ChatRequest::default();
+    req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+    assert!(
+        super::field_repair::present_rows(&req).any(|row| row.path == GROUNDED_PATH),
+        "premise: the request carries the un-validated row"
+    );
+
+    let _ = router.complete(req).await;
+
+    assert_eq!(router.probe_scheduler_snapshot().activations_total, 0);
 }
 
 #[tokio::test]
@@ -247,14 +269,11 @@ fn every_activation_call_site_passes_the_per_target_request() {
         3,
         "expected the complete, stream, and count_tokens call sites, found {args:?}"
     );
-    // NAME-based, and that is the limit of what this guard proves: any binding
-    // whose name contains `attempt_req` satisfies it, including a clone taken
-    // BEFORE the pre-flight rewrite (`attempt_req_before_preflight`). Measured --
-    // that mutation passes here. What closes the gap is the end-to-end
-    // composition test
-    // `an_acting_preflight_strips_before_activation_on_a_real_dispatch_walk`,
-    // which drives the real walk and reds on exactly that clone. This guard's job
-    // is narrower: catch a site wired to the INGRESS request, which no behavioral
+    // NAME-based, and that is the limit of what this guard proves. Where the
+    // FIELDS are captured -- before pre-flight -- is pinned behaviorally by
+    // `a_field_preflight_dropped_on_an_acting_negative_is_re_checked_from_the_pre_preflight_capture`,
+    // which drives the real walk. This guard's job is narrower: catch a site
+    // whose beta context is wired to the INGRESS request, which no behavioral
     // fixture here discriminates (the overlay set gives no observable difference).
     for arg in &args {
         assert!(
@@ -331,10 +350,101 @@ fn a_target_whose_base_url_is_not_attributable_activates_no_lane() {
         "p1",
         Some("anthropic-api"),
         false,
+        &ProbeFieldCapture::of(&grounding_request()),
         &grounding_request(),
     );
 
     assert_eq!(router.probe_scheduler_snapshot().activations_total, 0);
+}
+
+/// One kind's re-check verdict: the `[providers.p0]` body, the upstream its
+/// lane sends, and whether a re-check is queued.
+struct KindRow {
+    name: &'static str,
+    provider_toml: &'static str,
+    kind: &'static str,
+    upstream: &'static str,
+    queues: bool,
+}
+
+fn kind_rows() -> Vec<KindRow> {
+    #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+    let mut rows = vec![
+        KindRow {
+            name: "anthropic-api",
+            provider_toml: "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n",
+            kind: "anthropic-api",
+            upstream: "claude-sonnet-4-5",
+            queues: true,
+        },
+        KindRow {
+            name: "openai-compat, a kind with no token count",
+            provider_toml: "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
+                            api_key_ref = \"literal:k\"\n",
+            kind: "openai-compat",
+            upstream: "claude-sonnet-4-5",
+            queues: false,
+        },
+    ];
+    #[cfg(feature = "bedrock")]
+    rows.extend([
+        KindRow {
+            name: "bedrock, an Anthropic-family model",
+            provider_toml: "kind = \"bedrock\"\nregion = \"us-west-2\"\n\
+                            creds = { kind = \"default-chain\" }\n",
+            kind: "bedrock",
+            upstream: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            queues: true,
+        },
+        KindRow {
+            name: "bedrock, a model with no token count",
+            provider_toml: "kind = \"bedrock\"\nregion = \"us-west-2\"\n\
+                            creds = { kind = \"default-chain\" }\n",
+            kind: "bedrock",
+            upstream: "us.meta.llama4-scout-17b-instruct-v1:0",
+            queues: false,
+        },
+    ]);
+    rows
+}
+
+#[test]
+fn only_a_kind_with_a_free_token_count_queues_a_re_check() {
+    // Every row carries an acting negative on the count-validated row and an
+    // admitted request carrying it, so the ONLY difference between a queuing row
+    // and a silent one is whether a free count exists for the kind and model.
+    let rows = kind_rows();
+    assert!(
+        rows.iter().any(|row| row.queues) && rows.iter().any(|row| !row.queues),
+        "premise: the table must carry both verdicts"
+    );
+    for row in rows {
+        // Arrange
+        let config: Config = toml::from_str(&format!("\n[providers.p0]\n{}", row.provider_toml))
+            .expect("valid test toml");
+        let router = Router::new(Arc::new(config));
+        let lane = crate::state_key::StateKey::new("p0", row.upstream).expect("lane");
+        plant_acting_negative(&router, &lane, RECHECK_PATH, row.kind);
+        let req = grounding_request();
+
+        // Act
+        router.activate_probe_lanes_for_admitted_request(
+            &lane,
+            "p0",
+            Some(row.kind),
+            false,
+            &ProbeFieldCapture::of(&req),
+            &req,
+        );
+
+        // Assert
+        assert_eq!(
+            router.probe_scheduler_snapshot().activations_total,
+            u64::from(row.queues),
+            "{}",
+            row.name
+        );
+    }
 }
 
 #[test]
@@ -352,6 +462,7 @@ fn a_request_grounding_nothing_activates_no_lane() {
         "p1",
         Some("anthropic-api"),
         false,
+        &ProbeFieldCapture::of(&ChatRequest::default()),
         &ChatRequest::default(),
     );
 

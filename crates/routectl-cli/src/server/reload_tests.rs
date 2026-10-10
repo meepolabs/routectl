@@ -2573,15 +2573,30 @@ fn probe_router_with_counting_provider() -> (Router, Arc<AtomicUsize>) {
         )),
     );
     router.install_resolved_models(models);
+    plant_probe_recheck_negative(&router);
     (router, calls)
 }
 
-/// A request grounding the one closed-table capability, so an admitted
-/// dispatch queues a probe job.
+/// Plant an acting negative on the count-validated row for the probe fixtures'
+/// one lane: a probe only ever re-checks one.
+fn plant_probe_recheck_negative(router: &Router) {
+    routectl_router::plant_acting_field_verdict_for_tests(
+        router,
+        "p1#claude-sonnet-4-5",
+        routectl_router::TEST_RECHECK_PATH,
+        0,
+    );
+}
+
+/// A request carrying the count-validated closed-table field, so an admitted
+/// dispatch on a lane holding a negative on it queues a re-check.
 fn probe_grounding_request() -> routectl_core::ChatRequest {
-    let mut req = routectl_core::ChatRequest::default();
-    req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
-    req
+    routectl_core::ChatRequest {
+        chat_template_kwargs: Some(serde_json::json!({
+            routectl_router::TEST_RECHECK_KWARG: "summarized",
+        })),
+        ..Default::default()
+    }
 }
 
 /// THE end-to-end boundary this driver exists for: an admitted real request
@@ -2841,6 +2856,7 @@ fn stalling_probe_router() -> (Router, Arc<AtomicUsize>) {
         )),
     );
     router.install_resolved_models(models);
+    plant_probe_recheck_negative(&router);
     (router, live)
 }
 

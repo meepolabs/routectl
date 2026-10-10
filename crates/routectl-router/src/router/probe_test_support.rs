@@ -21,6 +21,14 @@ use crate::resolved::ResolvedModel;
 /// The one grounded closed-table path, on the acting lane.
 pub(super) const GROUNDED_PATH: &str = "thinking.enabled.display";
 
+/// The closed-table path a free token count validates -- the only kind of row
+/// a re-check probe is ever built from.
+pub(super) const RECHECK_PATH: &str = super::field_repair::TEST_RECHECK_PATH;
+
+/// The value [`grounding_request`] carries on the re-check row. One of the
+/// modeled probe values, so the payload bound admits it.
+pub(super) const RECHECK_VALUE: &str = "summarized";
+
 /// The upstream every fixture router below gives the model `nickname`.
 ///
 /// `m1` -- the only model of a single-lane fixture -- sends the real wire id;
@@ -60,14 +68,73 @@ pub(super) fn lane(nickname: &str) -> crate::state_key::StateKey {
         .expect("the fixture provider entry carries no separator")
 }
 
-/// A request grounding the closed-table surface. Without this the
-/// activation seam has no capability identity and every test below would
-/// pass vacuously, so `a_request_grounding_nothing_activates_no_lane`
-/// pins the converse.
+/// A request carrying the count-validated closed-table row. Without it the
+/// activation seam has no field to re-check and every test below would pass
+/// vacuously, so `a_request_grounding_nothing_activates_no_lane` pins the
+/// converse.
 pub(super) fn grounding_request() -> ChatRequest {
-    let mut req = ChatRequest::default();
-    req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+    with_recheck_field(ChatRequest::default(), RECHECK_VALUE)
+}
+
+/// `req` carrying `value` on the count-validated row.
+pub(super) fn with_recheck_field(mut req: ChatRequest, value: &str) -> ChatRequest {
+    req.chat_template_kwargs = Some(serde_json::json!({
+        super::field_repair::TEST_RECHECK_KWARG: value,
+    }));
     req
+}
+
+/// The value `req` carries on the count-validated row, if any.
+pub(super) fn recheck_value(req: &ChatRequest) -> Option<&str> {
+    req.chat_template_kwargs
+        .as_ref()
+        .and_then(|kwargs| kwargs.get(super::field_repair::TEST_RECHECK_KWARG))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// Plant a resident ACTING field negative on `path` for `lane`, keyed under
+/// `provider_kind` -- the state a re-check probe exists to revisit.
+///
+/// Through the registry's own carry-over import, so the planted row is one a
+/// ledger replay can produce. No confirmation is seeded: the verdict acts, but
+/// the pre-flight planner does not apply it, so the dispatch path is
+/// unchanged. Asserts its own premise, since a fixture that silently planted
+/// nothing would make every "a re-check queues" test pass for the wrong reason.
+pub(super) fn plant_acting_negative(
+    router: &Router,
+    lane: &crate::state_key::StateKey,
+    path: &str,
+    provider_kind: &str,
+) {
+    let stamped = std::time::Instant::now();
+    let feature_key = crate::field_capability::field_capability_key(path)
+        .expect("the fixture path is a well-formed qualified path");
+    router
+        .learned_capabilities
+        .import_entries(vec![crate::learned_capability::ExportedEntry {
+            provider_kind: provider_kind.to_string(),
+            state_key: lane.as_lane_key().to_string(),
+            feature_key,
+            verdict: crate::learned_capability::EntryVerdict::Negative,
+            signal: routectl_core::capability::SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: stamped,
+            last_seen: stamped,
+            expires_at: stamped + std::time::Duration::from_hours(1),
+            phase: routectl_core::capability::FailurePhase::F1,
+            source: routectl_core::capability::EvidenceSource::Live,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+            evidence_class: None,
+        }]);
+    let key =
+        FieldVerdictKey::new(lane, path, provider_kind).expect("a qualified path mints a key");
+    assert!(
+        router
+            .field_verdicts()
+            .is_negative_acting(&key, std::time::Instant::now()),
+        "fixture premise: the planted negative must be acting",
+    );
 }
 
 /// A provider whose `complete` / `stream` / `count_tokens` all fail with
@@ -217,7 +284,7 @@ impl Provider for BodyAssertingProvider {
         Err(Error::upstream("p1", 500, "body"))
     }
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
-        let carries_field = req.routectl_internal.anthropic_thinking_display.is_some();
+        let carries_field = recheck_value(&req).is_some();
         self.seen.lock().push(req);
         if !carries_field {
             // The upstream this stands in for answers a field-less count
@@ -246,32 +313,14 @@ impl Provider for BodyAssertingProvider {
 /// actually produce. Asserts its own premise: a fixture that silently failed to
 /// make the verdict eligible would make every "pre-flight stripped it" test
 /// pass for the wrong reason.
-pub(super) fn plant_eligible_verdict(router: &Router, nickname: &str) {
+pub(super) fn plant_eligible_verdict(router: &Router, nickname: &str, path: &str) {
     let lane = lane(nickname);
     let state_key = lane.as_lane_key();
-    let stamped = std::time::Instant::now();
-    let feature_key = crate::field_capability::field_capability_key(GROUNDED_PATH)
-        .expect("the grounded path is a well-formed qualified path");
-    router
-        .learned_capabilities
-        .import_entries(vec![crate::learned_capability::ExportedEntry {
-            provider_kind: router.provider_kind_for_state_key(state_key).to_string(),
-            state_key: state_key.to_string(),
-            feature_key: feature_key.clone(),
-            verdict: crate::learned_capability::EntryVerdict::Negative,
-            signal: routectl_core::capability::SignalTier::SelfIdentifying,
-            observations: 1,
-            first_seen: stamped,
-            last_seen: stamped,
-            expires_at: stamped + std::time::Duration::from_hours(1),
-            phase: routectl_core::capability::FailurePhase::F1,
-            source: routectl_core::capability::EvidenceSource::Live,
-            in_flight: false,
-            consecutive_failed_probes: 0,
-            evidence_class: None,
-        }]);
-    let key = FieldVerdictKey::new(&lane, GROUNDED_PATH, "anthropic-api")
-        .expect("a qualified path mints a key");
+    plant_acting_negative(router, &lane, path, "anthropic-api");
+    let feature_key = crate::field_capability::field_capability_key(path)
+        .expect("the fixture path is a well-formed qualified path");
+    let key =
+        FieldVerdictKey::new(&lane, path, "anthropic-api").expect("a qualified path mints a key");
     let incarnation = router.learned_capabilities.resident_incarnation_for_tests(
         state_key,
         &feature_key,
@@ -315,7 +364,8 @@ pub(super) async fn settle_terminally(router: &Router, count: usize) {
 }
 
 /// Build a single-leg router on `base_url` with `provider` installed
-/// under nickname `m1`, alias `default`.
+/// under nickname `m1`, alias `default`, whose lane holds an acting negative on
+/// the re-check row.
 pub(super) fn router_on_base(base_url: &str, provider: Arc<dyn Provider>) -> Router {
     router_on_base_with_failure_threshold(base_url, provider, Some(1))
 }
@@ -340,6 +390,19 @@ pub(super) fn router_on_base_with_failure_threshold(
 
 pub(super) fn remote_router(provider: Arc<dyn Provider>) -> Router {
     router_on_base("https://api.anthropic.com", provider)
+}
+
+/// [`remote_router`] with NOTHING learned on its lane, so an admitted request
+/// has no negative to re-check.
+pub(super) fn remote_router_without_negative(provider: Arc<dyn Provider>) -> Router {
+    build_router_learning(
+        "https://api.anthropic.com",
+        provider,
+        Some(1),
+        None,
+        1,
+        false,
+    )
 }
 
 /// A remote router with an explicit RPM limit AND breaker threshold, for the
@@ -375,15 +438,28 @@ pub(super) fn remote_router_with_lanes(provider: Arc<dyn Provider>, lanes: usize
     build_router("https://api.anthropic.com", provider, Some(1), None, lanes)
 }
 
-/// THE single router builder every fixture above composes: one anthropic-api
-/// provider entry `p1` on `base_url`, `lanes` models `m0..m{lanes-1}` all
-/// resolved to `provider`, and `default` aliased to the first.
+/// The router builder every fixture above composes: one anthropic-api provider
+/// entry `p1` on `base_url`, `lanes` models `m0..m{lanes-1}` all resolved to
+/// `provider`, `default` aliased to the first, and every lane holding an acting
+/// negative on the re-check row -- the only state a probe ever activates on.
 fn build_router(
     base_url: &str,
     provider: Arc<dyn Provider>,
     circuit_failures: Option<u32>,
     rpm_limit: Option<u32>,
     lanes: usize,
+) -> Router {
+    build_router_learning(base_url, provider, circuit_failures, rpm_limit, lanes, true)
+}
+
+/// [`build_router`], planting the re-check negatives only when `with_negative`.
+fn build_router_learning(
+    base_url: &str,
+    provider: Arc<dyn Provider>,
+    circuit_failures: Option<u32>,
+    rpm_limit: Option<u32>,
+    lanes: usize,
+    with_negative: bool,
 ) -> Router {
     let mut config = Config::default();
     let mut entry = ProviderEntry::anthropic_api("literal:k");
@@ -429,6 +505,11 @@ fn build_router(
         );
     }
     router.install_resolved_models(models);
+    if with_negative {
+        for nickname in &nicknames {
+            plant_acting_negative(&router, &lane(nickname), RECHECK_PATH, "anthropic-api");
+        }
+    }
     router
 }
 
@@ -475,5 +556,6 @@ pub(super) fn remote_router_with_model_beta(provider: Arc<dyn Provider>, beta: &
         ),
     );
     router.install_resolved_models(models);
+    plant_acting_negative(&router, &lane("m1"), RECHECK_PATH, "anthropic-api");
     router
 }
