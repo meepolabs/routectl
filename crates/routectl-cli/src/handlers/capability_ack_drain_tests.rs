@@ -25,6 +25,7 @@ fn learn_event(capability_key: &str) -> CapabilityLearnEvent {
         request_features: Vec::new(),
         phase: routectl_core::capability::FailurePhase::F1,
         source: routectl_core::capability::EvidenceSource::Live,
+        value: None,
     }
 }
 

@@ -2606,6 +2606,7 @@ fn carry_over_learned_from_rebuilds_the_field_verdict_facade_sharing_in_flight()
 
     let _ = guard.commit(
         routectl_core::capability::SignalTier::SelfIdentifying,
+        None,
         400,
         vec![],
         t0,

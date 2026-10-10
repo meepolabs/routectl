@@ -343,9 +343,9 @@ CREATE TABLE IF NOT EXISTS capability_learn_events (
 /// persisted so live-vs-rebuild equivalence can distinguish
 /// self-identifying from inferred negatives. `evidence_class` is nullable:
 /// it carries the pinned observation tokens and is NULL for rows that have
-/// none. `upstream_token` is nullable, forensic / display only -- never
-/// consulted by admission or replay (the negative ride-along carries the
-/// normalized capability, not the raw wire token). `catalog_version` /
+/// none. `upstream_token` is nullable: the encoded value of an envelope-field
+/// verdict (`shape:<token>` / `ceiling:<u32>`), NULL on every other row
+/// (see `capability_event::CapabilityEvent`). `catalog_version` /
 /// `overlay_revision` stamp the boundary revision a row was written under,
 /// so replay can filter defensively and a tombstone can mark the boundary.
 /// v17 appends the nullable `provider_kind` (the provider kind the lane

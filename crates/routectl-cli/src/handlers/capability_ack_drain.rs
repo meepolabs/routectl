@@ -47,7 +47,7 @@ use std::sync::Arc;
 
 use routectl_core::capability::Verdict;
 use routectl_router::router::CapabilityLearnEvent;
-use routectl_router::{DispatchMeta, Router, capability_key_is_field_verdict};
+use routectl_router::{DispatchMeta, Router, VerdictValue, capability_key_is_field_verdict};
 use routectl_usage::{CapabilityEvent, UsageHandle};
 
 use super::usage_capture::epoch_ms_now;
@@ -68,8 +68,9 @@ pub(crate) fn is_field_verdict_event(event: &CapabilityLearnEvent) -> bool {
 ///
 /// The row shape is IDENTICAL to the one the best-effort drain builds for a learned
 /// negative -- same verdict, phase, source, tier, stamps -- because it is the same
-/// fact reaching the same table. What differs is only that this one's outcome is
-/// AWAITED, by the daemon rather than by the request.
+/// fact reaching the same table. What differs is that this one's outcome is
+/// AWAITED, by the daemon rather than by the request, and that a rewrite verdict's
+/// value is persisted encoded in `upstream_token` (NULL for a drop).
 ///
 /// SYNCHRONOUS, and that is the whole correction: nothing here awaits, so a cancelled
 /// request cannot interrupt it and no response waits on SQLite. The admission itself
@@ -128,7 +129,7 @@ pub(crate) fn acknowledge_field_confirmations(
             source: ev.source.as_str().to_string(),
             tier: ev.signal_tier.as_str().to_string(),
             evidence_class: None,
-            upstream_token: None,
+            upstream_token: ev.value.as_ref().map(VerdictValue::encode),
             catalog_version,
             overlay_revision,
             provider_kind: crate::handlers::usage_capture::persisted_provider_kind(

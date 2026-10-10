@@ -56,6 +56,7 @@ pub(crate) mod feature_keys;
 pub(crate) mod field_canary;
 pub(crate) mod field_capability;
 pub(crate) mod field_verdict;
+pub(crate) mod field_verdict_value;
 pub(crate) mod glob;
 pub(crate) mod k_estimator;
 #[cfg(test)]
@@ -193,6 +194,7 @@ pub use factory::{
 };
 pub use field_canary::CanaryOutcome;
 pub use field_capability::capability_key_is_field_verdict;
+pub use field_verdict_value::VerdictValue;
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{
     Confidence, EstimateSource, K_SESSION_CAPACITY, KEstimate, KEstimator, KQuery, KSessionKey,

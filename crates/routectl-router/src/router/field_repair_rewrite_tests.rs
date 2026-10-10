@@ -190,7 +190,8 @@ fn rewrite_key() -> String {
 
 /// Mutation check: make the rewrite edit drop the field instead -> red (the
 /// retry carries no value); make `commit` refuse every `InvalidValue` repair
-/// -> red (nothing learned).
+/// -> red (nothing learned); commit a rewrite with no value -> red (the event
+/// carries none).
 #[tokio::test]
 async fn a_rejection_naming_one_accepted_value_rewrites_to_it_and_commits() {
     let named = &super::TEST_REWRITE_ACCEPTED[1..];
@@ -219,6 +220,11 @@ async fn a_rejection_naming_one_accepted_value_rewrites_to_it_and_commits() {
         learned,
         vec![rewrite_key()],
         "the rewrite commits one verdict"
+    );
+    assert_eq!(
+        dispatched.meta.learned_capabilities[0].value,
+        Some(crate::VerdictValue::Shape(named[0])),
+        "the committed verdict carries the value it rewrote to",
     );
     let summary = dispatched
         .meta

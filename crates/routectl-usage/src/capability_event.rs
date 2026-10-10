@@ -28,8 +28,13 @@ pub const TOMBSTONE_VERDICT: &str = "tombstone";
 /// `tier` is persisted so live-vs-rebuild equivalence can distinguish
 /// self-identifying from inferred negatives. `evidence_class` carries the
 /// pinned observation tokens and is `None` for rows that have none.
-/// `upstream_token` is forensic / display only -- never consulted by
-/// admission or replay. `catalog_version` / `overlay_revision` stamp the
+/// `upstream_token` is the VALUE slot of an envelope-field verdict: a rewrite
+/// verdict's row carries `shape:<token>` (or, for a token-ceiling verdict,
+/// `ceiling:<u32>`), and every other row -- a drop verdict included --
+/// carries NULL. The replayer reads it only for a `field:` row whose
+/// code-owned repair row declares a rewrite or ceiling transform, and decodes
+/// it strictly against that row's closed set; a token it refuses degrades the
+/// row to a plain negative without a value. `catalog_version` / `overlay_revision` stamp the
 /// boundary revision the row was written under. `provider_kind` names the
 /// provider kind the lane egressed through and `vocab_version` the
 /// persisted-token vocabulary the row's tokens belong to; both are `None` on
@@ -55,7 +60,8 @@ pub struct CapabilityEvent {
     pub tier: String,
     /// The pinned observation-evidence token, or `None`.
     pub evidence_class: Option<String>,
-    /// The raw upstream wire token, forensic / display only, or `None`.
+    /// The encoded value of a field verdict (`shape:<token>` /
+    /// `ceiling:<u32>`), or `None` (see the struct doc).
     pub upstream_token: Option<String>,
     /// Catalog version the row was stamped under.
     pub catalog_version: i64,

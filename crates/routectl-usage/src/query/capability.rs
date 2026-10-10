@@ -33,7 +33,8 @@ pub struct CapabilityEventRow {
     pub tier: Option<String>,
     /// The pinned observation-evidence token, or `None`.
     pub evidence_class: Option<String>,
-    /// The raw upstream wire token, forensic / display only, or `None`.
+    /// The encoded value of a field verdict (`shape:<token>` /
+    /// `ceiling:<u32>`), or `None`.
     pub upstream_token: Option<String>,
     /// Catalog version the row was stamped under.
     pub catalog_version: Option<i64>,

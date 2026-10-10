@@ -479,6 +479,7 @@ impl ReplayProbeGuard<'_> {
             request_features,
             phase: FailurePhase::F1,
             source: EvidenceSource::Live,
+            value: None,
         })
     }
 

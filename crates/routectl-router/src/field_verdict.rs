@@ -69,6 +69,7 @@ use routectl_core::capability::{
 
 use crate::field_canary::FieldCanaryRegistry;
 use crate::field_capability::field_capability_key;
+use crate::field_verdict_value::VerdictValue;
 use crate::learned_capability::{LearnedCapabilityRegistry, NegativeState};
 use crate::router::{CapabilityClearedEvent, CapabilityLearnEvent};
 use crate::state_key::StateKey;
@@ -624,6 +625,7 @@ impl FieldVerdictRegistry {
             request_features,
             phase: FailurePhase::F1,
             source: EvidenceSource::Live,
+            value: None,
         })
     }
 
@@ -1039,6 +1041,9 @@ impl FieldRepairGuard<'_> {
     /// re-verifies once per base decay by design. The backoff ladder stays
     /// reserved for the registry's own re-probe path.
     ///
+    /// `value` is what the verdict applies -- `Some` for a rewrite, `None` for a
+    /// drop -- and rides out on the event, which persists it encoded.
+    ///
     /// `request_features` is the request's derived in-flight feature set; no
     /// request body can enter the row.
     #[must_use]
@@ -1057,6 +1062,7 @@ impl FieldRepairGuard<'_> {
     pub fn commit(
         mut self,
         tier: SignalTier,
+        value: Option<VerdictValue>,
         upstream_status: u16,
         request_features: Vec<String>,
         now: Instant,
@@ -1161,6 +1167,7 @@ impl FieldRepairGuard<'_> {
             request_features,
             phase: FailurePhase::F1,
             source: EvidenceSource::Live,
+            value,
         })
     }
 

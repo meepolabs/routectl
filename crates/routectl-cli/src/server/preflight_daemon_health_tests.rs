@@ -46,6 +46,7 @@ fn earned_learn_event(
         request_features: Vec::new(),
         phase: routectl_core::capability::FailurePhase::F1,
         source: routectl_core::capability::EvidenceSource::Live,
+        value: None,
     }
 }
 

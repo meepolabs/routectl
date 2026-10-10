@@ -731,6 +731,7 @@ fn learn_event(
         request_features: vec!["web_search".to_string(), "prefill".to_string()],
         phase: FailurePhase::F1,
         source: EvidenceSource::Live,
+        value: None,
     }
 }
 
@@ -862,6 +863,7 @@ fn replay_learn_event() -> routectl_router::router::CapabilityLearnEvent {
         request_features: vec!["reasoning_replay".to_string()],
         phase: FailurePhase::F1,
         source: EvidenceSource::Live,
+        value: None,
     }
 }
 

@@ -829,6 +829,7 @@ async fn a_successful_repaired_retry_commits_one_learned_verdict() {
         rejected_key(),
         "the learned row is keyed on the qualified dotted path, byte for byte",
     );
+    assert_eq!(event.value, None, "a drop verdict carries no value");
     assert_eq!(
         event.state_key,
         crate::router::probe_test_support::seat_chain_lane("m0").as_lane_key(),

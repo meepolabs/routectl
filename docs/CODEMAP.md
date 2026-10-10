@@ -4258,6 +4258,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   lifecycle: minting and clearing, the pre-flight eligibility predicate across
   the quorum and the canary outcomes, and the refusal of a canary-disproved
   identity in the window before its durable clear lands
+- `src/field_verdict_value.rs` -- the value a field verdict applies and its
+  persisted codec (root: `VerdictValue`). `VerdictValue::{Shape(&'static
+  str), Ceiling(u32)}` encodes to the ledger's `upstream_token` as
+  `shape:<token>` / `ceiling:<u32>`; `decode(token, ValueSlot)` is STRICT
+  against the code-owned row's closed set (`ValueSlot::Shape(members)` /
+  `Ceiling`) -- unknown or mismatched prefix, non-member shape, non-canonical,
+  zero or out-of-range ceiling, empty or non-ASCII -> `None` plus a WARN
+  (`field_verdict_value_malformed`) and `malformed_total()`. A decoded shape is
+  the row's own `&'static` member, never the stored text. A rewrite commit
+  (`FieldRepairPlan::commit` -> `FieldRepairGuard::commit`) carries
+  `Some(Shape)` on `CapabilityLearnEvent::value`, and
+  `routectl-cli`'s `capability_ack_drain` writes it to `upstream_token` (NULL
+  for a drop)
 - `src/field_canary.rs` -- per-`FieldVerdictKey` canary and confirmation-quorum
   state, shared behind an `Arc` alongside `FieldVerdictRegistry`'s own
   in-flight set. STATE ONLY, one `Mutex<HashMap<FieldVerdictKey, CanaryState>>`
@@ -5290,8 +5303,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   NORMALIZED keys (empty on a tombstone row), open-set `verdict` / `phase` /
   `source` / `tier` tokens (tier persisted so live-vs-rebuild equivalence
   distinguishes self-identifying from inferred), nullable `evidence_class`
-  (pinned observation tokens), nullable `upstream_token` (forensic / display
-  only -- never consulted by admission or replay), and `catalog_version` /
+  (pinned observation tokens), nullable `upstream_token` (the
+  encoded value of a field verdict -- see `capability_event.rs`), and `catalog_version` /
   `overlay_revision` boundary-revision stamps) via `migrate_v12_to_v13`
   (mirrors the v8 -> v9 whole-new-table step: `CREATE TABLE / INDEX IF NOT
   EXISTS` in one transaction with the version bump, fresh-create and

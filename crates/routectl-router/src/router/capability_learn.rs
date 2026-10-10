@@ -10,6 +10,7 @@ use routectl_core::{ChatRequest, Error};
 use super::capability_observe::UntranslatedCapabilities;
 use super::{DispatchMeta, DispatchTarget, LearnedProbeGuard, Router};
 use crate::capability_matcher::resolve_requested_capability;
+use crate::field_verdict_value::VerdictValue;
 
 /// The native AWS Bedrock provider `kind` string; the only kind whose flat
 /// `ValidationException` envelope the drift observer inspects.
@@ -127,6 +128,10 @@ pub struct CapabilityLearnEvent {
     /// Whether the evidence came from live traffic or an out-of-band probe.
     /// Fixed to `Live` today.
     pub source: EvidenceSource,
+    /// The value a committed field verdict applies: `Some` only for a rewrite
+    /// commit, and persisted encoded in the ledger row's `upstream_token`.
+    /// `None` for a drop and for every non-field event.
+    pub value: Option<VerdictValue>,
 }
 
 /// One learned negative ready for [`Router::mint_learned_negative`]: the
@@ -1149,6 +1154,7 @@ impl Router {
                 request_features,
                 phase,
                 source: EvidenceSource::Live,
+                value: None,
             });
         }
     }

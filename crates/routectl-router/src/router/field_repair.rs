@@ -43,6 +43,7 @@ use routectl_core::failure_class::FailureClass;
 use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey};
+use crate::field_verdict_value::VerdictValue;
 
 use super::rejection_parser::{NamedRejection, RejectionKind, parse_rejection};
 use super::repair_budget::RepairBudget;
@@ -1273,7 +1274,9 @@ impl FieldRepairPlan<'_> {
     ///
     /// The commit carries the attribution tier of the rejection that drove the
     /// repair: a self-identifying verdict acts at once, an inferred one persists
-    /// pending and acts only once a later request corroborates it.
+    /// pending and acts only once a later request corroborates it. A rewrite
+    /// commit also carries the value it wrote, so the persisted verdict names
+    /// what it rewrites to.
     ///
     /// `request_features` is taken BY VALUE: the guard stores it on the event
     /// row, so a borrow here would only be cloned one frame deeper.
@@ -1288,10 +1291,14 @@ impl FieldRepairPlan<'_> {
         if !self.repair_teaches() {
             return None;
         }
-        self.candidates[idx]
-            .guard
-            .take()?
-            .commit(tier, upstream_status, request_features, now)
+        let value = self.rewritten.map(VerdictValue::Shape);
+        self.candidates[idx].guard.take()?.commit(
+            tier,
+            value,
+            upstream_status,
+            request_features,
+            now,
+        )
     }
 
     /// Phase two after the UNREPAIRED attempt succeeded: every carried field is

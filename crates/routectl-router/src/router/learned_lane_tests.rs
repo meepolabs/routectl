@@ -307,6 +307,7 @@ fn a_field_verdict_learned_under_one_nickname_applies_to_another_on_the_lane() {
         .expect("an unknown identity admits one repair");
     let learned = guard.commit(
         SignalTier::SelfIdentifying,
+        None,
         400,
         vec![field_key.clone()],
         now,
