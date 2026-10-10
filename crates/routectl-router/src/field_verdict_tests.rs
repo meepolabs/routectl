@@ -283,23 +283,17 @@ fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits");
     let sibling_reg = Arc::clone(&reg);
-    let state_key = k.state_key().to_string();
-    let capability_key = k.capability_key().to_string();
-    let provider_kind = k.provider_kind().to_string();
+    let sibling_key = k.clone();
     reg.learned().set_post_observe_test_hook(Box::new(move || {
-        let _ = sibling_reg
-            .learned()
-            .observe_in_generation_with_observations(
-                1,
-                &state_key,
-                &capability_key,
-                &provider_kind,
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
-                t0,
-            );
+        let _ = sibling_reg.learned().observe_field_verdict_in_generation(
+            1,
+            &sibling_key,
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            t0,
+        );
     }));
 
     // Act

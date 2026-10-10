@@ -163,16 +163,16 @@ impl FieldVerdictKey {
     }
 
     /// The serialized lane, which is the learned registry's key half.
-    fn registry_key(&self) -> &str {
+    pub(crate) fn registry_key(&self) -> &str {
         self.lane.as_lane_key()
     }
 
     /// The serialized lane this identity is keyed on, as the registry and the
     /// ledger store it.
     ///
-    /// Test-only, like its sibling below: the dispatch path passes the
-    /// identity whole and never reads a half out of it, so these accessors exist
-    /// for the tests that assert the key's composition.
+    /// Test-only: the dispatch path passes the identity whole and never reads
+    /// its lane out as a string, so this exists for the tests that assert the
+    /// key's composition.
     #[cfg(test)]
     #[must_use]
     pub fn state_key(&self) -> &str {
@@ -181,7 +181,7 @@ impl FieldVerdictKey {
 
     /// The normalized field capability key this identity is keyed on.
     ///
-    /// Ungated (unlike its two siblings): the pre-flight planner reads it to
+    /// Ungated: the pre-flight planner reads it to
     /// consult the operator `force_supported` resolver, which keys on the
     /// capability token. Reading it off the identity rather than re-minting
     /// the key at the call site is what makes the mask consult the SAME
@@ -192,9 +192,8 @@ impl FieldVerdictKey {
         &self.capability_key
     }
 
-    /// The provider-kind token this identity is keyed on.
-    /// Test-only -- see [`Self::state_key`].
-    #[cfg(test)]
+    /// The provider-kind token this identity is keyed on, which the learned
+    /// registry's field-verdict entry points key on.
     #[must_use]
     pub fn provider_kind(&self) -> &str {
         &self.provider_kind
@@ -571,11 +570,9 @@ impl FieldVerdictRegistry {
             drop(claim);
             return None;
         }
-        let observed = self.learned.observe_in_generation_with_observations(
+        let observed = self.learned.observe_field_verdict_in_generation(
             generation,
-            key.registry_key(),
-            &key.capability_key,
-            &key.provider_kind,
+            key,
             tier,
             FailurePhase::F1,
             EvidenceSource::Live,
@@ -1073,24 +1070,19 @@ impl FieldRepairGuard<'_> {
         // The persistence_generation comes from the Applied outcome, atomically
         // paired with the mutation it describes. `observations` rides out of
         // the SAME critical section the mutation ran under, via
-        // `observe_in_generation_with_observations`, rather than a second,
+        // `observe_field_verdict_in_generation`, rather than a second,
         // unguarded `snapshot()` call after the guard releases -- a
         // concurrent purge or sibling mutation between those two calls could
         // otherwise report a count this mutation never produced.
-        let observed = self
-            .registry
-            .learned
-            .observe_in_generation_with_observations(
-                self.generation,
-                key.registry_key(),
-                &key.capability_key,
-                &key.provider_kind,
-                tier,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
-                now,
-            );
+        let observed = self.registry.learned.observe_field_verdict_in_generation(
+            self.generation,
+            &key,
+            tier,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            now,
+        );
         let (acting, observations, persistence_generation, incarnation) = match observed {
             crate::learned_capability::GenerationOutcome::Applied {
                 value: (outcome, observations),
@@ -1133,6 +1125,12 @@ impl FieldRepairGuard<'_> {
                     "field-verdict commit refused: the incarnation sequence is \
                      exhausted"
                 );
+                return None;
+            }
+            // Unreachable for this identity: the namespace refusal applies only
+            // to the generic entry points, never to this one's own key.
+            crate::learned_capability::GenerationOutcome::FieldNamespace => {
+                self.registry.release_slot(&key);
                 return None;
             }
         };
@@ -1233,6 +1231,12 @@ impl FieldRepairGuard<'_> {
                     "field-verdict clear refused: the incarnation sequence is \
                      exhausted"
                 );
+                return None;
+            }
+            // Unreachable for this identity: the namespace refusal applies only
+            // to the generic entry points, never to this one's own key.
+            crate::learned_capability::GenerationOutcome::FieldNamespace => {
+                self.registry.release_slot(&self.key);
                 return None;
             }
         };

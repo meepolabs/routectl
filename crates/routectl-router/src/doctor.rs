@@ -200,8 +200,9 @@ pub struct MatrixReplaySummary {
     pub skipped_lane: usize,
     /// Rows skipped for a token the current vocabulary does not recognize.
     pub skipped_unknown: usize,
-    /// Rows skipped because their key enters the envelope-field namespace
-    /// only after the lane's key normalization.
+    /// Field-namespace rows no field-repair guard could have written: the key
+    /// enters the namespace only after the lane's key normalization, or the
+    /// row's source is not live.
     pub skipped_namespace: usize,
 }
 

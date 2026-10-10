@@ -104,7 +104,7 @@ fn plant_negative(router: &Router, state_key: &str, capability: &str) {
 
 /// [`plant_negative`] recorded under `provider_kind`.
 fn plant_negative_under(router: &Router, state_key: &str, capability: &str, provider_kind: &str) {
-    router.learned_capabilities.observe(
+    router.learned_capabilities.observe_any_key_for_tests(
         state_key,
         capability,
         provider_kind,

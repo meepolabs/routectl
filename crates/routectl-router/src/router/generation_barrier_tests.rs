@@ -63,14 +63,12 @@ fn an_old_router_field_observation_reaches_the_live_registry() {
     let key = field_key("thinking.enabled.display");
     let now = Instant::now();
 
-    let outcome = old.observe_learned_capability(
-        "nick",
+    let outcome = crate::router::observe_field_verdict_for_tests(
+        &old,
+        "nick#upstream",
         &key,
         "anthropic-api",
         SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
         now,
     );
 
@@ -132,26 +130,32 @@ fn old_router_reads_are_scoped_by_key_class() {
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
     // Both classes learned on the LIVE generation.
-    for capability in [key.as_str(), "web_search"] {
-        live.observe_learned_capability(
-            "nick",
-            capability,
-            "anthropic-api",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
-            now,
-        );
-    }
+    live.observe_learned_capability(
+        "nick#upstream",
+        "web_search",
+        "anthropic-api",
+        SignalTier::SelfIdentifying,
+        FailurePhase::F1,
+        EvidenceSource::Live,
+        None,
+        now,
+    );
+    let _ = crate::router::observe_field_verdict_for_tests(
+        &live,
+        "nick#upstream",
+        &key,
+        "anthropic-api",
+        SignalTier::SelfIdentifying,
+        now,
+    );
 
     assert_eq!(
-        old.acting_negative_for_generation("nick", "web_search", "anthropic-api", now),
+        old.acting_negative_for_generation("nick#upstream", "web_search", "anthropic-api", now),
         None,
         "a stale catalog-scoped read must not answer",
     );
     assert!(
-        old.acting_negative_for_generation("nick", &key, "anthropic-api", now)
+        old.acting_negative_for_generation("nick#upstream", &key, "anthropic-api", now)
             .is_some(),
         "a stale field read still answers",
     );

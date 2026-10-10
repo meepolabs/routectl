@@ -29,7 +29,7 @@ fn plant_negative(reg: &LearnedCapabilityRegistry, capability: &str, kind: &str)
 }
 
 fn plant_negative_at(reg: &LearnedCapabilityRegistry, capability: &str, kind: &str, now: Instant) {
-    let outcome = reg.observe_in_generation(
+    let outcome = reg.observe_any_key_in_generation_for_tests(
         reg.generation(),
         LANE,
         capability,

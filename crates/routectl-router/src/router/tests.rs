@@ -1588,7 +1588,7 @@ fn carry_over_learned_from_keeps_field_entries_and_clears_catalog_scoped_on_cata
     let config = Arc::new(Config::default());
     let before = Router::new(config.clone());
     for capability in [field_key.as_str(), "web_search"] {
-        before.learned_capabilities.observe(
+        before.learned_capabilities.observe_any_key_for_tests(
             "nick",
             capability,
             "anthropic-api",
@@ -1691,7 +1691,7 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
     let config = Arc::new(config);
     let before = Router::new(config.clone());
     for capability in [field_key.as_str(), "web_search"] {
-        before.learned_capabilities.observe(
+        before.learned_capabilities.observe_any_key_for_tests(
             "nick",
             capability,
             "anthropic-api",

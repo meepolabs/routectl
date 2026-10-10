@@ -316,12 +316,8 @@ fn the_owner_sweep_resets_a_dropped_field_verdict_canary() {
     let lane = crate::state_key::StateKey::parse(LANE).expect("a lane");
     let key = crate::field_verdict::FieldVerdictKey::new(&lane, "thinking.enabled.display", COMPAT)
         .expect("a qualified dotted path on a pass-through kind");
-    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
-        .expect("a qualified dotted path mints a key");
-    before.learned_capabilities.observe(
-        LANE,
-        &field_key,
-        COMPAT,
+    before.learned_capabilities.observe_field_verdict(
+        &key,
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
         routectl_core::capability::EvidenceSource::Live,

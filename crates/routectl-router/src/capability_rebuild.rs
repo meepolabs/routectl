@@ -263,9 +263,10 @@ pub struct CapabilityRebuildSummary {
     /// owner the current config no longer egresses to.
     pub skipped_owner: usize,
     /// Events skipped because their capability key lands in the envelope-field
-    /// namespace only once the lane's key normalization runs: the stored string
-    /// is not itself a field key, so no field-repair guard minted it. Replaying
-    /// one would make a resident field verdict out of upstream text.
+    /// namespace but no field-repair guard could have written them: the key
+    /// reaches the namespace only once the lane's key normalization runs, or
+    /// the row's source is not live. Replaying one would make a resident field
+    /// verdict out of evidence the field-repair guard never produced.
     pub skipped_namespace: usize,
 }
 
@@ -341,14 +342,14 @@ pub fn rebuild_capabilities_into(
     rows.sort_by_key(|row| row.rowid);
 
     for row in &rows {
-        if normalizes_into_field_namespace(row) {
+        if let Some(reason) = field_namespace_skip(row) {
             tracing::warn!(
                 event = "rebuild_skip",
-                reason = "normalized_field_namespace",
+                reason,
                 state_key = %routectl_core::sanitize_for_log(&row.state_key),
                 provider_kind = %row.provider_kind,
-                "capability rebuild skipped a row whose key enters the field namespace only \
-                 after normalization",
+                "capability rebuild skipped a field-namespace row no field-repair guard \
+                 could have written",
             );
             summary.skipped_namespace += 1;
             continue;
@@ -358,14 +359,20 @@ pub fn rebuild_capabilities_into(
     summary
 }
 
-/// True when the registry would store `row` under a field-namespace key that
-/// differs from the row's own capability string. A field-repair guard writes
-/// the exact key it minted, which normalization returns unchanged; anything
-/// else reaching the namespace came from a non-field producer.
-fn normalizes_into_field_namespace(row: &CapabilityEventRow) -> bool {
+/// Why a row the registry would store under a field-namespace key is not a
+/// field verdict's own row, or `None` when it is (or is outside the
+/// namespace). A field-repair guard writes the exact key it minted, which
+/// normalization returns unchanged, and only ever from a live request.
+fn field_namespace_skip(row: &CapabilityEventRow) -> Option<&'static str> {
     let normalized = normalize_capability_key(&row.capability, &row.provider_kind);
-    crate::field_capability::capability_key_is_field_verdict(&normalized)
-        && normalized != row.capability
+    if !crate::field_capability::capability_key_is_field_verdict(&normalized) {
+        return None;
+    }
+    if normalized != row.capability {
+        return Some("normalized_field_namespace");
+    }
+    (EvidenceSource::parse(&row.source) != Some(EvidenceSource::Live))
+        .then_some("non_live_field_namespace")
 }
 
 /// Replay one surviving row through the matching admission call. The parsed
@@ -540,18 +547,61 @@ fn mint_negative(
     source: EvidenceSource,
     summary: &mut CapabilityRebuildSummary,
 ) {
-    registry.observe(
-        &row.state_key,
-        &row.capability,
-        &row.provider_kind,
+    let recorded = if crate::field_capability::capability_key_is_field_verdict(&row.capability) {
+        mint_field_negative(row, registry, tier, phase, source)
+    } else {
+        registry
+            .observe(
+                &row.state_key,
+                &row.capability,
+                &row.provider_kind,
+                tier,
+                phase,
+                source,
+                row.evidence_class.as_deref(),
+                row.observed_at,
+            )
+            .is_some()
+    };
+    if !recorded {
+        tracing::debug!(
+            event = "rebuild_skip",
+            reason = "field_namespace_refused",
+            "capability rebuild skipped a negative the registry refused for its namespace",
+        );
+        summary.skipped_namespace += 1;
+        return;
+    }
+    summary.replayed_negative += 1;
+    bump_probe(source, summary);
+}
+
+/// Replay an exact field-namespace negative through the registry's
+/// field-verdict entry. `false` when the row's lane is not a learned lane.
+fn mint_field_negative(
+    row: &CapabilityEventRow,
+    registry: &LearnedCapabilityRegistry,
+    tier: SignalTier,
+    phase: FailurePhase,
+    source: EvidenceSource,
+) -> bool {
+    let Some(lane) = crate::state_key::StateKey::parse(&row.state_key) else {
+        return false;
+    };
+    let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
+        lane,
+        row.capability.clone(),
+        row.provider_kind.clone(),
+    );
+    registry.observe_field_verdict(
+        &key,
         tier,
         phase,
         source,
         row.evidence_class.as_deref(),
         row.observed_at,
     );
-    summary.replayed_negative += 1;
-    bump_probe(source, summary);
+    true
 }
 
 #[cfg(test)]

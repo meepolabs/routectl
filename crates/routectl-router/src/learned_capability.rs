@@ -61,6 +61,8 @@ use routectl_core::capability::{
 };
 
 use crate::beta_capability::{BetaSeedScope, capability_key_is_beta};
+use crate::field_capability::learned_key_enters_field_namespace;
+use crate::field_verdict::FieldVerdictKey;
 
 /// Default resident-entry ceiling. A safety valve, not a cache policy:
 /// eviction should never fire at solo-local volume.
@@ -957,6 +959,10 @@ pub enum GenerationOutcome<T> {
     /// observation relearns normally -- which is the correct outcome for evidence
     /// that genuinely still holds.
     Reserved,
+    /// Refused: the stored key would sit in the envelope-field namespace, which
+    /// only the field-verdict entry points write. Nothing was touched and no
+    /// incarnation was reserved, so the caller emits no event.
+    FieldNamespace,
 }
 
 /// Whether a guarded operation produces a new version of a key's state.
@@ -995,7 +1001,7 @@ impl<T> GenerationOutcome<T> {
                 incarnation,
                 generation,
             }),
-            Self::Stale | Self::Reserved | Self::Exhausted => None,
+            Self::Stale | Self::Reserved | Self::Exhausted | Self::FieldNamespace => None,
         }
     }
 
@@ -1073,8 +1079,63 @@ impl LearnedCapabilityRegistry {
     /// Callers are responsible for one observation per request per target
     /// (dedupe upstream); this method treats each call as a distinct
     /// learn event.
+    ///
+    /// `None` when the stored key would sit in the envelope-field namespace:
+    /// a field verdict is written only through the crate's field-verdict
+    /// entries, which take the identity the field namespace minted rather
+    /// than a free-form string.
     #[allow(clippy::too_many_arguments)]
     pub fn observe(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> Option<ObserveOutcome> {
+        if learned_key_enters_field_namespace(feature_key_raw, provider_kind) {
+            return None;
+        }
+        Some(self.observe_unchecked(
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        ))
+    }
+
+    /// [`Self::observe`] for a field verdict, keyed by its minted identity.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_field_verdict(
+        &self,
+        key: &FieldVerdictKey,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> ObserveOutcome {
+        self.observe_unchecked(
+            key.registry_key(),
+            key.capability_key(),
+            key.provider_kind(),
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_unchecked(
         &self,
         state_key: &str,
         feature_key_raw: &str,
@@ -2201,8 +2262,40 @@ impl LearnedCapabilityRegistry {
     /// been superseded and the key is catalog-scoped: the caller must then emit
     /// no ledger event and bump no metric, because the observation describes a
     /// catalog revision the daemon has left.
+    ///
+    /// Returns [`GenerationOutcome::FieldNamespace`] when the stored key would
+    /// sit in the envelope-field namespace; see [`Self::observe`].
     #[allow(clippy::too_many_arguments)]
     pub fn observe_in_generation(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> GenerationOutcome<ObserveOutcome> {
+        if learned_key_enters_field_namespace(feature_key_raw, provider_kind) {
+            return GenerationOutcome::FieldNamespace;
+        }
+        self.observe_in_generation_unchecked(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_in_generation_unchecked(
         &self,
         generation: u64,
         state_key: &str,
@@ -2235,6 +2328,62 @@ impl LearnedCapabilityRegistry {
         )
     }
 
+    /// [`Self::observe`] without the namespace refusal, for tests that plant a
+    /// field-namespace entry under a bare lane no field identity can carry.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_any_key_for_tests(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> ObserveOutcome {
+        self.observe_unchecked(
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    /// [`Self::observe_in_generation`] without the namespace refusal; see
+    /// [`Self::observe_any_key_for_tests`].
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_any_key_in_generation_for_tests(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> GenerationOutcome<ObserveOutcome> {
+        self.observe_in_generation_unchecked(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
     /// [`Self::observe_in_generation`], additionally reporting the entry's
     /// resulting observation count from INSIDE the same critical section the
     /// mutation ran under.
@@ -2245,8 +2394,67 @@ impl LearnedCapabilityRegistry {
     /// method returns could race a concurrent purge or sibling mutation on
     /// the same key and report a count the committing mutation never
     /// produced.
+    ///
+    /// Refuses a field-namespace key exactly as [`Self::observe_in_generation`]
+    /// does; a field verdict goes through
+    /// [`Self::observe_field_verdict_in_generation`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_in_generation_with_observations(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> GenerationOutcome<(ObserveOutcome, u32)> {
+        if learned_key_enters_field_namespace(feature_key_raw, provider_kind) {
+            return GenerationOutcome::FieldNamespace;
+        }
+        self.observe_counted_in_generation(
+            generation,
+            state_key,
+            feature_key_raw,
+            provider_kind,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    /// [`Self::observe_in_generation_with_observations`] for a field verdict,
+    /// keyed by its minted identity.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_field_verdict_in_generation(
+        &self,
+        generation: u64,
+        key: &FieldVerdictKey,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> GenerationOutcome<(ObserveOutcome, u32)> {
+        self.observe_counted_in_generation(
+            generation,
+            key.registry_key(),
+            key.capability_key(),
+            key.provider_kind(),
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_counted_in_generation(
         &self,
         generation: u64,
         state_key: &str,
@@ -2424,7 +2632,8 @@ impl LearnedCapabilityRegistry {
             } => Some((value, generation)),
             GenerationOutcome::Stale
             | GenerationOutcome::Reserved
-            | GenerationOutcome::Exhausted => None,
+            | GenerationOutcome::Exhausted
+            | GenerationOutcome::FieldNamespace => None,
         }
     }
 
@@ -2474,7 +2683,8 @@ impl LearnedCapabilityRegistry {
             } => Some((value, generation)),
             GenerationOutcome::Stale
             | GenerationOutcome::Reserved
-            | GenerationOutcome::Exhausted => None,
+            | GenerationOutcome::Exhausted
+            | GenerationOutcome::FieldNamespace => None,
         }
     }
 
@@ -3102,7 +3312,8 @@ impl LearnedCapabilityRegistry {
             } => Some((value, generation)),
             GenerationOutcome::Stale
             | GenerationOutcome::Reserved
-            | GenerationOutcome::Exhausted => None,
+            | GenerationOutcome::Exhausted
+            | GenerationOutcome::FieldNamespace => None,
         }
     }
 
@@ -3310,7 +3521,8 @@ impl LearnedCapabilityRegistry {
             // generation it does not own, nor act on a key a purge has captured.
             GenerationOutcome::Stale
             | GenerationOutcome::Reserved
-            | GenerationOutcome::Exhausted => None,
+            | GenerationOutcome::Exhausted
+            | GenerationOutcome::FieldNamespace => None,
         }
     }
 
@@ -3661,7 +3873,7 @@ mod tests {
         );
 
         // Assert
-        assert_eq!(outcome, ObserveOutcome::Acting);
+        assert_eq!(outcome, Some(ObserveOutcome::Acting));
         assert_eq!(
             reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
             RoutingDecision::RouteAway {
@@ -3690,7 +3902,7 @@ mod tests {
         );
 
         // Assert
-        assert_eq!(outcome, ObserveOutcome::Pending);
+        assert_eq!(outcome, Some(ObserveOutcome::Pending));
         assert_eq!(
             reg.acting_negative_for("nick", "web_search", "anthropic-api", t0),
             RoutingDecision::Allow
@@ -3727,7 +3939,7 @@ mod tests {
         );
 
         // Assert
-        assert_eq!(outcome, ObserveOutcome::Acting);
+        assert_eq!(outcome, Some(ObserveOutcome::Acting));
         assert_eq!(
             reg.acting_negative_for("nick", "web_search", "anthropic-api", within),
             RoutingDecision::RouteAway {
@@ -3767,7 +3979,7 @@ mod tests {
         );
 
         // Assert -- reset to a fresh pending observation, not acting.
-        assert_eq!(outcome, ObserveOutcome::Pending);
+        assert_eq!(outcome, Some(ObserveOutcome::Pending));
         assert_eq!(
             reg.acting_negative_for("nick", "web_search", "anthropic-api", after),
             RoutingDecision::Allow
@@ -4668,7 +4880,7 @@ mod tests {
         );
 
         // Assert -- the positive is replaced by an acting negative.
-        assert_eq!(outcome, ObserveOutcome::Acting);
+        assert_eq!(outcome, Some(ObserveOutcome::Acting));
         let snap = reg.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].verdict, Verdict::LearnedBroken(FailurePhase::F1));
@@ -4711,7 +4923,7 @@ mod tests {
 
         // Assert -- no acting negative; the verified positive survives intact
         // and routing stays Allow.
-        assert_eq!(outcome, ObserveOutcome::Pending);
+        assert_eq!(outcome, Some(ObserveOutcome::Pending));
         let snap = reg.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].verdict, Verdict::VerifiedWorking);
@@ -4732,7 +4944,7 @@ mod tests {
             None,
             t0,
         );
-        assert_eq!(outcome, ObserveOutcome::Acting);
+        assert_eq!(outcome, Some(ObserveOutcome::Acting));
         assert_eq!(
             reg.snapshot()[0].verdict,
             Verdict::LearnedBroken(FailurePhase::F1)
@@ -4769,7 +4981,7 @@ mod tests {
 
         // Assert -- acting (N=2), but F3+Live routes NOTHING (advisory-only);
         // it stays visible in the snapshot for the status surface.
-        assert_eq!(outcome, ObserveOutcome::Acting);
+        assert_eq!(outcome, Some(ObserveOutcome::Acting));
         assert_eq!(
             reg.acting_negative_for("nick", "structured_output", "openai-compat", confirm),
             RoutingDecision::Allow
@@ -4811,7 +5023,7 @@ mod tests {
         );
 
         // Assert -- acting (N=2), and F3+Probe routes away (not advisory).
-        assert_eq!(outcome, ObserveOutcome::Acting);
+        assert_eq!(outcome, Some(ObserveOutcome::Acting));
         assert_eq!(
             reg.acting_negative_for("nick", "structured_output", "openai-compat", confirm),
             RoutingDecision::RouteAway {
@@ -4970,6 +5182,10 @@ mod purge_tests;
 #[cfg(test)]
 #[path = "learned_capability_owner_tests.rs"]
 mod owner_tests;
+
+#[cfg(test)]
+#[path = "learned_capability_namespace_tests.rs"]
+mod namespace_tests;
 
 #[cfg(test)]
 #[path = "learned_capability_beta_cap_tests.rs"]

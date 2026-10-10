@@ -79,7 +79,7 @@ fn a_stale_generation_field_observation_is_accepted_into_the_live_registry() {
     reg.advance_generation();
     let key = field_key("thinking.enabled.display");
 
-    let outcome = reg.observe_in_generation(
+    let outcome = reg.observe_any_key_in_generation_for_tests(
         stale,
         "nick",
         &key,
@@ -113,7 +113,7 @@ fn stale_generation_reads_are_scoped_by_key_class() {
     let key = field_key("thinking.enabled.display");
     // Learn both classes at the current generation.
     for capability in [key.as_str(), "web_search"] {
-        reg.observe(
+        reg.observe_any_key_for_tests(
             "nick",
             capability,
             "anthropic-api",
@@ -152,7 +152,7 @@ fn pruning_catalog_scoped_entries_keeps_the_field_entries() {
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
     for capability in [key.as_str(), "web_search", "computer_use"] {
-        reg.observe(
+        reg.observe_any_key_for_tests(
             "nick",
             capability,
             "anthropic-api",
@@ -264,7 +264,7 @@ fn the_boundary_cut_excludes_observations_between_snapshot_and_submit() {
 
     let reg = Arc::new(registry());
     let now = Instant::now();
-    reg.observe(
+    reg.observe_any_key_for_tests(
         "nick",
         &field_key("thinking.enabled.display"),
         "anthropic-api",
@@ -340,7 +340,7 @@ fn the_boundary_cut_snapshots_only_catalog_independent_entries() {
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
     for capability in [key.as_str(), "web_search"] {
-        reg.observe(
+        reg.observe_any_key_for_tests(
             "nick",
             capability,
             "anthropic-api",
@@ -750,7 +750,7 @@ fn a_debug_render_concurrent_with_a_boundary_commit_does_not_deadlock() {
 
     let reg = Arc::new(registry());
     // `entries` non-empty, so the render has something to count.
-    reg.observe(
+    reg.observe_any_key_for_tests(
         "nick",
         &field_key("thinking.enabled.display"),
         "anthropic-api",

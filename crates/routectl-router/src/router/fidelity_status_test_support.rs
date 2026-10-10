@@ -346,3 +346,46 @@ pub fn plant_acting_field_verdict_for_tests(
         false,
     );
 }
+
+/// Record one field-verdict negative for `capability_key` on `state_key` through
+/// the registry's field-verdict entry, at this Router's own generation, exactly
+/// as the field-repair guard's commit does.
+///
+/// The public learn entry refuses the field namespace, so a cross-crate test
+/// that needs a field verdict observed through a specific (possibly superseded)
+/// Router goes through this seam instead.
+///
+/// GATED to test builds, with its siblings: a production caller could
+/// otherwise mint a routing-affecting verdict without the field-repair guard.
+///
+/// # Panics
+///
+/// If `state_key` is not a serialized learned lane.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub fn observe_field_verdict_for_tests(
+    router: &Router,
+    state_key: &str,
+    capability_key: &str,
+    provider_kind: &str,
+    tier: routectl_core::capability::SignalTier,
+    now: Instant,
+) -> crate::learned_capability::GenerationOutcome<(crate::learned_capability::ObserveOutcome, u32)>
+{
+    let key = FieldVerdictKey::from_capability_key(
+        lane_of(state_key),
+        capability_key.to_string(),
+        provider_kind.to_string(),
+    );
+    router
+        .learned_registry()
+        .observe_field_verdict_in_generation(
+            router.registry_generation(),
+            &key,
+            tier,
+            FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            now,
+        )
+}

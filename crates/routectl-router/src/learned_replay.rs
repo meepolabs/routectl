@@ -456,6 +456,12 @@ impl ReplayProbeGuard<'_> {
                 );
                 return None;
             }
+            // Unreachable for this identity: the namespace refusal applies only
+            // to the generic entry points, never to this one's own key.
+            crate::learned_capability::GenerationOutcome::FieldNamespace => {
+                self.registry.release_slot(&key);
+                return None;
+            }
         };
         self.registry.release_slot(&key);
         tracing::info!(
@@ -544,6 +550,12 @@ impl ReplayProbeGuard<'_> {
                     "reasoning-replay clear refused: the incarnation sequence is \
                      exhausted"
                 );
+                return None;
+            }
+            // Unreachable for this identity: the namespace refusal applies only
+            // to the generic entry points, never to this one's own key.
+            crate::learned_capability::GenerationOutcome::FieldNamespace => {
+                self.registry.release_slot(&self.key);
                 return None;
             }
         };

@@ -27,7 +27,7 @@ fn registry() -> LearnedCapabilityRegistry {
 
 /// Plant one acting self-identifying negative.
 fn plant(reg: &LearnedCapabilityRegistry, state_key: &str, capability: &str) {
-    reg.observe(
+    reg.observe_any_key_for_tests(
         state_key,
         capability,
         "",

@@ -393,7 +393,7 @@ fn scenario_c_self_identifying_negative_replaces_resident_verified() {
     );
 
     // Assert: the negative replaced the positive and acts at once.
-    assert_eq!(outcome, ObserveOutcome::Acting);
+    assert_eq!(outcome, Some(ObserveOutcome::Acting));
     let snap = router.learned_capabilities.snapshot();
     assert_eq!(snap.len(), 1);
     assert_eq!(snap[0].verdict, Verdict::LearnedBroken(FailurePhase::F1));

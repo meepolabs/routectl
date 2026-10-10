@@ -1257,7 +1257,7 @@ fn bedrock_broken(rowid: i64, at: Instant, capability: &str) -> CapabilityEventR
 /// the exact key it minted. It is skipped, counted, and logged at WARN; a row
 /// carrying an exact field key on the same lane still replays.
 ///
-/// Mutation check: remove the `normalizes_into_field_namespace` skip -> red
+/// Mutation check: remove the normalized arm of `field_namespace_skip` -> red
 /// (the poisoned row is resident as a field key and nothing is counted).
 #[cfg(feature = "bedrock")]
 #[test]
@@ -1287,4 +1287,35 @@ fn a_row_normalized_into_the_field_namespace_is_skipped_and_counted() {
         .find(|e| e.field("reason") == Some("normalized_field_namespace"))
         .expect("the skip is logged");
     assert_eq!(skip.level, tracing::Level::WARN);
+}
+
+/// A field verdict is only ever written from a live request, so an exact
+/// field-namespace row with any other source did not come from a field-repair
+/// guard. It is skipped and counted; the live row for the same key replays.
+///
+/// Mutation check: drop the non-live arm of `field_namespace_skip` -> red
+/// (nothing is counted and the probe row replays).
+#[test]
+fn a_non_live_exact_field_row_is_skipped_and_counted() {
+    let base = Instant::now();
+    let live_key =
+        crate::field_capability::field_capability_key("thinking.enabled.display").expect("path");
+    let probe_key =
+        crate::field_capability::field_capability_key("thinking.enabled.budget").expect("path");
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(1, CV, OV)),
+        rows: vec![
+            broken(2, base, &live_key),
+            probe_broken(3, base, &probe_key),
+        ],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    assert_eq!(summary.skipped_namespace, 1);
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(summary.replayed_probe, 0);
+    let resident: Vec<String> = reg.snapshot().into_iter().map(|e| e.feature_key).collect();
+    assert_eq!(resident, vec![live_key]);
 }

@@ -80,7 +80,8 @@ pub use fidelity_status::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use fidelity_status::{
     FieldVerdictStatusSpec, field_verdict_event_stamps_for_tests, make_field_canary_due_for_tests,
-    plant_acting_field_verdict_for_tests, seed_distinct_fidelity_counters_for_tests,
+    observe_field_verdict_for_tests, plant_acting_field_verdict_for_tests,
+    seed_distinct_fidelity_counters_for_tests,
 };
 pub use field_verdict_observability::{
     ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,

@@ -163,9 +163,10 @@ fn bedrock_normalization_reduces_each_row_to_its_field_key() {
 }
 
 /// Mutation checks: remove every namespace refusal on the path
-/// (`tool_type_key`, `commit_learned_observation`, and the generic mint) ->
-/// red (a learn event, a resident row, an acting field verdict). Any one
-/// refusal alone keeps this green, so each has its own unit pin.
+/// (`tool_type_key`, `commit_learned_observation`, the generic mint, and the
+/// registry's `observe_in_generation_with_observations`) -> red (a learn
+/// event, a resident row, an acting field verdict). Any one refusal alone
+/// keeps this green, so each has its own unit pin.
 #[tokio::test]
 async fn a_field_namespace_tool_type_echoed_by_bedrock_learns_nothing() {
     for (tool_type, stored_path) in field_namespace_tool_types() {
@@ -214,8 +215,9 @@ async fn a_field_namespace_tool_type_echoed_by_bedrock_learns_nothing() {
 /// hands it one the request's derived vocabulary carries.
 ///
 /// Mutation check: remove the namespace refusal in
-/// `commit_learned_observation` AND the one in `mint_learned_negative` -> red
-/// (one learn event). Each alone is pinned by its own row in this file.
+/// `commit_learned_observation`, the one in `mint_learned_negative`, AND the
+/// registry's in `observe_in_generation_with_observations` -> red (one learn
+/// event). Each alone is pinned by its own row.
 #[test]
 fn the_generic_learn_entry_refuses_a_field_namespace_key() {
     let router = bedrock_router("unused");
@@ -322,7 +324,9 @@ fn only_target(router: &Router) -> DispatchTarget {
 /// namespace, whichever learner hands it over.
 ///
 /// Mutation check: remove the refusal at the top of `mint_learned_negative`
-/// -> red (one learn event, one resident field row).
+/// AND the registry's in `observe_in_generation_with_observations` -> red (one
+/// learn event, one resident field row). The registry refusal alone is pinned
+/// in its own module.
 #[test]
 fn the_generic_mint_refuses_a_key_bedrock_stores_in_the_field_namespace() {
     let router = bedrock_router("unused");
@@ -355,4 +359,49 @@ fn the_generic_mint_refuses_a_key_bedrock_stores_in_the_field_namespace() {
 
     assert!(meta.learned_capabilities.is_empty());
     assert!(router.learned_capability_snapshot().is_empty());
+}
+
+/// The public learn entry refuses a key Bedrock would store in the field
+/// namespace: it reports the refusal, records nothing, and leaves no field
+/// verdict acting. The ordinary key on the same lane is the control.
+///
+/// Mutation check: remove the namespace refusal at the top of
+/// `observe_learned_capability` AND the one in the registry's
+/// `observe_in_generation` -> red (applied, one resident field row).
+#[test]
+fn the_public_learn_entry_refuses_a_key_bedrock_stores_in_the_field_namespace() {
+    let router = bedrock_router("unused");
+    let lane_key = format!("p0#{WIRE}");
+    let segment = crate::field_capability::field_capability_key(SEGMENT_PATH).expect("a path");
+    let now = Instant::now();
+    let observe = |feature_key: &str| {
+        router.observe_learned_capability(
+            &lane_key,
+            feature_key,
+            "bedrock",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            routectl_core::capability::EvidenceSource::Live,
+            None,
+            now,
+        )
+    };
+
+    let refused = observe(&format!("toolConfig.{segment}"));
+    let control = observe("web_search");
+
+    assert_eq!(
+        refused,
+        crate::learned_capability::GenerationOutcome::FieldNamespace
+    );
+    assert!(control.applied().is_some(), "the control key is recorded");
+    let resident: Vec<String> = router
+        .learned_capability_snapshot()
+        .into_iter()
+        .map(|entry| entry.feature_key)
+        .collect();
+    assert_eq!(resident, vec!["web_search".to_string()]);
+    let lane = crate::state_key::StateKey::parse(&lane_key).expect("lane");
+    let verdict = FieldVerdictKey::new(&lane, SEGMENT_PATH, "bedrock").expect("identity");
+    assert!(!router.field_verdicts().is_negative_acting(&verdict, now));
 }

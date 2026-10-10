@@ -439,6 +439,11 @@ impl Router {
     /// observation is accepted regardless of age -- its truth does not depend on
     /// the catalog revision, and the shared registry means it lands in the store
     /// the published Router reads.
+    ///
+    /// A key that is, or normalizes into, the envelope-field namespace is
+    /// refused with [`crate::learned_capability::GenerationOutcome::FieldNamespace`]
+    /// and nothing is recorded: field verdicts are written only by the
+    /// field-repair guard, through its own identity.
     // Mirrors the registry call it forwards to; grouping the arguments would
     // only introduce a type that exists to satisfy a lint.
     #[allow(clippy::too_many_arguments)]
@@ -454,6 +459,9 @@ impl Router {
         now: Instant,
     ) -> crate::learned_capability::GenerationOutcome<crate::learned_capability::ObserveOutcome>
     {
+        if crate::field_capability::learned_key_enters_field_namespace(feature_key, provider_kind) {
+            return crate::learned_capability::GenerationOutcome::FieldNamespace;
+        }
         self.learned_capabilities.observe_in_generation(
             self.registry_generation(),
             state_key,

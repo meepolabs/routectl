@@ -1212,7 +1212,7 @@ async fn a_committed_boundary_applies_the_reloads_tuning() {
 /// reads the effective generation itself.
 #[tokio::test]
 async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_restart() {
-    use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
+    use routectl_core::capability::SignalTier;
 
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
@@ -1235,14 +1235,12 @@ async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_
 
     // The old Router observes a wire-shape fact through the PRODUCTION path.
     let observed_key = field_key();
-    let outcome = before.observe_learned_capability(
+    let outcome = routectl_router::observe_field_verdict_for_tests(
+        &before,
         "nick#upstream",
         &observed_key,
         "anthropic-api",
         SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
         std::time::Instant::now(),
     );
     assert!(
@@ -1478,7 +1476,7 @@ async fn a_settlement_after_shutdown_abandonment_uses_the_rolled_back_generation
 /// and always emitting one would decorroborate the acting case.
 #[tokio::test]
 async fn an_inferred_survivors_corroboration_survives_a_reload_and_restart() {
-    use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
+    use routectl_core::capability::SignalTier;
 
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
@@ -1498,14 +1496,12 @@ async fn an_inferred_survivors_corroboration_survives_a_reload_and_restart() {
     let t0 = std::time::Instant::now();
     for (key, observations) in [(&pending_key, 1), (&acting_key, 2)] {
         for _ in 0..observations {
-            live.observe_learned_capability(
+            let _ = routectl_router::observe_field_verdict_for_tests(
+                &live,
                 "nick#upstream",
                 key,
                 "anthropic-api",
                 SignalTier::Inferred,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
                 t0,
             );
         }
@@ -1571,7 +1567,7 @@ fn observations_of(router: &Router, capability: &str) -> u32 {
 /// two rejections close together, then another hours later.
 #[tokio::test]
 async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart() {
-    use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
+    use routectl_core::capability::SignalTier;
 
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
@@ -1597,14 +1593,12 @@ async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart()
         .checked_sub(std::time::Duration::from_hours(7))
         .expect("test clock is well past boot");
     let observe_at = |at: std::time::Instant| {
-        live.observe_learned_capability(
+        let _ = routectl_router::observe_field_verdict_for_tests(
+            &live,
             "nick#upstream",
             &key,
             "anthropic-api",
             SignalTier::Inferred,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
             at,
         );
     };
@@ -2044,14 +2038,12 @@ fn resident_lanes(router: &Router) -> Vec<(String, String)> {
 /// it durable.
 fn observe_field(router: &Router, lane: &str, path: &str, kind: &str) -> String {
     let key = format!("{}{path}", key_prefix());
-    let outcome = router.observe_learned_capability(
+    let outcome = routectl_router::observe_field_verdict_for_tests(
+        router,
         lane,
         &key,
         kind,
         routectl_core::capability::SignalTier::SelfIdentifying,
-        routectl_core::capability::FailurePhase::F1,
-        routectl_core::capability::EvidenceSource::Live,
-        None,
         std::time::Instant::now(),
     );
     assert!(
