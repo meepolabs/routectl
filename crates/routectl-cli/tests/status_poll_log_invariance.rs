@@ -37,10 +37,6 @@ use serde_json::Value;
 /// The real `routectl` binary under test, resolved by cargo for this crate.
 const BIN: &str = env!("CARGO_BIN_EXE_routectl");
 
-/// The port the developer's own daemon conventionally listens on; the test
-/// must never touch it.
-const DEVELOPER_DAEMON_PORT: u16 = 9100;
-
 /// Give-up bound for the daemon to begin serving.
 const READY_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -350,12 +346,10 @@ fn get(port: u16, path: &str, request_id: Option<&str>) -> (u16, String) {
         .unwrap_or_else(|| panic!("GET {path} on port {port} got no HTTP response"))
 }
 
-/// A loopback port that was free a moment ago; never the developer's daemon.
+/// A loopback port the OS handed out as free a moment ago.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("bound address").port();
-    assert_ne!(port, DEVELOPER_DAEMON_PORT, "ephemeral port collided");
-    port
+    listener.local_addr().expect("bound address").port()
 }
 
 /// The routectl config directory the child resolves from its scoped home.

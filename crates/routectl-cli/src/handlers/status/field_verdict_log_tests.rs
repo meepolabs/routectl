@@ -902,65 +902,310 @@ fn the_gate_emits_on_change_or_heartbeat_and_not_on_unchanged_polls() {
     }
 }
 
-/// Every content input the line reports moves the fingerprint, so a change to any
-/// of them emits.
+/// The inputs one fingerprint row starts from and mutates.
+struct GateInputs {
+    snapshot: FidelitySnapshot,
+    budgets: Vec<PaidProbeBudget>,
+    globals: AccountingGlobals,
+    /// Scheduler state after a real settled probe, for the one input a test cannot
+    /// spell directly: the settlement enum is not exported by the router crate.
+    settled_probes: routectl_router::ProbeSchedulerSnapshot,
+}
+
+/// One fingerprint row: the baseline it starts from and the ONE input it moves.
+struct FingerprintRow {
+    name: &'static str,
+    setup: fn(&mut GateInputs),
+    change: fn(&mut GateInputs),
+}
+
+const fn no_setup(_: &mut GateInputs) {}
+
+fn budget_row(provider: &str, committed_today: Option<u32>) -> PaidProbeBudget {
+    PaidProbeBudget {
+        provider: provider.to_string(),
+        daily_cap: 3,
+        committed_today,
+        accounting: super::super::paid_probe_budget::AccountingHealth::Healthy,
+    }
+}
+
+/// `count` copies of the planted verdict row and its acting row.
+fn planted_rows(snapshot: &mut FidelitySnapshot, count: usize) {
+    let planted = view_with_planted_verdict().fidelity_snapshot();
+    snapshot.verdicts = vec![planted.verdicts[0].clone(); count];
+    snapshot.acting = vec![planted.acting[0].clone(); count];
+}
+
+/// One identical budget row per provider slot, `count` of them.
+fn identical_budgets(count: usize) -> Vec<PaidProbeBudget> {
+    vec![budget_row("p0", Some(1)); count]
+}
+
+/// A provider that answers every free `count_tokens` validator, so a probe pass
+/// settles the job the admitted request queued.
+struct CountingProvider;
+
+#[async_trait::async_trait]
+impl routectl_core::Provider for CountingProvider {
+    fn id(&self) -> &'static str {
+        "anthropic"
+    }
+    fn normalize_request(
+        &self,
+        _: &routectl_core::ChatRequest,
+    ) -> routectl_core::Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(
+        &self,
+        _: serde_json::Value,
+    ) -> routectl_core::Result<routectl_core::ChatResponse> {
+        Err(routectl_core::Error::normalize_response(
+            "anthropic",
+            "unused",
+        ))
+    }
+    async fn complete(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<routectl_core::ChatResponse> {
+        Ok(routectl_core::ChatResponse {
+            model: "wire-model".to_string(),
+            ..Default::default()
+        })
+    }
+    async fn stream(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<
+        futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+    > {
+        Err(routectl_core::Error::upstream("anthropic", 500, "unused"))
+    }
+    async fn count_tokens(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> routectl_core::Result<routectl_core::TokenCount> {
+        Ok(routectl_core::TokenCount {
+            input_tokens: 11,
+            extras: serde_json::Map::new(),
+        })
+    }
+}
+
+/// Scheduler state after one admitted request queued a free probe and one pass
+/// settled it.
+fn settled_probe_state() -> routectl_router::ProbeSchedulerSnapshot {
+    let mut router = fixture_router();
+    let mut models = std::collections::BTreeMap::new();
+    models.insert(
+        NICKNAME.to_string(),
+        Arc::new(routectl_router::ResolvedModel::new(
+            NICKNAME,
+            "anthropic",
+            Arc::new(CountingProvider) as Arc<dyn routectl_core::Provider>,
+            "claude-sonnet-4-5",
+        )),
+    );
+    router.install_resolved_models(models);
+    let mut request = routectl_core::ChatRequest::default();
+    request.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(async {
+            let _ = router.complete(request).await;
+            let _ = router.run_probe_pass().await;
+        });
+    router.probe_scheduler_snapshot()
+}
+
+/// Every input `line_fingerprint` hashes moves it, so a change to that input alone
+/// emits.
 ///
-/// Each row changes ONE input over a gate that has just admitted the baseline, so a
+/// Each row starts a fresh gate from its own baseline and changes ONE input, so a
 /// row going red names the input the fingerprint dropped.
 ///
-/// Mutation check: drop any one input from `line_fingerprint` -> red on its row.
+/// Mutation check: drop any one counter, probe count, global, the settlement token,
+/// or one of the three `hash_debug` row renderings from `line_fingerprint` -> red on
+/// its row.
+///
+/// The `total` and `omitted` counts of the acting, verdict, and budget fields have no
+/// single-input row, because none can exist: within each field, `total` equals the
+/// rendered row count plus `omitted`, and `omitted` is `total` minus the render
+/// ceiling, so dropping either count alone leaves the other carrying the same
+/// change. The `beyond the ceiling` rows pin the pair: they grow a field past the
+/// ceiling with identical rows, so the rendered rows do not move and only the two
+/// counts do -- dropping both counts of that field -> red on its row.
 #[test]
 fn a_change_to_any_reported_input_emits_a_line() {
-    type Change = fn(&mut FidelitySnapshot, &mut Vec<PaidProbeBudget>, &mut AccountingGlobals);
-    let rows: [(&str, Change); 8] = [
-        ("repair counter", |snap, _, _| {
-            snap.counters.repair_attempted += 1;
-        }),
-        ("parser counter", |snap, _, _| {
-            snap.counters.parser_unlocalized += 1;
-        }),
-        ("probe queue depth", |snap, _, _| snap.probes.queued += 1),
-        ("probe activations", |snap, _, _| {
-            snap.probes.activations_total += 1;
-        }),
-        ("writer degraded", |_, _, globals| {
-            globals.writer_degraded = true;
-        }),
-        ("unauthorized units", |_, _, globals| {
-            globals.consumed_unauthorized_total += 1;
-        }),
-        ("budget row", |_, budgets, _| {
-            budgets.push(PaidProbeBudget {
-                provider: "p0".to_string(),
-                daily_cap: 3,
-                committed_today: Some(1),
-                accounting: super::super::paid_probe_budget::AccountingHealth::Healthy,
-            });
-        }),
-        ("verdict row", |snap, _, _| {
-            *snap = view_with_planted_verdict().fidelity_snapshot();
-        }),
+    const CEILING: usize = super::super::fidelity_log::MAX_RENDERED_ROWS;
+    let rows = [
+        FingerprintRow {
+            name: "repair attempted",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.repair_attempted += 1,
+        },
+        FingerprintRow {
+            name: "repair succeeded",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.repair_succeeded += 1,
+        },
+        FingerprintRow {
+            name: "verdicts learned",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.verdicts_learned += 1,
+        },
+        FingerprintRow {
+            name: "outstanding unconfirmed",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.outstanding_unconfirmed += 1,
+        },
+        FingerprintRow {
+            name: "disproved requests",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.disproved_requests += 1,
+        },
+        FingerprintRow {
+            name: "preflight actions",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.preflight_actions += 1,
+        },
+        FingerprintRow {
+            name: "parser unlocalized",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.parser_unlocalized += 1,
+        },
+        FingerprintRow {
+            name: "probe activations",
+            setup: no_setup,
+            change: |i| i.snapshot.probes.activations_total += 1,
+        },
+        FingerprintRow {
+            name: "probe queue depth",
+            setup: no_setup,
+            change: |i| i.snapshot.probes.queued += 1,
+        },
+        FingerprintRow {
+            name: "probes in flight",
+            setup: no_setup,
+            change: |i| i.snapshot.probes.in_flight += 1,
+        },
+        FingerprintRow {
+            name: "probes backing off",
+            setup: no_setup,
+            change: |i| i.snapshot.probes.backing_off += 1,
+        },
+        FingerprintRow {
+            name: "probe settlement",
+            setup: no_setup,
+            change: |i| i.snapshot.probes.last_settlement = i.settled_probes.last_settlement,
+        },
+        FingerprintRow {
+            name: "writer degraded",
+            setup: no_setup,
+            change: |i| i.globals.writer_degraded = true,
+        },
+        FingerprintRow {
+            name: "unauthorized units",
+            setup: no_setup,
+            change: |i| i.globals.consumed_unauthorized_total += 1,
+        },
+        FingerprintRow {
+            name: "acting row content",
+            setup: |i| planted_rows(&mut i.snapshot, 1),
+            change: |i| i.snapshot.acting[0].state_key.push_str("-other"),
+        },
+        FingerprintRow {
+            name: "verdict row content",
+            setup: |i| planted_rows(&mut i.snapshot, 1),
+            change: |i| i.snapshot.verdicts[0].confirmations += 1,
+        },
+        FingerprintRow {
+            name: "budget row content",
+            setup: |i| i.budgets = vec![budget_row("p0", Some(1))],
+            change: |i| i.budgets[0].committed_today = Some(2),
+        },
+        FingerprintRow {
+            name: "acting rows beyond the ceiling",
+            setup: |i| {
+                let verdicts = std::mem::take(&mut i.snapshot.verdicts);
+                planted_rows(&mut i.snapshot, CEILING + 1);
+                i.snapshot.verdicts = verdicts;
+            },
+            change: |i| {
+                let extra = i.snapshot.acting[0].clone();
+                i.snapshot.acting.push(extra);
+            },
+        },
+        FingerprintRow {
+            name: "verdict rows beyond the ceiling",
+            setup: |i| {
+                let acting = std::mem::take(&mut i.snapshot.acting);
+                planted_rows(&mut i.snapshot, CEILING + 1);
+                i.snapshot.acting = acting;
+            },
+            change: |i| {
+                let extra = i.snapshot.verdicts[0].clone();
+                i.snapshot.verdicts.push(extra);
+            },
+        },
+        FingerprintRow {
+            name: "budget rows beyond the ceiling",
+            setup: |i| i.budgets = identical_budgets(CEILING + 1),
+            change: |i| i.budgets = identical_budgets(CEILING + 2),
+        },
     ];
+    let settled_probes = settled_probe_state();
+    assert!(
+        settled_probes.last_settlement.is_some(),
+        "premise: the probe pass settled a job, or the settlement row changes nothing",
+    );
 
-    for (name, change) in rows {
+    for row in rows {
         let gate = FidelityGate::default();
         let emission = FidelityEmission::always();
         let now = Instant::now();
-        let mut snapshot = fresh_view().fidelity_snapshot();
-        let mut budgets = no_budgets();
-        let mut globals = healthy_globals();
+        let mut inputs = GateInputs {
+            snapshot: fresh_view().fidelity_snapshot(),
+            budgets: no_budgets(),
+            globals: healthy_globals(),
+            settled_probes,
+        };
+        (row.setup)(&mut inputs);
         let baseline = snapshot_lines(|| {
-            emit_if_admitted(&snapshot, &budgets, globals, &emission, &gate, now);
-            emit_if_admitted(&snapshot, &budgets, globals, &emission, &gate, now);
+            for _ in 0..2 {
+                emit_if_admitted(
+                    &inputs.snapshot,
+                    &inputs.budgets,
+                    inputs.globals,
+                    &emission,
+                    &gate,
+                    now,
+                );
+            }
         });
-        assert_eq!(baseline, 1, "{name}: premise -- the repeat is suppressed");
+        assert_eq!(
+            baseline, 1,
+            "{}: premise -- the repeat is suppressed",
+            row.name
+        );
 
-        change(&mut snapshot, &mut budgets, &mut globals);
+        (row.change)(&mut inputs);
         let lines = snapshot_lines(|| {
-            emit_if_admitted(&snapshot, &budgets, globals, &emission, &gate, now);
+            emit_if_admitted(
+                &inputs.snapshot,
+                &inputs.budgets,
+                inputs.globals,
+                &emission,
+                &gate,
+                now,
+            );
         });
 
-        assert_eq!(lines, 1, "{name}: a changed input must emit");
+        assert_eq!(lines, 1, "{}: a changed input must emit", row.name);
     }
 }
 

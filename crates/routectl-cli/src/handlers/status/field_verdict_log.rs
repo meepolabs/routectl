@@ -19,7 +19,7 @@
 //! used budget without its cap says nothing at all. Splitting them across lines
 //! would make a reader correlate by timestamp.
 //!
-//! # Why ONE line per REQUEST, not per panel build
+//! # Why at most ONE line per REQUEST, not per panel build
 //!
 //! The `/status` aggregate builds the health panel and the doctor panel in one
 //! request, and both carry this surface. Emitting from each would put two
@@ -450,7 +450,7 @@ fn emit_observer_event(
 /// The acting rows that fit under the shared render ceiling.
 ///
 /// Bounded for the same reason the verdict rows are: the count grows with what a
-/// deployment has learned, and this line is emitted on every poll.
+/// deployment has learned, and this line may be emitted on any poll.
 fn bounded_acting(snapshot: &FidelitySnapshot) -> &[routectl_router::ActingFieldVerdict] {
     let end = snapshot
         .acting

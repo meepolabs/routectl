@@ -167,50 +167,51 @@ pub(crate) fn warm_capability_registry_from_ledger(
             restate_survivors_past_new_boundary(db_path, router, usage, stale_rowid)
         }
         outcome => {
-            log_fail_closed(&outcome, db_path, catalog_version, overlay_revision);
+            let warm = fail_closed_outcome(&outcome, db_path, catalog_version, overlay_revision);
             commit_fresh_tombstone(usage, catalog_version, overlay_revision);
-            let warm = match outcome {
-                BoundaryOutcome::Unreadable(class) => WarmOutcome::Unreadable(class),
-                BoundaryOutcome::NoTombstone => WarmOutcome::NoTombstone,
-                // `Replay` and `RevisionMismatch` never reach here (the arms
-                // above take them), listed for exhaustiveness.
-                BoundaryOutcome::Cold
-                | BoundaryOutcome::Replay(_)
-                | BoundaryOutcome::RevisionMismatch { .. } => WarmOutcome::Cold,
-            };
             WarmReport::without_replay(warm)
         }
     }
 }
 
-/// Log the fail-closed classification at the level its case warrants and no
-/// higher: a cold ledger and an absent tombstone are the ordinary cold-start
-/// shapes (debug), and only a genuinely unreadable ledger is a WARN.
-fn log_fail_closed(
+/// The warm outcome a fail-closed classification reports, logged at the level
+/// its case warrants and no higher: a cold ledger and an absent tombstone are
+/// the ordinary cold-start shapes (debug), and only a genuinely unreadable
+/// ledger is a WARN.
+fn fail_closed_outcome(
     outcome: &BoundaryOutcome,
     db_path: &Path,
     catalog_version: u32,
     overlay_revision: u64,
-) {
-    match outcome {
-        // Unreachable in practice (the caller replays or restates these
-        // cases), listed for exhaustiveness.
-        BoundaryOutcome::Replay(_) | BoundaryOutcome::RevisionMismatch { .. } => {}
-        BoundaryOutcome::Cold => tracing::debug!(
-            db_path = %db_path.display(),
-            "no usage ledger yet; capability warm fails closed to a fresh tombstone (cold start)"
-        ),
-        BoundaryOutcome::NoTombstone => tracing::debug!(
-            catalog_version,
-            overlay_revision,
-            "no capability tombstone in the ledger; failing closed and writing a fresh one"
-        ),
-        BoundaryOutcome::Unreadable(class) => tracing::warn!(
-            db_path = %db_path.display(),
-            reason = class,
-            "usage ledger not readable during capability startup warm; \
-             leaving registry empty and writing a fresh tombstone"
-        ),
+) -> WarmOutcome {
+    match *outcome {
+        BoundaryOutcome::Replay(_) | BoundaryOutcome::RevisionMismatch { .. } => {
+            unreachable!("a replayable or restatable boundary never takes the fail-closed path")
+        }
+        BoundaryOutcome::Cold => {
+            tracing::debug!(
+                db_path = %db_path.display(),
+                "no usage ledger yet; capability warm fails closed to a fresh tombstone (cold start)"
+            );
+            WarmOutcome::Cold
+        }
+        BoundaryOutcome::NoTombstone => {
+            tracing::debug!(
+                catalog_version,
+                overlay_revision,
+                "no capability tombstone in the ledger; failing closed and writing a fresh one"
+            );
+            WarmOutcome::NoTombstone
+        }
+        BoundaryOutcome::Unreadable(class) => {
+            tracing::warn!(
+                db_path = %db_path.display(),
+                reason = class,
+                "usage ledger not readable during capability startup warm; \
+                 leaving registry empty and writing a fresh tombstone"
+            );
+            WarmOutcome::Unreadable(class)
+        }
     }
 }
 

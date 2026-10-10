@@ -282,14 +282,19 @@ fn overlay_soft_defect_finding(defect: &OverlaySoftDefect) -> Finding {
     }
 }
 
+const MS_PER_SEC: i64 = 1_000;
+const SECS_PER_MIN: i64 = 60;
+const SECS_PER_HOUR: i64 = 60 * SECS_PER_MIN;
+const SECS_PER_DAY: i64 = 24 * SECS_PER_HOUR;
+
 /// A coarse human age: whole seconds, minutes, hours, or days.
 fn format_age(age_ms: i64) -> String {
-    let secs = age_ms / 1_000;
+    let secs = age_ms / MS_PER_SEC;
     match secs {
-        ..60 => format!("{secs}s"),
-        60..3_600 => format!("{}m", secs / 60),
-        3_600..86_400 => format!("{}h", secs / 3_600),
-        _ => format!("{}d", secs / 86_400),
+        ..SECS_PER_MIN => format!("{secs}s"),
+        SECS_PER_MIN..SECS_PER_HOUR => format!("{}m", secs / SECS_PER_MIN),
+        SECS_PER_HOUR..SECS_PER_DAY => format!("{}h", secs / SECS_PER_HOUR),
+        _ => format!("{}d", secs / SECS_PER_DAY),
     }
 }
 

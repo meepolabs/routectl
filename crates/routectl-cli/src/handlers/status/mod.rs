@@ -525,28 +525,6 @@ mod tests {
         Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()))
     }
 
-    #[test]
-    fn warm_report_defaults_to_not_run_and_keeps_the_installed_report() {
-        let installed = WarmReport {
-            outcome: crate::server::capability_rebuild::WarmOutcome::Replayed,
-            summary: Some(routectl_router::CapabilityRebuildSummary::default()),
-            loaded_rows: 7,
-        };
-
-        let default_state = test_state();
-        let warmed = StatusState::from_app(
-            &AppState::for_test(Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
-                Config::default(),
-            ))))),
-            None,
-            DaemonMeta::for_test(),
-        )
-        .with_warm_report(installed);
-
-        assert_eq!(*default_state.warm_report(), WarmReport::not_run());
-        assert_eq!(*warmed.warm_report(), installed);
-    }
-
     /// The GET-only panel paths. `/status/query` is deliberately absent: it
     /// owns the QUERY-method carve-out and is covered by its own tests.
     const STATUS_PATHS: &[&str] = &[

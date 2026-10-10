@@ -5892,8 +5892,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (fresh tombstone + restatements) atomically, and only on commit replays
   the same rows into the live registry; on failure (the slice read via
   `try_read_events` OR the batch commit) nothing is committed, an ERROR logs
-  the path-free class, and the registry stays empty. `log_fail_closed` logs the remaining cases at
-  their warranted level (debug for a cold ledger / absent tombstone, WARN
+  the path-free class, and the registry stays empty. `fail_closed_outcome` maps the remaining
+  cases to their `WarmOutcome` and logs each at its warranted level (debug for a cold ledger / absent tombstone, WARN
   only for a genuinely unreadable ledger) and
   `commit_fresh_tombstone` commits exactly one fresh tombstone stamped this
   boot's revision through the ACKNOWLEDGED batch path -- not best-effort and
@@ -6671,17 +6671,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   flattened extras would itself be a fidelity leak, so the floor is satisfied
   operator-side -- and at INFO rather than the 60s DEBUG metrics snapshot, which
   is not readable at a live log level). `log_field_verdict_snapshot(view,
-  learned, budgets)` reads `view.field_repair_counters()`,
-  `view.fidelity_snapshot()` -- ONE coherent router read -- then emits one
-  aggregated INFO,
+  budgets, globals, emission, gate)` reads `view.fidelity_snapshot()` -- ONE
+  coherent router read -- then emits one aggregated INFO,
   `"envelope field verdict snapshot"`, carrying: all SEVEN counters -- the three
   metrics totals, BOTH halves of the wrong-repair alarm
   (`rc_field_outstanding_unconfirmed_total`, current, and
   `rc_field_disproved_requests_total`, lifetime-monotonic),
   `rc_field_preflight_actions_total` and `rc_parser_unlocalized_total` --
   `rc_acting_field_verdicts{,_total}`, the per-verdict
-  `rc_field_verdict_rows{,_total}`, and the accounting-health
-  `rc_paid_probe_budgets{,_total}`. ONE line because the facts are only
+  `rc_field_verdict_rows{,_total,_omitted}`, the accounting-health
+  `rc_paid_probe_budgets{,_total,_omitted}`, the two process globals, and the
+  probe scheduler's `rc_probe_*` state. ONE line because the facts are only
   interpretable together (a confirmation count without its required quorum
   cannot be read as sufficient or short; a used budget without its cap says
   nothing). `budgets` is passed IN rather than read here, because the accounting
@@ -6700,11 +6700,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   The no-config doctor branch emits too, with unavailable budget data -- the floor is
   about the router, and only the caps come from config. Suppression is log-only, so
   every panel's data is built in full. The process-global writer health and unauthorized-spend total are emitted
-  HERE, once, never copied onto a provider row. A source guard in its own sidecar
-  pins each counter field to the counter it is NAMED for and refuses either global
-  being read off a row -- a swap emits a well-formed line that reports one fact as
-  another, which no assertion on the emitted VALUES can see. Pure function of its
-  read-only inputs -- no state, no mutation, log-only. The observer event is built
+  HERE, once, never copied onto a provider row. The sidecar pins each counter field
+  to the counter it is NAMED for on the captured event, with every counter seeded to
+  a distinct value so a swap between two fields cannot pass. Log-only: the router
+  and accounting inputs are read, never written; the one state it touches is the
+  daemon-scoped `FidelityGate` mark. The observer event is built
   ONLY inside a `cfg(test)` helper (`emit_observer_event`), and the gate is about COST
   rather than tidiness: the event owns a cloned `FidelitySnapshot`, whose verdict and
   acting vectors grow with the (target, field) identities a deployment has learned --
