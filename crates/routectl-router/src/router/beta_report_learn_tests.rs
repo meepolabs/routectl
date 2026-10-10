@@ -438,7 +438,15 @@ fn a_reported_flag_settles_its_admitted_probe_as_a_rejection_not_a_success() {
     let mut dedupe = HashSet::new();
     let mut meta = DispatchMeta::for_alias("m1");
 
-    router.settle_attempt_success(&report, &target, &req, &mut dedupe, &mut meta, &mut guard);
+    router.settle_attempt_success(
+        &report,
+        &UntranslatedCapabilities::default(),
+        &target,
+        &req,
+        &mut dedupe,
+        &mut meta,
+        &mut guard,
+    );
 
     assert!(
         meta.cleared_capabilities.is_empty(),
@@ -615,6 +623,7 @@ fn a_repeated_accepted_beta_settlement_emits_no_second_event() {
     let mut first_guard = admit_beta_probe(&router);
     router.settle_attempt_success(
         &empty,
+        &UntranslatedCapabilities::default(),
         &target,
         &req,
         &mut dedupe,
@@ -636,6 +645,7 @@ fn a_repeated_accepted_beta_settlement_emits_no_second_event() {
     );
     router.settle_attempt_success(
         &empty,
+        &UntranslatedCapabilities::default(),
         &target,
         &req,
         &mut dedupe,

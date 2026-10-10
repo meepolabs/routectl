@@ -669,9 +669,12 @@ impl Router {
                         // ride each clear out on the meta so the ledger records
                         // it and a warm rebuild does not resurrect the negative.
                         // Beta flags the provider reported stripping settle
-                        // first, as rejections.
+                        // first, as rejections. A capability the egress
+                        // withheld was never tested, so it is not cleared.
+                        let untranslated = UntranslatedCapabilities::take_from(&translation_report);
                         self.settle_attempt_success(
                             &beta_report,
+                            &untranslated,
                             target,
                             &req,
                             &mut learn_dedupe,
@@ -761,7 +764,7 @@ impl Router {
                             &req,
                             &resp,
                             target,
-                            &UntranslatedCapabilities::take_from(&translation_report),
+                            &untranslated,
                             meta,
                             Instant::now(),
                         );
@@ -1629,9 +1632,12 @@ impl Router {
                         // and ride each clear out on the meta so the ledger
                         // records it and a warm rebuild does not resurrect it.
                         // Beta flags the provider reported stripping settle
-                        // first, as rejections.
+                        // first, as rejections. A capability the egress
+                        // withheld was never tested, so it is not cleared.
+                        let untranslated = UntranslatedCapabilities::take_from(&translation_report);
                         self.settle_attempt_success(
                             &beta_report,
+                            &untranslated,
                             target,
                             &req,
                             &mut learn_dedupe,

@@ -388,17 +388,42 @@ impl LearnedProbeGuard {
         }
     }
 
-    /// The dispatch succeeded (2xx): clear every held entry, then disarm.
+    /// [`settle_success_except`](Self::settle_success_except) with nothing
+    /// withheld.
+    #[cfg(test)]
+    pub(super) fn settle_success(&mut self) -> Vec<super::CapabilityClearedEvent> {
+        self.settle_success_except(|_| false)
+    }
+
+    /// The dispatch succeeded (2xx): clear every held entry except those
+    /// whose capability `withheld` names, then disarm once nothing is held.
     /// Returns one [`CapabilityClearedEvent`](super::CapabilityClearedEvent)
     /// per cleared entry so the caller can ride the clears out on the dispatch
     /// meta; this is the ONLY settlement arm that clears a resident negative
     /// (a same-capability rejection refreshes with backoff, a drop records a
     /// transient error -- neither clears), so it is the ONLY arm that emits.
-    pub(super) fn settle_success(&mut self) -> Vec<super::CapabilityClearedEvent> {
+    ///
+    /// A withheld capability never reached the upstream, so the 2xx is no
+    /// evidence it is accepted and must not clear its negative. Its admission
+    /// stays held and the guard stays armed, so the drop releases its
+    /// `in_flight` slot as a transient and a later request re-probes.
+    pub(super) fn settle_success_except(
+        &mut self,
+        withheld: impl Fn(&str) -> bool,
+    ) -> Vec<super::CapabilityClearedEvent> {
         let mut cleared = Vec::new();
-        if let Some(registry) = self.registry.take() {
+        let (kept, settled): (Vec<_>, Vec<_>) = std::mem::take(&mut self.probes)
+            .into_iter()
+            .partition(|probe| withheld(&probe.feature));
+        self.probes = kept;
+        let registry = if self.probes.is_empty() {
+            self.registry.take()
+        } else {
+            self.registry.clone()
+        };
+        if let Some(registry) = registry {
             let now = Instant::now();
-            for probe in self.probes.drain(..) {
+            for probe in settled {
                 let settled = registry.record_probe_outcome_in_generation(
                     probe.generation,
                     &probe.learned_key,

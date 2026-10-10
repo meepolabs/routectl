@@ -21,7 +21,7 @@ use routectl_core::capability::{BETA_ACCEPTED, EvidenceSource, FailurePhase, Sig
 use routectl_core::{BetaRepairReport, ChatRequest};
 
 use super::capability_learn::{LearnDedupeKey, LearnedMint};
-use super::capability_observe::CapabilityObserveEvent;
+use super::capability_observe::{CapabilityObserveEvent, UntranslatedCapabilities};
 use super::runtime_gate::ProbeAdmission;
 use super::{DispatchMeta, DispatchTarget, LearnedProbeGuard, Router};
 use crate::beta_capability::beta_capability_key;
@@ -48,16 +48,20 @@ impl Router {
     /// Settle a successful attempt, in three steps: every flag the provider
     /// reported stripping, as a rejection; then every held beta re-probe the
     /// report did not name, as a verified positive; then the remaining held
-    /// re-probes as successes.
+    /// re-probes as successes, except any whose capability the attempt's
+    /// egress withheld (`untranslated`): that 2xx never tested it, so its
+    /// admission stays held and the negative stands.
     ///
     /// The order is load-bearing. A reported flag was rejected even though the
     /// attempt succeeded; settled after the success, an admitted re-probe for
     /// that flag would clear the very negative the upstream just re-confirmed.
     /// An unreported beta re-probe must leave the held set before the success
     /// settlement, which would otherwise clear it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn settle_attempt_success(
         &self,
         beta_report: &BetaRepairReport,
+        untranslated: &UntranslatedCapabilities,
         target: &DispatchTarget,
         req: &ChatRequest,
         dedupe: &mut HashSet<LearnDedupeKey>,
@@ -74,7 +78,7 @@ impl Router {
             self.record_accepted_beta(&admission, req, meta);
         }
         meta.cleared_capabilities
-            .extend(probe_guard.settle_success());
+            .extend(probe_guard.settle_success_except(|key| untranslated.names(key)));
     }
 
     /// Record a held beta re-probe the upstream accepted as a verified

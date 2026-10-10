@@ -52,7 +52,11 @@ mod bedrock_lanes {
     use super::*;
 
     use crate::router::CapabilityLearnEvent;
-    use routectl_core::capability::{FailurePhase, Verdict, WEB_SEARCH};
+    use std::time::{Duration, Instant};
+
+    use routectl_core::capability::{
+        EvidenceSource, FailurePhase, SignalTier, Verdict, WEB_SEARCH,
+    };
     use routectl_providers::bedrock::{
         BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth,
     };
@@ -402,6 +406,108 @@ creds = { kind = "default-chain" }
         let rows = web_search_rows(&lanes.router);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state_key, lane_key(WIRE_B));
+    }
+    /// A lapsed web-search negative on `wire`'s lane, so the chain filter
+    /// admits the next request to re-probe it.
+    fn seed_lapsed_web_search_negative(router: &Router, wire: &str) {
+        let now = Instant::now();
+        let lapsed = now
+            .checked_sub(Duration::from_secs(1))
+            .expect("test clock is well past boot");
+        router.learned_capabilities.import_entries(vec![
+            crate::learned_capability::ExportedEntry {
+                provider_kind: "bedrock".into(),
+                state_key: lane_key(wire),
+                feature_key: WEB_SEARCH.into(),
+                verdict: crate::learned_capability::EntryVerdict::Negative,
+                signal: SignalTier::SelfIdentifying,
+                observations: 1,
+                first_seen: lapsed,
+                last_seen: lapsed,
+                expires_at: lapsed,
+                evidence_class: None,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                in_flight: false,
+                consecutive_failed_probes: 0,
+            },
+        ]);
+    }
+
+    fn web_search_clears(dispatched: &Dispatched) -> Vec<&crate::router::CapabilityClearedEvent> {
+        dispatched
+            .meta
+            .cleared_capabilities
+            .iter()
+            .filter(|ev| ev.capability_key == WEB_SEARCH)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_success_on_the_converse_lane_that_withheld_web_search_keeps_its_re_probe_negative() {
+        // Arrange
+        let lanes = Lanes::start(&[lane(
+            "m1",
+            WIRE_A,
+            BedrockApiShape::Converse,
+            Answer::Success,
+        )])
+        .await;
+        seed_lapsed_web_search_negative(&lanes.router, WIRE_A);
+
+        // Act
+        let dispatched = lanes.send().await;
+
+        // Assert
+        assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+        assert_eq!(lanes.wire_tool_types(0).await, vec![Vec::<String>::new()]);
+        assert!(
+            web_search_clears(&dispatched).is_empty(),
+            "no web-search clear rides out: {:?}",
+            dispatched.meta.cleared_capabilities,
+        );
+        let rows = web_search_rows(&lanes.router);
+        assert_eq!(rows.len(), 1, "the negative is still resident: {rows:?}");
+        assert_eq!(rows[0].verdict, Verdict::LearnedBroken(FailurePhase::F1));
+        let entry = lanes
+            .router
+            .learned_capabilities
+            .export_entries()
+            .into_iter()
+            .find(|e| e.feature_key == WEB_SEARCH)
+            .expect("resident");
+        assert!(
+            !entry.in_flight,
+            "the held slot is released for a later re-probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_success_on_the_invoke_lane_that_sent_web_search_clears_its_re_probe_negative() {
+        // Arrange
+        let lanes =
+            Lanes::start(&[lane("m1", WIRE_A, BedrockApiShape::Invoke, Answer::Success)]).await;
+        seed_lapsed_web_search_negative(&lanes.router, WIRE_A);
+
+        // Act
+        let dispatched = lanes.send().await;
+
+        // Assert
+        assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+        assert_eq!(
+            lanes.wire_tool_types(0).await,
+            vec![vec!["web_search_20250305".to_string()]],
+        );
+        let cleared = web_search_clears(&dispatched);
+        assert_eq!(cleared.len(), 1, "{cleared:?}");
+        assert_eq!(cleared[0].state_key, lane_key(WIRE_A));
+        assert!(
+            web_search_rows(&lanes.router)
+                .iter()
+                .all(|row| row.verdict != Verdict::LearnedBroken(FailurePhase::F1)),
+            "the re-probed negative is lifted: {:?}",
+            web_search_rows(&lanes.router),
+        );
     }
 }
 
