@@ -661,7 +661,8 @@ license.
   host
 - `src/anthropic_api/context_management.rs` -- LRU+TTL thinking-block store
   for context-management beta emulation; exports `ThinkingCache`,
-  `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA`,
+  `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA` (also
+  re-exported from `anthropic_api` for the router's beta-override advisory),
   `CLEAR_THINKING_EDIT_TYPE`, `THINKING_CACHE_CAP`, `THINKING_CACHE_TTL`,
   `snapshot_to_cache`, `lookup_thinking`, `extract_tool_thinking`,
   `apply_clear_thinking_edit` (the reinjection path routes its
@@ -1973,17 +1974,25 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   through `model_egress_kind` (a `provider` value naming a `[pools]` block
   answers by its first resolvable member) and asking
   `routectl_providers::anthropic_api::egress_reads_max_thinking_budget` rather
-  than listing kinds locally (advisory only); `beta_floor_override_warnings`
-  flags an `unsupported` `beta:<flag>` override on an anthropic-api provider
-  naming a flag the egress beta floor re-adds (structured outputs, or a
-  provider / model `header_extras` `anthropic-beta` pin, on every such
-  provider; the OAuth gate, Claude Code floor and effort beta only on an
-  oauth-bearer provider on the Anthropic API host), compared
-  case-insensitively and naming every floor class the flag is in (advisory
-  only). Units live in the
-  `#[path]`-included `warnings_tests.rs` (gemini-gated),
-  `warnings_thinking_budget_tests.rs` (kind-agnostic) and
-  `warnings_beta_floor_tests.rs`
+  than listing kinds locally (advisory only). Units live in the
+  `#[path]`-included `warnings_tests.rs` (gemini-gated) and
+  `warnings_thinking_budget_tests.rs` (kind-agnostic)
+- `src/factory/beta_floor_warnings.rs` -- `beta_floor_override_warnings`,
+  the `config check` advisory for an `unsupported` `beta:<flag>` override on
+  an anthropic-api provider naming a flag the egress re-adds after the
+  override filter. `EgressLane` models each `build_headers` site from static
+  config (forwarded leg, own-OAuth cloak lane, `cloak.mode`,
+  `context_management`): the OAuth gate, Claude Code floor (unless
+  `cloak.mode = "never"`) and body-dependent effort union on an own-credential
+  oauth-bearer provider on the Anthropic API host only, the body-dependent
+  structured-outputs union off the forwarded leg, the provider pin, and the
+  model pin of every model a cell reaches (a provider cell walks every model
+  dispatching to the provider directly or through a pool, skipping one whose
+  own model cell decides the flag); then the removals (the context-management
+  beta is never reported under `context_management = true`; the redaction
+  beta's reason names the `thinking.display` exception). The enumerated site
+  list with conditions and line refs is the module doc of the
+  `#[path]`-included `warnings_beta_floor_tests.rs`, one table row per site
 - `src/factory/installation_id.rs` -- (cfg `openai-responses`) read-or-create
   the persistent per-installation UUIDv4 at `<config-dir>/installation_id`;
   `resolve_installation_id` adopts an existing valid file

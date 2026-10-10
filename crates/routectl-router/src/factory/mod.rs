@@ -1,5 +1,6 @@
 //! Provider factory root + re-exports.
 
+mod beta_floor_warnings;
 mod build;
 #[cfg(feature = "openai-responses")]
 mod installation_id;

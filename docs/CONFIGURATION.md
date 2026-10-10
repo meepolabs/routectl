@@ -876,22 +876,39 @@ validation. Matching never rewrites the flag: a forwarded flag keeps the
 client's spelling, and learned and seeded `beta:` verdicts stay
 case-sensitive.
 
-Because the floor is never withheld, an `unsupported` override on a floor
-flag has no effect on an `anthropic-api` provider, and `routectl config
-check` warns about it, naming the spec, the flag and why the floor re-adds
-it. The flags it checks on every `anthropic-api` provider:
-`structured-outputs-2025-12-15` (re-added when the body carries
-`output_config.format`) and the provider's
-`header_extras["anthropic-beta"]` (plus the model's own for a
-`"<provider>:<nickname>"` spec). On an `auth_kind = "oauth-bearer"` provider
-whose `base_url` host is `api.anthropic.com` it also checks
-`oauth-2025-04-20` (OAuth gate), `effort-2025-11-24` (re-added when the body
-carries `output_config.effort`) and the Claude Code floor listed below; all
-three apply only when routectl uses its own OAuth credential, so an
-`api-key` provider or one on another host is not warned about them, and
-there the override does withhold the flag. The comparison ignores ASCII case.
-The warning is advisory: the config still loads and the exit code is
-unchanged.
+Because the floor is never withheld, an `unsupported` override on a flag
+the egress re-adds has no effect wherever that re-add fires, and `routectl
+config check` warns about it, naming the spec, the flag and every reason it
+ships. The comparison ignores ASCII case, and only a re-add the cell's
+targets can reach is reported:
+
+- The provider's `header_extras["anthropic-beta"]` pin, on every
+  `anthropic-api` provider (a forwarded one included).
+- A model's own `header_extras["anthropic-beta"]` pin. A
+  `"<provider>:<nickname>"` cell checks that model; a provider cell checks
+  every model that dispatches to the provider, directly or through a
+  `[pools]` block, except a model whose own `"<provider>:<nickname>"` cell
+  also names the flag (that cell decides it).
+- `structured-outputs-2025-12-15`, re-added whenever the request carries
+  `output_config.format`; not on a `credential_source = "forwarded"`
+  provider, whose client betas pass through verbatim.
+- On an `auth_kind = "oauth-bearer"` provider whose `base_url` host is
+  `api.anthropic.com` and whose `credential_source` is `own` (the default)
+  only: `oauth-2025-04-20` (OAuth gate, always), `effort-2025-11-24`
+  (re-added whenever the request carries `output_config.effort`) and the
+  Claude Code floor listed below (re-added on every request without a Claude
+  Code session header, or on every request under `cloak.mode = "always"`;
+  never under `cloak.mode = "never"`). An `api-key` provider, one on another
+  host, or a forwarded one is not warned about these, and there the override
+  does withhold the flag.
+
+Two removals run after every re-add and are reflected in the warning:
+`context-management-2025-06-27` is never reported on a provider with
+`context_management = true`, which strips it from the header whatever
+supplied it; and `redact-thinking-2026-02-12` is reported with the exception
+"unless the request carries `thinking.display`" (except on a forwarded
+provider, where no removal runs). The warning is advisory: the config still
+loads and the exit code is unchanged.
 
 At ingress, client flags from the body and the `anthropic-beta` header are
 split on commas, trimmed and deduplicated; a flag holding any byte outside

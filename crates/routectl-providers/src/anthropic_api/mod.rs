@@ -113,6 +113,7 @@ pub use cloak::{
     CloakConfig, CloakMode, MAX_SENSITIVE_WORD_FOLDED_CHARS, MAX_SENSITIVE_WORDS,
     SensitiveWordsBoundError, ToolRename, validate_sensitive_words,
 };
+pub use context_management::CONTEXT_MANAGEMENT_BETA;
 /// Which provider kinds read the operator-declared thinking-budget cap.
 /// Re-exported from the module that consumes the field so config
 /// validation can answer "does this model's egress read the knob" without
