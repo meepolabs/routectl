@@ -1318,6 +1318,57 @@ place to assert it. The layer scan runs this repo's own
 so credential vocabulary keeps exactly one owner, and it carries a positive
 control proving the scan can fail.
 
+## Capturing an upstream rejection fixture
+
+Capability-learning parsers are tested against real upstream rejection
+envelopes committed under
+`crates/routectl-router/tests/fixtures/rejections/<dialect>/<case>.json`.
+`scripts/capture-rejection.sh` turns one rejection the daemon already
+logged into such a file. Its source is the DEBUG `upstream error body`
+line, which is redacted and capped in-process, so the script never
+handles a raw upstream body.
+
+1. Run the daemon with a file sink and the DEBUG line enabled:
+
+   ```
+   ROUTECTL_LOG=routectl=info,routectl_core::log_safe=debug,routectl_router::router::dispatch=debug \
+     routectl serve 2>/tmp/routectl-debug.log
+   ```
+
+   The `dispatch=debug` directive enables the router's class-decision
+   line, the only per-attempt record of the lifted error type; without it
+   the fixture carries no `lifted_type`.
+
+   Use a scratch `XDG_CONFIG_HOME` for a one-off capture daemon.
+
+2. Send the request that draws the rejection and note its request id
+   (the `x-request-id` response header).
+
+3. Capture it:
+
+   ```
+   bash scripts/capture-rejection.sh --log /tmp/routectl-debug.log \
+     --request-id <id> --dialect anthropic-api --case thinking-display \
+     --note "Captured on anthropic-api, <model>, <date>. Tier 1."
+   ```
+
+`--dialect` is one of `anthropic-api`, `bedrock`, `openai-compat`,
+`openai-responses`, and must match the line's `provider_kind`. The fixture
+is `{note, status, lifted_type, body}`; `lifted_type` appears only when
+the same request logged a non-empty `upstream_type` (the discriminator
+lifted onto the upstream error), and `body` is the logged body verbatim --
+a JSON envelope as serde_json re-serialized it. The note is yours to
+write: what was captured, on what, when, and its evidence tier; no
+request ids, hostnames or account identifiers.
+
+The script refuses, writing nothing, on an unknown dialect, no matching
+line, two differing lines for the id, a body carrying a cap or elision
+marker (`[truncated at`, `(json body, N bytes, not excerpted)`, an HTML
+page marker), a `scrub-fixture.sh --check` finding on the staged file, or
+an existing fixture without `--force`. Exit codes: 0 written, 1 refused,
+2 usage or a missing prerequisite. `scripts/capture-rejection.test.sh`
+is its self-test (CI runs it).
+
 
 ## Style notes
 

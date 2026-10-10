@@ -20,7 +20,7 @@
 # the upstream lane, never behind this driver.
 #
 # Usage (always through the runner, which exports the contract):
-#   scripts/capture_driver.sh --lane openai-responses-api --case tools-multiturn-01 \
+#   scripts/capture_driver.sh --lane openai-responses --case tools-multiturn-01 \
 #     --expected-ingress openai-responses -- scripts/drivers/codex.sh
 
 set -eu

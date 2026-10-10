@@ -564,6 +564,11 @@ jobs:
       - name: fixture promotion self-test
         run: bash scripts/promote_fixture.test.sh
 
+      # Drives the real capture script and scrub gate over a synthetic
+      # daemon log into a scratch output root; needs no daemon or credential.
+      - name: rejection capture self-test
+        run: bash scripts/capture-rejection.test.sh
+
       # "No credential in any layer" is an acceptance claim about the
       # capture-cell image, and a claim about an image nobody opened is an
       # assumption -- so the self-test walks every layer of `docker save`
