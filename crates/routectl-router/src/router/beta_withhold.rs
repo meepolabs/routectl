@@ -187,7 +187,7 @@ impl Router {
         let (reading, generation) =
             self.beta_reading_with_generation(learned_key, key, provider_kind, claim, now);
         match reading {
-            BetaLaneReading::ActingNegative => BetaVerdict::Withhold,
+            BetaLaneReading::ActingNegative { .. } => BetaVerdict::Withhold,
             BetaLaneReading::ProbeAdmitted => {
                 self.metrics.incr_probe_attempts();
                 admissions.push(ProbeAdmission {

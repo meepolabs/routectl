@@ -4867,7 +4867,6 @@ pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, 
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
 pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
-pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
 pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
 pub fn routectl_router::router::Router::learned_seed_clear_snapshot(&self) -> alloc::vec::Vec<routectl_router::SeedClearMarker>
 pub fn routectl_router::router::Router::observe_learned_capability(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>
@@ -15076,7 +15075,6 @@ pub fn routectl_router::router::Router::reserve_learned_capability_purge(&self, 
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::acknowledge_durable_field_confirmation(&self, &str, &str, &str, u64, u64, u32) -> bool
 pub fn routectl_router::router::Router::clear_learned_capability(&self, &str, &str, &str) -> routectl_router::GenerationOutcome<bool>
-pub fn routectl_router::router::Router::is_verified_working_or_false(&self, &str, &str, &str, std::time::Instant) -> bool
 pub fn routectl_router::router::Router::learned_capability_snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
 pub fn routectl_router::router::Router::learned_seed_clear_snapshot(&self) -> alloc::vec::Vec<routectl_router::SeedClearMarker>
 pub fn routectl_router::router::Router::observe_learned_capability(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::ObserveOutcome>

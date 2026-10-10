@@ -10,6 +10,7 @@ use routectl_core::{ChatRequest, Error, Result, sanitize_for_log};
 use crate::capability_strip::{Outcome, RequestInterceptor, StripContext, StripInterceptor};
 use crate::catalog::EffectiveRow;
 use crate::config::ProviderEntry;
+use crate::learned_capability::{BetaLaneReading, ProbeClaim};
 
 use super::class_observe::{DispatchSurface, UpstreamFacts, matched_by_label};
 use super::{DispatchTarget, ProbeAdmission, Router, operator_betas};
@@ -284,8 +285,8 @@ impl Router {
         // switch is on and the target carries a provider kind (legacy /
         // direct-construction targets without one skip the registry).
         // Scan EVERY feature: an earlier feature's `ProbeAdmitted` must not
-        // short-circuit a later feature's `RouteAway`, and `acting_negative_for`
-        // flips `in_flight` as a side effect on `ProbeAdmitted`, so every
+        // short-circuit a later feature's acting negative, and the claiming
+        // read flips `in_flight` as a side effect on `ProbeAdmitted`, so every
         // admission has to reach `admissions` for its guard to settle the slot
         // -- dropping one leaks `in_flight` and blocks that feature from ever
         // re-probing. Any `RouteAway` tail-drops the target after the full scan.
@@ -299,26 +300,34 @@ impl Router {
             // probe-admit). A catalog prior is weaker evidence and must not
             // re-decide a feature the learned registry already ruled on, so
             // the prior pass below skips these; a feature the learned pass
-            // found `Allow` (no evidence) stays open to the prior.
+            // found no verdict for stays open to the prior.
             let mut learned_claimed: Vec<&str> = Vec::new();
+            // Features whose one learned read found a verified-working
+            // positive: the prior pass skips them without a second read.
+            let mut verified_positive: Vec<&str> = Vec::new();
             for feature in features {
                 // ForceSupported mask: an operator `force_supported`
-                // override short-circuits this feature to Allow BEFORE
-                // `acting_negative_for` runs, so a masked cell never
-                // suppresses only the verdict while still claiming a
-                // re-probe slot (the `in_flight` flip happens inside
-                // `acting_negative_for`). A `RouteAway` override can never
-                // reach here -- it hard-dropped in the consult above.
+                // override short-circuits this feature to Allow BEFORE the
+                // claiming read runs, so a masked cell never suppresses only
+                // the verdict while still claiming a re-probe slot (the
+                // `in_flight` flip happens inside that read). A `RouteAway`
+                // override can never reach here -- it hard-dropped in the
+                // consult above.
                 if self.override_forces_supported(target, feature, provider_kind) {
                     continue;
                 }
                 let Some(learned_key) = target.learned_key(feature) else {
                     continue;
                 };
-                let (decision, read_generation) =
-                    self.acting_negative_with_generation(learned_key, feature, provider_kind, now);
-                match decision {
-                    crate::learned_capability::RoutingDecision::RouteAway { phase, .. } => {
+                let (reading, read_generation) = self.beta_reading_with_generation(
+                    learned_key,
+                    feature,
+                    provider_kind,
+                    ProbeClaim::Claim,
+                    now,
+                );
+                match reading {
+                    BetaLaneReading::ActingNegative { phase } => {
                         learned_claimed.push(feature);
                         // Strip-vs-route: a droppable capability the operator
                         // has not pinned to the wire is stripped in place ONLY
@@ -345,7 +354,7 @@ impl Router {
                             route_away = Some(feature.clone());
                         }
                     }
-                    crate::learned_capability::RoutingDecision::ProbeAdmitted => {
+                    BetaLaneReading::ProbeAdmitted => {
                         learned_claimed.push(feature);
                         self.metrics.incr_probe_attempts();
                         let normalized = normalize_capability_key(feature, provider_kind);
@@ -393,7 +402,8 @@ impl Router {
                             generation: read_generation,
                         });
                     }
-                    crate::learned_capability::RoutingDecision::Allow => {}
+                    BetaLaneReading::VerifiedPositive => verified_positive.push(feature),
+                    BetaLaneReading::NoVerdict => {}
                 }
             }
             // ANY route-away (or operator-pinned) acting negative demotes the
@@ -417,8 +427,8 @@ impl Router {
             // neutralize it (one switch covers the whole capability-truth
             // subsystem). `force_supported` masks a prior the same way it
             // masks a learned negative, and a resident acting VerifiedWorking
-            // positive likewise masks it -- a confirmed positive outranks a
-            // stale catalog demotion. A `Some(false)` prior soft-tails the
+            // positive (seen by the learned pass's read) likewise masks it --
+            // a confirmed positive outranks a stale catalog demotion. A `Some(false)` prior soft-tails the
             // target (weaker evidence -> the prior tail); `None` /
             // `Some(true)` are permissive no-ops. The prior never contributes
             // a strip key -- a catalog assertion is not a strippable wire
@@ -426,10 +436,8 @@ impl Router {
             // this demotion.
             for feature in features {
                 if learned_claimed.contains(&feature.as_str())
+                    || verified_positive.contains(&feature.as_str())
                     || self.override_forces_supported(target, feature, provider_kind)
-                    || target.learned_key(feature).is_some_and(|learned_key| {
-                        self.is_verified_working_or_false(learned_key, feature, provider_kind, now)
-                    })
                 {
                     continue;
                 }
@@ -632,6 +640,10 @@ mod strip_wire_egress_tests;
 #[cfg(test)]
 #[path = "capability_precedence_matrix_tests.rs"]
 mod capability_precedence_matrix_tests;
+
+#[cfg(test)]
+#[path = "feature_filter_read_tests.rs"]
+mod feature_filter_read_tests;
 
 #[cfg(test)]
 #[path = "computer_tool_key_tests.rs"]

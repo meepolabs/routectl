@@ -17,7 +17,11 @@ fn field_key(path: &str) -> String {
 /// Two Routers sharing one registry: `old` is the superseded generation, `live`
 /// is published after a boundary transition.
 fn superseded_pair() -> (Router, Router) {
-    let config = Arc::new(Config::default());
+    superseded_pair_with(Arc::new(Config::default()))
+}
+
+/// [`superseded_pair`] over a caller-supplied config.
+pub(super) fn superseded_pair_with(config: Arc<Config>) -> (Router, Router) {
     let old = Router::new(config.clone());
     let mut live = Router::new(config);
     live.carry_over_learned_from(&old);

@@ -54,12 +54,17 @@ impl Provider for StubProvider {
 
 /// The stable provider-kind these tests key learned negatives and overrides
 /// on. Matches the `[providers.p]` kind in [`base_router`].
-const KIND: &str = "openai-compat";
+pub(super) const KIND: &str = "openai-compat";
 
 /// A router with the capability subsystem enabled and one `openai-compat`
 /// provider `p`. `extra` appends further TOML tables (models, override
 /// cells) after the `[capability]` table.
-fn base_router(extra: &str) -> Router {
+pub(super) fn base_router(extra: &str) -> Router {
+    Router::new(Arc::new(base_config(extra)))
+}
+
+/// The [`base_router`] config, for callers that build their own Routers.
+pub(super) fn base_config(extra: &str) -> Config {
     let body = format!(
         "version = 3\n\
          [providers.p]\n\
@@ -70,14 +75,17 @@ fn base_router(extra: &str) -> Router {
          enabled = true\n\
          {extra}"
     );
-    let config: Config = toml::from_str(&body).expect("config parses");
-    Router::new(Arc::new(config))
+    toml::from_str(&body).expect("config parses")
 }
 
 /// A dispatch target on provider `p` carrying the given catalog capability
 /// priors on its baked effective row. `expand_chain_to_targets` fills the
 /// provider kind from config, so the prior + learned passes both run.
-fn target_with_priors(router: &Router, nickname: &str, priors: &[(&str, bool)]) -> DispatchTarget {
+pub(super) fn target_with_priors(
+    router: &Router,
+    nickname: &str,
+    priors: &[(&str, bool)],
+) -> DispatchTarget {
     let mut row = CatalogRow::sentinel();
     for (key, value) in priors {
         row.capabilities.insert((*key).to_string(), *value);
@@ -98,13 +106,13 @@ fn target_with_priors(router: &Router, nickname: &str, priors: &[(&str, bool)]) 
 
 /// The learned lane the matrix target for `nickname` keys on: each fixture
 /// nickname is its own upstream on the shared `p` entry.
-fn lane_of(nickname: &str) -> String {
+pub(super) fn lane_of(nickname: &str) -> String {
     format!("p#{nickname}")
 }
 
 /// Seed an acting (self-identifying) learned negative for `(nickname, feature)`
 /// in the given detection phase.
-fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePhase) {
+pub(super) fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePhase) {
     router.learned_capabilities.observe(
         &lane_of(nickname),
         feature,
@@ -118,7 +126,7 @@ fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePh
 }
 
 /// Seed a resident VerifiedWorking positive for `(nickname, feature)`.
-fn seed_verified(router: &Router, nickname: &str, feature: &str) {
+pub(super) fn seed_verified(router: &Router, nickname: &str, feature: &str) {
     router.learned_capabilities.observe_positive(
         &lane_of(nickname),
         feature,

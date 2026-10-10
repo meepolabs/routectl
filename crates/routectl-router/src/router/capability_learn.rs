@@ -490,9 +490,9 @@ impl Router {
     /// superseded Router asking about catalog-scoped truth. The caller treats it
     /// as no verdict rather than routing on state the reload replaced.
     /// Reached only from tests today: the production read path wants the
-    /// generation alongside the decision and calls
-    /// `acting_negative_with_generation`. Kept because it is the narrower of the
-    /// two and the barrier tests assert on it directly.
+    /// generation and the verified bit alongside the decision and calls
+    /// `beta_reading_with_generation`. Kept because it is the narrowest read
+    /// and the barrier tests assert on it directly.
     #[cfg(test)]
     pub(crate) fn acting_negative_for_generation(
         &self,
@@ -533,8 +533,11 @@ impl Router {
     /// Router's generation may not read it.
     ///
     /// A superseded Router must not treat catalog-scoped positive truth as its
-    /// own; `false` falls through to the ordinary no-positive path.
-    pub fn is_verified_working_or_false(
+    /// own; `false` falls through to the ordinary no-positive path. Reached
+    /// only from tests: the feature filter takes the verified bit from its one
+    /// `beta_reading_with_generation` read.
+    #[cfg(test)]
+    pub(crate) fn is_verified_working_or_false(
         &self,
         state_key: &str,
         feature_key: &str,
@@ -559,7 +562,9 @@ impl Router {
     /// admission derived from this decision settles against the generation that
     /// GRANTED it -- not one sampled later, which a boundary could have moved.
     /// A stale read yields `Allow` and the live generation: there is no verdict
-    /// to act on, so nothing will be admitted from it.
+    /// to act on, so nothing will be admitted from it. Reached only from tests:
+    /// the dispatch path reads through `beta_reading_with_generation`.
+    #[cfg(test)]
     pub(crate) fn acting_negative_with_generation(
         &self,
         state_key: &str,
@@ -582,10 +587,10 @@ impl Router {
         }
     }
 
-    /// A beta flag's learned verdict AND the effective persistence generation
-    /// it was read under, through the generation barrier in one acquisition.
-    /// A stale or purge-held read yields `NoVerdict` and the live generation:
-    /// nothing will be admitted from it.
+    /// A beta flag's or feature key's learned verdict AND the effective
+    /// persistence generation it was read under, through the generation
+    /// barrier in one acquisition. A stale or purge-held read yields
+    /// `NoVerdict` and the live generation: nothing will be admitted from it.
     pub(crate) fn beta_reading_with_generation(
         &self,
         state_key: &str,

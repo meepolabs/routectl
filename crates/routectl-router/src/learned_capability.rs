@@ -33,7 +33,7 @@
 //! overwhelmingly common non-expired case and never contends, upgrading to
 //! an exclusive write only to claim the single re-probe slot on the rare
 //! lapse. The generation-guarded entry point
-//! ([`LearnedCapabilityRegistry::acting_negative_in_generation`]) does NOT get
+//! ([`LearnedCapabilityRegistry::beta_reading_in_generation`]) does NOT get
 //! that fast path: `guarded_keyed` takes the `entries` write lock
 //! unconditionally for every generation-validated call (read or mutate), since
 //! a purge reservation (`prepare_purge`) needs the same two locks in the same
@@ -279,11 +279,17 @@ pub enum RoutingDecision {
     ProbeAdmitted,
 }
 
-/// One generation-guarded read of a lane's learned verdict on a beta flag.
+/// One generation-guarded read of a lane's learned verdict on a beta flag or
+/// a request feature key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BetaLaneReading {
-    /// An acting negative applies: withhold the flag.
-    ActingNegative,
+    /// An acting negative applies: withhold the flag, or strip / route away
+    /// from the feature.
+    ActingNegative {
+        /// Detection phase that attributed the negative; the feature filter's
+        /// strip-vs-route-away choice reads it.
+        phase: FailurePhase,
+    },
     /// A lapsed negative's single re-probe slot was claimed by this read.
     ProbeAdmitted,
     /// A verified-working positive owns the key.
@@ -1903,7 +1909,7 @@ impl LearnedCapabilityRegistry {
     /// here (matching the entries lock mode to the intent) would reopen
     /// exactly the AB/BA hazard this ordering exists to close -- a purge
     /// reservation contending with a generation-guarded READ (reachable on
-    /// the live dispatch path via `acting_negative_in_generation`) just as
+    /// the live dispatch path via `beta_reading_in_generation`) just as
     /// readily as with a mutation. `op` is handed the write guard's `&mut`
     /// map directly, plus the already-held lease set, so nothing it calls
     /// needs -- or is tempted -- to re-acquire either lock on this thread.
@@ -2378,6 +2384,7 @@ impl LearnedCapabilityRegistry {
     /// `None` means STALE, not "allow": a caller holding a superseded Router
     /// must fall through to its ordinary no-verdict path rather than route on
     /// catalog truth the reload replaced.
+    #[cfg(test)]
     pub(crate) fn acting_negative_in_generation(
         &self,
         generation: u64,
@@ -2408,12 +2415,13 @@ impl LearnedCapabilityRegistry {
         }
     }
 
-    /// A beta flag's learned verdict for `generation`, in ONE guarded read, or
-    /// `None` when that generation may not read the key or a purge holds it.
+    /// A beta flag's or feature key's learned verdict for `generation`, in ONE
+    /// guarded read, or `None` when that generation may not read the key or a
+    /// purge holds it.
     ///
     /// Folds the acting-negative decision and the verified-positive check into
     /// a single acquisition: `guarded_keyed` takes `entries` for write, so two
-    /// separate reads per flag would double that contention on the dispatch
+    /// separate reads per key would double that contention on the dispatch
     /// path. Under [`ProbeClaim::Forgo`] a lapsed negative stays
     /// [`BetaLaneReading::ActingNegative`] and its slot is left free.
     pub(crate) fn beta_reading_in_generation(
@@ -2437,7 +2445,9 @@ impl LearnedCapabilityRegistry {
                     ProbeClaim::Forgo => Self::unclaimed_decision_in(entries, &key),
                 };
                 match decision {
-                    RoutingDecision::RouteAway { .. } => BetaLaneReading::ActingNegative,
+                    RoutingDecision::RouteAway { phase, .. } => {
+                        BetaLaneReading::ActingNegative { phase }
+                    }
                     RoutingDecision::ProbeAdmitted => BetaLaneReading::ProbeAdmitted,
                     RoutingDecision::Allow if Self::is_verified_working_in(entries, &key) => {
                         BetaLaneReading::VerifiedPositive
