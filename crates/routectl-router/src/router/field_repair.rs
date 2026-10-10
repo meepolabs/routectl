@@ -1257,7 +1257,23 @@ impl Router {
         state_key: &str,
         plan: &FieldRepairPlan<'_>,
     ) {
-        let lossy = plan.repaired_lossy();
+        let field_path = plan
+            .repaired_path()
+            .expect("a reported repair names the row it dropped");
+        self.note_field_repair_at(meta, state_key, field_path, plan.repaired_lossy());
+    }
+
+    /// Record a field repair by the path it dropped and whether it was lossy:
+    /// the shared recorder behind [`Self::note_field_repair`] and the canary's
+    /// refused-value repair, so both report through one summary and one set
+    /// of counters.
+    pub(super) fn note_field_repair_at(
+        &self,
+        meta: &mut DispatchMeta,
+        state_key: &str,
+        field_path: &'static str,
+        lossy: bool,
+    ) {
         meta.field_repair = Some(super::FieldRepair {
             action: if lossy {
                 FIELD_ACTION_LOSSY_DROP_REPAIR
@@ -1265,9 +1281,7 @@ impl Router {
                 FIELD_ACTION_DROP_REPAIR
             },
             state_key: sanitize_for_log(state_key),
-            field_path: plan
-                .repaired_path()
-                .expect("a reported repair names the row it dropped"),
+            field_path,
             reason: FIELD_REASON_UPSTREAM_REJECTION,
             repair_attempted: true,
             repair_succeeded: false,

@@ -337,6 +337,14 @@ impl CanaryPlan<'_> {
         )
     }
 
+    /// Settle as INCONCLUSIVE: the answer proves nothing about the verdict, so
+    /// it stays resident and the claim is released for a later canary.
+    pub(super) fn settle_inconclusive(mut self) {
+        if let Some(claim) = self.claim.take() {
+            claim.settle(CanaryOutcome::Inconclusive);
+        }
+    }
+
     /// Settle as DISPROVED: the restored field was accepted unrepaired.
     ///
     /// The claim is HANDED OVER rather than settled here, for the same reason the
@@ -817,19 +825,22 @@ impl Router {
     ///
     /// - a refused FIELD is the rejection the verdict predicts, so the repaired
     ///   retry's later success re-confirms it (the caller settles that);
-    /// - a refused VALUE proves the upstream recognizes the field, which is
-    ///   exactly what an unsupported-field verdict denies. The verdict is
-    ///   settled as disproved HERE, before any repair, because the evidence is
-    ///   the rejection itself and does not depend on whether a retry is paid
-    ///   for or what it returns. The repaired retry then only serves the
-    ///   request, and the canary is gone from `plan`, so no success can confirm.
+    /// - a refused VALUE settles the canary INCONCLUSIVE here, before any
+    ///   repair: the verdict stays resident, nothing is confirmed, and the
+    ///   canary slot is free for a later request. Recognizing the field's
+    ///   schema does not prove this model accepts any valid value, and the
+    ///   restored value is the client's own, so one odd value must not erase a
+    ///   verdict every request on this identity shares. The repaired retry
+    ///   then only serves the request -- recorded as a lossy repair, never
+    ///   learned -- and the canary is gone from `plan`, so no success can
+    ///   confirm.
     ///
     /// The repair draws the request's shared allowance like every other repair:
     /// availability is checked before the drop and the charge follows it, so an
     /// exhausted allowance leaves the request untouched and the rejection on its
     /// ordinary path.
     ///
-    /// `Some(status)` means the field is gone, the estimate describes the new
+    /// `Some(repair)` means the field is gone, the estimate describes the new
     /// payload, one repair was charged, and the caller must re-dispatch this
     /// same target. `None` means nothing was mutated or charged.
     ///
@@ -847,15 +858,14 @@ impl Router {
         native_class: &routectl_core::failure_class::FailureClass,
         err: &routectl_core::Error,
         provider_kind: &str,
-    ) -> Option<u16> {
+    ) -> Option<CanaryRepair> {
         let surface = plan.canary_surface()?;
-        let kind =
-            Self::rejection_names_field_surface(surface, native_class, err, provider_kind)?.kind;
-        if kind == RejectionKind::InvalidValue
+        let named = Self::rejection_names_field_surface(surface, native_class, err, provider_kind)?;
+        let lossy_path = (named.kind == RejectionKind::InvalidValue).then_some(named.row.path);
+        if lossy_path.is_some()
             && let Some(canary) = plan.canary.take()
         {
-            meta.cleared_capabilities
-                .extend(canary.settle_disproved(self.field_verdicts()));
+            canary.settle_inconclusive();
         }
         // Presence is re-read here rather than assumed from the restoration:
         // the request has been through a dispatch since, and a drop that
@@ -872,12 +882,24 @@ impl Router {
             "can_draw held before the mutation, so the draw after it cannot fail",
         );
         super::dispatch::restamp_calibration_estimate(attempt_req, meta);
-        Some(
-            super::class_observe::upstream_facts(err)
+        Some(CanaryRepair {
+            status: super::class_observe::upstream_facts(err)
                 .status
                 .unwrap_or(0),
-        )
+            lossy_path,
+        })
     }
+}
+
+/// What a canary's repaired retry did, for the caller to re-dispatch and record.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CanaryRepair {
+    /// The upstream status of the rejection the repair answered.
+    pub(super) status: u16,
+    /// The dropped row's path when the rejection refused a VALUE: the repair
+    /// is lossy and must be recorded as such. `None` for a refused field,
+    /// whose repair the canary's own settlement accounts for.
+    pub(super) lossy_path: Option<&'static str>,
 }
 
 /// The inputs the VERDICT gates read, grouped so the call site is one argument

@@ -120,14 +120,18 @@ impl crate::capability_rebuild::CapabilityLedgerReader for DisplayVerdictLedger 
 
 /// A verdict replayed from the ledger is resident, acting, and seeded due by
 /// the warm rebuild itself -- the state a restart leaves every persisted
-/// display verdict in. The canary restores the field, the upstream refuses its
-/// VALUE, and that proves the field is recognized: the attempt is repaired and
-/// served, nothing confirms, and the verdict is cleared durably.
+/// display verdict in. The canary restores the field and the upstream refuses
+/// its VALUE. That proves nothing about the verdict: the attempt is repaired,
+/// served, and recorded as a lossy repair, nothing confirms, nothing clears,
+/// and the verdict stays resident.
 ///
-/// Mutation check: make `canary_repaired_retry` decline an `InvalidValue`
-/// rejection -> red (one attempt, the canary's 400 reaches the client).
+/// Mutation checks: make `canary_repaired_retry` settle the canary disproved
+/// -> red (a cleared row, the verdict gone); delete the lossy recorder call at
+/// the canary call site -> red (no repair summary); make
+/// `canary_repaired_retry` decline an `InvalidValue` rejection -> red (one
+/// attempt, the canary's 400 reaches the client).
 #[tokio::test]
-async fn a_canary_answered_with_a_refused_value_serves_and_clears_the_replayed_verdict() {
+async fn a_canary_answered_with_a_refused_value_serves_and_keeps_the_replayed_verdict() {
     let (router, observed) = install_display_seats(1, true);
     let lane = crate::router::probe_test_support::seat_chain_lane("m0");
     let summary = router.rebuild_learned_from_ledger(&DisplayVerdictLedger {
@@ -161,21 +165,37 @@ async fn a_canary_answered_with_a_refused_value_serves_and_clears_the_replayed_v
         dispatched.meta.learned_capabilities.is_empty(),
         "a refused value confirms nothing",
     );
-    let cleared: Vec<_> = dispatched
-        .meta
-        .cleared_capabilities
-        .iter()
-        .map(|event| event.capability_key.clone())
-        .collect();
-    assert_eq!(
-        cleared,
-        vec![grounded_key()],
-        "the clear rides out on the meta so a warm rebuild cannot resurrect the verdict",
-    );
     assert!(
-        router.learned_capability_snapshot().is_empty(),
-        "the resident verdict is gone, not merely suspended",
+        dispatched.meta.cleared_capabilities.is_empty(),
+        "a refused value clears nothing either",
     );
+    assert_eq!(
+        router.learned_capability_snapshot().len(),
+        1,
+        "the replayed verdict is still resident",
+    );
+    assert_eq!(
+        canary_snapshot(&router, "m0").and_then(|snap| snap.last_outcome),
+        Some(CanaryOutcome::Inconclusive),
+        "the canary settled inconclusive and released its slot",
+    );
+    let repair = dispatched
+        .meta
+        .field_repair
+        .as_ref()
+        .expect("the canary's repair is recorded like any other");
+    assert_eq!(
+        repair.action,
+        super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR
+    );
+    assert_eq!(repair.field_path, "thinking.enabled.display");
+    assert!(repair.repair_succeeded, "the repaired retry served");
+    assert!(!repair.learned, "and nothing was learned");
+    let counters = router.field_repair_counters();
+    assert_eq!(counters.repair_attempted, 1);
+    assert_eq!(counters.repair_succeeded, 1);
+    assert_eq!(counters.verdicts_learned, 0);
+    assert_eq!(router.metrics.field_repair_lossy_total(), 1);
 }
 
 /// The canary's repaired retry is a repair like any other: once earlier
@@ -216,9 +236,9 @@ async fn a_due_canary_after_the_request_allowance_is_spent_redispatches_nothing(
          no repaired retry",
     );
     assert!(
-        !router
+        router
             .field_verdicts()
             .is_negative_acting(&verdict_key("m2"), Instant::now()),
-        "the refused value still disproves the verdict: that evidence needs no retry",
+        "a refused value leaves the verdict acting, repaired or not",
     );
 }

@@ -164,6 +164,9 @@ enum Answer {
     RateLimited,
     /// Reject with a 503, the other remap control.
     Unavailable,
+    /// Reject with a caller-shaped 400 that names no field path, so the
+    /// parser localizes nothing from it.
+    UnlocalizedBadRequest,
     /// Serve the FIRST attempt outright: the field is accepted, which is the
     /// clear path.
     ServeImmediately,
@@ -224,6 +227,11 @@ impl MockSeat {
                 "field-mock",
                 503,
                 r#"{"error":{"type":"api_error","message":"unavailable"}}"#,
+            )),
+            Answer::UnlocalizedBadRequest => Err(Error::upstream(
+                "field-mock",
+                400,
+                r#"{"error":{"type":"invalid_request_error","message":"malformed request"}}"#,
             )),
         }
     }

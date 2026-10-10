@@ -438,6 +438,7 @@ impl Router {
             let mut field_canary = field_canary;
             let mut canary_repair_attempted = false;
             let mut canary_reject_status: u16 = 0;
+            let mut canary_repair_lossy = false;
             let provider_cfg = self.config.providers.get(provider_name);
             apply_context_reduction(
                 &self.config,
@@ -747,7 +748,11 @@ impl Router {
                         // why it is set exclusively by the repair branch below
                         // and never inferred from the request's shape. A
                         // refused-VALUE rejection already settled the canary as
-                        // disproved in that branch, so no plan is left here.
+                        // inconclusive in that branch, so no plan is left here
+                        // and its lossy repair only reports success.
+                        if canary_repair_lossy {
+                            self.note_field_repair_succeeded(meta, false);
+                        }
                         if let Some(plan) = std::mem::take(&mut field_canary).into_canary() {
                             if canary_repair_attempted {
                                 let features = super::field_repair::request_feature_keys(&req);
@@ -1012,7 +1017,7 @@ impl Router {
                         // allowance, so an exhausted one leaves the rejection on
                         // the ordinary path below.
                         if !canary_repair_attempted
-                            && let Some(status) = self.canary_repaired_retry(
+                            && let Some(repair) = self.canary_repaired_retry(
                                 &mut field_canary,
                                 &mut attempt_req,
                                 meta,
@@ -1023,7 +1028,11 @@ impl Router {
                             )
                         {
                             canary_repair_attempted = true;
-                            canary_reject_status = status;
+                            canary_reject_status = repair.status;
+                            if let Some(path) = repair.lossy_path {
+                                canary_repair_lossy = true;
+                                self.note_field_repair_at(meta, state_key, path, true);
+                            }
                             // A re-verification retry is a fixed correctness
                             // branch, not a retry policy, so it takes no
                             // backoff sleep.

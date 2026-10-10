@@ -414,25 +414,68 @@ async fn an_unresolved_bedrock_field_rejection_counts_once_and_changes_nothing()
 /// leaves the walk via the repair arm's `continue`, so the observer is never
 /// REACHED and the test would pass without the predicate existing at all. Here
 /// the repaired retry is rejected too, so a named rejection genuinely arrives
-/// at the observer and the predicate is what declines it.
+/// at the observer and the predicate is what declines it. The token-count row
+/// matters separately: that walk has its own observer call site.
+///
+/// Mutation check: make `rejection_localizes_no_field` ignore the parser
+/// (class gate only) -> red on every row.
 #[tokio::test]
 async fn a_localized_rejection_leaves_the_parser_blind_counter_untouched() {
-    let (router, seen) = single_seat(ALIAS, Answer::AlwaysRejectField);
+    for walk in ["complete", "count_tokens"] {
+        let (router, seen) = single_seat(ALIAS, Answer::AlwaysRejectField);
 
-    let served = router.complete(req_on(ALIAS)).await;
+        let rejected = match walk {
+            "complete" => router.complete(req_on(ALIAS)).await.is_err(),
+            _ => router
+                .count_tokens_with_meta(req_on(ALIAS))
+                .await
+                .result
+                .is_err(),
+        };
 
-    assert!(served.is_err(), "premise: every attempt is rejected");
-    assert_eq!(
-        seen.repairs(),
-        1,
-        "premise: the parser named the field, so a repaired attempt was dispatched \
-         and its own rejection reached the observer",
-    );
-    assert_eq!(
-        router.field_repair_counters().parser_unlocalized,
-        0,
-        "a rejection the parser named a row from is not evidence of blindness",
-    );
+        assert!(rejected, "{walk}: premise: every attempt is rejected");
+        assert_eq!(
+            seen.repairs(),
+            1,
+            "{walk}: premise: the parser named the field, so a repaired attempt was \
+             dispatched and its own rejection reached the observer",
+        );
+        assert_eq!(
+            router.field_repair_counters().parser_unlocalized,
+            0,
+            "{walk}: a rejection the parser named a row from is not evidence of blindness",
+        );
+    }
+}
+
+/// An unlocalized token-count rejection counts as parser blindness on an
+/// own-credential target and not at all on one that authenticates with the
+/// client's forwarded credential: routectl owns no credential there, so the
+/// rejection is not parser evidence. The own-credential row is the control
+/// that proves the fixture reaches the observer.
+///
+/// Mutation check: drop the forwarded-credential refusal from
+/// `observe_unlocalized_field_rejection` -> the forwarded row reds (1, not 0).
+#[tokio::test]
+async fn a_forwarded_token_count_rejection_counts_no_parser_blindness() {
+    for (row, forwarded, expected) in [("own credential", false, 1), ("forwarded", true, 0)] {
+        let (router, seen, req) = if forwarded {
+            forwarded_seat(Answer::UnlocalizedBadRequest)
+        } else {
+            let (router, seen) = single_seat(ALIAS, Answer::UnlocalizedBadRequest);
+            (router, seen, req_on(ALIAS))
+        };
+
+        let counted = router.count_tokens_with_meta(req).await;
+
+        assert!(counted.result.is_err(), "{row}: premise: the seat rejects");
+        assert_eq!(seen.calls(), 1, "{row}: premise: nothing is repaired");
+        assert_eq!(
+            router.field_repair_counters().parser_unlocalized,
+            expected,
+            "{row}",
+        );
+    }
 }
 
 /// A rejection whose CLASS cannot name a field at all is not counted as blind.
