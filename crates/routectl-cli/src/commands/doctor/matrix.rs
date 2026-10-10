@@ -282,14 +282,13 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
         .entries
         .iter()
         .find(|e| e.state_key == meta.lane && e.feature_key == capability);
-    let prior_stamp = lane_prior(meta, capability, inputs.priors);
     let signals = CellSignals {
         learned: learned_entry.map(|e| (e.verdict, e.source)),
         learned_acting: learned_entry
             .zip(inputs.learned.now)
             .map(|(entry, (now, _))| LearnedActing::from_entry(entry, now)),
         seed: seed_cell(meta, capability, inputs),
-        prior: prior_stamp.map(|(supported, _)| supported),
+        prior: None,
     };
     let resolved = resolve_per_nickname(meta, capability, inputs, signals);
     let shared_display = agreed(&resolved, |r| r.display);
@@ -311,12 +310,7 @@ fn build_cell(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> MatrixC
             shared_display.and_then(|d| d.supported),
             inputs,
         ),
-        Some(LAYER_PRIOR) => (
-            None,
-            prior_stamp.is_some_and(|(_, verified_at)| {
-                is_stale_days(verified_at, inputs.today, inputs.threshold)
-            }),
-        ),
+        Some(LAYER_PRIOR) => (None, lane_prior_is_stale(meta, capability, inputs)),
         _ => (None, false),
     };
     let stamps = learned_entry
@@ -477,16 +471,13 @@ fn action_for(
     })
 }
 
-/// The catalog prior stamp for a lane: the first mapped nickname whose prior
-/// cell carries the capability, with its `verified_at` stamp.
-fn lane_prior<'a>(
-    meta: &LaneMeta,
-    capability: &str,
-    priors: &'a [PriorCell],
-) -> Option<(bool, &'a str)> {
+/// Whether any mapped nickname whose catalog prior carries the capability has
+/// a `verified_at` stamp past the staleness threshold.
+fn lane_prior_is_stale(meta: &LaneMeta, capability: &str, inputs: &CellInputs) -> bool {
     meta.models
         .iter()
-        .find_map(|m| nickname_prior(m.nickname, capability, priors))
+        .filter_map(|m| nickname_prior(m.nickname, capability, inputs.priors))
+        .any(|(_, verified_at)| is_stale_days(verified_at, inputs.today, inputs.threshold))
 }
 
 /// One nickname's catalog prior for a capability, with its `verified_at` stamp.

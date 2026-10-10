@@ -503,6 +503,45 @@ fn nicknames_on_one_lane_with_opposing_priors_render_a_mixed_cell() {
     );
 }
 
+fn prior_verified(nickname: &str, cap: &str, verified_at: &str) -> PriorCell {
+    PriorCell {
+        verified_at: verified_at.to_string(),
+        ..prior(nickname, cap, true)
+    }
+}
+
+#[test]
+fn a_prior_cell_is_stale_when_any_agreeing_nickname_prior_is_stale() {
+    // `context` pins today to 2024-10-04 with a 14-day staleness hint.
+    const FRESH: &str = "2024-10-01";
+    const STALE: &str = "2024-01-01";
+    let cases = [
+        ("first fresh, second stale", FRESH, STALE, true),
+        ("first stale, second fresh", STALE, FRESH, true),
+        ("both fresh", FRESH, FRESH, false),
+    ];
+    for (name, alpha_at, beta_at, want_stale) in cases {
+        // Arrange: alpha and beta share lane p#up and agree on the prior.
+        let mut ctx = context(lane_config(), available(Vec::new(), Instant::now(), 0));
+        ctx.capability
+            .config
+            .as_mut()
+            .expect("config parsed")
+            .priors = vec![
+            prior_verified("alpha", "structured_output", alpha_at),
+            prior_verified("beta", "structured_output", beta_at),
+        ];
+
+        // Act
+        let panel = build_capability_matrix_panel(&ctx);
+
+        // Assert
+        let prior_cell = cell(&panel, "p#up", "structured_output");
+        assert_eq!(prior_cell.layer, Some("prior"), "{name}");
+        assert_eq!(prior_cell.stale, want_stale, "{name}");
+    }
+}
+
 #[test]
 fn nicknames_that_agree_on_a_lane_carry_no_per_nickname_actions() {
     let mut config = lane_config();
