@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-10-02, Converse, us.anthropic.claude-sonnet-5): thinking.type enabled sent to a model that only takes adaptive thinking. The message is verbatim, including the Converse model-errors wrapper; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the ValidationException discriminator from the x-amzn-ErrorType header, namespace stripped.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"The model returned the following errors: \\\"thinking.type.enabled\\\" is not supported for this model. Use \\\"thinking.type.adaptive\\\" and \\\"output_config.effort\\\" to control thinking behavior.\"}"
+}

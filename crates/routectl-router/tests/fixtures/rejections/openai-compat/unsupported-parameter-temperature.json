@@ -1,0 +1,6 @@
+{
+  "note": "Tier 2, vendor-documented, not captured here: OpenAI Chat Completions (POST /v1/chat/completions, o3-mini) rejecting temperature on a reasoning model, as reported at https://github.com/openai/openai-python/issues/2072 and https://community.openai.com/t/o3-mini-unsupported-parameter-temperature/1140846. The body is the documented {error: {message, type, param, code}} envelope re-serialized compactly. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"Unsupported parameter: 'temperature' is not supported with this model.\",\"type\":\"invalid_request_error\",\"param\":\"temperature\",\"code\":\"unsupported_parameter\"}}"
+}

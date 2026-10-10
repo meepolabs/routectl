@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-09-01, claude haiku, OAuth seat, no anthropic-beta header): a thinking.display value outside the enum. error.message is verbatim; the surrounding {type, error} envelope is the Messages API error shape captured on the same lane in forced_tool_choice_capture.json, with request_id dropped. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"thinking.enabled.display: Input should be 'summarized', 'omitted'\"}}"
+}

@@ -3594,6 +3594,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `header_extras` betas). Two stages, because the router refuses to
   activate for a loopback base URL: the real router yields the two canonical
   requests, then a real `AnthropicApiProvider` emits headers from them
+- `tests/rejection_fixtures.rs` -- every file under
+  `tests/fixtures/rejections/<dialect>/` is the `{note, status, lifted_type?,
+  body}` shape `scripts/capture-rejection.sh` writes, under a dialect from its
+  closed set, with a note that opens with its evidence tier (tier 1 names the
+  dialect it was captured on, tier 2 cites a public URL) and a body that is that
+  dialect's error envelope (Anthropic `{type:"error",error:{type,message}}`,
+  bedrock-runtime flat `{message}`, OpenAI `{error:{message,type,param,code}}`)
 - `src/router/probe_terminal_state_tests.rs` -- tombstones, their own capacity
   bound, stale settlement, and the lane's last-outcome stamp
 - `src/router/probe_breaker_tests.rs` -- breaker non-interference: a probe
