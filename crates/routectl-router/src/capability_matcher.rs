@@ -646,10 +646,12 @@ fn extract_bedrock_capability(
 /// request-membership gate admits it. Open set by design; an unsafe token, or
 /// one that is nothing but a date suffix, yields `None`.
 /// [`normalize_capability_key`] is deliberately not applied: it splits on `.`.
-/// A type spelled in the envelope-field namespace yields `None`: that
-/// namespace is minted only by the field-repair guard.
+/// A type with any `.`-separated segment in the envelope-field namespace
+/// yields `None`: that namespace is minted only by the field-repair guard, and
+/// the registry's Bedrock normalization can reduce a dotted type to the
+/// embedded segment.
 fn tool_type_key(token: &str) -> Option<FeatureKey> {
-    if !is_safe_token(token) || crate::field_capability::capability_key_is_field_verdict(token) {
+    if !is_safe_token(token) || crate::field_capability::token_reaches_field_namespace(token) {
         return None;
     }
     let key = canonical_tool_key(token);
@@ -1694,23 +1696,33 @@ mod tests {
         }
     }
 
-    /// Mutation check: drop the namespace refusal in `tool_type_key` -> red.
+    /// Mutation checks: drop the namespace refusal in `tool_type_key` -> red;
+    /// reduce it to a whole-token test -> red on the dotted rows, which
+    /// Bedrock normalization would store as the embedded field key.
     #[test]
     fn tool_type_step_refuses_a_type_in_the_field_namespace() {
         let key = crate::field_capability::field_capability_key("thinking.enabled.display")
             .expect("a qualified path");
-        let body = flat_validation_body(&format!(
-            "tools.0: Input tag '{key}' found using 'type' does not match any of the \
-             expected tags: 'bash_20250124', 'custom'"
-        ));
-        let err = upstream(400, &body, Some("ValidationException"), None);
+        let segment = crate::field_capability::field_capability_key("thinking").expect("a path");
+        for tool_type in [
+            key.clone(),
+            format!(".{segment}.enabled"),
+            format!("toolConfig.{segment}"),
+            format!("additionalModelRequestFields.{segment}"),
+        ] {
+            let body = flat_validation_body(&format!(
+                "tools.0: Input tag '{tool_type}' found using 'type' does not match any of \
+                 the expected tags: 'bash_20250124', 'custom'"
+            ));
+            let err = upstream(400, &body, Some("ValidationException"), None);
 
-        assert_eq!(tool_type_key(&key), None);
-        assert_eq!(
-            resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
-            None,
-            "the echoed field-namespace tool type resolves to no capability"
-        );
+            assert_eq!(tool_type_key(&tool_type), None, "{tool_type}");
+            assert_eq!(
+                resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+                None,
+                "{tool_type}: the echoed field-namespace tool type resolves to no capability"
+            );
+        }
     }
 
     #[test]

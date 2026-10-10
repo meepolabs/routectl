@@ -45,8 +45,8 @@ use serde_json::Value;
 /// deduped list in first-seen order.
 ///
 /// Skips `ToolDef::Custom`, `Other` entries without a string `type`, and
-/// a `type` spelled in the envelope-field namespace for tool-type
-/// derivation. Additionally appends the request-derived
+/// a `type` with any `.`-separated segment in the envelope-field namespace
+/// for tool-type derivation. Additionally appends the request-derived
 /// `structured_output` key (after any tool-type keys) when the request
 /// needs constrained decoding -- see the module docs for the three
 /// trigger sources (`output_config.format`, a strict tool, or the
@@ -67,8 +67,10 @@ pub fn derive_feature_keys(
                     continue;
                 };
                 // The envelope-field namespace is minted only from the closed
-                // repair table, never from a client-chosen tool type.
-                if crate::field_capability::capability_key_is_field_verdict(type_str) {
+                // repair table, never from a client-chosen tool type -- not
+                // even one segment of a dotted type, which Bedrock key
+                // normalization can reduce the type to.
+                if crate::field_capability::token_reaches_field_namespace(type_str) {
                     continue;
                 }
                 let key = canonical_tool_key(type_str);
@@ -280,13 +282,18 @@ mod tests {
         assert!(derive_feature_keys(&tools, None, None).is_empty());
     }
 
-    /// Mutation check: drop the namespace refusal in `derive_feature_keys` -> red.
+    /// Mutation checks: drop the namespace refusal in `derive_feature_keys` ->
+    /// red; reduce it to a whole-token test -> red on the dotted types.
     #[test]
     fn derive_skips_a_tool_type_in_the_field_namespace() {
         let key = crate::field_capability::field_capability_key("thinking.enabled.display")
             .expect("a qualified path");
+        let segment = crate::field_capability::field_capability_key("thinking").expect("a path");
         let tools = vec![
             ToolDef::Other(json!({ "type": key })),
+            ToolDef::Other(json!({ "type": format!(".{segment}.enabled") })),
+            ToolDef::Other(json!({ "type": format!("toolConfig.{segment}") })),
+            ToolDef::Other(json!({ "type": format!("additionalModelRequestFields.{segment}") })),
             ToolDef::Other(json!({ "type": "web_search_20250305" })),
         ];
         assert_eq!(derive_feature_keys(&tools, None, None), vec!["web_search"]);

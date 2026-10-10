@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::field_verdict::FieldVerdictKey;
 use crate::resolved::ResolvedModel;
 use crate::router::RouterOptions;
+use crate::router::capability_learn::LearnedMint;
 
 const ALIAS: &str = "namespace-guard-alias";
 const WIRE: &str = "anthropic.claude-sonnet-4-5-20250929-v1:0";
@@ -126,49 +127,95 @@ async fn an_ordinary_echoed_tool_type_is_learned_on_bedrock() {
     assert_eq!(learned, vec!["web_search"]);
 }
 
-/// Mutation checks: remove the namespace refusal in
-/// `commit_learned_observation` AND the one in `tool_type_key` -> red (one
-/// learn event, one resident row, one acting field verdict). Each guard alone
-/// keeps this green, so each has its own unit pin below.
-#[tokio::test]
-async fn a_field_namespace_tool_type_echoed_by_bedrock_learns_nothing() {
-    let key = field_key();
-    let router = bedrock_router(&key);
+/// The one-segment path the dotted rows embed: Bedrock keeps a single segment,
+/// so a dotted type can only ever be stored as a one-segment field key.
+const SEGMENT_PATH: &str = "thinking";
 
-    let dispatched = router
-        .complete_with_options(request_with_tool_type(&key), RouterOptions::default())
-        .await;
-
-    assert!(dispatched.result.is_err(), "the rejection stands");
-    assert!(
-        dispatched.meta.learned_capabilities.is_empty(),
-        "no learn event may carry a field-namespace key: {:?}",
-        dispatched
-            .meta
-            .learned_capabilities
-            .iter()
-            .map(|event| &event.capability_key)
-            .collect::<Vec<_>>(),
-    );
-    assert!(
-        router.learned_capability_snapshot().is_empty(),
-        "no learned row may be resident",
-    );
-    let lane = crate::state_key::StateKey::parse(&format!("p0#{WIRE}")).expect("lane");
-    let verdict = FieldVerdictKey::new(&lane, FIELD_PATH, "bedrock").expect("identity");
-    assert!(
-        !router
-            .field_verdicts()
-            .is_negative_acting(&verdict, Instant::now()),
-        "and no field verdict may become resident",
-    );
+/// The tool types that reach the field namespace on a Bedrock lane, each with
+/// the field path the registry would store it under: the key itself, and the
+/// dotted spellings Bedrock key normalization reduces to the embedded field
+/// key (head segment, or the segment after a request-bag prefix).
+fn field_namespace_tool_types() -> Vec<(String, &'static str)> {
+    let segment = crate::field_capability::field_capability_key(SEGMENT_PATH).expect("a path");
+    vec![
+        (field_key(), FIELD_PATH),
+        (format!(".{segment}.enabled"), SEGMENT_PATH),
+        (format!("toolConfig.{segment}"), SEGMENT_PATH),
+        (
+            format!("additionalModelRequestFields.{segment}"),
+            SEGMENT_PATH,
+        ),
+    ]
 }
 
-/// The generic learn entry refuses a field-namespace key on its own, even
-/// when the resolver hands it one the request's derived vocabulary carries.
+/// Premise for the dotted rows: the registry would store each one under the
+/// field key of its stored path, so only the namespace refusals stand between
+/// it and a resident field verdict.
+#[test]
+fn bedrock_normalization_reduces_each_row_to_its_field_key() {
+    for (tool_type, stored_path) in field_namespace_tool_types() {
+        assert_eq!(
+            routectl_core::capability::normalize_capability_key(&tool_type, "bedrock"),
+            crate::field_capability::field_capability_key(stored_path).expect("a path"),
+            "{tool_type}",
+        );
+    }
+}
+
+/// Mutation checks: remove every namespace refusal on the path
+/// (`tool_type_key`, `commit_learned_observation`, and the generic mint) ->
+/// red (a learn event, a resident row, an acting field verdict). Any one
+/// refusal alone keeps this green, so each has its own unit pin.
+#[tokio::test]
+async fn a_field_namespace_tool_type_echoed_by_bedrock_learns_nothing() {
+    for (tool_type, stored_path) in field_namespace_tool_types() {
+        let router = bedrock_router(&tool_type);
+
+        let dispatched = router
+            .complete_with_options(request_with_tool_type(&tool_type), RouterOptions::default())
+            .await;
+
+        assert!(
+            dispatched.result.is_err(),
+            "{tool_type}: the rejection stands"
+        );
+        assert!(
+            dispatched.meta.learned_capabilities.is_empty(),
+            "{tool_type}: no learn event may carry a field-namespace key: {:?}",
+            dispatched
+                .meta
+                .learned_capabilities
+                .iter()
+                .map(|event| &event.capability_key)
+                .collect::<Vec<_>>(),
+        );
+        let field_rows: Vec<String> = router
+            .learned_capability_snapshot()
+            .into_iter()
+            .map(|entry| entry.feature_key)
+            .filter(|key| crate::field_capability::capability_key_is_field_verdict(key))
+            .collect();
+        assert!(
+            field_rows.is_empty(),
+            "{tool_type}: no field-namespace row may be resident: {field_rows:?}",
+        );
+        let lane = crate::state_key::StateKey::parse(&format!("p0#{WIRE}")).expect("lane");
+        let verdict = FieldVerdictKey::new(&lane, stored_path, "bedrock").expect("identity");
+        assert!(
+            !router
+                .field_verdicts()
+                .is_negative_acting(&verdict, Instant::now()),
+            "{tool_type}: no field verdict may become resident",
+        );
+    }
+}
+
+/// The generic learn path refuses a field-namespace key even when the resolver
+/// hands it one the request's derived vocabulary carries.
 ///
 /// Mutation check: remove the namespace refusal in
-/// `commit_learned_observation` -> red (one learn event).
+/// `commit_learned_observation` AND the one in `mint_learned_negative` -> red
+/// (one learn event). Each alone is pinned by its own row in this file.
 #[test]
 fn the_generic_learn_entry_refuses_a_field_namespace_key() {
     let router = bedrock_router("unused");
@@ -209,6 +256,101 @@ fn the_generic_learn_entry_refuses_a_field_namespace_key() {
         &mut HashSet::new(),
         &mut meta,
         &mut LearnedProbeGuard::inert(),
+    );
+
+    assert!(meta.learned_capabilities.is_empty());
+    assert!(router.learned_capability_snapshot().is_empty());
+}
+
+/// The learn entry's refusal runs before any of its own side effects, not only
+/// before the mint: a field-namespace key arriving as an F2 candidate after a
+/// same-chain F1 must not bump the suppression counter the mint's own refusal
+/// would never reach.
+///
+/// Mutation check: remove the namespace refusal in
+/// `commit_learned_observation` -> red (the counter reads 1). The mint keeps
+/// its own refusal, so this is the row that pins the learn entry alone.
+#[test]
+fn the_generic_learn_entry_refuses_before_its_own_side_effects() {
+    let router = bedrock_router("unused");
+    let target = only_target(&router);
+    let mut req = request_with_tool_type("web_search");
+    req.routectl_internal.anthropic_thinking_display = Some("summarized".into());
+    req.reasoning = Some(routectl_core::ReasoningConfig {
+        enabled: Some(true),
+        ..Default::default()
+    });
+    let mut dedupe = HashSet::from([super::capability_learn::LearnDedupeKey::F1Seen {
+        feature_key: field_key(),
+    }]);
+    let mut meta = DispatchMeta::for_alias(ALIAS);
+
+    router.commit_learned_observation(
+        (field_key(), SignalTier::SelfIdentifying, FailurePhase::F2),
+        &FailureClass::BadRequest,
+        &Error::upstream("bedrock-mock", 400, "{}"),
+        400,
+        None,
+        "bedrock",
+        &target,
+        &req,
+        false,
+        &mut dedupe,
+        &mut meta,
+        &mut LearnedProbeGuard::inert(),
+    );
+
+    assert_eq!(router.metrics.f2_same_chain_suppressed_total(), 0);
+    assert!(meta.learned_capabilities.is_empty());
+}
+
+/// The single target of the namespace-guard fixture's one model.
+fn only_target(router: &Router) -> DispatchTarget {
+    let model: Arc<ResolvedModel> = router
+        .resolved_models
+        .values()
+        .next()
+        .map(Arc::clone)
+        .expect("one model");
+    router
+        .expand_chain_to_targets(vec![model], None)
+        .pop()
+        .expect("one target")
+}
+
+/// The generic mint refuses a key whose Bedrock-normalized form is in the field
+/// namespace, whichever learner hands it over.
+///
+/// Mutation check: remove the refusal at the top of `mint_learned_negative`
+/// -> red (one learn event, one resident field row).
+#[test]
+fn the_generic_mint_refuses_a_key_bedrock_stores_in_the_field_namespace() {
+    let router = bedrock_router("unused");
+    let target = only_target(&router);
+    let segment = crate::field_capability::field_capability_key(SEGMENT_PATH).expect("a path");
+    let dotted = format!("toolConfig.{segment}");
+    let learned_key = target
+        .learned_key(&dotted)
+        .expect("a learned lane")
+        .to_string();
+    let mut meta = DispatchMeta::for_alias(ALIAS);
+
+    router.mint_learned_negative(
+        LearnedMint {
+            learned_key,
+            feature_key: dotted.clone(),
+            state_key: &target.state_key,
+            provider_kind: "bedrock",
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            upstream_status: 400,
+            upstream_code: None,
+            upstream_param: None,
+            remapped: false,
+            request_features: vec![dotted],
+        },
+        &mut HashSet::new(),
+        &mut meta,
     );
 
     assert!(meta.learned_capabilities.is_empty());

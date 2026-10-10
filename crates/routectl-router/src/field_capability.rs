@@ -33,6 +33,8 @@
 //! must survive that change, so the two classes are distinguished by one
 //! predicate rather than by each call site re-deciding.
 
+use routectl_core::capability::normalize_capability_key;
+
 /// The permanent prefix of every envelope-field capability key.
 ///
 /// Private on purpose: a sibling module holding the prefix could assemble
@@ -135,6 +137,28 @@ pub fn capability_key_is_catalog_scoped(key: &str) -> bool {
 /// re-checks the grammar of a key already persisted.
 pub fn capability_key_is_field_verdict(key: &str) -> bool {
     field_capability_path(key).is_some()
+}
+
+/// True when any `.`-separated segment of `token` sits in the field namespace.
+///
+/// The question a producer of a NON-field key has to ask about upstream or
+/// client text. Testing the whole token is not enough: a capability-key
+/// normalizer may reduce a dotted token to one of its segments (Bedrock keeps
+/// the head, or the segment after a request-bag prefix), so
+/// `toolConfig.<field key>` would be stored as the field key it embeds.
+pub fn token_reaches_field_namespace(token: &str) -> bool {
+    token
+        .split(SEGMENT_SEPARATOR)
+        .any(capability_key_is_field_verdict)
+}
+
+/// True when a key that did NOT come from the field-repair guard would land in
+/// the field namespace: either as written, or once `provider_kind`'s
+/// capability-key normalization has run -- which is what the registry stores
+/// and the ledger replays.
+pub fn learned_key_enters_field_namespace(raw: &str, provider_kind: &str) -> bool {
+    capability_key_is_field_verdict(raw)
+        || capability_key_is_field_verdict(&normalize_capability_key(raw, provider_kind))
 }
 
 #[cfg(test)]

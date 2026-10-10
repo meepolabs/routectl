@@ -851,8 +851,11 @@ impl Router {
         // a closed-table row. Here it could only have come from upstream text
         // echoing a client-chosen token (a tool type spelled in the namespace),
         // and the membership gate below would admit it because the same client
-        // put it in the request.
-        if crate::field_capability::capability_key_is_field_verdict(&feature_key) {
+        // put it in the request. The NORMALIZED key is checked too: that is
+        // what the registry stores, and Bedrock reduces a dotted key to one of
+        // its segments.
+        if crate::field_capability::learned_key_enters_field_namespace(&feature_key, provider_kind)
+        {
             return;
         }
         // Request-membership gate: learn a negative ONLY for a capability the
@@ -1038,6 +1041,13 @@ impl Router {
             remapped,
             request_features,
         } = mint;
+        // The generic mint never writes the field namespace: only the
+        // field-repair guard mints there, through its own registry calls. The
+        // stored key is the NORMALIZED one, so that is the one tested.
+        if crate::field_capability::learned_key_enters_field_namespace(&feature_key, provider_kind)
+        {
+            return;
+        }
         // One observation per request per (learned key, feature): a retry, a
         // per-target re-entry, or a sibling target on the same lane that hits
         // this arm again is dropped here.

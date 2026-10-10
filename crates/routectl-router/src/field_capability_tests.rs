@@ -594,6 +594,52 @@ fn the_bedrock_lane_keeps_a_field_key_unchanged() {
     );
 }
 
+// --- non-field producers ---
+
+/// A token reaches the namespace when any dotted segment is a field key, and
+/// not otherwise: a dotted catalog path and a segment that merely names the
+/// namespace without its separator stay outside.
+#[test]
+fn a_token_reaches_the_namespace_through_any_dotted_segment() {
+    let key = field_capability_key(GROUNDED_PATH).expect("accepted");
+    for reaching in [
+        key.clone(),
+        format!(".{key}"),
+        format!("toolConfig.{key}"),
+        format!("web_search.{key}.x"),
+    ] {
+        assert!(token_reaches_field_namespace(&reaching), "{reaching}");
+    }
+    for outside in [
+        "web_search",
+        "toolConfig.tools.toolSpec",
+        "field.thinking",
+        "x:field:y",
+    ] {
+        assert!(!token_reaches_field_namespace(outside), "{outside}");
+    }
+}
+
+/// The learn-side predicate tests what the registry would STORE: a dotted key
+/// that Bedrock reduces into the namespace enters it on bedrock and nowhere
+/// else, and an ordinary key never does.
+///
+/// Mutation check: drop the normalized half of
+/// `learned_key_enters_field_namespace` -> red on the bedrock row.
+#[test]
+fn a_learned_key_enters_the_namespace_once_normalized() {
+    let key = field_capability_key(GROUNDED_PATH).expect("accepted");
+    let bagged = format!("toolConfig.{key}");
+
+    assert!(learned_key_enters_field_namespace(&key, ANTHROPIC));
+    assert!(learned_key_enters_field_namespace(&bagged, "bedrock"));
+    assert!(!learned_key_enters_field_namespace(&bagged, ANTHROPIC));
+    assert!(!learned_key_enters_field_namespace(
+        "additionalModelRequestFields.anthropic_beta",
+        "bedrock"
+    ));
+}
+
 // --- scan adapters ---
 
 fn count_prefix_literals_in(path: &Path) -> usize {
