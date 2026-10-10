@@ -1973,9 +1973,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   through `model_egress_kind` (a `provider` value naming a `[pools]` block
   answers by its first resolvable member) and asking
   `routectl_providers::anthropic_api::egress_reads_max_thinking_budget` rather
-  than listing kinds locally (advisory only). Units live in the
-  `#[path]`-included `warnings_tests.rs` (gemini-gated) and
-  `warnings_thinking_budget_tests.rs` (kind-agnostic)
+  than listing kinds locally (advisory only); `beta_floor_override_warnings`
+  flags an `unsupported` `beta:<flag>` override on an anthropic-api provider
+  naming a flag the egress beta floor re-adds (OAuth gate, Claude Code floor,
+  structured outputs, effort, or a provider / model `header_extras`
+  `anthropic-beta` pin), compared case-insensitively and naming every floor
+  class the flag is in (advisory only). Units live in the
+  `#[path]`-included `warnings_tests.rs` (gemini-gated),
+  `warnings_thinking_budget_tests.rs` (kind-agnostic) and
+  `warnings_beta_floor_tests.rs`
 - `src/factory/installation_id.rs` -- (cfg `openai-responses`) read-or-create
   the persistent per-installation UUIDv4 at `<config-dir>/installation_id`;
   `resolve_installation_id` adopts an existing valid file
@@ -2518,14 +2524,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   outcome, so an observation in that window sorts after the boundary rather than
   being rejected as pre-boundary), the barrier entry points
   `observe_learned_capability` / `observe_verified_capability` /
-  `acting_negative_with_generation` (the live act-side read: decision plus the
-  effective generation, paired under one guard) /
-  `beta_reading_with_generation` (the beta pass's one guarded read: acting
-  negative / probe admitted / verified positive / none) /
-  `is_verified_working_or_false` / `clear_learned_capability` (catalog-scoped work
+  `beta_reading_with_generation` (THE one guarded act-side read for both beta
+  flags and request feature keys: acting negative with its phase / probe
+  admitted / verified positive / none, plus the effective generation, under one
+  guard) / `clear_learned_capability` (catalog-scoped work
   from a superseded Router is refused as `Stale` and emits no event or metric; a
-  catalog-independent observation is always accepted into the live store),
-  `is_verified_working_or_false`,
+  catalog-independent observation is always accepted into the live store);
+  `acting_negative_with_generation` and `is_verified_working_or_false` are
+  test-only (`cfg(test)`),
   per-event `persistence_generation` on `CapabilityLearnEvent` /
   `CapabilityObserveEvent` / `CapabilityClearedEvent` (taken from the producing
   operation's own `Applied`, since one request may span a boundary and its
@@ -4047,9 +4053,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `provider_entry#upstream` ledger `lane_key`; no `Display`, only the
   sanitized `for_log`. Distinct from the runtime breaker `state_key`
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain
-  pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date
-  suffixes (e.g. `_20250305`) so `[capability.overrides.<spec>].unsupported`
-  can match capability-class regardless of vendor versioning; `ToolDef::Custom` (user-defined tools) does not contribute
+  pre-filter; walks `ToolDef::Other(v)["type"]` strings through
+  `canonical_tool_key` (strips date suffixes, e.g. `_20250305`, and keys the
+  bare `computer` type as `computer_use`; `computer_toolset` keeps its own key)
+  so `[capability.overrides.<spec>].unsupported` can match capability-class
+  regardless of vendor versioning; the learn side's tool-type and openai-param
+  paths in `capability_matcher.rs` key through the same function; `ToolDef::Custom` (user-defined tools) does not contribute
   tool-type keys. ALSO emits the request-derived `structured_output` key
   (appended after tool-type keys) when the request needs constrained decoding
   -- either `provider_extras["output_config"]["format"]` is non-null, the
@@ -4083,7 +4092,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   facts. Nothing on the read or write path removes another kind's version;
   that happens only in the reload owner sweep and at boot replay, and a stray
   version counts toward the cap until then. `owned_snapshot(current_kind)` is
-  the display read (only each lane's current-kind version);
+  the display read (only each lane's current-kind version; a row recorded under
+  the empty kind is never returned);
   `recorded_snapshot` / `RecordedLearnedEntry` carry the kind for the owner
   sweep and the boundary restatement: `generation` / `advance_generation` /
   `commit_boundary_transition` (promotes the pending generation, or advances,
@@ -4187,7 +4197,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `snapshot`/`export`/`import`/`clear` surface and seed the registry; a
   1024-entry cap evicts the oldest `last_seen` first, after a per-(lane, kind)
   beta-flag bound (`MAX_BETA_ENTRIES_PER_LANE` = 32) that evicts only that
-  lane's oldest unleased beta entry, on every insert path. Constructed via `new` or
+  lane's youngest unleased beta entry (latest `first_seen`, so a burst of new
+  flags churns among itself), on every insert path. Constructed via `new` or
   `from_capability_config` (decay / inferred-window from the `[capability]`
   hours + the shared `DEFAULT_MAX_ENTRIES` cap) -- the shared sizing path for
   both the router build and the doctor's read-only one-shot ledger rebuild;
@@ -4217,8 +4228,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   refresh, unrelated error -> release unchanged
 - `src/beta_capability.rs` -- sole owner of the beta-flag capability namespace
   (`beta_capability_key`, `beta_flag_of`, `capability_key_is_beta`) and
-  `BetaSeedScope`; the module is crate-internal, the root re-exports
-  `capability_key_is_beta`, `BetaSeedScope`, and (test-utils) the constructor
+  `BetaSeedScope`, plus `beta_override_key` (a beta key with its flag
+  ASCII-lowercased, any other key unchanged: the form override cells and their
+  lookups key on, so overrides match client flags case-insensitively); the
+  module is crate-internal, the root re-exports `capability_key_is_beta`,
+  `beta_override_key`, `BetaSeedScope`, and (test-utils) the constructor
 - `src/beta_seed.rs` -- `BEDROCK_BETA_SEED` / `BEDROCK_SEED_PROVIDER_KIND`, the
   shipped prior of client beta flags a `bedrock` target withholds absent a
   stronger verdict; `shipped_scope` (root: `shipped_beta_seed_scope`)
@@ -4652,7 +4666,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   namespace through a CLOSED set: the `OPENAI_PARAM_TRANSLATIONS` table
   (`response_format` -> `structured_output`) for wire params the request side
   keys differently, plus a passthrough for a param that -- after
-  `feature_keys::strip_date_suffix` + `normalize_capability_key` -- is ALREADY
+  `feature_keys::canonical_tool_key` + `normalize_capability_key` -- is ALREADY
   a `WELL_KNOWN_CAPABILITY_KEYS` entry (a typed built-in an upstream rejects
   by `type`); a param outside that closed set, or a missing param, yields
   `None` (EXCEPT the closed `OPENAI_PARAMLESS_ROUTE_AWAY` set --
@@ -4734,7 +4748,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   -> `RouteAway` and `.force_supported` -> `ForceSupported` into one map keyed
   `(target_spec, normalized_capability_key)` -> `OverrideVerdict`. Keys
   normalized via `routectl_core::capability::normalize_capability_key` with
-  the target's provider kind so a stored override meets a normalized lookup.
+  the target's provider kind, then a `beta:` key's flag lowercased via
+  `beta_override_key`, so a stored override meets a normalized lookup and
+  beta flags match in any case (a pair differing only in case lands in one
+  cell, so `validate_capability_overrides` rejects it as contradictory).
   `resolve(provider, nickname, cap, kind) -> Option<OverrideVerdict>` consults
   the model-scoped cell, then the provider-scoped cell (model wins). A dead-key
   WARN fires per override key that normalization rewrites (dead: it could
@@ -8167,16 +8184,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   row. Learned entries join on `state_key == lane`; priors and overrides
   resolve through the lane's nicknames (`provider:nickname` before bare
   `provider`, via `OverrideRegistry::resolve`). Columns are the well-known
-  keys then observed others capped at 10 (`(+N more)` overflow). Each cell
+  keys then every observed other key, uncapped (an override naming a beta flag
+  in another letter case folds into that flag's existing column via
+  `beta_override_key`). Each cell
   runs the shared `resolve_display_verdict` + `resolve_display_action` once
   per nickname on the lane; when the nicknames disagree on the verdict the
   cell's verdict is `mixed` with no lane-wide source, layer or age, when they
   disagree on the action it is `mixed`, and either way the cell lists each
   nickname's verdict, layer and action. It then layers on the winning layer,
-  the display-only age and stale flag, and the
+  the display-only age and stale flag (a prior-layer cell is stale when any
+  nickname on the lane has a stale prior), and the
   learned entry's epoch-ms timestamps mapped through the reader's pinned
   `now`/`now_ms` anchor pair. The shipped beta seed is its own layer: its
-  flags become `beta:<flag>` columns (inside the 10-column cap) whenever a lane
+  flags become `beta:<flag>` columns whenever a lane
   of the seed's kind exists, and a covered cell resolves `seed` (withhold) or,
   under a replayed seed-clear marker, cleared (allow). Lane-keyed coverage
   lives in the `#[path]`-included `lane_matrix_tests.rs`, the seed layer's in
@@ -8358,7 +8378,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   tally line, `render_table` alignment, lane / kind / nicknames leading
   columns (the lane printed exactly as `capability purge` accepts it),
   compact `verdict[source]->action` cells with a `(stale)` marker, an
-  `(unrouted)` lane tag, and a `(+N more)` column-overflow note
+  and an `(unrouted)` lane tag
 - `src/commands/capability_purge.rs` -- `routectl capability purge <lane>
   <capability>`: parses `<lane>` through `StateKey::parse` (refusing an
   unparseable lane locally, non-zero), POSTs the two keys to the daemon's
