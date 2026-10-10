@@ -571,6 +571,8 @@ list with more narrative.
 
 ### Fixed
 
+- **An empty mid-conversation system turn no longer fails the request on the anthropic-api lane.** After an idle compaction Claude Code can send a `role: "system"` turn whose content is empty (`[]`, `""`, or only whitespace text) alongside a top-level `system`; routectl refused it with a 400 (`messages[N] is a Role::System turn with no content`), ending the session. Such a turn is now omitted from the upstream body and counted on the existing forwarded-system DEBUG line (`system_turns_dropped_empty`); a system turn carrying any non-blank block, including a non-text block, still forwards unchanged.
+
 - **A new learned beta flag can no longer push a lane past its cap or evict an unrelated fact.** When all 32 learned beta entries on a lane are held by in-progress purges, a new beta-flag observation is now refused (logged as `event=evict reason=beta_lane_cap_leased`) instead of exceeding the per-lane bound, so it can no longer evict an unrelated learned fact through the global cap; it is learned on a later observation once the purge settles.
 
 - **The computer tool is learned and overridden as `computer_use`.** A request carrying the `computer_20250124` tool now derives the `computer_use` capability key, as do the learn-side tool-type and openai-param rejections, so `[capability.overrides.<spec>] unsupported = ["computer_use"]`, a `computer_use` entry in `[capability] essential`, and a `computer_use` catalog prior now apply to it; previously it keyed as `computer` and none of them matched. `computer_toolset_*` tools keep their own `computer_toolset` key. A learned `computer` negative recorded before the upgrade stays under its old key until it decays or is purged with `routectl capability purge`.

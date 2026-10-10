@@ -723,7 +723,7 @@ license.
   `build_tool_message`, `normalize_replay_invariants`; owns
   `SystemTurnPolicy` (forward a mid-conversation `role: "system"` turn in
   place vs treat it as lift-consumed, resolved by `request.rs`), the
-  billing/attribution screen on the forwarded path, and the
+  billing/attribution and empty-turn screen on the forwarded path, and the
   accounted-identity ledger that turns an unaccounted message drop into a
   normalize error. Sidecar `request_body_beta_tests.rs` pins that the shared
   normalizer leaves the body `anthropic_beta` carrier to each egress
