@@ -1202,6 +1202,9 @@ upstream = "openai.gpt-oss-20b"   # bare model id
 `base_url` is optional on an `openai-compat` provider only when the
 mantle sub-table is present (the region derives the endpoint). A
 non-mantle `openai-compat` provider still requires a non-empty `base_url`.
+Learned field repair does not act on a standard-lane provider whose
+`base_url` names a loopback host; that refusal is lexical, so an `https://`
+name that resolves to a loopback address is treated as remote.
 
 Validation rejects an incoherent entry:
 

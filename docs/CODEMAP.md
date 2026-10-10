@@ -1511,7 +1511,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a kind string against what a config can DECLARE rather than what the baked
   catalog carries;
   `api_key_ref()` exposes the primary key ref, `None` for Bedrock, so the
-  usage CLI can detect `oauth://` subscription providers; `cache_capability()`
+  usage CLI can detect `oauth://` subscription providers;
+  `classifiable_egress_base_url()` is the base URL an entry actually egresses
+  to when its configured fields alone determine it (`anthropic-api` and
+  standard-lane `openai-compat`: the configured base URL; native `bedrock`: the
+  runtime URL derived from `region`; a Mantle sub-lane or any other kind:
+  `None`), read by the field stages' attributability decision; `cache_capability()`
   fails closed for anthropic-api on a non-default base URL, plus
   `auto_emit_top_level_breakpoint()` and the per-block front-marker trio
   `auto_emit_per_block_breakpoints()` / `per_block_breakpoints_enabled()`
@@ -2790,10 +2795,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   nothing. `present_rows(req)` is the scan both arms share -- every closed-table
   row the request carries, in table order.
   `Router::plan_field_carry` admits BEFORE dispatch and without
-  touching the request, in this order: kill switch -> `anthropic-api` lane ->
-  NOT a forwarded-credential target -> loopback
-  suppression (`field_verdict::loopback_target_suppresses_minting` over
-  `ProviderEntry::anthropic_api_base_url`) -> then, PER PRESENT ROW, settlement
+  touching the request, in this order: kill switch -> an admitted kind
+  (`anthropic-api`, `bedrock`, `openai-compat`) -> NOT a forwarded-credential
+  target -> `field_repair::attributable_field_lane` (entry present, admitted
+  kind, a `ProviderEntry::classifiable_egress_base_url`, NOT
+  `field_verdict::loopback_target_suppresses_minting` over it) -> the entry's
+  kind agrees with the target's -> then, PER PRESENT ROW, settlement
   mode -> `field_verdict::FieldVerdictKey` -> the single-flight guard, yielding
   one `FieldRepairCandidate` per row that survives (`None` when none does).
   Every present row is admitted rather than only the first, because the
@@ -2896,10 +2903,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   any of them. Per-row admission order mirrors `plan_field_carry`, and mirrors
   its ATTRIBUTION refusals for the same reason rather than by analogy (a target
   whose rejection this stage could not attribute is one whose verdict it must
-  not act on): capability kill switch -> `anthropic-api` lane -> NOT
-  a forwarded-credential target -> an attributable
-  `ProviderEntry::anthropic_api_base_url` (a Bedrock Mantle entry reports none
-  and is refused here) -> NOT `loopback_target_suppresses_minting` ->
+  not act on): capability kill switch -> an admitted kind -> the shared
+  `field_repair::attributable_field_lane` (NOT a forwarded-credential target,
+  a classifiable egress base URL -- a Bedrock Mantle sub-lane reports none and
+  is refused here -- and NOT `loopback_target_suppresses_minting`) -> the
+  entry's kind agrees with the target's ->
   `FieldVerdictKey` -> NOT `override_forces_supported` for the identity's own
   capability key, through the same two-tier resolver the act and learn sides
   share -> `FieldVerdictRegistry::preflight_authorization` -> that
@@ -3324,8 +3332,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   first gate that holds. The two CONFIG-LEVEL gates come FIRST, because they refuse
   the LANE rather than the verdict: `CapabilityDisabled` is the global kill switch
   (`[capability] enabled = false`), so it holds for every verdict at once, and
-  `UnsupportedLane` means the target is not an Anthropic-API provider or has no
-  attributable base URL -- such a verdict is real but can never fire, so no per-key
+  `UnsupportedLane` means the target's kind is not one field repair admits
+  (`anthropic-api`, `bedrock`, `openai-compat`) or it has no attributable base URL
+  (a forwarded credential read off the entry, a local hop, or no classifiable
+  egress base URL) -- such a verdict is real but can never fire, so no per-key
   reason about it would be actionable. `MaskedByOverride` follows them, since it is
   about a specific capability on a lane the stage WOULD act on: an operator cell
   forcing the capability supported outranks any evidence, and its remedy is a config
@@ -3445,9 +3455,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   call sites AND by an end-to-end dispatch test that a pre-preflight clone (which
   survives the source guard) turns red.
   `activate_probe_lanes_for_admitted_request` mirrors `plan_field_carry`'s
-  refusals through the SHARED
-  `field_repair::attributable_anthropic_base_url` rather than a second base-url
-  read, captures the bounded payload (field value, both beta sources, the
+  refusals through the SHARED `field_repair::attributable_field_lane` (which
+  admits `anthropic-api`, `bedrock` and `openai-compat`; probes then narrow the
+  answer to `anthropic-api`, the only lane they act on) rather than a second
+  base-url read, captures the bounded payload (field value, both beta sources, the
   Claude-Code classification), and emits the once-per-incarnation beta-retention
   refusal warning. All `&self` bookkeeping: dials nothing, awaits nothing, never
   delays the admitted request

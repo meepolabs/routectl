@@ -36,9 +36,10 @@
 //! mirrored here, and for the same reason rather than by analogy: a target
 //! whose rejection this stage could not have attributed is a target whose
 //! resident verdict this stage must not act on either. That covers the
-//! operator `force_supported` mask, the local-hop suppression, and any lane
-//! carrying no attributable Anthropic API base URL (which is how a Bedrock
-//! Mantle entry is refused -- it reports none).
+//! operator `force_supported` mask, the local-hop suppression, a provider kind
+//! outside the admitted set (`anthropic-api`, `bedrock`, `openai-compat`), and
+//! any lane with no classifiable egress base URL (which is how a Bedrock Mantle
+//! sub-lane is refused -- it reports none).
 //!
 //! # Fail-open discipline
 //!
