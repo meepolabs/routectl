@@ -56,6 +56,14 @@ mod probe_pass;
 mod probe_payload_capture;
 mod probe_publication;
 mod probe_seat;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the field-repair seam does not consume the parser yet; removed when it does"
+    )
+)]
+mod rejection_parser;
 mod repair_budget;
 mod replay_repair;
 mod runtime_gate;

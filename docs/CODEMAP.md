@@ -3179,6 +3179,32 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/repair_budget_cross_walk_tests.rs`. Do not align it with the
   field arm's settlement before making the class reachable -- a behavioral
   test of an unreachable arm passes with the arm deleted
+- `src/router/rejection_parser.rs` -- the per-dialect rejection parser:
+  `parse_rejection(provider_kind, status, Option<&ParsedErrorBody>) ->
+  Option<NamedRejection>`, where `NamedRejection { row: &'static
+  FieldRepairRow, tier: SignalTier, accepted: Option<&'static str> }`. Reads
+  the carried parse (never the body text) on 400 / 422 only, for
+  `anthropic-api` (location prefix `<path>: ...` and `"a.b" is not
+  supported ... Use "x.y"` inside an `invalid_request_error`), `bedrock`
+  (the same two shapes on the flat `{"message"}` body after one Converse
+  errors wrapper is stripped) and `openai-compat` / `openai-responses`
+  (`error.param`, or the exact `Unsupported parameter: '<x>' is not
+  supported with this model.` template). Any other kind, `gemini`
+  included, resolves to nothing. A lifted path must be a bounded ASCII
+  token; it is canonicalized (numeric and `[n]` indices dropped, a leading
+  Converse `additionalModelRequestFields` bag removed on Bedrock) and
+  resolved against `closed_table()`, so only the table's own row ever
+  leaves the module -- a path with no row resolves to `None`. Tiers: a
+  structured param or a message whose reason matches a captured template is
+  `SelfIdentifying`; any other prose localization is `Inferred`. `accepted`
+  is always `None` until rows declare an accepted set. Not yet consumed by
+  the field-repair seam (hence the module's non-test `dead_code`
+  expectation). `src/router/rejection_parser_tests.rs` welds it to the
+  committed corpus (`tests/fixtures/rejections/**`, the Bedrock validation
+  canaries, the forced tool_choice capture and both near-miss sets): every
+  envelope's outcome -- row, localized-but-unresolved path, or not
+  localized -- is stated, and every grounded row must be reached by a
+  committed fixture
 - `src/router/repair_budget.rs` -- the per-request reactive-repair ceiling
   (`RepairBudget` + `REPAIRS_PER_REQUEST`) shared by all three dispatch
   walks: declared ABOVE each chain / seat loop beside the other

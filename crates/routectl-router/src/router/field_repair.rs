@@ -442,6 +442,12 @@ const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
     class: TransformClass::PrefixImpacting,
 }];
 
+/// The grounded rows alone, without the rows a test build appends.
+#[cfg(test)]
+pub(super) const fn grounded_table() -> &'static [FieldRepairRow] {
+    FIELD_REPAIRS
+}
+
 /// The whole closed table this build scans, grounded rows first.
 #[cfg(not(test))]
 pub(super) const fn closed_table() -> &'static [FieldRepairRow] {
