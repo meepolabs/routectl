@@ -571,6 +571,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A new learned beta flag can no longer push a lane past its cap or evict an unrelated fact.** When all 32 learned beta entries on a lane are held by in-progress purges, a new beta-flag observation is now refused (logged as `event=evict reason=beta_lane_cap_leased`) instead of exceeding the per-lane bound, so it can no longer evict an unrelated learned fact through the global cap; it is learned on a later observation once the purge settles.
+
 - **The computer tool is learned and overridden as `computer_use`.** A request carrying the `computer_20250124` tool now derives the `computer_use` capability key, as do the learn-side tool-type and openai-param rejections, so `[capability.overrides.<spec>] unsupported = ["computer_use"]`, a `computer_use` entry in `[capability] essential`, and a `computer_use` catalog prior now apply to it; previously it keyed as `computer` and none of them matched. `computer_toolset_*` tools keep their own `computer_toolset` key. A learned `computer` negative recorded before the upgrade stays under its old key until it decays or is purged with `routectl capability purge`.
 
 - **`config migrate` no longer half-applies or silently drops a capability list.** The file is left untouched when a later step refuses after an earlier one succeeded, and a retired `unsupported_features` list whose `[capability.overrides]` destination has the wrong shape is refused (kind `override_shape`) instead of being dropped; a version 1 file that still carries retired capability keys now migrates.

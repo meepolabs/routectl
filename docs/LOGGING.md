@@ -1556,17 +1556,20 @@ apart by `reason`: `registry_cap` when the registry is at capacity and evicts
 its oldest entry, and `beta_lane_cap` when a new beta-flag key arrives on a
 lane (under one provider kind) already holding 32 beta-flag entries, which
 evicts that lane's youngest beta-flag entry (latest first seen) and nothing
-else, so a burst of new flags churns among itself. The lane bound is
-checked first. A safety valve, not a routine cache policy.
+else, so a burst of new flags churns among itself. When every beta-flag entry
+on that full lane is held by a purge lease, `reason=beta_lane_cap_leased`: the
+new key is refused (nothing is stored or evicted) and is learned on a later
+observation once a lease releases. The lane bound is checked first. A safety
+valve, not a routine cache policy.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `evict`. |
-| `reason` | string | `registry_cap` or `beta_lane_cap`. |
-| `state_key` | string | The evicted entry's learned lane (`provider_entry#upstream`). |
-| `capability_key` | string | The evicted entry's capability token. |
+| `reason` | string | `registry_cap`, `beta_lane_cap`, or `beta_lane_cap_leased`. |
+| `state_key` | string | The evicted entry's learned lane (`provider_entry#upstream`); for `beta_lane_cap_leased`, the refused key's. |
+| `capability_key` | string | The evicted entry's capability token; for `beta_lane_cap_leased`, the refused key's. |
 | `max_entries` | integer | `registry_cap` only: the registry capacity that triggered eviction. |
-| `max_beta_entries_per_lane` | integer | `beta_lane_cap` only: the per-lane beta-flag bound. |
+| `max_beta_entries_per_lane` | integer | `beta_lane_cap` / `beta_lane_cap_leased` only: the per-lane beta-flag bound. |
 
 ```
 WARN routectl_router::learned_capability event=evict reason=registry_cap
@@ -1980,7 +1983,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::learned_capability` | `capability boundary rollback ignored ...`, `capability boundary commit ignored ...` | A stale settlement was ignored: file a bug with both receipts if it repeats. |
 | WARN | `routectl_router::learned_capability` | `capability boundary refused: another boundary is admitted ...`, `capability boundary refused: an operator purge holds a key's lease ...` | The reload kept the previous router: retry it once the in-flight boundary or purge settles. |
 | ERROR | `routectl_router::learned_capability` | `capability boundary generation exhausted ...`, `capability boundary receipt counter exhausted`, `pending capability generation did not strictly advance ...` | Reloads that need a boundary are refused: restart, and file a bug. |
-| WARN | `routectl_router::learned_capability` | `evict` event (`registry_cap` / `beta_lane_cap`) | A safety valve fired: raise the registry cap or investigate learn churn or beta-flag churn on `state_key`. |
+| WARN | `routectl_router::learned_capability` | `evict` event (`registry_cap` / `beta_lane_cap` / `beta_lane_cap_leased`) | A safety valve fired: raise the registry cap or investigate learn churn or beta-flag churn on `state_key`. |
 | WARN | `routectl_router::factory::build` | `invalid codex_version; falling back to the pinned codex identity` | Fix `codex_version` for `provider`. |
 | WARN | `routectl_router::factory::build` | `max_thinking_entry_bytes` zero / below minimum / above ceiling | Remove the key or set it within the logged bounds. |
 | WARN | `routectl_router::factory::build` | `codex_version changed but requires a daemon restart ...` | Restart the daemon to apply the new `codex_version`. |
