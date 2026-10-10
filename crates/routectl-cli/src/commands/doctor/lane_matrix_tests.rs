@@ -442,6 +442,105 @@ fn nicknames_on_one_lane_with_different_overrides_render_a_mixed_cell() {
     );
 }
 
+/// `lane_config` plus a second pool-backed nickname on the same upstream, so
+/// each member lane carries two nicknames, with `web_search` overridden per
+/// nickname on member `m1`.
+fn pooled_pair_config(pooled: &str, pooled_too: &str) -> Config {
+    let mut config = lane_config();
+    config
+        .models
+        .insert("pooled-too".to_string(), ModelEntry::new("pool", "seat-up"));
+    for (nickname, entry) in [("pooled", pooled), ("pooled-too", pooled_too)] {
+        config.capability.overrides.insert(
+            format!("m1:{nickname}"),
+            toml::from_str(&format!("{entry} = [\"web_search\"]")).expect("override entry parses"),
+        );
+    }
+    config
+}
+
+#[test]
+fn pooled_nicknames_that_disagree_on_a_member_lane_render_a_mixed_cell() {
+    let config = pooled_pair_config("force_supported", "unsupported");
+
+    let panel =
+        build_capability_matrix_panel(&context(config, available(Vec::new(), Instant::now(), 0)));
+
+    assert_eq!(
+        lane(&panel, "m1#seat-up").nicknames,
+        ["pooled", "pooled-too"],
+        "premise: the member lane carries both pool-backed nicknames"
+    );
+    let mixed = cell(&panel, "m1#seat-up", "web_search");
+    assert_eq!(mixed.verdict, "mixed");
+    assert_eq!(mixed.action, "mixed");
+    assert_eq!(
+        nickname_resolutions(mixed),
+        [
+            ("pooled", "forced_supported", Some("override"), "allow"),
+            ("pooled-too", "forced_unsupported", Some("override"), "drop"),
+        ]
+    );
+    assert_eq!(
+        cell(&panel, "m2#seat-up", "web_search").verdict,
+        "unknown",
+        "the overrides name member m1 only"
+    );
+}
+
+#[test]
+fn pooled_nicknames_that_agree_on_a_member_lane_render_one_verdict() {
+    let config = pooled_pair_config("unsupported", "unsupported");
+
+    let panel =
+        build_capability_matrix_panel(&context(config, available(Vec::new(), Instant::now(), 0)));
+
+    let agreed = cell(&panel, "m1#seat-up", "web_search");
+    assert_eq!(agreed.verdict, "forced_unsupported");
+    assert_eq!(agreed.action, "drop");
+    assert!(agreed.nickname_actions.is_empty());
+}
+
+#[test]
+fn a_bedrock_leaf_row_on_a_lane_now_of_another_kind_is_skipped_as_owner() {
+    let current = Some(routectl_router::CURRENT_VOCAB_VERSION);
+    let leaf_row = |kind: &str| CapabilityEvent {
+        capability: "anthropic_beta".to_string(),
+        ..event("p#up", Some(kind), current)
+    };
+    let replay_panel = |row: CapabilityEvent| {
+        let (_dir, path) = seeded_ledger(&[row]);
+        let source = gather_capability_matrix(
+            &ledger_config(&path),
+            false,
+            0,
+            routectl_router::BetaSeedScope::EMPTY,
+        );
+        build_capability_matrix_panel(&context(ledger_config(&path), source))
+    };
+
+    // Positive control: the same row recorded under the lane's current kind
+    // replays and surfaces a column for its key.
+    let control = replay_panel(leaf_row(OPENAI_COMPAT));
+    assert_eq!(control.replay.expect("the replay ran").replayed, 1);
+    assert!(control.columns.iter().any(|c| c == "anthropic_beta"));
+
+    let panel = replay_panel(leaf_row("bedrock"));
+
+    let replay = panel.replay.as_ref().expect("the replay ran");
+    assert_eq!(replay.loaded_rows, 1);
+    assert_eq!(replay.replayed, 0);
+    assert_eq!(
+        replay.skipped_owner, 1,
+        "the row's kind no longer owns p#up"
+    );
+    assert!(
+        !panel.columns.iter().any(|c| c == "anthropic_beta"),
+        "a skipped row contributes no column: {:?}",
+        panel.columns
+    );
+}
+
 fn prior(nickname: &str, cap: &str, supported: bool) -> PriorCell {
     PriorCell {
         nickname: nickname.to_string(),
