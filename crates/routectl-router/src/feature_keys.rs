@@ -44,8 +44,9 @@ use serde_json::Value;
 /// `web_search` and `computer_20250124` keys as `computer_use`. Returns a
 /// deduped list in first-seen order.
 ///
-/// Skips `ToolDef::Custom` and `Other` entries without a string `type`
-/// for tool-type derivation. Additionally appends the request-derived
+/// Skips `ToolDef::Custom`, `Other` entries without a string `type`, and
+/// a `type` spelled in the envelope-field namespace for tool-type
+/// derivation. Additionally appends the request-derived
 /// `structured_output` key (after any tool-type keys) when the request
 /// needs constrained decoding -- see the module docs for the three
 /// trigger sources (`output_config.format`, a strict tool, or the
@@ -65,6 +66,11 @@ pub fn derive_feature_keys(
                 let Some(type_str) = v.get("type").and_then(|t| t.as_str()) else {
                     continue;
                 };
+                // The envelope-field namespace is minted only from the closed
+                // repair table, never from a client-chosen tool type.
+                if crate::field_capability::capability_key_is_field_verdict(type_str) {
+                    continue;
+                }
                 let key = canonical_tool_key(type_str);
                 if seen.insert(key.to_string()) {
                     keys.push(key.to_string());
@@ -272,6 +278,18 @@ mod tests {
     fn derive_returns_empty_for_only_custom_tools() {
         let tools = vec![custom_tool("calc"), custom_tool("send_email")];
         assert!(derive_feature_keys(&tools, None, None).is_empty());
+    }
+
+    /// Mutation check: drop the namespace refusal in `derive_feature_keys` -> red.
+    #[test]
+    fn derive_skips_a_tool_type_in_the_field_namespace() {
+        let key = crate::field_capability::field_capability_key("thinking.enabled.display")
+            .expect("a qualified path");
+        let tools = vec![
+            ToolDef::Other(json!({ "type": key })),
+            ToolDef::Other(json!({ "type": "web_search_20250305" })),
+        ];
+        assert_eq!(derive_feature_keys(&tools, None, None), vec!["web_search"]);
     }
 
     #[test]

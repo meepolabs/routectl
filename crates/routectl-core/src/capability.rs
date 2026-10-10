@@ -359,11 +359,13 @@ const BEDROCK_REQUEST_BAG_PREFIXES: &[&str] = &["additionalModelRequestFields", 
 /// bag prefix, so a second pass returns it unchanged.
 ///
 /// A key in the envelope-field namespace (`field:`-prefixed) is
-/// exempt from the Bedrock reduction and returned verbatim: such a key was
-/// minted by routectl from a qualified path, not lifted from an upstream
-/// smithy path, and it is permanent -- reducing a dotted field key to its
-/// head segment would fuse distinct fields onto one token that could never
-/// be un-minted.
+/// exempt from the Bedrock reduction and returned verbatim: reducing a
+/// dotted field key to its head segment would fuse distinct fields onto one
+/// permanent token that could never be un-minted. This function does not
+/// decide where such a key came from: upstream text can carry one (a
+/// rejection echoing a client-chosen tool type), so keeping the namespace
+/// to keys the router's field-repair guard minted is the learn path's job,
+/// not this normalizer's.
 pub fn normalize_capability_key(raw: &str, provider_kind: &str) -> String {
     if provider_kind == "bedrock" && !is_field_namespace_key(raw) {
         return normalize_bedrock_key(raw);

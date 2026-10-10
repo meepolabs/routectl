@@ -3188,6 +3188,10 @@ mod state_key_rpm_isolation_tests;
 #[path = "learned_lane_tests.rs"]
 mod learned_lane_tests;
 
+#[cfg(all(test, feature = "bedrock"))]
+#[path = "field_namespace_learn_guard_tests.rs"]
+mod field_namespace_learn_guard_tests;
+
 #[cfg(test)]
 #[path = "state_carry_over_owner_tests.rs"]
 mod state_carry_over_owner_tests;

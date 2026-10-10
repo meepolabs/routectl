@@ -847,6 +847,14 @@ impl Router {
         if feature_key == crate::class_policy::OPERATOR_REMAP_CAPABILITY {
             return;
         }
+        // A field-namespace key is minted only by the field-repair guard, from
+        // a closed-table row. Here it could only have come from upstream text
+        // echoing a client-chosen token (a tool type spelled in the namespace),
+        // and the membership gate below would admit it because the same client
+        // put it in the request.
+        if crate::field_capability::capability_key_is_field_verdict(&feature_key) {
+            return;
+        }
         // Request-membership gate: learn a negative ONLY for a capability the
         // request actually carried. `request_features` is the act-side lookup
         // vocabulary (`super::field_repair::request_feature_keys`'s
