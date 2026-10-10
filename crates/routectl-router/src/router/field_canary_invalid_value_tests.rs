@@ -525,14 +525,13 @@ fn a_canary_lossy_repair_and_a_fallback_repair_each_keep_their_record() {
     );
 }
 
-/// Two repairs on ONE target, settled by one success: the canary's lossy repair
-/// fires first and the reactive refused-field repair second, so the success
-/// settles a record that is no longer the latest. Each settlement reaches its
-/// own record.
+/// Two repairs on ONE target: the canary's lossy repair fires first and its
+/// re-dispatch is REJECTED again (a refused field), which the reactive repair
+/// then fixes. The final success settles only the reactive record: the lossy
+/// record's own re-dispatch failed, so it stays unsucceeded.
 ///
-/// Mutation check: settle the most recent record instead of the handle's ->
-/// red (the canary record stays unsucceeded while the later one absorbs both
-/// settlements).
+/// Mutation check: keep the canary handle across the second rejection -> red
+/// (the lossy record reports a success its own retry never reached).
 #[tokio::test]
 async fn a_success_settles_each_repair_on_its_own_record() {
     let (router, observed) = install_two_repair_seats(&[TwoRepairRole::Both]);
@@ -570,16 +569,16 @@ async fn a_success_settles_each_repair_on_its_own_record() {
         vec![
             (
                 super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR,
-                true,
+                false,
                 false
             ),
             (super::field_repair::FIELD_ACTION_DROP_REPAIR, true, true),
         ],
-        "both records settled succeeded, and only the refused-field one learned",
+        "only the repair whose own re-dispatch served settles succeeded",
     );
     let counters = router.field_repair_counters();
     assert_eq!(counters.repair_attempted, 2);
     assert_eq!(counters.repair_lossy, 1);
-    assert_eq!(counters.repair_succeeded, 2);
+    assert_eq!(counters.repair_succeeded, 1);
     assert_eq!(counters.verdicts_learned, 1);
 }

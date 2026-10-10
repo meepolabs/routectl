@@ -793,6 +793,11 @@ impl Router {
                         return Ok(resp);
                     }
                     Err(mut e) => {
+                        // The canary's lossy repair is settled only by the
+                        // success of ITS re-dispatch; any failure after it
+                        // (including a second rejection a later repair then
+                        // fixes) leaves its record unsucceeded.
+                        canary_lossy_repair = None;
                         let native_cf = match replay_plan.as_ref() {
                             Some(plan) => {
                                 classify_with_attempt(&e, target.provider_kind, plan.attempt())
