@@ -91,7 +91,7 @@ use crate::field_verdict::{FieldVerdictKey, PreflightAuthorization};
 
 use super::class_observe::DispatchSurface;
 use super::field_repair::{
-    ANTHROPIC_API_KIND, FieldRepairRow, FieldSurface, TransformClass, present_rows,
+    ANTHROPIC_API_KIND, FieldRepairRow, FieldSurface, FieldTransform, TransformClass, present_rows,
 };
 use super::rejection_parser::RejectionKind;
 use super::repair_budget::RepairBudget;
@@ -174,6 +174,11 @@ pub(super) const FIELD_PREFLIGHT_NO_TARGET_OPT_IN: &str = "no_target_opt_in";
 /// removed something the presence check did not predict. Fails open to a
 /// byte-equivalent original.
 pub(super) const FIELD_PREFLIGHT_AMBIGUOUS_MUTATION: &str = "ambiguous_mutation";
+
+/// Reason token: the verdict is authorized, but its row writes a value rather
+/// than dropping the field, and the verdict carries no stored value to write.
+/// Neither applied nor canaried.
+pub(super) const FIELD_PREFLIGHT_NO_STORED_VALUE: &str = "no_stored_value";
 
 /// Reason token: this request is the re-verification canary. The verdict was
 /// eligible and the cadence came due, so the tested field was RESTORED rather
@@ -498,6 +503,12 @@ impl Router {
             Ok(authorization) => authorization,
             Err(reason) => return refuse(reason),
         };
+        // Before the canary claim: a row this planner cannot apply has no
+        // pre-flight action for a canary to withhold, so restoring it would
+        // re-verify nothing.
+        if row.transform != FieldTransform::Drop {
+            return refuse(FIELD_PREFLIGHT_NO_STORED_VALUE);
+        }
         let claim = self.try_claim_canary(
             key,
             row,

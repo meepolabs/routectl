@@ -4447,3 +4447,4 @@ include!("field_preflight_action_tests.rs");
 include!("field_preflight_provenance_tests.rs");
 include!("field_preflight_persistence_tests.rs");
 include!("field_preflight_isolation_tests.rs");
+include!("field_preflight_rewrite_tests.rs");

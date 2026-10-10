@@ -366,7 +366,7 @@ upstream body, and the session key are never carried:
 
 | Field | Meaning |
 |---|---|
-| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it) |
+| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it), `field_rewrite_repair` when the field was rewritten to the one accepted value the rejection named (learned like a drop of a refused field) |
 | `state_key` | Sanitized `[providers]` state key of the repaired target |
 | `field_path` | The closed-table qualified dotted path that was repaired |
 | `reason` | Why the repair fired (`upstream_field_rejection`) |
@@ -531,6 +531,7 @@ the whole information content of a fail-open:
 | `below_quorum` | The verdict IS eligible, but its acknowledged confirmation count is below the quorum this transform class requires. A prefix-impacting rewrite needs two confirmed cycles; one is not enough |
 | `no_target_opt_in` | A prefix-impacting transform whose quorum is satisfied but whose target is not named in `[fidelity] prefix_impact_opt_in`. A content rewrite stays dormant until the operator opts the target in |
 | `ambiguous_mutation` | The transform was authorized but removed nothing, or reported success while its field was still present. Fails open to a byte-equivalent original |
+| `no_stored_value` | The verdict is authorized, but its field is repaired by writing a value rather than by dropping it, and the verdict carries no stored value to write. Neither applied nor canaried |
 | `canary_restored` | This request is the re-verification canary: the tested field was RESTORED rather than dropped, and the upstream's answer re-verifies or disproves the verdict |
 | `capability_writer_unhealthy` | Durable capability-event persistence cannot currently be guaranteed, so learned pre-flight is suspended for EVERY verdict. Not a verdict gate: it says nothing about whether the verdict is right, only that a wrong one could not be durably retracted (the clear, the purge, and the confirmation are all capability-event writes). Held while ANY of three monotonic failure counters is nonzero -- a store fault, a capability write the channel refused as full, or one it refused as closed -- so a SINGLE failure holds it for the life of the process, including one that happened at boot before the gate was wired. Ordinary usage-record drops are excluded: telemetry falling behind says nothing about capability persistence. Reactive forward-and-repair is unaffected and still serves every request -- see the status token of the same name |
 

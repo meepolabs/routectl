@@ -18,11 +18,16 @@
 //! itself or only the value sent in it. Dropping a field whose value was
 //! refused also strips every valid value from later requests, so only an
 //! [`RejectionKind::UnsupportedField`] may justify a learned drop.
+//!
+//! For a row that rewrites rather than drops, the parser also reports the
+//! accepted value the envelope names: a quoted token equal to a member of the
+//! row's closed accepted set. Only exactly ONE named member fills it; none or
+//! several leave it empty, so a rewrite never picks between candidates.
 
 use routectl_core::capability::SignalTier;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
 
-use super::field_repair::{FieldRepairRow, closed_table};
+use super::field_repair::{FieldRepairRow, FieldTransform, closed_table};
 
 /// Statuses a caller-shaped field rejection arrives on. Everything else says
 /// nothing about the request envelope.
@@ -69,13 +74,6 @@ pub(super) struct NamedRejection {
     pub(super) row: &'static FieldRepairRow,
     pub(super) tier: SignalTier,
     pub(super) kind: RejectionKind,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no row carries a closed accepted-value set yet, so nothing reads it"
-        )
-    )]
     pub(super) accepted: Option<&'static str>,
 }
 
@@ -93,11 +91,39 @@ pub(super) fn parse_rejection(
     if localized.ends_in_index {
         return None;
     }
+    let row = resolve(&localized.segments)?;
     Some(NamedRejection {
-        row: resolve(&localized.segments)?,
+        row,
         tier: localized.tier,
         kind: localized.kind,
-        accepted: None,
+        accepted: named_accepted(row, localized.evidence),
+    })
+}
+
+/// The one member of `row`'s closed accepted set that `evidence` names as a
+/// quoted token, or `None` for a row that does not rewrite, an envelope
+/// naming no member, and one naming several.
+fn named_accepted(row: &FieldRepairRow, evidence: &str) -> Option<&'static str> {
+    let FieldTransform::Rewrite { accepted } = row.transform else {
+        return None;
+    };
+    let mut named = quoted_tokens(evidence)
+        .filter_map(|token| accepted.iter().copied().find(|member| *member == token));
+    let first = named.next()?;
+    named.all(|other| other == first).then_some(first)
+}
+
+/// Every `'...'` or `"..."` span in `text`, in order. An unclosed quote ends
+/// the scan.
+fn quoted_tokens(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        let open = rest.find(['\'', '"'])?;
+        let quote = &rest[open..=open];
+        let after = &rest[open + 1..];
+        let close = after.find(quote)?;
+        rest = &after[close + 1..];
+        Some(&after[..close])
     })
 }
 
@@ -127,6 +153,9 @@ struct LocalizedPath<'a> {
     ends_in_index: bool,
     tier: SignalTier,
     kind: RejectionKind,
+    /// The envelope text that may name accepted values: the reason after a
+    /// located path, or the whole message.
+    evidence: &'a str,
 }
 
 /// One arm's reading of an envelope: the raw path and what it says about it.
@@ -135,6 +164,7 @@ struct Attribution<'a> {
     path: &'a str,
     tier: SignalTier,
     kind: RejectionKind,
+    evidence: &'a str,
 }
 
 fn localize<'a>(
@@ -158,6 +188,7 @@ fn localize<'a>(
         ends_in_index: ends_in_index(attribution.path),
         tier: attribution.tier,
         kind: attribution.kind,
+        evidence: attribution.evidence,
     })
 }
 
@@ -190,6 +221,7 @@ fn quoted_not_supported(message: &str) -> Option<Attribution<'_>> {
         path,
         tier,
         kind: RejectionKind::UnsupportedField,
+        evidence: continuation,
     })
 }
 
@@ -210,14 +242,20 @@ fn location_prefix(message: &str) -> Option<Attribution<'_>> {
     } else {
         RejectionKind::InvalidValue
     };
-    Some(Attribution { path, tier, kind })
+    Some(Attribution {
+        path,
+        tier,
+        kind,
+        evidence: reason,
+    })
 }
 
 /// `error.param` alone names a field without saying the field was refused;
 /// only the `unsupported_parameter` code or the exact template naming the
 /// same parameter does.
 fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
-    let templated = parsed.error_message().and_then(unsupported_parameter);
+    let message = parsed.error_message();
+    let templated = message.and_then(unsupported_parameter);
     let (path, unsupported) = match parsed.error_param() {
         Some(param) => (
             param,
@@ -235,6 +273,7 @@ fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
         path,
         tier: SignalTier::SelfIdentifying,
         kind,
+        evidence: message.unwrap_or(""),
     })
 }
 

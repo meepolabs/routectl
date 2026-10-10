@@ -4,14 +4,17 @@
 //!
 //! An upstream that rejects a request by naming a WIRE FIELD PATH states
 //! either that the lane does not accept that field, or that it does not
-//! accept the VALUE sent in it. The L0 repair is the same for both: DROP the
-//! mapped field from the attempt request and re-dispatch the same target
-//! once. There is no rewrite, no substituted value, and no second class -- an
-//! L0 repair either removes one field or does nothing at all. What differs is
-//! what the repair may teach: only a refused FIELD commits a verdict. A
-//! refused value is repaired for this attempt alone and recorded as a lossy
-//! repair, because a learned drop would strip every valid value of that
-//! field from every later request on the lane.
+//! accept the VALUE sent in it. The row's [`FieldTransform`] decides the
+//! repair: a DROP row removes the mapped field, a REWRITE row replaces its
+//! value with the one member of the row's closed accepted set the rejection
+//! names, and either re-dispatches the same target once. A rewrite never
+//! substitutes a value the rejection did not name, and a rejection naming
+//! none or several repairs nothing. What differs is what the repair may
+//! teach: a refused FIELD, or a rewrite to the upstream's own named value,
+//! commits a verdict. A refused value on a drop row is repaired for this
+//! attempt alone and recorded as a lossy repair, because a learned drop
+//! would strip every valid value of that field from every later request on
+//! the lane.
 //!
 //! # Why the table is closed, and what "closed" buys
 //!
@@ -70,6 +73,10 @@ pub(super) const FIELD_ACTION_DROP_REPAIR: &str = "field_drop_repair";
 /// VALUE sent in the field rather than the field: the drop served this
 /// attempt only, and no verdict was learned from it. Closed set.
 pub(super) const FIELD_ACTION_LOSSY_DROP_REPAIR: &str = "field_lossy_drop_repair";
+
+/// Action token for the field-repair WARN when the repair rewrote the field to
+/// the one accepted value the rejection named. Closed set.
+pub(super) const FIELD_ACTION_REWRITE_REPAIR: &str = "field_rewrite_repair";
 
 /// Reason token: the attempt drew an upstream rejection naming this field
 /// path. Closed set.
@@ -178,6 +185,15 @@ pub(super) enum FieldSurface {
     /// surface, and disjoint from both other carriers.
     #[cfg(test)]
     UnsupportedFieldForTests,
+    /// Test-only surface for a REWRITE row: the [`TEST_REWRITE_KWARG`] key of
+    /// `chat_template_kwargs`. A key no other fixture sets, so the row stays
+    /// confined to the tests that opt into it.
+    #[cfg(test)]
+    RewriteFieldForTests,
+    /// Test-only surface for a CEILING row: `max_tokens` holding exactly
+    /// [`TEST_CEILING_SENTINEL`].
+    #[cfg(test)]
+    CeilingFieldForTests,
 }
 
 impl FieldSurface {
@@ -212,6 +228,13 @@ impl FieldSurface {
             Self::UnsupportedFieldForTests => {
                 req.user.as_deref() == Some(TEST_UNSUPPORTED_SENTINEL)
             }
+            #[cfg(test)]
+            Self::RewriteFieldForTests => req
+                .chat_template_kwargs
+                .as_ref()
+                .is_some_and(|kwargs| kwargs.get(TEST_REWRITE_KWARG).is_some()),
+            #[cfg(test)]
+            Self::CeilingFieldForTests => req.max_tokens == Some(TEST_CEILING_SENTINEL),
         }
     }
 
@@ -242,7 +265,15 @@ impl FieldSurface {
             Self::PartialDropForTests
             | Self::PrefixImpactingSystemForTests
             | Self::ClaimsRemovalForTests
-            | Self::UnsupportedFieldForTests => None,
+            | Self::UnsupportedFieldForTests
+            | Self::CeilingFieldForTests => None,
+            #[cfg(test)]
+            Self::RewriteFieldForTests => req
+                .chat_template_kwargs
+                .as_ref()
+                .and_then(|kwargs| kwargs.get(TEST_REWRITE_KWARG))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         }
     }
 
@@ -284,8 +315,34 @@ impl FieldSurface {
             Self::PartialDropForTests
             | Self::PrefixImpactingSystemForTests
             | Self::ClaimsRemovalForTests
-            | Self::UnsupportedFieldForTests => {}
+            | Self::UnsupportedFieldForTests
+            | Self::CeilingFieldForTests => {}
+            #[cfg(test)]
+            Self::RewriteFieldForTests => {
+                let kwargs = req
+                    .chat_template_kwargs
+                    .get_or_insert_with(|| serde_json::json!({}));
+                if let Some(object) = kwargs.as_object_mut() {
+                    object.insert(TEST_REWRITE_KWARG.to_string(), value.into());
+                }
+            }
         }
+    }
+
+    /// Rewrite this surface's carrier on `req` to `value`, adopting the change
+    /// only when the surface then reads back exactly `value`. `false` leaves
+    /// `req` untouched.
+    ///
+    /// Staged on a clone because [`Self::set_in`] cannot report failure, and a
+    /// rewrite that did not take must not leave a half-written body behind.
+    fn rewrite_in(&self, req: &mut ChatRequest, value: &str) -> bool {
+        let mut scratch = req.clone();
+        self.set_in(&mut scratch, value);
+        if self.value_in(&scratch).as_deref() != Some(value) {
+            return false;
+        }
+        *req = scratch;
+        true
     }
 
     /// Drop this surface from `req`, returning whether anything was removed.
@@ -333,6 +390,20 @@ impl FieldSurface {
                     return false;
                 }
                 req.user.take().is_some()
+            }
+            #[cfg(test)]
+            Self::RewriteFieldForTests => req
+                .chat_template_kwargs
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|object| object.remove(TEST_REWRITE_KWARG))
+                .is_some(),
+            #[cfg(test)]
+            Self::CeilingFieldForTests => {
+                if !Self::CeilingFieldForTests.present_in(req) {
+                    return false;
+                }
+                req.max_tokens.take().is_some()
             }
         }
     }
@@ -407,14 +478,52 @@ impl TransformClass {
     }
 }
 
+/// What a repair does to a row's field once a rejection names it.
+///
+/// [`TransformClass`] says what a transform COSTS the request; this says what
+/// it DOES. Closed: a new kind of repair is a new variant, never a value
+/// derived from upstream text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FieldTransform {
+    /// Remove the field.
+    Drop,
+    /// Replace the field's value with the ONE member of `accepted` the
+    /// rejection names. A rejection naming none, or several, repairs nothing:
+    /// the substituted value is always the upstream's own answer.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no grounded row rewrites yet; the test table carries one"
+        )
+    )]
+    Rewrite { accepted: &'static [&'static str] },
+    /// Clamp a token budget to a learned ceiling. Reserved: no repair applies
+    /// it yet, so a row carrying it is never repaired and never applied.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reserved for learned token ceilings; the test table carries one"
+        )
+    )]
+    Ceiling,
+}
+
 /// One row of the closed path-to-surface table: the qualified dotted path,
-/// the request-side surface whose removal drops it, and the class that
-/// decides which gates a pre-flight application must clear.
+/// the request-side surface carrying it, what a repair does to it, the class
+/// that decides which gates a pre-flight application must clear, and whether
+/// a free token count validates the field.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FieldRepairRow {
     pub(super) path: &'static str,
     pub(super) surface: FieldSurface,
+    pub(super) transform: FieldTransform,
     pub(super) class: TransformClass,
+    /// Whether the upstream's token-count endpoint rejects this field the way
+    /// a completion does, so a free count can re-check a verdict on it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no re-check gates on it yet"))]
+    pub(super) count_tokens_validates: bool,
 }
 
 /// The CLOSED path-to-surface table: one row per qualified dotted path this
@@ -425,10 +534,15 @@ pub(super) struct FieldRepairRow {
 /// produces that wire field. A path outside this table resolves to no row,
 /// so it mutates nothing and repairs nothing -- the table is the whole of
 /// what an L0 repair can act on.
+///
+/// `count_tokens_validates` is false on the display row: no captured token
+/// count has rejected the field, so a count accepting it proves nothing.
 const FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
     path: "thinking.enabled.display",
     surface: FieldSurface::AnthropicThinkingDisplay,
+    transform: FieldTransform::Drop,
     class: TransformClass::Envelope,
+    count_tokens_validates: false,
 }];
 
 /// The qualified dotted path of the test-only prefix-impacting row. Outside
@@ -458,6 +572,29 @@ pub(in crate::router) const TEST_UNSUPPORTED_PATH: &str = "routectl_test_unsuppo
 pub(in crate::router) const TEST_UNSUPPORTED_SENTINEL: &str =
     "routectl-test-only-unsupported-field-sentinel";
 
+/// The qualified dotted path of the test-only rewrite row.
+#[cfg(test)]
+pub(in crate::router) const TEST_REWRITE_PATH: &str = "routectl_test_rewrite_field";
+
+/// The `chat_template_kwargs` key the test-only rewrite surface reads and
+/// writes.
+#[cfg(test)]
+pub(in crate::router) const TEST_REWRITE_KWARG: &str = "routectl_test_rewrite_kwarg";
+
+/// The test-only rewrite row's closed accepted set. Two members, so a
+/// rejection can name both.
+#[cfg(test)]
+pub(in crate::router) const TEST_REWRITE_ACCEPTED: &[&str] =
+    &["routectl-test-accepted-a", "routectl-test-accepted-b"];
+
+/// The qualified dotted path of the test-only ceiling row.
+#[cfg(test)]
+pub(in crate::router) const TEST_CEILING_PATH: &str = "routectl_test_ceiling_field";
+
+/// The EXACT `max_tokens` the test-only ceiling surface recognizes.
+#[cfg(test)]
+pub(in crate::router) const TEST_CEILING_SENTINEL: u32 = 987_653;
+
 /// Rows a TEST build adds to the closed table.
 ///
 /// The grounded table ships no prefix-impacting row, so without this the
@@ -472,12 +609,32 @@ const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[
     FieldRepairRow {
         path: TEST_PREFIX_IMPACTING_PATH,
         surface: FieldSurface::PrefixImpactingSystemForTests,
+        transform: FieldTransform::Drop,
         class: TransformClass::PrefixImpacting,
+        count_tokens_validates: false,
     },
     FieldRepairRow {
         path: TEST_UNSUPPORTED_PATH,
         surface: FieldSurface::UnsupportedFieldForTests,
+        transform: FieldTransform::Drop,
         class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: TEST_REWRITE_PATH,
+        surface: FieldSurface::RewriteFieldForTests,
+        transform: FieldTransform::Rewrite {
+            accepted: TEST_REWRITE_ACCEPTED,
+        },
+        class: TransformClass::Envelope,
+        count_tokens_validates: true,
+    },
+    FieldRepairRow {
+        path: TEST_CEILING_PATH,
+        surface: FieldSurface::CeilingFieldForTests,
+        transform: FieldTransform::Ceiling,
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
     },
 ];
 
@@ -768,20 +925,25 @@ pub(super) struct FieldRepairPlan<'a> {
     /// `None` until one succeeds, which is what makes the one-repair ceiling a
     /// property of the plan rather than of a caller's flag alone.
     repaired: Option<usize>,
-    /// What the rejection that drove the repair refused. Only a refused FIELD
-    /// may commit: a refused value repairs this attempt and teaches nothing.
+    /// What the rejection that drove the repair refused. A refused FIELD may
+    /// commit; a refused value commits only through a rewrite.
     repaired_kind: Option<RejectionKind>,
+    /// The accepted value a rewrite repair wrote, or `None` for a drop. A
+    /// rewrite commits whatever the rejection refused: its value is the
+    /// upstream's own named answer, not a guess.
+    rewritten: Option<&'static str>,
     /// How confidently that rejection was attributed to the row. The commit
     /// records it, so an inferred attribution persists without acting until an
     /// independent request corroborates it.
     repaired_tier: Option<SignalTier>,
 }
 
-/// One admitted row: the closed-table path and surface, plus the guard whose
-/// settlement this row owes.
+/// One admitted row: the closed-table path, surface and transform, plus the
+/// guard whose settlement this row owes.
 struct FieldRepairCandidate<'a> {
     path: &'static str,
     surface: FieldSurface,
+    transform: FieldTransform,
     /// `Some` only for a SETTLING walk. `None` is the non-settling plan: it
     /// repairs for the answer its caller returns and can settle nothing, so it
     /// holds no single-flight claim (leaving it available to a sibling request
@@ -789,6 +951,41 @@ struct FieldRepairCandidate<'a> {
     /// no-ops on it -- the type carries the capability rather than every
     /// settlement site re-checking a mode flag.
     guard: Option<FieldRepairGuard<'a>>,
+}
+
+/// The concrete edit one repair makes: a row's transform resolved against the
+/// rejection that named it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FieldEdit {
+    Drop,
+    Rewrite(&'static str),
+}
+
+impl FieldEdit {
+    /// The edit `transform` makes for `named`, or `None` when it makes none: a
+    /// rewrite whose rejection named no single accepted value, and the
+    /// reserved ceiling transform, which no repair applies yet.
+    fn for_rejection(transform: FieldTransform, named: &NamedRejection) -> Option<Self> {
+        match transform {
+            FieldTransform::Drop => Some(Self::Drop),
+            FieldTransform::Rewrite { .. } => named.accepted.map(Self::Rewrite),
+            FieldTransform::Ceiling => None,
+        }
+    }
+
+    fn apply_to(self, surface: FieldSurface, req: &mut ChatRequest) -> bool {
+        match self {
+            Self::Drop => surface.drop_from(req),
+            Self::Rewrite(value) => surface.rewrite_in(req, value),
+        }
+    }
+
+    const fn rewritten(self) -> Option<&'static str> {
+        match self {
+            Self::Drop => None,
+            Self::Rewrite(value) => Some(value),
+        }
+    }
 }
 
 impl FieldRepairPlan<'_> {
@@ -799,15 +996,31 @@ impl FieldRepairPlan<'_> {
         self.repaired.map(|idx| self.candidates[idx].path)
     }
 
-    /// Whether the repair this plan applied answered a refused VALUE: the drop
-    /// served the attempt but changed what the client asked for, and nothing
-    /// may be learned from it.
+    /// Whether the repair this plan applied DROPPED a field whose VALUE was
+    /// refused: the drop served the attempt but changed what the client asked
+    /// for, and nothing may be learned from it.
     pub(super) fn repaired_lossy(&self) -> bool {
-        self.repaired_kind == Some(RejectionKind::InvalidValue)
+        self.repaired_kind == Some(RejectionKind::InvalidValue) && self.rewritten.is_none()
     }
 
-    /// Perform the repair for whichever admitted row `err` names: drop that
-    /// row's field from the attempt request, re-stamp the calibration estimate,
+    /// The closed-set WARN action token for the repair this plan applied.
+    fn repair_action(&self) -> &'static str {
+        if self.rewritten.is_some() {
+            FIELD_ACTION_REWRITE_REPAIR
+        } else if self.repaired_lossy() {
+            FIELD_ACTION_LOSSY_DROP_REPAIR
+        } else {
+            FIELD_ACTION_DROP_REPAIR
+        }
+    }
+
+    /// Whether the applied repair may commit a verdict once its retry succeeds.
+    fn repair_teaches(&self) -> bool {
+        self.rewritten.is_some() || self.repaired_kind == Some(RejectionKind::UnsupportedField)
+    }
+
+    /// Perform the repair for whichever admitted row `err` names: apply that
+    /// row's transform to the attempt request, re-stamp the calibration estimate,
     /// CHARGE the shared per-request budget, and RELEASE every other
     /// candidate's guard -- all or nothing.
     ///
@@ -860,14 +1073,16 @@ impl FieldRepairPlan<'_> {
                 )
                 .map(|named| (idx, named))
             })?;
-        let status = self.apply_candidate(idx, attempt_req, meta, budget, rejection)?;
+        let edit = FieldEdit::for_rejection(self.candidates[idx].transform, &named)?;
+        let status = self.apply_candidate(idx, edit, attempt_req, meta, budget, rejection)?;
         self.repaired_kind = Some(named.kind);
         self.repaired_tier = Some(named.tier);
+        self.rewritten = edit.rewritten();
         Some(status)
     }
 
     /// The EFFECT half of [`Self::apply`], for the candidate at `idx`: the
-    /// presence re-check, the allowance check, the drop, the charge, the guard
+    /// presence re-check, the allowance check, the edit, the charge, the guard
     /// releases, and the estimate re-stamp.
     ///
     /// Split from the rejection-to-candidate SELECTION above so the fail-closed
@@ -879,6 +1094,7 @@ impl FieldRepairPlan<'_> {
     fn apply_candidate(
         &mut self,
         idx: usize,
+        edit: FieldEdit,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
         budget: &mut RepairBudget,
@@ -899,7 +1115,7 @@ impl FieldRepairPlan<'_> {
         if !budget.can_draw() {
             return None;
         }
-        if !surface.drop_from(attempt_req) {
+        if !edit.apply_to(surface, attempt_req) {
             // FAIL CLOSED. `present_in` held immediately above and nothing
             // between touches the request, so reaching here means the two have
             // diverged -- a bug in this module. The debug assertion names it in
@@ -913,7 +1129,7 @@ impl FieldRepairPlan<'_> {
             // request exactly as the caller handed it over.
             debug_assert!(
                 false,
-                "a present surface must remove something; presence and drop have diverged",
+                "a present surface must take the edit; presence and the edit have diverged",
             );
             return None;
         }
@@ -963,10 +1179,12 @@ impl FieldRepairPlan<'_> {
                 // candidate is well formed.
                 path: "divergent.surface.for.tests",
                 surface: FieldSurface::DivergentForTests,
+                transform: FieldTransform::Drop,
                 guard: None,
             }],
             repaired: None,
             repaired_kind: None,
+            rewritten: None,
             repaired_tier: None,
         }
     }
@@ -991,7 +1209,7 @@ impl FieldRepairPlan<'_> {
             1,
             "the divergent fixture holds exactly one candidate",
         );
-        self.apply_candidate(0, attempt_req, meta, budget, rejection)
+        self.apply_candidate(0, FieldEdit::Drop, attempt_req, meta, budget, rejection)
     }
 
     /// Phase two after a successful repaired retry: persist the REPAIRED row's
@@ -1003,10 +1221,11 @@ impl FieldRepairPlan<'_> {
     /// retry that succeeded is evidence about that row alone -- every other
     /// candidate's guard was already released by [`Self::apply`].
     ///
-    /// And only when the rejection refused the FIELD. A refused value says the
-    /// lane accepts the field, so a verdict dropping it would strip every
-    /// valid value from every later request on the lane; such a plan releases
-    /// its guard here and persists nothing.
+    /// And only when the rejection refused the FIELD, or the repair rewrote it
+    /// to the one accepted value the rejection named. A refused value repaired
+    /// by a DROP says the lane accepts the field, so a verdict dropping it
+    /// would strip every valid value from every later request on the lane;
+    /// such a plan releases its guard here and persists nothing.
     ///
     /// The commit carries the attribution tier of the rejection that drove the
     /// repair: a self-identifying verdict acts at once, an inferred one persists
@@ -1022,7 +1241,7 @@ impl FieldRepairPlan<'_> {
     ) -> Option<CapabilityLearnEvent> {
         let idx = self.repaired?;
         let tier = self.repaired_tier?;
-        if self.repaired_kind != Some(RejectionKind::UnsupportedField) {
+        if !self.repair_teaches() {
             return None;
         }
         self.candidates[idx]
@@ -1162,6 +1381,7 @@ impl Router {
                     return Some(FieldRepairCandidate {
                         path: row.path,
                         surface: row.surface,
+                        transform: row.transform,
                         guard: None,
                     });
                 }
@@ -1176,6 +1396,7 @@ impl Router {
                 Some(FieldRepairCandidate {
                     path: row.path,
                     surface: row.surface,
+                    transform: row.transform,
                     guard: Some(guard),
                 })
             })
@@ -1187,6 +1408,7 @@ impl Router {
             candidates,
             repaired: None,
             repaired_kind: None,
+            rewritten: None,
             repaired_tier: None,
         })
     }
@@ -1261,6 +1483,9 @@ impl Router {
             .repaired_path()
             .expect("a reported repair names the row it dropped");
         self.note_field_repair_at(meta, state_key, field_path, plan.repaired_lossy());
+        if let Some(record) = meta.field_repair.as_mut() {
+            record.action = plan.repair_action();
+        }
     }
 
     /// Record a field repair by the path it dropped and whether it was lossy:
@@ -1500,6 +1725,76 @@ mod table_tests {
              prefix-impacting, and a row whose class changed would silently change \
              which gates its pre-flight application must clear",
         );
+        assert_eq!(
+            FIELD_REPAIRS[0].transform,
+            FieldTransform::Drop,
+            "the grounded row drops its field; its captured rejection names two accepted \
+             values, so it cannot be a rewrite",
+        );
+        assert!(
+            !FIELD_REPAIRS[0].count_tokens_validates,
+            "no captured token count rejects the display field",
+        );
+    }
+
+    #[test]
+    fn the_test_table_carries_one_row_per_transform() {
+        let transforms: Vec<FieldTransform> =
+            TEST_FIELD_REPAIRS.iter().map(|row| row.transform).collect();
+        assert!(transforms.contains(&FieldTransform::Drop));
+        assert!(transforms.contains(&FieldTransform::Ceiling));
+        assert!(transforms.contains(&FieldTransform::Rewrite {
+            accepted: TEST_REWRITE_ACCEPTED,
+        }));
+    }
+
+    #[test]
+    fn a_ceiling_row_and_an_unfilled_rewrite_make_no_edit() {
+        let named_row = |path: &str| {
+            closed_table()
+                .iter()
+                .find(|row| row.path == path)
+                .expect("a test row")
+        };
+        let named = |path: &str, accepted| NamedRejection {
+            row: named_row(path),
+            tier: SignalTier::SelfIdentifying,
+            kind: RejectionKind::InvalidValue,
+            accepted,
+        };
+        let ceiling = named(TEST_CEILING_PATH, None);
+        let rewrite = named(TEST_REWRITE_PATH, None);
+        let filled = named(TEST_REWRITE_PATH, Some(TEST_REWRITE_ACCEPTED[0]));
+
+        assert_eq!(
+            FieldEdit::for_rejection(FieldTransform::Ceiling, &ceiling),
+            None
+        );
+        assert_eq!(
+            FieldEdit::for_rejection(rewrite.row.transform, &rewrite),
+            None
+        );
+        assert_eq!(
+            FieldEdit::for_rejection(filled.row.transform, &filled),
+            Some(FieldEdit::Rewrite(TEST_REWRITE_ACCEPTED[0])),
+        );
+    }
+
+    #[test]
+    fn a_rewrite_that_does_not_read_back_leaves_the_request_untouched() {
+        let mut req = ChatRequest {
+            chat_template_kwargs: Some(serde_json::json!("not an object")),
+            ..Default::default()
+        };
+        let before = req.chat_template_kwargs.clone();
+
+        let taken = FieldSurface::RewriteFieldForTests.rewrite_in(&mut req, "v");
+
+        assert!(
+            !taken,
+            "a write the surface cannot read back did not happen"
+        );
+        assert_eq!(req.chat_template_kwargs, before);
     }
 
     /// An Anthropic invalid-request rejection whose message names `path`.
@@ -1806,7 +2101,7 @@ mod table_tests {
         // not be read as a violation. The region under test begins where that
         // refusal block ends.
         let body = apply_body(SOURCE);
-        let mutation = "if !surface.drop_from(attempt_req) {";
+        let mutation = "if !edit.apply_to(surface, attempt_req) {";
         let at = body.find(mutation).unwrap_or_else(|| {
             panic!("`apply` must mutate through `{mutation}`; its body was: {body}")
         });

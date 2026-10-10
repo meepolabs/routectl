@@ -52,6 +52,7 @@ fn outcome(kind: &str, status: u16, body: &str) -> Outcome {
             ends_in_index,
             tier,
             kind,
+            ..
         }) => {
             let marker = if ends_in_index { "[]" } else { "" };
             Outcome::Unresolved(format!("{}{marker}", segments.join(".")), tier, kind)
@@ -647,4 +648,57 @@ fn an_anthropic_message_outside_an_invalid_request_error_resolves_to_none() {
     let body = UpstreamBody::new(body.to_string());
 
     assert!(parse_rejection(ANTHROPIC, 400, body.parsed()).is_none());
+}
+
+#[test]
+fn the_accepted_value_fills_only_for_exactly_one_named_member() {
+    use super::super::field_repair::{TEST_REWRITE_ACCEPTED, TEST_REWRITE_PATH};
+    let [first, second] = TEST_REWRITE_ACCEPTED else {
+        panic!("premise: the test rewrite row's closed set has two members");
+    };
+    let repeated = format!("'{first}' or '{first}'");
+    let double_quoted = format!("\"{second}\"");
+    let one = format!("'{first}'");
+    let both = format!("'{first}', '{second}'");
+    let cases: [(&str, &str, Option<&str>); 6] = [
+        ("one single-quoted member", one.as_str(), Some(first)),
+        (
+            "one double-quoted member",
+            double_quoted.as_str(),
+            Some(second),
+        ),
+        ("one member named twice", repeated.as_str(), Some(first)),
+        ("two members", both.as_str(), None),
+        (
+            "a value outside the set",
+            "'routectl-test-not-a-member'",
+            None,
+        ),
+        ("an unquoted member", first, None),
+    ];
+
+    for (name, reason, expected) in cases {
+        let body = UpstreamBody::new(anthropic_body(&format!(
+            "{TEST_REWRITE_PATH}: Input should be {reason}"
+        )));
+
+        let named = parse_rejection(ANTHROPIC, 400, body.parsed())
+            .unwrap_or_else(|| panic!("{name}: resolves the rewrite row"));
+
+        assert_eq!(named.row.path, TEST_REWRITE_PATH, "{name}");
+        assert_eq!(named.kind, InvalidValue, "{name}");
+        assert_eq!(named.accepted, expected, "{name}");
+    }
+}
+
+#[test]
+fn a_drop_row_never_carries_an_accepted_value() {
+    let body = UpstreamBody::new(anthropic_body(DISPLAY_MESSAGE));
+
+    let named = parse_rejection(ANTHROPIC, 400, body.parsed()).expect("display row");
+
+    assert_eq!(
+        named.accepted, None,
+        "the display envelope quotes values, but its row drops rather than rewrites",
+    );
 }
