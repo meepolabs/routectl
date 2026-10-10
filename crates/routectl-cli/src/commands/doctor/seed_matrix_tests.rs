@@ -1,6 +1,7 @@
 //! The shipped beta seed as its own matrix layer: seeded columns on lanes of
 //! the seed's kind, the seed cell's source and action, a cleared seed from a
-//! replayed marker, and a learned beta negative's withhold action.
+//! replayed marker, a learned beta negative's withhold action, and an
+//! override in another spelling of a flag folding into that flag's column.
 
 use std::time::{Duration, Instant};
 
@@ -215,4 +216,74 @@ fn a_seed_clear_on_another_lane_leaves_the_seed_withholding() {
     let panel = panel_with(seed_config(), source, seed_scope(SEED));
 
     assert_eq!(cell(&panel, BEDROCK_LANE, &beta(SEEDED)).action, "withhold");
+}
+
+const LEARNED_SPELLING: &str = "Context-1M-2025-08-07";
+const OVERRIDE_SPELLING: &str = "context-1m-2025-08-07";
+
+/// `seed_config` plus a provider-scoped `unsupported` override on `p`.
+fn config_overriding(flag: &str) -> Config {
+    let mut config = seed_config();
+    let extra: Config = toml::from_str(&format!(
+        "version = 3\n\
+         [capability.overrides.p]\n\
+         unsupported = [\"{}\"]\n",
+        beta(flag)
+    ))
+    .expect("override config parses");
+    config.capability.overrides = extra.capability.overrides;
+    config
+}
+
+fn columns_for_flag(panel: &CapabilityMatrixPanel, flag: &str) -> Vec<String> {
+    panel
+        .columns
+        .iter()
+        .filter(|column| column.eq_ignore_ascii_case(&beta(flag)))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn an_override_in_another_spelling_renders_in_the_learned_column() {
+    let now = Instant::now();
+    let entry = negative(
+        OTHER_LANE,
+        &beta(LEARNED_SPELLING),
+        FailurePhase::F1,
+        now,
+        now + Duration::from_mins(1),
+    );
+
+    let panel = panel_with(
+        config_overriding(OVERRIDE_SPELLING),
+        available(vec![entry], now, 1_000_000),
+        BetaSeedScope::EMPTY,
+    );
+
+    assert_eq!(
+        columns_for_flag(&panel, LEARNED_SPELLING),
+        [beta(LEARNED_SPELLING)]
+    );
+    let overridden = cell(&panel, OTHER_LANE, &beta(LEARNED_SPELLING));
+    assert_eq!(overridden.verdict, "forced_unsupported");
+    assert_eq!(overridden.source, Some("override"));
+    assert_eq!(overridden.layer, Some("override"));
+}
+
+#[test]
+fn an_override_with_no_other_spelling_renders_its_own_column() {
+    let panel = panel_with(
+        config_overriding(OVERRIDE_SPELLING),
+        empty_source(),
+        BetaSeedScope::EMPTY,
+    );
+
+    assert_eq!(
+        columns_for_flag(&panel, OVERRIDE_SPELLING),
+        [beta(OVERRIDE_SPELLING)]
+    );
+    let overridden = cell(&panel, OTHER_LANE, &beta(OVERRIDE_SPELLING));
+    assert_eq!(overridden.verdict, "forced_unsupported");
+    assert_eq!(overridden.source, Some("override"));
 }

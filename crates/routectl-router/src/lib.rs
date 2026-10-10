@@ -86,7 +86,7 @@ pub use activation::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use beta_capability::beta_capability_key;
-pub use beta_capability::{BetaSeedScope, capability_key_is_beta};
+pub use beta_capability::{BetaSeedScope, beta_override_key, capability_key_is_beta};
 pub use beta_seed::shipped_scope as shipped_beta_seed_scope;
 pub use calibration::{CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary};
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};

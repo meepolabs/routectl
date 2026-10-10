@@ -36,8 +36,8 @@ use routectl_router::{
     ACTION_MIXED, ActionInputs, BetaSeedScope, CapabilityMatrixPanel, DisplayVerdict,
     LearnedActing, LearnedLaneProjection, LearnedRegistryEntry, MatrixAvailability, MatrixCell,
     MatrixLane, MatrixNicknameAction, MatrixSource, ModelEntry, OverrideRegistry, ProviderEntry,
-    SeedCell, SeedClearMarker, StateKey, VERDICT_MIXED, capability_key_is_beta, is_stale_days,
-    lane_strips_capability, resolve_display_action, resolve_display_verdict,
+    SeedCell, SeedClearMarker, StateKey, VERDICT_MIXED, beta_override_key, capability_key_is_beta,
+    is_stale_days, lane_strips_capability, resolve_display_action, resolve_display_verdict,
 };
 
 use super::sections::staleness_threshold_days;
@@ -237,6 +237,11 @@ fn seeded_columns(seed: BetaSeedScope, lanes: &[LaneMeta]) -> Vec<String> {
 
 /// The column keys: the well-known keys, then the observed keys outside that
 /// set (from learned entries, priors, overrides, and the seed), sorted.
+///
+/// Override keys are stored canonicalized while the other layers keep the
+/// client's spelling, so an override that canonicalizes onto an existing
+/// column renders in that column: its cells resolve the override through the
+/// registry's own canonicalizing lookup either way.
 fn columns_for(
     entries: &[LearnedRegistryEntry],
     priors: &[PriorCell],
@@ -255,8 +260,11 @@ fn columns_for(
             insert_other(&mut others, key);
         }
     }
+    let observed: BTreeSet<String> = others.iter().map(|key| beta_override_key(key)).collect();
     for row in overrides.snapshot() {
-        insert_other(&mut others, &row.capability_key);
+        if !observed.contains(&row.capability_key) {
+            insert_other(&mut others, &row.capability_key);
+        }
     }
 
     let mut columns: Vec<String> = WELL_KNOWN_CAPABILITY_KEYS

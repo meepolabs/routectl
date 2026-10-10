@@ -16626,6 +16626,7 @@ pub fn routectl_router::baked_row_map() -> alloc::collections::btree::map::BTree
 pub fn routectl_router::baked_shrink_counts() -> routectl_router::ShrinkCounts
 pub fn routectl_router::baked_table_rows() -> alloc::vec::Vec<routectl_router::catalog::BakedPricingRow>
 pub fn routectl_router::bare_oauth_pool_candidates(&toml_edit::document::DocumentMut) -> alloc::vec::Vec<routectl_router::BareOauthRef>
+pub fn routectl_router::beta_override_key(&str) -> alloc::string::String
 pub fn routectl_router::break_even_k(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate) -> core::option::Option<f64>
 pub fn routectl_router::build_import_candidate(routectl_router::CandidateOrigin, &serde_json::value::Value, &serde_json::value::Value, &str) -> routectl_router::ImportCandidate
 pub async fn routectl_router::build_provider(&str, &routectl_router::ProviderEntry, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>) -> routectl_core::error::Result<alloc::sync::Arc<dyn routectl_core::provider::Provider>>
