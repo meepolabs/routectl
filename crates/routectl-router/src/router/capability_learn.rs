@@ -721,8 +721,8 @@ impl Router {
     /// Every gate short-circuits, so a common (non-capability) failure
     /// pays only the cheap early checks. The full eligibility gate (all
     /// must hold): the kill switch is on; the upstream fault is a request
-    /// fault (400/422); the class was not operator-remapped; the request
-    /// did not carry a forwarded bearer; the resolver attributes the fault
+    /// fault (400/422); the class was not operator-remapped; the target
+    /// does not dispatch on a forwarded credential; the resolver attributes the fault
     /// to a canonical capability; that capability is not the
     /// operator-remap provenance token; and the capability is a member of
     /// the request's derived feature set
@@ -743,7 +743,6 @@ impl Router {
         cf: &ClassifiedFailure,
         remapped: bool,
         target: &DispatchTarget,
-        is_forwarded: bool,
         req: &ChatRequest,
         dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
@@ -761,7 +760,7 @@ impl Router {
             return;
         };
         let upstream_status = *status;
-        if remapped || is_forwarded {
+        if remapped || target.use_forwarded_credential {
             return;
         }
         let Some(provider_kind) = target.provider_kind else {
@@ -1327,3 +1326,7 @@ pub(super) const fn f2_class_is_deterministic(class: &FailureClass) -> bool {
 #[cfg(test)]
 #[path = "learn_capture_tests.rs"]
 mod learn_capture_tests;
+
+#[cfg(test)]
+#[path = "capability_learn_forwarded_gate_tests.rs"]
+mod capability_learn_forwarded_gate_tests;

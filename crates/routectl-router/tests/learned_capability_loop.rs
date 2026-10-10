@@ -35,7 +35,6 @@ use futures::StreamExt;
 
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_core::capability::SignalTier;
-use routectl_core::schema::ForwardedBearer;
 use routectl_core::{ChatRequest, Error, Message, MessageContent, Role, ToolDef};
 use routectl_router::class_policy::{ClassPolicy, ConfigFailureClass};
 use routectl_router::{

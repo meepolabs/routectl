@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::stream::BoxStream;
-use routectl_core::ForwardedBearer;
 use routectl_core::ToolDef;
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::failure_class::FailureClass;
@@ -584,21 +583,6 @@ async fn inferred_prefill_is_dormant_and_not_learned() {
     );
     assert!(learn_warns(&events).is_empty());
     assert!(router.learned_capabilities.is_empty());
-}
-
-#[tokio::test]
-async fn forwarded_request_is_not_learned() {
-    // A request carrying a forwarded client bearer never contributes a
-    // learned negative (the forwarded token owns its own retry/backoff).
-    let router = router_with(OPENAI_P1, self_identifying_provider());
-    let mut req = req_with_tool("web_search");
-    req.routectl_internal.forwarded_bearer = Some(ForwardedBearer::new("t".into()));
-
-    let (dispatched, events) =
-        with_capture(router.complete_with_options(req, RouterOptions::default())).await;
-
-    assert!(dispatched.meta.learned_capabilities.is_empty());
-    assert!(learn_warns(&events).is_empty());
 }
 
 #[tokio::test]
