@@ -85,9 +85,10 @@ pub enum PreflightBlockedReason {
     /// verdict can act at all. Distinct from the per-key reasons below because it is
     /// a GLOBAL setting, and the remedy is flipping it rather than providing evidence.
     CapabilityDisabled,
-    /// The target's lane is not one this stage acts on: either it is not an
-    /// Anthropic-API provider, or it has no attributable base URL (a forwarded
-    /// credential, a local hop, or a Bedrock Mantle entry). A verdict on such a lane
+    /// The target's lane is not one this stage acts on: its provider kind is not
+    /// one field repair admits (`anthropic-api`, `bedrock`, `openai-compat`), or it
+    /// has no attributable base URL (a forwarded credential, a local hop, or no
+    /// classifiable egress base URL, as on a Bedrock Mantle sub-lane). A verdict on such a lane
     /// is REAL (the registry holds it from a reactive repair or a ledger replay), but
     /// pre-flight will never fire on it.
     UnsupportedLane,
@@ -524,19 +525,22 @@ impl Router {
     /// Derived from the same two predicates the planner's own
     /// `preflight_lane_admits` and `preflight_identity` read: the provider kind
     /// must be one field repair admits, and the entry must carry an attributable base URL
-    /// (not a forwarded credential, a local hop, or none). A status read cannot
-    /// check `use_forwarded_credential` because it has no `DispatchTarget` -- what
-    /// it has is the lane, whose provider entry carries the base URL and kind. A
-    /// forwarded credential is a per-request property the status surface does not
-    /// carry, so it is not checked here; the verdict row's blocked reason may
-    /// therefore read `not_eligible` on a lane whose REQUESTS are forwarded, which
-    /// is the correct conservative reading rather than a false claim about the
-    /// lane itself.
+    /// (not a forwarded credential, a local hop, or none). A status read has no
+    /// `DispatchTarget`, so the forwarded fact is read off the operator's entry
+    /// through the same accessor the chain derives
+    /// `DispatchTarget::use_forwarded_credential` from, which keeps the two from
+    /// disagreeing about the same provider.
     fn lane_supports_preflight(&self, key: &FieldVerdictKey) -> bool {
+        let provider_name = key.lane().provider_entry();
+        let use_forwarded_credential = self
+            .config
+            .providers
+            .get(provider_name)
+            .is_some_and(|entry| entry.forwarded_base_url().is_some());
         crate::router::field_repair::attributable_field_lane(
             &self.config,
-            key.lane().provider_entry(),
-            false,
+            provider_name,
+            use_forwarded_credential,
         )
         .is_some()
     }

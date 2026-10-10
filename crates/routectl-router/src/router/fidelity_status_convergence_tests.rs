@@ -182,14 +182,25 @@ fn convergence_prefix_path() -> &'static str {
 const REFUSED_KIND: &str = "openai-responses";
 
 fn convergence_router(base_url: &str, kind: &str) -> Router {
+    convergence_router_on(&format!(
+        "kind = \"{kind}\"\napi_key_ref = \"env://K\"\nbase_url = \"{base_url}\"\n"
+    ))
+}
+
+/// A convergence fixture router whose `[providers.p0]` body is `provider_toml`.
+fn convergence_router_on(provider_toml: &str) -> Router {
+    convergence_router_with_config(
+        toml::from_str(&format!("\n[providers.p0]\n{provider_toml}"))
+            .expect("valid convergence toml"),
+    )
+}
+
+/// A convergence fixture router over `config`, whose `p0` entry the caller
+/// has already shaped.
+fn convergence_router_with_config(mut config: Config) -> Router {
     use crate::config::{AliasValue, ModelEntry};
     use crate::resolved::ResolvedModel;
 
-    let toml_text = format!(
-        "\n[providers.p0]\nkind = \"{kind}\"\napi_key_ref = \"env://K\"\n\
-         base_url = \"{base_url}\"\n"
-    );
-    let mut config: Config = toml::from_str(&toml_text).expect("valid convergence toml");
     config
         .models
         .insert(NICKNAME.to_string(), ModelEntry::new("p0", "wire-model"));
@@ -242,6 +253,44 @@ fn plant_convergence_verdict(router: &Router, path: &str, confirmations: u32) {
         .field_verdicts()
         .canaries()
         .seed_from_rebuild(&key, incarnation, confirmations, false);
+}
+
+/// The envelope request carrying a client bearer, as a forwarded target needs.
+fn convergence_forwarded_req() -> routectl_core::ChatRequest {
+    let mut req = convergence_envelope_req();
+    req.routectl_internal.forwarded_bearer = Some(routectl_core::ForwardedBearer::new(
+        "sk-ant-oat01-FWD".into(),
+    ));
+    req
+}
+
+/// One UNBLOCKED row per non-anthropic kind field repair admits: the real planner
+/// acts and the status surface reports no lane-level block.
+fn push_widened_kind_positive_rows(cases: &mut Vec<ConvergenceCase>, envelope: &'static str) {
+    #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+    let mut lanes = vec![(
+        "eligible envelope verdict on an openai-compat lane",
+        "kind = \"openai-compat\"\napi_key_ref = \"env://K\"\nbase_url = \"https://example.test/v1\"\n",
+    )];
+    #[cfg(feature = "bedrock")]
+    lanes.push((
+        "eligible envelope verdict on a native bedrock lane",
+        "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n",
+    ));
+    for (name, provider_toml) in lanes {
+        let router = convergence_router_on(provider_toml);
+        plant_convergence_verdict(&router, envelope, ENVELOPE_QUORUM);
+        cases.push(ConvergenceCase {
+            name,
+            router,
+            req: convergence_envelope_req(),
+            path: envelope,
+            expect: None,
+            planner_reason_override: Some(
+                crate::router::field_preflight::FIELD_PREFLIGHT_ACTION_DROP,
+            ),
+        });
+    }
 }
 
 /// Every convergence case, one per gate the two surfaces can disagree about.
@@ -303,6 +352,39 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
             planner_reason_override: None,
         });
     }
+
+    // The widened kinds: each acts like the anthropic-api lane when nothing blocks.
+    push_widened_kind_positive_rows(&mut cases, envelope);
+
+    // A FORWARDED-credential entry: one client's rejection must not steer every
+    // other client, so neither side may act on a verdict for its lane.
+    let forwarded = {
+        let mut config: Config = toml::from_str(
+            "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n\
+             base_url = \"https://api.anthropic.com\"\n",
+        )
+        .expect("valid convergence toml");
+        let entry = config
+            .providers
+            .remove("p0")
+            .expect("the fixture entry exists")
+            .with_credential_source(crate::config::CredentialSource::Forwarded);
+        config.providers.insert("p0".to_string(), entry);
+        convergence_router_with_config(config)
+    };
+    plant_convergence_verdict(&forwarded, envelope, ENVELOPE_QUORUM);
+    cases.push(ConvergenceCase {
+        name: "forwarded-credential entry",
+        router: forwarded,
+        req: convergence_forwarded_req(),
+        path: envelope,
+        expect: Some(PreflightBlockedReason::UnsupportedLane),
+        // As for the local hop: the planner names the attribution refusal, the
+        // status surface folds it into the lane it will never act on.
+        planner_reason_override: Some(
+            crate::router::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET,
+        ),
+    });
 
     // An UNATTRIBUTABLE base URL: a local hop. A rejection from one cannot be
     // attributed to an upstream, so neither side may act on a verdict for it.
