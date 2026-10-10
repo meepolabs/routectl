@@ -6029,11 +6029,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/probe_driver.rs` -- `run_probe_driver` and
   `PROBE_DRIVER_INTERVAL`: the daemon task that ticks the router's probe pass.
 - `src/server/capability_health.rs` -- bridges the router's
-  capability-persistence gate to the usage writer whose health answers it, the
-  read-direction sibling of `paid_probe_ledger.rs` below and installed at the
-  same boot point for the same two reasons (after the writer exists, before
-  publication). `UsagePaidProbeLedger`'s counterpart `UsageCapabilityHealth`
-  holds the writer's OWN shared counters plus the baseline it observed at install
+  capability-persistence gate to the usage writer whose health answers it,
+  installed at boot after the writer exists and before publication.
+  `UsageCapabilityHealth` holds the writer's OWN shared counters plus the baseline it observed at install
   time, and reports durable only while BOTH `write_errors` and
   `capability_events_dropped_full` are unmoved -- neither subsumes the other (a
   write error is a store fault, a dropped event is back-pressure, and for the
@@ -6047,15 +6045,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   recovery is a restart. `install_capability_health(router, usage)` is consuming
   and called once from `serve.rs`; a reload needs none, since
   `carry_over_learned_from` attaches the outgoing installation
-- `src/server/paid_probe_ledger.rs` -- bridges the router's paid-probe budget
-  seam to the usage writer, plus `install_paid_probe_ledger` (boot-time).
-  Tests: `paid_probe_ledger_tests.rs` + its lifetime / wiring `include!`
-  sidecars, plus `paid_probe_end_to_end_tests.rs` as its own `#[path]` module
-  (composes the real writer, this adapter, and the daemon's probe pass into one
-  wire call; shares the live-writer / control-row fixtures via
-  `src/server/test_support.rs`: `drain_usage_writer_strict` awaits a writer's
-  full drain, and the async `live_usage_writer` runs one start-and-drain settle
-  cycle on the db before returning a fresh writer)
+- `src/server/test_support.rs` -- `cfg(test)` helpers shared by more than one
+  server sidecar: `isolate_usage_db` (points a config's usage DB at a tempdir),
+  `drain_usage_writer_strict` (awaits a writer's full drain), the async
+  `live_usage_writer` (one start-and-drain settle cycle on the db before
+  returning a fresh writer), `begin_writer_drain` / `WriterDrain`, and
+  `overlay_at_revision`
 - `src/server/router_publish.rs` -- `publish_router`, the publication step every
   reload path shares. STAMPS the replacement's probe incarnation and retires the
   outgoing incarnation's work BEFORE `router_swap.store`: between a store and a
@@ -6610,15 +6605,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
   loads a snapshot into `StatusRouterView` (also private inner `Arc<Router>`)
-  which exposes ONLY seven read methods -- `route_targets(now)`,
+  which exposes ONLY six read methods -- `route_targets(now)`,
   `learned_capabilities()`, `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
   see `field_verdict_log.rs`), `field_verdict_status()` (the per-verdict
   fidelity rows, a PURE router-side read -- see
-  `routectl-router/src/router/fidelity_status.rs`),
-  `paid_probe_daily_caps()` (the RUNNING daemon's configured caps, read through
-  the facade rather than from a re-loaded file so a budget row cannot report a
-  cap no reservation is checked against), and `effective_view()` (runs
+  `routectl-router/src/router/fidelity_status.rs`), `effective_view()` (runs
   `derive_effective_view` against the live config AND the overlay retained on
   the pinned Router, INTERNALLY, so panels never touch raw `Config` and one
   derivation can never pair mismatched config / overlay generations), and
@@ -6699,12 +6691,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   pinned view's Router arc, so neither can cross a config-reload boundary
 - `src/handlers/status/field_verdict_log.rs` -- the single EMITTER of the
   fidelity INFO line, called from both `health.rs` and `doctor.rs` so a field
-  repair, a pre-flight rewrite, a durably purged verdict, or a paid-probe budget
+  repair, a pre-flight rewrite, or a durably purged verdict
   stays observable at INFO without a response-body change (a routectl key in the
   flattened extras would itself be a fidelity leak, so the floor is satisfied
   operator-side -- and at INFO rather than the 60s DEBUG metrics snapshot, which
   is not readable at a live log level). `log_field_verdict_snapshot(view,
-  budgets, globals, emission, gate)` reads `view.fidelity_snapshot()` -- ONE
+  writer_degraded, emission, gate)` reads `view.fidelity_snapshot()` -- ONE
   coherent router read -- then emits one aggregated INFO,
   `"envelope field verdict snapshot"`, carrying: all SEVEN counters -- the three
   metrics totals, BOTH halves of the wrong-repair alarm
@@ -6712,14 +6704,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `rc_field_disproved_requests_total`, lifetime-monotonic),
   `rc_field_preflight_actions_total` and `rc_parser_unlocalized_total` --
   `rc_acting_field_verdicts{,_total}`, the per-verdict
-  `rc_field_verdict_rows{,_total,_omitted}`, the accounting-health
-  `rc_paid_probe_budgets{,_total,_omitted}`, the two process globals, and the
+  `rc_field_verdict_rows{,_total,_omitted}`, the process-global
+  `rc_usage_writer_degraded`, and the
   probe scheduler's `rc_probe_*` state. ONE line because the facts are only
   interpretable together (a confirmation count without its required quorum
-  cannot be read as sufficient or short; a used budget without its cap says
-  nothing). `budgets` is passed IN rather than read here, because the accounting
-  read needs the ledger path and the counters facade and the caller already holds
-  both. AT MOST ONE LINE PER REQUEST, and only when due: the daemon-scoped
+  cannot be read as sufficient or short). `writer_degraded` is passed IN rather
+  than read here, because it is a counter read on the facade the caller holds.
+  AT MOST ONE LINE PER REQUEST, and only when due: the daemon-scoped
   `FidelityGate` (held on `StatusState`) admits a line when its fingerprint --
   every field except the `rc_probe_next_retry_ms` countdown -- differs from the
   last admitted one, or `SNAPSHOT_HEARTBEAT` (1h) has passed since it, checked
@@ -6730,13 +6721,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   pre-assigned emitter because each panel builds through `guard_panel`, which degrades
   a failing source to an unavailable panel that never reaches its logger: with an
   assigned emitter, a failing health panel took the whole line down for that request.
-  The no-config doctor branch emits too, with unavailable budget data -- the floor is
-  about the router, and only the caps come from config. Suppression is log-only, so
-  every panel's data is built in full. The process-global writer health and unauthorized-spend total are emitted
-  HERE, once, never copied onto a provider row. The sidecar pins each counter field
+  The no-config doctor branch emits too -- the floor is about the router, not the
+  report. Suppression is log-only, so
+  every panel's data is built in full. The sidecar pins each counter field
   to the counter it is NAMED for on the captured event, with every counter seeded to
   a distinct value so a swap between two fields cannot pass. Log-only: the router
-  and accounting inputs are read, never written; the one state it touches is the
+  and writer-health inputs are read, never written; the one state it touches is the
   daemon-scoped `FidelityGate` mark. The observer event is built
   ONLY inside a `cfg(test)` helper (`emit_observer_event`), and the gate is about COST
   rather than tidiness: the event owns a cloned `FidelitySnapshot`, whose verdict and
@@ -6753,51 +6743,30 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   pins the allocation to the gated region, with a positive control proving it is
   locating a real construction rather than matching nothing
 - `src/handlers/status/fidelity_log.rs` -- the RENDERING under that emitter:
-  `rendered_verdicts` / `rendered_budgets` flatten each DTO to tokens, counts,
+  `rendered_verdicts` flattens each verdict DTO to tokens, counts,
   and booleans. Split from the emitter because the judgement lives here -- several
   DTO fields are `Option`s whose absent case is a real operator-facing state
   rather than missing data, and each gets its own literal: `unknown` for a
   transform class this build's table does not carry (and for the quorum only a
   class can have), `none` for an unblocked verdict and for a canary that has NEVER
-  settled (distinct from `inconclusive`), and `unknown` for a budget whose count
-  could not be read (never zero, which would claim nothing was spent). A test pins
-  that no real token collides with any of those literals. Both row kinds are also
+  settled (distinct from `inconclusive`). A test pins
+  that no real token collides with any of those literals. The rows are also
   BOUNDED here, under one shared `MAX_RENDERED_ROWS` code constant: the row count
   grows with what a deployment has learned while the line is re-emitted on every
   change, so
   `Bounded { rows, total, omitted }` carries the real total and the dropped count
   alongside the rows -- a truncated line says how much it hides rather than
   presenting a subset as complete
-- `src/handlers/status/paid_probe_budget.rs` -- the paid-cap accounting-health
-  rows: `paid_probe_budgets(caps, db_path, usage, now_ms)` yields one
-  `PaidProbeBudget` per provider named in `[fidelity] paid_probe_daily_caps`,
-  folding the operator's cap, the LEDGER's committed count for the current UTC day
-  (read through `routectl_usage::committed_units` -- durable, because the budget
-  survives restart and a process-local tally would report zero on a daemon that
-  came up after spending its cap), and an `AccountingHealth` token -- and NOTHING
-  ELSE. The writer's health and the
-  unauthorized-spend total are process-global facts and live on a separate
-  `AccountingGlobals` read (`accounting_globals`), emitted once: the writer is one
-  actor and the unauthorized counter has no provider dimension at all, so a per-row
-  copy reads as a multiple of the truth to anyone summing the column and as this
-  provider's spend to anyone who does not -- both wrong, neither detectable from
-  the line. That unauthorized total is the reason the surface exists: units that
-  committed while shutdown had begun bought no call, and the divergence is
-  invisible in `committed_today` (the unit IS spent, its ledger row looks ordinary,
-  and there is no refund) and deliberately not folded into `writer_degraded`
-  (neither a storage fault nor a healthy write). It is PROCESS-LIFETIME and resets
-  on restart, which the field documents. Reads through
-  `UsageHealthView`, a counters-only facade over the shared `Arc<UsageCounters>`:
-  `StatusState`'s contract is that it carries no writer producer handle (which
-  could enqueue rows), and a lexical guard in `mod.rs` refuses that type's name in
-  every status source. The ledger is opened ONCE per build rather than per row (so
-  the rows share one read instant) with `open_readonly_fastfail`, and the OPEN runs
-  INSIDE the panel's `spawn_blocking` closure: SQLite work on an async worker blocks
-  that worker, and the ordinary read-only open waits out a busy timeout -- so a
-  busy or checkpointing ledger would hold one of the few status permits for that
-  whole wait on every poll, and a handful of concurrent polls could wedge the
-  subtree. Failing fast degrades ONE field to `unreadable`, which the row already
-  has a token for
+- `src/handlers/status/usage_health.rs` -- `UsageHealthView`, a counters-only
+  facade over the usage writer's shared `Arc<UsageCounters>`, with two reads:
+  `writer_degraded()` (latching, derived from the monotonic write-error count --
+  it over-reports a recovered writer rather than under-reporting a live fault)
+  feeding the fidelity line's `rc_usage_writer_degraded`, and
+  `capability_writes()` -> `CapabilityWriteCounters` (the three
+  capability-persistence failure counters, reported apart rather than summed)
+  for the doctor panel. A facade rather than the writer's producer handle:
+  `StatusState`'s contract is that it carries no handle that could enqueue rows,
+  and a lexical guard in `mod.rs` refuses that type's name in every status source
 - `src/handlers/status/config.rs` -- `/status/config`. Renders the
   provenance-annotated EFFECTIVE (live, in-effect) config view: snapshots the
   router through the read-only facade and folds its config together with the

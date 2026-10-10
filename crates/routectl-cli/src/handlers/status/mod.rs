@@ -24,7 +24,6 @@ mod fidelity_log;
 mod field_verdict_log;
 mod health;
 mod page;
-mod paid_probe_budget;
 #[cfg(test)]
 mod production_source;
 mod query;
@@ -33,6 +32,7 @@ mod router_view;
 pub(crate) mod test_hooks;
 mod types;
 mod usage;
+mod usage_health;
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -158,15 +158,16 @@ pub struct StatusState {
     /// request's future dropping. See [`BuilderCapacity`].
     pub builder_capacity: BuilderCapacity,
     /// Read-only view of the usage writer's shared health counters, for the
-    /// paid-probe accounting-health rows.
+    /// writer-health and capability-write reads the doctor and health panels
+    /// report.
     ///
     /// A COUNTERS facade, never the writer's producer handle: that handle can
     /// enqueue rows, so a status handler holding one would be structurally capable
     /// of writing -- and a lexical guard in this module's tests refuses its type
     /// name in every status source for exactly that reason. This carries the same
     /// shared `Arc` the writer holds and exposes only reads, which is what lets the
-    /// accounting surface exist without weakening the contract above.
-    pub usage_health: paid_probe_budget::UsageHealthView,
+    /// health reads exist without weakening the contract above.
+    pub usage_health: usage_health::UsageHealthView,
     /// The change gate on the shared fidelity INFO line, held for the daemon's
     /// lifetime so an unchanged snapshot is not re-emitted on every poll.
     fidelity_gate: Arc<field_verdict_log::FidelityGate>,
@@ -188,7 +189,7 @@ impl StatusState {
     ) -> Self {
         let usage_db_path = app.router.load().config.usage.db_path.clone();
         let usage_health =
-            paid_probe_budget::UsageHealthView::new(std::sync::Arc::clone(app.usage.counters()));
+            usage_health::UsageHealthView::new(std::sync::Arc::clone(app.usage.counters()));
         Self {
             router: StatusRouterHandle::new(app.router.clone()),
             activation: app.activation.clone(),
@@ -652,8 +653,8 @@ mod tests {
                 &panel_forbidden,
             ),
             (
-                "paid_probe_budget.rs",
-                include_str!("paid_probe_budget.rs"),
+                "usage_health.rs",
+                include_str!("usage_health.rs"),
                 &panel_forbidden,
             ),
             (

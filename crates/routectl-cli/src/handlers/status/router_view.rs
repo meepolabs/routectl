@@ -11,7 +11,6 @@
 //! name the private field, so it can never obtain a `&Router`, call
 //! `.complete`/`.stream`, or touch `.config`.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -80,12 +79,12 @@ impl QueryPricer {
 }
 
 /// A read-only view over one pinned router snapshot. The `router` field is
-/// private, so the only router state a panel can observe is what the seven
+/// private, so the only router state a panel can observe is what the six
 /// methods below expose -- route health, learned negatives, the live
-/// envelope-field repair counters, the per-verdict fidelity rows, the configured
-/// paid-probe caps, the derived effective config view (which is computed here
-/// so panels never handle raw `Config`), and the doctor's served inputs (an
-/// opaque value only the doctor gather can read).
+/// envelope-field repair counters, the per-verdict fidelity rows, the derived
+/// effective config view (which is computed here so panels never handle raw
+/// `Config`), and the doctor's served inputs (an opaque value only the doctor
+/// gather can read).
 pub struct StatusRouterView {
     router: Arc<Router>,
 }
@@ -122,20 +121,6 @@ impl StatusRouterView {
     /// router's own module, both behaviorally and by a source guard.
     pub fn fidelity_snapshot(&self) -> FidelitySnapshot {
         self.router.fidelity_snapshot()
-    }
-
-    /// The operator's configured per-provider paid-probe UTC-day caps.
-    ///
-    /// Read through the facade rather than from a re-loaded config file, so the
-    /// caps a budget row reports are the ones the RUNNING daemon gates
-    /// reservations on -- a file read could pick up an edit the daemon has not
-    /// accepted, and report a cap no reservation is checked against.
-    ///
-    /// Cloned rather than borrowed: the map is small (one entry per provider an
-    /// operator opted into paid probes, default none) and the caller uses it
-    /// outside the pinned snapshot's borrow.
-    pub fn paid_probe_daily_caps(&self) -> BTreeMap<String, u32> {
-        self.router.config.fidelity.paid_probe_daily_caps.clone()
     }
 
     /// The derived effective-config view for the config panel, folding the
@@ -191,21 +176,19 @@ mod tests {
     }
 
     #[test]
-    fn view_exposes_only_the_seven_read_methods() {
+    fn view_exposes_only_the_six_read_methods() {
         let handle = handle();
         let view = handle.view();
 
         // The full read surface: route health, learned negatives, live
-        // field-repair counters, the coherent fidelity snapshot, the configured
-        // paid-probe caps, effective view, the doctor's served inputs. If a
-        // future edit widens this surface (e.g. exposes `&Router` or a dispatch
-        // method), it lands here in review against a facade whose contract is
-        // these seven calls.
+        // field-repair counters, the coherent fidelity snapshot, effective view,
+        // the doctor's served inputs. If a future edit widens this surface (e.g.
+        // exposes `&Router` or a dispatch method), it lands here in review against
+        // a facade whose contract is these six calls.
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
         let _learned: Vec<LearnedRegistryEntry> = view.learned_capabilities();
         let _counters: FieldRepairCounters = view.field_repair_counters();
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
-        let _caps: BTreeMap<String, u32> = view.paid_probe_daily_caps();
         let _effective: EffectiveView = view.effective_view();
         let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run());
     }

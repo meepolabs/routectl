@@ -14,9 +14,6 @@ use super::*;
 use routectl_router::{
     CanaryPosture, FieldVerdictStatus, FieldVerdictStatusSpec, PreflightBlockedReason,
 };
-use routectl_usage::PaidProbeUsage;
-
-use super::super::paid_probe_budget::AccountingHealth;
 
 /// A verdict row with every optional field ABSENT: no class, no quorum, nothing
 /// blocking, no settled canary.
@@ -134,67 +131,11 @@ fn a_fully_populated_verdict_renders_each_present_value() {
     );
 }
 
-fn budget_row(committed: Option<u32>, accounting: AccountingHealth) -> PaidProbeBudget {
-    PaidProbeBudget {
-        provider: "anthropic".to_string(),
-        daily_cap: 5,
-        committed_today: committed,
-        accounting,
-    }
-}
-
-/// An unreadable budget renders its used count as the unknown literal, never as
-/// zero.
-///
-/// Zero is a claim that nothing was spent, which a failed or corrupt read cannot
-/// substantiate -- and a zero beside an otherwise-ordinary row is exactly how an
-/// unreadable budget comes to look like a clean one.
-///
-/// Both failing readings are driven, because they are different operator
-/// situations and a renderer that special-cased one would pass a single-case test
-/// while rendering the other as a spend.
-#[test]
-fn a_budget_with_no_readable_count_renders_unknown_rather_than_zero() {
-    for accounting in [AccountingHealth::Malformed, AccountingHealth::Unreadable] {
-        let rendered = rendered_budgets(&[budget_row(None, accounting)]);
-
-        assert_eq!(
-            rendered.rows[0].committed_today, COMMITTED_UNKNOWN,
-            "{accounting:?}: an unread count is not a zero spend",
-        );
-        assert_eq!(
-            rendered.rows[0].accounting,
-            accounting.as_str(),
-            "and the health token says WHICH way the read failed",
-        );
-    }
-}
-
-/// A readable budget renders its count, including a genuine zero.
-///
-/// The control, and the zero case specifically: a renderer that emitted the
-/// unknown literal whenever the count was zero would make a healthy unspent budget
-/// look unreadable, which is the inverse error and just as misleading.
-#[test]
-fn a_readable_budget_renders_its_count_including_zero() {
-    let rendered = rendered_budgets(&[
-        budget_row(Some(0), AccountingHealth::Healthy),
-        budget_row(Some(3), AccountingHealth::Healthy),
-    ]);
-
-    assert_eq!(
-        rendered.rows[0].committed_today, "0",
-        "a real zero spend renders as zero: it is a reading, not an absence",
-    );
-    assert_eq!(rendered.rows[1].committed_today, "3");
-    assert_eq!(rendered.rows[0].accounting, "healthy");
-}
-
 /// The rendered vocabulary has no collision with the unknown literals.
 ///
-/// A class legitimately named `unknown`, or a spend of literally the string
-/// `unknown`, would make a present value indistinguishable from an absent one --
-/// and nothing about the reading would say which it was.
+/// A class or quorum legitimately rendered as `unknown` would make a present value
+/// indistinguishable from an absent one -- and nothing about the reading would say
+/// which it was.
 #[test]
 fn no_real_token_collides_with_an_unknown_literal() {
     use routectl_router::CanaryPosture as Posture;
@@ -209,43 +150,14 @@ fn no_real_token_collides_with_an_unknown_literal() {
         PreflightBlockedReason::BelowQuorum.as_str(),
         PreflightBlockedReason::NoTargetOptIn.as_str(),
         PreflightBlockedReason::CanarySuspended.as_str(),
-        AccountingHealth::Healthy.as_str(),
-        AccountingHealth::Malformed.as_str(),
-        AccountingHealth::Unreadable.as_str(),
     ];
-    for unknown in [
-        TRANSFORM_CLASS_UNKNOWN,
-        REQUIRED_QUORUM_UNKNOWN,
-        COMMITTED_UNKNOWN,
-    ] {
+    for unknown in [TRANSFORM_CLASS_UNKNOWN, REQUIRED_QUORUM_UNKNOWN] {
         assert!(
             !reals.contains(&unknown),
             "the absent-value literal {unknown:?} must not also be a real token, or \
              a present value reads as an absent one",
         );
     }
-}
-
-/// The usage read's three answers map onto three distinct health tokens.
-///
-/// Pins the mapping rather than the tokens: the read and the surface are different
-/// vocabularies, and a collapse between two of the read's answers here would hide
-/// one of them behind the other's token.
-#[test]
-fn each_usage_read_answer_maps_to_its_own_health_token() {
-    let mapped = [
-        (PaidProbeUsage::Committed(0), AccountingHealth::Healthy),
-        (PaidProbeUsage::Malformed, AccountingHealth::Malformed),
-        (PaidProbeUsage::Unreadable, AccountingHealth::Unreadable),
-    ];
-    let mut tokens: Vec<&str> = mapped.iter().map(|(_, h)| h.as_str()).collect();
-    tokens.sort_unstable();
-    tokens.dedup();
-    assert_eq!(
-        tokens.len(),
-        mapped.len(),
-        "each read answer keeps its own token: {tokens:?}",
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -306,23 +218,4 @@ fn a_row_set_over_the_ceiling_is_truncated_and_reports_what_it_dropped() {
         "and the omitted count says exactly how much is hidden, so a truncated line \
          is self-describing rather than silently partial",
     );
-}
-
-/// The budget rows are bounded under the SAME ceiling.
-///
-/// One constant across both kinds, because the property is "how long can this line
-/// get" and that is one question. A per-kind ceiling would be two numbers to reason
-/// about for one bound.
-#[test]
-fn the_budget_rows_share_the_same_ceiling() {
-    let over = MAX_RENDERED_ROWS + 3;
-    let budgets: Vec<PaidProbeBudget> = (0..over)
-        .map(|_| budget_row(Some(0), AccountingHealth::Healthy))
-        .collect();
-
-    let rendered = rendered_budgets(&budgets);
-
-    assert_eq!(rendered.rows.len(), MAX_RENDERED_ROWS);
-    assert_eq!(rendered.total, over);
-    assert_eq!(rendered.omitted, 3);
 }

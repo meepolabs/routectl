@@ -22,9 +22,6 @@ use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::CircuitPhase;
 
 use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
-use super::paid_probe_budget::{
-    AccountingGlobals, PaidProbeBudget, accounting_globals, paid_probe_budgets,
-};
 use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
@@ -198,13 +195,11 @@ fn map_learned(entry: LearnedRegistryEntry, now: Instant, now_ms: i64) -> Learne
 /// reads, so the target health and the learned negatives are internally
 /// consistent (no interleaved hot-swap).
 ///
-/// `budgets` is computed by the caller, which is the one that holds the ledger
-/// path and the counters facade -- keeping this function a projection over the
-/// pinned snapshot rather than a second place that opens a database.
+/// `writer_degraded` is read by the caller, which holds the counters facade --
+/// keeping this function a projection over the pinned snapshot.
 fn build_from_view(
     view: &StatusRouterView,
-    budgets: &[PaidProbeBudget],
-    globals: AccountingGlobals,
+    writer_degraded: bool,
     emission: FidelityEmission,
     gate: &FidelityGate,
 ) -> HealthPanel {
@@ -218,7 +213,7 @@ fn build_from_view(
         .map(|target| map_target(target, now_ms))
         .collect();
     let entries = view.learned_capabilities();
-    log_field_verdict_snapshot(view, budgets, globals, emission, gate);
+    log_field_verdict_snapshot(view, writer_degraded, emission, gate);
     let learned_negatives = entries
         .into_iter()
         .map(|entry| map_learned(entry, now, now_ms))
@@ -245,17 +240,9 @@ pub(super) async fn build_with_emission(
     emission: FidelityEmission,
 ) -> Panel<HealthPanel> {
     let view = state.router.view();
-    // The inputs the accounting read needs are captured here; the READ ITSELF runs
-    // inside the blocking closure below. That placement is the point: the read
-    // opens SQLite, and SQLite work on an async worker blocks that worker for the
-    // duration. `guard_panel` exists to run exactly this kind of work on a blocking
-    // thread while holding a cancellation-survivable permit, so the open belongs
-    // inside it rather than awaited in front of it.
-    let caps = view.paid_probe_daily_caps();
-    let db_path = state.usage_db_path.clone();
-    // The process-global accounting facts are counter reads, not I/O, so they stay
-    // out here beside the router snapshot -- one read time for the whole build.
-    let globals = accounting_globals(&state.usage_health);
+    // A counter read, not I/O, so it stays out here beside the router snapshot --
+    // one read time for the whole build.
+    let writer_degraded = state.usage_health.writer_degraded();
     let gate = Arc::clone(&state.fidelity_gate);
     // The snapshot is pinned at `view()`, so request time IS the read time.
     let as_of = now_utc_rfc3339();
@@ -278,9 +265,7 @@ pub(super) async fn build_with_emission(
         move || {
             #[cfg(test)]
             assert!(!fail, "injected health-builder failure");
-            let budgets =
-                paid_probe_budgets(&caps, &db_path, chrono::Utc::now().timestamp_millis());
-            let dto = build_from_view(&view, &budgets, globals, emission, &gate);
+            let dto = build_from_view(&view, writer_degraded, emission, &gate);
             Panel::available(SCHEMA_VERSION, as_of, dto)
         },
     )
@@ -300,15 +285,6 @@ mod lane_tests;
 #[cfg(test)]
 mod tests {
     use super::super::vocabulary;
-
-    /// Healthy process-global accounting, for the panel tests whose subject is the
-    /// panel rather than the accounting.
-    fn healthy_globals() -> AccountingGlobals {
-        AccountingGlobals {
-            writer_degraded: false,
-            consumed_unauthorized_total: 0,
-        }
-    }
     use super::*;
     use crate::handlers::status::DaemonMeta;
     use crate::server::AppState;
@@ -717,8 +693,7 @@ mod tests {
         let events = routectl_testkit::capture_events(|| {
             build_from_view(
                 &view,
-                &[],
-                healthy_globals(),
+                false,
                 FidelityEmission::always(),
                 &FidelityGate::default(),
             );
@@ -740,8 +715,7 @@ mod tests {
         let view = state.router.view();
         let panel = build_from_view(
             &view,
-            &[],
-            healthy_globals(),
+            false,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );

@@ -1,5 +1,5 @@
-//! Rendering for the INFO fidelity snapshot: the per-verdict and per-budget rows,
-//! flattened to tokens, counts, and booleans.
+//! Rendering for the INFO fidelity snapshot: the per-verdict rows, flattened to
+//! tokens, counts, and booleans.
 //!
 //! # Why rendering is its own module, separate from the emitter
 //!
@@ -13,22 +13,19 @@
 //!
 //! # Why every absent case gets a literal
 //!
-//! On a status surface an absent field reads as an unavailable panel. Three of the
+//! On a status surface an absent field reads as an unavailable panel. Two of the
 //! absences here mean something quite specific and quite different from "no data":
-//! an unblocked verdict (pre-flight IS rewriting traffic), a canary that has never
-//! settled (as opposed to one that settled inconclusively), and an unreadable
-//! budget (as opposed to a budget of zero). Each is spelled.
+//! an unblocked verdict (pre-flight IS rewriting traffic) and a canary that has
+//! never settled (as opposed to one that settled inconclusively). Each is spelled.
 //!
 //! # Content discipline
 //!
 //! Every rendered field is a count, a boolean, a closed-set token, a
-//! code-authored path literal, a `sanitize_for_log`-sanitized state key, or an
-//! operator-authored config key (a provider name). Deliberately NO request value,
-//! response body, credential, session key, or upstream text at any verbosity.
+//! code-authored path literal, or a `sanitize_for_log`-sanitized state key.
+//! Deliberately NO request value, response body, credential, session key, or
+//! upstream text at any verbosity.
 
 use routectl_router::FieldVerdictStatus;
-
-use super::paid_probe_budget::PaidProbeBudget;
 
 /// Rendered class for a verdict whose path this build's closed table does not
 /// carry -- what a verdict persisted by a build with a wider table looks like.
@@ -42,12 +39,6 @@ pub(super) const TRANSFORM_CLASS_UNKNOWN: &str = "unknown";
 /// read as "no confirmations needed", which is the opposite of the truth.
 pub(super) const REQUIRED_QUORUM_UNKNOWN: &str = "unknown";
 
-/// Rendered used-count for a budget whose accounting could not be read.
-///
-/// A literal rather than a zero, and the distinction is the whole point: zero
-/// claims nothing was spent, which a failed or corrupt read cannot substantiate.
-pub(super) const COMMITTED_UNKNOWN: &str = "unknown";
-
 /// Ceiling on rendered rows per row-carrying field on the INFO line.
 ///
 /// A log line is a BOUNDED surface. The verdict count grows with the number of
@@ -58,9 +49,9 @@ pub(super) const COMMITTED_UNKNOWN: &str = "unknown";
 /// field and so is the OMITTED count, so a truncated line says exactly how much it
 /// is not showing rather than silently presenting a partial set as complete.
 ///
-/// ONE constant across both row kinds deliberately. Two would be two numbers to
-/// reason about for one property (how long can this line get), and a per-kind
-/// ceiling buys nothing: the kinds are read together.
+/// ONE constant across every row-carrying field deliberately. Two would be two
+/// numbers to reason about for one property (how long can this line get), and a
+/// per-field ceiling buys nothing: the fields are read together.
 ///
 /// A CODE constant, never a config knob: a bound an operator -- or an agent --
 /// can raise mid-session with no diff is an unlogged exemption, not an option.
@@ -144,33 +135,6 @@ pub(super) fn rendered_verdicts(rows: &[FieldVerdictStatus]) -> Bounded<Rendered
                 canary_last_outcome: row.canary_outcome_token(),
                 requests_in_flight: row.requests_in_flight,
                 unconfirmed_requests: row.unconfirmed_requests,
-            })
-            .collect(),
-    )
-}
-
-/// One rendered paid-probe budget row.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct RenderedBudget {
-    pub(super) provider: String,
-    pub(super) daily_cap: u32,
-    pub(super) committed_today: String,
-    pub(super) accounting: &'static str,
-}
-
-/// Render the budget rows, in the order the accounting read reported them,
-/// BOUNDED under the same ceiling as the verdict rows.
-pub(super) fn rendered_budgets(budgets: &[PaidProbeBudget]) -> Bounded<RenderedBudget> {
-    bounded(
-        budgets
-            .iter()
-            .map(|budget| RenderedBudget {
-                provider: budget.provider.clone(),
-                daily_cap: budget.daily_cap,
-                committed_today: budget
-                    .committed_today
-                    .map_or_else(|| COMMITTED_UNKNOWN.to_string(), |used| used.to_string()),
-                accounting: budget.accounting.as_str(),
             })
             .collect(),
     )

@@ -166,10 +166,6 @@ fn one_populated_event(
         !event.snapshot.acting.is_empty(),
         "with the acting verdict present in the snapshot the line is built from",
     );
-    assert_eq!(
-        event.budget_rows_total, 0,
-        "and it carries no budget rows for {endpoint}: no fixture configures a cap",
-    );
     event
 }
 

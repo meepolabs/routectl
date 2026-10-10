@@ -1,7 +1,7 @@
 //! Shared live-visibility log line for the envelope-field fidelity surface,
 //! called from both the health and doctor panels so a field repair, a pre-flight
-//! rewrite, a durably purged verdict, or a paid-probe budget stays observable at
-//! INFO without a response-body change.
+//! rewrite, or a durably purged verdict stays observable at INFO without a
+//! response-body change.
 //!
 //! # Why INFO, and why not the response body
 //!
@@ -15,9 +15,8 @@
 //!
 //! The facts are only interpretable together. A confirmation count without its
 //! required quorum cannot be read as sufficient or short; an
-//! unconfirmed-exposure count without its lifetime sibling reads as the other; a
-//! used budget without its cap says nothing at all. Splitting them across lines
-//! would make a reader correlate by timestamp.
+//! unconfirmed-exposure count without its lifetime sibling reads as the other.
+//! Splitting them across lines would make a reader correlate by timestamp.
 //!
 //! # Why at most ONE line per REQUEST, not per panel build
 //!
@@ -51,14 +50,13 @@ use routectl_router::FidelitySnapshot;
 ///
 /// Built once, consumed by the `cfg(test)` observers.
 ///
-/// Every field here is ASSERTED by an observer test. The process-global accounting
-/// facts deliberately are NOT carried: in every daemon fixture that can reach an
-/// endpoint they hold their defaults (`writer_degraded: false`,
-/// `consumed_unauthorized_total: 0`), so an endpoint assertion on them would read the
-/// same against a field wired to nothing -- and there is no test seam that forges a
-/// write error on a real writer. They are pinned where they CAN be discriminated
-/// instead: `the_global_fields_carry_the_globals_values` drives the emitter with
-/// `true`/`41` and asserts the emitted LINE, which is the surface an operator reads.
+/// Every field here is ASSERTED by an observer test. The process-global writer
+/// health deliberately is NOT carried: in every daemon fixture that can reach an
+/// endpoint it holds its default (`false`), so an endpoint assertion on it would read
+/// the same against a field wired to nothing -- and there is no test seam that forges
+/// a write error on a real writer. It is pinned where it CAN be discriminated
+/// instead: `the_writer_health_field_carries_the_passed_value` drives the emitter with
+/// `true` and asserts the emitted LINE, which is the surface an operator reads.
 ///
 /// `cfg(test)` on the TYPE, not merely on its construction: its only constructor is
 /// the gated `emit_observer_event`, so outside a test build it would be a struct
@@ -79,20 +77,13 @@ use routectl_router::FidelitySnapshot;
 pub(crate) struct FidelityEvent {
     pub(crate) snapshot: FidelitySnapshot,
     pub(crate) verdict_rows_total: usize,
-    /// Budget rows the line carried. Discriminating at the endpoint: a daemon with a
-    /// configured `[fidelity.paid_probe_daily_caps]` entry emits one, while the
-    /// no-config doctor branch legitimately emits none.
-    pub(crate) budget_rows_total: usize,
 }
 
 /// A per-call observer slot.
 #[cfg(test)]
 type EventObserver = std::sync::Mutex<Option<tokio::sync::oneshot::Sender<FidelityEvent>>>;
 
-use super::fidelity_log::{
-    Bounded, RenderedBudget, RenderedVerdict, rendered_budgets, rendered_verdicts,
-};
-use super::paid_probe_budget::{AccountingGlobals, PaidProbeBudget};
+use super::fidelity_log::{Bounded, RenderedVerdict, rendered_verdicts};
 use super::router_view::StatusRouterView;
 
 /// Message of the snapshot line. Stable and greppable, and named so a test can
@@ -199,18 +190,15 @@ impl FidelityEmission {
 
 /// Emit the single aggregated fidelity INFO log for one request: the live
 /// process-lifetime counters, every resident field verdict's own row, the probe
-/// scheduler state, the paid-probe budgets, and the process-global accounting
-/// facts. Log-only -- never crosses onto a panel's response body.
+/// scheduler state, and the process-global usage-writer health. Log-only -- never
+/// crosses onto a panel's response body.
 ///
-/// `budgets` and `globals` are passed IN rather than read here. The budgets need a
-/// ledger open, which belongs on the blocking thread the caller already runs on;
-/// the globals are counter reads on a handle this module does not hold. Keeping
-/// both out makes this function a pure projection over its inputs, which is what
-/// lets a status poll be asserted pure.
+/// `writer_degraded` is passed IN rather than read here: it is a counter read on a
+/// handle this module does not hold. Keeping it out makes this function a pure
+/// projection over its inputs, which is what lets a status poll be asserted pure.
 pub(super) fn log_field_verdict_snapshot(
     view: &StatusRouterView,
-    budgets: &[PaidProbeBudget],
-    globals: AccountingGlobals,
+    writer_degraded: bool,
     emission: FidelityEmission,
     gate: &FidelityGate,
 ) {
@@ -226,7 +214,7 @@ pub(super) fn log_field_verdict_snapshot(
     // by their documented filters -- never by timing, which a reader reconciling
     // them could not tell apart from a real filter.
     let snapshot: FidelitySnapshot = view.fidelity_snapshot();
-    emit_if_admitted(&snapshot, budgets, globals, &emission, gate, Instant::now());
+    emit_if_admitted(&snapshot, writer_degraded, &emission, gate, Instant::now());
 }
 
 /// The gated half of [`log_field_verdict_snapshot`], with the clock passed in.
@@ -235,8 +223,7 @@ pub(super) fn log_field_verdict_snapshot(
 /// time, and `now` so the heartbeat is checkable without waiting an hour.
 fn emit_if_admitted(
     snapshot: &FidelitySnapshot,
-    budgets: &[PaidProbeBudget],
-    globals: AccountingGlobals,
+    writer_degraded: bool,
     #[cfg_attr(
         not(test),
         expect(unused_variables, reason = "read only by the test-build observer")
@@ -246,8 +233,7 @@ fn emit_if_admitted(
     now: Instant,
 ) {
     let verdicts = rendered_verdicts(&snapshot.verdicts);
-    let rendered_budgets = rendered_budgets(budgets);
-    let fingerprint = line_fingerprint(snapshot, &verdicts, &rendered_budgets, globals);
+    let fingerprint = line_fingerprint(snapshot, &verdicts, writer_degraded);
     if !gate.admit(fingerprint, now) {
         return;
     }
@@ -260,7 +246,7 @@ fn emit_if_admitted(
     // every few seconds. `emit_observer_event` is where the construction lives, so
     // nothing in this function body allocates a second snapshot outside `cfg(test)`.
     #[cfg(test)]
-    emit_observer_event(emission, snapshot, budgets);
+    emit_observer_event(emission, snapshot);
     let probes = &snapshot.probes;
     tracing::info!(
         rc_field_repair_attempted_total = snapshot.counters.repair_attempted,
@@ -276,15 +262,7 @@ fn emit_if_admitted(
         rc_field_verdict_rows_total = verdicts.total,
         rc_field_verdict_rows_omitted = verdicts.omitted,
         rc_field_verdict_rows = ?verdicts.rows,
-        rc_paid_probe_budgets_total = rendered_budgets.total,
-        rc_paid_probe_budgets_omitted = rendered_budgets.omitted,
-        rc_paid_probe_budgets = ?rendered_budgets.rows,
-        // PROCESS-GLOBAL, emitted once and never copied onto a provider row: the
-        // writer is one actor and the unauthorized counter has no provider
-        // dimension, so per-row copies would make a summed column read as a
-        // multiple of the truth. Resets on restart -- see `AccountingGlobals`.
-        rc_usage_writer_degraded = globals.writer_degraded,
-        rc_paid_probe_consumed_unauthorized_total = globals.consumed_unauthorized_total,
+        rc_usage_writer_degraded = writer_degraded,
         // Probe state from the scheduler's OWN snapshot rather than re-derived, so
         // the queue numbers here are the numbers the scheduler enforces its bounds
         // against.
@@ -352,8 +330,7 @@ impl FidelityGate {
 fn line_fingerprint(
     snapshot: &FidelitySnapshot,
     verdicts: &Bounded<RenderedVerdict>,
-    budgets: &Bounded<RenderedBudget>,
-    globals: AccountingGlobals,
+    writer_degraded: bool,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     let counters = &snapshot.counters;
@@ -366,7 +343,6 @@ fn line_fingerprint(
         counters.preflight_actions,
         counters.parser_unlocalized,
         snapshot.probes.activations_total,
-        globals.consumed_unauthorized_total,
     ] {
         count.hash(&mut hasher);
     }
@@ -375,19 +351,16 @@ fn line_fingerprint(
         acting_omitted(snapshot),
         verdicts.total,
         verdicts.omitted,
-        budgets.total,
-        budgets.omitted,
         snapshot.probes.queued,
         snapshot.probes.in_flight,
         snapshot.probes.backing_off,
     ] {
         count.hash(&mut hasher);
     }
-    globals.writer_degraded.hash(&mut hasher);
+    writer_degraded.hash(&mut hasher);
     probe_settlement_token(&snapshot.probes).hash(&mut hasher);
     hash_debug(&mut hasher, bounded_acting(snapshot));
     hash_debug(&mut hasher, &verdicts.rows);
-    hash_debug(&mut hasher, &budgets.rows);
     hasher.finish()
 }
 
@@ -419,11 +392,7 @@ fn hash_debug<T: std::fmt::Debug + ?Sized>(hasher: &mut DefaultHasher, value: &T
 /// it by clone only if it is actually installed, so a test watching one channel does
 /// not pay for the other.
 #[cfg(test)]
-fn emit_observer_event(
-    emission: &FidelityEmission,
-    snapshot: &FidelitySnapshot,
-    budgets: &[PaidProbeBudget],
-) {
+fn emit_observer_event(emission: &FidelityEmission, snapshot: &FidelitySnapshot) {
     let per_call = emission
         .observer
         .as_ref()
@@ -434,7 +403,6 @@ fn emit_observer_event(
     }
     let event = FidelityEvent {
         verdict_rows_total: snapshot.verdicts.len(),
-        budget_rows_total: budgets.len(),
         snapshot: snapshot.clone(),
     };
     if let Some(obs) = daemon {

@@ -1,6 +1,6 @@
 //! Coverage for the fidelity INFO emitter: the counter-to-field mapping, the
-//! bounded sanitized rows, the process-global fields, the probe state, and the
-//! one-line-per-request rule.
+//! bounded sanitized rows, the process-global writer health, the probe state,
+//! and the one-line-per-request rule.
 //!
 //! # Why the row tests plant a REAL verdict
 //!
@@ -99,16 +99,8 @@ fn captured_snapshot(body: impl FnOnce()) -> routectl_testkit::CapturedEvent {
     lines.remove(0)
 }
 
-fn no_budgets() -> Vec<PaidProbeBudget> {
-    Vec::new()
-}
-
-fn healthy_globals() -> AccountingGlobals {
-    AccountingGlobals {
-        writer_degraded: false,
-        consumed_unauthorized_total: 0,
-    }
-}
+/// The usage writer's health for the tests whose subject is not that field.
+const WRITER_HEALTHY: bool = false;
 
 // ---------------------------------------------------------------------------
 // The counter-to-field mapping
@@ -135,18 +127,11 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
     let router = fixture_router();
     let seeded = routectl_router::seed_distinct_fidelity_counters_for_tests(&router);
     let view = view_over(router);
-    // The globals are seeded distinctly too, and to values no counter above holds --
-    // so a field wired to a counter instead of a global is caught as well.
-    let globals = AccountingGlobals {
-        writer_degraded: true,
-        consumed_unauthorized_total: 41,
-    };
 
     let info = captured_snapshot(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            globals,
+            WRITER_HEALTHY,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -198,43 +183,33 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
     );
 }
 
-/// The two process-global fields carry the GLOBALS' values, not a counter's or a
-/// row's.
+/// The process-global writer-health field carries the value passed in, not a
+/// default.
 ///
-/// Seeded to values no counter holds, so a field wired to the wrong source is caught
-/// by the value rather than by reading the source. The scope claim is the point: a
-/// process-wide fact in a per-provider position reads as a multiple of the truth to
-/// anyone summing the column.
+/// Driven with `true`, the non-default value, so a field wired to a constant is
+/// caught by the value; `every_count_is_reported_even_at_zero` is the `false`
+/// control.
+///
+/// Mutation check: emit `rc_usage_writer_degraded = false` -> red here.
 #[test]
-fn the_global_fields_carry_the_globals_values() {
+fn the_writer_health_field_carries_the_passed_value() {
     let router = fixture_router();
     let _seeded = routectl_router::seed_distinct_fidelity_counters_for_tests(&router);
     let view = view_over(router);
-    let globals = AccountingGlobals {
-        writer_degraded: true,
-        consumed_unauthorized_total: 41,
-    };
 
     let info = captured_snapshot(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            globals,
+            true,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
     });
 
     assert_eq!(
-        info.field("rc_paid_probe_consumed_unauthorized_total"),
-        Some("41"),
-        "the unauthorized total carries the GLOBAL value -- 41 is held by no counter, \
-         so a field wired to one instead is caught by the value",
-    );
-    assert_eq!(
         info.field("rc_usage_writer_degraded"),
         Some("true"),
-        "and the writer-health field carries the global boolean rather than a default",
+        "the writer-health field carries the passed boolean rather than a default",
     );
 }
 
@@ -247,7 +222,7 @@ fn the_global_fields_carry_the_globals_values() {
 /// An absent field on a status surface reads as an unavailable panel, not as
 /// "nothing happened" -- and the states these report at zero are exactly the ones
 /// an operator is debugging: a pre-flight that has not fired, a parser that has
-/// seen nothing, a deployment with no configured cap.
+/// seen nothing, a probe lane that never activated.
 #[test]
 fn every_count_is_reported_even_at_zero() {
     let view = fresh_view();
@@ -255,8 +230,7 @@ fn every_count_is_reported_even_at_zero() {
     let info = captured_snapshot(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -275,9 +249,6 @@ fn every_count_is_reported_even_at_zero() {
         "rc_acting_field_verdicts_omitted",
         "rc_field_verdict_rows_total",
         "rc_field_verdict_rows_omitted",
-        "rc_paid_probe_budgets_total",
-        "rc_paid_probe_budgets_omitted",
-        "rc_paid_probe_consumed_unauthorized_total",
         "rc_probe_activations_total",
         "rc_probe_queued",
         "rc_probe_in_flight",
@@ -331,8 +302,7 @@ fn a_planted_resident_verdict_is_emitted_as_one_fully_populated_row() {
     let info = captured_snapshot(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -400,8 +370,7 @@ fn the_acting_row_names_the_verdict_it_reports() {
     let info = captured_snapshot(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -434,8 +403,7 @@ fn a_build_whose_claim_is_taken_emits_no_line() {
     let events_first = routectl_testkit::capture_events(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             emission.clone(),
             &FidelityGate::default(),
         );
@@ -450,13 +418,7 @@ fn a_build_whose_claim_is_taken_emits_no_line() {
     );
 
     let events = routectl_testkit::capture_events(|| {
-        log_field_verdict_snapshot(
-            &view,
-            &no_budgets(),
-            healthy_globals(),
-            emission,
-            &FidelityGate::default(),
-        );
+        log_field_verdict_snapshot(&view, WRITER_HEALTHY, emission, &FidelityGate::default());
     });
 
     assert!(
@@ -478,8 +440,7 @@ fn an_emitting_build_emits_exactly_one_line() {
     let events = routectl_testkit::capture_events(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -511,8 +472,7 @@ fn every_count_renders_as_a_bare_integer() {
     let info = captured_snapshot(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -526,8 +486,6 @@ fn every_count_renders_as_a_bare_integer() {
         "rc_acting_field_verdicts_omitted",
         "rc_field_verdict_rows_total",
         "rc_field_verdict_rows_omitted",
-        "rc_paid_probe_budgets_total",
-        "rc_paid_probe_consumed_unauthorized_total",
         "rc_probe_queued",
         "rc_probe_in_flight",
         "rc_probe_backing_off",
@@ -558,18 +516,11 @@ fn two_builders_sharing_a_claim_emit_exactly_one_line() {
     let events = routectl_testkit::capture_events(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             emission.clone(),
             &FidelityGate::default(),
         );
-        log_field_verdict_snapshot(
-            &view,
-            &no_budgets(),
-            healthy_globals(),
-            emission,
-            &FidelityGate::default(),
-        );
+        log_field_verdict_snapshot(&view, WRITER_HEALTHY, emission, &FidelityGate::default());
     });
 
     assert_eq!(
@@ -606,13 +557,7 @@ fn a_builder_that_never_reaches_the_logger_leaves_the_claim_for_its_sibling() {
     drop(degraded);
 
     let events = routectl_testkit::capture_events(|| {
-        log_field_verdict_snapshot(
-            &view,
-            &no_budgets(),
-            healthy_globals(),
-            emission,
-            &FidelityGate::default(),
-        );
+        log_field_verdict_snapshot(&view, WRITER_HEALTHY, emission, &FidelityGate::default());
     });
 
     assert_eq!(
@@ -637,8 +582,7 @@ fn a_standalone_builder_always_emits() {
     let events = routectl_testkit::capture_events(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -689,15 +633,11 @@ fn the_emitter_sends_one_populated_event_through_the_per_call_observer() {
     }));
     plant_acting_field_verdict_for_tests(&router, STATE_KEY, "thinking.enabled.display", 1);
     let view = StatusRouterHandle::new(std::sync::Arc::new(ArcSwap::from_pointee(router))).view();
-    let globals = AccountingGlobals {
-        writer_degraded: false,
-        consumed_unauthorized_total: 0,
-    };
 
     let mut emission = FidelityEmission::always();
     let mut rx = emission.observe();
 
-    log_field_verdict_snapshot(&view, &[], globals, emission, &FidelityGate::default());
+    log_field_verdict_snapshot(&view, WRITER_HEALTHY, emission, &FidelityGate::default());
 
     let event = rx.try_recv().expect("the emitter sent exactly one event");
     assert_eq!(
@@ -719,18 +659,13 @@ fn the_emitter_sends_one_populated_event_through_the_per_call_observer() {
 fn a_suppressed_builder_sends_no_event_to_the_observer() {
     let router = Router::new(std::sync::Arc::new(Config::default()));
     let view = StatusRouterHandle::new(std::sync::Arc::new(ArcSwap::from_pointee(router))).view();
-    let globals = AccountingGlobals {
-        writer_degraded: false,
-        consumed_unauthorized_total: 0,
-    };
 
     let mut emission = FidelityEmission::shared();
     let mut rx = emission.observe();
     // First builder takes the claim.
     log_field_verdict_snapshot(
         &view,
-        &[],
-        globals,
+        WRITER_HEALTHY,
         emission.clone(),
         &FidelityGate::default(),
     );
@@ -740,7 +675,7 @@ fn a_suppressed_builder_sends_no_event_to_the_observer() {
     // Second builder: claim is taken.
     let mut emission2 = emission;
     let mut rx2 = emission2.observe();
-    log_field_verdict_snapshot(&view, &[], globals, emission2, &FidelityGate::default());
+    log_field_verdict_snapshot(&view, WRITER_HEALTHY, emission2, &FidelityGate::default());
     assert!(
         rx2.try_recv().is_err(),
         "the second builder found the claim taken and sent nothing",
@@ -760,10 +695,6 @@ fn health_failure_fallback_lets_doctor_emit_through_the_observer() {
     let router = fixture_router();
     routectl_router::plant_acting_field_verdict_for_tests(&router, STATE_KEY, GROUNDED_PATH, 1);
     let view = view_over(router);
-    let globals = AccountingGlobals {
-        writer_degraded: false,
-        consumed_unauthorized_total: 0,
-    };
 
     let mut emission = FidelityEmission::shared();
     let mut rx = emission.observe();
@@ -774,13 +705,7 @@ fn health_failure_fallback_lets_doctor_emit_through_the_observer() {
     let _ = emission.clone(); // health took a clone and dropped it
 
     // Doctor's builder: it reaches the emitter and finds the claim free.
-    log_field_verdict_snapshot(
-        &view,
-        &no_budgets(),
-        globals,
-        emission,
-        &FidelityGate::default(),
-    );
+    log_field_verdict_snapshot(&view, WRITER_HEALTHY, emission, &FidelityGate::default());
 
     let event = rx.try_recv().expect(
         "the doctor builder sent the event: it found the claim free because \
@@ -888,14 +813,7 @@ fn the_gate_emits_on_change_or_heartbeat_and_not_on_unchanged_polls() {
             for _ in 0..step.polls {
                 (step.change)(&mut snapshot);
                 now += step.advance;
-                emit_if_admitted(
-                    &snapshot,
-                    &no_budgets(),
-                    healthy_globals(),
-                    &emission,
-                    &gate,
-                    now,
-                );
+                emit_if_admitted(&snapshot, WRITER_HEALTHY, &emission, &gate, now);
             }
         });
         assert_eq!(lines, step.expected_lines, "{}", step.name);
@@ -905,8 +823,7 @@ fn the_gate_emits_on_change_or_heartbeat_and_not_on_unchanged_polls() {
 /// The inputs one fingerprint row starts from and mutates.
 struct GateInputs {
     snapshot: FidelitySnapshot,
-    budgets: Vec<PaidProbeBudget>,
-    globals: AccountingGlobals,
+    writer_degraded: bool,
     /// Scheduler state after a real settled probe, for the one input a test cannot
     /// spell directly: the settlement enum is not exported by the router crate.
     settled_probes: routectl_router::ProbeSchedulerSnapshot,
@@ -921,25 +838,11 @@ struct FingerprintRow {
 
 const fn no_setup(_: &mut GateInputs) {}
 
-fn budget_row(provider: &str, committed_today: Option<u32>) -> PaidProbeBudget {
-    PaidProbeBudget {
-        provider: provider.to_string(),
-        daily_cap: 3,
-        committed_today,
-        accounting: super::super::paid_probe_budget::AccountingHealth::Healthy,
-    }
-}
-
 /// `count` copies of the planted verdict row and its acting row.
 fn planted_rows(snapshot: &mut FidelitySnapshot, count: usize) {
     let planted = view_with_planted_verdict().fidelity_snapshot();
     snapshot.verdicts = vec![planted.verdicts[0].clone(); count];
     snapshot.acting = vec![planted.acting[0].clone(); count];
-}
-
-/// One identical budget row per provider slot, `count` of them.
-fn identical_budgets(count: usize) -> Vec<PaidProbeBudget> {
-    vec![budget_row("p0", Some(1)); count]
 }
 
 /// A provider that answers every free `count_tokens` validator, so a probe pass
@@ -1028,11 +931,11 @@ fn settled_probe_state() -> routectl_router::ProbeSchedulerSnapshot {
 /// Each row starts a fresh gate from its own baseline and changes ONE input, so a
 /// row going red names the input the fingerprint dropped.
 ///
-/// Mutation check: drop any one counter, probe count, global, the settlement token,
-/// or one of the three `hash_debug` row renderings from `line_fingerprint` -> red on
-/// its row.
+/// Mutation check: drop any one counter, probe count, the writer-health flag, the
+/// settlement token, or one of the two `hash_debug` row renderings from
+/// `line_fingerprint` -> red on its row.
 ///
-/// The `total` and `omitted` counts of the acting, verdict, and budget fields have no
+/// The `total` and `omitted` counts of the acting and verdict fields have no
 /// single-input row, because none can exist: within each field, `total` equals the
 /// rendered row count plus `omitted`, and `omitted` is `total` minus the render
 /// ceiling, so dropping either count alone leaves the other carrying the same
@@ -1106,12 +1009,7 @@ fn a_change_to_any_reported_input_emits_a_line() {
         FingerprintRow {
             name: "writer degraded",
             setup: no_setup,
-            change: |i| i.globals.writer_degraded = true,
-        },
-        FingerprintRow {
-            name: "unauthorized units",
-            setup: no_setup,
-            change: |i| i.globals.consumed_unauthorized_total += 1,
+            change: |i| i.writer_degraded = true,
         },
         FingerprintRow {
             name: "acting row content",
@@ -1122,11 +1020,6 @@ fn a_change_to_any_reported_input_emits_a_line() {
             name: "verdict row content",
             setup: |i| planted_rows(&mut i.snapshot, 1),
             change: |i| i.snapshot.verdicts[0].confirmations += 1,
-        },
-        FingerprintRow {
-            name: "budget row content",
-            setup: |i| i.budgets = vec![budget_row("p0", Some(1))],
-            change: |i| i.budgets[0].committed_today = Some(2),
         },
         FingerprintRow {
             name: "acting rows beyond the ceiling",
@@ -1152,11 +1045,6 @@ fn a_change_to_any_reported_input_emits_a_line() {
                 i.snapshot.verdicts.push(extra);
             },
         },
-        FingerprintRow {
-            name: "budget rows beyond the ceiling",
-            setup: |i| i.budgets = identical_budgets(CEILING + 1),
-            change: |i| i.budgets = identical_budgets(CEILING + 2),
-        },
     ];
     let settled_probes = settled_probe_state();
     assert!(
@@ -1170,8 +1058,7 @@ fn a_change_to_any_reported_input_emits_a_line() {
         let now = Instant::now();
         let mut inputs = GateInputs {
             snapshot: fresh_view().fidelity_snapshot(),
-            budgets: no_budgets(),
-            globals: healthy_globals(),
+            writer_degraded: WRITER_HEALTHY,
             settled_probes,
         };
         (row.setup)(&mut inputs);
@@ -1179,8 +1066,7 @@ fn a_change_to_any_reported_input_emits_a_line() {
             for _ in 0..2 {
                 emit_if_admitted(
                     &inputs.snapshot,
-                    &inputs.budgets,
-                    inputs.globals,
+                    inputs.writer_degraded,
                     &emission,
                     &gate,
                     now,
@@ -1197,8 +1083,7 @@ fn a_change_to_any_reported_input_emits_a_line() {
         let lines = snapshot_lines(|| {
             emit_if_admitted(
                 &inputs.snapshot,
-                &inputs.budgets,
-                inputs.globals,
+                inputs.writer_degraded,
                 &emission,
                 &gate,
                 now,
@@ -1220,10 +1105,10 @@ fn a_gate_suppressed_poll_sends_no_observer_event() {
 
     let mut first = FidelityEmission::always();
     let mut first_rx = first.observe();
-    log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), first, &gate);
+    log_field_verdict_snapshot(&view, WRITER_HEALTHY, first, &gate);
     let mut repeat = FidelityEmission::always();
     let mut repeat_rx = repeat.observe();
-    log_field_verdict_snapshot(&view, &no_budgets(), healthy_globals(), repeat, &gate);
+    log_field_verdict_snapshot(&view, WRITER_HEALTHY, repeat, &gate);
 
     assert!(
         first_rx.try_recv().is_ok(),
@@ -1345,8 +1230,7 @@ fn snapshot_fields_match_the_logging_doc_table_exactly_once() {
     let info = captured_snapshot(|| {
         log_field_verdict_snapshot(
             &view,
-            &no_budgets(),
-            healthy_globals(),
+            WRITER_HEALTHY,
             FidelityEmission::always(),
             &FidelityGate::default(),
         );

@@ -116,13 +116,6 @@ fn web_search_request(model: &str) -> ChatRequest {
     }
 }
 
-fn globals() -> AccountingGlobals {
-    AccountingGlobals {
-        writer_degraded: false,
-        consumed_unauthorized_total: 0,
-    }
-}
-
 #[tokio::test]
 async fn each_target_learned_lane_is_the_state_key_of_the_row_learned_on_it() {
     // Arrange: learn a negative through real dispatch on one nickname.
@@ -137,8 +130,7 @@ async fn each_target_learned_lane_is_the_state_key_of_the_row_learned_on_it() {
     // Act
     let panel = build_from_view(
         &state.router.view(),
-        &[],
-        globals(),
+        false,
         FidelityEmission::always(),
         &FidelityGate::default(),
     );

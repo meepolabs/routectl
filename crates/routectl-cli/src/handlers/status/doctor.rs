@@ -32,11 +32,8 @@ use routectl_router::DoctorReport;
 use routectl_router::router::RouteTargetStatus;
 
 use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
-use super::paid_probe_budget::{
-    AccountingGlobals, CapabilityWriteCounters, PaidProbeBudget, accounting_globals,
-    paid_probe_budgets,
-};
 use super::router_view::StatusRouterView;
+use super::usage_health::CapabilityWriteCounters;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::commands::doctor::{GatherSources, build_report_no_network, gather_context_no_network};
@@ -98,13 +95,12 @@ fn map_reachability(target: RouteTargetStatus) -> TargetReachability {
 fn build_panel_data(
     report: DoctorReport,
     view: &StatusRouterView,
-    budgets: &[PaidProbeBudget],
-    globals: AccountingGlobals,
+    writer_degraded: bool,
     capability_writes: CapabilityWriteCounters,
     emission: FidelityEmission,
     gate: &FidelityGate,
 ) -> DoctorPanel {
-    log_field_verdict_snapshot(view, budgets, globals, emission, gate);
+    log_field_verdict_snapshot(view, writer_degraded, emission, gate);
     let reachability = view
         .route_targets(Instant::now())
         .into_iter()
@@ -134,14 +130,8 @@ async fn build_from_path(
     let served = view
         .served_doctor_inputs(*state.warm_report())
         .with_reload_failure(reload_failure);
-    // Captured here; the ledger OPEN runs inside the blocking closure below, beside
-    // the gather's own disk I/O -- SQLite work on an async worker blocks that
-    // worker, and `guard_panel` is what puts it on a blocking thread under a
-    // cancellation-survivable permit.
-    let caps = view.paid_probe_daily_caps();
-    let db_path = state.usage_db_path.clone();
     // Counter reads, not I/O, so these stay out here beside the router snapshot.
-    let globals = accounting_globals(&state.usage_health);
+    let writer_degraded = state.usage_health.writer_degraded();
     let capability_writes = state.usage_health.capability_writes();
     let gate = Arc::clone(&state.fidelity_gate);
     let handle = tokio::runtime::Handle::current();
@@ -162,13 +152,10 @@ async fn build_from_path(
             ));
             let report = build_report_no_network(&ctx);
             let schema_version = report.schema_version;
-            let budgets =
-                paid_probe_budgets(&caps, &db_path, chrono::Utc::now().timestamp_millis());
             let data = build_panel_data(
                 report,
                 &view,
-                &budgets,
-                globals,
+                writer_degraded,
                 capability_writes,
                 emission,
                 &gate,
@@ -196,18 +183,16 @@ pub(super) async fn build_with_emission(
             // A daemon serving without an on-disk config path has no doctor REPORT
             // to build, but it still has a live router -- and the observability
             // floor is about the router, not the report. So the fidelity line is
-            // emitted here too, with UNAVAILABLE budget data: the caps come from
-            // config and there is none to read, while every other field on the line
-            // (the counters, the verdict rows, the probe state, the writer health)
-            // comes from state this branch has in full.
+            // emitted here too: every field on the line (the counters, the verdict
+            // rows, the probe state, the writer health) comes from state this branch
+            // has in full.
             //
             // The alternative -- staying silent -- would mean a config-less daemon
             // satisfied the floor only through `/status/health`, which is a narrower
             // contract than the one this surface documents.
             log_field_verdict_snapshot(
                 &state.router.view(),
-                &[],
-                accounting_globals(&state.usage_health),
+                state.usage_health.writer_degraded(),
                 #[cfg(test)]
                 emission.with_daemon_observer(state),
                 #[cfg(not(test))]
