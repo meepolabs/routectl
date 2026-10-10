@@ -27,7 +27,7 @@
 use super::super::PurgeOutcome;
 use super::super::Router;
 use super::super::repair_budget::REPAIRS_PER_REQUEST;
-use super::{ANTHROPIC_API_KIND, provisional};
+use super::{ANTHROPIC_API_KIND, OPENAI_UNSUPPORTED_CODE, provisional};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1183,30 +1183,39 @@ fn bedrock_field_rejection() -> Error {
     )
 }
 
-/// An openai-compat `{"error":{...}}` envelope refusing the grounded field: the
-/// unsupported-parameter template naming the same `param`, lifted as the
-/// provider lifts `error.type`. It carries no `error.code`: an
-/// `unsupported_parameter` code lifts the class to feature-unsupported, which
-/// the repair arm does not admit.
+/// An openai-compat `{"error":{...}}` envelope refusing the grounded field, as
+/// the provider builds one: the unsupported-parameter template naming the same
+/// `param`, with the `unsupported_parameter` code the upstream sends and the
+/// provider lifts beside `error.type`. That code lifts the class to
+/// feature-unsupported, which the repair arm admits on this kind.
 fn openai_compat_field_rejection() -> Error {
+    openai_compat_rejection(Some(OPENAI_UNSUPPORTED_CODE))
+}
+
+/// The same refusal with no `error.code`: the exact template alone localizes
+/// the field, and the class stays `BadRequest`.
+fn openai_compat_templated_field_rejection() -> Error {
+    openai_compat_rejection(None)
+}
+
+fn openai_compat_rejection(code: Option<&str>) -> Error {
+    let mut error = json!({
+        "message": format!(
+            "Unsupported parameter: '{REJECTED_PATH}' is not supported with this model."
+        ),
+        "type": "invalid_request_error",
+        "param": REJECTED_PATH,
+    });
+    if let Some(code) = code {
+        error["code"] = json!(code);
+    }
     Error::upstream_with_body(
         "widened-mock",
         400,
-        routectl_core::UpstreamBody::new(
-            json!({
-                "error": {
-                    "message": format!(
-                        "Unsupported parameter: '{REJECTED_PATH}' is not supported with this model."
-                    ),
-                    "type": "invalid_request_error",
-                    "param": REJECTED_PATH,
-                }
-            })
-            .to_string(),
-        ),
+        routectl_core::UpstreamBody::new(json!({ "error": error }).to_string()),
         None,
         Some("invalid_request_error".to_string()),
-        None,
+        code.map(str::to_string),
     )
 }
 
@@ -1214,14 +1223,24 @@ fn openai_compat_field_rejection() -> Error {
 /// of the grounded field.
 type WidenedLane = (&'static str, &'static str, fn() -> Error);
 
-/// Each non-anthropic kind field repair acts on.
+const OPENAI_COMPAT_TOML: &str = "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
+
+/// Each non-anthropic kind field repair acts on, openai-compat in both of the
+/// shapes its upstreams refuse a parameter in (coded and template-only).
 fn widened_lanes() -> Vec<WidenedLane> {
     #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
-    let mut lanes: Vec<WidenedLane> = vec![(
-        "openai-compat",
-        "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n",
-        openai_compat_field_rejection,
-    )];
+    let mut lanes: Vec<WidenedLane> = vec![
+        (
+            "openai-compat",
+            OPENAI_COMPAT_TOML,
+            openai_compat_field_rejection,
+        ),
+        (
+            "openai-compat",
+            OPENAI_COMPAT_TOML,
+            openai_compat_templated_field_rejection,
+        ),
+    ];
     #[cfg(feature = "bedrock")]
     lanes.push((
         "bedrock",
@@ -1254,8 +1273,9 @@ fn widened_seat_on(provider_toml: &str, rejection: fn() -> Error) -> (Router, Ar
 /// No injection: each widened kind's own rejection reaches the live parser
 /// through status extraction and that kind's dialect.
 ///
-/// Mutation check: map either kind to `None` in `Dialect::of_kind` -> that
-/// kind's row reds (one attempt, nothing learned).
+/// Mutation checks: map either kind to `None` in `Dialect::of_kind` -> that
+/// kind's rows red (one attempt, nothing learned); reduce the field-repair
+/// class gate to `BadRequest` alone -> the coded openai-compat row reds.
 #[tokio::test]
 async fn a_widened_lane_repairs_and_learns_the_field_verdict() {
     for (kind, provider_toml, rejection) in widened_lanes() {

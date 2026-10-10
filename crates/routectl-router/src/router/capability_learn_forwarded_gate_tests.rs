@@ -83,7 +83,9 @@ fn anthropic_forced_tool_choice_rejection() -> Arc<Rejecting> {
 }
 
 /// Target B's answer: a self-identifying openai-compat 400 naming the
-/// request's `web_search` tool.
+/// request's `web_search` tool. Its `unsupported_parameter` code can carry a
+/// field rejection, and `web_search` is no closed-table row, so it also counts
+/// once as parser-unlocalized on every chain below.
 fn openai_web_search_rejection() -> Arc<Rejecting> {
     Arc::new(Rejecting {
         id: "pb",
@@ -240,8 +242,9 @@ async fn forwarded_target_rejection_mints_nothing_and_counts_no_parser_blindness
         );
         assert_eq!(
             router.field_repair_counters().parser_unlocalized,
-            0,
-            "{surface:?}: a forwarded target's rejection is not parser evidence",
+            1,
+            "{surface:?}: only B's own-credential rejection counts; a forwarded \
+             target's rejection is not parser evidence",
         );
     }
 }
@@ -266,8 +269,8 @@ async fn own_credential_first_target_rejection_observes_and_counts_parser_blindn
         );
         assert_eq!(
             router.field_repair_counters().parser_unlocalized,
-            1,
-            "{surface:?}: A's unlocalized rejection counts once",
+            2,
+            "{surface:?}: A's unlocalized rejection counts once, beside B's",
         );
     }
 }

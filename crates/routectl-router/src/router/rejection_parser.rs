@@ -60,7 +60,8 @@ const LIST_SEPARATORS: [&str; 3] = [", or ", ", ", " or "];
 
 const OPENAI_UNSUPPORTED_PREFIX: &str = "Unsupported parameter: '";
 const OPENAI_UNSUPPORTED_SUFFIX: &str = "' is not supported with this model.";
-const OPENAI_UNSUPPORTED_CODE: &str = "unsupported_parameter";
+/// The openai `error.code` that refuses a named parameter.
+pub(super) const OPENAI_UNSUPPORTED_CODE: &str = "unsupported_parameter";
 
 /// The location-prefix reason that refuses the field itself; every other
 /// reason refuses the value.

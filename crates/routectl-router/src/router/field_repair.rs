@@ -45,7 +45,9 @@ use routectl_core::{ChatRequest, sanitize_for_log};
 use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey};
 use crate::field_verdict_value::VerdictValue;
 
-use super::rejection_parser::{NamedRejection, RejectionKind, parse_rejection};
+use super::rejection_parser::{
+    NamedRejection, OPENAI_UNSUPPORTED_CODE, RejectionKind, parse_rejection,
+};
 use super::repair_budget::RepairBudget;
 
 use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
@@ -893,7 +895,7 @@ fn rejected_field(
     err: &Error,
     provider_kind: &str,
 ) -> Option<NamedRejection> {
-    if !class_can_name_a_field(class) {
+    if !class_can_name_a_field(class, provider_kind) {
         return None;
     }
     #[cfg(test)]
@@ -904,15 +906,32 @@ fn rejected_field(
     parse_rejection(provider_kind, status, err.parsed_body())
 }
 
-/// Whether a failure class can carry a field-naming rejection at all.
+/// Whether a failure class, on a lane of `provider_kind`, can carry a
+/// field-naming rejection at all.
 ///
 /// A field rejection is a caller-shaped 4xx: the upstream read the envelope
 /// and refused one field in it. Every other class -- auth, rate limiting,
 /// transport, overload, server error -- says nothing about the envelope's
 /// shape, so a repair driven by one would drop a field over an unrelated
 /// fault and then learn a permanent negative from it.
-const fn class_can_name_a_field(class: &FailureClass) -> bool {
-    matches!(class, FailureClass::BadRequest)
+///
+/// `BadRequest` on every kind, plus exactly one lifted feature-unsupported
+/// token: the openai-compat `unsupported_parameter` code, which the
+/// classifier lifts out of `BadRequest` and which is precisely the code that
+/// refuses a named parameter. The other lifted openai tokens refuse a value or
+/// a region rather than a field, and no other kind lifts this one. A subset of
+/// the generic learner's deterministic-class gate
+/// ([`super::capability_learn::f2_class_is_deterministic`]); the field arm runs
+/// first and the two learners never claim the same path (pinned by the
+/// disjointness test over the closed table).
+fn class_can_name_a_field(class: &FailureClass, provider_kind: &str) -> bool {
+    match class {
+        FailureClass::BadRequest => true,
+        FailureClass::FeatureUnsupported { capability } => {
+            provider_kind == OPENAI_COMPAT_KIND && capability == OPENAI_UNSUPPORTED_CODE
+        }
+        _ => false,
+    }
 }
 
 /// Whether a dispatch walk can SETTLE an envelope-field verdict.
@@ -1514,7 +1533,7 @@ impl Router {
         err: &Error,
         provider_kind: &str,
     ) -> bool {
-        class_can_name_a_field(native_class)
+        class_can_name_a_field(native_class, provider_kind)
             && rejected_field(native_class, err, provider_kind).is_none()
     }
 
@@ -1716,6 +1735,10 @@ mod field_repair_tests;
 #[cfg(test)]
 #[path = "field_attribution_tests.rs"]
 mod field_attribution_tests;
+
+#[cfg(test)]
+#[path = "field_learner_disjointness_tests.rs"]
+mod field_learner_disjointness_tests;
 
 #[cfg(test)]
 mod table_tests {
@@ -2057,13 +2080,27 @@ mod table_tests {
         );
     }
 
+    /// Mutation checks: reduce the gate to `BadRequest` alone -> red on the
+    /// openai-compat `unsupported_parameter` row; admit every
+    /// `FeatureUnsupported` -> red on the refused lifted tokens; drop the kind
+    /// test -> red on the anthropic-api and bedrock `unsupported_parameter`
+    /// rows.
     #[test]
     fn only_a_caller_shaped_rejection_can_name_a_field() {
+        let unsupported = |token: &str| FailureClass::FeatureUnsupported {
+            capability: token.into(),
+        };
+        for kind in FIELD_REPAIR_KINDS {
+            assert!(
+                class_can_name_a_field(&FailureClass::BadRequest, kind),
+                "{kind}: the envelope-refusal class is the one a field rejection arrives on",
+            );
+        }
         assert!(
-            class_can_name_a_field(&FailureClass::BadRequest),
-            "the envelope-refusal class is the one a field rejection arrives on",
+            class_can_name_a_field(&unsupported(OPENAI_UNSUPPORTED_CODE), OPENAI_COMPAT_KIND),
+            "the openai code that refuses a named parameter lifts out of BadRequest",
         );
-        for other in [
+        let refused_everywhere = [
             FailureClass::RateLimited,
             FailureClass::Auth,
             FailureClass::ContentPolicy,
@@ -2073,14 +2110,23 @@ mod table_tests {
             FailureClass::NetworkError,
             FailureClass::Overloaded,
             FailureClass::Unknown,
-            FailureClass::FeatureUnsupported {
-                capability: "reasoning_replay".into(),
-            },
-        ] {
+            unsupported("unsupported_value"),
+            unsupported("unsupported_country_region_territory"),
+            unsupported("reasoning_replay"),
+        ];
+        for kind in FIELD_REPAIR_KINDS {
+            for other in &refused_everywhere {
+                assert!(
+                    !class_can_name_a_field(other, kind),
+                    "{kind}: {other:?} does not refuse a named field, so a repair driven by it \
+                     would drop a field over an unrelated fault and learn from it",
+                );
+            }
+        }
+        for kind in [ANTHROPIC_API_KIND, BEDROCK_KIND] {
             assert!(
-                !class_can_name_a_field(&other),
-                "{other:?} says nothing about the envelope's shape, so a repair driven by it \
-                 would drop a field over an unrelated fault and learn from it",
+                !class_can_name_a_field(&unsupported(OPENAI_UNSUPPORTED_CODE), kind),
+                "{kind}: the lifted openai code is admitted on openai-compat only",
             );
         }
     }
