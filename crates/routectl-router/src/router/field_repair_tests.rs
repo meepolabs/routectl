@@ -1127,27 +1127,140 @@ fn seat_on(provider_toml: &str, answer: Answer) -> (Router, Arc<Observed>) {
     (router, observed.remove(0))
 }
 
-/// `[providers.p0]` bodies for each non-anthropic kind field repair acts on.
-fn widened_lanes() -> Vec<(&'static str, &'static str)> {
-    let mut lanes = vec![(
+/// A seat on a widened kind that answers the carried attempt with that kind's
+/// own structured rejection of the grounded field, built as its provider
+/// builds one, and serves the repaired retry.
+struct WidenedSeat {
+    rejection: fn() -> Error,
+    observed: Arc<Observed>,
+}
+
+impl WidenedSeat {
+    fn answer_for(&self, req: &ChatRequest) -> Result<()> {
+        if self.observed.record(req) {
+            return Err((self.rejection)());
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for WidenedSeat {
+    fn id(&self) -> &'static str {
+        "widened-mock"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response("widened-mock", "unused"))
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        self.answer_for(&req).map(|()| success_response())
+    }
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        self.answer_for(&req).map(|()| {
+            stream::iter(vec![Ok(content_chunk())]).boxed() as BoxStream<'static, Result<ChatChunk>>
+        })
+    }
+}
+
+/// A bedrock-runtime `ValidationException` refusing the grounded field: the
+/// flat `{"message":...}` body with the lifted discriminator, in the
+/// request-validation location-prefix shape the captured canaries carry.
+#[cfg(feature = "bedrock")]
+fn bedrock_field_rejection() -> Error {
+    Error::upstream_with_body(
+        "widened-mock",
+        400,
+        routectl_core::UpstreamBody::new(
+            json!({ "message": format!("{REJECTED_PATH}: Extra inputs are not permitted") })
+                .to_string(),
+        ),
+        None,
+        Some("ValidationException".to_string()),
+        None,
+    )
+}
+
+/// An openai-compat `{"error":{...}}` envelope refusing the grounded field: the
+/// unsupported-parameter template naming the same `param`, lifted as the
+/// provider lifts `error.type`. It carries no `error.code`: an
+/// `unsupported_parameter` code lifts the class to feature-unsupported, which
+/// the repair arm does not admit.
+fn openai_compat_field_rejection() -> Error {
+    Error::upstream_with_body(
+        "widened-mock",
+        400,
+        routectl_core::UpstreamBody::new(
+            json!({
+                "error": {
+                    "message": format!(
+                        "Unsupported parameter: '{REJECTED_PATH}' is not supported with this model."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": REJECTED_PATH,
+                }
+            })
+            .to_string(),
+        ),
+        None,
+        Some("invalid_request_error".to_string()),
+        None,
+    )
+}
+
+/// A widened kind, its `[providers.p0]` body, and its own structured rejection
+/// of the grounded field.
+type WidenedLane = (&'static str, &'static str, fn() -> Error);
+
+/// Each non-anthropic kind field repair acts on.
+fn widened_lanes() -> Vec<WidenedLane> {
+    #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+    let mut lanes: Vec<WidenedLane> = vec![(
         "openai-compat",
         "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n",
+        openai_compat_field_rejection,
     )];
-    if cfg!(feature = "bedrock") {
-        lanes.push((
-            "bedrock",
-            "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n",
-        ));
-    }
+    #[cfg(feature = "bedrock")]
+    lanes.push((
+        "bedrock",
+        "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n",
+        bedrock_field_rejection,
+    ));
     lanes
 }
 
+/// A one-seat chain on `provider_toml` whose seat is a [`WidenedSeat`].
+fn widened_seat_on(provider_toml: &str, rejection: fn() -> Error) -> (Router, Arc<Observed>) {
+    let mut config: Config =
+        toml::from_str(&format!("\n[providers.p0]\n{provider_toml}")).expect("valid test toml");
+    config
+        .aliases
+        .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
+    let mut router = Router::new(Arc::new(config));
+    let observed = Arc::new(Observed::default());
+    let seat: Arc<dyn Provider> = Arc::new(WidenedSeat {
+        rejection,
+        observed: Arc::clone(&observed),
+    });
+    router.install_resolved_models(BTreeMap::from([(
+        "m0".to_string(),
+        Arc::new(ResolvedModel::new("m0", "p0", seat, "wire-0")),
+    )]));
+    (router, observed)
+}
+
+/// No injection: each widened kind's own rejection reaches the live parser
+/// through status extraction and that kind's dialect.
+///
+/// Mutation check: map either kind to `None` in `Dialect::of_kind` -> that
+/// kind's row reds (one attempt, nothing learned).
 #[tokio::test]
 async fn a_widened_lane_repairs_and_learns_the_field_verdict() {
-    for (kind, provider_toml) in widened_lanes() {
+    for (kind, provider_toml, rejection) in widened_lanes() {
         // Arrange
-        let _injection = provisional::inject(REJECTED_PATH);
-        let (router, seen) = seat_on(provider_toml, Answer::ServeRepaired);
+        let (router, seen) = widened_seat_on(provider_toml, rejection);
 
         // Act
         let dispatched = router
@@ -1157,7 +1270,8 @@ async fn a_widened_lane_repairs_and_learns_the_field_verdict() {
         // Assert
         assert!(
             dispatched.result.is_ok(),
-            "{kind}: the repaired retry serves"
+            "{kind}: the repaired retry serves: {:?}",
+            dispatched.result.err()
         );
         assert_eq!(seen.repairs(), 1, "{kind}: exactly one repair");
         assert_eq!(
