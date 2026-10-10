@@ -61,7 +61,7 @@ pub fn translate_tool(td: &ToolDef) -> AnthropicTool {
 /// The OpenAI Responses hosted-MCP tool `type`. Anthropic's own connector
 /// types (`mcp_toolset`, the `mcp_servers` body field) are distinct and are
 /// not matched.
-const RESPONSES_HOSTED_MCP_TYPE: &str = "mcp";
+pub(super) const RESPONSES_HOSTED_MCP_TYPE: &str = "mcp";
 
 fn is_responses_hosted_mcp(td: &ToolDef) -> bool {
     match td {

@@ -32,6 +32,7 @@ pub mod system_content;
 pub(crate) mod token_source;
 pub mod tool_def;
 pub(crate) mod tool_pairing;
+mod translation_report;
 pub mod upstream_meta;
 pub(crate) mod volatile;
 
@@ -95,6 +96,7 @@ pub use system_content::{SystemBlock, SystemContent};
 pub use token_source::{StaticToken, TokenSource};
 pub use tool_def::{CustomTool, ToolDef};
 pub use tool_pairing::{ToolPairingDefect, ToolPairingError, validate_tool_pairing};
+pub use translation_report::{TranslationKey, TranslationReason, TranslationReport};
 pub use upstream_meta::{
     AnthropicUnifiedQuota, CodexQuota, OpeningUsage, OpeningUsageOrigin, UpstreamMeta,
     UsageInputSource,

@@ -41,7 +41,9 @@
 use serde_json::Value;
 
 use routectl_core::cache_control::{self, BreakpointPosition};
-use routectl_core::{ChatRequest, CoreHistoryReasoning, Error, Result};
+use routectl_core::{
+    ChatRequest, CoreHistoryReasoning, Error, Result, TranslationKey, TranslationReason,
+};
 
 // `MessageContent`, `ReasoningDetail`, and `ReasoningDetailKind` are
 // referenced by the inline test modules below via `use super::*;`; the
@@ -103,17 +105,28 @@ use super::extras::{effort_ratio, is_routectl_managed_key};
 pub(crate) use super::tools::HostedMcpToolWithholdTally;
 pub(crate) use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
-/// Count this request's hosted-MCP tool withhold on the anthropic lane. A
-/// policy action rather than a drop: the tool carries the caller's
-/// remote-server credentials, and routectl withholds it from this upstream
-/// whatever the upstream would make of it. Takes the request so a background
-/// probe records nothing -- see `super::probe_aware_metrics`.
+/// Count this request's hosted-MCP tool withhold on the anthropic lane and
+/// report it on the attempt's translation report. A policy action rather than
+/// a drop: the tool carries the caller's remote-server credentials, and
+/// routectl withholds it from this upstream whatever the upstream would make
+/// of it. Takes the request so a background probe records nothing -- see
+/// `super::probe_aware_metrics`.
 fn flush_hosted_mcp_tally(hosted_mcp: &HostedMcpToolWithholdTally, req: &ChatRequest) {
     if hosted_mcp.withheld() && super::is_client_traffic(req) {
         crate::translation_drop_metrics::record_translation_policy_action(
             super::LANE,
             "hosted_mcp_tool_withheld",
         );
+        report_hosted_mcp_withheld(req);
+    }
+}
+
+fn report_hosted_mcp_withheld(req: &ChatRequest) {
+    let Some(report) = req.routectl_internal.translation_report.as_ref() else {
+        return;
+    };
+    if let Some(key) = TranslationKey::from_tool_type(super::tools::RESPONSES_HOSTED_MCP_TYPE) {
+        report.record(TranslationReason::HostedToolWithheld(key));
     }
 }
 

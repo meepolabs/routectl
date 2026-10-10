@@ -41,6 +41,11 @@ license.
 - `src/beta_repair_report.rs` -- `BetaRepairReport`: clone-shared slot where a
   provider records the client beta flags it stripped after a named rejection
   (deduped, first-seen order); the router `take`s it after the call
+- `src/translation_report.rs` -- `TranslationReport`: clone-shared per-attempt
+  slot where an egress records a tool it withheld or could not translate, as a
+  closed `TranslationReason` (`HostedToolWithheld`, `TranslationRejected`)
+  carrying only the date-stripped `TranslationKey`, never a label, URL or
+  header; deduped, first-seen order; skipped for background probes
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for
   unknown Anthropic SSE bytes (skip-serialized; preserves unknown
   content_block types verbatim through the canonical pipeline so Anthropic

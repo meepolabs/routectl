@@ -12,7 +12,8 @@
 use serde_json::Value;
 
 use routectl_core::{
-    ChatRequest, CustomTool, Result, ToolDef, cache_control::CacheControl, sanitize_for_log,
+    ChatRequest, CustomTool, Result, ToolDef, TranslationKey, TranslationReason, TranslationReport,
+    cache_control::CacheControl, sanitize_for_log,
 };
 
 use crate::anthropic_api::request::translate_tool;
@@ -69,8 +70,9 @@ pub(super) fn build_tool_config(
         Some(canonical) => {
             let mut out = Vec::with_capacity(canonical.len());
             let mut builtin_dropped = false;
+            let report = client_translation_report(req);
             for td in canonical {
-                append_tool_with_cache_point(id, td, &mut out, &mut builtin_dropped);
+                append_tool_with_cache_point(id, td, &mut out, &mut builtin_dropped, report);
             }
             if builtin_dropped {
                 // Once per REQUEST, not once per dropped tool: a request
@@ -174,12 +176,14 @@ fn is_tool_choice_none(tc: Option<&Value>) -> bool {
 ///
 /// `builtin_dropped` is set when an Anthropic-builtin tool is discarded, so
 /// the caller can bump the drop counter once for the whole request rather
-/// than once per dropped tool.
+/// than once per dropped tool. The dropped tool's key is also recorded on
+/// `report` when one is listening.
 fn append_tool_with_cache_point(
     id: &str,
     td: &ToolDef,
     out: &mut Vec<ConverseToolDef>,
     builtin_dropped: &mut bool,
+    report: Option<&TranslationReport>,
 ) {
     let (spec, cache_control) = match td {
         ToolDef::Custom(c) => (custom_tool_to_converse(c), c.cache_control.clone()),
@@ -211,8 +215,9 @@ fn append_tool_with_cache_point(
             // verdict per foundations sec 14: deletion stays blocked until
             // this lane's own wire evidence contradicts it.
             // TRANSLATION-DROP: lane=bedrock-converse class=builtin_tool_unrepresentable test=anthropic_builtin_tool_drops_and_bumps_the_drop_counter_once
-            AnthropicTool::Builtin(_) => {
+            AnthropicTool::Builtin(builtin) => {
                 *builtin_dropped = true;
+                report_builtin_withheld(report, &builtin);
                 tracing::warn!(
                     provider = id,
                     "dropping Anthropic-builtin tool on Converse egress; \
@@ -225,6 +230,29 @@ fn append_tool_with_cache_point(
     out.push(spec);
     if let Some(cc) = cache_control {
         out.push(cache_point_tool_def(&cc));
+    }
+}
+
+/// The attempt's translation report, or `None` for a background probe: the
+/// report describes what a client's request lost, and a probe is routectl's
+/// own traffic.
+const fn client_translation_report(req: &ChatRequest) -> Option<&TranslationReport> {
+    if req.routectl_internal.background_probe {
+        return None;
+    }
+    req.routectl_internal.translation_report.as_ref()
+}
+
+fn report_builtin_withheld(report: Option<&TranslationReport>, builtin: &Value) {
+    let Some(report) = report else {
+        return;
+    };
+    let key = builtin
+        .get("type")
+        .and_then(Value::as_str)
+        .and_then(TranslationKey::from_tool_type);
+    if let Some(key) = key {
+        report.record(TranslationReason::HostedToolWithheld(key));
     }
 }
 

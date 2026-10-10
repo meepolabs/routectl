@@ -19,7 +19,10 @@
 
 use serde_json::{Value, json};
 
-use routectl_core::{ChatRequest, CustomTool, Message, MessageContent, Role, ToolDef};
+use routectl_core::{
+    ChatRequest, CustomTool, Message, MessageContent, Role, ToolDef, TranslationKey,
+    TranslationReason, TranslationReport,
+};
 
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 
@@ -428,4 +431,129 @@ fn a_hosted_mcp_tool_choice_alone_counts_one_policy_action_and_warns_without_val
     let rendered = format!("{events:?}");
     assert!(!rendered.contains(CHOICE_NAME_SENTINEL), "{rendered}");
     assert!(!rendered.contains(LABEL_SENTINEL), "{rendered}");
+}
+
+fn listening(mut req: ChatRequest) -> (ChatRequest, TranslationReport) {
+    let report = TranslationReport::default();
+    req.routectl_internal.translation_report = Some(report.clone());
+    (req, report)
+}
+
+fn withheld(tool_type: &str) -> TranslationReason {
+    TranslationReason::HostedToolWithheld(
+        TranslationKey::from_tool_type(tool_type).expect("token-shaped tool type"),
+    )
+}
+
+fn web_search_builtin() -> Value {
+    json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 3})
+}
+
+#[test]
+#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
+fn an_anthropic_api_hosted_mcp_withhold_is_reported_under_the_mcp_key() {
+    for req in [
+        mcp_and_function_request(),
+        with_tool_choice(
+            request_with_tools(vec![function_tool()]),
+            hosted_mcp_tool_choice(),
+        ),
+    ] {
+        // Arrange -- the tool withhold and the choice-only withhold.
+        let (req, report) = listening(req);
+
+        // Act
+        let _ = anthropic_api_body(&req);
+
+        // Assert
+        assert_eq!(report.take(), vec![withheld("mcp")]);
+    }
+}
+
+#[test]
+#[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
+fn a_converse_builtin_drop_is_reported_under_its_canonical_key() {
+    // Arrange
+    let (req, report) = listening(request_with_tools(vec![
+        ToolDef::Other(web_search_builtin()),
+        ToolDef::Other(web_search_builtin()),
+        function_tool(),
+    ]));
+
+    // Act
+    let _ = bedrock_converse_body(&req);
+
+    // Assert
+    assert_eq!(report.take(), vec![withheld("web_search")]);
+}
+
+#[test]
+fn a_request_whose_tools_all_translate_reports_nothing() {
+    // Arrange -- positive control for the two tests above: the same lanes,
+    // with nothing withheld or dropped.
+    let (anthropic_req, anthropic_report) = listening(request_with_tools(vec![
+        ToolDef::Other(web_search_builtin()),
+        function_tool(),
+    ]));
+    let (converse_req, converse_report) = listening(request_with_tools(vec![function_tool()]));
+
+    // Act
+    let _ = anthropic_api_body(&anthropic_req);
+    let _ = bedrock_converse_body(&converse_req);
+
+    // Assert
+    assert!(anthropic_report.take().is_empty());
+    assert!(converse_report.take().is_empty());
+}
+
+#[test]
+#[serial_test::serial(
+    anthropic_hosted_mcp_tool_withheld,
+    bedrock_converse_builtin_tool_unrepresentable
+)]
+fn a_background_probe_reports_no_translation_reason() {
+    // Arrange
+    let mut probe = request_with_tools(vec![
+        ToolDef::Other(hosted_mcp_tool()),
+        ToolDef::Other(web_search_builtin()),
+        function_tool(),
+    ]);
+    probe.routectl_internal.background_probe = true;
+    let (probe, report) = listening(probe);
+
+    // Act
+    let anthropic = anthropic_api_body(&probe);
+    let converse = bedrock_converse_body(&probe);
+
+    // Assert -- still withheld / dropped from the wire, but not reported.
+    assert_no_mcp_value("anthropic-api probe", &anthropic);
+    assert!(!converse.contains("web_search_20250305"), "{converse}");
+    assert!(report.take().is_empty());
+}
+
+#[test]
+#[serial_test::serial(
+    anthropic_hosted_mcp_tool_withheld,
+    bedrock_converse_builtin_tool_unrepresentable
+)]
+fn the_translation_report_debug_form_names_no_tool_value() {
+    // Arrange
+    let (req, report) = listening(with_tool_choice(
+        mcp_and_function_request(),
+        hosted_mcp_tool_choice(),
+    ));
+
+    // Act
+    let _ = anthropic_api_body(&req);
+    let _ = bedrock_converse_body(&req);
+    let slot_debug = format!("{:?}", req.routectl_internal);
+    let reasons = report.take();
+    let reasons_debug = format!("{reasons:?}");
+
+    // Assert -- the positive control: the reason really was recorded.
+    assert_eq!(reasons, vec![withheld("mcp")]);
+    for rendered in [slot_debug, reasons_debug] {
+        assert_no_mcp_value("translation report", &rendered);
+        assert!(!rendered.contains(CHOICE_NAME_SENTINEL), "{rendered}");
+    }
 }
