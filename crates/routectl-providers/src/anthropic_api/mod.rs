@@ -1171,6 +1171,10 @@ mod redact_display_tests;
 #[path = "client_beta_withhold_tests.rs"]
 mod client_beta_withhold_tests;
 
+#[cfg(test)]
+#[path = "client_beta_floor_site_tests.rs"]
+mod client_beta_floor_site_tests;
+
 // A cloak relocation refusal halts all three dispatch paths before egress.
 #[cfg(test)]
 #[path = "mod_cloak_refusal_tests.rs"]

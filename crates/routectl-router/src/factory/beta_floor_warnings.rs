@@ -8,6 +8,12 @@
 //! module doc of `warnings_beta_floor_tests.rs`, and every site has a row
 //! there. A change to the egress composition updates that list, this model
 //! and the table together.
+//!
+//! The egress facts this model relies on are pinned on the provider side by
+//! `client_beta_floor_site_tests.rs` in `routectl-providers`
+//! (`anthropic_api`), which drives `build_headers` per site with the
+//! condition true and false; its rows carry the same S1-S8 labels as the
+//! table here.
 
 use routectl_core::identity::anthropic::{
     EFFORT_BETA, OAUTH_ANTHROPIC_BETA, REDACT_THINKING_BETA, STRUCTURED_OUTPUTS_BETA,
@@ -259,7 +265,8 @@ impl EgressLane {
                 "always, {OWN_OAUTH_LANE} with cloak.mode = \"always\""
             )),
             CloakMode::Auto => Some(format!(
-                "on every request without a Claude Code session header, {OWN_OAUTH_LANE}"
+                "on requests routectl classifies as non-Claude-Code (normally: no Claude Code \
+                 session header), {OWN_OAUTH_LANE}"
             )),
         }
     }
