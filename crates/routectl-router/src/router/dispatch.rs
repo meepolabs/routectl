@@ -37,6 +37,7 @@ use super::ReplayDegradation;
 use super::beta_report_learn::install_beta_repair_report;
 use super::cache_plan::{AutoCacheRequestPlan, CacheDecision, CacheInjection};
 use super::capability_learn::LearnDedupeKey;
+use super::capability_observe::{UntranslatedCapabilities, install_translation_report};
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
@@ -624,6 +625,7 @@ impl Router {
                 // delayed and its outcome does not depend on it.
                 self.on_admitted_request(target, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
+                let translation_report = install_translation_report(&mut attempt_req);
                 let result = run_with_timeout(
                     provider_name,
                     provider.as_ref(),
@@ -755,7 +757,14 @@ impl Router {
                                     .extend(plan.settle_disproved(self.field_verdicts()));
                             }
                         }
-                        self.observe_capabilities(&req, &resp, target, meta, Instant::now());
+                        self.observe_capabilities(
+                            &req,
+                            &resp,
+                            target,
+                            &UntranslatedCapabilities::take_from(&translation_report),
+                            meta,
+                            Instant::now(),
+                        );
                         // Subscription-quota feed, the non-streaming half. The
                         // reading rides on the assembled response, and this arm
                         // is terminal (it returns immediately below), so the
@@ -1143,6 +1152,7 @@ impl Router {
                             remapped,
                             target,
                             &req,
+                            &UntranslatedCapabilities::take_from(&translation_report),
                             &mut learn_dedupe,
                             meta,
                             &mut learned_probe_guard,
@@ -1567,6 +1577,7 @@ impl Router {
                 // queues one job.
                 self.on_admitted_request(target, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
+                let translation_report = install_translation_report(&mut attempt_req);
                 let r = try_stream_with_first_content(
                     provider_name,
                     model,
@@ -1970,6 +1981,7 @@ impl Router {
                             remapped,
                             target,
                             &req,
+                            &UntranslatedCapabilities::take_from(&translation_report),
                             &mut learn_dedupe,
                             meta,
                             &mut learned_probe_guard,
@@ -3737,3 +3749,7 @@ mod reasoning_drop_warn_tests;
 #[cfg(test)]
 #[path = "opening_usage_fallback_tests.rs"]
 mod opening_usage_fallback_tests;
+
+#[cfg(test)]
+#[path = "translation_report_learn_tests.rs"]
+mod translation_report_learn_tests;

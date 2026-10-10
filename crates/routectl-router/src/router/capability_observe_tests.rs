@@ -219,7 +219,14 @@ fn kill_switch_fully_disables_observation() {
 
     // Act
     let events = capture_events(|| {
-        router.observe_capabilities(&req, &resp, &target, &mut meta, Instant::now());
+        router.observe_capabilities(
+            &req,
+            &resp,
+            &target,
+            &UntranslatedCapabilities::default(),
+            &mut meta,
+            Instant::now(),
+        );
     });
 
     // Assert: zero writes, zero ride-alongs, zero counters, zero WARNs.
@@ -285,7 +292,14 @@ fn a_forwarded_credential_target_never_learns_a_positive() {
 
         // Act
         let events = capture_events(|| {
-            router.observe_capabilities(&req, &resp, &target, &mut meta, Instant::now());
+            router.observe_capabilities(
+                &req,
+                &resp,
+                &target,
+                &UntranslatedCapabilities::default(),
+                &mut meta,
+                Instant::now(),
+            );
         });
 
         // Assert: registry entry, ledger ride-along, counter, and WARN move
@@ -333,7 +347,14 @@ fn verified_structured_output_admits_and_rides_along() {
 
     // Act
     let events = capture_events(|| {
-        router.observe_capabilities(&req, &resp, &target, &mut meta, Instant::now());
+        router.observe_capabilities(
+            &req,
+            &resp,
+            &target,
+            &UntranslatedCapabilities::default(),
+            &mut meta,
+            Instant::now(),
+        );
     });
 
     // Assert: one acting positive rode out with the replay columns.
@@ -382,7 +403,14 @@ fn verified_positive_no_ops_when_a_negative_resides() {
     let mut meta = DispatchMeta::for_alias("m1");
 
     // Act
-    router.observe_capabilities(&req, &resp, &target, &mut meta, Instant::now());
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &UntranslatedCapabilities::default(),
+        &mut meta,
+        Instant::now(),
+    );
 
     // Assert: the passive positive is suppressed -- no ride-along, no counter,
     // the negative stays resident.
@@ -421,7 +449,14 @@ fn only_a_positive_verdict_transition_rides_out_for_the_ledger() {
             Prior::Empty => t0,
             Prior::ResidentPositive => {
                 let mut seed = DispatchMeta::for_alias("m1");
-                router.observe_capabilities(&req, &resp, &target, &mut seed, t0);
+                router.observe_capabilities(
+                    &req,
+                    &resp,
+                    &target,
+                    &UntranslatedCapabilities::default(),
+                    &mut seed,
+                    t0,
+                );
                 assert_eq!(seed.capability_observations.len(), 1, "{name}: seed");
                 t0
             }
@@ -458,7 +493,14 @@ fn only_a_positive_verdict_transition_rides_out_for_the_ledger() {
         let mut meta = DispatchMeta::for_alias("m1");
 
         // Act
-        router.observe_capabilities(&req, &resp, &target, &mut meta, now);
+        router.observe_capabilities(
+            &req,
+            &resp,
+            &target,
+            &UntranslatedCapabilities::default(),
+            &mut meta,
+            now,
+        );
 
         // Assert: the positive acts either way, but only a transition rides out.
         assert_eq!(meta.capability_observations.len(), want, "{name}");
@@ -480,14 +522,23 @@ fn a_same_verdict_refresh_still_counts_as_an_acting_positive() {
         &req,
         &resp,
         &target,
+        &UntranslatedCapabilities::default(),
         &mut DispatchMeta::for_alias("m1"),
         now,
     );
 
     // Act
     let mut meta = DispatchMeta::for_alias("m1");
-    let events =
-        capture_events(|| router.observe_capabilities(&req, &resp, &target, &mut meta, now));
+    let events = capture_events(|| {
+        router.observe_capabilities(
+            &req,
+            &resp,
+            &target,
+            &UntranslatedCapabilities::default(),
+            &mut meta,
+            now,
+        )
+    });
 
     // Assert: the counter tracks acting traffic; the WARN and the ledger
     // ride-along stay with transitions.
@@ -516,7 +567,14 @@ fn forced_search_absent_is_f3_and_needs_corroboration() {
 
     // Act 1 -- a single inferred observation is pending, not acting.
     let mut meta1 = DispatchMeta::for_alias("m1");
-    router.observe_capabilities(&req, &resp, &target, &mut meta1, now);
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &UntranslatedCapabilities::default(),
+        &mut meta1,
+        now,
+    );
     assert!(
         meta1.capability_observations.is_empty(),
         "a first inferred observation must not act"
@@ -525,8 +583,16 @@ fn forced_search_absent_is_f3_and_needs_corroboration() {
 
     // Act 2 -- a second (corroborating) observation within the window acts.
     let mut meta2 = DispatchMeta::for_alias("m1");
-    let events =
-        capture_events(|| router.observe_capabilities(&req, &resp, &target, &mut meta2, now));
+    let events = capture_events(|| {
+        router.observe_capabilities(
+            &req,
+            &resp,
+            &target,
+            &UntranslatedCapabilities::default(),
+            &mut meta2,
+            now,
+        )
+    });
 
     // Assert: the corroborated F3 rode out, advisory-only in the registry.
     assert_eq!(meta2.capability_observations.len(), 1);
@@ -571,7 +637,14 @@ fn distinct_capabilities_each_ride_exactly_once() {
     let mut meta = DispatchMeta::for_alias("m1");
 
     // Act
-    router.observe_capabilities(&req, &resp, &target, &mut meta, Instant::now());
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &UntranslatedCapabilities::default(),
+        &mut meta,
+        Instant::now(),
+    );
 
     // Assert: exactly one event per distinct capability, no double-count.
     let mut keys: Vec<&str> = meta
@@ -607,8 +680,22 @@ fn schema_mismatch_body_is_f3_suspect() {
 
     // Act -- two observations to corroborate the inferred suspect absence.
     let mut meta = DispatchMeta::for_alias("m1");
-    router.observe_capabilities(&req, &resp, &target, &mut meta, now);
-    router.observe_capabilities(&req, &resp, &target, &mut meta, now);
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &UntranslatedCapabilities::default(),
+        &mut meta,
+        now,
+    );
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &UntranslatedCapabilities::default(),
+        &mut meta,
+        now,
+    );
 
     // Assert: a single acting F3 suspect on the second observation.
     assert_eq!(meta.capability_observations.len(), 1);
@@ -777,7 +864,14 @@ fn an_admitted_positive_retains_its_evidence_class_on_the_resident_entry() {
     let mut meta = DispatchMeta::for_alias("m1");
 
     // Act
-    router.observe_capabilities(&req, &resp, &target, &mut meta, Instant::now());
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &UntranslatedCapabilities::default(),
+        &mut meta,
+        Instant::now(),
+    );
 
     // Assert
     let snap = router.learned_capabilities.snapshot();
@@ -806,9 +900,23 @@ fn an_admitted_suspect_absence_retains_its_evidence_class_on_the_resident_entry(
 
     // Act
     let mut meta = DispatchMeta::for_alias("m1");
-    router.observe_capabilities(&req, &resp, &target, &mut meta, now);
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &UntranslatedCapabilities::default(),
+        &mut meta,
+        now,
+    );
     let mut meta2 = DispatchMeta::for_alias("m1");
-    router.observe_capabilities(&req, &resp, &target, &mut meta2, now);
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &target,
+        &UntranslatedCapabilities::default(),
+        &mut meta2,
+        now,
+    );
 
     // Assert
     let snap = router.learned_capabilities.snapshot();

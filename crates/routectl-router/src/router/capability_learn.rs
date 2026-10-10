@@ -7,6 +7,7 @@ use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::{ChatRequest, Error};
 
+use super::capability_observe::UntranslatedCapabilities;
 use super::{DispatchMeta, DispatchTarget, LearnedProbeGuard, Router};
 use crate::capability_matcher::resolve_requested_capability;
 
@@ -736,6 +737,9 @@ impl Router {
     /// life of a single request: the error arm fires per attempt, so a
     /// same-request retry (or a per-target re-entry) must never manufacture
     /// a second observation and falsely confirm an inferred signal.
+    ///
+    /// A capability in `untranslated` never learns: the attempt's egress kept
+    /// it off the wire, so the rejection cannot be about it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_for_learning(
         &self,
@@ -744,6 +748,7 @@ impl Router {
         remapped: bool,
         target: &DispatchTarget,
         req: &ChatRequest,
+        untranslated: &UntranslatedCapabilities,
         dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
         probe_guard: &mut LearnedProbeGuard,
@@ -780,6 +785,9 @@ impl Router {
             self.observe_feature_naming_drift(provider_kind, cf, target, req, dedupe);
             return;
         };
+        if untranslated.names(&resolved.0) {
+            return;
+        }
         self.commit_learned_observation(
             resolved,
             &cf.class,

@@ -299,13 +299,27 @@ fn scenario_b_forced_search_absent_acts_f3_yet_routing_stays_allow() {
     // Act: a first inferred observation is pending; a second within the window
     // corroborates and acts.
     let mut meta1 = DispatchMeta::for_alias("m1");
-    router.observe_capabilities(&req, &resp, &t, &mut meta1, now);
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &t,
+        &UntranslatedCapabilities::default(),
+        &mut meta1,
+        now,
+    );
     assert!(
         meta1.capability_observations.is_empty(),
         "a first inferred observation must not act",
     );
     let mut meta2 = DispatchMeta::for_alias("m1");
-    router.observe_capabilities(&req, &resp, &t, &mut meta2, now);
+    router.observe_capabilities(
+        &req,
+        &resp,
+        &t,
+        &UntranslatedCapabilities::default(),
+        &mut meta2,
+        now,
+    );
 
     // Assert: the corroborated F3 acted. The registry stores it as the raw
     // negative material -- verdict token `broken`, phase `f3`, source `live`
@@ -356,6 +370,7 @@ fn scenario_c_self_identifying_negative_replaces_resident_verified() {
         &structured_output_request(&["name"]),
         &clean_response(assistant_text(r#"{"name":"ok"}"#), None),
         &t,
+        &UntranslatedCapabilities::default(),
         &mut meta,
         now,
     );
@@ -402,6 +417,7 @@ fn scenario_d_verified_positive_masks_catalog_prior() {
         &web_search_request(),
         &clean_response(assistant_text("done"), Some(usage)),
         &seed,
+        &UntranslatedCapabilities::default(),
         &mut meta,
         Instant::now(),
     );
@@ -453,7 +469,14 @@ fn scenario_e_degraded_successes_produce_no_verdict() {
     // Act
     for resp in &degraded {
         let mut meta = DispatchMeta::for_alias("m1");
-        router.observe_capabilities(&req, resp, &t, &mut meta, now);
+        router.observe_capabilities(
+            &req,
+            resp,
+            &t,
+            &UntranslatedCapabilities::default(),
+            &mut meta,
+            now,
+        );
         assert!(
             meta.capability_observations.is_empty(),
             "a degraded response must ride nothing out",
@@ -480,6 +503,7 @@ fn scenario_f_identical_observations_and_now_yield_identical_registry() {
             &structured_output_request(&["name"]),
             &clean_response(assistant_text(r#"{"name":"ok"}"#), None),
             &t,
+            &UntranslatedCapabilities::default(),
             &mut DispatchMeta::for_alias("m1"),
             now,
         );
@@ -489,6 +513,7 @@ fn scenario_f_identical_observations_and_now_yield_identical_registry() {
             &fs_req,
             &fs_resp,
             &t,
+            &UntranslatedCapabilities::default(),
             &mut DispatchMeta::for_alias("m1"),
             now,
         );
@@ -496,6 +521,7 @@ fn scenario_f_identical_observations_and_now_yield_identical_registry() {
             &fs_req,
             &fs_resp,
             &t,
+            &UntranslatedCapabilities::default(),
             &mut DispatchMeta::for_alias("m1"),
             now,
         );

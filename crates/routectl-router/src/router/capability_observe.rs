@@ -26,6 +26,7 @@ use routectl_core::capability::{
     EvidenceSource, FailurePhase, STRUCTURED_OUTPUT, SignalTier, WEB_SEARCH,
 };
 use routectl_core::{ChatRequest, ChatResponse, ReasoningConfig};
+use routectl_core::{TranslationReason, TranslationReport};
 use serde_json::Value;
 
 use super::{DispatchMeta, DispatchTarget, Router};
@@ -34,6 +35,40 @@ use crate::capability_detect::{
 };
 use crate::feature_keys::ToolChoiceForce;
 use crate::learned_capability::{GenerationOutcome, ObserveOutcome, PositiveOutcome};
+
+/// Install a fresh, empty translation report on the request about to go
+/// upstream and return the handle the router reads after the call.
+///
+/// Called once per provider call, as the beta repair report is: clones share
+/// one slot, so a slot reused across calls would carry an earlier attempt's
+/// withhold into a later attempt whose egress sent the tool.
+pub(super) fn install_translation_report(attempt_req: &mut ChatRequest) -> TranslationReport {
+    let report = TranslationReport::default();
+    attempt_req.routectl_internal.translation_report = Some(report.clone());
+    report
+}
+
+/// The capabilities one attempt's egress did not carry onto the wire, read
+/// once after the call returns. The upstream answered a request without
+/// them, so that attempt's success or rejection is no evidence about them,
+/// and neither learner takes any.
+#[derive(Debug, Default)]
+pub(super) struct UntranslatedCapabilities(Vec<TranslationReason>);
+
+impl UntranslatedCapabilities {
+    /// Drain `report` into the attempt's untranslated set.
+    pub(super) fn take_from(report: &TranslationReport) -> Self {
+        Self(report.take())
+    }
+
+    /// Whether the attempt's egress withheld or refused `capability_key`.
+    pub(super) fn names(&self, capability_key: &str) -> bool {
+        self.0.iter().any(|reason| match reason {
+            TranslationReason::HostedToolWithheld(key)
+            | TranslationReason::TranslationRejected(key) => key.as_str() == capability_key,
+        })
+    }
+}
 
 /// A single response-evidence observation captured on the terminal
 /// successful non-streaming dispatch, riding out on [`DispatchMeta`] to the
@@ -102,11 +137,15 @@ impl Router {
     /// gates its negatives the same way), or the target carries no
     /// provider-kind (a legacy / direct-construction target -- fail closed,
     /// exactly as the learn path does).
+    ///
+    /// An observation about a capability in `untranslated` is dropped: the
+    /// egress kept it off the wire, so the response says nothing about it.
     pub(super) fn observe_capabilities(
         &self,
         req: &ChatRequest,
         resp: &ChatResponse,
         target: &DispatchTarget,
+        untranslated: &UntranslatedCapabilities,
         meta: &mut DispatchMeta,
         now: Instant,
     ) {
@@ -128,7 +167,7 @@ impl Router {
         // therefore dedupes on the capability key alone.
         let mut dedupe: HashSet<&'static str> = HashSet::new();
         for obs in observations {
-            if !dedupe.insert(obs.capability_key) {
+            if untranslated.names(obs.capability_key) || !dedupe.insert(obs.capability_key) {
                 continue;
             }
             let Some(learned_key) = target.learned_key(obs.capability_key) else {
