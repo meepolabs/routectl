@@ -1114,36 +1114,110 @@ async fn a_loopback_target_repairs_nothing_and_mints_nothing() {
     assert!(dispatched.result.is_err(), "so the rejection stands");
 }
 
-#[tokio::test]
-async fn a_non_anthropic_lane_performs_no_field_repair() {
-    // Stage 1 acts on one lane. A second lane's rejection envelope has not
-    // been captured, and the Bedrock lane additionally rewrites a dotted
-    // capability key -- so both are excluded at this arm rather than by
-    // changing the shared normalizer other capability classes depend on.
-    let _injection = provisional::inject(REJECTED_PATH);
-    let mut config: Config = toml::from_str(
-        "\n[providers.p0]\nkind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n",
-    )
-    .expect("valid test toml");
+/// A one-seat chain on a single provider entry spelled by `provider_toml`
+/// (the body of `[providers.p0]`).
+fn seat_on(provider_toml: &str, answer: Answer) -> (Router, Arc<Observed>) {
+    let mut config: Config =
+        toml::from_str(&format!("\n[providers.p0]\n{provider_toml}")).expect("valid test toml");
     config
         .aliases
         .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-    let (router, observed, _mocks) = install(config, 1, Answer::ServeRepaired);
+    let (router, mut observed, _mocks) = install(config, 1, answer);
+    (router, observed.remove(0))
+}
 
-    let dispatched = router
-        .complete_with_options(req_on(ALIAS), RouterOptions::new())
-        .await;
+/// `[providers.p0]` bodies for each non-anthropic kind field repair acts on.
+fn widened_lanes() -> Vec<(&'static str, &'static str)> {
+    let mut lanes = vec![(
+        "openai-compat",
+        "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n",
+    )];
+    if cfg!(feature = "bedrock") {
+        lanes.push((
+            "bedrock",
+            "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n",
+        ));
+    }
+    lanes
+}
 
-    assert_eq!(
-        observed[0].calls(),
-        1,
-        "a lane outside this stage performs no field repair",
-    );
-    assert!(
-        dispatched.meta.learned_capabilities.is_empty(),
-        "and mints no field verdict",
-    );
-    assert!(dispatched.result.is_err());
+#[tokio::test]
+async fn a_widened_lane_repairs_and_learns_the_field_verdict() {
+    for (kind, provider_toml) in widened_lanes() {
+        // Arrange
+        let _injection = provisional::inject(REJECTED_PATH);
+        let (router, seen) = seat_on(provider_toml, Answer::ServeRepaired);
+
+        // Act
+        let dispatched = router
+            .complete_with_options(req_on(ALIAS), RouterOptions::new())
+            .await;
+
+        // Assert
+        assert!(
+            dispatched.result.is_ok(),
+            "{kind}: the repaired retry serves"
+        );
+        assert_eq!(seen.repairs(), 1, "{kind}: exactly one repair");
+        assert_eq!(
+            seen.carried_per_attempt(),
+            vec![true, false],
+            "{kind}: the retry went upstream without the field",
+        );
+        assert_eq!(
+            dispatched.meta.learned_capabilities.len(),
+            1,
+            "{kind}: the confirmed repair persists one verdict",
+        );
+        let event = &dispatched.meta.learned_capabilities[0];
+        assert_eq!(
+            event.capability_key,
+            rejected_key(),
+            "{kind}: the learned key is the qualified path, unreduced",
+        );
+        assert_eq!(
+            event.provider_kind, kind,
+            "{kind}: keyed on the lane's kind"
+        );
+        assert!(
+            verdict_resident(&router, "m0"),
+            "{kind}: resident after commit"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_lane_outside_the_repair_kinds_performs_no_field_repair() {
+    let mut refused: Vec<&str> = Vec::new();
+    if cfg!(feature = "openai-responses") {
+        refused.push(
+            "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n",
+        );
+    }
+    if cfg!(feature = "gemini") {
+        refused.push("kind = \"gemini\"\napi_key_ref = \"literal:k\"\n");
+    }
+    for provider_toml in refused {
+        // Arrange
+        let _injection = provisional::inject(REJECTED_PATH);
+        let (router, seen) = seat_on(provider_toml, Answer::ServeRepaired);
+
+        // Act
+        let dispatched = router
+            .complete_with_options(req_on(ALIAS), RouterOptions::new())
+            .await;
+
+        // Assert
+        assert_eq!(seen.calls(), 1, "{provider_toml}: no repaired retry");
+        assert!(
+            dispatched.meta.learned_capabilities.is_empty(),
+            "{provider_toml}: and no field verdict",
+        );
+        assert!(
+            dispatched.result.is_err(),
+            "{provider_toml}: the rejection stands"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

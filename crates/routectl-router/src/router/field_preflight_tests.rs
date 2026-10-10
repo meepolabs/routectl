@@ -708,10 +708,11 @@ fn a_stale_confirmation_from_a_since_relearned_incarnation_falls_open() {
     assert!(carries_field(&planned));
 }
 
+#[cfg(feature = "openai-responses")]
 #[test]
-fn a_non_anthropic_lane_falls_open_before_any_verdict_is_read() {
+fn a_lane_outside_the_repair_kinds_falls_open_before_any_verdict_is_read() {
     let (router, _seen) = install(
-        chain_config(ALIAS, 1, "openai-compat"),
+        chain_config(ALIAS, 1, "openai-responses"),
         1,
         Answer::ServeImmediately,
     );
@@ -721,7 +722,7 @@ fn a_non_anthropic_lane_falls_open_before_any_verdict_is_read() {
 
     let (planned, decision) = plan(&router, &req_on(ALIAS), "m0");
 
-    assert!(!decision.acted, "this stage acts on one lane only");
+    assert!(!decision.acted, "this stage does not act on this kind");
     assert_eq!(decision.reason, FIELD_PREFLIGHT_UNSUPPORTED_LANE);
     assert!(carries_field(&planned));
 }
@@ -1452,17 +1453,20 @@ fn every_fail_open_arm_returns_a_serialized_equal_original() {
         FIELD_PREFLIGHT_NOT_ELIGIBLE,
     ));
 
-    let (router, _seen) = install(
-        chain_config(ALIAS, 1, "openai-compat"),
-        1,
-        Answer::ServeImmediately,
-    );
-    cases.push((
-        "wrong lane",
-        router,
-        original.clone(),
-        FIELD_PREFLIGHT_UNSUPPORTED_LANE,
-    ));
+    #[cfg(feature = "openai-responses")]
+    {
+        let (router, _seen) = install(
+            chain_config(ALIAS, 1, "openai-responses"),
+            1,
+            Answer::ServeImmediately,
+        );
+        cases.push((
+            "wrong lane",
+            router,
+            original.clone(),
+            FIELD_PREFLIGHT_UNSUPPORTED_LANE,
+        ));
+    }
 
     let mut config = chain_config(ALIAS, 1, ANTHROPIC);
     config.capability.enabled = false;
@@ -1503,7 +1507,11 @@ fn every_fail_open_arm_returns_a_serialized_equal_original() {
 
     assert_eq!(
         cases.len(),
-        7,
+        if cfg!(feature = "openai-responses") {
+            7
+        } else {
+            6
+        },
         "every refusal arm reachable here is covered"
     );
     for (label, router, req, expected_reason) in cases {

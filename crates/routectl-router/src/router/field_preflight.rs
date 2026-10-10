@@ -91,7 +91,8 @@ use crate::field_verdict::{FieldVerdictKey, PreflightAuthorization};
 
 use super::class_observe::DispatchSurface;
 use super::field_repair::{
-    ANTHROPIC_API_KIND, FieldRepairRow, FieldSurface, FieldTransform, TransformClass, present_rows,
+    FieldRepairRow, FieldSurface, FieldTransform, TransformClass, field_repair_admits_kind,
+    present_rows,
 };
 use super::rejection_parser::RejectionKind;
 use super::repair_budget::RepairBudget;
@@ -121,7 +122,8 @@ pub(super) const FIELD_PREFLIGHT_NO_GROUNDED_FIELD: &str = "no_grounded_field";
 pub(super) const FIELD_PREFLIGHT_WRITER_UNHEALTHY: &str = "capability_writer_unhealthy";
 
 /// Reason token: the capability learning kill switch is off, or the target is
-/// not on the one lane this stage acts on. Checked before any verdict is read.
+/// on a provider kind field repair does not act on. Checked before any verdict
+/// is read.
 ///
 /// Does NOT cover the forwarded-credential refusal. That one reports
 /// [`FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET`], because it is decided inside the
@@ -132,12 +134,12 @@ pub(super) const FIELD_PREFLIGHT_UNSUPPORTED_LANE: &str = "unsupported_lane";
 
 /// Reason token: this stage could not attribute a rejection from the target to
 /// a routectl-owned seat. Three causes, all decided by the one shared
-/// decision (`field_repair::attributable_anthropic_base_url`):
+/// decision (`field_repair::attributable_field_lane`):
 ///
 /// - the target authenticates with a FORWARDED client credential, so one
 ///   client's rejection must not mint a verdict steering every other client;
-/// - the target carries no attributable Anthropic API base URL (a Bedrock
-///   Mantle entry reports none and is refused here);
+/// - the target's entry has no classifiable egress base URL (a Bedrock
+///   Mantle sub-lane reports none and is refused here);
 /// - the URL it carries names a local hop.
 pub(super) const FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET: &str = "unattributable_target";
 
@@ -653,12 +655,12 @@ impl Router {
     }
 
     /// The LANE gates, shared with the reactive admission's exclusions: the
-    /// capability kill switch and the one provider kind this stage acts on.
+    /// capability kill switch and the provider kinds field repair admits.
     /// `Some(provider_kind)` when the lane admits.
     ///
     /// The forwarded-credential refusal is deliberately NOT repeated here. It
     /// lives in the shared attributability decision
-    /// (`field_repair::attributable_anthropic_base_url`), which
+    /// (`field_repair::attributable_field_lane`), which
     /// `preflight_identity` calls with this target's own flag, so every stage
     /// draws its verdict from one refusal set rather than from a local copy.
     ///
@@ -675,7 +677,7 @@ impl Router {
             return None;
         }
         let provider_kind = target.provider_kind?;
-        if provider_kind != ANTHROPIC_API_KIND {
+        if !field_repair_admits_kind(provider_kind) {
             return None;
         }
         Some(provider_kind)
@@ -684,9 +686,9 @@ impl Router {
     /// The ATTRIBUTION gates plus the field identity, mirroring the reactive
     /// admission rather than paraphrasing it: read the base URL from the
     /// operator's own provider entry (the target carries none), and refuse both
-    /// a lane that reports no attributable Anthropic API URL -- which is how a
-    /// Bedrock Mantle entry is refused, since its accessor answers `None` -- and
-    /// a URL naming a local hop. A rejection this stage could not have
+    /// a lane that reports no classifiable egress URL -- which is how a Bedrock
+    /// Mantle sub-lane is refused, since its accessor answers `None` -- and a
+    /// URL naming a local hop. A rejection this stage could not have
     /// attributed to the upstream is a verdict this stage must not act on
     /// proactively either.
     ///
@@ -699,12 +701,15 @@ impl Router {
     ) -> Result<FieldVerdictKey, &'static str> {
         // THE shared attributability read, so this stage cannot refuse a
         // target the reactive arm would act on, or act on one it would refuse.
-        crate::router::field_repair::attributable_anthropic_base_url(
+        let lane = crate::router::field_repair::attributable_field_lane(
             &self.config,
             &target.provider_name,
             target.use_forwarded_credential,
         )
         .ok_or(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)?;
+        if lane.provider_kind != provider_kind {
+            return Err(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
+        }
         let lane = target
             .learned_lane
             .as_ref()

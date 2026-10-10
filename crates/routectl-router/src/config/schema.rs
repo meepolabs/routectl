@@ -2030,6 +2030,41 @@ impl ProviderEntry {
         }
     }
 
+    /// The base URL this entry actually egresses to, when the configured
+    /// fields alone determine it; `None` when they do not.
+    ///
+    /// - `anthropic-api`: [`Self::anthropic_api_base_url`], so the Mantle
+    ///   sub-lane answers `None`;
+    /// - `openai-compat`: the configured `base_url`, except on the Mantle
+    ///   sub-lane, whose `base_url` is left empty and whose endpoint the
+    ///   factory derives from `bedrock_mantle.region`;
+    /// - native `bedrock`: the runtime endpoint derived from `region`, the
+    ///   same derivation the provider dials; a region that fails admission
+    ///   names no endpoint and answers `None`;
+    /// - every other kind: `None`. Their egress is not classified here, so a
+    ///   caller keying a decision on it fails closed.
+    pub fn classifiable_egress_base_url(&self) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            Self::AnthropicApi { .. } => self
+                .anthropic_api_base_url()
+                .map(std::borrow::Cow::Borrowed),
+            #[cfg(feature = "bedrock")]
+            Self::OpenaiCompat {
+                bedrock_mantle: Some(_),
+                ..
+            } => None,
+            Self::OpenaiCompat { base_url, .. } => Some(std::borrow::Cow::Borrowed(base_url)),
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { region, .. } => {
+                routectl_providers::bedrock::endpoint::bedrock_runtime_url(region)
+                    .ok()
+                    .map(std::borrow::Cow::Owned)
+            }
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
     /// Per-provider `header_extras`. Returns a reference to the
     /// per-variant map so the dispatch-layer merge helpers can read
     /// without re-matching the enum.

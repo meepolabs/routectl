@@ -533,7 +533,7 @@ the whole information content of a fail-open:
 |---|---|
 | `field_preflight_drop` | ACTED: the mapped field was dropped from the per-target request before dispatch |
 | `no_grounded_field` | The request carries no closed-table field at all |
-| `unsupported_lane` | The capability kill switch is off, or the target is not on the one lane this stage acts on |
+| `unsupported_lane` | The capability kill switch is off, or the target's provider kind is not one field repair acts on (`anthropic-api`, `bedrock`, `openai-compat`) |
 | `unattributable_target` | A rejection from this target could not be attributed to a routectl-owned seat: it authenticates with a forwarded client credential, carries no attributable Anthropic API base URL (a Bedrock Mantle entry reports none), or names a local hop |
 | `masked_by_override` | An operator `force_supported` override masks this field's capability cell for this target. The operator has said to send the field; the learned verdict is NOT deleted |
 | `no_identity` | No identity could be minted for the field on this target |

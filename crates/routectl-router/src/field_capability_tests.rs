@@ -571,32 +571,25 @@ fn the_anthropic_lane_normalizes_a_field_key_unchanged() {
     assert_eq!(normalize_capability_key(&key, ANTHROPIC), key);
 }
 
-/// Pinned Stage 1 exclusion, NOT a desired behavior: the Bedrock branch of
-/// the shared normalizer reduces a dotted key to its head segment, so two
-/// distinct fields collapse onto one token. Stage 1 does not mint or act on
-/// field keys for that lane and core normalization is deliberately left
-/// alone; this test fails the moment that changes, which is when the
-/// exclusion needs revisiting. The plain-catalog-key assertions are the
-/// control that keeps this from reading as a claim about all keys.
+/// The shared normalizer exempts this namespace on the Bedrock lane, so a
+/// dotted field key reaches the registry and ledger byte for byte there too.
+/// Welds the core exemption to the prefix this module actually mints with:
+/// if the two spellings drift apart, the field keys below truncate again and
+/// this reds. The plain-catalog-key assertions are the control that keeps the
+/// exemption from reading as a lane that stopped normalizing.
 #[test]
-fn the_bedrock_lane_currently_truncates_a_field_key_at_the_first_dot() {
+fn the_bedrock_lane_keeps_a_field_key_unchanged() {
     let nested = field_capability_key("thinking.display").expect("accepted");
     let sibling = field_capability_key("thinking.budget_tokens").expect("accepted");
 
-    let normalized = normalize_capability_key(&nested, "bedrock");
-
-    assert_eq!(normalized, format!("{FIELD_CAPABILITY_PREFIX}thinking"));
+    assert_eq!(normalize_capability_key(&nested, "bedrock"), nested);
+    assert_eq!(normalize_capability_key(&sibling, "bedrock"), sibling);
     assert_eq!(
-        normalize_capability_key(&sibling, "bedrock"),
-        normalized,
-        "the truncation is lossy: two distinct fields collapse onto one token"
+        normalize_capability_key("additionalModelRequestFields.anthropic_beta", "bedrock"),
+        "anthropic_beta"
     );
     assert_eq!(
         normalize_capability_key("web_search", ANTHROPIC),
-        "web_search"
-    );
-    assert_eq!(
-        normalize_capability_key("web_search", "bedrock"),
         "web_search"
     );
 }

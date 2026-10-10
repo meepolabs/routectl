@@ -1000,68 +1000,65 @@ fn the_anthropic_lane_preserves_the_minted_key_exactly() {
 }
 
 #[test]
-fn a_lane_whose_normalization_rewrites_the_key_acquires_no_field_identity() {
-    // Arrange -- the Bedrock normalizer truncates a dotted capability key at
-    // its first segment, so two structurally distinct fields would collapse
-    // onto one permanent token. Stage 1 excludes that lane rather than
-    // changing core normalization: the identity is refused at construction,
-    // which is upstream of every mint path.
-    let dotted = field_capability_key(GROUNDED_PATH).expect("accepted");
-    assert_ne!(
-        normalize_capability_key(&dotted, "bedrock"),
-        dotted,
-        "the exclusion is only meaningful while that lane still rewrites the key"
-    );
-
-    // Act / Assert -- no identity, so no guard and no verdict, for any dotted
-    // path on that lane.
-    for path in [
+fn a_dotted_field_key_on_bedrock_acquires_its_identity_byte_for_byte() {
+    // Arrange -- the Bedrock normalizer truncates an ordinary dotted key at its
+    // first segment; a field key is exempt, so structurally distinct fields
+    // keep distinct permanent tokens on that lane.
+    let paths = [
         GROUNDED_PATH,
         "thinking.display",
         "thinking.budget_tokens",
         "tools.0.input_schema",
-    ] {
-        assert!(
+    ];
+
+    // Act
+    let keys: Vec<String> = paths
+        .iter()
+        .map(|path| {
             FieldVerdictKey::new(&crate::state_key::StateKey::fixture("t"), path, "bedrock")
-                .is_none(),
-            "a rewritten key must acquire no identity: {path}"
-        );
+                .unwrap_or_else(|| panic!("a field key on bedrock acquires an identity: {path}"))
+                .capability_key()
+                .to_string()
+        })
+        .collect();
+
+    // Assert
+    for (path, key) in paths.iter().zip(&keys) {
+        assert_eq!(*key, field_capability_key(path).expect("accepted"));
     }
+    let distinct: std::collections::BTreeSet<&String> = keys.iter().collect();
+    assert_eq!(distinct.len(), paths.len(), "no two fields share a token");
+    // Control: the same lane still reduces a non-field dotted key, so the
+    // pass-through above is the exemption and not a lane that stopped
+    // normalizing.
+    assert_eq!(
+        normalize_capability_key("additionalModelRequestFields.anthropic_beta", "bedrock"),
+        "anthropic_beta"
+    );
 }
 
 #[test]
-fn a_bedrock_target_cannot_acquire_a_field_guard_for_a_dotted_path() {
-    // Arrange -- the refusal proven through the lifecycle, not only through
-    // the constructor: there is no path from a dotted field on that lane to a
-    // held guard, even on a perfectly mintable remote base.
+fn a_bedrock_target_acquires_a_field_guard_for_a_dotted_path() {
+    // Arrange
     let reg = registry();
     let t0 = Instant::now();
-
-    // Act
     let identity = FieldVerdictKey::new(
         &crate::state_key::StateKey::fixture("t"),
         GROUNDED_PATH,
         "bedrock",
-    );
-
-    // Assert
-    assert!(identity.is_none());
-    assert_eq!(reg.snapshot_len(), 0);
-
-    // The accept control on the SAME lane: a single-segment path is not
-    // rewritten, so it still mints. This is what keeps the refusal specific to
-    // the truncation rather than a blanket ban on the lane.
-    let single = FieldVerdictKey::new(
-        &crate::state_key::StateKey::fixture("t"),
-        "thinking",
-        "bedrock",
     )
-    .expect("an unrewritten key still mints on this lane");
-    assert_eq!(
-        single.capability_key(),
-        field_capability_key("thinking").expect("accepted")
+    .expect("a field key on bedrock acquires an identity");
+
+    // Act / Assert
+    assert!(
+        reg.admit_provisional(
+            &identity,
+            "https://bedrock-runtime.us-west-2.amazonaws.com",
+            1,
+            t0
+        )
+        .is_some()
     );
-    assert!(reg.admit_provisional(&single, REMOTE_BASE, 1, t0).is_some());
 }
 
 // --- canary suspension gates eligibility ---

@@ -49,20 +49,9 @@ use super::repair_budget::RepairBudget;
 
 use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
 
-/// The one provider kind Stage 1 acts on. Matches `ProviderEntry::kind_str`,
-/// so it round-trips with the `kind = "..."` discriminant in the operator's
-/// provider table.
-///
-/// Every other kind is excluded here rather than downstream, which is what
-/// keeps the Bedrock exclusion a property of this arm instead of a property
-/// of the shared capability-key normalizer: that lane's normalization
-/// rewrites a dotted key, and the field namespace is permanent, so a lane
-/// whose keys would be rewritten must never mint one. The verdict key
-/// refuses such a lane independently ([`FieldVerdictKey::new`]) -- two
-/// independent refusals for one irreversible mistake.
-/// Visible to the sibling pre-flight and probe-lifecycle modules so every arm
-/// gates on the SAME lane token this one does, rather than each carrying a
-/// copy that could drift from it.
+/// `anthropic-api`, as `ProviderEntry::kind_str` spells it: the lane the
+/// probe stages act on, and one of the kinds field repair admits
+/// ([`field_repair_admits_kind`]).
 pub(super) const ANTHROPIC_API_KIND: &str = "anthropic-api";
 
 /// Action token for the field-repair WARN: the L0 repair dropped the mapped
@@ -735,22 +724,52 @@ pub(super) fn grounded_closed_table_payloads(
         .filter_map(|row| row.surface.value_in(req).map(|value| (row.path, value)))
 }
 
-/// THE single attributability decision every field stage makes: the reactive
-/// `plan_field_carry`, the pre-flight planner, probe activation, and the
-/// probe's pre-dial recheck.
+/// The provider kinds whose rejections a field stage may act on: each has a
+/// rejection dialect in the parser and an egress the attributability decision
+/// can classify. Every other kind is refused by [`attributable_field_lane`]
+/// and by the lane gates that call [`field_repair_admits_kind`].
 ///
-/// Answers `Some(base_url)` only when ALL of:
+/// Absent on purpose: `openai-responses` (no rejection dialect in the parser,
+/// so a lane on it could only ever mint from evidence nothing localized) and
+/// `gemini`.
+const FIELD_REPAIR_KINDS: &[&str] = &[ANTHROPIC_API_KIND, BEDROCK_KIND, OPENAI_COMPAT_KIND];
+
+/// `bedrock`, as `ProviderEntry::kind_str` spells it.
+const BEDROCK_KIND: &str = "bedrock";
+
+/// `openai-compat`, as `ProviderEntry::kind_str` spells it.
+const OPENAI_COMPAT_KIND: &str = "openai-compat";
+
+/// Whether a field stage may act on a lane of `provider_kind` at all.
+pub(super) fn field_repair_admits_kind(provider_kind: &str) -> bool {
+    FIELD_REPAIR_KINDS.contains(&provider_kind)
+}
+
+/// What the attributability decision admitted: the entry's kind and the base
+/// URL it egresses to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AttributableLane<'a> {
+    pub(super) provider_kind: &'static str,
+    pub(super) base_url: std::borrow::Cow<'a, str>,
+}
+
+/// THE single attributability decision every field stage makes: the reactive
+/// `plan_field_carry`, the pre-flight planner, the fidelity status read,
+/// probe activation, and the probe's pre-dial recheck (the two probe stages
+/// further narrow the answer to `anthropic-api`).
+///
+/// Answers `Some` only when ALL of:
 ///
 /// - the caller's own forwarded-credential fact is false. A target
 ///   authenticating with the CLIENT's bearer must not have its rejections
 ///   attributed to a routectl-owned seat: one client's rejection would mint a
 ///   permanent verdict steering every other client;
 /// - the operator's OWN `[providers]` entry for `provider_name` exists;
-/// - that entry yields an attributable Anthropic base URL. The Bedrock Mantle
-///   shape is excluded here, by the accessor itself: its entry reads
-///   `anthropic-api` while egressing through Mantle, and the accessor answers
-///   `None`;
-/// - the base URL does not name a LOOPBACK destination.
+/// - that entry's kind is one of [`FIELD_REPAIR_KINDS`];
+/// - the entry's effective egress is classifiable from its configured fields
+///   (`ProviderEntry::classifiable_egress_base_url`). The Mantle sub-lanes
+///   are excluded here: their configured base URL is not where they egress;
+/// - that base URL does not name a LOOPBACK destination.
 ///
 /// The forwarded fact is a PARAMETER rather than a per-site check because its
 /// two sources differ -- the dispatch arms read a target's own
@@ -763,22 +782,27 @@ pub(super) fn grounded_closed_table_payloads(
 /// Read from the operator's entry rather than from a dispatch target because
 /// the suppression predicate keys on the configured base URL, which no target
 /// carries.
-pub(super) fn attributable_anthropic_base_url<'a>(
+pub(super) fn attributable_field_lane<'a>(
     config: &'a crate::config::Config,
     provider_name: &str,
     use_forwarded_credential: bool,
-) -> Option<&'a str> {
+) -> Option<AttributableLane<'a>> {
     if use_forwarded_credential {
         return None;
     }
-    let base_url = config
-        .providers
-        .get(provider_name)
-        .and_then(crate::config::ProviderEntry::anthropic_api_base_url)?;
-    if crate::field_verdict::loopback_target_suppresses_minting(base_url) {
+    let entry = config.providers.get(provider_name)?;
+    let provider_kind = entry.kind_str();
+    if !field_repair_admits_kind(provider_kind) {
         return None;
     }
-    Some(base_url)
+    let base_url = entry.classifiable_egress_base_url()?;
+    if crate::field_verdict::loopback_target_suppresses_minting(&base_url) {
+        return None;
+    }
+    Some(AttributableLane {
+        provider_kind,
+        base_url,
+    })
 }
 
 /// The transform class of the closed-table row a `field:`-namespaced capability
@@ -1321,7 +1345,7 @@ impl Router {
     /// - the caller cannot SETTLE (`mode`): a walk whose settlement rows have
     ///   nowhere to go must not claim a slot it cannot resolve;
     /// - the learned-capability kill switch is off;
-    /// - the target is not on the one lane this stage acts on;
+    /// - the target's provider kind is not one field repair acts on;
     /// - the target authenticates with a FORWARDED client credential;
     /// - the attempt carries no field in the closed table, so no L0 drop could
     ///   change what goes upstream;
@@ -1348,7 +1372,7 @@ impl Router {
             return None;
         }
         let provider_kind = target.provider_kind?;
-        if provider_kind != ANTHROPIC_API_KIND {
+        if !field_repair_admits_kind(provider_kind) {
             return None;
         }
         // A forwarded-credential target authenticates with the CLIENT's own
@@ -1365,8 +1389,8 @@ impl Router {
         }
         // Read from the operator's own provider entry rather than from the
         // dispatch target: the suppression predicate keys on the configured
-        // base URL, and the target carries none. The accessor answers only
-        // for the lane this stage acts on, so every other kind fails closed
+        // base URL, and the target carries none. The decision answers only
+        // for the kinds this stage acts on, so every other kind fails closed
         // here as well as at the kind check above.
         //
         // Loopback suppression is folded into the SAME shared read, so it
@@ -1381,11 +1405,17 @@ impl Router {
         // The forwarded fact comes from the TARGET here -- the chain derived it
         // for this dispatch -- and the rest of the refusal set lives in the
         // shared decision.
-        let base_url = attributable_anthropic_base_url(
+        let lane = attributable_field_lane(
             &self.config,
             &target.provider_name,
             target.use_forwarded_credential,
         )?;
+        // A reload may have re-kinded the entry under a target expanded from
+        // the old one; the verdict key carries the target's kind, so the two
+        // must agree before anything is keyed on it.
+        if lane.provider_kind != provider_kind {
+            return None;
+        }
         // The identities come from the CLOSED TABLE plus the request, never
         // from upstream text: every row whose surface this attempt actually
         // carries, in table source order.
@@ -1409,7 +1439,7 @@ impl Router {
                     FieldVerdictKey::new(target.learned_lane.as_ref()?, row.path, provider_kind)?;
                 let guard = self.field_verdicts().admit_provisional(
                     &key,
-                    base_url,
+                    &lane.base_url,
                     self.registry_generation(),
                     now,
                 )?;
@@ -1675,6 +1705,10 @@ pub(in crate::router) mod provisional {
 #[cfg(test)]
 #[path = "field_repair_tests.rs"]
 mod field_repair_tests;
+
+#[cfg(test)]
+#[path = "field_attribution_tests.rs"]
+mod field_attribution_tests;
 
 #[cfg(test)]
 mod table_tests {

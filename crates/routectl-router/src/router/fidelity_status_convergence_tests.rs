@@ -176,6 +176,11 @@ fn convergence_prefix_path() -> &'static str {
 /// A convergence fixture router: one `anthropic-api` provider on `base_url`, one
 /// model, one alias, and the model INSTALLED as a resolved single-seat target so the
 /// planner's chain expansion finds it.
+/// A provider kind field repair refuses: it has no rejection dialect in the
+/// parser.
+#[cfg(feature = "openai-responses")]
+const REFUSED_KIND: &str = "openai-responses";
+
 fn convergence_router(base_url: &str, kind: &str) -> Router {
     use crate::config::{AliasValue, ModelEntry};
     use crate::resolved::ResolvedModel;
@@ -284,17 +289,20 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
         ),
     });
 
-    // A NON-ANTHROPIC lane: not the one kind this stage acts on.
-    let other_kind = convergence_router("https://example.test/v1", "openai-compat");
-    plant_convergence_verdict(&other_kind, envelope, ENVELOPE_QUORUM);
-    cases.push(ConvergenceCase {
-        name: "non-anthropic provider kind",
-        router: other_kind,
-        req: convergence_envelope_req(),
-        path: envelope,
-        expect: Some(PreflightBlockedReason::UnsupportedLane),
-        planner_reason_override: None,
-    });
+    // A lane on a kind field repair does not act on.
+    #[cfg(feature = "openai-responses")]
+    {
+        let other_kind = convergence_router("https://example.test/v1", REFUSED_KIND);
+        plant_convergence_verdict(&other_kind, envelope, ENVELOPE_QUORUM);
+        cases.push(ConvergenceCase {
+            name: "provider kind outside the repair kinds",
+            router: other_kind,
+            req: convergence_envelope_req(),
+            path: envelope,
+            expect: Some(PreflightBlockedReason::UnsupportedLane),
+            planner_reason_override: None,
+        });
+    }
 
     // An UNATTRIBUTABLE base URL: a local hop. A rejection from one cannot be
     // attributed to an upstream, so neither side may act on a verdict for it.
@@ -344,13 +352,14 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
     //
     // Every other row here has exactly one gate holding, so it is satisfied by any
     // ordering and none of them can see the precedence at all. This one is the
-    // discriminating fixture: an operator mask on a NON-ANTHROPIC lane. The planner
+    // discriminating fixture: an operator mask on a lane of a refused kind. The planner
     // refuses the lane before it ever reads the override registry, so the status
     // surface must too -- reporting the mask here would tell an operator to edit a
     // `[capability.overrides]` cell to un-block a verdict that would stay inert on
     // that lane whatever they did to the cell.
-    let masked_on_bad_lane = convergence_router("https://example.test/v1", "openai-compat");
+    #[cfg(feature = "openai-responses")]
     {
+        let masked_on_bad_lane = convergence_router("https://example.test/v1", REFUSED_KIND);
         let mut config = (*masked_on_bad_lane.config).clone();
         config.capability.overrides.insert(
             "p0".to_string(),
@@ -365,7 +374,7 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
             masked_on_bad_lane,
             config,
             "https://example.test/v1",
-            "openai-compat",
+            REFUSED_KIND,
         );
         plant_convergence_verdict(&masked_on_bad_lane, envelope, ENVELOPE_QUORUM);
         cases.push(ConvergenceCase {
@@ -524,6 +533,7 @@ fn rebuild_convergence_router_with(previous: Router, config: Config) -> Router {
 /// exactly -- a rebuild that reset the kind would silently turn the refused-lane
 /// fixture into an ordinary one, and the gate-ordering case would stop
 /// discriminating.
+#[cfg(feature = "openai-responses")]
 fn rebuild_convergence_router_with_kind(
     previous: Router,
     mut config: Config,

@@ -523,7 +523,7 @@ impl Router {
     ///
     /// Derived from the same two predicates the planner's own
     /// `preflight_lane_admits` and `preflight_identity` read: the provider kind
-    /// must be `anthropic-api`, and the entry must carry an attributable base URL
+    /// must be one field repair admits, and the entry must carry an attributable base URL
     /// (not a forwarded credential, a local hop, or none). A status read cannot
     /// check `use_forwarded_credential` because it has no `DispatchTarget` -- what
     /// it has is the lane, whose provider entry carries the base URL and kind. A
@@ -533,17 +533,12 @@ impl Router {
     /// is the correct conservative reading rather than a false claim about the
     /// lane itself.
     fn lane_supports_preflight(&self, key: &FieldVerdictKey) -> bool {
-        let entry = key.lane().provider_entry();
-        let pk = self
-            .config
-            .providers
-            .get(entry)
-            .map_or("", |p| p.kind_str());
-        if pk != super::field_repair::ANTHROPIC_API_KIND {
-            return false;
-        }
-        crate::router::field_repair::attributable_anthropic_base_url(&self.config, entry, false)
-            .is_some()
+        crate::router::field_repair::attributable_field_lane(
+            &self.config,
+            key.lane().provider_entry(),
+            false,
+        )
+        .is_some()
     }
 
     /// Whether an operator `[capability.overrides]` cell forces this capability

@@ -59,11 +59,12 @@ impl Router {
     ///   verdict steering every other client. Read through the same accessor
     ///   the chain derives `DispatchTarget::use_forwarded_credential` from, so
     ///   this cannot disagree with the flag activation refuses on;
-    /// - no attributable Anthropic base URL, which is how the Bedrock Mantle
+    /// - no classifiable egress base URL, which is how the Bedrock Mantle
     ///   shape is excluded (its entry reads `anthropic-api` while egressing
-    ///   through Mantle, and the accessor answers `None` for it), or a base URL
-    ///   naming a LOOPBACK destination. Both through
-    ///   `field_repair::attributable_anthropic_base_url`, the same
+    ///   through Mantle, and the accessor answers `None` for it), a base URL
+    ///   naming a LOOPBACK destination, or a kind other than `anthropic-api`
+    ///   (the only lane probes act on). All through
+    ///   `field_repair::attributable_field_lane`, the same
     ///   entry-and-base-url read the reactive arm and the pre-flight planner
     ///   attribute through.
     ///
@@ -87,12 +88,12 @@ impl Router {
             .providers
             .get(provider_name)
             .is_some_and(|entry| entry.forwarded_base_url().is_some());
-        super::field_repair::attributable_anthropic_base_url(
+        super::field_repair::attributable_field_lane(
             &self.config,
             provider_name,
             use_forwarded_credential,
         )
-        .is_some()
+        .is_some_and(|lane| lane.provider_kind == super::field_repair::ANTHROPIC_API_KIND)
     }
 
     /// The resolved seat a probe identity's lane names.

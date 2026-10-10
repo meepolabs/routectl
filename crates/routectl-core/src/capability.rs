@@ -357,11 +357,31 @@ const BEDROCK_REQUEST_BAG_PREFIXES: &[&str] = &["additionalModelRequestFields", 
 /// distinct garbage never collapses onto one shared persisted key. This
 /// keeps the reduction idempotent: the result of one pass has no leading
 /// bag prefix, so a second pass returns it unchanged.
+///
+/// A key in the envelope-field namespace (`field:`-prefixed) is
+/// exempt from the Bedrock reduction and returned verbatim: such a key was
+/// minted by routectl from a qualified path, not lifted from an upstream
+/// smithy path, and it is permanent -- reducing a dotted field key to its
+/// head segment would fuse distinct fields onto one token that could never
+/// be un-minted.
 pub fn normalize_capability_key(raw: &str, provider_kind: &str) -> String {
-    if provider_kind == "bedrock" {
+    if provider_kind == "bedrock" && !is_field_namespace_key(raw) {
         return normalize_bedrock_key(raw);
     }
     raw.to_string()
+}
+
+/// The namespace name of envelope-field capability keys, without its `:`
+/// separator. Only the name is held here; the router's field-capability
+/// module owns the prefix and the only constructor. If the two ever
+/// disagree, field keys on Bedrock reduce again and the router refuses
+/// their identity -- the drift fails closed rather than minting a fused key.
+const FIELD_NAMESPACE: &str = "field";
+
+/// True when `raw` sits in the envelope-field namespace.
+fn is_field_namespace_key(raw: &str) -> bool {
+    raw.split_once(':')
+        .is_some_and(|(namespace, _)| namespace == FIELD_NAMESPACE)
 }
 
 fn normalize_bedrock_key(raw: &str) -> String {
@@ -638,6 +658,38 @@ mod tests {
 
         // Assert
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_field_namespace_key_passes_through_bedrock_normalization_unchanged() {
+        for path in ["thinking.enabled.display", "a.b", "x"] {
+            let raw = format!("{FIELD_NAMESPACE}:{path}");
+            assert_eq!(
+                normalize_capability_key(&raw, "bedrock"),
+                raw,
+                "a field key must not be reduced: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_outside_the_field_namespace_still_reduces_on_bedrock() {
+        for (raw, reduced) in [
+            ("anthropic.claude-v2:1", "anthropic"),
+            ("fields:a.b", "fields:a"),
+            ("Field:a.b", "Field:a"),
+            (":a.b", ":a"),
+            (
+                "additionalModelRequestFields.anthropic_beta",
+                "anthropic_beta",
+            ),
+        ] {
+            assert_eq!(
+                normalize_capability_key(raw, "bedrock"),
+                reduced,
+                "{raw} is outside the field namespace and must reduce as before"
+            );
+        }
     }
 
     #[test]

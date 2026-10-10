@@ -45,19 +45,21 @@ impl Router {
     /// resolved dispatch target. THE production entry point, and the only
     /// path by which a lane ever enters the scheduler.
     ///
-    /// The refusals MIRROR `Router::plan_field_carry`'s exactly, because a
-    /// probe produces evidence for the verdicts that arm mints: a target
-    /// the arm may not act on must not be probed. In refusal order:
+    /// The refusals MIRROR `Router::plan_field_carry`'s, because a probe
+    /// produces evidence for the verdicts that arm mints: a target the arm
+    /// may not act on must not be probed. Narrower in one respect: probes act
+    /// on `anthropic-api` alone, while the arm also acts on other kinds. In
+    /// refusal order:
     ///
     /// - the learned-capability kill switch is off;
-    /// - a kind other than the one lane this stage acts on;
+    /// - a kind other than `anthropic-api`;
     /// - a target authenticating with a FORWARDED client credential, whose
     ///   rejections are not attributable to a routectl-owned seat;
-    /// - a provider entry that yields NO attributable Anthropic base URL.
+    /// - a provider entry that yields NO classifiable egress base URL.
     ///   This is what excludes the Bedrock Mantle shape, whose entry reads
     ///   `anthropic-api` while egressing through Mantle: the accessor
     ///   answers `None` for it, so the refusal comes from the same
-    ///   accessor the reactive arm uses rather than a second base-url read
+    ///   decision the reactive arm uses rather than a second base-url read
     ///   that could disagree;
     /// - a base URL naming a LOOPBACK destination, through the same
     ///   suppression predicate;
@@ -86,12 +88,12 @@ impl Router {
         // same decision through `probe_entry_is_attributable`, which reads the
         // forwarded fact off the entry instead -- it has no target by then, and
         // a reload may have replaced the entry since.
-        if super::field_repair::attributable_anthropic_base_url(
+        if super::field_repair::attributable_field_lane(
             &self.config,
             provider_name,
             use_forwarded_credential,
         )
-        .is_none()
+        .is_none_or(|lane| lane.provider_kind != super::field_repair::ANTHROPIC_API_KIND)
         {
             return;
         }
