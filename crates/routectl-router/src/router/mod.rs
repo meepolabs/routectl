@@ -47,12 +47,12 @@ mod field_verdict_observability;
 mod learned_lanes;
 mod opening_lookup;
 mod overlays;
-mod paid_probe_authorize;
-mod paid_probe_dial;
-mod paid_probe_ledger;
-mod paid_probe_profile;
 mod precontent;
 mod prefix_rewrite;
+#[expect(
+    dead_code,
+    reason = "the paid failure classification has no caller left"
+)]
 mod probe_failure_class;
 mod probe_lifecycle;
 mod probe_lifecycle_state;
@@ -93,7 +93,6 @@ pub use opening_lookup::OpeningLane;
 use overlays::apply_layered_overlays;
 pub(crate) use overlays::operator_betas;
 pub use overlays::{merge_header_extras, merge_payload_extras};
-pub use paid_probe_ledger::{PaidProbeLedger, PaidProbeReservation};
 pub use probe_pass::ProbePassSummary;
 use routectl_core::capability::FailurePhase;
 #[cfg(test)]
@@ -365,13 +364,6 @@ pub struct Router {
     /// per-Router ticket would restart at zero and make every reload's
     /// "new" incarnation equal to the first one's.
     probe_incarnation_ticket: Arc<AtomicU64>,
-    /// Identities whose FREE probe validation ran out of steps. A
-    /// candidate records that free validation is spent -- one of the two
-    /// conditions a paid call needs -- and is never itself permission to
-    /// spend. Bounded by the scheduler's queue depth; cleared on
-    /// publication and shutdown, since a candidate from a retired
-    /// incarnation describes router state that no longer serves. Shared
-    /// with the scheduler on carry-over for the same reason.
     /// Serializes the short publication and shutdown transitions against each
     /// other, and carries the terminal-shutdown bit -- see
     /// [`probe_lifecycle_state`].
@@ -379,32 +371,15 @@ pub struct Router {
     /// Shared across Router generations by `carry_over_learned_from`, for the
     /// same reason the ticket is: the publishing router and the shutting-down
     /// router are different objects, so a per-router state would serialize
-    /// nothing between them. NEVER held across an await; a paid authorization
-    /// does not take it at all.
+    /// nothing between them. NEVER held across an await.
     probe_lifecycle_state: Arc<probe_lifecycle_state::ProbeLifecycleState>,
-    /// A `VecDeque` so the claim/requeue pair is FIFO: a refused candidate goes
-    /// behind every other waiting one. With a `Vec` the natural pair is pop/push
-    /// at the same end, which re-claims the candidate just refused on the very
-    /// next pass -- one lane whose accounting keeps refusing would starve every
-    /// healthy lane behind it for as long as the condition lasted.
+    /// Identities whose FREE probe validation ran out of steps. Bounded by
+    /// the scheduler's queue depth; cleared on publication and shutdown,
+    /// since a candidate from a retired incarnation describes router state
+    /// that no longer serves. Shared with the scheduler on carry-over for the
+    /// same reason.
     paid_probe_candidates:
         Arc<Mutex<std::collections::VecDeque<probe_lifecycle::PaidProbeCandidate>>>,
-    /// Crash-safe paid-probe budget seam -- see
-    /// [`paid_probe_ledger`]. `None` on every Router `Router::new` builds, and
-    /// installed only by a boot path that has a durable accounting actor to
-    /// install. Absent means every reservation refuses, so a paid call is
-    /// impossible without an explicit installation rather than merely
-    /// improbable.
-    ///
-    /// Shared across Router generations by `carry_over_learned_from`, which
-    /// attaches this same `Arc` to the replacement. Sharing is what lets both
-    /// a config reload and a credentials rebuild preserve the seam without the
-    /// reload site holding an accounting handle of its own -- and it is
-    /// load-bearing beyond convenience: two generations reserving against
-    /// different installations would be two budgets for one provider-day, and
-    /// since a committed unit is never refunded, the overspend would be
-    /// permanent.
-    paid_probe_ledger: Option<Arc<dyn paid_probe_ledger::PaidProbeLedger>>,
     /// Capability-persistence health seam -- see [`capability_health`]. `None` on
     /// every Router `Router::new` builds, and absent reads as NOT GUARANTEED, so
     /// learned pre-flight suspends on a build path that never installed one.
@@ -2127,7 +2102,6 @@ impl Router {
             probe_incarnation_ticket: Arc::new(AtomicU64::new(1)),
             probe_lifecycle_state: Arc::default(),
             paid_probe_candidates: Arc::default(),
-            paid_probe_ledger: None,
             capability_health: None,
             probe_queue_full_warned: Mutex::new(false),
             probe_payload_refused_warned: Mutex::new(false),
@@ -2771,9 +2745,8 @@ impl Router {
     ///
     /// Carries MORE than the learned registry, despite the name: the replay
     /// facade, the field-verdict facade, the PROBE SCHEDULER (with its
-    /// candidate list and incarnation ticket), and the paid-probe ledger
-    /// installation are attached here too, all under the same attach-not-copy
-    /// discipline. They ride along because they are
+    /// candidate list and incarnation ticket), and the capability-health read
+    /// are attached here too, all under the same attach-not-copy discipline. They ride along because they are
     /// all keyed on the shared registry and must span the swap together -- a
     /// caller that carried the registry but not the scheduler would leave an
     /// outstanding probe settling into a table the published Router never
@@ -2817,14 +2790,6 @@ impl Router {
         // of superseded work is the scheduler's own generation check, not a
         // fresh table -- see `carry_over_probe_scheduler_from`.
         self.carry_over_probe_scheduler_from(previous);
-        // The paid-budget seam rides along under the same discipline, and for
-        // a reason specific to it: the replacement must reserve against the
-        // SAME accounting actor, because a committed unit is never refunded, so
-        // two installations would be two day budgets whose overspend cannot be
-        // undone. Attaching here also means neither the config-reload nor the
-        // credentials-rebuild site needs an accounting handle in scope to
-        // preserve it.
-        self.paid_probe_ledger = previous.paid_probe_ledger().cloned();
         // The persistence-health read rides along under the same discipline, and
         // for a reason of its own: both generations submit capability events to
         // the SAME writer, so its health is one fact. A replacement that lost the

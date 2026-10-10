@@ -26,8 +26,7 @@
 //!
 //! The health of the capability-event writer is knowable only to the crate that
 //! owns the writer, and that crate is one this one must not depend on -- the
-//! dependency runs the other way, exactly as it does for
-//! [`super::paid_probe_ledger`]. So the contract is declared here, in the crate
+//! dependency runs the other way. So the contract is declared here, in the crate
 //! that CONSUMES it, and the writer-owning crate implements it. Nothing here
 //! names a database, a channel, a counter, or a schema: an implementation maps
 //! its own saturation, transaction, and degraded-state diagnostics onto this one
@@ -56,7 +55,7 @@ use super::Router;
 /// Whether durable capability-event persistence can currently be guaranteed.
 ///
 /// `Send + Sync` so the Router can hold one behind an `Arc` and share it across
-/// dispatch tasks, mirroring [`super::paid_probe_ledger::PaidProbeLedger`].
+/// dispatch tasks.
 pub trait CapabilityPersistenceHealth: Send + Sync {
     /// Whether a capability-event write, clear, or purge submitted right now can
     /// be expected to land durably.
@@ -78,10 +77,9 @@ impl Router {
     /// Install the capability-persistence health read, consuming and returning
     /// the Router.
     ///
-    /// A CONSUMING BUILDER rather than a `&mut self` setter, for the same reason
-    /// [`Router::with_paid_probe_ledger`] is one: the installation belongs to
-    /// boot, before the Router is published behind its `ArcSwap`, and a setter
-    /// would advertise a post-publication mutation that cannot be performed
+    /// A CONSUMING BUILDER rather than a `&mut self` setter, because the
+    /// installation belongs to boot, before the Router is published behind its
+    /// `ArcSwap`, and a setter would advertise a post-publication mutation that cannot be performed
     /// through a shared `Arc` anyway.
     ///
     /// A second call REPLACES the installation, which is what a rebuild needs:

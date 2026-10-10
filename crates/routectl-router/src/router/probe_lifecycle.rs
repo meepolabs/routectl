@@ -467,8 +467,7 @@ impl Router {
         incarnation: u64,
         payload: crate::probe_scheduler::ProbePayload,
     ) {
-        // THE QUEUE LOCK FIRST, then liveness -- the same order, and for the same
-        // reason, as `Router::requeue_paid_probe_candidate`. A worker settling a
+        // THE QUEUE LOCK FIRST, then liveness. A worker settling a
         // probe can reach this concurrently with a publication or shutdown; both of
         // those advance the ticket BEFORE taking this lock to clear, so either this
         // recording completes and the clear removes it, or the clear goes first and
@@ -476,11 +475,6 @@ impl Router {
         // before the lock would leave the window where a record lands on a list
         // that was just emptied and nothing removes it.
         let mut candidates = self.paid_probe_candidates.lock();
-        // TEST PARK POINT, at the first in-lock position -- the only place that
-        // discriminates the two lock orders. See the requeue path's hook for the
-        // full reasoning; inert outside tests and in tests that install no hook.
-        #[cfg(test)]
-        Self::record_park_hook();
         // A settlement that commits against a superseded generation records
         // nothing. The incarnation comparison catches work from a generation this
         // router no longer publishes under; the shared-ticket read catches this
@@ -511,36 +505,6 @@ impl Router {
             validator: ProbeValidator::PaidCompletion,
             payload,
         });
-    }
-
-    /// The park hook the recording lock-order test installs, called once inside
-    /// `record_paid_probe_candidate`.
-    ///
-    /// Thread-local for the same reason the requeue's is: the racing clear runs on
-    /// another thread and must NOT be parked, or the test would arrange a deadlock
-    /// rather than a race.
-    #[cfg(test)]
-    fn record_park_hook() {
-        RECORD_PARK.with(|hook| {
-            if let Some(park) = hook.borrow().as_ref() {
-                park();
-            }
-        });
-    }
-
-    /// `record_paid_probe_candidate`, for the lock-order and post-shutdown tests.
-    ///
-    /// The production path is reached only from a worker settling a probe, which a
-    /// test cannot park mid-settlement; this drives the same function directly so a
-    /// mutation to its lock order or liveness reads is observable.
-    #[cfg(test)]
-    pub(crate) fn record_paid_probe_candidate_for_tests(
-        &self,
-        key: &FieldVerdictKey,
-        incarnation: u64,
-        payload: crate::probe_scheduler::ProbePayload,
-    ) {
-        self.record_paid_probe_candidate(key, incarnation, payload);
     }
 
     /// Every RECORDED candidate, live incarnation or not.
@@ -629,25 +593,6 @@ impl Router {
         self.probe_lifecycle_state = std::sync::Arc::clone(&previous.probe_lifecycle_state);
         self.probe_incarnation = std::sync::atomic::AtomicU64::new(previous.probe_incarnation());
     }
-}
-
-// Per-thread park hook for the recording lock-order test. Test-only, and
-// thread-local by design: the racing clear runs on another thread and must not be
-// parked. A line comment rather than a doc comment because rustdoc generates
-// nothing for a macro invocation and rejects one attached to it.
-#[cfg(test)]
-thread_local! {
-    static RECORD_PARK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Install `park` as this thread's recording hook for the duration of `body`.
-#[cfg(test)]
-pub(super) fn with_record_park<R>(park: impl Fn() + 'static, body: impl FnOnce() -> R) -> R {
-    RECORD_PARK.with(|hook| *hook.borrow_mut() = Some(Box::new(park)));
-    let out = body();
-    RECORD_PARK.with(|hook| *hook.borrow_mut() = None);
-    out
 }
 
 /// The single short user turn a count-token probe carries.

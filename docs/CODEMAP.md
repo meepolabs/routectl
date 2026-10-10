@@ -2516,10 +2516,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   registry `Arc` rather than copying entries -- one store spans generations, so a
   request still in flight on the pre-swap Router writes where the published
   Router reads; also rebuilds the learned-replay facade on that same Arc
-  carrying its in-flight admissions, adopts the shared generation, and attaches
-  the paid-probe ledger installation by `Arc` identity so both a config reload
-  and a credentials rebuild preserve the budget seam with no accounting handle
-  in scope -- see `src/router/paid_probe_ledger.rs`. Retuning
+  carrying its in-flight admissions, and adopts the shared generation. Retuning
   the shared registry from the reloaded `[capability]` knobs -- the only path by
   which changed tuning can take effect, since the registry outlives the Router
   that built it -- happens HERE only for a config-only reload, where the reload
@@ -3376,8 +3373,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   expiry DROPS the future, and settles the outcome; it executes only the
   count-token free validator (the expected-rejection class is in no plan).
   `build_probe_request` is the SHARED body builder for BOTH probe classes (the
-  free count-token validator here and the paid completion in
-  `paid_probe_dial.rs`), so the two ask the same question of the same lane rather
+  free count-token validator here and the paid-candidate payload), so the two ask the same question of the same lane rather
   than drifting into different envelopes: the
   seat's UPSTREAM wire id, one minimal constant turn, the closed-table field
   applied through the GROUNDED table's own carrier (`grounded_table_row`, so a
@@ -3452,9 +3448,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   reopened the resurrection window. Equality rather than `>=` or a per-router flag:
   a flag needs a writer on routers the publication never touched, and `>=` cannot
   express a generation current for nobody. Publication and shutdown are
-  SYNCHRONOUS and never wait on a paid probe, so a slow, saturated, or wedged
-  accounting layer cannot hold a reload or a shutdown open -- the AUTHORIZATION
-  abandons itself instead (see `paid_probe_authorize.rs`). Additive
+  SYNCHRONOUS. Additive
   `publish_probe_incarnation_into(&Arc<Self>, impl FnOnce(Arc<Self>))` stamps and
   then invokes the store callback BEFORE returning, so the stamp-before-store
   ordering is a property of the protocol rather than a convention two call sites
@@ -3501,171 +3495,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   REFUSED BEFORE THE MUTEX: a thread-local marker, checked ahead of any
   acquisition and cleared on the token's `Drop`, turns a store callback that calls
   back in into an immediate no-op instead of a deadlock on a non-reentrant lock
-- `src/router/paid_probe_authorize.rs` -- `Router::authorize_paid_probe()`:
-  claiming one paid-probe candidate and turning it into permission for exactly
-  one paid call. Order IS the contract -- claim atomically, recheck every
-  precondition, take the shared slot, reserve once. The claim pops from the
-  shared candidate list inside the list's own critical section with NOTHING
-  awaited in between, so two concurrent claimers get different candidates or one
-  gets none; a claim spanning the reservation await would commit two
-  never-refundable units for one exhausted lane. Preconditions are RE-DERIVED,
-  never inherited from the record: live incarnation, the exact seat (the same
-  resolver, so an AMBIGUOUS key refuses), attributability through the predicate
-  both free stages call, the LIVE non-zero cap, and a committed
-  `PaidProbeProfile`. Each of those refuses with ZERO ledger calls -- nothing the
-  accounting layer could say makes a stale, seatless, unattributable, uncapped,
-  or unpriced lane dialable. `Committed` yields a `PaidProbeAuthorization` owning
-  the claimed payload, the resolved seat and provider `Arc`, the profile, the
-  incarnation, the ledger's own used/cap commit proof, and the paid concurrency
-  slot; it is NOT `Clone` (a clone would be two dials on one committed unit, and
-  no refund method exists) and a commit is FINAL -- a later reload or lowered cap
-  does not invalidate it, while shutdown or cancellation may drop it and never
-  refunds. Its `Debug` is HAND-WRITTEN and prints only the accounting shape
-  (committed used/cap, incarnation, sized allowance), naming the identity, seat,
-  payload, and slot as elided: a derive would print the captured payload's
-  client-supplied field value and beta tokens plus the provider identity, on
-  exactly the path a diagnostic reaches for. `PaidProbeRefusal::requeues()` is the one axis a caller acts on:
-  whether the condition can change WITHOUT a new generation. REQUEUED: the
-  concurrency refusal plus the four RECOVERABLE accounting outcomes
-  (`CapExhausted` at UTC rollover, `Overloaded`, `WriteFailed`, `MalformedState`
-  by external repair), enumerated per variant rather than as `Accounting(_)` so a
-  new reservation outcome cannot inherit a retry by default. DISCARDED: stale /
-  no-seat / unattributable / cap-zero / no-profile, since their correction
-  publishes a new generation (which clears the list) or arrives as new traffic --
-  plus BOTH ABSENCE CASES, which are terminal for the PROCESS. `NoLedger` is
-  checked before the trait call (the installation is a consuming boot-time
-  builder, so a Router without one never gains one) and an installed ledger's
-  `Unavailable` is terminal too: no accounting is reachable, and neither a missing
-  installation nor a shutdown reverses, so a requeue could only be re-refused for
-  the daemon's life while holding a bounded slot. Contrast `Overloaded`, which is
-  LOAD and passes. TWO FURTHER TERMINAL refusals come from the publication
-  protocol rather than from the accounting layer: `Superseded`, raised at either
-  generation check (before the ledger call, so nothing was spent -- or on its
-  acknowledgement, in which case the unit MAY be committed and stays consumed as
-  deliberate underuse, since no release method exists and dialing for retired
-  router state is the worse outcome), and `ReservationTimeout` at
-  `PAID_PROBE_RESERVATION_TIMEOUT`, a code constant bounding the one await so a
-  wedged accounting layer cannot strand a claimed candidate and a held slot.
-  Expiry is terminal UNKNOWN, not retryable: the actor may commit after the
-  future is dropped, so a retry could pair a second unit with the first and no
-  call may follow. Dropping the whole authorize future behaves the same way --
-  nothing requeued, slot released. Claim/requeue are FIFO over a `VecDeque` (`pop_front` /
-  `push_back`): with a LIFO pair the candidate just refused is re-claimed on the
-  very next pass, so one lane whose accounting keeps refusing starves every
-  healthy lane behind it. The requeue obeys the list's own depth bound and
-  identity check, counting a refusal on
-  `paid_candidate_capacity_refusals_total`. `record_paid_probe_candidate` (the
-  WORKER-settlement side, in `probe_lifecycle.rs`) takes the same lock order and
-  the same liveness reads, so a settlement committing against a superseded or
-  terminal generation records nothing. IT TAKES THE QUEUE LOCK FIRST, before
-  either liveness read, and holds it through dedupe/capacity/push: checking
-  liveness first leaves a window in which a publication or shutdown advances the
-  ticket AND clears, after which this call pushes a retained payload onto a list
-  that was just emptied and nothing removes it. Because both clears advance the
-  ticket before taking this same lock, the two orders linearize -- either the
-  requeue completes and the following clear removes it, or the clear goes first and
-  the requeue's under-lock read observes the supersession and drops. The liveness
-  reads happen UNDER that lock for the same reason: publication and shutdown each
-  advance the TICKET BEFORE acquiring it, so the read cannot observe a pre-clear
-  generation after the clear has run. No outbound call, body build, CLI
-  adapter, usage-DB write, or status render lives here. Pinned by
-  `src/router/paid_probe_authorize_tests.rs` (a counting ledger double, so every
-  "no ledger call" has a POSITIVE control differing in exactly that one fact and
-  reaching the ledger; two and sixteen concurrent claimers against a SLOW double
-  so they provably overlap; cap zero paired with a live free validator still
-  dialing; every missing-profile class by name; each accounting refusal requeuing
-  once without duplication; and a source guard on the absent `Clone` derive).
-  Split into `include!`d fragments to stay under the size ceiling --
-  `paid_probe_authorize_claim_tests.rs` (concurrent claiming and the pre-ledger
-  preconditions), `paid_probe_authorize_requeue_tests.rs` (requeue rules, slot,
-  finality, surface guards), `paid_probe_generation_tests.rs` (the
-  publication/shutdown races, the wedged-ledger timeout, the callback ordering,
-  and the restored legacy surface), and `paid_probe_fairness_tests.rs` (rotation
-  fairness and the Debug redaction) -- all compiling into the host module, so
-  every test keeps its name. The race tests drive a ledger that PARKS inside its
-  reservation and signals that it has, so each interleaving is deterministic
-  rather than timed, and the timeout tests bound their OWN wait so a missing
-  production bound fails by name instead of stalling the suite. Named mutation
-  checks: removing either generation check, removing the requeue's shared read,
-  removing the shutdown ticket advance, unbounding the ledger await, reordering the
-  publication callback, and removing the stale, attributability, cap-zero, or
-  profile check -- each reds its own case
-- `src/router/paid_probe_dial.rs` -- `Router::run_paid_probe()`: authorize then
-  dial, spending one committed unit on one direct `seat.provider.complete`.
-  No driver pass, usage write, verdict mint, or status render; contracts in module docs
 - `src/router/probe_pass.rs` -- `Router::run_probe_pass()` and
-  `ProbePassSummary`: the driver-facing entry point for one probe pass.
-- `src/router/paid_probe_ledger.rs` -- the CRATE-BOUNDARY contract for the  crash-safe paid-probe budget: the `PaidProbeLedger` trait
-  (`reserve_paid_probe_unit(provider, daily_cap)`, the only method -- there is
-  no release, refund, or timeout, because a committed unit is spent) and the
-  closed `PaidProbeReservation` outcome set, of which only `Committed { used,
-  cap }` authorizes a dial. The trait and enum are crate-root `pub` because an
-  out-of-crate implementor returns the enum; the `permits_paid_call` predicate
-  and the `as_str` log tokens are `pub(crate)`, so the authorization decision
-  and the token vocabulary stay this crate's and never become semver surface.
-  NO DAY KEY crosses the boundary: the implementation owns `(provider, day)`
-  entirely -- resolution and rollover are accounting concerns, and a day string
-  here would be state the router carries and logs without owning. Every variant
-  is MECHANISM-NEUTRAL (`Overloaded`, not a channel or queue), so an adapter
-  maps its own saturation and transaction diagnostics inward and keeps the
-  detail on its side; the implementation lives in the usage-writer-owning crate,
-  so this crate names no database, channel, or schema and takes no
-  `routectl-usage` dependency. `Router::with_paid_probe_ledger` is a CONSUMING
-  builder (boot-time installation, not a post-publication setter) over an
-  `Option` that `Router::new` leaves absent, so a Router nobody installed one on
-  answers `Unavailable` and can make no paid call at all. Carried across a
-  reload by `carry_over_learned_from`, by `Arc` identity: two installations
-  would be two never-refundable day budgets for one provider-day. Pinned by
-  `src/router/paid_probe_ledger_tests.rs` (counting double: absent refuses at
-  every cap, installed answers once with the identity and cap unchanged, every
-  refusal passes through permitting nothing, saturation authorizes nothing,
-  carry-over shares the instance) plus a source guard that the Router half
-  constructs no commit
-- `src/router/paid_probe_profile.rs` -- `Router::paid_probe_profile(key) ->
-  Option<PaidProbeProfile>`: whether this build may size a paid-probe body for an
-  identity, and what the smallest viable output allowance is. Read off the
-  RESOLVED MODEL'S OWN `effective_row` through the existing exact
-  seat lookup -- never a provider-name table, never a per-provider spend profile
-  -- so this stage cannot admit a cell the economics view calls unpriced. A
-  profile exists only when the row is Present AND confirms a finite positive
-  input rate, a finite positive output rate, a positive output ceiling, and an
-  effective ceiling at or above the shape's floor; missing, disabled,
-  half-priced, zero, negative, non-finite, absent-ceiling, or below-floor all
-  yield `None`, and an identity naming no resolved model, no live pool member, or
-  a key more than one direct/pooled candidate answers to does too. The EFFECTIVE
-  ceiling is
-  `min(catalog ceiling, configured ceiling)` with the resolved model's
-  `max_output_tokens` sentinel `0` meaning unset: a configured cap LOWERS the
-  ceiling (it binds the same request) but never RAISES it past the catalog's
-  vendor fact. The ceiling is a VIABILITY constraint, not a clamp target: a cell
-  below the floor cannot carry the field at all, so clamping under it would ship
-  an allowance whose serialized body omits the very field the probe asks about.
-  The provider-KIND gate sits at the point the floor is chosen, because both
-  floors describe ONE egress's wire shapes -- another lane's serializer, or an
-  entry a reload removed, gets no profile.
-  `LEGACY_MIN_VIABLE_MAX_TOKENS` (1025) and `ADAPTIVE_MIN_VIABLE_MAX_TOKENS` (1)
-  are properties of the request serializer, welded to it by real
-  `normalize_request` cases rather than duplicated from its private constant.
-  `PaidProbeProfile` is a `Copy` pair (`max_tokens`, `output_ceiling_tokens`)
-  constructible only here, carrying no provider identity and no dollar figure.
-  Pinned by `src/router/paid_probe_profile_tests.rs` (a named case per missing or
-  degenerate fact against a fully-priced control differing in exactly that fact,
-  catalog and configured ceilings at and one below each floor in both
-  precedence directions, NaN / infinity, two executed key collisions -- pooled
-  pair versus pooled pair, and direct nickname versus pooled composed key -- each
-  with single-kind controls in the same fixture router, a non-Anthropic lane with
-  a real Anthropic control, and the real-serializer pair: field present at 1025,
-  whole thinking object absent at 1024, adaptive shape intact at 1). That sidecar
-  is the HOST of two `include!`d fragments, which keeps every file under the size
-  ceiling while leaving each test's fully qualified name unchanged (a second
-  `#[path] mod` would rename them all); the host owns the imports and the fixture
-  builders, and neither fragment carries a top-level `use`:
-  - `src/router/paid_probe_profile_pooled_tests.rs` -- pooled seat resolution:
-    a member's own composed key resolves, both collision shapes refuse, and each
-    single-kind control profiles
-  - `src/router/paid_probe_profile_wire_tests.rs` -- the operator-ceiling
-    precedence cases, the serializer-specific lane gate, and the real
-    `normalize_request` assertions
+  `ProbePassSummary`: the driver-facing entry point for one probe pass, which
+  runs the due free batch to completion and reports how many validators ran.
 - `src/router/probe_test_support.rs` -- shared fixtures for the probe sidecars:
   one `build_router` behind the per-shape wrappers (base URL, breaker
   threshold, RPM limit, lane count, model beta floor, paid cap),
@@ -3735,20 +3567,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_preflight_isolation_tests.rs` -- `include!`d fragment of
   `field_preflight_tests.rs`: child-process isolation with a parent deadline
   for tests whose threads may not terminate
-- `src/router/paid_probe_hostile_claim_tests.rs` -- `include!`d fragment of
-  `paid_probe_authorize_tests.rs`: the hostile paid-claim proof. 512
-  contenders gathered at an async barrier and released together against ONE
-  candidate, over eight rounds, with a deliberately SLOW committing ledger so the
-  winner is still inside its reservation window while the losers claim. Asserts
-  exactly one authorization, exactly one reservation (the money assertion -- a
-  committed unit is never refunded), and that every loser refused with
-  `NoCandidate` rather than a precondition; a sibling case pins that the claimed
-  candidate is OFF the list afterwards and no concurrency slot is stranded, which
-  the reservation count alone cannot see. 512 rather than the sibling claim test's
-  sixteen because this class of race is thread-count sensitive in a measured way.
-  The read-then-remove claim mutation reds these in 5 of 8 runs at
-  `--test-threads=512` -- partial detection is the honest result for a real race
-  and is recorded in the file, so a single green run is not read as proof
 - `src/router/field_repair_parser_tests.rs` -- `include!`d fragment of
   `field_repair_tests.rs`: the parser-unlocalized counter and its class gate
 - `src/probe_scheduler/queue_status_tests.rs` -- `include!`d fragment of

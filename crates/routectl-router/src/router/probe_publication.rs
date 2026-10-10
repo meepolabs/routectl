@@ -6,13 +6,10 @@
 //! queued, run, and settled); this one owns the GENERATION that work is valid
 //! under, and the terminal state that ends it.
 //!
-//! Nothing here waits on a paid probe. A publication draws a ticket value,
-//! stamps it, retires superseded work, clears candidates, and (through the
-//! callback form) stores the replacement -- all synchronously, all under the
-//! shared lifecycle transition, and all bounded by in-memory work. The paid
-//! authorization orders ITSELF against this by re-reading
-//! `Router::is_current_publication`, so a slow or wedged accounting layer can
-//! never hold a reload or a shutdown open.
+//! A publication draws a ticket value, stamps it, retires superseded work,
+//! clears candidates, and (through the callback form) stores the replacement
+//! -- all synchronously, all under the shared lifecycle transition, and all
+//! bounded by in-memory work.
 
 use std::sync::Arc;
 
@@ -33,14 +30,7 @@ impl Router {
     /// Also clears terminal tombstones and any tombstone saturation: a new
     /// incarnation must be free to ask questions the previous one settled.
     ///
-    /// SYNCHRONOUS, and it never waits on a paid probe. Ordering against an
-    /// in-flight paid authorization is the AUTHORIZATION's job, not this one's:
-    /// it re-reads `is_current_publication` immediately before its ledger
-    /// call and again after the acknowledgement, so a publication that lands
-    /// either side of that call causes the authorization to abandon itself. A
-    /// publication therefore cannot be delayed by an accounting layer that is
-    /// slow, saturated, or wedged -- which is the property a blocking exclusion
-    /// could not offer.
+    /// SYNCHRONOUS: it awaits nothing.
     ///
     /// SERIALIZED against the shutdown and against other publications by the
     /// shared lifecycle state, which is held for this whole short transition. The
@@ -86,10 +76,6 @@ impl Router {
         // settle as stale: they release nothing they no longer hold and
         // schedule no follow-up work.
         let cancelled = self.probe_scheduler.retire_before(next);
-        // The TICKET MOVED BEFORE THIS LOCK IS TAKEN, which is what makes the
-        // requeue path safe: a requeue holding the candidate lock either finished
-        // before this clear (and is cleared by it) or takes the lock after and
-        // reads itself superseded. See `Router::requeue_paid_probe_candidate`.
         self.paid_probe_candidates.lock().clear();
         cancelled
     }
@@ -103,15 +89,14 @@ impl Router {
     ///
     /// - Every live router immediately fails `is_current_publication`,
     ///   because the ticket has moved past every stamped incarnation. So an
-    ///   in-flight authorization abandons itself at its next check and an
-    ///   in-flight refusal cannot requeue, rather than racing the clear below.
+    ///   in-flight settlement cannot record a candidate, rather than racing
+    ///   the clear below.
     /// - The terminal generation is UNSTAMPED, so nothing can become current
     ///   again. A shutdown that merely advanced the ticket to a value some router
     ///   then stamped would be an ABA: the predicate would read current again and
     ///   the resurrection window would reopen.
     ///
-    /// Synchronous, like `publish_probe_incarnation`, and for the same
-    /// reason: shutdown must not be held open by an accounting layer.
+    /// Synchronous, like `publish_probe_incarnation`.
     pub fn shutdown_probe_work(&self) -> usize {
         // Sets the terminal bit inside its own acquisition, so a publication that
         // has not yet started reads terminal and does nothing at all rather than
@@ -184,8 +169,6 @@ impl Router {
     ///    marker is cleared on drop, so a panicking callback does not poison later
     ///    publications on this thread -- though a callback SHOULD NOT panic, since
     ///    unwinding out of it abandons the publication mid-transition.
-    ///
-    /// Nothing here waits on a paid probe; see `publish_probe_incarnation`.
     ///
     /// THE STORE IS INSIDE THE LIFECYCLE TRANSITION, which is the property the
     /// callback form exists for beyond ordering. A publication whose commit point
