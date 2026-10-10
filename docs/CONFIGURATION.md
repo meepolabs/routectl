@@ -896,11 +896,13 @@ targets can reach is reported:
   `api.anthropic.com` and whose `credential_source` is `own` (the default)
   only: `oauth-2025-04-20` (OAuth gate, always), `effort-2025-11-24`
   (re-added whenever the request carries `output_config.effort`) and the
-  Claude Code floor listed below (re-added on every request without a Claude
-  Code session header, or on every request under `cloak.mode = "always"`;
-  never under `cloak.mode = "never"`). An `api-key` provider, one on another
-  host, or a forwarded one is not warned about these, and there the override
-  does withhold the flag.
+  Claude Code floor listed below (re-added on requests routectl classifies as
+  non-Claude-Code -- normally those without a Claude Code session header -- or
+  on every request under `cloak.mode = "always"`; never under
+  `cloak.mode = "never"`). An `api-key` provider or one on another host is not
+  warned about these, and there the override does withhold the flag. A
+  forwarded provider is not warned either, but there no `beta:` override
+  withholds anything: the client's beta set is forwarded as sent.
 
 Two removals run after every re-add and are reflected in the warning:
 `context-management-2025-06-27` is never reported on a provider with

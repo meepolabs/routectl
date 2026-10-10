@@ -4209,7 +4209,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   1024-entry cap evicts the oldest `last_seen` first, after a per-(lane, kind)
   beta-flag bound (`MAX_BETA_ENTRIES_PER_LANE` = 32) that evicts only that
   lane's youngest unleased beta entry (latest `first_seen`, so a burst of new
-  flags churns among itself), on every insert path. Constructed via `new` or
+  flags churns among itself), on every insert path; when every beta entry on
+  the full lane is leased, the new key is refused instead
+  (`ObserveOutcome::Refused` / `PositiveOutcome::Refused`, WARN
+  `reason=beta_lane_cap_leased`) so nothing exceeds the bound or reaches the
+  global cap. Constructed via `new` or
   `from_capability_config` (decay / inferred-window from the `[capability]`
   hours + the shared `DEFAULT_MAX_ENTRIES` cap) -- the shared sizing path for
   both the router build and the doctor's read-only one-shot ledger rebuild;
