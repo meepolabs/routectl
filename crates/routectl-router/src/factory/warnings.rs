@@ -482,17 +482,10 @@ fn beta_floor_classes(
     provider: &ProviderEntry,
     model: Option<&crate::config::ModelEntry>,
 ) -> Vec<(String, &'static str)> {
-    use routectl_core::identity::anthropic::{
-        EFFORT_BETA, OAUTH_ANTHROPIC_BETA, STRUCTURED_OUTPUTS_BETA,
-        default_claude_code_anthropic_betas,
-    };
+    use routectl_core::identity::anthropic::{EFFORT_BETA, STRUCTURED_OUTPUTS_BETA};
 
     let empty = std::collections::BTreeMap::new();
     let mut floor: Vec<(String, &'static str)> = vec![
-        (
-            OAUTH_ANTHROPIC_BETA.to_string(),
-            "OAuth gate: re-added on own-OAuth requests to api.anthropic.com",
-        ),
         (
             STRUCTURED_OUTPUTS_BETA.to_string(),
             "structured outputs: re-added when the body carries output_config.format",
@@ -502,13 +495,9 @@ fn beta_floor_classes(
             "effort: re-added when the body carries output_config.effort",
         ),
     ];
-    floor.extend(default_claude_code_anthropic_betas().iter().map(|flag| {
-        (
-            (*flag).to_string(),
-            "Claude Code floor: re-added on non-Claude-Code requests over own OAuth to \
-             api.anthropic.com",
-        )
-    }));
+    if is_own_oauth_anthropic_host(provider) {
+        floor.extend(own_oauth_floor_classes());
+    }
     floor.extend(
         crate::router::operator_betas(Some(provider.header_extras()), &empty)
             .into_iter()
@@ -535,6 +524,46 @@ fn beta_floor_classes(
         .into_iter()
         .map(|(flag, class)| (flag.to_ascii_lowercase(), class))
         .collect()
+}
+
+/// Whether `provider` is an anthropic-api entry the egress treats as its
+/// own-OAuth lane: `auth_kind = "oauth-bearer"` on the exact Anthropic API
+/// host. The egress additionally exempts a forwarded-credential request, but
+/// that is decided per request and cannot be read from config, so the
+/// warning text names the condition instead.
+fn is_own_oauth_anthropic_host(provider: &ProviderEntry) -> bool {
+    use routectl_core::identity::anthropic::is_anthropic_api_host;
+    use routectl_providers::anthropic_api::AuthKind;
+
+    matches!(
+        provider,
+        ProviderEntry::AnthropicApi {
+            auth_kind: AuthKind::OauthBearer,
+            base_url,
+            ..
+        } if is_anthropic_api_host(base_url)
+    )
+}
+
+/// The OAuth gate and the Claude Code floor, the floor classes the egress
+/// re-adds only on the own-OAuth lane.
+fn own_oauth_floor_classes() -> impl Iterator<Item = (String, &'static str)> {
+    use routectl_core::identity::anthropic::{
+        OAUTH_ANTHROPIC_BETA, default_claude_code_anthropic_betas,
+    };
+
+    std::iter::once((
+        OAUTH_ANTHROPIC_BETA.to_string(),
+        "OAuth gate: re-added on api.anthropic.com when routectl uses its own OAuth \
+         credential",
+    ))
+    .chain(default_claude_code_anthropic_betas().iter().map(|flag| {
+        (
+            (*flag).to_string(),
+            "Claude Code floor: re-added on non-Claude-Code requests to api.anthropic.com \
+             when routectl uses its own OAuth credential",
+        )
+    }))
 }
 
 #[cfg(test)]

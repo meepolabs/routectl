@@ -53,6 +53,24 @@ fn anthropic_unsupported(spec: &str, flag: &str) -> Config {
     )
 }
 
+/// An `unsupported` override on an own-OAuth anthropic-api provider whose
+/// `base_url` is `base_url`.
+fn oauth_unsupported_at(base_url: &str, flag: &str) -> Config {
+    config_with_override(
+        "anthropic-api",
+        &format!(
+            "api_key_ref = \"env://KEY\"\nauth_kind = \"oauth-bearer\"\nbase_url = \"{base_url}\"\n"
+        ),
+        "p",
+        "unsupported",
+        flag,
+    )
+}
+
+fn oauth_unsupported(flag: &str) -> Config {
+    oauth_unsupported_at("https://api.anthropic.com", flag)
+}
+
 /// A Claude Code floor flag that sits in no other floor class, so its row
 /// pins the Claude Code class alone.
 fn claude_code_only_flag() -> &'static str {
@@ -63,16 +81,20 @@ fn claude_code_only_flag() -> &'static str {
         .expect("the Claude Code floor carries a flag outside the other classes")
 }
 
+fn assert_one_warning_naming(row: &str, warnings: &[String], spec: &str, flag: &str, class: &str) {
+    assert_eq!(warnings.len(), 1, "row `{row}`: {warnings:?}");
+    for (what, needle) in [("flag", flag), ("class", class), ("spec", spec)] {
+        assert!(
+            warnings[0].contains(needle),
+            "row `{row}` must name the {what} `{needle}`: {}",
+            warnings[0]
+        );
+    }
+}
+
 #[test]
 fn an_unsupported_floor_flag_on_anthropic_api_warns_once_naming_its_class() {
-    let rows: [(&str, &str, &str, &str); 6] = [
-        ("oauth gate", "p", OAUTH_ANTHROPIC_BETA, "OAuth gate"),
-        (
-            "claude code floor",
-            "p",
-            claude_code_only_flag(),
-            "Claude Code floor",
-        ),
+    let rows: [(&str, &str, &str, &str); 4] = [
         (
             "structured outputs",
             "p",
@@ -97,21 +119,56 @@ fn an_unsupported_floor_flag_on_anthropic_api_warns_once_naming_its_class() {
     for (row, spec, flag, class) in rows {
         let warnings = beta_floor_override_warnings(&anthropic_unsupported(spec, flag));
 
-        assert_eq!(warnings.len(), 1, "row `{row}`: {warnings:?}");
+        assert_one_warning_naming(row, &warnings, spec, flag, class);
+    }
+}
+
+#[test]
+fn an_own_oauth_floor_flag_on_an_oauth_bearer_anthropic_host_provider_warns() {
+    let rows: [(&str, &str, &str); 2] = [
+        ("oauth gate", OAUTH_ANTHROPIC_BETA, "OAuth gate"),
+        (
+            "claude code floor",
+            claude_code_only_flag(),
+            "Claude Code floor",
+        ),
+    ];
+
+    for (row, flag, class) in rows {
+        let warnings = beta_floor_override_warnings(&oauth_unsupported(flag));
+
+        assert_one_warning_naming(row, &warnings, "p", flag, class);
         assert!(
-            warnings[0].contains(flag),
-            "row `{row}` must name the flag: {}",
+            warnings[0].contains("its own OAuth credential"),
+            "row `{row}` must name the own-credential condition: {}",
             warnings[0]
         );
+    }
+}
+
+#[test]
+fn an_own_oauth_floor_flag_is_silent_off_the_own_oauth_lane() {
+    let rows: [(&str, Config); 3] = [
+        (
+            "claude code flag on an api-key provider",
+            anthropic_unsupported("p", claude_code_only_flag()),
+        ),
+        (
+            "oauth gate on an api-key provider",
+            anthropic_unsupported("p", OAUTH_ANTHROPIC_BETA),
+        ),
+        (
+            "oauth gate on an oauth-bearer provider off the Anthropic host",
+            oauth_unsupported_at("https://anthropic-proxy.example.test", OAUTH_ANTHROPIC_BETA),
+        ),
+    ];
+
+    for (row, config) in rows {
+        let warnings = beta_floor_override_warnings(&config);
+
         assert!(
-            warnings[0].contains(class),
-            "row `{row}` must name the class `{class}`: {}",
-            warnings[0]
-        );
-        assert!(
-            warnings[0].contains(spec),
-            "row `{row}` must name the spec: {}",
-            warnings[0]
+            warnings.is_empty(),
+            "row `{row}`: the egress withholds the flag there: {warnings:?}"
         );
     }
 }
@@ -173,7 +230,7 @@ fn a_case_variant_floor_flag_warns() {
 
 #[test]
 fn a_flag_in_two_floor_classes_warns_once_naming_both() {
-    let warnings = beta_floor_override_warnings(&anthropic_unsupported("p", OAUTH_ANTHROPIC_BETA));
+    let warnings = beta_floor_override_warnings(&oauth_unsupported(OAUTH_ANTHROPIC_BETA));
 
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("OAuth gate"), "{}", warnings[0]);

@@ -232,8 +232,8 @@ pub struct MatrixWarm {
 
 /// The learned-capability truth matrix panel: lanes (rows) by capability
 /// keys (columns). `columns` is the well-known capability keys followed by
-/// every observed key outside that set. `lanes` is empty when `availability` is not `Available`
-/// and no config-derived cell exists.
+/// every observed key outside that set. `lanes` is empty when
+/// `availability` is not `Available` and no config-derived cell exists.
 ///
 /// `source` names the learned layer's origin and fixes which tally is
 /// carried: a `ledger_replay` panel carries `replay` (present whenever the

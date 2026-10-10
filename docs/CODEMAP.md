@@ -8377,7 +8377,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   a warm (with an `unreadable` warm's class), the replay
   tally line, `render_table` alignment, lane / kind / nicknames leading
   columns (the lane printed exactly as `capability purge` accepts it),
-  compact `verdict[source]->action` cells with a `(stale)` marker, an
+  compact `verdict[source]->action` cells with a `(stale)` marker
   and an `(unrouted)` lane tag
 - `src/commands/capability_purge.rs` -- `routectl capability purge <lane>
   <capability>`: parses `<lane>` through `StateKey::parse` (refusing an

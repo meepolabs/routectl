@@ -23,7 +23,7 @@
 //!   ([`OPENAI_PARAM_TRANSLATIONS`], e.g. `response_format` ->
 //!   `structured_output`) for wire params that name a capability under a
 //!   different key than the request side, plus a passthrough for a param
-//!   that -- after `strip_date_suffix` + `normalize_capability_key` -- is
+//!   that -- after [`canonical_tool_key`] + `normalize_capability_key` -- is
 //!   ALREADY a well-known capability key (a typed built-in tool an upstream
 //!   rejects by `type`). A param outside that closed set, or an absent
 //!   `param`, yields `None` -- the loop never learns a capability the request
@@ -750,7 +750,7 @@ mod tests {
     };
     use crate::capability_strip::{CapabilityAction, action_for};
     use crate::feature_keys::{FORCED_TOOL_CHOICE, derive_feature_keys, tool_choice_force};
-    use routectl_core::capability::{FailurePhase, STRUCTURED_OUTPUT, SignalTier};
+    use routectl_core::capability::{COMPUTER_USE, FailurePhase, STRUCTURED_OUTPUT, SignalTier};
     use routectl_core::error::Error;
     use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify};
     use routectl_core::{ChatRequest, MAX_SAFE_TOKEN_LEN, ToolDef};
@@ -1715,7 +1715,7 @@ mod tests {
     fn keys_the_open_tool_leg_can_learn_route_away() {
         for key in [
             "web_search",
-            "computer",
+            COMPUTER_USE,
             STRUCTURED_OUTPUT,
             "unseen_tool_key",
         ] {
