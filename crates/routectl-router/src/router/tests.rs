@@ -2604,7 +2604,12 @@ fn carry_over_learned_from_rebuilds_the_field_verdict_facade_sharing_in_flight()
          admission for the same identity",
     );
 
-    let _ = guard.commit(400, vec![], t0);
+    let _ = guard.commit(
+        routectl_core::capability::SignalTier::SelfIdentifying,
+        400,
+        vec![],
+        t0,
+    );
     let t_lapsed = t0 + Duration::from_hours(1) + Duration::from_secs(1);
 
     assert!(

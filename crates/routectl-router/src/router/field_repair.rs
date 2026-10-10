@@ -35,6 +35,7 @@
 use std::time::Instant;
 
 use routectl_core::Error;
+use routectl_core::capability::SignalTier;
 use routectl_core::failure_class::FailureClass;
 use routectl_core::{ChatRequest, sanitize_for_log};
 
@@ -770,6 +771,10 @@ pub(super) struct FieldRepairPlan<'a> {
     /// What the rejection that drove the repair refused. Only a refused FIELD
     /// may commit: a refused value repairs this attempt and teaches nothing.
     repaired_kind: Option<RejectionKind>,
+    /// How confidently that rejection was attributed to the row. The commit
+    /// records it, so an inferred attribution persists without acting until an
+    /// independent request corroborates it.
+    repaired_tier: Option<SignalTier>,
 }
 
 /// One admitted row: the closed-table path and surface, plus the guard whose
@@ -842,7 +847,7 @@ impl FieldRepairPlan<'_> {
         // WHICH row: the one the upstream named. Refusing here is
         // pre-mutation, so an unnamed rejection leaves the request and every
         // guard exactly as the caller handed them over.
-        let (idx, kind) = self
+        let (idx, named) = self
             .candidates
             .iter()
             .enumerate()
@@ -853,10 +858,11 @@ impl FieldRepairPlan<'_> {
                     rejection,
                     provider_kind,
                 )
-                .map(|kind| (idx, kind))
+                .map(|named| (idx, named))
             })?;
         let status = self.apply_candidate(idx, attempt_req, meta, budget, rejection)?;
-        self.repaired_kind = Some(kind);
+        self.repaired_kind = Some(named.kind);
+        self.repaired_tier = Some(named.tier);
         Some(status)
     }
 
@@ -961,6 +967,7 @@ impl FieldRepairPlan<'_> {
             }],
             repaired: None,
             repaired_kind: None,
+            repaired_tier: None,
         }
     }
 
@@ -1001,6 +1008,10 @@ impl FieldRepairPlan<'_> {
     /// valid value from every later request on the lane; such a plan releases
     /// its guard here and persists nothing.
     ///
+    /// The commit carries the attribution tier of the rejection that drove the
+    /// repair: a self-identifying verdict acts at once, an inferred one persists
+    /// pending and acts only once a later request corroborates it.
+    ///
     /// `request_features` is taken BY VALUE: the guard stores it on the event
     /// row, so a borrow here would only be cloned one frame deeper.
     pub(super) fn commit(
@@ -1010,13 +1021,14 @@ impl FieldRepairPlan<'_> {
         now: Instant,
     ) -> Option<CapabilityLearnEvent> {
         let idx = self.repaired?;
+        let tier = self.repaired_tier?;
         if self.repaired_kind != Some(RejectionKind::UnsupportedField) {
             return None;
         }
         self.candidates[idx]
             .guard
             .take()?
-            .commit(upstream_status, request_features, now)
+            .commit(tier, upstream_status, request_features, now)
     }
 
     /// Phase two after the UNREPAIRED attempt succeeded: every carried field is
@@ -1175,6 +1187,7 @@ impl Router {
             candidates,
             repaired: None,
             repaired_kind: None,
+            repaired_tier: None,
         })
     }
 
@@ -1207,10 +1220,9 @@ impl Router {
         native_class: &FailureClass,
         err: &Error,
         provider_kind: &str,
-    ) -> Option<RejectionKind> {
+    ) -> Option<NamedRejection> {
         rejected_field(native_class, err, provider_kind)
             .filter(|named| named.row.surface == surface)
-            .map(|named| named.kind)
     }
 
     /// Whether a rejection eligible to name a field localized NO field path from
@@ -1351,18 +1363,23 @@ pub(in crate::router) mod provisional {
     }
 
     /// Make every field rejection on this thread name `path` as a refused
-    /// FIELD until the returned guard drops.
+    /// FIELD, attributed self-identifyingly, until the returned guard drops.
     ///
     /// Visible to the whole `router` module rather than to `field_repair`
     /// alone: the canary settlement's coverage lives in a sibling sidecar and
     /// needs the SAME seam.
     pub(in crate::router) fn inject(path: &str) -> Injection {
+        inject_with_tier(path, SignalTier::SelfIdentifying)
+    }
+
+    /// [`inject`], with the attribution tier the resolution carries.
+    pub(in crate::router) fn inject_with_tier(path: &str, tier: SignalTier) -> Injection {
         let named = closed_table()
             .iter()
             .find(|row| row.path == path)
             .map(|row| NamedRejection {
                 row,
-                tier: SignalTier::SelfIdentifying,
+                tier,
                 kind: RejectionKind::UnsupportedField,
                 accepted: None,
             });

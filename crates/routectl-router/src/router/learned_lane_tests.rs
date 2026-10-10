@@ -305,7 +305,12 @@ fn a_field_verdict_learned_under_one_nickname_applies_to_another_on_the_lane() {
             now,
         )
         .expect("an unknown identity admits one repair");
-    let learned = guard.commit(400, vec![field_key.clone()], now);
+    let learned = guard.commit(
+        SignalTier::SelfIdentifying,
+        400,
+        vec![field_key.clone()],
+        now,
+    );
     assert!(
         learned.is_some(),
         "premise: the repaired retry persisted a verdict"

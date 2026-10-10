@@ -100,7 +100,7 @@ fn two_distinct_field_paths_are_distinct_entries() {
     let _ = reg
         .admit_provisional(&display, REMOTE_BASE, 1, t0)
         .expect("an unknown pair admits one repair")
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
 
     // Assert -- the sibling field inherits nothing.
@@ -130,7 +130,7 @@ fn the_same_field_on_two_targets_is_two_distinct_entries() {
     let _ = reg
         .admit_provisional(&here, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits")
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
 
     // Assert -- a fact proven about one target says nothing about another.
@@ -171,7 +171,7 @@ fn the_identity_carries_the_provider_kind_the_key_was_normalized_under() {
     let _ = reg
         .admit_provisional(&anthropic, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits")
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
 
     // Assert -- one row, acting for the kind that wrote it. A reader under the
@@ -256,7 +256,12 @@ fn a_successful_repaired_retry_commits_the_field_negative() {
 
     // Act -- the repaired retry came back 2xx, so the rejection is confirmed.
     let event = guard
-        .commit(400, vec!["thinking".to_string()], t0)
+        .commit(
+            SignalTier::SelfIdentifying,
+            400,
+            vec!["thinking".to_string()],
+            t0,
+        )
         .expect("a live commit emits its row");
 
     // Assert
@@ -298,7 +303,7 @@ fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_
 
     // Act
     let event = guard
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
 
     // Assert -- the emitted event carries the count this commit's OWN
@@ -329,7 +334,7 @@ fn a_failed_repair_leaves_resident_state_unchanged() {
     let _ = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits")
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
@@ -532,7 +537,7 @@ fn the_default_anthropic_target_can_mint_a_field_verdict() {
     let event = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("the public Anthropic endpoint may mint")
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
 
     // Assert
@@ -1225,8 +1230,15 @@ fn a_refused_confirmation_preserves_the_affected_request_tally() {
         other => panic!("expected the resident row to reserve a lease, got {other:?}"),
     };
 
-    let event =
-        reg.record_canary_confirmation(&k, claim, reg.learned().generation(), 400, vec![], t0);
+    let event = reg.record_canary_confirmation(
+        &k,
+        claim,
+        reg.learned().generation(),
+        SignalTier::SelfIdentifying,
+        400,
+        vec![],
+        t0,
+    );
 
     assert!(
         event.is_none(),
@@ -1433,7 +1445,12 @@ fn the_committed_row_reuses_the_existing_event_shape() {
 
     // Act
     let event = guard
-        .commit(400, vec!["thinking".to_string()], t0)
+        .commit(
+            SignalTier::SelfIdentifying,
+            400,
+            vec!["thinking".to_string()],
+            t0,
+        )
         .expect("a live commit emits its row");
 
     // Assert -- every field is a normalized key or a closed-set token, on the
@@ -1470,7 +1487,7 @@ fn a_bare_commit_leaves_the_canary_confirmation_count_at_zero() {
         .expect("unknown pair admits");
 
     let event = guard
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
 
     assert_eq!(
@@ -1493,7 +1510,7 @@ fn a_repeated_confirmed_rejection_refreshes_the_same_row() {
     let _ = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("unknown pair admits")
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
@@ -1502,7 +1519,7 @@ fn a_repeated_confirmed_rejection_refreshes_the_same_row() {
 
     // Act
     let event = guard
-        .commit(400, vec![], lapsed)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], lapsed)
         .expect("a live commit emits its row");
 
     // Assert -- one row with its history intact, acting on a fresh window.
@@ -1534,7 +1551,7 @@ fn a_field_verdict_commit_from_a_superseded_generation_still_persists() {
     // The reload lands between admission and settlement.
     reg.learned().advance_generation();
 
-    let event = guard.commit(400, vec![], t0);
+    let event = guard.commit(SignalTier::SelfIdentifying, 400, vec![], t0);
 
     assert!(
         event.is_some(),
@@ -1554,7 +1571,7 @@ fn a_field_verdict_clear_from_a_superseded_generation_still_clears() {
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("admitted");
-    let _ = guard.commit(400, vec![], t0);
+    let _ = guard.commit(SignalTier::SelfIdentifying, 400, vec![], t0);
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
@@ -1584,7 +1601,9 @@ fn the_event_generation_comes_from_the_applied_outcome() {
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("admitted");
 
-    let event = guard.commit(400, vec![], t0).expect("live commit");
+    let event = guard
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
+        .expect("live commit");
 
     assert_eq!(
         event.persistence_generation,
@@ -1628,7 +1647,7 @@ fn the_slot_is_released_on_commit_from_any_generation() {
         .expect("admitted");
     reg.learned().advance_generation();
 
-    let _ = guard.commit(400, vec![], t0);
+    let _ = guard.commit(SignalTier::SelfIdentifying, 400, vec![], t0);
 
     // The commit persisted an acting entry, so re-admission at the same instant
     // finds Acting and is correctly refused. Verify the slot itself is released by
@@ -1681,7 +1700,7 @@ fn a_commit_during_a_pending_boundary_stamps_the_pending_generation() {
     );
 
     let event = guard
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a field commit applies");
 
     assert_eq!(
@@ -1719,7 +1738,7 @@ fn a_clear_during_a_pending_boundary_stamps_the_pending_generation() {
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("admitted");
-    let _ = guard.commit(400, vec![], t0);
+    let _ = guard.commit(SignalTier::SelfIdentifying, 400, vec![], t0);
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
@@ -1785,7 +1804,7 @@ fn a_settlement_after_a_rolled_back_boundary_stamps_the_generation_in_force() {
     assert_eq!(reg.learned().generation(), active);
 
     let event = guard
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a field commit applies");
 
     assert_eq!(
@@ -1813,7 +1832,7 @@ fn a_clear_after_a_rolled_back_boundary_stamps_the_generation_in_force() {
     let seed = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("admitted");
-    let _ = seed.commit(400, vec![], t0);
+    let _ = seed.commit(SignalTier::SelfIdentifying, 400, vec![], t0);
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
 
     // Boundary first, so the clear's guard stores the pending token.
@@ -1876,7 +1895,7 @@ fn an_old_guard_blocks_the_replacement_facades_admission() {
     );
 
     // Settling the old guard frees the identity for the replacement.
-    let _ = guard.commit(400, vec![], t0);
+    let _ = guard.commit(SignalTier::SelfIdentifying, 400, vec![], t0);
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
     assert!(
         replacement
@@ -1985,7 +2004,7 @@ fn a_purge_lease_blocks_a_concurrent_commit_and_leaves_the_entry_untouched() {
     // A prior successful repair leaves a resident row for the purge to capture.
     reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("admitted")
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
     let before = reg
         .learned()
@@ -2011,7 +2030,7 @@ fn a_purge_lease_blocks_a_concurrent_commit_and_leaves_the_entry_untouched() {
         other => panic!("expected the resident row to reserve a lease, got {other:?}"),
     };
 
-    let outcome = guard.commit(400, vec![], t_lapsed);
+    let outcome = guard.commit(SignalTier::SelfIdentifying, 400, vec![], t_lapsed);
 
     assert!(
         outcome.is_none(),
@@ -2052,7 +2071,7 @@ fn a_purge_lease_blocks_a_concurrent_clear_and_leaves_the_entry_resident() {
 
     reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
         .expect("admitted")
-        .commit(400, vec![], t0)
+        .commit(SignalTier::SelfIdentifying, 400, vec![], t0)
         .expect("a live commit emits its row");
 
     let guard = reg
@@ -2134,8 +2153,15 @@ fn a_stale_claim_confirms_nothing_and_observes_nothing() {
     // The identity is carried forward while this canary is still out.
     reg.canaries().acknowledge_confirmation(&k, planned + 1, 1);
 
-    let event =
-        reg.record_canary_confirmation(&k, claim, reg.learned().generation(), 400, vec![], t0);
+    let event = reg.record_canary_confirmation(
+        &k,
+        claim,
+        reg.learned().generation(),
+        SignalTier::SelfIdentifying,
+        400,
+        vec![],
+        t0,
+    );
 
     assert!(
         event.is_none(),

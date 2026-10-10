@@ -1242,3 +1242,4 @@ async fn a_straggler_forwards_unchanged_instead_of_stranding_on_a_rejection() {
 }
 
 include!("field_canary_invalid_value_tests.rs");
+include!("field_canary_tier_tests.rs");

@@ -177,6 +177,9 @@ enum Answer {
     /// would be vacuous. Each seat here spends one repair and then hands the
     /// walk on, which is exactly the shape the shared ceiling has to bound.
     RejectThenWalk,
+    /// Reject the carried variant with the field rejection, then answer the
+    /// REPAIRED attempt with a 503, so the walk falls back having repaired.
+    RejectThenUnavailable,
 }
 
 struct MockSeat {
@@ -200,11 +203,14 @@ impl MockSeat {
                 Err(Error::upstream("field-mock", 400, field_reject_body()))
             }
             Answer::RejectThenWalk => Err(Error::upstream("field-mock", 501, "cannot count")),
+            Answer::RejectThenUnavailable if carried => {
+                Err(Error::upstream("field-mock", 400, field_reject_body()))
+            }
             Answer::ServeRepaired if carried => {
                 Err(Error::upstream("field-mock", 400, field_reject_body()))
             }
             Answer::ServeRepaired | Answer::ServeImmediately => Ok(()),
-            Answer::UnrelatedError => Err(Error::upstream(
+            Answer::UnrelatedError | Answer::RejectThenUnavailable => Err(Error::upstream(
                 "field-mock",
                 503,
                 r#"{"error":{"type":"api_error","message":"upstream unavailable"}}"#,
@@ -2089,3 +2095,4 @@ mod forced_tool_choice_key_tests {
 }
 
 include!("field_repair_parser_tests.rs");
+include!("field_repair_tier_tests.rs");

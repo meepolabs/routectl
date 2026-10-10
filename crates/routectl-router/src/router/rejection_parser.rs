@@ -67,14 +67,6 @@ pub(super) enum RejectionKind {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct NamedRejection {
     pub(super) row: &'static FieldRepairRow,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the field-repair seam does not thread the attribution tier into \
-                      verdict persistence yet"
-        )
-    )]
     pub(super) tier: SignalTier,
     pub(super) kind: RejectionKind,
     #[cfg_attr(

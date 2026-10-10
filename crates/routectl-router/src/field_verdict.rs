@@ -252,6 +252,9 @@ pub struct PreflightAuthorization {
     /// The acknowledged confirmation count resident for that incarnation, at
     /// least [`MINIMUM_CONFIRMATIONS`].
     pub confirmations: u32,
+    /// The attribution tier of the acting verdict, from the SAME guarded read
+    /// the incarnation came from.
+    pub tier: SignalTier,
     /// The detection phase that attributed the acting verdict, from the SAME
     /// guarded read the incarnation came from.
     pub phase: FailurePhase,
@@ -476,6 +479,7 @@ impl FieldVerdictRegistry {
         (acting_facts(()) == Some(before)).then_some(PreflightAuthorization {
             incarnation: before.incarnation,
             confirmations: snapshot.confirmations,
+            tier: before.tier,
             phase: before.phase,
             source: before.source,
             // Derived through the status surface's OWN posture function, from the
@@ -537,11 +541,18 @@ impl FieldVerdictRegistry {
     /// check runs BEFORE the observation: observing refreshes the learned row's
     /// decay and increments its `observations`, so a straggler reaching it would
     /// corroborate a lifecycle it never tested. Such a claim only releases.
+    ///
+    /// `tier` is the tier of the verdict under test, carried from the
+    /// authorization the canary was claimed on. The re-observation keeps it: a
+    /// canary re-tests the field, it does not re-attribute the rejection, so an
+    /// inferred verdict stays inferred however often it is confirmed.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_canary_confirmation(
         &self,
         key: &FieldVerdictKey,
         claim: crate::field_canary::CanaryClaimGuard<'_>,
         generation: u64,
+        tier: SignalTier,
         upstream_status: u16,
         request_features: Vec<String>,
         now: Instant,
@@ -564,7 +575,7 @@ impl FieldVerdictRegistry {
             key.registry_key(),
             &key.capability_key,
             &key.provider_kind,
-            SignalTier::SelfIdentifying,
+            tier,
             FailurePhase::F1,
             EvidenceSource::Live,
             None,
@@ -606,7 +617,7 @@ impl FieldVerdictRegistry {
             state_key: key.registry_key().to_string(),
             capability_key: key.capability_key.clone(),
             provider_kind: key.provider_kind.clone(),
-            signal_tier: SignalTier::SelfIdentifying,
+            signal_tier: tier,
             observations,
             upstream_status,
             remapped: false,
@@ -1015,11 +1026,18 @@ impl FieldRepairGuard<'_> {
     /// (refreshing a resident or lapsed one) and returns the emission row for
     /// the capability-event sink.
     ///
+    /// `tier` is how confidently the rejection was attributed to the field. A
+    /// self-identifying commit acts on this one observation; an inferred one
+    /// persists PENDING and acts only once a later request confirms it within
+    /// the registry's inferred window ([`crate::learned_capability::signal_acts`]).
+    /// The event row carries the same tier, so a warm rebuild replays the
+    /// verdict at the confidence it was learned at.
+    ///
     /// A refresh re-stamps the base decay window rather than applying the
     /// registry's geometric re-probe backoff: this is a corroborated
-    /// self-identifying observation, not a failed probe, so a chronically
-    /// rejecting field re-verifies once per base decay by design. The backoff
-    /// ladder stays reserved for the registry's own re-probe path.
+    /// observation, not a failed probe, so a chronically rejecting field
+    /// re-verifies once per base decay by design. The backoff ladder stays
+    /// reserved for the registry's own re-probe path.
     ///
     /// `request_features` is the request's derived in-flight feature set; no
     /// request body can enter the row.
@@ -1038,6 +1056,7 @@ impl FieldRepairGuard<'_> {
     /// happened.
     pub fn commit(
         mut self,
+        tier: SignalTier,
         upstream_status: u16,
         request_features: Vec<String>,
         now: Instant,
@@ -1060,18 +1079,23 @@ impl FieldRepairGuard<'_> {
                 key.registry_key(),
                 &key.capability_key,
                 &key.provider_kind,
-                SignalTier::SelfIdentifying,
+                tier,
                 FailurePhase::F1,
                 EvidenceSource::Live,
                 None,
                 now,
             );
-        let (observations, persistence_generation, incarnation) = match observed {
+        let (acting, observations, persistence_generation, incarnation) = match observed {
             crate::learned_capability::GenerationOutcome::Applied {
-                value: (_, observations),
+                value: (outcome, observations),
                 incarnation,
                 generation,
-            } => (observations, generation, incarnation),
+            } => (
+                outcome == crate::learned_capability::ObserveOutcome::Acting,
+                observations,
+                generation,
+                incarnation,
+            ),
             crate::learned_capability::GenerationOutcome::Stale => {
                 self.registry.release_slot(&key);
                 tracing::debug!(
@@ -1119,7 +1143,9 @@ impl FieldRepairGuard<'_> {
             state_key = %routectl_core::sanitize_for_log(key.registry_key()),
             capability_key = %key.capability_key,
             upstream_status,
+            signal_tier = tier.as_str(),
             observations,
+            acting,
             "envelope-field verdict persisted after a successful repaired retry",
         );
         Some(CapabilityLearnEvent {
@@ -1128,7 +1154,7 @@ impl FieldRepairGuard<'_> {
             state_key: key.registry_key().to_string(),
             capability_key: key.capability_key,
             provider_kind: key.provider_kind,
-            signal_tier: SignalTier::SelfIdentifying,
+            signal_tier: tier,
             observations,
             upstream_status,
             remapped: false,

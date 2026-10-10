@@ -83,6 +83,7 @@
 
 use std::time::Instant;
 
+use routectl_core::capability::SignalTier;
 use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_canary::{CanaryClaimGuard, CanaryOutcome, ModifiedRequestGuard};
@@ -238,6 +239,11 @@ pub(super) struct CanaryPlan<'a> {
     /// a settlement presents the same token rather than re-reading one a
     /// boundary may have moved in the meantime.
     generation: u64,
+    /// The tier of the verdict under test, from the same authorization read. A
+    /// confirmation re-observes at this tier: the canary's own rejection says
+    /// nothing about how the verdict was first attributed, so it must neither
+    /// promote an inferred verdict nor demote a self-identifying one.
+    tier: SignalTier,
 }
 
 impl Drop for CanaryPlan<'_> {
@@ -324,6 +330,7 @@ impl CanaryPlan<'_> {
             &self.key,
             claim,
             self.generation,
+            self.tier,
             upstream_status,
             request_features,
             now,
@@ -620,6 +627,7 @@ impl Router {
                 key,
                 surface: row.surface,
                 generation,
+                tier: authorization.tier,
             }));
         }
         Ok(key)
@@ -841,7 +849,8 @@ impl Router {
         provider_kind: &str,
     ) -> Option<u16> {
         let surface = plan.canary_surface()?;
-        let kind = Self::rejection_names_field_surface(surface, native_class, err, provider_kind)?;
+        let kind =
+            Self::rejection_names_field_surface(surface, native_class, err, provider_kind)?.kind;
         if kind == RejectionKind::InvalidValue
             && let Some(canary) = plan.canary.take()
         {

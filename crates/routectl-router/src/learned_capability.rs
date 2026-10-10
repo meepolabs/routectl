@@ -412,9 +412,9 @@ pub struct SeedClearMarker {
 /// entry, read out of a single guarded acquisition. See
 /// [`LearnedCapabilityRegistry::field_acting_facts_in_generation`].
 ///
-/// The three fields travel together because they describe one lifecycle: an
-/// incarnation number paired with another lifecycle's phase or source would
-/// attribute a rewrite to evidence that never authorized it.
+/// The fields travel together because they describe one lifecycle: an
+/// incarnation number paired with another lifecycle's tier, phase or source
+/// would attribute a rewrite to evidence that never authorized it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
     clippy::redundant_pub_crate,
@@ -426,6 +426,8 @@ pub struct SeedClearMarker {
 pub(crate) struct FieldActingFacts {
     /// The acting entry's own incarnation.
     pub incarnation: u64,
+    /// The attribution tier the entry was learned at.
+    pub tier: SignalTier,
     /// The detection phase that attributed this verdict.
     pub phase: FailurePhase,
     /// Whether the evidence came from live traffic or an out-of-band probe.
@@ -3217,6 +3219,7 @@ impl LearnedCapabilityRegistry {
                     state,
                     entries.get(&key).map(|e| FieldActingFacts {
                         incarnation: e.incarnation,
+                        tier: e.signal,
                         phase: e.phase,
                         source: e.source,
                     }),

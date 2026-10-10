@@ -114,6 +114,9 @@ struct Recorder {
     /// a rejection and settles INCONCLUSIVE -- which leaves the verdict resident.
     /// Off where the canary's unrepaired SUCCESS is the disproof under test.
     reject_carried: bool,
+    /// When set, reject any attempt still carrying the field with THIS body
+    /// instead, so a test chooses how the rejection is attributed.
+    carried_rejection: Option<&'static str>,
 }
 
 impl Recorder {
@@ -163,6 +166,11 @@ impl Provider for Recorder {
         self.record(&req);
         if self.reject_carried && Self::carries_field(&req) {
             return Err(Error::upstream("p0", 400, FIELD_REJECT_BODY));
+        }
+        if let Some(body) = self.carried_rejection
+            && Self::carries_field(&req)
+        {
+            return Err(Error::upstream("p0", 400, body));
         }
         Ok(ChatResponse {
             model: "claude-sonnet-4-5".to_string(),
@@ -470,3 +478,4 @@ fn available_data(panel: &Value) -> &Value {
 include!("preflight_daemon_rewrite_tests.rs");
 include!("preflight_daemon_observability_tests.rs");
 include!("preflight_daemon_health_tests.rs");
+include!("preflight_daemon_tier_tests.rs");
