@@ -876,6 +876,18 @@ validation. Matching never rewrites the flag: a forwarded flag keeps the
 client's spelling, and learned and seeded `beta:` verdicts stay
 case-sensitive.
 
+Because the floor is never withheld, an `unsupported` override on a floor
+flag has no effect on an `anthropic-api` provider, and `routectl config
+check` warns about it, naming the spec, the flag and why the floor re-adds
+it. The flags it checks: `oauth-2025-04-20` (OAuth
+gate), the Claude Code floor listed below, `structured-outputs-2025-12-15`
+(re-added when the body carries `output_config.format`),
+`effort-2025-11-24` (re-added when the body carries `output_config.effort`),
+and the provider's `header_extras["anthropic-beta"]` (plus the model's own
+for a `"<provider>:<nickname>"` spec). The comparison ignores ASCII case.
+The warning is advisory: the config still loads and the exit code is
+unchanged.
+
 At ingress, client flags from the body and the `anthropic-beta` header are
 split on commas, trimmed and deduplicated; a flag holding any byte outside
 visible ASCII is dropped, and a request with more than 64 distinct flags is

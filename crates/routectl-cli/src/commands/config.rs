@@ -953,6 +953,40 @@ mod oauth_auth_selector_tests {
 }
 
 #[cfg(test)]
+mod beta_floor_override_tests {
+    use super::validation_report;
+    use routectl_router::Config;
+
+    /// The floor-flag advisory reaches `config check` through the shared
+    /// suite, and stays a warning: the error half (which alone sets the exit
+    /// code) is untouched.
+    #[test]
+    fn config_check_warns_on_an_unsupported_floor_flag_without_failing() {
+        // Arrange
+        let toml_text = "[providers.claude]\n\
+                         kind = \"anthropic-api\"\n\
+                         api_key_ref = \"env://ANTHROPIC_KEY\"\n\
+                         \n\
+                         [capability.overrides.claude]\n\
+                         unsupported = [\"beta:effort-2025-11-24\"]\n";
+        let config: Config = toml::from_str(toml_text).expect("config must parse");
+
+        // Act
+        let report = validation_report(&config, Some(toml_text));
+
+        // Assert
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let warning = report
+            .warnings
+            .iter()
+            .find(|w| w.contains("effort-2025-11-24"))
+            .unwrap_or_else(|| panic!("no floor-flag warning: {:?}", report.warnings));
+        assert!(warning.contains("claude"), "{warning}");
+        assert!(warning.contains("output_config.effort"), "{warning}");
+    }
+}
+
+#[cfg(test)]
 mod containment_line_tests {
     use super::{MAX_REPORTED_LINE_CHARS, safe_line, validation_report};
     use routectl_router::Config;

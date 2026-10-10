@@ -1900,6 +1900,7 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     warnings.extend(super::warnings::unread_thinking_budget_warnings(config));
     warnings.extend(super::warnings::cloudcode_host_warnings(config));
     warnings.extend(super::warnings::cloudcode_model_warnings(config));
+    warnings.extend(super::warnings::beta_floor_override_warnings(config));
 
     ConfigValidation { errors, warnings }
 }

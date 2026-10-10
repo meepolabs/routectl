@@ -425,6 +425,118 @@ pub fn codex_identity_warnings(config: &crate::config::Config) -> Vec<String> {
     }
 }
 
+/// Advisory (never fatal) load-time check on the beta-override surface: warn
+/// when an `unsupported` `beta:<flag>` override on an anthropic-api provider
+/// names a flag the egress re-adds from its beta floor. The override parses
+/// and is stored, but the floor is never withheld, so the flag still ships
+/// whenever its floor condition holds.
+///
+/// Flags compare in the override's canonical form
+/// ([`crate::beta_capability::beta_override_key`]): case-insensitive ASCII,
+/// matching how the override itself is looked up. A flag in more than one
+/// floor class yields one warning naming every class it is in.
+///
+/// Bedrock's `anthropic_beta_floor()` is not consulted: it is empty for every
+/// non-Bedrock entry. `force_supported` entries are not inspected -- sending
+/// a floor flag is what the floor does anyway.
+pub(super) fn beta_floor_override_warnings(config: &crate::config::Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (spec, override_entry) in &config.capability.overrides {
+        let (provider_name, nickname) = crate::override_registry::split_target_spec(spec);
+        let Some(provider @ ProviderEntry::AnthropicApi { .. }) =
+            config.providers.get(provider_name)
+        else {
+            continue;
+        };
+        let model = nickname.and_then(|n| config.models.get(n));
+        let floor = beta_floor_classes(provider, model);
+        for raw in &override_entry.unsupported {
+            let key = crate::beta_capability::beta_override_key(raw);
+            let Some(flag) = crate::beta_capability::beta_flag_of(&key) else {
+                continue;
+            };
+            let classes: Vec<&str> = floor
+                .iter()
+                .filter(|(floor_flag, _)| floor_flag == flag)
+                .map(|(_, class)| *class)
+                .collect();
+            if classes.is_empty() {
+                continue;
+            }
+            warnings.push(format!(
+                "[capability.overrides.\"{spec}\"] unsupported `{raw}` cannot withhold a \
+                 floor flag on anthropic-api provider `{provider_name}`: the floor is never \
+                 withheld, so the flag still ships whenever its floor condition holds ({}). \
+                 Remove the override.",
+                classes.join("; "),
+            ));
+        }
+    }
+    warnings
+}
+
+/// Every flag the anthropic-api egress re-adds regardless of a withhold,
+/// lowercased, each paired with the reason class an operator reads in the
+/// warning. A flag appears once per class it belongs to.
+fn beta_floor_classes(
+    provider: &ProviderEntry,
+    model: Option<&crate::config::ModelEntry>,
+) -> Vec<(String, &'static str)> {
+    use routectl_core::identity::anthropic::{
+        EFFORT_BETA, OAUTH_ANTHROPIC_BETA, STRUCTURED_OUTPUTS_BETA,
+        default_claude_code_anthropic_betas,
+    };
+
+    let empty = std::collections::BTreeMap::new();
+    let mut floor: Vec<(String, &'static str)> = vec![
+        (
+            OAUTH_ANTHROPIC_BETA.to_string(),
+            "OAuth gate: re-added on own-OAuth requests to api.anthropic.com",
+        ),
+        (
+            STRUCTURED_OUTPUTS_BETA.to_string(),
+            "structured outputs: re-added when the body carries output_config.format",
+        ),
+        (
+            EFFORT_BETA.to_string(),
+            "effort: re-added when the body carries output_config.effort",
+        ),
+    ];
+    floor.extend(default_claude_code_anthropic_betas().iter().map(|flag| {
+        (
+            (*flag).to_string(),
+            "Claude Code floor: re-added on non-Claude-Code requests over own OAuth to \
+             api.anthropic.com",
+        )
+    }));
+    floor.extend(
+        crate::router::operator_betas(Some(provider.header_extras()), &empty)
+            .into_iter()
+            .map(|flag| {
+                (
+                    flag,
+                    "provider header_extras: the provider's anthropic-beta header always ships",
+                )
+            }),
+    );
+    if let Some(model) = model {
+        floor.extend(
+            crate::router::operator_betas(None, &model.header_extras)
+                .into_iter()
+                .map(|flag| {
+                    (
+                        flag,
+                        "model header_extras: the model's anthropic-beta header always ships",
+                    )
+                }),
+        );
+    }
+    floor
+        .into_iter()
+        .map(|(flag, class)| (flag.to_ascii_lowercase(), class))
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "warnings_tests.rs"]
 mod warnings_tests;
@@ -435,3 +547,7 @@ mod warnings_tests;
 #[cfg(test)]
 #[path = "warnings_thinking_budget_tests.rs"]
 mod warnings_thinking_budget_tests;
+
+#[cfg(test)]
+#[path = "warnings_beta_floor_tests.rs"]
+mod warnings_beta_floor_tests;
