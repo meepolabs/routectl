@@ -67,10 +67,6 @@ pub(crate) mod log_hash;
 pub(crate) mod override_registry;
 pub mod pool_build;
 pub mod pricing;
-#[expect(
-    dead_code,
-    reason = "the paid slot and paid settlement counters have no caller left"
-)]
 pub(crate) mod probe_scheduler;
 pub(crate) mod quota;
 pub(crate) mod resolved;

@@ -52,12 +52,7 @@ fn a_repeat_activation_for_the_same_lane_and_capability_dedupes() {
 
     // Act: the second and third admitted requests on the same lane.
     let second = scheduler.activate(&key(0), 1, vec![ProbeValidator::CountTokens], payload());
-    let third = scheduler.activate(
-        &key(0),
-        1,
-        vec![ProbeValidator::ExpectedRejection],
-        payload(),
-    );
+    let third = scheduler.activate(&key(0), 1, vec![ProbeValidator::CountTokens], payload());
 
     // Assert: dedupe is per lane AND capability, so neither adds a job.
     assert_eq!(second, ProbeActivation::Deduped);

@@ -4,15 +4,14 @@
 //! # The race this closes
 //!
 //! A publication is not one instruction: it draws a ticket value, stamps it,
-//! retires superseded work, clears the candidate list, and (through the callback
-//! form) stores the replacement router. A shutdown does the same shape of work.
+//! retires superseded work, and (through the callback form) stores the
+//! replacement router. A shutdown does the same shape of work.
 //! Run concurrently and interleaved, the two produce states neither intends --
 //! most damagingly a publication whose STORE lands after a shutdown has already
 //! cleared, publishing a router into a daemon that is going away.
 //!
 //! The shared ticket alone cannot fix that. It orders the GENERATION correctly,
-//! and an authorization reading it abandons itself as designed; but the ticket
-//! says nothing about whether the rest of a publication's own transition has
+//! but it says nothing about whether the rest of a publication's own transition has
 //! run, so a publication that drew a value before a shutdown can still be
 //! mid-transition after it.
 //!
@@ -21,10 +20,9 @@
 //! The design this replaces held an async guard ACROSS THE LEDGER AWAIT, so a
 //! wedged accounting layer could hold a reload open. Nothing here spans an
 //! await: this mutex is taken and released inside one synchronous transition
-//! whose longest step is a bounded in-memory sweep. A paid authorization never
-//! takes it at all -- it continues to order itself optimistically against the
-//! ticket. So the availability property is unchanged: publication and shutdown
-//! still wait on nothing that can be slow.
+//! whose longest step is a bounded in-memory sweep. So the availability
+//! property is unchanged: publication and shutdown still wait on nothing that
+//! can be slow.
 //!
 //! `parking_lot::Mutex` rather than the async one for exactly that reason: this
 //! is a short critical section between synchronous callers, and an async lock
@@ -50,8 +48,7 @@
 //!
 //! # Shared across replacement routers
 //!
-//! Attached by carry-over like the scheduler, the candidate list, and the
-//! ticket. The publishing router and the shutting-down router are different
+//! Attached by carry-over like the scheduler and the ticket. The publishing router and the shutting-down router are different
 //! objects, so a per-router state would serialize nothing between them.
 
 use std::cell::Cell;

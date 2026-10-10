@@ -3376,19 +3376,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   pass) and
   runs it with `join_all`, wraps each operation in `tokio::time::timeout` so
   expiry DROPS the future, and settles the outcome; it executes only the
-  count-token free validator (the expected-rejection class is in no plan).
-  `build_probe_request` is the SHARED body builder for BOTH probe classes (the
-  free count-token validator here and the paid-candidate payload), so the two ask the same question of the same lane rather
-  than drifting into different envelopes: the
+  count-token free validator, the only class a plan names.
+  `build_probe_request` builds the probe body: the
   seat's UPSTREAM wire id, one minimal constant turn, the closed-table field
   applied through the GROUNDED table's own carrier (`grounded_table_row`, so a
   test-only row is neither produceable nor consumable by a probe) plus the
   minimal canonical reasoning state the normalizer needs, each captured beta
   source reapplied to ITS OWN carrier, and the originating Claude-Code
   classification so the egress makes the same `is_non_cc` call. `max_tokens` is
-  its one parameter -- the single axis the two classes differ on -- set BEFORE
-  `apply_probe_payload`, which fills the free default only where the field is
-  absent, so a caller-supplied allowance survives it.
+  left to `apply_probe_payload`'s probe default.
   Classification
   is welded ACROSS crates: the header literal and the presence predicate live
   once in `routectl_core::identity::anthropic`
@@ -3401,20 +3397,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`tests/probe_beta_wire.rs`) and by classification + census tests in the
   providers crate. A payload refused for any
   retention bound is COUNTED (`payload_refusals_total`) and diagnosed once per
-  incarnation rather than skipped silently. A `PaidProbeCandidate` is recorded
-  only when the scheduler reports the plan spent its last free step AND
-  `paid_probe_permitted` agrees; a candidate refused for list capacity is
-  COUNTED (`paid_candidate_capacity_refusals_total`). It RETAINS the exhausting
-  job's own `ProbePayload` (cloned before the settle consumes the lease, and
-  already bounded by every ceiling `ProbePayload::new` enforced), so the paid
-  stage asks about the exact field, value, and beta context the admitted request
-  was about to send rather than rebuilding one from config. Both counters are
-  SNAPSHOT TELEMETRY -- nothing renders them to an operator today. Nothing
-  here dials a paid endpoint, and the candidate list is input for the paid
-  stage rather than permission to spend. `probe_scheduler_snapshot()` is PURE and `pub`
+  incarnation rather than skipped silently; the counter is SNAPSHOT TELEMETRY --
+  nothing renders it to an operator today. A plan that runs out without settling
+  is tombstoned by the scheduler and records nothing else.
+  `probe_scheduler_snapshot()` is PURE and `pub`
   (the reload boundary tests read it across the crate boundary);
-  `carry_over_probe_scheduler_from` ATTACHES the scheduler, candidate list,
-  and incarnation TICKET
+  `carry_over_probe_scheduler_from` ATTACHES the scheduler and incarnation
+  TICKET
 - (providers) `anthropic_api::is_client_traffic` -- excludes background probes
   from this lane's translation metrics, the unified-quota shared claim/log state,
   and thinking-cache writes; response-local metadata unaffected. Rationale in module docs
@@ -3435,24 +3424,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   refusal warning. All `&self` bookkeeping: dials nothing, awaits nothing, never
   delays the admitted request
 - `src/router/probe_seat.rs` -- `ProbeSeat`, `probe_seat_for`,
-  `probe_entry_is_attributable`, `paid_probe_daily_cap`: which seat a probe
+  `probe_entry_is_attributable`: which seat a probe
   identity's lane names (the first resolved model or pooled member egressing
   that provider entry with that upstream) and whether a rejection from it is
   attributable
-- `src/router/probe_failure_class.rs` -- two closed mappings off the SHARED
-  `routectl_core` classifier: what a failure means for free validation, and for
-  paid settlement (one arm per variant). Both fail closed; reasoning in module docs
-- (router) the PAID-PROBE PUBLICATION GENERATION PROTOCOL, in
+- `src/router/probe_failure_class.rs` -- one closed mapping off the SHARED
+  `routectl_core` classifier: what a failure means for free validation. Fails
+  closed; reasoning in module docs
+- (router) the PROBE PUBLICATION GENERATION PROTOCOL, in
   `src/router/probe_publication.rs`. The shared monotonic `probe_incarnation_ticket`
   is the authority: a publication draws from it and stamps the drawn value on
-  itself, so `Router::is_current_publication` (crate-internal, `Acquire` on both
-  loads) is the equality of this router's stamp with the ticket. `shutdown_probe_work`
+  itself. `shutdown_probe_work`
   advances the ticket to a terminal generation NO router is stamped with BEFORE
   clearing, which supersedes every live router at once and cannot be undone -- a
   shutdown that advanced to a value some router then stamped would be an ABA that
-  reopened the resurrection window. Equality rather than `>=` or a per-router flag:
-  a flag needs a writer on routers the publication never touched, and `>=` cannot
-  express a generation current for nobody. Publication and shutdown are
+  reopened the resurrection window. Publication and shutdown are
   SYNCHRONOUS. Additive
   `publish_probe_incarnation_into(&Arc<Self>, impl FnOnce(Arc<Self>))` stamps and
   then invokes the store callback BEFORE returning, so the stamp-before-store
@@ -3462,8 +3448,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   convention. The plain sync `publish_probe_incarnation` / `shutdown_probe_work`
   stay public and unchanged for compatibility
 - `src/router/probe_publication.rs` -- `publish_probe_incarnation`,
-  `publish_probe_incarnation_into`, `shutdown_probe_work`, and
-  `is_current_publication`: the short SERIALIZED transitions that move the probe
+  `publish_probe_incarnation_into`, and `shutdown_probe_work`: the short SERIALIZED transitions that move the probe
   lifecycle forward. Each takes the shared lifecycle transition for its whole
   ticket/stamp-retire-clear/store sequence, because the ticket alone orders the
   GENERATION but says nothing about whether the rest of a transition has run --
@@ -3479,16 +3464,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   that activation into a table just swept. Two separate calls could not close the
   window from outside. The public callback contract is documented on
   `publish_probe_incarnation_into`: one non-blocking, non-panicking store, no
-  lifecycle re-entry. Both clears take the candidate lock only AFTER the ticket has moved,
-  which is what lets `requeue_paid_probe_candidate` linearize against them. Split
+  lifecycle re-entry. Split
   from `probe_lifecycle.rs` for file size: that module owns per-incarnation WORK,
   this one owns the generation that work is valid under
 - `src/router/probe_lifecycle_state.rs` -- `ProbeLifecycleState`, one short
   `parking_lot::Mutex` plus a terminal-shutdown bit, shared across replacement
   routers by carry-over (the publishing and shutting-down routers are different
   objects, so a per-router state would serialize nothing). NEVER held across an
-  await, and a paid authorization never takes it -- which is what distinguishes it
-  from the withdrawn blocking exclusion: the longest step under it is a bounded
+  await -- which is what distinguishes it from the withdrawn blocking exclusion: the longest step under it is a bounded
   in-memory sweep, so publication and shutdown still wait on nothing that can be
   slow. LIVENESS IS STRUCTURAL: `begin_publication` checks the terminal bit INSIDE
   its own acquisition and returns `Option<LiveLifecycleTransition>`, the opaque
@@ -3505,7 +3488,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   runs the due free batch to completion and reports how many validators ran.
 - `src/router/probe_test_support.rs` -- shared fixtures for the probe sidecars:
   one `build_router` behind the per-shape wrappers (base URL, breaker
-  threshold, RPM limit, lane count, model beta floor, paid cap),
+  threshold, RPM limit, lane count, model beta floor),
   `plant_eligible_verdict`, and the provider doubles
 - `src/router/probe_scheduling_tests.rs` -- activation and lifecycle from the
   scheduler side, plus the pre-flight/activation composition
@@ -3513,13 +3496,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   every mirrored refusal, and the end-to-end pre-flight-strips-then-activates
   composition with its unstripped positive control
 - `src/router/probe_worker_tests.rs` -- what the worker executes, settles, and
-  refuses to spend, including the counted paid-candidate capacity refusal
-  - `src/router/probe_candidate_payload_tests.rs` -- an `include!`d fragment of
-    it: what a recorded candidate RETAINS, driven through the real worker. The
-    retained payload is compared against the body the probe ACTUALLY sent (a
-    hand-written expectation could agree with a default-constructed payload and
-    hold whether retention worked or not), both beta sources non-empty and
-    asserted as a premise, and a publication clears the list payloads included
+  refuses to spend, including an exhausted plan tombstoning with no further dial
 - `src/router/probe_payload_seat_tests.rs` -- the probe body, the pre-dial
   recheck, and the real-normalizer thinking/beta weld
 - `src/router/probe_payload_bound_tests.rs` -- the modeled display-value
@@ -3584,9 +3561,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   feature-ABSENT controls that make that non-vacuous (no resident verdict, and a
   resident-but-unacknowledged one, both of which must forward the client's field
   verbatim -- without them an unconditional strip would pass), the counter and the
-  single request WARN moving on a real rewrite, and the cap-zero lane still
-  activating and running FREE validation while committing no reservation and
-  dispatching no paid call. Lives in this crate rather than the daemon e2e suite
+  single request WARN moving on a real rewrite, and a lane activating on its first
+  admitted request and running FREE validation. Lives in this crate rather than the daemon e2e suite
   for a structural reason the file states: pre-flight and probe activation both
   refuse a target whose base URL names a local hop, and every in-process HTTP mock
   binds loopback -- so a wiremock-backed daemon test would assert over a lane where
@@ -4346,24 +4322,23 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   each documenting the edit that turns it red
 - `src/probe_scheduler/mod.rs` -- `ProbeScheduler` over one
   `Mutex<SchedulerInner>` (the job table, terminal tombstones, retirement floor,
-  held paid slots, and counters), plus `Job`/`JobPhase` and every state
+  and counters), plus `Job`/`JobPhase` and every state
   transition: activate, lease, settle/release, reschedule, defer, tombstone,
-  retire, cancel. `in_flight()` is ONE reading over free leases PLUS held paid
-  slots, and `lease_due`, `try_acquire_paid_slot`, and the snapshot all read it,
-  so `PROBE_MAX_CONCURRENCY` bounds real simultaneous background work rather
-  than one of its two kinds. `retire_before` KEEPS a retired IN-FLIGHT row while
+  retire, cancel. `in_flight()` is the ONE reading `lease_due` and the snapshot
+  both use, so `PROBE_MAX_CONCURRENCY` bounds real simultaneous background work.
+  An exhausted plan is tombstoned for the incarnation. `retire_before` KEEPS a
+  retired IN-FLIGHT row while
   dropping queued and backing-off ones: a live upstream operation must keep
-  occupying its slot across a reload, or the replacement router's next lease or
-  paid acquisition admits work on top of it and real load exceeds the ceiling
+  occupying its slot across a reload, or the replacement router's next lease
+  admits work on top of it and real load exceeds the ceiling
   with no counter showing it. The retained row is non-leasable (the raised
   `retired_below` floor already refuses it) and is swept by `release` when its
   lease settles or drops, reported STALE so it cannot reschedule, tombstone into a
   retired incarnation, or report a spent free step. `cancel_all` clears in-flight
   rows too, and the asymmetry is deliberate: after a shutdown there is no later
   admission for an under-count to mislead, and the caller must not wait on an
-  upstream. `release` and `release_paid_slot` are MODULE-PRIVATE (descendants
-  `lease` and `paid_slot` reach them; a sibling forging either would free a slot
-  whose operation is still running -- measured: at `pub(super)` a planted sibling
+  upstream. `release` is MODULE-PRIVATE (the descendant `lease` reaches it; a
+  sibling forging it would free a slot whose operation is still running -- measured: at `pub(super)` a planted sibling
   call compiles, module-private makes it `E0624`).
 - `src/probe_scheduler/lease.rs` -- the RAII `ProbeLease` guard a worker holds
   while a free operation runs, and `ReleaseOutcome` (`Stale` vs
@@ -4371,20 +4346,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   advancing the cursor run the plan out"). `ProbeLease::new` is `pub(super)` with
   private fields, so only the scheduler's leasing critical section can mint one.
   Split out of `mod.rs` for file size; names and surface are unchanged.
-- `src/probe_scheduler/paid_slot.rs` -- `PaidProbeSlot`, the RAII guard a paid
-  probe holds from before its reservation await until its call completes. Counted
-  by the SAME ceiling free leases refuse at (a separate paid counter would let
-  real load reach the sum of two bounds while each read inside its own). Owns an
-  `Arc<ProbeScheduler>` rather than a borrow because it outlives the function
-  that took it -- it travels inside the authorization -- and its `Drop` is the
-  only release path, so a completed dial, a cancelled future, and a shutdown all
-  return the slot. Releasing is NEVER a refund: the slot bounds load, the ledger
-  bounds spend. Deliberately not `Clone`, and its `Debug` is HAND-WRITTEN to a
-  field-less `PaidProbeSlot(held)`: a derive would recurse into
-  `Arc<ProbeScheduler>` and render the WHOLE job table -- every other lane's
-  identity and captured beta context -- from a guard held on a money-spending
-  path. It also does not read the count through the scheduler, which would take
-  that lock from inside a formatter.
 - `src/probe_scheduler/debug.rs` -- the hand-written, field-less `ProbeScheduler`
   `Debug` (`ProbeScheduler { .. }`): it renders nothing from the job table and
   never takes the scheduler lock. `Job` and `SchedulerInner` implement no `Debug`.
@@ -4399,8 +4360,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/probe_scheduler/bounds.rs` -- the queue, concurrency, timeout, backoff,
   attempt, deferral, and tombstone-capacity limits as code constants.
 - `src/probe_scheduler/vocab.rs` -- the closed validator / outcome /
-  settlement / activation tokens, `ProbeSchedulerSnapshot`,
-  `PaidPassSettlement`, `validator_plan`, and `paid_probe_permitted`.
+  settlement / activation tokens, `ProbeSchedulerSnapshot`, and
+  `validator_plan` (`[CountTokens]` for a count-token lane, otherwise empty,
+  which activation refuses).
 - `src/probe_scheduler/payload.rs` -- `ProbePayload` and every capture-time
   refusal. `PROBE_MODELED_DISPLAY_VALUES` restricts the probed value to the
   vocabulary the egress models (`summarized` / `omitted` / `updates`); the rule
@@ -4420,30 +4382,20 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   scheduler has no business holding a session id across a queueing delay). The
   count bound is read off `len()` BEFORE any per-token work and dedupe runs
   through a `BTreeSet`, so a pathological input costs one length read rather
-  than an O(n^2) scan. TWO HOLDERS share the retention ceiling and counting only
-  one understates it by half: a payload is retained by a tracked JOB here and
-  again by a paid CANDIDATE on the Router, each list bounded by
-  `PROBE_QUEUE_DEPTH` independently, so total retained payload bytes are bounded
-  by TWICE the depth times the per-payload sum. `is_retainable_beta` REFUSES (never sanitizes) a token
+  than an O(n^2) scan. A payload is retained only by a tracked JOB, so total
+  retained payload bytes are bounded by `PROBE_QUEUE_DEPTH` times the
+  per-payload sum. `is_retainable_beta` REFUSES (never sanitizes) a token
   carrying a comma, CR, LF, or any control char: the egress joins betas into one
   comma-separated header, and a rewritten token is a different flag.
 - `src/probe_scheduler/test_support.rs` -- shared fixtures for
   `probe_scheduler/queue_tests.rs` (queue mechanics),
-  `probe_scheduler/plan_tests.rs` (free plan and paid boundary), and
+  `probe_scheduler/plan_tests.rs` (the validator plan and its refusal), and
   `probe_scheduler/concurrency_tests.rs` (parallelism, deferral occupancy).
   - `src/probe_scheduler/retirement_tests.rs` -- an `include!`d fragment of
-    `concurrency_tests.rs`: a retired in-flight row stays counted and blocks paid
-    admission until its lease settles, a DROPPED lease on one returns its slot
+    `concurrency_tests.rs`: a retired in-flight row stays counted and blocks a
+    new lease until its lease settles, a DROPPED lease on one returns its slot
     too, and shutdown clears in-flight rows where retirement keeps them. Named
     mutation check: removing the in-flight retention reds the first two.
-  - `src/probe_scheduler/paid_slot_tests.rs` -- an `include!`d fragment of
-    `concurrency_tests.rs`: the paid slot displacing a free lease and vice versa,
-    release on drop and on a CANCELLED FUTURE (not `catch_unwind` -- the gated
-    release profile is `panic = "abort"`, so an unwinding variant would be
-    inert), and both kinds contending at 64 threads against an EXTERNAL live
-    counter rather than the snapshot the mutation would have skewed. Named
-    mutation check: dropping paid slots from the shared reading reds all four,
-    peaking at 3 against a bound of 2.
 - `src/capability_rebuild.rs` -- boot warm-rebuild of the learned registry
   from the persisted capability-event ledger, mirroring the K estimator's
   `rebuild.rs`. Owns the `CapabilityLedgerReader` dependency-inversion trait

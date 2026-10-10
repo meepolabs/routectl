@@ -95,11 +95,8 @@ impl Router {
         {
             return;
         }
-        // `count_tokens` is available on this lane, so the plan leads with that
-        // free validator. The expected-rejection class does NOT follow it: it
-        // has no grounded template, so `validator_plan` omits it entirely and
-        // the plan's only other entry is the paid class, which this stage never
-        // dials.
+        // `count_tokens` is available on this lane, so the plan is that free
+        // validator.
         let plan = validator_plan(true);
         // The admitted request's CLAUDE-CODE classification, read once: the
         // egress's `is_non_cc` decision gates the beta floor, so the probe must

@@ -98,15 +98,11 @@ fn spending_a_step_with_another_free_step_left_advances_rather_than_exhausting()
     // answer -- the caller never reads the cursor separately.
     //
     // Arrange: two free steps. Built DIRECTLY rather than through
-    // `validator_plan`, which excludes `ExpectedRejection` because it has no
-    // grounded template -- so no plan that function returns has two free steps.
-    // The scheduler's advance logic is general over plan length, and a
-    // two-step plan is what exercises it.
+    // `validator_plan`, which never returns more than one step. The scheduler's
+    // advance logic is general over plan length, and a two-step plan is what
+    // exercises it.
     let scheduler = ProbeScheduler::default();
-    let plan = vec![
-        ProbeValidator::CountTokens,
-        ProbeValidator::ExpectedRejection,
-    ];
+    let plan = vec![ProbeValidator::CountTokens, ProbeValidator::CountTokens];
     assert_eq!(
         scheduler.activate(&key(0), 1, plan, payload()),
         ProbeActivation::Queued
@@ -122,12 +118,12 @@ fn spending_a_step_with_another_free_step_left_advances_rather_than_exhausting()
     // Act
     let release = lease.settle(ProbeSettlement::SpentFreeStep, now);
 
-    // Assert: committed, but the plan is NOT spent -- so no paid candidate.
+    // Assert: committed, but the plan is NOT spent.
     assert!(release.committed());
     assert!(
         !release.exhausted_free_plan(),
         "a plan with a free step left must not report itself spent, or a lane \
-         reaches the paid class having never run step two"
+         is tombstoned having never run step two"
     );
     let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.free_exhausted_total, 0);
@@ -137,17 +133,14 @@ fn spending_a_step_with_another_free_step_left_advances_rather_than_exhausting()
     );
     assert_eq!(snap.tombstoned, 0, "an advanced job is not terminal");
 
-    // And the NEXT lease runs the SECOND step, which is what proves the
-    // cursor actually moved rather than the job merely being rescheduled.
+    // The NEXT lease runs the SECOND step. Both steps name the same validator,
+    // so what proves the cursor moved is the exhaustion below: had the first
+    // settlement only rescheduled, spending this step would advance again
+    // rather than run the plan out.
     let later = now + PROBE_BACKOFF_CEILING;
     let second = scheduler
         .lease_due(later)
         .expect("the advanced job is due again");
-    assert_eq!(
-        second.validator(),
-        ProbeValidator::ExpectedRejection,
-        "the advance must move the cursor to the next free step"
-    );
 
     // Act again: spending the LAST step runs the plan out.
     let release = second.settle(ProbeSettlement::SpentFreeStep, later);
@@ -156,7 +149,7 @@ fn spending_a_step_with_another_free_step_left_advances_rather_than_exhausting()
     assert!(release.committed());
     assert!(
         release.exhausted_free_plan(),
-        "spending the last free step is what makes the paid class a candidate"
+        "spending the last free step must report the plan spent"
     );
     let snap = scheduler.snapshot(Instant::now());
     assert_eq!(snap.free_exhausted_total, 1);
@@ -316,8 +309,7 @@ fn deferrals_below_the_ceiling_keep_the_job_queued() {
     assert_eq!(snap.abandoned_total, 0, "and no attempt was ever charged");
 }
 
-// The paid-slot group lives in a sibling file to keep every file under the size
-// ceiling. It compiles into THIS module via `include!`, so the imports above
-// stay in scope and no test's module path changes.
-include!("paid_slot_tests.rs");
+// The retirement group lives in a sibling file to keep every file under the
+// size ceiling. It compiles into THIS module via `include!`, so the imports
+// above stay in scope and no test's module path changes.
 include!("retirement_tests.rs");

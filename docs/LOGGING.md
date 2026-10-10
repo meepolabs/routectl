@@ -1319,17 +1319,13 @@ The latch SCOPES differ, because the conditions do:
 
 These are TELEMETRY on the router's snapshot accessor, not an
 operator-rendered surface: nothing in `status` or `doctor` prints them today,
-and a consumer reads them through `Router::probe_scheduler_snapshot()`. Two are
-worth naming because they are the only signal their condition produces:
+and a consumer reads them through `Router::probe_scheduler_snapshot()`. One is
+worth naming because it is the only signal its condition produces:
 
 - `payload_refusals_total` -- lanes not probed because their beta context was
   refused. A lane counted here produces no job, no settlement, and no
   tombstone, so without this counter it is indistinguishable from a lane that
   was never admitted.
-- `paid_candidate_capacity_refusals_total` -- exhausted lanes whose paid-probe
-  CANDIDATE could not be recorded because the candidate list was full. Costs no
-  upstream call (a candidate is not permission to spend), but a non-zero value
-  means the candidate list is truncated rather than complete.
 
 ### `learn` (WARN)
 

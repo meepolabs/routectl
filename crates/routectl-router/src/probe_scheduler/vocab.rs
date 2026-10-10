@@ -7,52 +7,30 @@
 
 /// One validator class a probe job can run.
 ///
-/// The two free classes bill no inference: an Anthropic-family
-/// `count_tokens` call is documented free (and separately rate limited,
-/// which is one more reason it obeys the bounds here), and an
-/// expected-rejection probe is answered by a 4xx that bills nothing.
+/// The only class is the free one: an Anthropic-family `count_tokens` call is
+/// documented free (and separately rate limited, which is one more reason it
+/// obeys the bounds here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeValidator {
     /// Free remote count-token validator, where the lane supports one.
     CountTokens,
-    /// Free expected-rejection validator: the answer is the refusal.
-    ///
-    /// NOT CONSTRUCTED by any plan in this build -- `validator_plan`
-    /// excludes it because it has no grounded rejection template and can
-    /// therefore perform no operation. The variant is retained rather than
-    /// deleted because the worker's refusal arm names it explicitly, which
-    /// is what keeps an inert step from ever counting as executed; the
-    /// change that lands a real operation puts it back in the plan.
-    #[cfg_attr(not(test), allow(dead_code))]
-    ExpectedRejection,
-    /// Paid completion probe. Runs only behind [`paid_probe_permitted`].
-    PaidCompletion,
 }
 
 impl ProbeValidator {
-    /// Whether this validator bills no inference.
-    #[must_use]
-    pub const fn is_free(self) -> bool {
-        matches!(self, Self::CountTokens | Self::ExpectedRejection)
-    }
-
     /// Closed-set log token for this validator.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CountTokens => "count_tokens",
-            Self::ExpectedRejection => "expected_rejection",
-            Self::PaidCompletion => "paid_completion",
         }
     }
 }
 
 /// What free validation established for one identity.
 ///
-/// ONE vocabulary for both the per-step result a validator returns and the
-/// plan-level state the paid predicate reads: a second enum saying the
-/// same things is how the two come to disagree about whether a step counts
-/// as spent.
+/// ONE vocabulary for the per-step result a validator returns, shared by the
+/// worker and the scheduler: a second enum saying the same things is how the
+/// two come to disagree about whether a step counts as spent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreeValidatorOutcome {
     /// The question is answered; the job is done.
@@ -60,8 +38,8 @@ pub enum FreeValidatorOutcome {
     /// Did not answer, and re-running the SAME step could. A transient
     /// upstream fault says nothing about the field under test, so the step
     /// is retried under the attempt cap rather than consumed -- spending a
-    /// free step on a 503 would push the lane toward the paid class for a
-    /// reason unrelated to what the probe asks.
+    /// free step on a 503 would run the plan out for a reason unrelated to
+    /// what the probe asks.
     Transient,
     /// The step ran and answered as much as it can. The plan advances to
     /// its next free step.
@@ -71,10 +49,9 @@ pub enum FreeValidatorOutcome {
     /// refuses the operation outright.
     ///
     /// NOT a spent step. The lane never took the question, so counting it
-    /// would run the free plan out and make the lane a PAID candidate on the
-    /// strength of a probe that could not execute -- with `count_tokens` the
-    /// only executable free validator in this build, one `Unavailable` is the
-    /// whole plan.
+    /// would run the free plan out on the strength of a probe that could not
+    /// execute -- with `count_tokens` the only validator in this build, one
+    /// `Unavailable` is the whole plan.
     ///
     /// TERMINAL for the incarnation, like every other `Abandoned` cause, and
     /// for a reason specific to this one: seat resolution and provider-entry
@@ -100,50 +77,20 @@ pub enum FreeValidatorOutcome {
     /// Charging an attempt here would let three deferrals abandon and tombstone
     /// an identity over a breaker that simply had not finished recovering.
     GateDeferred,
-    /// EVERY free step in the plan has run without settling the question.
-    /// Distinct from `Inconclusive`, which describes one step: only an
-    /// exhausted plan may make the paid class a candidate, so a single
-    /// inconclusive step cannot short-circuit the remaining free work.
-    Exhausted,
 }
 
-/// The EXECUTABLE validator order for a lane, free classes first.
-///
-/// [`ProbeValidator::ExpectedRejection`] is deliberately ABSENT. It has no
-/// grounded rejection template in this build, and inventing one is exactly
-/// what the feature forbids -- so it can perform no operation. Listing an
-/// inert step would be worse than omitting it in two ways: the worker would
-/// report it as executed when nothing was sent, and its non-answer would
-/// advance the plan toward paid eligibility, which means a lane could reach
-/// the paid class on the strength of a step that never ran. It returns to
-/// the plan in the change that gives it a real operation.
+/// The validator plan for a lane.
 ///
 /// `supports_count_tokens` decides whether the count-token validator is in
-/// the plan; a lane without it has NO executable free step, and
-/// `activate` refuses such a plan rather than queueing a job that can only
-/// no-op.
+/// the plan; a lane without it has NO executable step, and `activate` refuses
+/// such a plan rather than queueing a job that can only no-op.
 #[must_use]
 pub fn validator_plan(supports_count_tokens: bool) -> Vec<ProbeValidator> {
-    let mut plan = Vec::with_capacity(2);
     if supports_count_tokens {
-        plan.push(ProbeValidator::CountTokens);
+        vec![ProbeValidator::CountTokens]
+    } else {
+        Vec::new()
     }
-    plan.push(ProbeValidator::PaidCompletion);
-    plan
-}
-
-/// Whether a paid probe may run for a provider, given what free
-/// validation established and the provider's configured UTC-day cap.
-///
-/// Both conditions must hold, and the default cap is zero, so the paid
-/// path is dormant until an operator opts in AND free validation has
-/// actually run out of steps. This favors underuse over overspend: a
-/// missing, malformed, or zero cap declines, and so does any outcome
-/// short of [`FreeValidatorOutcome::Exhausted`] -- a plan with a free
-/// step left must spend that step before anything paid is a candidate.
-#[must_use]
-pub const fn paid_probe_permitted(free: FreeValidatorOutcome, daily_cap: u32) -> bool {
-    daily_cap > 0 && matches!(free, FreeValidatorOutcome::Exhausted)
 }
 
 /// The outcome of one activation attempt. Every variant is a closed-set
@@ -158,15 +105,13 @@ pub enum ProbeActivation {
     QueueFull,
     /// The activating router generation is retired; nothing was queued.
     Retired,
-    /// The plan carried no EXECUTABLE free validator, so there is nothing
-    /// this scheduler may run. The paid class is never queued, so a plan of
-    /// paid steps alone queues nothing rather than scheduling a paid dial --
-    /// and a lane whose only free step is the inert expected-rejection one
-    /// lands here rather than queueing a job that could only no-op.
+    /// The plan carried no validator, so there is nothing this scheduler may
+    /// run: a lane without `count_tokens` lands here rather than queueing a
+    /// job that could only no-op.
     ///
     /// UNREACHABLE IN THIS BUILD, and deliberately kept anyway. Every
-    /// production activation passes `validator_plan(true)`, which always leads
-    /// with `CountTokens`, so no production plan filters down to empty. It
+    /// production activation passes `validator_plan(true)`, which is always
+    /// `[CountTokens]`, so no production plan is empty. It
     /// carries no snapshot counter for exactly that reason: a counter that can
     /// only ever read zero reports nothing, and its zero would be mistaken for
     /// evidence that the case was checked. The variant stays because the arm
@@ -227,8 +172,8 @@ pub enum ProbeSettlement {
     Deferred,
     /// This free validator did not settle the question. The SCHEDULER then
     /// decides, inside the settling critical section, whether the plan has
-    /// another free step (advance and back off) or is spent (leave the
-    /// scheduler, making the paid class a candidate).
+    /// another step (advance and back off) or is spent (leave the scheduler
+    /// and tombstone the identity for the incarnation).
     ///
     /// That decision is deliberately NOT the caller's. It reads the job's
     /// `plan_cursor`, and a caller that read the cursor through a separate
@@ -242,7 +187,7 @@ pub enum ProbeSettlement {
     /// plan: a retry re-runs the SAME validator against a condition that may
     /// pass, while this one moves on because the validator answered as much
     /// as it can. Collapsing them would let a lane spend its whole attempt
-    /// budget on step one and reach the paid class having never run step two.
+    /// budget on step one and be abandoned having never run step two.
     SpentFreeStep,
     /// The operation did not finish inside the per-operation timeout and
     /// its future was DROPPED. Counted as a timeout and rescheduled like a
@@ -255,13 +200,12 @@ pub enum ProbeSettlement {
     TimedOut,
     /// ROUTECTL'S OWN probe request was malformed, unauthorized, or
     /// otherwise refused as a bad request. The job is abandoned: no free
-    /// step is spent and no paid candidate is recorded.
+    /// step is spent.
     ///
-    /// This is the distinction that keeps the paid path honest. A 400 or a
-    /// 401 on a body routectl built is a defect in the PROBE, not evidence
-    /// about the capability under test -- counting it as a spent free step
-    /// would walk a lane to paid eligibility on the strength of requests
-    /// that never asked the question.
+    /// A 400 or a 401 on a body routectl built is a defect in the PROBE, not
+    /// evidence about the capability under test -- counting it as a spent
+    /// free step would run a lane's plan out on the strength of requests that
+    /// never asked the question.
     ///
     /// It IS terminal for the incarnation. A probe now travels under the
     /// admitted request's own beta context and Claude-Code classification, so a
@@ -310,13 +254,7 @@ impl ProbeSettlement {
 pub struct ProbeSchedulerSnapshot {
     /// Jobs waiting to be leased right now.
     pub queued: usize,
-    /// Background probe work occupying a concurrency slot right now: leased
-    /// free jobs PLUS held paid-probe slots.
-    ///
-    /// ONE number over both kinds, because `PROBE_MAX_CONCURRENCY` is
-    /// one ceiling over both: a paid slot displaces a free lease, so reporting
-    /// the two separately would let an operator read each inside its bound
-    /// while the real simultaneous load sat at their sum.
+    /// Leased jobs occupying a concurrency slot right now.
     pub in_flight: usize,
     /// Jobs waiting out a backoff.
     pub backing_off: usize,
@@ -337,8 +275,8 @@ pub struct ProbeSchedulerSnapshot {
     pub resolved_total: u64,
     /// Lifetime jobs abandoned at the attempt cap.
     pub abandoned_total: u64,
-    /// Lifetime jobs whose free plan ran out of steps. Each one made the
-    /// paid class a candidate; none of them dialed a paid call.
+    /// Lifetime jobs whose free plan ran out of steps without settling. Each
+    /// one tombstoned its identity for the incarnation.
     pub free_exhausted_total: u64,
     /// Lifetime leases settled as deferred by a gate, which charge no attempt.
     pub deferrals_total: u64,
@@ -351,7 +289,7 @@ pub struct ProbeSchedulerSnapshot {
     /// probe request routectl itself built was refused (malformed / auth /
     /// bad request), the failure class is one this build has not audited, or
     /// the step could not run on the lane at all (no resolved seat, an
-    /// unattributable provider entry). No free step spent, no paid candidate.
+    /// unattributable provider entry). No free step spent.
     pub abandoned_probe_requests_total: u64,
     /// Identities holding a terminal tombstone for the live incarnation.
     pub tombstoned: usize,
@@ -365,28 +303,6 @@ pub struct ProbeSchedulerSnapshot {
     /// Whether terminal-marker capacity is currently exhausted, so every
     /// activation at or below the saturating incarnation is refused.
     pub tombstone_saturated: bool,
-    /// Times a paid-probe CANDIDATE could not be recorded because the
-    /// candidate list was already at capacity.
-    ///
-    /// A candidate is not permission to spend, so dropping one costs no
-    /// upstream call -- but it does silently lose the record of a lane whose
-    /// free validation is exhausted, which is the only signal that lane ever
-    /// produces. An operator reading zero here knows the list is complete;
-    /// non-zero says some exhausted lanes went unrecorded, which is a capacity
-    /// fact rather than a failure. Counted rather than warned because the
-    /// condition is per-identity and bounded by the same queue depth: a WARN
-    /// would repeat per settlement with nothing new to say.
-    pub paid_candidate_capacity_refusals_total: u64,
-    /// Times a paid-probe slot could not be taken because background
-    /// concurrency was already at `PROBE_MAX_CONCURRENCY`.
-    ///
-    /// The refusal is the shared ceiling working: free leases and paid slots
-    /// draw on one pool, so a busy free worker legitimately delays a paid call.
-    /// Counted rather than warned because the condition is transient load and
-    /// per-attempt -- a WARN would repeat with nothing new to say -- and
-    /// counted at all because otherwise a paid stage that never runs looks
-    /// identical to one that was never reached.
-    pub paid_slot_refusals_total: u64,
     /// Times a lane could not be activated because its beta context breached a
     /// payload retention bound or validity rule.
     ///
@@ -397,44 +313,6 @@ pub struct ProbeSchedulerSnapshot {
     /// read. An operator seeing this non-zero alongside a lane that never
     /// produces evidence has the explanation.
     pub payload_refusals_total: u64,
-    /// Lifetime paid-probe candidates CLAIMED off the list. Recorded at the
-    /// claim itself, so a pass cancelled at any later point still reports
-    /// that it took a candidate.
-    ///
-    /// An empty list claims nothing and counts nothing.
-    pub paid_candidate_attempts_total: u64,
-    /// Lifetime paid-probe reservations committed, recorded on the ledger's
-    /// COMMITTED ACKNOWLEDGEMENT rather than on whatever the pass went on to
-    /// do.
-    ///
-    /// That is the only honest boundary: the unit is spent the moment the
-    /// ledger acknowledges it and there is no refund, so this counts a
-    /// commit whose pass was then superseded, gate-deferred, cancelled, or
-    /// dropped. Reading spend off a pass's final outcome would undercount
-    /// exactly the irreversible cases.
-    pub paid_reservations_committed_total: u64,
-    /// Lifetime paid-probe calls DISPATCHED to a provider, recorded
-    /// immediately before the call rather than after it answers -- so a
-    /// cancelled or timed-out call still reports that the upstream may have
-    /// received it.
-    ///
-    /// Excludes a gate deferral, which spends the reservation without
-    /// dispatching a call.
-    pub paid_provider_calls_started_total: u64,
-    /// Lifetime paid-probe calls that answered.
-    pub paid_completed_total: u64,
-    /// Lifetime paid-probe calls the upstream refused or failed.
-    pub paid_provider_failed_total: u64,
-    /// Lifetime paid-probe calls that did not answer inside the operation
-    /// timeout.
-    pub paid_timeouts_total: u64,
-    /// Lifetime paid-probe reservations the per-attempt gate declined before
-    /// any call was dispatched.
-    pub paid_gate_deferrals_total: u64,
-    /// Lifetime paid-probe passes refused after claiming a candidate: every
-    /// authorization refusal except the empty-list case, which claimed
-    /// nothing to be refused.
-    pub paid_authorization_refusals_total: u64,
     /// The most recently settled FREE probe outcome, process-wide, or `None`
     /// before any free probe has settled.
     ///
@@ -465,32 +343,4 @@ pub struct ProbeSchedulerSnapshot {
     /// means a job's backoff has already elapsed and it is leasable on the next
     /// tick -- distinct from `None`, which means there is nothing to wait for.
     pub next_retry_in: Option<std::time::Duration>,
-}
-
-/// How one paid-probe pass SETTLED, for the scheduler's terminal counters. A
-/// closed set local to this crate: the pass's own outcome and refusal
-/// vocabularies live on `router`, in modules this one cannot name, so `router`
-/// translates its outcome into this vocabulary before handing it to
-/// `ProbeScheduler::record_paid_settlement`.
-///
-/// TERMINAL OUTCOMES ONLY. The irreversible milestones a pass passes through --
-/// claiming a candidate, committing a reservation, dispatching a call -- are
-/// each recorded where they happen, because a pass cancelled after one of them
-/// never reaches a settlement to report it. There is likewise no
-/// "nothing was claimed" variant: an empty candidate list settles nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaidPassSettlement {
-    /// A claimed candidate was refused by authorization, for any reason other
-    /// than an empty list. May or may not have committed a reservation first --
-    /// a post-commit supersession lands here too, which is exactly why spend is
-    /// counted at the commit rather than inferred from this value.
-    Refused,
-    /// The per-attempt gate declined the call after the reservation committed.
-    GateDeferred,
-    /// A call was dispatched and the upstream answered.
-    Completed,
-    /// A call was dispatched and the upstream refused or failed.
-    ProviderFailed,
-    /// A call was dispatched and did not answer inside the operation timeout.
-    TimedOut,
 }

@@ -24,8 +24,8 @@ pub enum ReleaseOutcome {
     Stale,
     /// The settlement applied.
     Committed {
-        /// `true` when this settlement spent the LAST free step, so the paid
-        /// class is now a candidate for this identity. Only a
+        /// `true` when this settlement spent the LAST free step, so the
+        /// identity is tombstoned for the incarnation. Only a
         /// [`ProbeSettlement::SpentFreeStep`] that ran the plan out sets it.
         free_spent: bool,
     },
@@ -34,11 +34,10 @@ pub enum ReleaseOutcome {
 impl ReleaseOutcome {
     /// Whether the settlement applied against current state.
     ///
-    /// Test-only: the production worker keys on
-    /// [`Self::exhausted_free_plan`], which already implies commitment, so a
-    /// separate commitment read has no production caller. The tests need it
-    /// to tell "did not commit" from "committed but spent no step" -- two
-    /// outcomes the stronger predicate cannot distinguish.
+    /// Test-only, like [`Self::exhausted_free_plan`]: the production worker acts
+    /// on no consequence of a settlement, so neither read has a production
+    /// caller. The tests need both to tell "did not commit" from "committed but
+    /// spent no step" -- two outcomes the stronger predicate cannot distinguish.
     #[cfg(test)]
     #[must_use]
     pub const fn committed(self) -> bool {
@@ -46,6 +45,7 @@ impl ReleaseOutcome {
     }
 
     /// Whether this settlement spent the last free step in the plan.
+    #[cfg(test)]
     #[must_use]
     pub const fn exhausted_free_plan(self) -> bool {
         matches!(self, Self::Committed { free_spent: true })
@@ -121,6 +121,7 @@ impl ProbeLease<'_> {
     /// The router generation the leased job was activated at. Carried so
     /// every observation a probe produces is stamped with the generation
     /// that selected it, never a freshly sampled one.
+    #[cfg(test)]
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
@@ -143,10 +144,9 @@ impl ProbeLease<'_> {
     /// The returned [`ReleaseOutcome`] carries both facts a caller needs and
     /// neither can derive itself: whether the settlement COMMITTED against
     /// current state, and whether it spent the plan's last free step. A
-    /// caller may only publish a consequence of the settlement (a paid
-    /// candidate, say) after it commits, or a lease settling into a scheduler
-    /// that no longer tracks it would leave a candidate describing retired
-    /// router state.
+    /// caller may only publish a consequence of the settlement after it
+    /// commits, or a lease settling into a scheduler that no longer tracks it
+    /// would publish something describing retired router state.
     #[must_use]
     pub fn settle(mut self, settlement: ProbeSettlement, now: Instant) -> ReleaseOutcome {
         self.settled = true;

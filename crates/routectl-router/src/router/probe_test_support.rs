@@ -303,9 +303,8 @@ pub(super) fn plant_eligible_verdict(router: &Router, nickname: &str) {
 /// is precisely why resolvability has to be arranged rather than assumed: those
 /// assertions cannot detect the wrong path, and the tests that can
 /// (`an_exhausted_identity_is_tombstoned_for_its_incarnation`,
-/// `a_spent_free_plan_surfaces_a_paid_candidate_and_never_dials_one`) read
-/// `free_exhausted_total` and paid candidacy, which an abandonment leaves at
-/// zero. `remote_router_with_lanes` installs one resolved model per lane.
+/// `an_exhausted_free_plan_tombstones_and_dials_nothing_further`) read
+/// `free_exhausted_total`, which an abandonment leaves at zero. `remote_router_with_lanes` installs one resolved model per lane.
 pub(super) async fn settle_terminally(router: &Router, count: usize) {
     for n in 0..count {
         let key = FieldVerdictKey::new(&lane(&format!("m{n}")), GROUNDED_PATH, "anthropic-api")
@@ -476,61 +475,5 @@ pub(super) fn remote_router_with_model_beta(provider: Arc<dyn Provider>, beta: &
         ),
     );
     router.install_resolved_models(models);
-    router
-}
-
-/// A remote router with `lanes` resolvable nicknames AND a non-zero
-/// paid-probe daily cap, for the candidate-capacity test: both halves are
-/// needed, since a zero cap records no candidate at all and an unresolvable
-/// lane never exhausts its plan.
-pub(super) fn remote_router_with_lanes_and_paid_cap(
-    provider: Arc<dyn Provider>,
-    lanes: usize,
-    cap: u32,
-) -> Router {
-    let mut router = remote_router_with_lanes(provider, lanes);
-    let mut config = (*router.config).clone();
-    config
-        .fidelity
-        .paid_probe_daily_caps
-        .insert("p1".to_string(), cap);
-    router.config = Arc::new(config);
-    router
-}
-
-/// A remote router whose provider carries a non-zero paid-probe daily cap.
-/// Without the opt-in the cap defaults to zero and no candidate is ever
-/// recorded, which is the fail-closed default rather than a defect --
-/// `a_zero_cap_router_records_no_candidate` pins that direction.
-pub(super) fn remote_router_with_paid_cap(provider: Arc<dyn Provider>, cap: u32) -> Router {
-    with_paid_cap(router_on_base("https://api.anthropic.com", provider), cap)
-}
-
-/// `remote_router_with_model_beta` plus a non-zero paid-probe daily cap.
-///
-/// Both halves are needed by the candidate-retention test: the beta floor gives
-/// the captured payload a non-default OPERATOR source to retain (an all-empty
-/// payload would compare equal to a freshly built one whether retention worked
-/// or not), and the cap is what lets an exhausted plan record a candidate at
-/// all.
-pub(super) fn remote_router_with_model_beta_and_paid_cap(
-    provider: Arc<dyn Provider>,
-    beta: &str,
-    cap: u32,
-) -> Router {
-    with_paid_cap(remote_router_with_model_beta(provider, beta), cap)
-}
-
-/// Install `cap` as `p1`'s paid-probe daily cap on an already-built router.
-///
-/// One writer for the fidelity knob, so the three fixtures above cannot drift
-/// on which provider key the cap lands under.
-fn with_paid_cap(mut router: Router, cap: u32) -> Router {
-    let mut config = (*router.config).clone();
-    config
-        .fidelity
-        .paid_probe_daily_caps
-        .insert("p1".to_string(), cap);
-    router.config = Arc::new(config);
     router
 }

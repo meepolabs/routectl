@@ -541,7 +541,6 @@ async fn three_deferrals_neither_abandon_nor_tombstone_the_identity() {
     // The job is still tracked and still backing off, so it can ask again.
     assert_eq!(snap.backing_off, 1, "the job remains queued to retry");
     assert_eq!(snap.free_exhausted_total, 0, "no free step was spent");
-    assert!(router.paid_probe_candidates().is_empty());
 }
 
 #[tokio::test]

@@ -9,8 +9,8 @@
 fn retirement_keeps_an_in_flight_row_counted_until_its_lease_settles() {
     // THE reload undercount. A retirement that dropped the in-flight row would
     // make `in_flight()` stop counting an operation that is STILL RUNNING against
-    // the upstream -- so the replacement router's next lease or paid acquisition
-    // would admit work on top of it, and real simultaneous background load would
+    // the upstream -- so the replacement router's next lease would admit work on
+    // top of it, and real simultaneous background load would
     // exceed PROBE_MAX_CONCURRENCY with no counter showing it. A reload is
     // exactly when this happens, because retirement and live probe work coincide.
     let scheduler = Arc::new(ProbeScheduler::new());
@@ -77,11 +77,15 @@ fn retirement_keeps_an_in_flight_row_counted_until_its_lease_settles() {
         "the retained row plus the fresh lease fill the SHARED ceiling"
     );
 
-    // THE ADMISSION CONSEQUENCE: with the ceiling full, paid work is refused --
-    // which is the whole reason the retained row must keep counting.
+    // THE ADMISSION CONSEQUENCE: with the ceiling full, a further due job is
+    // refused -- which is the whole reason the retained row must keep counting.
+    assert_eq!(
+        scheduler.activate(&key(10), 2, vec![ProbeValidator::CountTokens], payload()),
+        ProbeActivation::Queued
+    );
     assert!(
-        scheduler.try_acquire_paid_slot().is_none(),
-        "a live old free operation must block paid admission across a reload"
+        scheduler.lease_due(now).is_none(),
+        "a live old operation must block a new lease across a reload"
     );
     drop(fresh);
 
@@ -99,8 +103,8 @@ fn retirement_keeps_an_in_flight_row_counted_until_its_lease_settles() {
         "and the slot comes back only now"
     );
     assert!(
-        scheduler.try_acquire_paid_slot().is_some(),
-        "with the old operation genuinely finished, paid work may proceed"
+        scheduler.lease_due(now).is_some(),
+        "with the old operation genuinely finished, new work may proceed"
     );
 }
 

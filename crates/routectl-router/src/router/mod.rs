@@ -49,10 +49,6 @@ mod opening_lookup;
 mod overlays;
 mod precontent;
 mod prefix_rewrite;
-#[expect(
-    dead_code,
-    reason = "the paid failure classification has no caller left"
-)]
 mod probe_failure_class;
 mod probe_lifecycle;
 mod probe_lifecycle_state;
@@ -373,13 +369,6 @@ pub struct Router {
     /// router are different objects, so a per-router state would serialize
     /// nothing between them. NEVER held across an await.
     probe_lifecycle_state: Arc<probe_lifecycle_state::ProbeLifecycleState>,
-    /// Identities whose FREE probe validation ran out of steps. Bounded by
-    /// the scheduler's queue depth; cleared on publication and shutdown,
-    /// since a candidate from a retired incarnation describes router state
-    /// that no longer serves. Shared with the scheduler on carry-over for the
-    /// same reason.
-    paid_probe_candidates:
-        Arc<Mutex<std::collections::VecDeque<probe_lifecycle::PaidProbeCandidate>>>,
     /// Capability-persistence health seam -- see [`capability_health`]. `None` on
     /// every Router `Router::new` builds, and absent reads as NOT GUARANTEED, so
     /// learned pre-flight suspends on a build path that never installed one.
@@ -2101,7 +2090,6 @@ impl Router {
             probe_incarnation: AtomicU64::new(1),
             probe_incarnation_ticket: Arc::new(AtomicU64::new(1)),
             probe_lifecycle_state: Arc::default(),
-            paid_probe_candidates: Arc::default(),
             capability_health: None,
             probe_queue_full_warned: Mutex::new(false),
             probe_payload_refused_warned: Mutex::new(false),
@@ -2745,7 +2733,7 @@ impl Router {
     ///
     /// Carries MORE than the learned registry, despite the name: the replay
     /// facade, the field-verdict facade, the PROBE SCHEDULER (with its
-    /// candidate list and incarnation ticket), and the capability-health read
+    /// incarnation ticket), and the capability-health read
     /// are attached here too, all under the same attach-not-copy discipline. They ride along because they are
     /// all keyed on the shared registry and must span the swap together -- a
     /// caller that carried the registry but not the scheduler would leave an

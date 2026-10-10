@@ -1,11 +1,11 @@
 //! The production probe worker: what it executes, what it settles, and
 //! what it refuses to spend.
 //!
-//! The contract these pin is the paid boundary. A free step is spent only
-//! when the lane actually took the question, and only a plan that spends its
-//! LAST free step makes the paid class a candidate -- so every outcome that
-//! did not ask (a malformed probe, an unsupported lane, a gate refusal, an
-//! unmodelled failure class) must leave the plan where it was.
+//! The contract these pin is what spends a step. A free step is spent only
+//! when the lane actually took the question, and a plan that spends its LAST
+//! step is exhausted and tombstoned -- so every outcome that did not ask (a
+//! malformed probe, an unsupported lane, a gate refusal, an unmodelled failure
+//! class) must leave the plan where it was.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,8 +16,7 @@ use super::Router;
 use super::probe_lifecycle::PROBE_ACTIVATION_REFUSED_EVENT;
 use super::probe_test_support::{
     BoxStreamAlias, FailingProvider, GROUNDED_PATH, OkProvider, ZeroCountProvider,
-    grounding_request, remote_router, remote_router_with_lanes_and_paid_cap,
-    remote_router_with_paid_cap,
+    grounding_request, remote_router,
 };
 use crate::config::Config;
 use crate::field_verdict::FieldVerdictKey;
@@ -48,68 +47,50 @@ async fn the_worker_executes_a_free_validator_and_resolves_the_job() {
 }
 
 #[tokio::test]
-async fn a_spent_free_plan_surfaces_a_paid_candidate_and_never_dials_one() {
+async fn an_exhausted_free_plan_tombstones_and_dials_nothing_further() {
     // A well-formed zero SPENDS the step without answering, which is the
     // only shape that exhausts the plan: a 400 abandons (routectl's own
-    // request was wrong) and a 5xx retries, neither of which may advance
-    // toward paid eligibility.
+    // request was wrong) and a 5xx retries.
     let provider = Arc::new(ZeroCountProvider {
         calls: AtomicUsize::new(0),
     });
-    let router = remote_router_with_paid_cap(provider.clone(), 3);
+    let router = remote_router(provider.clone());
     let _ = router.complete(grounding_request()).await;
     let calls_after_dispatch = provider.calls.load(Ordering::SeqCst);
 
     let executed = router.run_due_probes_recording().await;
 
-    // Every executed validator was free, and none was paid.
-    assert!(!executed.is_empty(), "the worker executed no validator");
-    for validator in &executed {
-        assert!(
-            validator.is_free(),
-            "the worker executed a paid validator: {validator:?}"
-        );
-    }
+    assert_eq!(executed, vec![ProbeValidator::CountTokens]);
+    let snap = router.probe_scheduler_snapshot();
     assert_eq!(
-        router.probe_scheduler_snapshot().free_exhausted_total,
-        1,
+        snap.free_exhausted_total, 1,
         "the spent step must exhaust the one-step free plan"
     );
+    assert_eq!(snap.tombstoned, 1, "an exhausted plan is terminal");
+    assert_eq!(snap.queued + snap.backing_off + snap.in_flight, 0);
 
-    // The paid class is a CANDIDATE only, never dialed: the only provider
-    // calls are the count-token executions the free plan accounts for.
-    let candidates = router.paid_probe_candidates();
-    assert!(
-        !candidates.is_empty(),
-        "an exhausted free plan must surface a paid candidate"
-    );
-    for candidate in &candidates {
-        assert_eq!(candidate.validator, ProbeValidator::PaidCompletion);
-    }
-    let count_token_executions = executed
-        .iter()
-        .filter(|v| **v == ProbeValidator::CountTokens)
-        .count();
+    // Nothing runs after exhaustion: the only provider calls are the
+    // count-token executions the plan accounts for, and a later pass finds
+    // no work.
+    assert_eq!(router.run_due_probes().await, 0);
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
-        calls_after_dispatch + count_token_executions,
-        "a provider call the free plan cannot account for means a paid dial fired"
+        calls_after_dispatch + executed.len(),
+        "a provider call the free plan cannot account for was dialed"
     );
 }
 
 #[tokio::test]
-async fn a_bad_request_on_routectls_own_probe_abandons_without_a_candidate() {
+async fn a_bad_request_on_routectls_own_probe_abandons_without_spending_a_step() {
     // A 400/401 on a body routectl built is a defect in the
     // PROBE, not evidence about the capability. It must not spend a free
-    // step, and must never reach paid eligibility -- the cap here is
-    // non-zero precisely so a candidate WOULD be recorded if the outcome
-    // were treated as a spent step.
+    // step.
     let provider = Arc::new(FailingProvider {
         status: 400,
         calls: AtomicUsize::new(0),
         count_calls: AtomicUsize::new(0),
     });
-    let router = remote_router_with_paid_cap(provider.clone(), 3);
+    let router = remote_router(provider.clone());
     let _ = router.complete(grounding_request()).await;
 
     router.run_due_probes().await;
@@ -123,10 +104,6 @@ async fn a_bad_request_on_routectls_own_probe_abandons_without_a_candidate() {
         snap.free_exhausted_total, 0,
         "an abandoned probe must not spend a free step"
     );
-    assert!(
-        router.paid_probe_candidates().is_empty(),
-        "an abandoned probe must never surface a paid candidate"
-    );
 }
 
 #[tokio::test]
@@ -136,7 +113,7 @@ async fn an_auth_failure_on_the_probe_request_also_abandons() {
         calls: AtomicUsize::new(0),
         count_calls: AtomicUsize::new(0),
     });
-    let router = remote_router_with_paid_cap(provider.clone(), 3);
+    let router = remote_router(provider.clone());
     let _ = router.complete(grounding_request()).await;
 
     router.run_due_probes().await;
@@ -147,7 +124,7 @@ async fn an_auth_failure_on_the_probe_request_also_abandons() {
             .abandoned_probe_requests_total,
         1
     );
-    assert!(router.paid_probe_candidates().is_empty());
+    assert_eq!(router.probe_scheduler_snapshot().free_exhausted_total, 0);
 }
 
 #[tokio::test]
@@ -160,7 +137,7 @@ async fn a_transient_failure_retries_the_step_rather_than_spending_it() {
         calls: AtomicUsize::new(0),
         count_calls: AtomicUsize::new(0),
     });
-    let router = remote_router_with_paid_cap(provider.clone(), 3);
+    let router = remote_router(provider.clone());
     let _ = router.complete(grounding_request()).await;
 
     router.run_due_probes().await;
@@ -296,111 +273,6 @@ async fn the_worker_runs_nothing_for_a_retired_incarnation() {
     assert_eq!(ran, 0, "retired work must never execute");
 }
 
-#[tokio::test]
-async fn a_paid_candidate_refused_for_capacity_is_counted_rather_than_dropped_silently() {
-    // The candidate list is bounded, and a refusal at that bound must be
-    // OBSERVABLE. It costs no upstream call -- a candidate is not permission to
-    // spend -- but it loses the only signal an exhausted lane produces, so an
-    // operator reading the snapshot has to be able to tell a complete list from
-    // a truncated one.
-    //
-    // Driven through the real worker: each lane's well-formed zero spends its
-    // one free step, exhausting the plan and making it a candidate. Past the
-    // bound the recording refuses.
-    let provider = Arc::new(ZeroCountProvider {
-        calls: AtomicUsize::new(0),
-    });
-    let router = remote_router_with_lanes_and_paid_cap(provider, PROBE_QUEUE_DEPTH + 4, 3);
-
-    // NEGATIVE control first: inside the bound nothing is refused.
-    for n in 0..PROBE_QUEUE_DEPTH {
-        let key = FieldVerdictKey::new(
-            &crate::router::probe_test_support::lane(&format!("m{n}")),
-            GROUNDED_PATH,
-            "anthropic-api",
-        )
-        .expect("identity");
-        router.activate_probe_lane(&key, ProbeValidator::CountTokens);
-        router.run_due_probes().await;
-    }
-    assert_eq!(
-        router.all_recorded_paid_candidates_for_tests().len(),
-        PROBE_QUEUE_DEPTH,
-        "premise: the list must actually be AT its bound before overflowing it"
-    );
-    assert_eq!(
-        router
-            .probe_scheduler_snapshot()
-            .paid_candidate_capacity_refusals_total,
-        0,
-        "NEGATIVE control: nothing refused while capacity remains"
-    );
-
-    // POSITIVE: past the bound, each exhausted lane is refused and counted.
-    for n in PROBE_QUEUE_DEPTH..PROBE_QUEUE_DEPTH + 4 {
-        let key = FieldVerdictKey::new(
-            &crate::router::probe_test_support::lane(&format!("m{n}")),
-            GROUNDED_PATH,
-            "anthropic-api",
-        )
-        .expect("identity");
-        router.activate_probe_lane(&key, ProbeValidator::CountTokens);
-        router.run_due_probes().await;
-    }
-
-    assert_eq!(
-        router.all_recorded_paid_candidates_for_tests().len(),
-        PROBE_QUEUE_DEPTH,
-        "the list stays at its bound"
-    );
-    assert_eq!(
-        router
-            .probe_scheduler_snapshot()
-            .paid_candidate_capacity_refusals_total,
-        4,
-        "every refused candidate must be counted, not silently dropped"
-    );
-}
-
-#[tokio::test]
-async fn a_zero_cap_router_records_no_candidate_though_the_free_plan_is_spent() {
-    // Fail-closed default: `[fidelity]` caps default to zero, so an
-    // exhausted free plan on an un-opted-in provider surfaces nothing. The
-    // positive direction is
-    // `a_spent_free_plan_surfaces_a_paid_candidate_and_never_dials_one`,
-    // whose only difference from this fixture is the cap.
-    let provider = Arc::new(ZeroCountProvider {
-        calls: AtomicUsize::new(0),
-    });
-    let router = remote_router(provider);
-    let _ = router.complete(grounding_request()).await;
-
-    router.run_due_probes().await;
-
-    assert!(
-        router.paid_probe_candidates().is_empty(),
-        "a zero cap must record no paid candidate"
-    );
-    assert!(
-        router.probe_scheduler_snapshot().free_exhausted_total > 0,
-        "premise: the free plan must actually have been exhausted"
-    );
-}
-
-#[test]
-fn a_settled_free_outcome_makes_no_paid_candidate() {
-    // The paid predicate is the worker's own gate, exercised directly for
-    // the outcome the worker cannot manufacture on a dry fixture.
-    assert!(!crate::probe_scheduler::paid_probe_permitted(
-        FreeValidatorOutcome::Settled,
-        5
-    ));
-    assert!(crate::probe_scheduler::paid_probe_permitted(
-        FreeValidatorOutcome::Exhausted,
-        5
-    ));
-}
-
 // ---------------------------------------------------------------------
 // The bounded queue-full diagnostic
 // ---------------------------------------------------------------------
@@ -486,8 +358,8 @@ fn an_unsupported_capability_rejection_spends_no_free_step() {
     // The upstream says the capability is not supported HERE. That is an
     // answer about the lane, but not one this stage may spend a step on:
     // `count_tokens` is the only executable free validator in this build, so
-    // spending it would exhaust the plan and hand the lane to the PAID class on
-    // the strength of a question the upstream refused to take.
+    // spending it would exhaust the plan on the strength of a question the
+    // upstream refused to take.
     //
     // What this pins is the EXPLICIT arm, which is redundant with the
     // fail-closed catch-all that would refuse this class anyway. That is the
@@ -510,7 +382,7 @@ fn an_unsupported_capability_rejection_spends_no_free_step() {
         super::probe_failure_class::probe_outcome_for_class_for_tests(unsupported),
         FreeValidatorOutcome::ProbeRequestRefused,
         "an unsupported-capability rejection must be refused, not spent -- \
-         spending it would make the lane a paid candidate"
+         spending it would exhaust the plan on a question never taken"
     );
 
     // Control: a class that SHOULD retry still retries, so the assertion above
@@ -524,15 +396,15 @@ fn an_unsupported_capability_rejection_spends_no_free_step() {
 }
 
 #[tokio::test]
-async fn a_lane_with_no_resolved_seat_makes_no_paid_candidate() {
+async fn a_lane_with_no_resolved_seat_spends_no_step() {
     // The `Unavailable` direction: the step could not run on this lane at
-    // all, so it spends nothing. With `count_tokens` the only executable free
-    // validator in this build, treating this as spent would make ONE
-    // unresolvable lane a paid candidate immediately.
+    // all, so it spends nothing. With `count_tokens` the only validator in
+    // this build, treating this as spent would exhaust ONE unresolvable
+    // lane's plan immediately.
     let provider = Arc::new(OkProvider {
         count_calls: AtomicUsize::new(0),
     });
-    let router = remote_router_with_paid_cap(provider.clone(), 3);
+    let router = remote_router(provider.clone());
     // An identity naming a state key no resolved model answers for, so seat
     // resolution finds nothing.
     let key = FieldVerdictKey::new(
@@ -550,12 +422,6 @@ async fn a_lane_with_no_resolved_seat_makes_no_paid_candidate() {
         0,
         "premise: there is no seat, so nothing may be dialed"
     );
-    assert!(
-        router.paid_probe_candidates().is_empty(),
-        "a lane whose free validator could not run must not become a paid \
-         candidate"
-    );
-    assert!(router.all_recorded_paid_candidates_for_tests().is_empty());
     assert_eq!(
         router.probe_scheduler_snapshot().free_exhausted_total,
         0,
@@ -568,7 +434,7 @@ fn an_unmodelled_failure_class_spends_no_free_step() {
     // The `#[non_exhaustive]` catch-all, stated at the classifier boundary
     // where every variant is reachable. A class this build has not audited
     // must fail CLOSED -- refused, not spent -- or a variant added upstream
-    // could walk a lane to the paid class purely by existing.
+    // could run a lane's plan out purely by existing.
     //
     // `Unknown` stands in for that set: it is the one unaudited-shaped class
     // this build can reach, and it takes the same catch-all arm any unmodelled
@@ -756,8 +622,3 @@ async fn an_unknown_display_value_refuses_the_payload_and_tombstones_nothing() {
         "and must reach the upstream"
     );
 }
-
-// The candidate-retention group lives in a sibling file to keep every file under
-// the size ceiling. It compiles into THIS module via `include!`, so the imports
-// above stay in scope and no test's module path changes.
-include!("probe_candidate_payload_tests.rs");

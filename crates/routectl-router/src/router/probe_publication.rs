@@ -7,7 +7,7 @@
 //! under, and the terminal state that ends it.
 //!
 //! A publication draws a ticket value, stamps it, retires superseded work,
-//! clears candidates, and (through the callback form) stores the replacement
+//! and (through the callback form) stores the replacement
 //! -- all synchronously, all under the shared lifecycle transition, and all
 //! bounded by in-memory work.
 
@@ -75,26 +75,17 @@ impl Router {
         // Retire everything below the new incarnation. Outstanding leases
         // settle as stale: they release nothing they no longer hold and
         // schedule no follow-up work.
-        let cancelled = self.probe_scheduler.retire_before(next);
-        self.paid_probe_candidates.lock().clear();
-        cancelled
+        self.probe_scheduler.retire_before(next)
     }
 
     /// Cancel every queued probe job for shutdown, returning how many were
     /// cancelled. Outstanding leases settle as stale and schedule nothing.
     ///
     /// ADVANCES THE SHARED TICKET FIRST, to a generation NO router is stamped
-    /// with, and that ordering is the whole of the shutdown protocol. Two
-    /// properties follow, neither of which clearing alone would give:
-    ///
-    /// - Every live router immediately fails `is_current_publication`,
-    ///   because the ticket has moved past every stamped incarnation. So an
-    ///   in-flight settlement cannot record a candidate, rather than racing
-    ///   the clear below.
-    /// - The terminal generation is UNSTAMPED, so nothing can become current
-    ///   again. A shutdown that merely advanced the ticket to a value some router
-    ///   then stamped would be an ABA: the predicate would read current again and
-    ///   the resurrection window would reopen.
+    /// with, and that ordering is the whole of the shutdown protocol. The
+    /// terminal generation is UNSTAMPED, so nothing can become current again: a
+    /// shutdown that merely advanced the ticket to a value some router then
+    /// stamped would be an ABA that reopened the resurrection window.
     ///
     /// Synchronous, like `publish_probe_incarnation`.
     pub fn shutdown_probe_work(&self) -> usize {
@@ -108,11 +99,6 @@ impl Router {
         // Past every stamped incarnation, and never stamped on any router. The
         // ticket is the shared authority, so one `fetch_add` retires every
         // generation at once -- there is no per-router state to sweep.
-        //
-        // BEFORE the clears below, for the same reason the publication orders them
-        // that way: a requeue or a recording already holding the candidate lock
-        // completes and is then cleared, and one that takes it afterwards reads
-        // itself superseded.
         let terminal = self
             .probe_incarnation_ticket
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
@@ -124,9 +110,7 @@ impl Router {
         // whose retirement floor had not moved, re-arming work after the sweep.
         // Raising the floor to `terminal` inside the same critical section refuses
         // every such activation instead.
-        let cancelled = self.probe_scheduler.cancel_all_and_retire_to(terminal);
-        self.paid_probe_candidates.lock().clear();
-        cancelled
+        self.probe_scheduler.cancel_all_and_retire_to(terminal)
     }
 
     /// Stamp this Router's incarnation and hand it to `store` BEFORE returning.
@@ -197,34 +181,5 @@ impl Router {
         // store, and a shutdown cannot interleave between them.
         store(Arc::clone(self));
         retired
-    }
-
-    /// Whether THIS Router still holds the current publication.
-    ///
-    /// The shared monotonic ticket is the authority: a publication draws from it
-    /// and stamps the drawn value on itself, so the newest publication is the one
-    /// whose stamp EQUALS the ticket. Any router that has been superseded reads a
-    /// ticket greater than its own stamp, and so does every router once a shutdown
-    /// has advanced the ticket to its terminal unstamped generation.
-    ///
-    /// EQUALITY rather than a `>=` or a per-router flag, and both alternatives
-    /// were considered: a flag needs a writer on every router the publication did
-    /// not touch (there is none), and a `>=` comparison cannot express the
-    /// shutdown generation, which must be current for nobody.
-    ///
-    /// `Acquire` on both loads, pairing with the `Release` store of the stamp and
-    /// the `AcqRel` ticket bump. That is what makes a router observing itself
-    /// current also observe the candidate list and scheduler state the publication
-    /// wrote before stamping.
-    ///
-    /// NO ABA. The ticket only ever increases, so a router that reads itself
-    /// superseded can never read itself current again -- which is what lets a
-    /// caller act on a single read without holding anything.
-    pub(crate) fn is_current_publication(&self) -> bool {
-        let stamped = self.probe_incarnation();
-        let newest = self
-            .probe_incarnation_ticket
-            .load(std::sync::atomic::Ordering::Acquire);
-        stamped == newest
     }
 }

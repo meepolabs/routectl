@@ -82,7 +82,7 @@ fn the_first_admitted_request_activates_the_lane_once() {
     // Act: three admitted requests on the same lane and capability.
     let first = router.activate_probe_lane(&key(0), ProbeValidator::CountTokens);
     let second = router.activate_probe_lane(&key(0), ProbeValidator::CountTokens);
-    let third = router.activate_probe_lane(&key(0), ProbeValidator::ExpectedRejection);
+    let third = router.activate_probe_lane(&key(0), ProbeValidator::CountTokens);
 
     // Assert
     assert_eq!(first, ProbeActivation::Queued);
@@ -412,12 +412,8 @@ fn an_admitted_request_activates_a_free_validator_first() {
     );
     let lease = router.lease_due_probe(now).expect("the queued job is due");
 
-    // Assert: no paid call may be the first thing a lane does.
-    assert!(
-        lease.validator().is_free(),
-        "activation queued a paid validator: {:?}",
-        lease.validator()
-    );
+    // Assert: the first thing a lane does is the free count-token step.
+    assert_eq!(lease.validator(), ProbeValidator::CountTokens);
 }
 
 #[test]

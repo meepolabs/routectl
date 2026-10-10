@@ -35,14 +35,15 @@
 //! ceiling and is abandoned at the attempt cap, so an upstream that always
 //! fails is retried a bounded number of times rather than forever.
 //!
-//! # Free validation before any paid path
+//! # Free validation only
 //!
-//! [`validator_plan`] orders the free validators ahead of the paid one for
-//! every lane, and [`paid_probe_permitted`] opens the paid path only when
-//! free validation actually failed to answer AND the provider carries a
-//! non-zero daily cap. Free validators have no spend cap because they bill
-//! no inference, which is exactly why they must still obey every bound
-//! above -- "free" bounds the bill, not the load.
+//! [`validator_plan`] names only free validators. They have no spend cap
+//! because they bill no inference, which is exactly why they must still obey
+//! every bound above -- "free" bounds the bill, not the load. An identity whose
+//! plan runs out without settling leaves the scheduler on the
+//! [`ProbeSettlement::SpentFreeStep`] that spent its last step, reported by
+//! [`ReleaseOutcome::exhausted_free_plan`], and is tombstoned for the
+//! incarnation like any other terminal outcome.
 //!
 //! # Generations, retirement, and stale settlement
 //!
@@ -57,19 +58,6 @@
 //! only by the existing normalized constructor, and its diagnostics are
 //! closed-set tokens and counters.
 //!
-//! # The paid class is never a queued job
-//!
-//! [`ProbeScheduler::activate`] filters the submitted plan to its FREE
-//! steps, so no job in this table can name a paid validator and no lease
-//! can hand one to a worker. An identity whose free steps all run without
-//! settling leaves the scheduler on the
-//! [`ProbeSettlement::SpentFreeStep`] that runs its plan out, reported by
-//! [`ReleaseOutcome::exhausted_free_plan`]. That is the input the router draws
-//! a paid CANDIDATE from -- necessary but not sufficient, since
-//! [`paid_probe_permitted`] must also agree on the provider's daily cap -- and
-//! a candidate records that free validation is spent rather than granting
-//! permission to spend money. Nothing in this module dials a paid endpoint.
-//!
 //! # Two bounds live OUTSIDE this module
 //!
 //! [`PROBE_OPERATION_TIMEOUT`] is a constant here but is ENFORCED by the
@@ -80,7 +68,6 @@
 //! the code in this module, so both are named here rather than left to be
 //! discovered.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -90,7 +77,6 @@ use crate::field_verdict::FieldVerdictKey;
 mod bounds;
 mod debug;
 mod lease;
-mod paid_slot;
 mod payload;
 mod schedule;
 mod vocab;
@@ -98,7 +84,6 @@ mod vocab;
 // The module's flat surface: every consumer names `probe_scheduler::X`, so the
 // file split inside is an organizing choice rather than a new API shape.
 pub use lease::{ProbeLease, ReleaseOutcome};
-pub use paid_slot::PaidProbeSlot;
 
 pub use bounds::{
     PROBE_MAX_ATTEMPTS, PROBE_MAX_CONCURRENCY, PROBE_MAX_DEFERRALS, PROBE_OPERATION_TIMEOUT,
@@ -117,10 +102,9 @@ pub use payload::{
     PROBE_BETA_MAX_COUNT_PER_SOURCE, PROBE_BETA_MAX_TOKEN_BYTES, PROBE_BETA_MAX_TOTAL_BYTES,
     PROBE_MODELED_DISPLAY_VALUES,
 };
-pub use vocab::PaidPassSettlement;
 pub use vocab::{
     FreeValidatorOutcome, ProbeActivation, ProbeSchedulerSnapshot, ProbeSettlement, ProbeValidator,
-    paid_probe_permitted, validator_plan,
+    validator_plan,
 };
 
 /// Where one job is in its lifecycle.
@@ -141,7 +125,7 @@ struct Job {
     key: FieldVerdictKey,
     generation: u64,
     payload: ProbePayload,
-    /// The FREE plan this job walks, and the cursor into it. Held on the
+    /// The plan this job walks, and the cursor into it. Held on the
     /// job rather than recomputed per lease so a plan that changes shape
     /// (a lane losing count_tokens support across a reload) cannot make a
     /// half-walked job skip or repeat a step.
@@ -164,7 +148,7 @@ struct Job {
 }
 
 impl Job {
-    /// The validator this job runs next, or `None` when its free plan is
+    /// The validator this job runs next, or `None` when its plan is
     /// exhausted.
     fn validator(&self) -> Option<ProbeValidator> {
         self.plan.get(self.plan_cursor).copied()
@@ -206,14 +190,6 @@ struct SchedulerInner {
     /// tracked, activated, or retried.
     retired_below: u64,
     next_lease_seq: u64,
-    /// Paid-probe slots held right now, counted in the SAME `in_flight`
-    /// reading the free-lease ceiling and the snapshot read.
-    ///
-    /// A `usize` under the one scheduler lock rather than an atomic, so
-    /// "check the ceiling and take the slot" is one critical section -- two
-    /// concurrent acquisitions reading an atomic ceiling could both see room
-    /// and both take the last slot.
-    paid_slots_held: usize,
     counters: ProbeSchedulerSnapshot,
     /// The most recently settled free-probe outcome, process-wide.
     ///
@@ -233,16 +209,10 @@ impl SchedulerInner {
         self.jobs.iter().filter(|job| matcher(job.phase)).count()
     }
 
-    /// Everything occupying a concurrency slot right now: leased free jobs
-    /// PLUS held paid slots.
-    ///
-    /// ONE reading, deliberately. The free-lease ceiling, the snapshot's
-    /// `in_flight`, and the paid acquisition all read this, so a paid slot
-    /// displaces a free lease and vice versa -- which is what makes
-    /// [`PROBE_MAX_CONCURRENCY`] a bound on real simultaneous background work
-    /// rather than on one of its two kinds.
+    /// Leased jobs occupying a concurrency slot right now. The lease ceiling
+    /// and the snapshot's `in_flight` both read this one value.
     fn in_flight(&self) -> usize {
-        self.count_phase(|phase| matches!(phase, JobPhase::InFlight)) + self.paid_slots_held
+        self.count_phase(|phase| matches!(phase, JobPhase::InFlight))
     }
 
     /// Time until the EARLIEST backing-off job becomes leasable, or `None` when
@@ -327,10 +297,6 @@ impl ProbeScheduler {
             inner.counters.queue_full_total += 1;
             return ProbeActivation::QueueFull;
         }
-        // Filtered to FREE steps here, so no path in this module can lease a paid
-        // validator into execution. What makes an exhausted plan a paid
-        // CANDIDATE is `paid_probe_permitted`, not this filter.
-        let plan: Vec<ProbeValidator> = plan.into_iter().filter(|v| v.is_free()).collect();
         if plan.is_empty() {
             return ProbeActivation::NoFreeValidator;
         }
@@ -449,9 +415,8 @@ impl ProbeScheduler {
         // different -- a real upstream operation is running right now, and its
         // `ProbeLease` is what will end it. Dropping the row here would make
         // `in_flight()` stop counting an operation that is still consuming
-        // upstream concurrency, so the very next `lease_due` or
-        // `try_acquire_paid_slot` would admit work on top of it and the real
-        // simultaneous load would exceed `PROBE_MAX_CONCURRENCY` with no counter
+        // upstream concurrency, so the very next `lease_due` would admit work
+        // on top of it and the real simultaneous load would exceed `PROBE_MAX_CONCURRENCY` with no counter
         // showing it. A reload is exactly when that happens, because retirement
         // and live probe work coincide.
         //
@@ -522,51 +487,8 @@ impl ProbeScheduler {
         cancelled
     }
 
-    /// Take one PAID concurrency slot, or `None` at the ceiling.
+    /// Raise the retirement floor WITHOUT sweeping the table.
     ///
-    /// Checked against the SAME [`PROBE_MAX_CONCURRENCY`] reading
-    /// [`Self::lease_due`] refuses at, inside one critical section, so a paid
-    /// slot and a free lease compete for one pool of background concurrency.
-    /// See `paid_slot` for why that is the bound rather than a paid counter of
-    /// its own.
-    ///
-    /// Acquired BEFORE the reservation await, not after: a slot taken after the
-    /// commit would leave the awaiting window uncounted, and the ceiling would
-    /// bound only the part of a paid call that is cheapest to bound.
-    ///
-    /// Takes `&Arc<Self>` because the returned guard OUTLIVES this call -- it
-    /// travels inside the authorization -- so it owns a refcount rather than
-    /// borrowing the scheduler the way a free lease does.
-    pub fn try_acquire_paid_slot(self: &Arc<Self>) -> Option<PaidProbeSlot> {
-        let mut inner = self.inner.lock();
-        if inner.in_flight() >= PROBE_MAX_CONCURRENCY {
-            inner.counters.paid_slot_refusals_total += 1;
-            return None;
-        }
-        inner.paid_slots_held += 1;
-        drop(inner);
-        Some(PaidProbeSlot::new(Arc::clone(self)))
-    }
-
-    /// Give one paid slot back. Called ONLY by [`PaidProbeSlot`]'s `Drop`, so
-    /// no path can release a slot it does not hold.
-    ///
-    /// Saturating rather than a bare decrement: an underflow here would wrap to
-    /// `usize::MAX` and permanently refuse every later lease and acquisition,
-    /// which is a worse failure than the impossible double release it would be
-    /// reporting.
-    ///
-    /// MODULE-PRIVATE, which is the narrowest visibility that compiles: a
-    /// private item is visible to its module's DESCENDANTS, and the only caller
-    /// is `paid_slot`'s `Drop`. Anything wider would let a sibling module forge
-    /// a release for a slot it never took, which reads as free capacity while
-    /// the real work is still running.
-    fn release_paid_slot(&self) {
-        let mut inner = self.inner.lock();
-        inner.paid_slots_held = inner.paid_slots_held.saturating_sub(1);
-    }
-
-    /// Raise the retirement floor WITHOUT sweeping the table.    ///
     /// TEST-ONLY. Reproduces the window between raising the floor and
     /// sweeping, which is the state the per-lease generation check exists
     /// for: `retire_before` does both, so nothing else can construct a
@@ -574,20 +496,6 @@ impl ProbeScheduler {
     #[cfg(test)]
     pub fn raise_retirement_floor_without_sweeping_for_tests(&self, generation: u64) {
         self.inner.lock().retired_below = generation;
-    }
-
-    /// Record that a paid-probe candidate could not be stored because the
-    /// candidate list was at capacity.
-    ///
-    /// Lives on the SCHEDULER although the list lives on `Router`, because the
-    /// scheduler owns the operator-readable counter set: a refusal recorded
-    /// anywhere else would need its own reader, and a bounded refusal with no
-    /// reader is the silent drop this exists to remove.
-    pub fn note_paid_candidate_capacity_refusal(&self) {
-        self.inner
-            .lock()
-            .counters
-            .paid_candidate_capacity_refusals_total += 1;
     }
 
     /// Record that a lane's beta context breached a payload retention bound, so
@@ -599,53 +507,6 @@ impl ProbeScheduler {
     /// admitted.
     pub fn note_payload_refusal(&self) {
         self.inner.lock().counters.payload_refusals_total += 1;
-    }
-
-    /// Record that a paid-probe pass CLAIMED a candidate off the list.
-    ///
-    /// Called at the claim, not at a settlement. A claim is irreversible --
-    /// the candidate is off the list whatever happens next -- so a pass
-    /// cancelled at any later point must still report that it took one.
-    pub fn note_paid_candidate_claimed(&self) {
-        self.inner.lock().counters.paid_candidate_attempts_total += 1;
-    }
-
-    /// Record that the ledger ACKNOWLEDGED a committed reservation.
-    ///
-    /// Called on the acknowledgement itself rather than on whatever the pass
-    /// goes on to do, because that is where the unit becomes spent and there is
-    /// no refund: a supersession, gate deferral, timeout, or cancellation after
-    /// this point changes nothing about the spend. Inferring it from a pass's
-    /// final outcome would undercount exactly the irreversible cases.
-    pub fn note_paid_reservation_committed(&self) {
-        self.inner.lock().counters.paid_reservations_committed_total += 1;
-    }
-
-    /// Record that a paid-probe call was DISPATCHED to a provider.
-    ///
-    /// Called immediately before the call rather than after it answers: once
-    /// the request is handed to the provider the upstream may have received it,
-    /// so a cancelled or timed-out call has still started.
-    pub fn note_paid_provider_call_started(&self) {
-        self.inner.lock().counters.paid_provider_calls_started_total += 1;
-    }
-
-    /// Record how one paid-probe pass SETTLED.
-    ///
-    /// Terminal counters only. The irreversible milestones have their own
-    /// recorders above, called where they occur, so this adds nothing a
-    /// cancellation could skip -- and one exhaustive match still forces a build
-    /// that adds a settlement shape to decide what it counts.
-    pub fn record_paid_settlement(&self, settlement: PaidPassSettlement) {
-        let mut inner = self.inner.lock();
-        let counters = &mut inner.counters;
-        match settlement {
-            PaidPassSettlement::Refused => counters.paid_authorization_refusals_total += 1,
-            PaidPassSettlement::GateDeferred => counters.paid_gate_deferrals_total += 1,
-            PaidPassSettlement::Completed => counters.paid_completed_total += 1,
-            PaidPassSettlement::ProviderFailed => counters.paid_provider_failed_total += 1,
-            PaidPassSettlement::TimedOut => counters.paid_timeouts_total += 1,
-        }
     }
 
     /// Current queue state plus the lifetime counters.
@@ -675,9 +536,8 @@ impl ProbeScheduler {
     /// STALE: it is counted, releases nothing, and schedules nothing, so
     /// no work is ever queued against retired state.
     ///
-    /// MODULE-PRIVATE, like `release_paid_slot`: the only callers are `lease`'s
-    /// `settle` and its `Drop`, both descendants of this module, so a private
-    /// item already reaches them. Wider visibility would let a sibling settle a
+    /// MODULE-PRIVATE: the only callers are `lease`'s `settle` and its `Drop`,
+    /// both descendants of this module, so a private item already reaches them. Wider visibility would let a sibling settle a
     /// lease it does not hold, freeing a slot whose operation is still running.
     fn release(
         &self,
@@ -711,8 +571,8 @@ impl ProbeScheduler {
         // Reported STALE rather than settled, which is the same answer a caller
         // would have got had the row been dropped at retirement: the settlement
         // must not reschedule a retired job, must not tombstone into a retired
-        // incarnation, and must not report a spent free step that could publish a
-        // paid candidate describing router state that no longer serves.
+        // incarnation, and must not report a spent free step against router
+        // state that no longer serves.
         let retired_below = inner.retired_below;
         if let Some(index) = inner.position(key)
             && inner.jobs[index].generation < retired_below

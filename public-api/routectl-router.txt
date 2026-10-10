@@ -14101,16 +14101,6 @@ pub routectl_router::ProbeSchedulerSnapshot::free_exhausted_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::in_flight: usize
 pub routectl_router::ProbeSchedulerSnapshot::last_settlement: core::option::Option<routectl_router::probe_scheduler::vocab::ProbeSettlement>
 pub routectl_router::ProbeSchedulerSnapshot::next_retry_in: core::option::Option<core::time::Duration>
-pub routectl_router::ProbeSchedulerSnapshot::paid_authorization_refusals_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_candidate_attempts_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_candidate_capacity_refusals_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_completed_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_gate_deferrals_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_provider_calls_started_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_provider_failed_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_reservations_committed_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_slot_refusals_total: u64
-pub routectl_router::ProbeSchedulerSnapshot::paid_timeouts_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::payload_refusals_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::queue_full_total: u64
 pub routectl_router::ProbeSchedulerSnapshot::queued: usize

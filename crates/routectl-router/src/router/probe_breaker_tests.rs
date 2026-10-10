@@ -89,7 +89,6 @@ async fn a_probe_admitted_as_the_half_open_attempt_declines_and_returns_the_slot
     );
     assert_eq!(snap.deferrals_total, 1);
     assert_eq!(snap.free_exhausted_total, 0);
-    assert!(router.paid_probe_candidates().is_empty());
 }
 
 #[tokio::test]

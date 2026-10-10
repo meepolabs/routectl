@@ -521,23 +521,8 @@ const _: () = assert!(
 /// with the default `0`, permits no paid probe calls; only free
 /// validators may still run for it.
 ///
-/// It IS consumed at runtime, and it gates REAL UPSTREAM SPEND. A non-zero
-/// entry is read at two distinct points, and both are live:
-///
-/// - PAID-CANDIDATE ELIGIBILITY: when a lane's free validation runs out of
-///   steps, the probe worker reads this cap through the shared
-///   `paid_probe_permitted` predicate and records a candidate only when it is
-///   non-zero, so at the default zero every exhausted lane declines and nothing
-///   is recorded.
-/// - PAID AUTHORIZATION: the paid pass re-reads the LIVE cap for the claimed
-///   candidate's provider and refuses outright at zero, then passes that same
-///   number to the durable reservation. A committed reservation authorizes
-///   exactly one outbound completion call against that provider, which is
-///   billable upstream spend, and the unit is never refunded.
-///
-/// So a non-zero entry is the operator's authorization to spend money: raising
-/// it from zero permits up to that many billable calls per provider per UTC day.
-/// Its KEYS are additionally validated at config load against the configured
+/// Nothing reads the cap at runtime: no probe path spends money, so a value
+/// has no effect. Its KEYS are additionally validated at config load against the configured
 /// providers (a `:`-scoped key, or one naming an unknown provider, fails the
 /// load), so a typo'd entry is rejected at load rather than discovered later.
 ///

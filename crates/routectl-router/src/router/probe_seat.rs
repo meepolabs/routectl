@@ -207,19 +207,4 @@ impl Router {
             .get(provider_name)
             .map(super::super::config::ProviderEntry::kind_str)
     }
-
-    /// The configured paid-probe daily cap for the provider behind `key`,
-    /// or zero when the lane, the provider, or the entry is absent. Zero is
-    /// the default in `[fidelity]`, so an unconfigured provider declines.
-    pub(super) fn paid_probe_daily_cap(&self, key: &FieldVerdictKey) -> u32 {
-        self.probe_seat_for(key)
-            .and_then(|seat| {
-                self.config
-                    .fidelity
-                    .paid_probe_daily_caps
-                    .get(&seat.provider_name)
-                    .copied()
-            })
-            .unwrap_or(0)
-    }
 }

@@ -8,7 +8,7 @@
 //! re-enter the queue on the next admitted request.
 //!
 //! A settlement for state the scheduler no longer tracks releases its slot
-//! and does nothing else: no candidate, no reschedule.
+//! and does nothing else: no spent step, no tombstone, no reschedule.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,8 +18,8 @@ use routectl_core::{ChatRequest, ChatResponse, Error, Provider, Result, TokenCou
 use super::Router;
 use super::probe_test_support::{
     BoxStreamAlias, FailingProvider, GROUNDED_PATH, OkProvider, ZeroCountProvider,
-    grounding_request, remote_router, remote_router_with_lanes, remote_router_with_paid_cap,
-    remote_router_with_rpm, router_on_base_with_failure_threshold, settle_terminally,
+    grounding_request, remote_router, remote_router_with_lanes, remote_router_with_rpm,
+    router_on_base_with_failure_threshold, settle_terminally,
 };
 use crate::field_verdict::FieldVerdictKey;
 use crate::probe_scheduler::{
@@ -421,17 +421,17 @@ async fn below_capacity_no_saturation_is_raised() {
 }
 
 // ---------------------------------------------------------------------
-// A candidate is published only after a committed settlement
+// Only a committed settlement counts an exhausted plan
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_lease_retired_mid_flight_publishes_no_candidate() {
-    // The settlement cannot commit (the job is gone), so no candidate may
-    // be recorded -- one would describe router state already retired.
+async fn a_lease_retired_mid_flight_counts_no_exhaustion() {
+    // The settlement cannot commit (the job is gone), so it may not count an
+    // exhausted plan -- that would describe router state already retired.
     let provider = Arc::new(ZeroCountProvider {
         calls: AtomicUsize::new(0),
     });
-    let router = remote_router_with_paid_cap(provider, 3);
+    let router = remote_router(provider);
     let key = FieldVerdictKey::new(
         &crate::router::probe_test_support::lane("m1"),
         GROUNDED_PATH,
@@ -458,12 +458,9 @@ async fn a_lease_retired_mid_flight_publishes_no_candidate() {
         !release.exhausted_free_plan(),
         "an uncommitted settlement spends no free step"
     );
-    assert!(
-        router.paid_probe_candidates().is_empty(),
-        "no candidate may be published from an uncommitted settlement"
-    );
-    assert!(router.all_recorded_paid_candidates_for_tests().is_empty());
-    assert_eq!(router.probe_scheduler_snapshot().stale_settlements_total, 1);
+    let snap = router.probe_scheduler_snapshot();
+    assert_eq!(snap.free_exhausted_total, 0);
+    assert_eq!(snap.stale_settlements_total, 1);
 }
 
 #[tokio::test]
@@ -474,7 +471,7 @@ async fn a_committed_settlement_reports_that_it_committed() {
     let provider = Arc::new(ZeroCountProvider {
         calls: AtomicUsize::new(0),
     });
-    let router = remote_router_with_paid_cap(provider, 3);
+    let router = remote_router(provider);
     let key = FieldVerdictKey::new(
         &crate::router::probe_test_support::lane("m1"),
         GROUNDED_PATH,
@@ -493,16 +490,17 @@ async fn a_committed_settlement_reports_that_it_committed() {
 
     assert!(release.committed());
     // The one-step free plan had no further step, so spending it ran the
-    // plan out -- which is the fact that makes the paid class a candidate.
+    // plan out.
     assert!(release.exhausted_free_plan());
+    assert_eq!(router.probe_scheduler_snapshot().free_exhausted_total, 1);
 }
 
 #[tokio::test]
-async fn shutdown_during_an_outstanding_lease_publishes_no_candidate() {
+async fn shutdown_during_an_outstanding_lease_counts_no_exhaustion() {
     let provider = Arc::new(ZeroCountProvider {
         calls: AtomicUsize::new(0),
     });
-    let router = remote_router_with_paid_cap(provider, 3);
+    let router = remote_router(provider);
     let key = FieldVerdictKey::new(
         &crate::router::probe_test_support::lane("m1"),
         GROUNDED_PATH,
@@ -522,15 +520,15 @@ async fn shutdown_during_an_outstanding_lease_publishes_no_candidate() {
 
     assert!(!release.committed());
     assert!(!release.exhausted_free_plan());
-    assert!(router.paid_probe_candidates().is_empty());
+    assert_eq!(router.probe_scheduler_snapshot().free_exhausted_total, 0);
 }
 
 #[tokio::test]
-async fn a_worker_run_retired_mid_flight_publishes_no_candidate() {
+async fn a_worker_run_retired_mid_flight_counts_no_exhaustion() {
     // End-to-end form of the commit gate: the WORKER (not a hand-held
     // lease) runs a job whose incarnation is retired while its validator is
-    // in flight. The settlement cannot commit, so no candidate may be
-    // published -- one would describe router state already gone.
+    // in flight. The settlement cannot commit, so it may neither count an
+    // exhausted plan nor tombstone into the retired incarnation.
     //
     // The provider performs the retirement from inside the call, which is
     // the only way to land it strictly between lease and settle.
@@ -563,7 +561,7 @@ async fn a_worker_run_retired_mid_flight_publishes_no_candidate() {
                 router.publish_probe_incarnation();
             }
             // A well-formed zero: a SPENT step, which is what would
-            // otherwise exhaust the plan and publish a candidate.
+            // otherwise exhaust the plan and tombstone the identity.
             Ok(TokenCount {
                 input_tokens: 0,
                 extras: serde_json::Map::new(),
@@ -574,7 +572,7 @@ async fn a_worker_run_retired_mid_flight_publishes_no_candidate() {
     let provider = Arc::new(RetiringProvider {
         router: parking_lot::Mutex::new(None),
     });
-    let router = Arc::new(remote_router_with_paid_cap(provider.clone(), 3));
+    let router = Arc::new(remote_router(provider.clone()));
     *provider.router.lock() = Some(Arc::downgrade(&router));
     let key = FieldVerdictKey::new(
         &crate::router::probe_test_support::lane("m1"),
@@ -587,21 +585,18 @@ async fn a_worker_run_retired_mid_flight_publishes_no_candidate() {
     let ran = router.run_due_probes().await;
 
     assert_eq!(ran, 1, "premise: the worker leased and ran the job");
+    let snap = router.probe_scheduler_snapshot();
     assert_eq!(
-        router.probe_scheduler_snapshot().stale_settlements_total,
-        1,
+        snap.stale_settlements_total, 1,
         "premise: the settlement must have arrived against retired state"
     );
-    assert!(
-        router.paid_probe_candidates().is_empty(),
-        "an uncommitted settlement must publish no paid candidate"
+    assert_eq!(
+        snap.free_exhausted_total, 0,
+        "an uncommitted settlement must count no exhausted plan"
     );
-    // Asserted on the RAW list: the live-incarnation filter on the reader
-    // above would hide a wrongly-recorded candidate (it carries the retired
-    // incarnation), which would make this guard unfalsifiable.
-    assert!(
-        router.all_recorded_paid_candidates_for_tests().is_empty(),
-        "nothing may even be RECORDED from an uncommitted settlement"
+    assert_eq!(
+        snap.tombstoned, 0,
+        "nor tombstone the identity into a retired incarnation"
     );
 }
 

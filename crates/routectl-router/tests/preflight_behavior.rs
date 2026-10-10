@@ -379,21 +379,19 @@ fn a_real_rewrite_counts_one_adopted_row_action_and_warns_once() {
 }
 
 // ---------------------------------------------------------------------------
-// Cap zero: free validation runs, nothing is committed
+// Free validation runs on the first admitted request
 // ---------------------------------------------------------------------------
 
-/// With a paid cap of ZERO, a lane still activates and runs free validation, and no
-/// reservation is ever committed.
+/// A lane activates on its first admitted real request and the probe pass runs
+/// its free validation.
 ///
-/// The cap-zero boundary, asserted on the two halves that
-/// can disagree: free work HAPPENS (the lane is not disabled) while paid spend does
-/// NOT (no reservation, no paid call). A build that disabled the lane wholesale
-/// would satisfy "no paid call" while losing every free validator.
+/// Asserted on both halves, because each alone is vacuous: an activation that
+/// queued nothing runnable would pass the first, and a pass over an empty
+/// scheduler would pass neither.
 #[tokio::test]
-async fn a_zero_cap_lane_still_activates_and_runs_free_validation() {
+async fn a_lane_activates_and_runs_free_validation() {
     let seat = Seat::new(false);
     let router = router_with(Arc::clone(&seat));
-    // Default fidelity config: every provider's cap is zero.
     assert!(
         router.fidelity_snapshot().probes.activations_total.eq(&0),
         "premise: nothing has activated before the first admitted request",
@@ -403,40 +401,14 @@ async fn a_zero_cap_lane_still_activates_and_runs_free_validation() {
     assert!(served.is_ok(), "the admitted request serves: {served:?}");
     // The activation is non-blocking for the user request, so the pass runs on the
     // driver's tick rather than inline. Run one tick, exactly as the daemon does.
-    router.run_probe_pass().await;
-
-    let snapshot = router.fidelity_snapshot();
-    assert!(
-        snapshot.probes.activations_total > 0,
-        "a lane activates on its first admitted real request, whatever its paid cap",
-    );
-    assert_eq!(
-        snapshot.probes.paid_reservations_committed_total, 0,
-        "so no reservation is committed: cap zero means nothing is spent",
-    );
-    assert_eq!(
-        snapshot.probes.paid_provider_calls_started_total, 0,
-        "and no paid call is dispatched",
-    );
-}
-
-/// The same lane's free validation genuinely RAN, rather than the pass being empty.
-///
-/// The control that makes the cap-zero case non-vacuous: a scheduler that queued
-/// nothing would report zero paid calls too, and the assertions above could not tell
-/// the difference between "free ran, paid refused" and "nothing happened".
-#[tokio::test]
-async fn the_zero_cap_lanes_free_validation_actually_runs() {
-    let seat = Seat::new(false);
-    let router = router_with(Arc::clone(&seat));
-
-    let _ = router.complete(req_with_field()).await;
-    let before = router.fidelity_snapshot().probes.queued;
     let summary = router.run_probe_pass().await;
 
     assert!(
-        before > 0 || summary.free_validators_run > 0,
-        "the activation queued real free work, and the pass ran it -- so 'no paid \
-         call' above is a refusal rather than an empty scheduler",
+        router.fidelity_snapshot().probes.activations_total > 0,
+        "a lane activates on its first admitted real request",
+    );
+    assert!(
+        summary.free_validators_run > 0,
+        "and the pass runs the free validation it queued",
     );
 }
