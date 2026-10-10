@@ -416,29 +416,16 @@ fn extract_feature_naming_capability(
     ))
 }
 
-/// Ceiling on the upstream error body we JSON-parse to extract a field.
-/// Guards BOTH the self-identifying `error.param` read and the inferred
-/// `error.message` read: a malicious upstream must not be able to force
-/// repeated large-JSON parses on the routing path; a body over this cap is
-/// not parsed and yields `None`. Bound to the shared core constant the
-/// request-fault producers cap their stored body at, so the producer and
-/// this consumer cannot drift and truncate a real envelope into unparseable
-/// JSON.
-const MAX_ERROR_BODY_BYTES: usize = routectl_core::MAX_ERROR_BODY_BYTES;
-
-/// Extract `error.<field>` (a string) from an [`Error::Upstream`] body.
-/// Shared by the self-identifying `param` read and the inferred `message`
-/// read. Any non-upstream error variant, an over-cap body, a non-JSON body,
-/// a missing field, or a non-string value yields `None`.
+/// Extract `error.<field>` (a string) from the body parse an
+/// [`Error::Upstream`] carries ([`Error::parsed_body`]); the body text is
+/// never parsed here, so the routing path cannot be made to re-parse a large
+/// upstream body. Shared by the self-identifying `param` read and the
+/// inferred `message` read. Any non-upstream error variant, a body over
+/// [`routectl_core::MAX_ERROR_BODY_BYTES`] (it carries no parse), a non-JSON
+/// body, a missing field, or a non-string value yields `None`.
 fn upstream_error_field(err: &Error, field: &str) -> Option<String> {
-    let Error::Upstream { body, .. } = err else {
-        return None;
-    };
-    if body.len() > MAX_ERROR_BODY_BYTES {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    value.get("error")?.get(field)?.as_str().map(str::to_string)
+    let error = err.parsed_body()?.value().get("error")?;
+    error.get(field)?.as_str().map(str::to_string)
 }
 
 /// The upstream `error.param` string, for observability enrichment on the
@@ -688,21 +675,17 @@ fn extract_anchored_token<'a>(message: &'a str, prefix: &str, suffix: &str) -> O
 }
 
 /// Read a top-level string field from a FLAT AWS error envelope
-/// (`{"__type","message"}`) on an [`Error::Upstream`] body, bounded by the
-/// module's [`MAX_ERROR_BODY_BYTES`] cap. Distinct from
-/// [`upstream_error_field`], which reads the NESTED `/error/<field>` shape
-/// and returns `None` on this flat body. Any non-upstream variant, an
-/// over-cap body, a non-JSON body, a missing field, or a non-string value
-/// yields `None`.
+/// (`{"__type","message"}`) through the body parse an [`Error::Upstream`]
+/// carries. Distinct from [`upstream_error_field`], which reads the NESTED
+/// `/error/<field>` shape and returns `None` on this flat body. Any
+/// non-upstream variant, an over-cap body (it carries no parse), a non-JSON
+/// body, a missing field, or a non-string value yields `None`.
 fn bedrock_flat_field(err: &Error, field: &str) -> Option<String> {
-    let Error::Upstream { body, .. } = err else {
-        return None;
-    };
-    if body.len() > MAX_ERROR_BODY_BYTES {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    value.get(field)?.as_str().map(str::to_string)
+    err.parsed_body()?
+        .value()
+        .get(field)?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// The flat Bedrock validation `message`, or `None` when the body is not a
@@ -744,8 +727,8 @@ mod tests {
     use super::upstream_param;
     use super::{
         BEDROCK_TOKEN_TRANSLATIONS, BEDROCK_VALIDATION_EXCEPTION_TYPE, BEDROCK_VALIDATION_PHRASES,
-        BEDROCK_VALIDATION_TEMPLATES, BedrockTemplate, MAX_ERROR_BODY_BYTES, TokenKey,
-        bedrock_validation_message, extract_bedrock_capability, extract_feature_naming_capability,
+        BEDROCK_VALIDATION_TEMPLATES, BedrockTemplate, TokenKey, bedrock_validation_message,
+        extract_bedrock_capability, extract_feature_naming_capability,
         is_bedrock_validation_exception, tool_type_key,
     };
     use crate::capability_strip::{CapabilityAction, action_for};
@@ -753,7 +736,7 @@ mod tests {
     use routectl_core::capability::{COMPUTER_USE, FailurePhase, STRUCTURED_OUTPUT, SignalTier};
     use routectl_core::error::Error;
     use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify};
-    use routectl_core::{ChatRequest, MAX_SAFE_TOKEN_LEN, ToolDef};
+    use routectl_core::{ChatRequest, MAX_ERROR_BODY_BYTES, MAX_SAFE_TOKEN_LEN, ToolDef};
 
     /// The verbatim Anthropic Messages API 400 body for a prefill
     /// rejection.
@@ -1405,6 +1388,38 @@ mod tests {
                 "param {param:?} must be dropped"
             );
         }
+    }
+
+    /// Prefix `body` with a UTF-8 BOM. The carried parse strips it under the
+    /// shared body rules while `serde_json::from_str` on the raw text rejects
+    /// it, so a reader that answers on this body read the carried parse rather
+    /// than the body string.
+    fn bom_prefixed(body: &str) -> String {
+        format!("\u{feff}{body}")
+    }
+
+    #[test]
+    fn upstream_error_fields_come_from_the_carried_parse() {
+        let body = bom_prefixed(&openai_unsupported_body(
+            "unsupported_parameter",
+            "web_search",
+        ));
+        let err = upstream(400, &body, None, None);
+        assert!(serde_json::from_str::<serde_json::Value>(&body).is_err());
+
+        assert_eq!(upstream_param(&err).as_deref(), Some("web_search"));
+    }
+
+    #[test]
+    fn bedrock_flat_field_comes_from_the_carried_parse() {
+        let body = bom_prefixed(&flat_validation_body("flat message"));
+        let err = upstream(400, &body, None, None);
+        assert!(serde_json::from_str::<serde_json::Value>(&body).is_err());
+
+        assert_eq!(
+            bedrock_validation_message(&err).as_deref(),
+            Some("flat message")
+        );
     }
 
     // --- Bedrock validation arm: flat reader + anchored-template engine ---

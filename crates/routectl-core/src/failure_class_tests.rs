@@ -1032,6 +1032,27 @@ fn an_oversized_body_is_refused_unparsed() {
 }
 
 #[test]
+fn the_envelope_is_read_from_the_carried_parse_not_the_body_text() {
+    // Arrange: a BOM ahead of the envelope. The carried parse strips it under
+    // the shared body rules; a parse of the raw text would reject it.
+    let body = format!("\u{feff}{REPLAY_REJECTION_BODY}");
+    assert!(serde_json::from_str::<serde_json::Value>(&body).is_err());
+    let err = Error::upstream_full("p", 400, body, None, None, None);
+    let before = crate::log_safe::capped_parse_count();
+
+    // Act
+    let got = classify_with_attempt(
+        &err,
+        Some(REPLAY_KIND),
+        ReplayAttempt::with_gray_artifacts(1),
+    );
+
+    // Assert
+    assert_eq!(got.class, replay_class());
+    assert_eq!(crate::log_safe::capped_parse_count() - before, 0);
+}
+
+#[test]
 fn the_replay_class_reuses_the_existing_feature_unsupported_token() {
     // The matcher adds no vocabulary: the class it produces carries the
     // same kebab token every other feature-unsupported rejection does.

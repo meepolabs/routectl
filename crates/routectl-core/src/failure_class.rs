@@ -10,12 +10,13 @@
 //!
 //! Leaf module: it reads only the fields already on [`Error::Upstream`] and
 //! pulls in no config, router, or provider-crate types. The one path that
-//! looks past the structured fields into the response `body` is the closed
-//! replay-rejection matcher in the `replay` submodule, and only after its
-//! cheaper gates have already held.
+//! looks past the structured fields into the carried parse of the response
+//! `body` is the closed replay-rejection matcher in the `replay` submodule,
+//! and only after its cheaper gates have already held.
 
 use serde::{Deserialize, Serialize};
 
+use crate::ParsedErrorBody;
 use crate::error::Error;
 
 /// A coarse, stable failure category derived from a canonical [`Error`].
@@ -299,7 +300,7 @@ mod tables {
 /// `feature_unsupported` set -- would over-match every validation error on
 /// that provider family.
 mod replay {
-    use crate::MAX_ERROR_BODY_BYTES;
+    use crate::ParsedErrorBody;
 
     /// The capability key a proven replay rejection resolves to. Mirrors
     /// the capability-key vocabulary: the learned layer looks the negative
@@ -392,13 +393,13 @@ mod replay {
     ///
     /// Pure in its inputs: no clock, no registry, no provider handle, so it
     /// is exercisable without a live upstream. Ordered cheapest-first, so
-    /// the body is parsed only for a rejection that already passed the
-    /// status, artifact, and family gates.
+    /// the carried parse is read only for a rejection that already passed
+    /// the status, artifact, and family gates.
     pub fn is_replay_rejection(
         status: u16,
         upstream_type: Option<&str>,
         upstream_code: Option<&str>,
-        body: &str,
+        parsed: Option<&ParsedErrorBody>,
         provider_kind: Option<&str>,
         attempt: ReplayAttempt,
     ) -> bool {
@@ -408,7 +409,7 @@ mod replay {
         if !matches!(provider_kind, Some(kind) if FIXTURE_BACKED_KINDS.contains(&kind)) {
             return false;
         }
-        let envelope = Envelope::read(body);
+        let envelope = Envelope::read(parsed);
         PROVEN_REJECTIONS
             .iter()
             .any(|sig| signature_matches(sig, upstream_type, upstream_code, &envelope))
@@ -435,35 +436,23 @@ mod replay {
     }
 
     impl Envelope {
-        /// Read the envelope, or an empty one when the body is not a JSON
-        /// `{"error":{...}}` shape.
+        /// Read the envelope from the error's carried parse, or an empty
+        /// one when there is no parse or it is not a `{"error":{...}}` shape.
         ///
         /// Strict by design: a non-envelope body yields no fields rather
         /// than falling back to a raw excerpt, so an anchor can never match
         /// text that merely appeared somewhere in an unstructured body. An
-        /// oversized body is refused unparsed, bounding the JSON a hostile
-        /// upstream can push onto the routing path -- the same ceiling the
-        /// request-fault producers write against.
-        fn read(body: &str) -> Self {
-            if body.len() > MAX_ERROR_BODY_BYTES {
-                return Self::default();
-            }
-            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) else {
-                return Self::default();
-            };
-            let Some(error) = parsed.get("error") else {
+        /// over-cap body carries no parse, so it yields no fields either.
+        fn read(parsed: Option<&ParsedErrorBody>) -> Self {
+            let Some(parsed) = parsed.filter(|p| p.is_error_envelope()) else {
                 return Self::default();
             };
             Self {
-                error_type: string_at(error, "type"),
-                code: string_at(error, "code"),
-                message: string_at(error, "message").map(|m| normalize(&m)),
+                error_type: parsed.error_type().map(str::to_string),
+                code: parsed.error_code(),
+                message: parsed.error_message().map(normalize),
             }
         }
-    }
-
-    fn string_at(value: &serde_json::Value, key: &str) -> Option<String> {
-        value.get(key)?.as_str().map(str::to_string)
     }
 
     /// Lowercase with whitespace runs collapsed, so a re-cased or rewrapped
@@ -542,7 +531,6 @@ pub fn classify_with_attempt(
     match err {
         Error::Upstream {
             status,
-            body,
             upstream_type,
             upstream_code,
             ..
@@ -550,7 +538,7 @@ pub fn classify_with_attempt(
             *status,
             upstream_type.as_deref(),
             upstream_code.as_deref(),
-            body,
+            err.parsed_body(),
             provider_kind,
             attempt,
         ),
@@ -571,7 +559,7 @@ fn classify_upstream(
         status,
         upstream_type,
         upstream_code,
-        "",
+        None,
         provider_kind,
         ReplayAttempt::none(),
     )
@@ -581,7 +569,7 @@ fn classify_upstream_attempt(
     status: u16,
     upstream_type: Option<&str>,
     upstream_code: Option<&str>,
-    body: &str,
+    parsed: Option<&ParsedErrorBody>,
     provider_kind: Option<&str>,
     attempt: ReplayAttempt,
 ) -> ClassifiedFailure {
@@ -601,7 +589,7 @@ fn classify_upstream_attempt(
                 status,
                 upstream_type,
                 upstream_code,
-                body,
+                parsed,
                 provider_kind,
                 attempt,
             )
@@ -629,7 +617,7 @@ fn replay_rejection(
     status: u16,
     upstream_type: Option<&str>,
     upstream_code: Option<&str>,
-    body: &str,
+    parsed: Option<&ParsedErrorBody>,
     provider_kind: Option<&str>,
     attempt: ReplayAttempt,
 ) -> Option<ClassifiedFailure> {
@@ -637,7 +625,7 @@ fn replay_rejection(
         status,
         upstream_type,
         upstream_code,
-        body,
+        parsed,
         provider_kind,
         attempt,
     )
