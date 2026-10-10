@@ -366,7 +366,7 @@ upstream body, and the session key are never carried:
 
 | Field | Meaning |
 |---|---|
-| `action` | What the router did (`field_drop_repair`) |
+| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it) |
 | `state_key` | Sanitized `[providers]` state key of the repaired target |
 | `field_path` | The closed-table qualified dotted path that was repaired |
 | `reason` | Why the repair fired (`upstream_field_rejection`) |
@@ -395,21 +395,25 @@ exhausted). All six carry only the same sanitized `state_key` and
 `capability_key` fields as the settling lines -- no additional detail,
 since a refusal is definitionally a no-op on the registry.
 
-Three counters ride the router metrics snapshot (DEBUG, target
+Four counters ride the router metrics snapshot (DEBUG, target
 `routectl_router::router::metrics`) so the arm is answerable without a
 log level: `rc_field_repair_attempted_total`,
-`rc_field_repair_succeeded_total`, and `rc_field_verdicts_learned_total`.
-All three, plus the pre-flight and parser-blindness counters, also ride
-the INFO snapshot below -- the DEBUG snapshot is not readable at a live
-log level, so an observability floor satisfied only there would be a
-floor no operator can read.
+`rc_field_repair_lossy_total`, `rc_field_repair_succeeded_total`, and
+`rc_field_verdicts_learned_total`. All but the lossy count, plus the
+pre-flight and parser-blindness counters, also ride the INFO snapshot
+below -- the DEBUG snapshot is not readable at a live log level, so an
+observability floor satisfied only there would be a floor no operator can
+read.
 Read them as a pair -- a rising attempted count with a flat succeeded
 count means the dropped field was not what the upstream objected to.
 
-All three are ZERO on a current build, and that is expected rather than a
-fault: no rejection parser is grounded yet, so nothing on real traffic
-resolves a field path and the repair arm never fires. A nonzero count is
-itself the signal that the arm has become reachable.
+`rc_field_repair_lossy_total` is the subset of attempted repairs whose
+rejection refused a VALUE rather than the field. Those repairs never
+commit a verdict, so the same rejection is repaired again on every
+request that carries the value; a lossy count rising with the attempted
+count and a flat learned count is that steady state, not a fault. The
+captured `anthropic-api` `thinking.display` enum rejection is one such
+case today.
 
 One SETTLEMENT limitation to read alongside the counters, because it
 makes two token-count call paths behave differently on purpose. The

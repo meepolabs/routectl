@@ -143,8 +143,9 @@ impl Recorder {
     }
 }
 
-/// A rejection body shaped like the captured envelope. Carries no secret and makes
-/// nothing fire -- production attributes no path to it.
+/// A rejection body shaped like the captured envelope. Carries no secret. The
+/// parser reads it as a refused VALUE, so it can repair an attempt but never
+/// confirm or mint a verdict.
 const FIELD_REJECT_BODY: &str = r#"{"error":{"type":"invalid_request_error","message":"thinking.enabled.display: Input should be 'summarized', 'omitted'"}}"#;
 
 #[async_trait::async_trait]

@@ -3,11 +3,15 @@
 //! field guard.
 //!
 //! An upstream that rejects a request by naming a WIRE FIELD PATH states
-//! that the lane does not accept that field. The L0 repair is the whole of
-//! the response: DROP the mapped field from the attempt request and
-//! re-dispatch the same target once. There is no rewrite, no substituted
-//! value, and no second class -- an L0 repair either removes one field or
-//! does nothing at all.
+//! either that the lane does not accept that field, or that it does not
+//! accept the VALUE sent in it. The L0 repair is the same for both: DROP the
+//! mapped field from the attempt request and re-dispatch the same target
+//! once. There is no rewrite, no substituted value, and no second class -- an
+//! L0 repair either removes one field or does nothing at all. What differs is
+//! what the repair may teach: only a refused FIELD commits a verdict. A
+//! refused value is repaired for this attempt alone and recorded as a lossy
+//! repair, because a learned drop would strip every valid value of that
+//! field from every later request on the lane.
 //!
 //! # Why the table is closed, and what "closed" buys
 //!
@@ -20,24 +24,13 @@
 //! known to remove that wire field, so the repair's effect is reviewable
 //! rather than inferred.
 //!
-//! # Why nothing resolves in production yet
+//! # Where the attribution comes from
 //!
-//! The repair needs a path, and the only producer of one is a rejection
-//! parser that is deliberately NOT part of this stage: the capability
-//! matcher's feature-naming tables ship empty by their own stated
-//! discipline (no entry without a real captured envelope), and the envelope
-//! that was captured names a wire field path plus an enum rather than a
-//! feature in prose -- the shape those tables cannot parse. So
-//! [`rejected_field_path`] resolves NOTHING on real traffic, by
-//! construction, and every arm downstream of it is inert in production.
-//!
-//! That is the intended Stage 1 state, not a gap to close here: the
-//! namespace, the guard, the budget, the settlement and the persistence are
-//! what this stage lands and what a captured envelope later switches on. The
-//! coverage that keeps them honest injects a PROVISIONAL resolution through
-//! the test-only seam in [`provisional`], and a control asserts the
-//! production resolver stays inert for every rejection shape a test can
-//! build.
+//! The per-dialect rejection parser reads the error's carried parse and
+//! names a row of this table, or nothing. The coverage of the arms
+//! downstream of it can also inject a resolution through the test-only seam
+//! in [`provisional`]; an injection replaces the parser for the thread it is
+//! set on and stands for a refused field.
 
 use std::time::Instant;
 
@@ -47,6 +40,7 @@ use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey};
 
+use super::rejection_parser::{NamedRejection, RejectionKind, parse_rejection};
 use super::repair_budget::RepairBudget;
 
 use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
@@ -70,6 +64,11 @@ pub(super) const ANTHROPIC_API_KIND: &str = "anthropic-api";
 /// Action token for the field-repair WARN: the L0 repair dropped the mapped
 /// envelope field and re-dispatched the same target once. Closed set.
 pub(super) const FIELD_ACTION_DROP_REPAIR: &str = "field_drop_repair";
+
+/// Action token for the field-repair WARN when the upstream refused the
+/// VALUE sent in the field rather than the field: the drop served this
+/// attempt only, and no verdict was learned from it. Closed set.
+pub(super) const FIELD_ACTION_LOSSY_DROP_REPAIR: &str = "field_lossy_drop_repair";
 
 /// Reason token: the attempt drew an upstream rejection naming this field
 /// path. Closed set.
@@ -169,6 +168,15 @@ pub(super) enum FieldSurface {
     /// still emits the field to the upstream.
     #[cfg(test)]
     ClaimsRemovalForTests,
+    /// Test-only ENVELOPE surface for a field the upstream refuses outright:
+    /// the `user` field, when it holds exactly [`TEST_UNSUPPORTED_SENTINEL`].
+    ///
+    /// The one grounded row's captured rejection refuses a VALUE, so without
+    /// this the path on which a parsed rejection commits a verdict has no row
+    /// to act on. Sentinel-gated for the same reason as the prefix-impacting
+    /// surface, and disjoint from both other carriers.
+    #[cfg(test)]
+    UnsupportedFieldForTests,
 }
 
 impl FieldSurface {
@@ -199,6 +207,10 @@ impl FieldSurface {
             // leaves this surface readable.
             #[cfg(test)]
             Self::ClaimsRemovalForTests => true,
+            #[cfg(test)]
+            Self::UnsupportedFieldForTests => {
+                req.user.as_deref() == Some(TEST_UNSUPPORTED_SENTINEL)
+            }
         }
     }
 
@@ -228,7 +240,8 @@ impl FieldSurface {
             #[cfg(test)]
             Self::PartialDropForTests
             | Self::PrefixImpactingSystemForTests
-            | Self::ClaimsRemovalForTests => None,
+            | Self::ClaimsRemovalForTests
+            | Self::UnsupportedFieldForTests => None,
         }
     }
 
@@ -269,7 +282,8 @@ impl FieldSurface {
             #[cfg(test)]
             Self::PartialDropForTests
             | Self::PrefixImpactingSystemForTests
-            | Self::ClaimsRemovalForTests => {}
+            | Self::ClaimsRemovalForTests
+            | Self::UnsupportedFieldForTests => {}
         }
     }
 
@@ -312,6 +326,13 @@ impl FieldSurface {
             // post-condition re-check exists to catch.
             #[cfg(test)]
             Self::ClaimsRemovalForTests => true,
+            #[cfg(test)]
+            Self::UnsupportedFieldForTests => {
+                if !Self::UnsupportedFieldForTests.present_in(req) {
+                    return false;
+                }
+                req.user.take().is_some()
+            }
         }
     }
 }
@@ -426,6 +447,16 @@ pub(in crate::router) const TEST_PREFIX_IMPACTING_PATH: &str = "system.prompt.fo
 pub(in crate::router) const TEST_PREFIX_SENTINEL: &str =
     "routectl-test-only-prefix-impacting-surface-sentinel";
 
+/// The qualified dotted path of the test-only refused-field row. Outside the
+/// grounded table and every committed rejection fixture's paths.
+#[cfg(test)]
+pub(in crate::router) const TEST_UNSUPPORTED_PATH: &str = "routectl_test_unsupported_field";
+
+/// The EXACT `user` value the test-only refused-field surface recognizes.
+#[cfg(test)]
+pub(in crate::router) const TEST_UNSUPPORTED_SENTINEL: &str =
+    "routectl-test-only-unsupported-field-sentinel";
+
 /// Rows a TEST build adds to the closed table.
 ///
 /// The grounded table ships no prefix-impacting row, so without this the
@@ -436,11 +467,18 @@ pub(in crate::router) const TEST_PREFIX_SENTINEL: &str =
 /// stays assertable: a new permanent row must still be a deliberate edit
 /// that updates the guard on that count.
 #[cfg(test)]
-const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
-    path: TEST_PREFIX_IMPACTING_PATH,
-    surface: FieldSurface::PrefixImpactingSystemForTests,
-    class: TransformClass::PrefixImpacting,
-}];
+const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[
+    FieldRepairRow {
+        path: TEST_PREFIX_IMPACTING_PATH,
+        surface: FieldSurface::PrefixImpactingSystemForTests,
+        class: TransformClass::PrefixImpacting,
+    },
+    FieldRepairRow {
+        path: TEST_UNSUPPORTED_PATH,
+        surface: FieldSurface::UnsupportedFieldForTests,
+        class: TransformClass::Envelope,
+    },
+];
 
 /// The grounded rows alone, without the rows a test build appends.
 #[cfg(test)]
@@ -505,11 +543,9 @@ pub(super) fn apply_probe_payload(
 
 /// The GROUNDED table's row for `path`, or `None`.
 ///
-/// Named and separate from [`closed_table_row`] because the two answer
-/// different questions and the difference is load-bearing: `closed_table_row`
-/// resolves against the TEST-INCLUSIVE table (a test build appends
-/// `TEST_FIELD_REPAIRS`), while this one resolves against `FIELD_REPAIRS`
-/// alone. The probe path uses this one on BOTH sides -- capture through
+/// Resolves against `FIELD_REPAIRS` alone, never the TEST-INCLUSIVE
+/// [`closed_table`] (a test build appends `TEST_FIELD_REPAIRS`), and the
+/// difference is load-bearing. The probe path uses this one on BOTH sides -- capture through
 /// [`grounded_closed_table_payloads`] and application through
 /// [`apply_probe_payload`] -- so a test-only row can be neither produced nor
 /// consumed by a probe, in any build.
@@ -575,20 +611,6 @@ pub(super) fn attributable_anthropic_base_url<'a>(
         return None;
     }
     Some(base_url)
-}
-
-/// The closed table's row for `path` -- the table's OWN path literal plus its
-/// surface -- or `None` for a path this build has no grounded repair for.
-///
-/// THE single lookup, and the whole of the table's refusal: a repair fires only
-/// when a rejection's path equals a row's, so an unknown path resolves to no
-/// row and therefore to no mutation. Returning the table's literal rather than
-/// the caller's string is what keeps upstream bytes out of every downstream
-/// consumer, including the operator-facing WARN.
-pub(super) fn closed_table_row(path: &str) -> Option<(&'static str, FieldSurface)> {
-    closed_table()
-        .iter()
-        .find_map(|row| (row.path == path).then_some((row.path, row.surface)))
 }
 
 /// The transform class of the closed-table row a `field:`-namespaced capability
@@ -661,57 +683,32 @@ pub(super) fn request_feature_keys(req: &ChatRequest) -> Vec<String> {
     .collect()
 }
 
-/// The CLOSED-TABLE path an upstream rejection named, or `None` when this
-/// build can attribute none -- which is EVERY real rejection in this stage.
+/// The closed-table row an upstream rejection named and what it refused, or
+/// `None` when the class cannot carry a field rejection or the parser named
+/// no row.
 ///
-/// Returns the table's own `&'static str`, never a string built from upstream
-/// text: a repair can only ever act on a table row, so resolving through the
-/// table here means no caller downstream can hold a path the table does not
-/// know. That is also what keeps upstream bytes out of the operator-facing
-/// WARN, which renders this literal.
+/// The row is the table's own `&'static` entry, never a string built from
+/// upstream text: a repair can only ever act on a table row, so no caller
+/// downstream can hold a path the table does not know. That is also what
+/// keeps upstream bytes out of the operator-facing WARN, which renders the
+/// row's literal.
 ///
-/// The class is read FIRST, so no parser is consulted for a class that cannot
-/// carry a field rejection -- the future parser's input set is the same as
-/// today's.
-fn rejected_field_path(
+/// The class is read FIRST, so the parser is never consulted for a class
+/// that cannot carry a field rejection.
+fn rejected_field(
     class: &FailureClass,
     err: &Error,
     provider_kind: &str,
-) -> Option<&'static str> {
+) -> Option<NamedRejection> {
     if !class_can_name_a_field(class) {
         return None;
     }
-    closed_table_row(&parse_rejected_field_path(err, provider_kind)?).map(|(path, _)| path)
-}
-
-/// Parse the qualified dotted field path a rejection envelope names.
-///
-/// PRODUCTION IMPLEMENTATION, and it resolves nothing by construction: the
-/// envelope-to-path parser is out of this stage (see the module docs), so there
-/// is no producer of a path on real traffic. The arguments are taken and named
-/// because this signature is the seam a grounded parser lands behind -- no
-/// caller changes when it does.
-#[cfg(not(test))]
-#[expect(
-    clippy::missing_const_for_fn,
-    reason = "const only because the body is a placeholder; a grounded parser reads the \
-              error body and allocates, so marking it const now would have to be undone by \
-              the change that fills it in"
-)]
-fn parse_rejected_field_path(err: &Error, provider_kind: &str) -> Option<String> {
-    let _ = (err, provider_kind);
-    None
-}
-
-/// Test build: the provisional resolution stands in for the absent parser, so
-/// every arm downstream of it is reachable. Substituted at exactly this seam
-/// and nowhere else, which is why the production body above stays the single
-/// thing a grounded parser has to fill in -- and why the control beside it can
-/// assert production inertness against the same rejection shapes.
-#[cfg(test)]
-fn parse_rejected_field_path(err: &Error, provider_kind: &str) -> Option<String> {
-    let _ = (err, provider_kind);
-    provisional::injected_path()
+    #[cfg(test)]
+    if let provisional::Injected::Resolution(named) = provisional::injected() {
+        return named;
+    }
+    let status = super::class_observe::upstream_facts(err).status?;
+    parse_rejection(provider_kind, status, err.parsed_body())
 }
 
 /// Whether a failure class can carry a field-naming rejection at all.
@@ -770,6 +767,9 @@ pub(super) struct FieldRepairPlan<'a> {
     /// `None` until one succeeds, which is what makes the one-repair ceiling a
     /// property of the plan rather than of a caller's flag alone.
     repaired: Option<usize>,
+    /// What the rejection that drove the repair refused. Only a refused FIELD
+    /// may commit: a refused value repairs this attempt and teaches nothing.
+    repaired_kind: Option<RejectionKind>,
 }
 
 /// One admitted row: the closed-table path and surface, plus the guard whose
@@ -792,6 +792,13 @@ impl FieldRepairPlan<'_> {
     /// never upstream text, so it is safe in an operator-facing field.
     pub(super) fn repaired_path(&self) -> Option<&'static str> {
         self.repaired.map(|idx| self.candidates[idx].path)
+    }
+
+    /// Whether the repair this plan applied answered a refused VALUE: the drop
+    /// served the attempt but changed what the client asked for, and nothing
+    /// may be learned from it.
+    pub(super) fn repaired_lossy(&self) -> bool {
+        self.repaired_kind == Some(RejectionKind::InvalidValue)
     }
 
     /// Perform the repair for whichever admitted row `err` names: drop that
@@ -835,15 +842,22 @@ impl FieldRepairPlan<'_> {
         // WHICH row: the one the upstream named. Refusing here is
         // pre-mutation, so an unnamed rejection leaves the request and every
         // guard exactly as the caller handed them over.
-        let idx = self.candidates.iter().position(|candidate| {
-            Router::rejection_names_field_surface(
-                candidate.surface,
-                native_class,
-                rejection,
-                provider_kind,
-            )
-        })?;
-        self.apply_candidate(idx, attempt_req, meta, budget, rejection)
+        let (idx, kind) = self
+            .candidates
+            .iter()
+            .enumerate()
+            .find_map(|(idx, candidate)| {
+                Router::rejection_names_field_surface(
+                    candidate.surface,
+                    native_class,
+                    rejection,
+                    provider_kind,
+                )
+                .map(|kind| (idx, kind))
+            })?;
+        let status = self.apply_candidate(idx, attempt_req, meta, budget, rejection)?;
+        self.repaired_kind = Some(kind);
+        Some(status)
     }
 
     /// The EFFECT half of [`Self::apply`], for the candidate at `idx`: the
@@ -946,6 +960,7 @@ impl FieldRepairPlan<'_> {
                 guard: None,
             }],
             repaired: None,
+            repaired_kind: None,
         }
     }
 
@@ -981,6 +996,11 @@ impl FieldRepairPlan<'_> {
     /// retry that succeeded is evidence about that row alone -- every other
     /// candidate's guard was already released by [`Self::apply`].
     ///
+    /// And only when the rejection refused the FIELD. A refused value says the
+    /// lane accepts the field, so a verdict dropping it would strip every
+    /// valid value from every later request on the lane; such a plan releases
+    /// its guard here and persists nothing.
+    ///
     /// `request_features` is taken BY VALUE: the guard stores it on the event
     /// row, so a borrow here would only be cloned one frame deeper.
     pub(super) fn commit(
@@ -990,6 +1010,9 @@ impl FieldRepairPlan<'_> {
         now: Instant,
     ) -> Option<CapabilityLearnEvent> {
         let idx = self.repaired?;
+        if self.repaired_kind != Some(RejectionKind::UnsupportedField) {
+            return None;
+        }
         self.candidates[idx]
             .guard
             .take()?
@@ -1151,11 +1174,13 @@ impl Router {
         Some(FieldRepairPlan {
             candidates,
             repaired: None,
+            repaired_kind: None,
         })
     }
 
-    /// Whether the rejection `err`, natively classified as `native_class`,
-    /// names a closed-table row whose SURFACE is `surface`.
+    /// What the rejection `err`, natively classified as `native_class`,
+    /// refused at a closed-table row whose SURFACE is `surface`, or `None`
+    /// when it names no such row.
     ///
     /// THE single implementation of "did the upstream name this mutation", shared
     /// by the reactive plan's own candidate selection ([`FieldRepairPlan::apply`])
@@ -1177,19 +1202,15 @@ impl Router {
     /// the drop acts on, and two rows sharing one surface would be the same
     /// mutation under two identities.
     ///
-    /// False for every real rejection in this stage: no envelope resolves to a
-    /// path (see [`rejected_field_path`]), so an admitted carry settles as an
-    /// ordinary success or releases, and no repair fires.
     pub(super) fn rejection_names_field_surface(
         surface: FieldSurface,
         native_class: &FailureClass,
         err: &Error,
         provider_kind: &str,
-    ) -> bool {
-        let Some(named) = rejected_field_path(native_class, err, provider_kind) else {
-            return false;
-        };
-        closed_table_row(named).is_some_and(|(_, row_surface)| row_surface == surface)
+    ) -> Option<RejectionKind> {
+        rejected_field(native_class, err, provider_kind)
+            .filter(|named| named.row.surface == surface)
+            .map(|named| named.kind)
     }
 
     /// Whether a rejection eligible to name a field localized NO field path from
@@ -1203,7 +1224,7 @@ impl Router {
         provider_kind: &str,
     ) -> bool {
         class_can_name_a_field(native_class)
-            && rejected_field_path(native_class, err, provider_kind).is_none()
+            && rejected_field(native_class, err, provider_kind).is_none()
     }
 
     /// Record that the field repair fired for this request, for the single
@@ -1213,22 +1234,37 @@ impl Router {
     /// often does this arm fire" without depending on a log level, so both
     /// are driven from here and cannot disagree about whether a repair
     /// happened.
+    ///
+    /// A repair answering a refused VALUE is recorded under its own action
+    /// token and counted as lossy: it served the attempt by dropping a field
+    /// the client set and the lane accepts, and an operator needs to tell that
+    /// apart from a drop of a field the lane does not take at all.
     pub(super) fn note_field_repair(
         &self,
         meta: &mut DispatchMeta,
         state_key: &str,
-        path: &'static str,
+        plan: &FieldRepairPlan<'_>,
     ) {
+        let lossy = plan.repaired_lossy();
         meta.field_repair = Some(super::FieldRepair {
-            action: FIELD_ACTION_DROP_REPAIR,
+            action: if lossy {
+                FIELD_ACTION_LOSSY_DROP_REPAIR
+            } else {
+                FIELD_ACTION_DROP_REPAIR
+            },
             state_key: sanitize_for_log(state_key),
-            field_path: path,
+            field_path: plan
+                .repaired_path()
+                .expect("a reported repair names the row it dropped"),
             reason: FIELD_REASON_UPSTREAM_REJECTION,
             repair_attempted: true,
             repair_succeeded: false,
             learned: false,
         });
         self.metrics.incr_field_repair_attempted();
+        if lossy {
+            self.metrics.incr_field_repair_lossy();
+        }
     }
 
     /// Record that the repaired retry succeeded, and whether that outcome
@@ -1273,14 +1309,13 @@ pub(super) fn emit_field_repair(meta: &DispatchMeta) {
 /// greppable, closed-set.
 const FIELD_REPAIR_EVENT: &str = "envelope_field_repaired";
 
-/// Test-only injection of a PROVISIONAL field resolution.
+/// Test-only injection of a field resolution, standing in for the parser.
 ///
-/// The production resolver is inert by construction (see the module docs),
-/// so behavioral coverage of every arm downstream of it -- the drop, the
-/// shared budget, the two-phase settlement, the persistence, the WARN --
-/// needs a resolution from somewhere. This is that seam, and it is the ONLY
-/// one: no production path reads it, and the corresponding control asserts
-/// the production resolver stays inert for the same rejection shapes.
+/// Arms downstream of the parser -- the drop, the shared budget, the two-phase
+/// settlement, the persistence, the WARN -- are covered over the full closed
+/// table, test rows included, and over rejection shapes no committed envelope
+/// produces. This is the seam those tests resolve through; no production path
+/// reads it.
 ///
 /// Thread-local because a `#[tokio::test]` drives its future to completion on
 /// the test's own thread, so an injection set in a test body is visible
@@ -1289,26 +1324,49 @@ const FIELD_REPAIR_EVENT: &str = "envelope_field_repaired";
 /// (`the_injected_resolution_is_visible_inside_a_dispatch`).
 #[cfg(test)]
 pub(in crate::router) mod provisional {
-    use std::cell::RefCell;
+    use std::cell::Cell;
+
+    use routectl_core::capability::SignalTier;
+
+    use super::super::rejection_parser::{NamedRejection, RejectionKind};
+    use super::closed_table;
+
+    /// This thread's injection state.
+    #[derive(Clone, Copy, Debug)]
+    pub(super) enum Injected {
+        /// No injection: the live parser answers.
+        None,
+        /// The parser is replaced by this answer. `None` is an injected path
+        /// with no closed-table row: it resolves to nothing and must not fall
+        /// through to the parser.
+        Resolution(Option<NamedRejection>),
+    }
 
     thread_local! {
-        static INJECTED_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
+        static INJECTED: Cell<Injected> = const { Cell::new(Injected::None) };
     }
 
-    /// The injected path, if this thread has one.
-    pub(super) fn injected_path() -> Option<String> {
-        INJECTED_PATH.with(|slot| slot.borrow().clone())
+    pub(super) fn injected() -> Injected {
+        INJECTED.with(Cell::get)
     }
 
-    /// Make every field rejection on this thread resolve to `path` until the
-    /// returned guard drops.
+    /// Make every field rejection on this thread name `path` as a refused
+    /// FIELD until the returned guard drops.
     ///
     /// Visible to the whole `router` module rather than to `field_repair`
     /// alone: the canary settlement's coverage lives in a sibling sidecar and
-    /// needs the SAME seam, because a second injection point would be a second
-    /// thing a grounded parser has to displace.
+    /// needs the SAME seam.
     pub(in crate::router) fn inject(path: &str) -> Injection {
-        INJECTED_PATH.with(|slot| *slot.borrow_mut() = Some(path.to_string()));
+        let named = closed_table()
+            .iter()
+            .find(|row| row.path == path)
+            .map(|row| NamedRejection {
+                row,
+                tier: SignalTier::SelfIdentifying,
+                kind: RejectionKind::UnsupportedField,
+                accepted: None,
+            });
+        INJECTED.with(|slot| slot.set(Injected::Resolution(named)));
         Injection
     }
 
@@ -1318,7 +1376,7 @@ pub(in crate::router) mod provisional {
 
     impl Drop for Injection {
         fn drop(&mut self) {
-            INJECTED_PATH.with(|slot| *slot.borrow_mut() = None);
+            INJECTED.with(|slot| slot.set(Injected::None));
         }
     }
 }
@@ -1331,43 +1389,8 @@ mod field_repair_tests;
 mod table_tests {
     use super::*;
 
-    /// This module's own source, for the production-body guard. Scanned whole:
-    /// the production parser sits under `cfg(not(test))`, so it is present in
-    /// the TEXT while absent from this binary, and reading the text is the only
-    /// way to assert anything about it.
+    /// This module's own source, for the control-flow guard over `apply`.
     const SOURCE: &str = include_str!("field_repair.rs");
-
-    /// The body of the `cfg(not(test))` parser seam: the text between its
-    /// signature's opening brace and the closing brace at column zero.
-    ///
-    /// # Panics
-    ///
-    /// If the `cfg(not(test))` attribute, the signature that follows it, or the
-    /// closing brace is absent. Failing closed is the point -- a locator that
-    /// returned an empty body on a missed needle would make its caller pass
-    /// vacuously, which is exactly the shape a production-inertness guard must
-    /// not have.
-    fn production_parser_body(source: &str) -> &str {
-        const GATE: &str = "#[cfg(not(test))]";
-        const SIGNATURE: &str = "fn parse_rejected_field_path(";
-        const OPEN: &str = ") -> Option<String> {";
-        let gate_at = source
-            .find(GATE)
-            .expect("the production parser must sit behind a cfg(not(test)) gate");
-        let after_gate = &source[gate_at..];
-        let sig_at = after_gate
-            .find(SIGNATURE)
-            .expect("the cfg(not(test)) gate must be followed by the parser signature");
-        let after_sig = &after_gate[sig_at..];
-        let open = after_sig
-            .find(OPEN)
-            .expect("the parser signature must be followed by its body");
-        let body = &after_sig[open + OPEN.len()..];
-        let end = body
-            .find("\n}")
-            .expect("the parser body must close at column zero");
-        &body[..end]
-    }
 
     /// The body of `FieldRepairPlan::apply_candidate` -- the EFFECT half of the
     /// repair, from its signature's opening brace to the closing brace at its
@@ -1380,9 +1403,8 @@ mod table_tests {
     ///
     /// # Panics
     ///
-    /// If the signature or the closing brace is absent -- failing closed, for
-    /// the same reason as the production-body locator: a guard reading an empty
-    /// body would pass vacuously.
+    /// If the signature or the closing brace is absent -- failing closed: a
+    /// guard reading an empty body would pass vacuously.
     fn apply_body(source: &str) -> &str {
         const SIGNATURE: &str = "fn apply_candidate(";
         const OPEN: &str = "    ) -> Option<u16> {";
@@ -1398,36 +1420,6 @@ mod table_tests {
             .find("\n    }")
             .expect("`apply_candidate`'s body must close at its own indentation");
         &body[..end]
-    }
-
-    /// A body reduced to its CODE TOKENS: comments removed, every run of
-    /// whitespace collapsed away entirely.
-    ///
-    /// Normalizing to an exact string is what makes the production-inertness
-    /// guard a CONTRACT rather than a denylist. A denylist of forbidden
-    /// substrings can only refuse the shapes someone thought of -- an arbitrary
-    /// `helper()` call returning `Option<String>` passes every such needle while
-    /// making the parser live. Comparing the whole normalized body against the
-    /// one permitted spelling inverts that: anything not exactly "discard the
-    /// two parameters, return None" fails, whatever it is called.
-    ///
-    /// Whitespace is dropped rather than collapsed to single spaces, and a
-    /// comma directly before a closing bracket is dropped too, so the contract
-    /// is insensitive to rustfmt's line breaking: reflowing the parameter
-    /// discard onto several lines adds a trailing comma that is not part of the
-    /// property being asserted. Nothing else is rewritten -- a dropped token
-    /// would be a hole in the contract.
-    fn normalized_code(body: &str) -> String {
-        let mut out = String::with_capacity(body.len());
-        for line in body.lines() {
-            let code = match line.find("//") {
-                Some(at) => &line[..at],
-                None => line,
-            };
-            out.extend(code.chars().filter(|c| !c.is_whitespace()));
-        }
-        // Trailing commas inside brackets only: `,)` and `,]`.
-        out.replace(",)", ")").replace(",]", "]")
     }
 
     use routectl_core::{ReasoningConfig, ReasoningDetail, ReasoningDetailKind};
@@ -1479,27 +1471,47 @@ mod table_tests {
         );
     }
 
+    /// An Anthropic invalid-request rejection whose message names `path`.
+    fn rejection_naming(path: &str, reason: &str) -> Error {
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": format!("{path}: {reason}")},
+        });
+        Error::upstream("p", 400, body.to_string())
+    }
+
     #[test]
     fn a_path_outside_the_closed_table_resolves_to_no_row() {
-        // The whole of "unknown path mutates nothing": with no row there is
-        // no surface, so no code path can decide what to drop.
+        // The whole of "unknown path mutates nothing": the parser localizes
+        // each of these, and with no row there is no surface, so no code path
+        // can decide what to drop.
         for unknown in [
             "thinking.display",
             "thinking.enabled",
             "thinking.enabled.display.extra",
-            "",
             "reasoning.exclude",
         ] {
             assert!(
-                closed_table_row(unknown).is_none(),
+                rejected_field(
+                    &FailureClass::BadRequest,
+                    &rejection_naming(unknown, "Extra inputs are not permitted"),
+                    ANTHROPIC_API_KIND,
+                )
+                .is_none(),
                 "`{unknown}` is outside the closed table and must resolve to no row",
             );
         }
-        // Positive control: the table is not simply empty.
+        // Positive control: the same message shape on the grounded path DOES
+        // resolve, so the negatives above are about the paths and not about an
+        // empty table or a parser that never answers.
         assert!(
-            closed_table_row("thinking.enabled.display").is_some(),
-            "control: the grounded path DOES resolve, so the negatives above are about the \
-             paths and not about an empty table",
+            rejected_field(
+                &FailureClass::BadRequest,
+                &rejection_naming("thinking.enabled.display", "Extra inputs are not permitted"),
+                ANTHROPIC_API_KIND,
+            )
+            .is_some(),
+            "control: the grounded path resolves through the same parser",
         );
     }
 
@@ -1672,41 +1684,74 @@ mod table_tests {
     }
 
     #[test]
-    fn the_cfg_test_resolver_declines_every_shape_with_no_injection_in_scope() {
-        // Scope, stated because it is easy to overread: this exercises the
-        // cfg(test) resolver. It shows the TEST build attributes no path
-        // without an injection -- which is what makes every no-injection
-        // control elsewhere meaningful -- and it says NOTHING about the
-        // production body, which this binary does not contain. The production
-        // claim is pinned by
-        // `the_production_parser_body_cannot_resolve_a_path` below.
-        let captured = r#"{"error":{"type":"invalid_request_error","message":"thinking.enabled.display: Input should be 'summarized', 'omitted'"}}"#;
-        for body in [
-            captured,
-            r#"{"error":{"type":"invalid_request_error","message":"thinking.enabled.display"}}"#,
-            r#"{"error":{"param":"thinking.enabled.display"}}"#,
+    fn the_live_resolver_names_the_display_row_from_the_captured_rejection() {
+        // No injection in scope: the carried parse of the captured envelope is
+        // what the parser reads. The display rejection refuses the VALUE, which
+        // is what keeps the seam from learning a drop out of it.
+        let captured = rejection_naming(
             "thinking.enabled.display",
-            "{}",
-            "",
+            "Input should be 'summarized', 'omitted'",
+        );
+
+        let named = rejected_field(&FailureClass::BadRequest, &captured, ANTHROPIC_API_KIND)
+            .expect("the captured display rejection names its row");
+
+        assert_eq!(named.row.path, "thinking.enabled.display");
+        assert_eq!(named.row.surface, FieldSurface::AnthropicThinkingDisplay);
+        assert_eq!(named.kind, RejectionKind::InvalidValue);
+    }
+
+    #[test]
+    fn the_live_resolver_names_nothing_without_a_parse_or_a_parser() {
+        let captured = rejection_naming(
+            "thinking.enabled.display",
+            "Input should be 'summarized', 'omitted'",
+        );
+        // Control: the shape below resolves on its own lane, so each refusal
+        // is about the one input that changed.
+        assert!(
+            rejected_field(&FailureClass::BadRequest, &captured, ANTHROPIC_API_KIND).is_some(),
+            "premise: the captured rejection resolves on anthropic-api",
+        );
+        assert!(
+            rejected_field(&FailureClass::BadRequest, &captured, "gemini").is_none(),
+            "a lane kind with no parser names nothing",
+        );
+        for unparsed in [
+            Error::upstream(
+                "p",
+                400,
+                "thinking.enabled.display: Input should be 'summarized', 'omitted'",
+            ),
+            Error::upstream("p", 400, ""),
+            Error::upstream("p", 400, "{}"),
+            Error::normalize_request(
+                "p",
+                "thinking.enabled.display: Input should be 'summarized', 'omitted'",
+            ),
         ] {
-            let err = Error::upstream("p", 400, body);
             assert!(
-                rejected_field_path(&FailureClass::BadRequest, &err, ANTHROPIC_API_KIND).is_none(),
-                "with no injection in scope, no field path may be attributed to `{body}`",
+                rejected_field(&FailureClass::BadRequest, &unparsed, ANTHROPIC_API_KIND).is_none(),
+                "an error carrying no parsed envelope names nothing: {unparsed:?}",
             );
         }
-        // Positive control: the seam DOES resolve when injected, so the
-        // negatives above are about the absent resolution and not about a
-        // resolver that can never return a path.
-        let _injection = provisional::inject("thinking.enabled.display");
-        assert_eq!(
-            rejected_field_path(
-                &FailureClass::BadRequest,
-                &Error::upstream("p", 400, captured),
-                ANTHROPIC_API_KIND,
-            ),
-            Some("thinking.enabled.display"),
-            "control: the injected seam resolves, so the negatives are not vacuous",
+    }
+
+    #[test]
+    fn an_injected_unknown_path_does_not_fall_through_to_the_parser() {
+        // The injection replaces the parser for its thread, a non-resolving
+        // injection included: a test that injects an unknown path is asserting
+        // that path's refusal, and a fall-through would let the realistic body
+        // beside it resolve instead.
+        let captured = rejection_naming(
+            "thinking.enabled.display",
+            "Input should be 'summarized', 'omitted'",
+        );
+        let _injection = provisional::inject("thinking.display");
+
+        assert!(
+            rejected_field(&FailureClass::BadRequest, &captured, ANTHROPIC_API_KIND).is_none(),
+            "an injected path with no row resolves to nothing, whatever the body says",
         );
     }
 
@@ -1761,103 +1806,14 @@ mod table_tests {
     }
 
     #[test]
-    fn the_production_parser_body_is_exactly_a_discard_and_none() {
-        // THE production-inertness claim, and it cannot be made behaviorally:
-        // the `cfg(not(test))` body is not compiled into this test binary, so no
-        // call from here can reach it. Its own source is the evidence, read from
-        // THIS file so the guard cannot drift from what ships.
-        //
-        // An EXACT contract, not a denylist. A list of forbidden substrings can
-        // only refuse the shapes its author imagined; an arbitrary
-        // `helper(err)?` returning `Option<String>` slips through every one of
-        // them while making the parser live. So the whole normalized body is
-        // compared against the single permitted spelling: discard both
-        // parameters, return None. Anything else -- any call, any binding, any
-        // second statement -- fails, whatever it is named.
-        assert_eq!(
-            normalized_code(production_parser_body(SOURCE)),
-            "let_=(err,provider_kind);None",
-            "the production parser body may ONLY discard its two parameters and return None. \
-             This stage ships no grounded envelope parser, so any other body means the arm can \
-             attribute a path on real traffic -- and the change that grounds a parser updates \
-             this contract deliberately, together with the coverage that then becomes \
-             reachable",
-        );
-    }
-
-    #[test]
-    fn the_body_contract_refuses_an_arbitrary_helper_call() {
-        // The contract's own discrimination, measured rather than assumed: the
-        // shapes a substring denylist would have admitted must all fail it. Each
-        // of these is a body that RESOLVES a path, written so no obvious needle
-        // ("Some(", "serde_json", "message") appears in it.
-        let permitted = "let_=(err,provider_kind);None";
-        for live in [
-            "let _ = provider_kind;\n    helper(err)\n",
-            "let _ = (err, provider_kind);\n    lookup()\n",
-            "grounded(err, provider_kind)\n",
-            "let _ = provider_kind;\n    err.field_path()\n",
-            "let _ = (err, provider_kind);\n    None.or_else(fallback)\n",
-        ] {
-            assert_ne!(
-                normalized_code(live),
-                permitted,
-                "a body that delegates to a helper must NOT satisfy the contract: `{live}`",
-            );
-        }
-        // And the real shape does satisfy it, in both a formatted and a
-        // reflowed spelling plus with a comment -- so the contract is about the
-        // CODE and not about rustfmt's line breaking.
-        for inert in [
-            "let _ = (err, provider_kind);\n    None\n",
-            "let _ = (\n        err,\n        provider_kind,\n    );\n    None\n",
-            "// no grounded parser in this stage\n    let _ = (err, provider_kind);\n    None\n",
-        ] {
-            assert_eq!(
-                normalized_code(inert),
-                permitted,
-                "the inert shape must satisfy the contract regardless of formatting or \
-                 comments: `{inert}`",
-            );
-        }
-    }
-
-    #[test]
-    fn the_production_body_locator_fails_closed() {
-        // The guard above is only as good as its locator: a needle that stopped
-        // matching would read an empty body and pass vacuously. So the locator
-        // PANICS rather than returning nothing, asserted here per missing
-        // needle so a partial match cannot pass either.
-        for absent in [
-            "fn unrelated() {}",
-            // The gate without the signature.
-            "#[cfg(not(test))]\nfn something_else(x: u8) -> u8 { x }\n",
-            // The gate and signature without the returning-body opener.
-            "#[cfg(not(test))]\nfn parse_rejected_field_path(e: &Error) -> bool { true }\n",
-        ] {
-            let outcome = std::panic::catch_unwind(|| production_parser_body(absent));
-            assert!(
-                outcome.is_err(),
-                "a source without the full production-parser shape must panic the locator, not \
-                 yield a body every assertion would pass against: `{absent}`",
-            );
-        }
-        // And it finds a real one, so the panic case is not the only behavior.
-        assert!(
-            !production_parser_body(SOURCE).is_empty(),
-            "the locator must find this module's own production body",
-        );
-    }
-
-    #[test]
     fn an_injected_resolution_does_not_bypass_the_class_gate() {
-        // The injection replaces the missing PARSER, not the arm's own
+        // The injection replaces the PARSER, not the arm's own
         // conditions: a class that cannot name a field still resolves to
         // nothing even with a resolution injected, so no test can
         // accidentally cover a path production could not reach.
         let _injection = provisional::inject("thinking.enabled.display");
         assert!(
-            rejected_field_path(
+            rejected_field(
                 &FailureClass::RateLimited,
                 &Error::upstream("p", 429, "{}"),
                 ANTHROPIC_API_KIND,
@@ -1871,12 +1827,18 @@ mod table_tests {
     fn an_injection_clears_itself_so_it_cannot_leak_into_a_sibling_test() {
         {
             let _injection = provisional::inject("thinking.enabled.display");
-            assert!(provisional::injected_path().is_some(), "injected in scope");
+            assert!(
+                matches!(
+                    provisional::injected(),
+                    provisional::Injected::Resolution(_)
+                ),
+                "injected in scope",
+            );
         }
         assert!(
-            provisional::injected_path().is_none(),
+            matches!(provisional::injected(), provisional::Injected::None),
             "the injection must clear on drop: the thread is reused across tests, so a leaked \
-             resolution would make a sibling's production-inertness control vacuous",
+             resolution would override the live parser in a sibling test",
         );
     }
 }

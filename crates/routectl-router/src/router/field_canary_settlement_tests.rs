@@ -421,10 +421,10 @@ fn success_response() -> ChatResponse {
     }
 }
 
-/// Make every field rejection on this thread resolve to the grounded path, the
-/// way `field_repair_tests` does: the envelope-to-path parser is out of this
-/// stage, so a behavioral test of everything downstream of it injects the
-/// resolution.
+/// Make every field rejection on this thread name the grounded path as a
+/// refused FIELD, the way `field_repair_tests` does: the captured rejection
+/// refuses a value, which can never confirm a verdict, so a behavioral test of
+/// the confirming settlement injects the resolution.
 fn inject_resolution() -> super::field_repair::provisional::Injection {
     super::field_repair::provisional::inject(GROUNDED_PATH)
 }

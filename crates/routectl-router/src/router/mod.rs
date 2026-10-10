@@ -56,13 +56,6 @@ mod probe_pass;
 mod probe_payload_capture;
 mod probe_publication;
 mod probe_seat;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the field-repair seam does not consume the parser yet; removed when it does"
-    )
-)]
 mod rejection_parser;
 mod repair_budget;
 mod replay_repair;
@@ -652,10 +645,14 @@ struct RouterMetrics {
     /// Reactive envelope-field repairs that FIRED: an upstream rejection
     /// named a field in the closed repair table, the attempt carried it, and
     /// the mapped field was dropped for a same-target re-dispatch. Bumped
-    /// once per repair in every dispatch walk. Zero while no rejection parser
-    /// is grounded, so a nonzero count is itself the signal that the arm has
-    /// become reachable.
+    /// once per repair in every dispatch walk.
     field_repair_attempted_total: AtomicU64,
+    /// The subset of [`field_repair_attempted_total`](Self::field_repair_attempted_total)
+    /// whose rejection refused the VALUE sent in the field rather than the
+    /// field: the drop served the attempt but changed what the client asked
+    /// for, and learned nothing. A rising count says a lane is serving
+    /// requests on a weaker contract than the client set.
+    field_repair_lossy_total: AtomicU64,
     /// The subset of [`field_repair_attempted_total`](Self::field_repair_attempted_total)
     /// whose repaired re-dispatch actually succeeded. The pair is what makes
     /// the arm answerable: a rising attempted count with a flat succeeded
@@ -861,6 +858,17 @@ impl RouterMetrics {
     fn incr_field_repair_attempted(&self) {
         self.field_repair_attempted_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one fired repair that answered a refused value.
+    fn incr_field_repair_lossy(&self) {
+        self.field_repair_lossy_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the cumulative lossy-field-repair count.
+    fn field_repair_lossy_total(&self) -> u64 {
+        self.field_repair_lossy_total.load(Ordering::Relaxed)
     }
 
     /// Count one fired repair whose re-dispatch succeeded.
@@ -1134,6 +1142,7 @@ impl RouterMetrics {
             rc_verified_working_total = self.verified_working_total(),
             rc_f3_suspect_total = self.f3_suspect_total(),
             rc_field_repair_attempted_total = self.field_repair_attempted_total(),
+            rc_field_repair_lossy_total = self.field_repair_lossy_total(),
             rc_field_repair_succeeded_total = self.field_repair_succeeded_total(),
             rc_field_verdicts_learned_total = self.field_verdicts_learned_total(),
             rc_window_gate_skips_total = self.window_gate_skips_total(),
@@ -1177,6 +1186,7 @@ impl RouterMetrics {
             rc_verified_working_total = self.verified_working_total(),
             rc_f3_suspect_total = self.f3_suspect_total(),
             rc_field_repair_attempted_total = self.field_repair_attempted_total(),
+            rc_field_repair_lossy_total = self.field_repair_lossy_total(),
             rc_field_repair_succeeded_total = self.field_repair_succeeded_total(),
             rc_field_verdicts_learned_total = self.field_verdicts_learned_total(),
             rc_window_gate_skips_total = self.window_gate_skips_total(),

@@ -671,10 +671,7 @@ impl Router {
                     {
                         field_repair_attempted = true;
                         field_reject_status = status;
-                        let repaired_path = plan
-                            .repaired_path()
-                            .expect("a reported repair names the row it dropped");
-                        self.note_field_repair(meta, &target.state_key, repaired_path);
+                        self.note_field_repair(meta, &target.state_key, plan);
                         probe_guard.release();
                         continue;
                     }

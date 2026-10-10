@@ -81,9 +81,9 @@ const FIELD_PATH: &str = "thinking.enabled.display";
 /// change should produce.
 const EXPECTED_CADENCE: u32 = 100;
 
-/// A rejection body shaped like the captured envelope. Carries no secret, and is
-/// NOT what makes anything fire -- production attributes no path to it, so the
-/// canary that draws it settles INCONCLUSIVE, which is exactly the property the
+/// A rejection body shaped like the captured envelope. Carries no secret. The
+/// parser reads it as a refused VALUE, which cannot confirm a verdict, so the
+/// canary that draws it settles INCONCLUSIVE -- exactly the property the
 /// contention fixture needs (an inconclusive settlement leaves the verdict
 /// resident).
 const FIELD_REJECT_BODY: &str = r#"{"error":{"type":"invalid_request_error","message":"thinking.enabled.display: Input should be 'summarized', 'omitted'"}}"#;

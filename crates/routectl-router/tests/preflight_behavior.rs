@@ -111,10 +111,21 @@ impl Seat {
     }
 }
 
-/// The rejection body the captured envelope produced, so the fixture's error is
-/// realistic. It is NOT what makes anything fire -- production attributes no path
-/// to it -- it is here so the shape is the real one.
-const FIELD_REJECT_BODY: &str = r#"{"error":{"type":"invalid_request_error","message":"thinking.enabled.display: Input should be 'summarized', 'omitted'"}}"#;
+/// The committed anthropic-api display rejection fixture.
+const DISPLAY_REJECTION_FIXTURE: &str =
+    include_str!("fixtures/rejections/anthropic-api/thinking-display-enum.json");
+
+/// The captured display rejection body. The live parser names the display row
+/// from it and reads a refused VALUE, so a carried request it rejects is
+/// repaired for that attempt and teaches no verdict.
+fn field_reject_body() -> String {
+    let fixture: serde_json::Value =
+        serde_json::from_str(DISPLAY_REJECTION_FIXTURE).expect("the fixture is JSON");
+    fixture["body"]
+        .as_str()
+        .expect("the fixture carries its body")
+        .to_string()
+}
 
 #[async_trait::async_trait]
 impl Provider for Seat {
@@ -130,7 +141,7 @@ impl Provider for Seat {
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let carried = self.record(&req);
         if carried && self.reject_carried {
-            return Err(Error::upstream("p0", 400, FIELD_REJECT_BODY));
+            return Err(Error::upstream("p0", 400, field_reject_body()));
         }
         Ok(ChatResponse {
             model: "claude-sonnet-4-5".to_string(),
@@ -375,6 +386,40 @@ fn a_real_rewrite_counts_one_adopted_row_action_and_warns_once() {
         warns[0].field("transform_class"),
         Some("envelope"),
         "which names the class it acted on",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The captured display rejection, attributed live
+// ---------------------------------------------------------------------------
+
+/// With no verdict resident, the captured display rejection is repaired
+/// invisibly: the seat sees one carried attempt and one repaired retry, the
+/// client gets the answer, and nothing is learned -- the upstream refused the
+/// value, not the field, so a learned drop would strip valid values from every
+/// later request.
+///
+/// Mutation check: make the router's rejection parser return `None` -> red, one
+/// attempt and the rejection reaches the client.
+#[tokio::test]
+async fn the_captured_display_rejection_is_repaired_and_teaches_nothing() {
+    let seat = Seat::new(true);
+    let router = router_with(Arc::clone(&seat));
+
+    let served = router.complete(req_with_field()).await;
+
+    assert!(served.is_ok(), "the repaired request serves: {served:?}");
+    assert_eq!(
+        seat.carried_per_attempt(),
+        vec![true, false],
+        "one carried attempt, then one retry without the field",
+    );
+    let counters = router.field_repair_counters();
+    assert_eq!(counters.repair_succeeded, 1, "the repair fired and served");
+    assert_eq!(counters.verdicts_learned, 0, "and nothing was learned");
+    assert!(
+        router.learned_capability_snapshot().is_empty(),
+        "the learned store holds no verdict for the field",
     );
 }
 

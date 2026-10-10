@@ -2,14 +2,15 @@
 //! dispatch walks: the drop, the shared per-request ceiling, the two-phase
 //! settlement, the persistence rows, and every path that must learn nothing.
 //!
-//! # Why the fixture injects a resolution
+//! # Why most of the fixture injects a resolution
 //!
-//! The envelope-to-path parser is out of this stage, so nothing on real
-//! traffic resolves a field path (`field_repair`'s module docs, and the
-//! production-inertness control beside the resolver). A behavioral test
-//! therefore injects a PROVISIONAL resolution the way the capability tests
-//! plant learned negatives: the arm under test is everything DOWNSTREAM of
-//! the resolution, and that is what a grounded parser will later switch on.
+//! The one grounded row's captured rejection refuses a VALUE, which repairs
+//! the attempt and learns nothing. The arms these tests pin -- the commit,
+//! the clear, the persistence rows -- need a refused FIELD on that row, so
+//! they inject the resolution the way the capability tests plant learned
+//! negatives: the arm under test is everything DOWNSTREAM of the parser. The
+//! live parser's own path through every walk is pinned without an injection
+//! in the included parser fragment.
 //!
 //! # Why count_tokens is covered here and not by source guards
 //!
@@ -64,11 +65,25 @@ fn rejected_key() -> String {
         .expect("the grounded path is a well-formed qualified path")
 }
 
-/// A rejection body shaped like the captured envelope. Carries no secret.
-/// It is NOT what makes the repair fire -- production attributes no path to
-/// it (asserted by `field_repair`'s own control) -- it is here so the
-/// fixture's error is realistic rather than blank.
-const FIELD_REJECT_BODY: &str = r#"{"error":{"type":"invalid_request_error","message":"thinking.enabled.display: Input should be 'summarized', 'omitted'"}}"#;
+/// The committed anthropic-api display rejection fixture.
+const DISPLAY_REJECTION_FIXTURE: &str =
+    include_str!("../../tests/fixtures/rejections/anthropic-api/thinking-display-enum.json");
+
+/// The captured display rejection body, read from the committed fixture so
+/// the live parser is driven by the bytes the upstream actually sent. Under an
+/// injection the injection decides the resolution; without one the parser
+/// names the display row and a refused value.
+fn field_reject_body() -> &'static str {
+    static BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let fixture: serde_json::Value =
+            serde_json::from_str(DISPLAY_REJECTION_FIXTURE).expect("the fixture is JSON");
+        fixture["body"]
+            .as_str()
+            .expect("the fixture carries its body")
+            .to_string()
+    });
+    &BODY
+}
 
 /// Chain length, strictly greater than the ceiling so a per-target budget
 /// and the shared per-request budget give DIFFERENT repair counts on one
@@ -178,13 +193,15 @@ impl MockSeat {
     fn answer_for(&self, req: &ChatRequest) -> Result<()> {
         let carried = self.observed.record(req);
         match self.answer {
-            Answer::AlwaysRejectField => Err(Error::upstream("field-mock", 400, FIELD_REJECT_BODY)),
+            Answer::AlwaysRejectField => {
+                Err(Error::upstream("field-mock", 400, field_reject_body()))
+            }
             Answer::RejectThenWalk if carried => {
-                Err(Error::upstream("field-mock", 400, FIELD_REJECT_BODY))
+                Err(Error::upstream("field-mock", 400, field_reject_body()))
             }
             Answer::RejectThenWalk => Err(Error::upstream("field-mock", 501, "cannot count")),
             Answer::ServeRepaired if carried => {
-                Err(Error::upstream("field-mock", 400, FIELD_REJECT_BODY))
+                Err(Error::upstream("field-mock", 400, field_reject_body()))
             }
             Answer::ServeRepaired | Answer::ServeImmediately => Ok(()),
             Answer::UnrelatedError => Err(Error::upstream(
@@ -1589,7 +1606,7 @@ fn an_apply_that_removes_nothing_charges_no_budget_and_reports_no_repair() {
         &mut meta,
         &mut budget,
         &FailureClass::BadRequest,
-        &Error::upstream("p", 400, FIELD_REJECT_BODY),
+        &Error::upstream("p", 400, field_reject_body()),
         ANTHROPIC_API_KIND,
     );
 
@@ -1650,7 +1667,7 @@ fn a_surface_that_removes_nothing_fails_closed_in_release() {
         &mut req,
         &mut meta,
         &mut budget,
-        &Error::upstream("p", 400, FIELD_REJECT_BODY),
+        &Error::upstream("p", 400, field_reject_body()),
     );
 
     // Assert -- refused, and nothing spent or changed on the way out.
@@ -1818,38 +1835,6 @@ async fn the_injected_resolution_is_visible_inside_a_dispatch() {
         "the dispatch observed the injected resolution; a zero here means the injection is \
          not visible on the dispatch's thread and every behavioral test above is vacuous",
     );
-}
-
-#[tokio::test]
-async fn without_an_injection_no_walk_repairs_anything() {
-    // The control for every test above, and the production posture: with no
-    // provisional resolution in scope, the same fixture and the same
-    // rejection body produce NO repair on any walk -- because production
-    // attributes no field path to any envelope in this stage.
-    let (complete_router, complete_seen) = single_seat(ALIAS, Answer::ServeRepaired);
-    let (stream_router, stream_seen) = single_seat(ALIAS, Answer::ServeRepaired);
-    let (count_router, count_seen) = single_seat(ALIAS, Answer::ServeRepaired);
-
-    let _ = complete_router.complete(req_on(ALIAS)).await;
-    let _ = stream_router.stream(req_on(ALIAS)).await;
-    let _ = count_router.count_tokens(req_on(ALIAS)).await;
-
-    for (surface, seen) in [
-        ("complete", &complete_seen),
-        ("stream", &stream_seen),
-        ("count_tokens", &count_seen),
-    ] {
-        assert_eq!(
-            seen.repairs(),
-            0,
-            "{surface}: with no grounded parser, production must repair nothing",
-        );
-        assert_eq!(
-            seen.calls(),
-            1,
-            "{surface}: and the rejection stands after one attempt",
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

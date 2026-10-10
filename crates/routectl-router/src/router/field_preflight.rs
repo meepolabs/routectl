@@ -833,8 +833,11 @@ impl Router {
         // The rejection must name the SAME row the canary restored, compared on
         // the surface rather than the path string: the surface is what the drop
         // acts on, and two rows sharing one surface would be the same mutation
-        // under two identities.
-        if !Self::rejection_names_field_surface(surface, native_class, err, provider_kind) {
+        // under two identities. And it must refuse the FIELD: the retry's
+        // success confirms the verdict, and a refused value is evidence the
+        // lane accepts the field, not that it refuses it.
+        let kind = Self::rejection_names_field_surface(surface, native_class, err, provider_kind)?;
+        if kind != super::rejection_parser::RejectionKind::UnsupportedField {
             return None;
         }
         // Presence is re-read here rather than assumed from the restoration:

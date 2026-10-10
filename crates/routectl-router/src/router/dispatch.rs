@@ -977,10 +977,7 @@ impl Router {
                         {
                             field_repair_attempted = true;
                             field_reject_status = status;
-                            let repaired_path = plan
-                                .repaired_path()
-                                .expect("a reported repair names the row it dropped");
-                            self.note_field_repair(meta, state_key, repaired_path);
+                            self.note_field_repair(meta, state_key, plan);
                             // A repair is a fixed correctness branch, not a
                             // retry policy, so it takes no backoff sleep (the
                             // streaming walk has none to skip).
@@ -1883,10 +1880,7 @@ impl Router {
                         {
                             field_repair_attempted = true;
                             field_reject_status = status;
-                            let repaired_path = plan
-                                .repaired_path()
-                                .expect("a reported repair names the row it dropped");
-                            self.note_field_repair(meta, state_key, repaired_path);
+                            self.note_field_repair(meta, state_key, plan);
                             probe_guard.release();
                             // Preserve the genuine rejection as last_err before
                             // re-gating the repaired attempt: if the re-gate
