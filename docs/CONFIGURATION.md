@@ -791,7 +791,8 @@ then revalidate with one re-probe, show in `routectl doctor` as
 `beta:<flag>` cells with action `withhold`, and are dropped with
 `routectl capability purge <provider#upstream> beta:<flag>`. A lane
 holds at most 32 learned beta entries; a new one past that evicts the
-lane's oldest. Nothing is learned from a token-count retry, a
+lane's most recently learned one, so established entries outlast a burst of
+new flags. Nothing is learned from a token-count retry, a
 forwarded-credential request, a flag under a `force_supported` override,
 or with `[capability] enabled = false`.
 

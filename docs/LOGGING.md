@@ -1555,7 +1555,8 @@ Emitted when inserting a new entry evicts a resident one. Two bounds, told
 apart by `reason`: `registry_cap` when the registry is at capacity and evicts
 its oldest entry, and `beta_lane_cap` when a new beta-flag key arrives on a
 lane (under one provider kind) already holding 32 beta-flag entries, which
-evicts that lane's oldest beta-flag entry and nothing else. The lane bound is
+evicts that lane's youngest beta-flag entry (latest first seen) and nothing
+else, so a burst of new flags churns among itself. The lane bound is
 checked first. A safety valve, not a routine cache policy.
 
 | Field | Type | Meaning |
@@ -1574,7 +1575,7 @@ WARN routectl_router::learned_capability event=evict reason=registry_cap
 WARN routectl_router::learned_capability event=evict reason=beta_lane_cap
   state_key=anthropic#claude-sonnet-4-5 capability_key=beta:zz-flag-0
   max_beta_entries_per_lane=32
-  "learned-capability lane at its beta-flag cap; evicted the lane's oldest beta entry"
+  "learned-capability lane at its beta-flag cap; evicted the lane's youngest beta entry"
 ```
 
 ### `route_away` (INFO / WARN)

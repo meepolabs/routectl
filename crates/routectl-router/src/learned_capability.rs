@@ -71,7 +71,9 @@ pub const DEFAULT_MAX_ENTRIES: usize = 1024;
 /// The same per-lane bound the provider-side rejected-beta memory applied, so
 /// a client spraying flags keeps the footprint it always had and cannot push
 /// non-beta facts out through the global cap: a new beta key past this bound
-/// evicts the lane's own oldest beta entry instead.
+/// evicts the lane's own youngest beta entry (latest `first_seen`) instead,
+/// so a burst of new flags churns among itself rather than displacing
+/// established entries.
 pub const MAX_BETA_ENTRIES_PER_LANE: usize = 32;
 
 /// A re-probe's backoff window never exceeds this multiple of the base
@@ -3456,7 +3458,9 @@ impl LearnedCapabilityRegistry {
 
     /// When `key` is a beta key and its `(state_key, provider_kind)` already
     /// holds [`MAX_BETA_ENTRIES_PER_LANE`] beta entries, evict that lane and
-    /// kind's beta entry with the oldest `last_seen`, emitting the `evict` WARN.
+    /// kind's beta entry with the latest `first_seen`, emitting the `evict`
+    /// WARN. Not `last_seen`: a re-probe refreshes it, so an established entry
+    /// would look as young as the burst displacing it.
     ///
     /// Leased entries count toward the bound but are never the victim, for the
     /// reason [`Self::evict_if_full`] gives; with every candidate leased the
@@ -3487,7 +3491,7 @@ impl LearnedCapabilityRegistry {
         }
         let victim = lane_betas()
             .filter(|(resident, _)| !leased.contains(*resident))
-            .min_by_key(|(_, entry)| entry.last_seen)
+            .max_by_key(|(_, entry)| entry.first_seen)
             .map(|(resident, _)| resident.clone());
         if let Some(victim) = victim {
             tracing::warn!(
@@ -3496,7 +3500,7 @@ impl LearnedCapabilityRegistry {
                 state_key = %routectl_core::sanitize_for_log(&victim.state_key),
                 capability_key = %victim.feature_key,
                 max_beta_entries_per_lane = MAX_BETA_ENTRIES_PER_LANE,
-                "learned-capability lane at its beta-flag cap; evicted the lane's oldest beta entry",
+                "learned-capability lane at its beta-flag cap; evicted the lane's youngest beta entry",
             );
             map.remove(&victim);
         }

@@ -677,25 +677,15 @@ fn a_config_only_reload_keeps_a_cleared_seed() {
 /// would withhold the flag for good once the lane cap evicts that positive.
 #[test]
 fn a_cleared_seed_stays_sent_after_its_accepted_positive_is_evicted() {
-    // Arrange -- marker, then an accepted positive on the same seeded cell.
+    // Arrange -- marker, a lane one short of its bound, then an accepted
+    // positive on the seeded cell as the lane's youngest beta entry.
     let router = router(&capability(true));
     let target = target_on(&router, "bed");
     let lane = lane_of(&target);
     let base = Instant::now();
     mark_seed_cleared(&router, &target, "fx-seed-only");
-    let accepted = router
-        .learned_capabilities
-        .observe_accepted_beta_in_generation(
-            router.learned_capabilities.generation(),
-            &lane,
-            &key("fx-seed-only"),
-            BEDROCK,
-            base,
-        );
-    assert!(accepted.value().is_some(), "premise: the positive lands");
-
-    // Act -- newer beta negatives fill the lane past its bound.
-    for n in 0..crate::learned_capability::MAX_BETA_ENTRIES_PER_LANE {
+    let bound = crate::learned_capability::MAX_BETA_ENTRIES_PER_LANE;
+    let fill = |n: usize| {
         router.learned_capabilities.observe(
             &lane,
             &key(&format!("zz-fill-{n}")),
@@ -704,9 +694,25 @@ fn a_cleared_seed_stays_sent_after_its_accepted_positive_is_evicted() {
             FailurePhase::F1,
             EvidenceSource::Live,
             None,
-            base + std::time::Duration::from_secs(1 + u64::try_from(n).expect("small")),
+            base + std::time::Duration::from_secs(u64::try_from(n).expect("small")),
         );
+    };
+    for n in 0..bound - 1 {
+        fill(n);
     }
+    let accepted = router
+        .learned_capabilities
+        .observe_accepted_beta_in_generation(
+            router.learned_capabilities.generation(),
+            &lane,
+            &key("fx-seed-only"),
+            BEDROCK,
+            base + std::time::Duration::from_secs(u64::try_from(bound).expect("small")),
+        );
+    assert!(accepted.value().is_some(), "premise: the positive lands");
+
+    // Act -- one more new beta negative pushes the lane past its bound.
+    fill(bound + 1);
 
     // Assert
     assert!(

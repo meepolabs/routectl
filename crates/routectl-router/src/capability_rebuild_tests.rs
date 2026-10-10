@@ -947,7 +947,7 @@ fn a_passive_verified_row_after_a_negative_stays_suppressed() {
 }
 
 #[test]
-fn replayed_beta_negatives_past_the_lane_bound_keep_the_newest() {
+fn replayed_beta_negatives_past_the_lane_bound_evict_the_youngest_resident() {
     // A ledger holding more beta rejections on one lane than the live bound
     // allows rebuilds to the same bounded set the live registry would hold.
     use crate::learned_capability::MAX_BETA_ENTRIES_PER_LANE;
@@ -973,9 +973,10 @@ fn replayed_beta_negatives_past_the_lane_bound_keep_the_newest() {
     let resident: Vec<String> = reg.snapshot().into_iter().map(|e| e.feature_key).collect();
     assert_eq!(resident.len(), MAX_BETA_ENTRIES_PER_LANE);
     assert!(
-        !resident.contains(&key(0)),
-        "the oldest replayed beta is evicted"
+        !resident.contains(&key(MAX_BETA_ENTRIES_PER_LANE - 1)),
+        "the youngest resident beta is evicted"
     );
+    assert!(resident.contains(&key(0)));
     assert!(resident.contains(&key(MAX_BETA_ENTRIES_PER_LANE)));
 }
 

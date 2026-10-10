@@ -1,5 +1,6 @@
 //! Tests for the per-lane beta-flag bound: a lane spraying beta flags replaces
-//! its own oldest beta entry instead of evicting anything else.
+//! its own youngest beta entry (latest `first_seen`) instead of evicting
+//! anything else, so established entries outlive a burst of new flags.
 
 use super::*;
 use crate::beta_capability::beta_capability_key;
@@ -65,7 +66,7 @@ fn beta_count(reg: &LearnedCapabilityRegistry, lane: &str, kind: &str) -> usize 
 }
 
 #[test]
-fn the_beta_past_the_lane_bound_evicts_the_lanes_oldest_beta_and_warns() {
+fn the_beta_past_the_lane_bound_evicts_the_lanes_youngest_beta_and_warns() {
     // Arrange
     let reg = registry();
     let base = Instant::now();
@@ -85,15 +86,21 @@ fn the_beta_past_the_lane_bound_evicts_the_lanes_oldest_beta_and_warns() {
     // Assert
     let keys = resident(&reg, LANE, KIND);
     assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
-    assert!(!keys.contains(&beta(0)), "the oldest beta must be evicted");
-    assert!(keys.contains(&beta(1)));
+    assert!(
+        !keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 1)),
+        "the youngest beta must be evicted"
+    );
+    assert!(keys.contains(&beta(0)));
     assert!(keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE)));
     let warn = events
         .iter()
         .find(|e| e.level == tracing::Level::WARN && e.field("event") == Some("evict"))
         .expect("the lane eviction must emit an evict WARN");
     assert_eq!(warn.field("reason"), Some("beta_lane_cap"));
-    assert_eq!(warn.field("capability_key"), Some(beta(0).as_str()));
+    assert_eq!(
+        warn.field("capability_key"),
+        Some(beta(MAX_BETA_ENTRIES_PER_LANE - 1).as_str())
+    );
     assert_eq!(warn.field("state_key"), Some(LANE));
     assert_eq!(
         warn.field("max_beta_entries_per_lane"),
@@ -103,14 +110,14 @@ fn the_beta_past_the_lane_bound_evicts_the_lanes_oldest_beta_and_warns() {
 
 #[test]
 fn the_lane_bound_leaves_non_beta_facts_and_other_lanes_and_kinds_untouched() {
-    // Arrange -- the oldest entries on the lane are non-beta, and other
-    // lanes / kinds carry older betas than any on the filled lane.
+    // Arrange -- the youngest entry on the lane is non-beta, and other
+    // lanes / kinds carry younger betas than any on the filled lane.
     let reg = registry();
     let base = Instant::now();
-    learn(&reg, LANE, KIND, "web_search", base);
-    learn(&reg, OTHER_LANE, KIND, &beta(0), base);
-    learn(&reg, LANE, "bedrock", &beta(0), base);
-    fill_betas(&reg, LANE, KIND, MAX_BETA_ENTRIES_PER_LANE, base + secs(10));
+    fill_betas(&reg, LANE, KIND, MAX_BETA_ENTRIES_PER_LANE, base);
+    learn(&reg, LANE, KIND, "web_search", base + secs(50));
+    learn(&reg, OTHER_LANE, KIND, &beta(0), base + secs(50));
+    learn(&reg, LANE, "bedrock", &beta(0), base + secs(50));
 
     // Act
     learn(
@@ -129,20 +136,43 @@ fn the_lane_bound_leaves_non_beta_facts_and_other_lanes_and_kinds_untouched() {
     );
     assert_eq!(beta_count(&reg, LANE, KIND), MAX_BETA_ENTRIES_PER_LANE);
     assert!(
-        !keys.contains(&beta(0)),
-        "the lane's own oldest beta is the victim"
+        !keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 1)),
+        "the lane's own youngest beta is the victim"
     );
     assert_eq!(resident(&reg, OTHER_LANE, KIND), vec![beta(0)]);
     assert_eq!(resident(&reg, LANE, "bedrock"), vec![beta(0)]);
 }
 
 #[test]
-fn a_leased_beta_is_never_the_lane_victim() {
-    // Arrange -- the oldest beta is held by a purge lease.
+fn an_established_negative_survives_a_burst_of_new_flags_and_keeps_acting() {
+    // Arrange -- one negative learned well before the burst.
     let reg = registry();
     let base = Instant::now();
+    let established = beta_capability_key("zz-established").expect("well-formed flag");
+    learn(&reg, LANE, KIND, &established, base);
+
+    // Act -- a full lane's worth of distinct new flags.
+    for n in 0..MAX_BETA_ENTRIES_PER_LANE {
+        learn(&reg, LANE, KIND, &beta(n), base + secs(10 + n));
+    }
+
+    // Assert
+    assert_eq!(beta_count(&reg, LANE, KIND), MAX_BETA_ENTRIES_PER_LANE);
+    assert!(resident(&reg, LANE, KIND).contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 1)));
+    let state = reg
+        .negative_state_in_generation(reg.generation(), LANE, &established, KIND, base + secs(100))
+        .map(|(state, _)| state);
+    assert_eq!(state, Some(NegativeState::Acting));
+}
+
+#[test]
+fn a_leased_beta_is_never_the_lane_victim() {
+    // Arrange -- the youngest beta is held by a purge lease.
+    let reg = registry();
+    let base = Instant::now();
+    let youngest = beta(MAX_BETA_ENTRIES_PER_LANE - 1);
     fill_betas(&reg, LANE, KIND, MAX_BETA_ENTRIES_PER_LANE, base);
-    let lease = match reg.prepare_purge(reg.generation(), LANE, &beta(0), KIND) {
+    let lease = match reg.prepare_purge(reg.generation(), LANE, &youngest, KIND) {
         PurgePreparation::Reserved(lease) => lease,
         other => panic!("expected a reservation, got {other:?}"),
     };
@@ -159,13 +189,14 @@ fn a_leased_beta_is_never_the_lane_victim() {
     // Assert
     let keys = resident(&reg, LANE, KIND);
     assert!(
-        keys.contains(&beta(0)),
+        keys.contains(&youngest),
         "the leased entry must stay resident"
     );
     assert!(
-        !keys.contains(&beta(1)),
-        "the oldest unleased beta is the victim"
+        !keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 2)),
+        "the youngest unleased beta is the victim"
     );
+    assert!(keys.contains(&beta(0)));
     assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
     reg.restore_purge(lease);
 }
@@ -254,7 +285,8 @@ fn an_accepted_beta_positive_is_bounded_per_lane() {
     assert!(matches!(outcome.value(), Some(PositiveOutcome::Recorded)));
     let keys = resident(&reg, LANE, KIND);
     assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
-    assert!(!keys.contains(&beta(0)));
+    assert!(!keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 1)));
+    assert!(keys.contains(&beta(0)));
     assert!(keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE)));
 }
 
@@ -300,7 +332,8 @@ fn a_replayed_accepted_beta_is_bounded_per_lane() {
     // Assert
     let keys = resident(&reg, LANE, KIND);
     assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
-    assert!(!keys.contains(&beta(0)));
+    assert!(!keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 1)));
+    assert!(keys.contains(&beta(0)));
     let accepted = reg
         .export_entries()
         .into_iter()
@@ -315,10 +348,11 @@ fn an_imported_carry_over_is_bounded_per_lane() {
     let source = LearnedCapabilityRegistry::new(DECAY, WINDOW, DEFAULT_MAX_ENTRIES);
     let base = Instant::now();
     for n in 0..=MAX_BETA_ENTRIES_PER_LANE {
-        // Distinct lanes in the source so its own bound never fires.
+        // Distinct lanes in the source so its own bound never fires; the
+        // padding makes export (key) order match `first_seen` order.
         learn(
             &source,
-            &format!("src{n}#upstream"),
+            &format!("src{n:02}#upstream"),
             KIND,
             &beta(n),
             base + secs(n),
@@ -340,5 +374,7 @@ fn an_imported_carry_over_is_bounded_per_lane() {
     // Assert
     let keys = resident(&reg, LANE, KIND);
     assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
-    assert!(!keys.contains(&beta(0)));
+    assert!(!keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 1)));
+    assert!(keys.contains(&beta(0)));
+    assert!(keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE)));
 }
