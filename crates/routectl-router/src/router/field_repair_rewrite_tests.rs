@@ -379,6 +379,14 @@ fn both_members() -> String {
     )
 }
 
+/// Lists one member, then a separator with no member after it.
+fn truncated_list() -> String {
+    format!(
+        "{}: Input should be '{ACCEPTED_B}' or ",
+        super::TEST_REWRITE_PATH,
+    )
+}
+
 /// Name, value sent, the seat's rejection message, and the value the retry
 /// carries (`None`: no retry).
 type LiveRewriteCase = (
@@ -394,10 +402,11 @@ type LiveRewriteCase = (
 /// Mutation checks: read candidates from every quoted token in the message
 /// -> red (the mixed row rewrites to the first quoted member); drop the
 /// equal-value refusal in `rewrite_in` -> red (the listed-current row
-/// repairs).
+/// repairs); accept a list ending in a bare separator -> red (the truncated
+/// row repairs).
 #[tokio::test]
 async fn a_live_rejection_rewrites_only_to_a_replacement_it_names() {
-    let cases: [LiveRewriteCase; 5] = [
+    let cases: [LiveRewriteCase; 6] = [
         (
             "an echoed current member",
             ACCEPTED_A,
@@ -426,6 +435,12 @@ async fn a_live_rejection_rewrites_only_to_a_replacement_it_names() {
             "a list naming two members",
             CLIENT_REWRITE_VALUE,
             both_members,
+            None,
+        ),
+        (
+            "a truncated list",
+            CLIENT_REWRITE_VALUE,
+            truncated_list,
             None,
         ),
     ];

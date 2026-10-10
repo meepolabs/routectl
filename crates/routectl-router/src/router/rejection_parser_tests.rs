@@ -661,7 +661,7 @@ fn the_accepted_value_fills_only_for_exactly_one_named_member() {
     };
     let outside = "routectl-test-not-a-member";
     let listed = |reason: &str| format!("{TEST_REWRITE_PATH}: Input should be {reason}");
-    let cases: [(&str, String, RejectionKind, Option<&str>); 11] = [
+    let cases: [(&str, String, RejectionKind, Option<&str>); 14] = [
         (
             "one single-quoted member",
             listed(&format!("'{first}'")),
@@ -710,6 +710,24 @@ fn the_accepted_value_fills_only_for_exactly_one_named_member() {
             listed(&format!("'{second}'. Received input: '{first}'")),
             InvalidValue,
             Some(second),
+        ),
+        (
+            "a truncated list ending in a separator",
+            listed(&format!("'{first}' or ")),
+            InvalidValue,
+            None,
+        ),
+        (
+            "a separator followed by an unquoted word",
+            listed(&format!("'{first}', or something else")),
+            InvalidValue,
+            None,
+        ),
+        (
+            "an escaped delimiter inside a member",
+            listed(&format!("'{first}\\', '{second}'")),
+            InvalidValue,
+            None,
         ),
         (
             "a member echoed in prose with no list",

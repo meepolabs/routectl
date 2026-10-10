@@ -131,23 +131,35 @@ fn named_accepted(row: &FieldRepairRow, replacements: &[&str]) -> Option<&'stati
 fn quoted_list(text: &str) -> Vec<&str> {
     let mut tokens = Vec::new();
     let mut rest = text;
-    while let Some((token, after)) = leading_quoted(rest) {
+    loop {
+        let Some((token, after)) = leading_quoted(rest) else {
+            // A separator promised another member that never came (a
+            // truncated `'a' or `), or a member was not cleanly quoted: the
+            // list is not a list this parser can trust, so it names nothing.
+            return if tokens.is_empty() {
+                tokens
+            } else {
+                Vec::new()
+            };
+        };
         tokens.push(token);
         match LIST_SEPARATORS
             .iter()
             .find_map(|separator| after.strip_prefix(separator))
         {
             Some(next) => rest = next,
-            None => break,
+            None => return tokens,
         }
     }
-    tokens
 }
 
-/// The `'...'` or `"..."` span `text` starts with, and the text after it.
+/// The `'...'` or `"..."` span `text` starts with, and the text after it. A
+/// span carrying a backslash is refused: an escaped delimiter would move the
+/// token boundary, and no grounded envelope escapes a closed-set value.
 fn leading_quoted(text: &str) -> Option<(&str, &str)> {
     let quote = text.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
-    text[1..].split_once(quote)
+    let (token, after) = text[1..].split_once(quote)?;
+    (!token.contains('\\')).then_some((token, after))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
