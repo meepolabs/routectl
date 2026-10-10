@@ -96,7 +96,7 @@ async fn a_daemon_request_activates_its_lane_and_the_pass_runs_free_validation()
     let status = post_inference(&daemon, &body_with_field()).await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let live = daemon.live_router();
-    let queued_before = live.fidelity_snapshot().probes.queued;
+    let count_tokens_before = recorder.count_tokens_calls();
     let summary = live.run_probe_pass().await;
 
     assert!(
@@ -104,8 +104,12 @@ async fn a_daemon_request_activates_its_lane_and_the_pass_runs_free_validation()
         "the HTTP request activated the lane",
     );
     assert!(
-        queued_before > 0 || summary.free_validators_run > 0,
-        "and the activation queued real free work that the pass ran",
+        summary.free_validators_run > 0,
+        "the pass ran the free validation the activation queued: {summary:?}",
+    );
+    assert!(
+        recorder.count_tokens_calls() > count_tokens_before,
+        "and that validation reached the provider's count_tokens",
     );
     daemon.shutdown().await;
 }

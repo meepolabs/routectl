@@ -109,6 +109,7 @@ async fn await_health(base_url: &str) {
 struct Recorder {
     seen: Mutex<Vec<ChatRequest>>,
     calls: AtomicUsize,
+    count_tokens_calls: AtomicUsize,
     /// Reject any attempt still CARRYING the field, so a canary's restoration draws
     /// a rejection and settles INCONCLUSIVE -- which leaves the verdict resident.
     /// Off where the canary's unrepaired SUCCESS is the disproof under test.
@@ -135,6 +136,10 @@ impl Recorder {
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn count_tokens_calls(&self) -> usize {
+        self.count_tokens_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -187,6 +192,7 @@ impl Provider for Recorder {
         Err(Error::upstream("p0", 500, "unused"))
     }
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        self.count_tokens_calls.fetch_add(1, Ordering::SeqCst);
         self.record(&req);
         Ok(TokenCount {
             input_tokens: 7,
