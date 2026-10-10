@@ -125,9 +125,11 @@ fn named_accepted(row: &FieldRepairRow, replacements: &[&str]) -> Option<&'stati
 }
 
 /// The leading run of quoted tokens in `text` joined by a list separator
-/// (`'a', 'b' or 'c'`). The run ends at the first byte that is neither a
-/// closed quote nor a separator followed by one, so trailing prose -- an echo
-/// of the refused input included -- never contributes.
+/// (`'a', 'b' or 'c'`). Text after the last token that does not start with a
+/// separator ends the run, so trailing prose -- an echo of the refused input
+/// included -- never contributes. A separator not followed by a cleanly quoted
+/// member (unterminated, or carrying a `\`) invalidates the whole list: it
+/// names nothing.
 fn quoted_list(text: &str) -> Vec<&str> {
     let mut tokens = Vec::new();
     let mut rest = text;
