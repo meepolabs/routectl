@@ -88,7 +88,7 @@ use axum::{Extension, Json};
 use serde_json::json;
 
 use crate::server::is_loopback;
-use crate::server::request_id::RequestId;
+use crate::server::request_id::{self, RequestId};
 
 /// Ceiling on concurrent in-flight `/status*` requests across the WHOLE
 /// subtree. The unit is ADMITTED HTTP REQUESTS, and it is equally the ceiling
@@ -387,10 +387,7 @@ pub async fn host_guard(
     };
     let host_403_total = HOST_403_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if should_log_shed(host_403_total) {
-        let request_id = req
-            .extensions()
-            .get::<RequestId>()
-            .map(|r| tracing::field::display(r.0.as_str()));
+        let request_id = request_id::uncovered_by_span(req.extensions().get::<RequestId>());
         tracing::warn!(
             target: SHED_TARGET,
             host_403_total,
@@ -482,9 +479,7 @@ pub async fn handle_status_overload(
 ) -> Response {
     let shed_total = STATUS_SHED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if should_log_shed(shed_total) {
-        let request_id = request_id
-            .as_ref()
-            .map(|Extension(r)| tracing::field::display(r.0.as_str()));
+        let request_id = request_id::uncovered_by_span(request_id.as_ref().map(|Extension(r)| r));
         tracing::warn!(
             target: SHED_TARGET,
             shed_total,

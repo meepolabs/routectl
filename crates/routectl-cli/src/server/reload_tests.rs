@@ -2391,6 +2391,10 @@ async fn a_panicking_loader_rejects_the_reload_as_loader_panicked() {
     assert_eq!(warns.len(), 1, "events: {events:?}");
     let blob = format!("{} {:?}", warns[0].message, warns[0].fields);
     assert!(blob.contains("is_panic"), "warn: {blob}");
+    assert!(
+        blob.contains("loader task did not complete"),
+        "warn: {blob}"
+    );
     for e in &events {
         let blob = format!("{} {:?}", e.message, e.fields);
         assert!(
@@ -2398,6 +2402,41 @@ async fn a_panicking_loader_rejects_the_reload_as_loader_panicked() {
             "loader-panic WARN leaked the panic payload: {blob}"
         );
     }
+}
+
+/// A cancelled loader rejects the reload the same way, and its WARN neither
+/// claims a panic nor drops the cancellation kind.
+#[tokio::test]
+async fn a_cancelled_loader_rejects_the_reload_without_claiming_a_panic() {
+    // Arrange
+    let handle = tokio::spawn(std::future::pending::<Result<LoadedConfig, ReloadFailure>>());
+    handle.abort();
+    let joined = handle.await;
+    assert!(
+        joined
+            .as_ref()
+            .is_err_and(tokio::task::JoinError::is_cancelled)
+    );
+
+    // Act
+    let mut verdict = None;
+    let events = routectl_testkit::capture_events(|| {
+        verdict = Some(loader_verdict(joined));
+    });
+
+    // Assert
+    assert_eq!(
+        verdict.expect("closure ran").err(),
+        Some(ReloadFailure::LoaderPanicked)
+    );
+    let warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN)
+        .collect();
+    assert_eq!(warns.len(), 1, "events: {events:?}");
+    let blob = format!("{} {:?}", warns[0].message, warns[0].fields);
+    assert!(blob.contains("is_cancelled"), "warn: {blob}");
+    assert!(!warns[0].message.contains("panic"), "warn: {blob}");
 }
 
 /// The coordinator records a rejected reload's class on the daemon meta, and

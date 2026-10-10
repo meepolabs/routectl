@@ -6090,8 +6090,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   registry agrees with its ledger for that key
 - `src/server/request_id.rs` -- request-id middleware (`x-request-id` echo +
   `tracing` span field with allowlist sanitization); the request span is
-  DEBUG for read-only polling paths (`/health`, `/status`, `/status/*`) and
-  INFO otherwise
+  DEBUG for read-only polling paths (`/health`, `/status`, and the declared
+  `/status/*` routes) and INFO otherwise; `uncovered_by_span` gives a
+  rejection WARN its explicit `request_id` field only when that span is off
 - `src/server/status_gate.rs` -- status-subtree-ONLY middleware (`/v1/*`
   carries none of it). `StatusHostAllowlist` + `host_guard`
   (anti-DNS-rebinding: rejects a claimed authority outside {loopback literals

@@ -40,10 +40,11 @@
 
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use routectl_router::FidelitySnapshot;
 
 /// The structured payload the fidelity INFO line carries.
@@ -325,10 +326,7 @@ impl FidelityGate {
     /// Check and set under ONE lock, so two concurrent polls over the same state
     /// cannot both observe the old mark and both emit.
     fn admit(&self, fingerprint: u64, now: Instant) -> bool {
-        // The guarded value is two plain words with no cross-field invariant a
-        // panicking holder could leave half-written, so a poisoned lock is still
-        // a correct one.
-        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut last = self.last.lock();
         let due = last.is_none_or(|mark| {
             mark.fingerprint != fingerprint
                 || now.saturating_duration_since(mark.last_emit) >= SNAPSHOT_HEARTBEAT

@@ -15,7 +15,7 @@
 //!      DEBUG so the span-close access line stays out of the default
 //!      INFO log; events inside such a request then carry no
 //!      `request_id` span field at INFO (rejection WARNs add it
-//!      explicitly).
+//!      explicitly, via `uncovered_by_span`, only when the span is off).
 //!   2. Stashed on `req.extensions` as a `RequestId` so handlers /
 //!      provider impls that need to thread it into upstream-bound
 //!      headers can pull it back out.
@@ -79,6 +79,21 @@ const POLLING_PATHS: &[&str] = &[
 
 fn is_polling_path(path: &str) -> bool {
     POLLING_PATHS.contains(&path)
+}
+
+/// The id to attach to a WARN as an explicit `request_id` field, or `None`
+/// when the current request span is enabled and so already prints it. A
+/// polling path's span is DEBUG, so at INFO its events would otherwise carry
+/// no correlation id; on an enabled span the explicit field would print the
+/// id a second time.
+pub(crate) fn uncovered_by_span(
+    id: Option<&RequestId>,
+) -> Option<tracing::field::DisplayValue<&str>> {
+    if tracing::Span::current().is_disabled() {
+        id.map(|r| tracing::field::display(r.0.as_str()))
+    } else {
+        None
+    }
 }
 
 pub async fn middleware(mut req: Request, next: Next) -> Response {
@@ -175,6 +190,12 @@ mod tests {
         polling.sort_unstable();
 
         assert_eq!(polling, declared);
+        // `is_polling_path` is an exact string match, so a parameterized
+        // route (`/status/{id}`) would never match a real request path; such
+        // a route needs a pattern matcher before it can join this list.
+        for path in POLLING_PATHS {
+            assert!(!path.contains('{'), "parameterized polling path {path:?}");
+        }
     }
 
     #[test]

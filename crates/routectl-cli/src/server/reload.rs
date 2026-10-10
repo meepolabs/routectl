@@ -771,7 +771,7 @@ pub(super) async fn handle_config_reload(
 }
 
 /// Fold the blocking loader's join result into the reload verdict: a loader
-/// panic rejects the reload like any other load failure.
+/// panic or cancellation rejects the reload like any other load failure.
 fn loader_verdict(
     joined: Result<Result<LoadedConfig, ReloadFailure>, tokio::task::JoinError>,
 ) -> Result<LoadedConfig, ReloadFailure> {
@@ -781,7 +781,7 @@ fn loader_verdict(
         tracing::warn!(
             is_panic = join_err.is_panic(),
             is_cancelled = join_err.is_cancelled(),
-            "config reload failed: loader task panicked; keeping previous config",
+            "config reload failed: loader task did not complete; keeping previous config",
         );
         Err(ReloadFailure::LoaderPanicked)
     })
