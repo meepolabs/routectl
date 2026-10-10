@@ -16,8 +16,8 @@
 //! Each case here is paired against the state in which the feature is NOT
 //! engaged, because the whole class of defect on an observability surface is a
 //! field that reads plausibly whether or not the thing it describes exists. A
-//! zero-cap daemon must report a cap-zero lane rather than no lane; a daemon with
-//! no resident verdict must report an empty row set rather than an absent field.
+//! daemon with no resident verdict must report an empty row set rather than an
+//! absent field.
 //!
 //! # No live services, no live ledger
 //!
@@ -28,12 +28,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, collect_config_validation};
-// Through its OWN module path rather than a crate-root re-export. The root
-// re-export existed only for this test, and adding one for a test's convenience
-// widens the crate's published surface permanently -- the path below is already
-// public and already the one production config code uses.
-use routectl_router::config::FidelityConfig;
+use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
@@ -45,7 +40,7 @@ mod common;
 /// Dead on purpose. Every assertion here is about a READ surface, and a reachable
 /// upstream would let a background probe or a warm dial change state underneath a
 /// purity assertion -- which would make a failure indistinguishable from a race.
-fn servable_config(fidelity: FidelityConfig) -> Arc<Config> {
+fn servable_config() -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "anthropic".to_string(),
@@ -65,7 +60,6 @@ fn servable_config(fidelity: FidelityConfig) -> Arc<Config> {
         providers,
         models,
         aliases,
-        fidelity,
         ..Config::default()
     })
 }
@@ -127,22 +121,6 @@ async fn get_status(base_url: &str, path: &str) -> Value {
     response.json().await.expect("status body parses")
 }
 
-/// A `[fidelity]` block with one provider capped at `cap`.
-///
-/// Built by mutating the default rather than by a struct literal: the type is
-/// `#[non_exhaustive]`, which refuses every foreign struct expression -- literal
-/// and functional-update alike -- so that a new knob stays additive for callers
-/// outside the router crate. Mutating the default is the supported shape, and it
-/// also means this fixture inherits every future default rather than pinning
-/// today's.
-fn caps_of(provider: &str, cap: u32) -> FidelityConfig {
-    let mut fidelity = FidelityConfig::default();
-    fidelity
-        .paid_probe_daily_caps
-        .insert(provider.to_string(), cap);
-    fidelity
-}
-
 /// The health panel is reachable and AVAILABLE on a real daemon, which is the
 /// precondition every assertion below rests on.
 ///
@@ -152,7 +130,7 @@ fn caps_of(provider: &str, cap: u32) -> FidelityConfig {
 /// once, loudly, where its failure names itself.
 #[tokio::test]
 async fn the_health_panel_is_available_on_a_real_daemon() {
-    let base_url = spawn(servable_config(FidelityConfig::default())).await;
+    let base_url = spawn(servable_config()).await;
 
     let panel = get_status(&base_url, "/status/health").await;
 
@@ -182,7 +160,7 @@ async fn the_health_panel_is_available_on_a_real_daemon() {
 /// verdict exists.
 #[tokio::test]
 async fn repeated_status_polls_do_not_activate_a_lane_or_advance_a_cadence() {
-    let base_url = spawn(servable_config(FidelityConfig::default())).await;
+    let base_url = spawn(servable_config()).await;
     let before = get_status(&base_url, "/status/health").await;
 
     for _ in 0..20 {
@@ -213,7 +191,7 @@ async fn repeated_status_polls_do_not_activate_a_lane_or_advance_a_cadence() {
 /// pass a health-only test.
 #[tokio::test]
 async fn the_doctor_panel_is_reachable_on_a_real_daemon() {
-    let base_url = spawn(servable_config(FidelityConfig::default())).await;
+    let base_url = spawn(servable_config()).await;
 
     let panel = get_status(&base_url, "/status/doctor").await;
 
@@ -226,84 +204,6 @@ async fn the_doctor_panel_is_reachable_on_a_real_daemon() {
     );
 }
 
-/// A CAP-ZERO lane still serves, and the free-validator path is unaffected.
-///
-/// The cap-zero case: paid probes are refused outright
-/// while free validation keeps running. Asserted as "the daemon is healthy and
-/// answering with the cap configured at zero" -- a cap of zero must not be a
-/// startup error, a degraded panel, or a refusal, because zero is the DEFAULT and
-/// a deployment that never opted into paid probes is the normal one.
-///
-/// Paired against the nonzero cap below, which is what makes this a test of the
-/// cap rather than of the daemon.
-#[tokio::test]
-async fn a_zero_cap_lane_serves_and_reports_a_healthy_panel() {
-    let base_url = spawn(servable_config(caps_of("anthropic", 0))).await;
-
-    let panel = get_status(&base_url, "/status/health").await;
-
-    let _ = available_data(&panel);
-}
-
-/// A NONZERO cap serves identically.
-///
-/// The pair for the zero-cap case. Without it, a daemon that refused to start on
-/// ANY `[fidelity]` cap would satisfy the test above by failing the same way for a
-/// different reason, and the cap-zero assertion would be about nothing.
-#[tokio::test]
-async fn a_nonzero_cap_lane_serves_and_reports_a_healthy_panel() {
-    let base_url = spawn(servable_config(caps_of("anthropic", 3))).await;
-
-    let panel = get_status(&base_url, "/status/health").await;
-
-    let _ = available_data(&panel);
-}
-
-/// A cap naming an UNKNOWN provider is refused at config load, not discovered at
-/// runtime.
-///
-/// The load-time validation the config slice ships, asserted here because its
-/// consequence is a runtime one: an operator's typo must fail the load rather than
-/// silently configuring a budget no reservation is ever checked against. Driven
-/// through the same validation path the daemon boots through.
-#[tokio::test]
-async fn a_cap_naming_an_unknown_provider_is_refused_rather_than_silently_ignored() {
-    let config = servable_config(caps_of("no-such-provider", 5));
-
-    let outcome = collect_config_validation(&config);
-
-    assert!(
-        outcome
-            .errors
-            .iter()
-            .any(|e| e.contains("paid_probe_daily_caps")),
-        "a cap keyed on a provider no `[providers]` entry names is an operator typo, \
-         and discovering it at runtime means a budget that gates nothing: {:?}",
-        outcome.errors,
-    );
-}
-
-/// The paired control for the validation above: a cap naming a CONFIGURED provider
-/// loads clean.
-///
-/// Without it, a validator that refused every `[fidelity]` cap would satisfy the
-/// refusal test while making the feature unusable.
-#[tokio::test]
-async fn a_cap_naming_a_configured_provider_loads_clean() {
-    let config = servable_config(caps_of("anthropic", 5));
-
-    let outcome = collect_config_validation(&config);
-
-    assert!(
-        !outcome
-            .errors
-            .iter()
-            .any(|e| e.contains("paid_probe_daily_caps")),
-        "a cap on a configured provider is the supported shape: {:?}",
-        outcome.errors,
-    );
-}
-
 /// A fresh daemon reports NO resident field verdict, and reports it as an empty
 /// set rather than an absent surface.
 ///
@@ -312,7 +212,7 @@ async fn a_cap_naming_a_configured_provider_loads_clean() {
 /// on a status surface those two look identical unless the empty case is explicit.
 #[tokio::test]
 async fn a_fresh_daemon_reports_an_empty_learned_set_rather_than_an_absent_one() {
-    let base_url = spawn(servable_config(FidelityConfig::default())).await;
+    let base_url = spawn(servable_config()).await;
 
     let panel = get_status(&base_url, "/status/health").await;
 

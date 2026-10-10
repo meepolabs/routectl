@@ -13,7 +13,7 @@
 /// drops the field before planning, passes every router-level test and fails this.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_daemon_request_is_rewritten_when_a_verdict_is_eligible() {
-    let (config, dir) = daemon_config(None);
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     plant_acting_field_verdict_for_tests(&router, STATE_KEY, FIELD_PATH, 1);
@@ -40,7 +40,7 @@ async fn a_daemon_request_is_rewritten_when_a_verdict_is_eligible() {
 /// unconditionally, which is a fidelity defect rather than the feature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_daemon_request_forwards_unchanged_when_no_verdict_is_resident() {
-    let (config, dir) = daemon_config(None);
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     let daemon = spawn_daemon(config, dir, router).await;
@@ -84,7 +84,7 @@ async fn a_daemon_request_forwards_unchanged_when_no_verdict_is_resident() {
 /// would test the cadence a second time and nothing else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_daemon_canary_request_clears_the_verdict_and_the_next_request_forwards_unchanged() {
-    let (config, dir) = daemon_config(None);
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     plant_acting_field_verdict_for_tests(&router, STATE_KEY, FIELD_PATH, 1);

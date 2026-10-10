@@ -1,5 +1,5 @@
 use routectl_router::CURRENT_CONFIG_VERSION;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::server::reload_failure::ReloadFailure;
@@ -3093,5 +3093,3 @@ fn both_driver_selects_are_biased_with_shutdown_first() {
         );
     }
 }
-
-include!("probe_driver_paid_tests.rs");

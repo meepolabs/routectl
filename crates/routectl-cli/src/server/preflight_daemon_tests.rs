@@ -196,7 +196,7 @@ impl Provider for Recorder {
 }
 
 /// A servable config on a remote-looking base URL, with its ledger in a tempdir.
-fn daemon_config(caps: Option<(&str, u32)>) -> (Arc<Config>, tempfile::TempDir) {
+fn daemon_config() -> (Arc<Config>, tempfile::TempDir) {
     let toml_text = format!(
         "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"{REMOTE_BASE}\"\n"
     );
@@ -212,12 +212,6 @@ fn daemon_config(caps: Option<(&str, u32)>) -> (Arc<Config>, tempfile::TempDir) 
         "default".to_string(),
         AliasValue::Single(NICKNAME.to_string()),
     );
-    if let Some((provider, cap)) = caps {
-        config
-            .fidelity
-            .paid_probe_daily_caps
-            .insert(provider.to_string(), cap);
-    }
     let dir = tempfile::tempdir().expect("usage tempdir");
     config.usage.db_path = dir.path().join("usage.db");
     (Arc::new(config), dir)

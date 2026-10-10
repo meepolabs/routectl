@@ -374,9 +374,8 @@ async fn the_health_read_survives_a_rebuild() {
 
 #[test]
 fn the_boot_installs_the_health_read_only_after_the_usage_writer_exists() {
-    // A source-text guard over the boot sequence, for the same reason its sibling
-    // in `paid_probe_ledger_wiring_tests.rs` is one: the ordering is a property of
-    // the sequence rather than of any value, so installing against a not-yet-started
+    // A source-text guard over the boot sequence because the ordering is a
+    // property of the sequence rather than of any value, so installing against a not-yet-started
     // writer would compile and leave every behavioral test green. An ordered TRIPLE,
     // not mere presence -- presence alone would pass on exactly the swaps that break
     // it.

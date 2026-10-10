@@ -288,7 +288,7 @@ fn an_absent_vocabulary_source_is_an_error_rather_than_an_empty_set() {
 
 #[test]
 fn a_vocabulary_source_carrying_no_declaration_is_a_failed_parse() {
-    // The lesson this project already paid for: an empty parse result is a
+    // The lesson this project already learned: an empty parse result is a
     // FAILED parse, not a safe answer. Every token trivially "has a predicate"
     // when the vocabulary is empty.
     let stub = "#!/usr/bin/env python3\n\"\"\"A module with no vocabulary.\"\"\"\n";

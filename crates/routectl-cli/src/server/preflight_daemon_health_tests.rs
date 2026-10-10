@@ -157,7 +157,7 @@ async fn advance_through_the_daemon(
 ///     rewritten and the zero-confirmation premise reds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unacknowledged_verdict_preflights_the_next_request_once_its_write_is_acknowledged() {
-    let (config, dir) = daemon_config(None);
+    let (config, dir) = daemon_config();
     let db_path = config.usage.db_path.clone();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
@@ -245,7 +245,7 @@ async fn an_unacknowledged_verdict_preflights_the_next_request_once_its_write_is
 ///     is queued and the advance follows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unwritten_event_advances_nothing_and_the_next_request_still_carries_the_field() {
-    let (config, dir) = daemon_config(None);
+    let (config, dir) = daemon_config();
     let db_path = config.usage.db_path.clone();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
@@ -304,7 +304,7 @@ async fn an_unwritten_event_advances_nothing_and_the_next_request_still_carries_
 /// advances the count and the request below is rewritten.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_mismatched_incarnation_acknowledgment_advances_nothing_even_when_its_row_lands() {
-    let (config, dir) = daemon_config(None);
+    let (config, dir) = daemon_config();
     let db_path = config.usage.db_path.clone();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
@@ -380,7 +380,7 @@ async fn a_mismatched_incarnation_acknowledgment_advances_nothing_even_when_its_
 ///     term from the health predicate -> same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_refused_capability_batch_suspends_preflight_and_the_next_request_forwards_unchanged() {
-    let (config, dir) = daemon_config(None);
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     plant_acting_field_verdict_for_tests(&router, STATE_KEY, FIELD_PATH, 1);

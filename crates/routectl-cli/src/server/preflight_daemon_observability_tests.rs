@@ -1,4 +1,4 @@
-// Status/doctor INFO-snapshot scenarios, the zero-cap free-validation probe,
+// Status/doctor INFO-snapshot scenarios, the free-validation probe,
 // and per-call endpoint event emission -- the daemon's observability surface.
 // `include!`d into preflight_daemon_tests.rs; the fixtures and imports live
 // there, so do not add `use` lines here.
@@ -15,7 +15,7 @@
 /// vacuity an earlier version of the log test had.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_daemon_status_and_doctor_surfaces_report_a_populated_snapshot() {
-    let (config, dir) = daemon_config(Some(("p0", 3)));
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     plant_acting_field_verdict_for_tests(&router, STATE_KEY, FIELD_PATH, 1);
@@ -36,7 +36,7 @@ async fn the_daemon_status_and_doctor_surfaces_report_a_populated_snapshot() {
         "and the doctor route answers its envelope: {doctor}",
     );
     // The snapshot the daemon's own INFO line is built from, read through the live
-    // router: populated rows, and a budget row for the configured cap.
+    // router: populated rows.
     let snapshot = daemon.live_router().fidelity_snapshot();
     assert_eq!(
         snapshot.verdicts.len(),
@@ -67,21 +67,19 @@ async fn the_daemon_status_and_doctor_surfaces_report_a_populated_snapshot() {
 }
 
 // ---------------------------------------------------------------------------
-// Cap zero, through the daemon
+// Free validation, through the daemon
 // ---------------------------------------------------------------------------
 
-/// A zero-cap daemon activates its lane on a real HTTP request and runs FREE
-/// validation, while committing no reservation and dispatching no paid call.
+/// A daemon activates its lane on a real HTTP request and its probe pass runs the
+/// FREE validation that activation queued.
 ///
 /// The probe pass is driven on the daemon's EXACT live Router, after an HTTP request
 /// has activated it -- the activation is non-blocking for the user request, so the
 /// work lands on a driver tick. The wiring and the request boundary are real; only
 /// the tick is invoked directly rather than waited out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_zero_cap_daemon_activates_and_runs_free_validation_without_spending() {
-    // Cap ZERO, explicitly rather than by omission, so the assertion is about the cap
-    // rather than about an absent config section.
-    let (config, dir) = daemon_config(Some(("p0", 0)));
+async fn a_daemon_request_activates_its_lane_and_the_pass_runs_free_validation() {
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     let daemon = spawn_daemon(config, dir, router).await;
@@ -98,51 +96,16 @@ async fn a_zero_cap_daemon_activates_and_runs_free_validation_without_spending()
     let status = post_inference(&daemon, &body_with_field()).await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let live = daemon.live_router();
-    let summary = live.run_probe_pass().await;
-
-    let probes = live.fidelity_snapshot().probes;
-    assert!(
-        probes.activations_total > 0,
-        "the HTTP request activated the lane -- a lane activates on its first \
-         admitted real request whatever its paid cap",
-    );
-    assert!(
-        !summary.paid_probe_attempted,
-        "and a zero cap attempts no paid probe: the eligibility predicate reads the \
-         cap before any candidate is claimed",
-    );
-    assert_eq!(
-        probes.paid_reservations_committed_total, 0,
-        "so no reservation is committed -- cap zero spends nothing",
-    );
-    assert_eq!(
-        probes.paid_provider_calls_started_total, 0,
-        "and no paid call is dispatched",
-    );
-    daemon.shutdown().await;
-}
-
-/// The control for the case above: the zero-cap lane's free work genuinely ran.
-///
-/// Without it, a scheduler that queued nothing would also report zero paid calls, and
-/// the assertions above could not tell "free ran, paid refused" from "nothing
-/// happened".
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_zero_cap_daemons_free_validation_actually_runs() {
-    let (config, dir) = daemon_config(Some(("p0", 0)));
-    let recorder = Arc::new(Recorder::default());
-    let router = router_with(&config, Arc::clone(&recorder));
-    let daemon = spawn_daemon(config, dir, router).await;
-
-    let _ = post_inference(&daemon, &body_with_field()).await;
-    let live = daemon.live_router();
     let queued_before = live.fidelity_snapshot().probes.queued;
     let summary = live.run_probe_pass().await;
 
     assert!(
+        live.fidelity_snapshot().probes.activations_total > 0,
+        "the HTTP request activated the lane",
+    );
+    assert!(
         queued_before > 0 || summary.free_validators_run > 0,
-        "the activation queued real free work and the pass ran it, so 'no paid call' \
-         is a refusal rather than an empty scheduler",
+        "and the activation queued real free work that the pass ran",
     );
     daemon.shutdown().await;
 }
@@ -179,19 +142,9 @@ fn drain_events(
 /// an emitter reached with an empty snapshot satisfies every count assertion while
 /// reporting nothing an operator can use, which is exactly the shape an earlier
 /// version of the log test had.
-///
-/// `expect_budget_rows` is the count the caller's fixture configures. Asserted rather
-/// than ignored because the budget rows are the half of the line a verdict count
-/// cannot vouch for: they come from a DIFFERENT source (the operator's configured
-/// caps plus a ledger read on the blocking thread), so an emitter reached with the
-/// verdict rows intact and the budget read dropped passes every other assertion here.
-/// The fixtures discriminate it -- a configured cap emits one row, the no-config
-/// doctor branch legitimately emits none -- so the value distinguishes a real read
-/// from a default.
 fn one_populated_event(
     events: Vec<crate::handlers::status::FidelityEvent>,
     endpoint: &str,
-    expect_budget_rows: usize,
 ) -> crate::handlers::status::FidelityEvent {
     assert_eq!(
         events.len(),
@@ -214,11 +167,8 @@ fn one_populated_event(
         "with the acting verdict present in the snapshot the line is built from",
     );
     assert_eq!(
-        event.budget_rows_total, expect_budget_rows,
-        "and it carries {expect_budget_rows} paid-probe budget row(s) for {endpoint}: \
-         the budgets come from the operator's configured caps plus a ledger read, not \
-         from the router snapshot, so a dropped budget read leaves every verdict \
-         assertion above green",
+        event.budget_rows_total, 0,
+        "and it carries no budget rows for {endpoint}: no fixture configures a cap",
     );
     event
 }
@@ -229,7 +179,7 @@ fn one_populated_event(
 async fn observing_daemon(
     config_path_from: Option<&std::path::Path>,
 ) -> (Daemon, crate::handlers::status::test_hooks::FidelityEvents) {
-    let (config, dir) = daemon_config(Some(("p0", 3)));
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     plant_acting_field_verdict_for_tests(&router, STATE_KEY, FIELD_PATH, 1);
@@ -287,9 +237,7 @@ async fn the_health_endpoint_emits_one_populated_fidelity_event() {
         "premise: the health panel served its payload, so the builder ran to \
          completion: {data}",
     );
-    // ONE budget row: the fixture configures a cap for `p0`, and the health
-    // builder reads the caps off the same live config.
-    one_populated_event(drain_events(&mut events), "/status/health", 1);
+    one_populated_event(drain_events(&mut events), "/status/health");
 
     daemon.shutdown().await;
 }
@@ -320,7 +268,7 @@ async fn the_configured_doctor_endpoint_emits_one_populated_fidelity_event() {
         "premise: this IS the configured branch -- the panel carries a gathered \
          report rather than an unavailable envelope: {doctor}",
     );
-    one_populated_event(drain_events(&mut events), "/status/doctor", 1);
+    one_populated_event(drain_events(&mut events), "/status/doctor");
 
     daemon.shutdown().await;
 }
@@ -354,12 +302,7 @@ async fn the_no_config_doctor_branch_still_emits_one_populated_fidelity_event() 
         "premise: this IS the no-config branch, so the panel is unavailable -- which \
          is precisely the state in which silence would be a narrower floor: {doctor}",
     );
-    // ZERO budget rows, and that is the branch's own contract rather than a
-    // shortcoming: the caps come from an on-disk config this daemon has none of, so
-    // the line is emitted with unavailable budget data while every other field --
-    // the counters, the verdict rows, the probe state -- comes from state it holds
-    // in full.
-    one_populated_event(drain_events(&mut events), "the no-config /status/doctor", 0);
+    one_populated_event(drain_events(&mut events), "the no-config /status/doctor");
 
     daemon.shutdown().await;
 }
@@ -402,7 +345,7 @@ async fn the_status_aggregate_emits_exactly_one_fidelity_event_for_both_panels()
         "and so did the doctor panel, so two fidelity-carrying builders ran in this \
          one request: {aggregate}",
     );
-    one_populated_event(drain_events(&mut events), "the /status aggregate", 1);
+    one_populated_event(drain_events(&mut events), "the /status aggregate");
 
     daemon.shutdown().await;
 }
@@ -421,7 +364,7 @@ async fn the_status_aggregate_emits_exactly_one_fidelity_event_for_both_panels()
 async fn unchanged_aggregate_polls_emit_once_and_a_new_verdict_emits_once_more() {
     let config_dir = tempfile::tempdir().expect("config tempdir");
     let config_path = write_config_file(config_dir.path());
-    let (config, dir) = daemon_config(Some(("p0", 3)));
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     let (hooks, mut events) = crate::handlers::status::test_hooks::StatusTestHooks::observing();
@@ -455,7 +398,6 @@ async fn unchanged_aggregate_polls_emit_once_and_a_new_verdict_emits_once_more()
     one_populated_event(
         drain_events(&mut events),
         "the aggregate polled after a verdict landed",
-        1,
     );
 
     daemon.shutdown().await;
@@ -479,7 +421,7 @@ async fn unchanged_aggregate_polls_emit_once_and_a_new_verdict_emits_once_more()
 async fn an_aggregate_whose_health_builder_fails_still_emits_one_event_from_doctor() {
     let config_dir = tempfile::tempdir().expect("config tempdir");
     let config_path = write_config_file(config_dir.path());
-    let (config, dir) = daemon_config(Some(("p0", 3)));
+    let (config, dir) = daemon_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     plant_acting_field_verdict_for_tests(&router, STATE_KEY, FIELD_PATH, 1);
@@ -512,7 +454,6 @@ async fn an_aggregate_whose_health_builder_fails_still_emits_one_event_from_doct
     one_populated_event(
         drain_events(&mut events),
         "the aggregate whose health builder failed",
-        1,
     );
 
     daemon.shutdown().await;

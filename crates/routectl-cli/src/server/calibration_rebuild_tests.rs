@@ -160,7 +160,7 @@ async fn a_restart_recovers_the_factor_the_previous_process_had_learned() {
     assert_eq!(summary.lanes_calibrated, 1);
 }
 
-/// The trap this repo has already paid for once: the rebuild can only key on
+/// The trap this repo has already fallen into once: the rebuild can only key on
 /// what the ledger STORES, and it must produce the same lane key the live
 /// write and the gate lookup use -- the served nickname. Keyed on the upstream
 /// wire id, nothing ever matches, no lane ever calibrates, and there is no

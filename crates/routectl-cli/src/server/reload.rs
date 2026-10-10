@@ -445,7 +445,7 @@ async fn apply_config_reload(
 /// case -- routectl's own hourly-ish token auto-refresh, which rewrites
 /// credentials.json with the same keys but new token values -- leaves
 /// the seat set identical and skips the rebuild, so a routine refresh
-/// costs only the cache reload it already paid for.
+/// costs only the cache reload it already performed.
 pub(super) async fn handle_credentials_reload(
     oauth_store: &Option<Arc<routectl_auth::OAuthStore>>,
     current_config: &Arc<Config>,

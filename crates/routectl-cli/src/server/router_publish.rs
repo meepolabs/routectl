@@ -29,12 +29,8 @@ use routectl_router::Router;
 /// remembering it. The callback shape is also what keeps the router crate free of
 /// any dependency on the swap primitive used here.
 ///
-/// SYNCHRONOUS, and deliberately: nothing in publication waits on a paid probe.
-/// An in-flight paid authorization orders itself against this by re-reading the
-/// shared publication generation immediately before its ledger call and again on
-/// the acknowledgement, so it abandons itself rather than this path waiting for
-/// it. A blocking design would let a slow, saturated, or wedged accounting layer
-/// hold a reload open.
+/// SYNCHRONOUS, and deliberately: nothing in publication waits on in-flight
+/// probe work, so a slow or wedged probe cannot hold a reload open.
 ///
 /// Safe to stamp before the swap because a caller only reaches here at its
 /// COMMIT POINT: every failure and abandonment path has already returned, so

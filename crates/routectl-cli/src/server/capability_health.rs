@@ -4,8 +4,7 @@
 //! The router declares the contract (`routectl_router::CapabilityPersistenceHealth`)
 //! because it CONSUMES it, and the usage crate owns the writer whose state answers
 //! it. Neither depends on the other, so this crate -- the one that already depends
-//! on both and owns the daemon's boot -- is where the two meet. Its sibling
-//! `paid_probe_ledger` bridges the same two crates for the same reason.
+//! on both and owns the daemon's boot -- is where the two meet.
 //!
 //! # What "durable" means here, and why it is read from counters
 //!

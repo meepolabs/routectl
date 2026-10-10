@@ -15,12 +15,12 @@ const RELOAD_TASK_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::
 /// GUARANTEE it is finished before returning.
 ///
 /// The guarantee is the point, not the wait. These tasks own clones of the
-/// daemon's shared state -- the coordinator carries a `UsageHandle`, the probe
-/// driver reads the router `ArcSwap`, and through it the paid-probe accounting
-/// adapter's own handle -- so this barrier is what the shutdown sequence relies
-/// on when it releases the router and drains the writer next. A task still
-/// running past here would still hold those clones, and the drain would wait out
-/// its abandon deadline on a producer nothing is going to use again.
+/// daemon's shared state -- the coordinator carries a `UsageHandle` and the
+/// probe driver reads the router `ArcSwap` -- so this barrier is what the
+/// shutdown sequence relies on when it releases the router and drains the
+/// writer next. A task still running past here would still hold those clones,
+/// and the drain would wait out its abandon deadline on a producer nothing is
+/// going to use again.
 ///
 /// So the deadline ABORTS rather than detaches. The handle is borrowed into the
 /// timeout (`&mut`) instead of moved, which keeps ownership here on expiry;

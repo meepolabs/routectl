@@ -26,9 +26,9 @@
 //! # NO REQUEST RESPONSE WAITS ON SQLITE FOR THIS
 //!
 //! Which is the second thing the spawn buys, and it is not incidental. The previous
-//! shape awaited the commit inline, so a request that happened to mint a verdict paid
-//! a database round trip before its response went out -- on the rare tail, but paid
-//! by the client rather than by the daemon. Now the handler admits and returns; the
+//! shape awaited the commit inline, so a request that happened to mint a verdict
+//! waited on a database round trip before its response went out -- on the rare tail,
+//! but borne by the client rather than by the daemon. Now the handler admits and returns; the
 //! advancement is the daemon's own work.
 //!
 //! # What shutdown owes it, and why that is LESS than a purge settlement owes

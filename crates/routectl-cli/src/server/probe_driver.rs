@@ -11,8 +11,7 @@ use arc_swap::ArcSwap;
 use routectl_router::Router;
 use tokio::sync::watch;
 
-/// How often the probe driver looks for due free-validator work and attempts
-/// a paid probe.
+/// How often the probe driver looks for due free-validator work.
 ///
 /// A code CONSTANT, not an operator knob and never read from the
 /// environment: it is one of the bounds that keeps background validation
@@ -21,9 +20,8 @@ use tokio::sync::watch;
 /// a best-effort side channel, and a lane's answer is not time-critical.
 pub(super) const PROBE_DRIVER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Drive the live `Router`'s probe pass -- the due free batch, then at most
-/// one paid probe -- until `shutdown` fires, then cancel whatever is still
-/// queued.
+/// Drive the live `Router`'s probe pass -- the due free batch -- until
+/// `shutdown` fires, then cancel whatever is still queued.
 ///
 /// Starts IDLE and stays idle: each tick asks the currently published
 /// router for its due work, and with nothing queued that is a lock, a
@@ -32,8 +30,8 @@ pub(super) const PROBE_DRIVER_INTERVAL: std::time::Duration = std::time::Duratio
 /// status read all leave the queue empty, so none of them can cause a call.
 ///
 /// One `run_probe_pass` call per tick, never a second task or interval: the
-/// free-before-paid ordering and the at-most-one-paid-candidate bound both
-/// live inside that single call, so this driver only needs to schedule it.
+/// batch's bounds live inside that single call, so this driver only needs to
+/// schedule it.
 ///
 /// Reads `router_swap` per tick rather than capturing one `Arc`, matching
 /// the metrics driver above: a publication switches the driver onto the
@@ -95,11 +93,10 @@ pub(super) async fn run_probe_driver(
                         return;
                     }
                     ran = run => {
-                        if ran.free_validators_run > 0 || ran.paid_probe_attempted {
+                        if ran.free_validators_run > 0 {
                             tracing::debug!(
                                 probe_validators_run = ran.free_validators_run,
-                                paid_probe_attempted = ran.paid_probe_attempted,
-                                "probe driver ran its due free batch and paid attempt",
+                                "probe driver ran its due free batch",
                             );
                         }
                     }
@@ -116,11 +113,9 @@ pub(super) async fn run_probe_driver(
 /// run will not run, and draining would hold the shutdown path for as long
 /// as the upstream takes.
 fn cancel_probe_work_at_shutdown(router_swap: &Arc<ArcSwap<Router>>) {
-    // SYNCHRONOUS, and it never waits on an in-flight paid probe. `shutdown_probe_work`
+    // SYNCHRONOUS, and it never waits on in-flight probe work. `shutdown_probe_work`
     // advances the shared publication generation to a terminal value no router is
-    // stamped with BEFORE clearing, so an in-flight authorization abandons itself
-    // at its next generation check and an in-flight refusal cannot requeue --
-    // rather than this path waiting for a reservation that may never answer.
+    // stamped with BEFORE clearing, so an in-flight refusal cannot requeue.
     let cancelled = router_swap.load().shutdown_probe_work();
     if cancelled > 0 {
         tracing::debug!(

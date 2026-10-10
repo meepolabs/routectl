@@ -160,7 +160,7 @@ async fn a_stalled_reload_task_is_cancelled_so_it_releases_the_accounting_handle
 }
 
 /// A reload-side task that DOES observe shutdown is awaited normally: no
-/// deadline is paid, and its state is released.
+/// deadline is waited out, and its state is released.
 ///
 /// The paired control. Without it, a barrier that aborted every task
 /// immediately -- cancelling work that was about to finish cleanly -- would
@@ -189,7 +189,7 @@ async fn a_cooperative_reload_task_is_awaited_without_paying_the_deadline() {
     await_reload_tasks(vec![task]).await;
     let barrier_wait = waited_at.elapsed();
 
-    // Assert: awaited (no deadline paid) AND its state released.
+    // Assert: awaited (no deadline waited out) AND its state released.
     assert_dropped(&mut dropped, "an awaited task's accounting handle");
     assert!(
         barrier_wait < RELOAD_TASK_SHUTDOWN_DEADLINE,
@@ -205,26 +205,20 @@ async fn a_cooperative_reload_task_is_awaited_without_paying_the_deadline() {
 }
 
 /// The barrier releases a stalled task's ROUTER reference too, so the published
-/// Router -- and the paid-probe accounting adapter it carries -- can be dropped
-/// by the shutdown sequence that follows.
+/// Router can be dropped by the shutdown sequence that follows.
 ///
 /// The probe driver holds the router `ArcSwap` rather than a usage handle, so
-/// the adapter's producer clone reaches the barrier through it. Asserted on the
-/// `Arc` count -- a direct ownership reading, like the drop acknowledgements
-/// above: after the barrier, the test is the only owner, which is what lets the
-/// serve loop's `drop(router_swap)` actually release the adapter.
+/// the drop acknowledgements above cannot see it. Asserted on the `Arc` count
+/// -- a direct ownership reading: after the barrier, the test is the only
+/// owner, which is what lets the serve loop's `drop(router_swap)` actually
+/// release the Router.
 #[tokio::test]
 async fn a_stalled_task_holding_the_router_releases_it_at_the_barrier() {
     // Arrange
-    let (_dir, handle, writer) = live_writer();
-    let router = crate::server::paid_probe_ledger::install_paid_probe_ledger(
-        routectl_router::Router::new(Arc::new(routectl_router::Config::default())),
-        &handle,
-    );
+    let router = routectl_router::Router::new(Arc::new(routectl_router::Config::default()));
     let router_swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
     let (task, started) = stalled_task_holding(Arc::clone(&router_swap));
     started.await.expect("the stalled task must start");
-    drop(handle);
     assert_eq!(
         Arc::strong_count(&router_swap),
         2,
@@ -234,16 +228,10 @@ async fn a_stalled_task_holding_the_router_releases_it_at_the_barrier() {
     // Act
     await_reload_tasks(vec![task]).await;
 
-    // Assert: sole ownership, so releasing it here really releases the adapter.
+    // Assert
     assert_eq!(
         Arc::strong_count(&router_swap),
         1,
         "a task surviving the barrier would keep the published Router alive",
-    );
-    drop(router_swap);
-    let mut drain = begin_writer_drain(writer).await;
-    assert!(
-        drain.completes_within(DRAIN_CEILING).await,
-        "with the Router released, the writer must finish its drain",
     );
 }

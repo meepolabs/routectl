@@ -12,11 +12,10 @@
 //! parent never registers a signal handler and never touches its own
 //! disposition, so nothing here can affect a sibling test.
 //!
-//! WHAT IT PINS. The daemon holds a producer handle to its usage writer through
-//! the Router's paid-probe accounting adapter, so a shutdown that drains the
-//! writer before releasing the Router waits out the writer's whole abandon
-//! deadline. The bound below is far under that deadline and far over a healthy
-//! shutdown, so it fails loudly on the ordering regression and on nothing else.
+//! WHAT IT PINS. A shutdown that drains the usage writer while any producer
+//! handle is still held waits out the writer's whole abandon deadline. The bound
+//! below is far under that deadline and far over a healthy shutdown, so it fails
+//! loudly on that ordering regression and on nothing else.
 //!
 //! Isolation: `HOME` and `XDG_CONFIG_HOME` are scoped to a fresh tempdir ON THE
 //! CHILD ONLY, so the config, the usage ledger, and the catalog state all
@@ -228,8 +227,7 @@ fn health_is_serving(port: u16) -> bool {
 /// elapses.
 ///
 /// A readiness PROBE, not a sleep: it answers only once the whole boot sequence
-/// has finished (writer started, accounting adapter installed, Router
-/// published), which is the state the shutdown measurement needs. A child that
+/// has finished (writer started, Router published), which is the state the shutdown measurement needs. A child that
 /// died during boot is detected here rather than mistaken for a slow start.
 fn await_serving(child: &mut ServeChild, port: u16) {
     let until = Instant::now() + READY_DEADLINE;
@@ -280,10 +278,9 @@ fn the_child_command_uses_only_the_explicit_fixture_config() {
 /// A real daemon must complete graceful shutdown far inside the usage writer's
 /// drain-abandon deadline.
 ///
-/// The regression this exists for: the Router carries the paid-probe accounting
-/// adapter, which holds a producer clone of the writer's channel. Releasing the
-/// Router only after draining leaves the drain waiting on a handle nothing will
-/// use again, turning every shutdown into a multi-second stall. Measured end to
+/// The regression this exists for: a producer clone of the writer's channel
+/// still held when the drain starts leaves the drain waiting on a handle nothing
+/// will use again, turning every shutdown into a multi-second stall. Measured end to
 /// end on the shipped binary, from the signal to the process exit.
 #[cfg(unix)]
 #[test]
@@ -317,7 +314,7 @@ fn a_booted_daemon_shuts_down_well_inside_the_writer_abandon_deadline() {
     );
     assert!(
         elapsed < SHUTDOWN_BUDGET,
-        "shutdown took {elapsed:?}: the Router's accounting adapter must be released \
+        "shutdown took {elapsed:?}: every usage producer handle must be released \
          before the usage writer is drained, or the drain waits out its abandon deadline",
     );
 }

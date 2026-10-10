@@ -1,7 +1,6 @@
 //! Shared unit-test helpers used by more than one server sidecar.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,15 +76,6 @@ impl WriterDrain {
             Err(_) => false,
         }
     }
-
-    /// Await the drain to completion under a generous ceiling, failing loudly
-    /// rather than hanging the suite if it never finishes.
-    pub(super) async fn finish(self) {
-        tokio::time::timeout(Duration::from_secs(10), self.handle)
-            .await
-            .expect("the drain must finish once nothing holds the writer's channel")
-            .expect("the drain task must not panic");
-    }
 }
 
 /// Start `writer`'s blocking drain and return once it has genuinely begun.
@@ -119,10 +109,6 @@ pub(super) async fn begin_writer_drain(writer: UsageWriter) -> WriterDrain {
 /// row the open wrote as one the behavior under test added. After the cycle,
 /// the returned writer's open changes nothing a second connection can see.
 ///
-/// Shared by the accounting-adapter sidecars and the composed end-to-end proof:
-/// both need the same real writer over a real file, and a second copy of this
-/// setup is a second thing that can drift from the schema the writer opens.
-///
 /// The settle cycle's blocking shutdown runs on the blocking pool, so a caller
 /// on a current-thread runtime does not stall its only worker.
 pub(super) async fn live_usage_writer() -> (tempfile::TempDir, PathBuf, UsageHandle, UsageWriter) {
@@ -134,41 +120,6 @@ pub(super) async fn live_usage_writer() -> (tempfile::TempDir, PathBuf, UsageHan
     drain_usage_writer_strict(settle_writer).await;
     let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
     (dir, path, handle, writer)
-}
-
-/// Every control row the database holds, read through a connection the writer
-/// does not own.
-///
-/// Returns the whole table rather than one key on purpose: the storage key a
-/// paid-probe reservation lands under is the usage crate's own encoding and
-/// deliberately never crosses the boundary, so callers DERIVE the key from what
-/// a committed reservation adds instead of restating it. A hardcoded key here
-/// would be a second copy of a private encoding, and would keep passing if the
-/// reservation started writing somewhere else entirely.
-pub(super) fn usage_control_rows(path: &Path) -> BTreeMap<String, String> {
-    let db = routectl_usage::open_readonly(path).expect("read-only open");
-    let mut stmt = db
-        .conn()
-        .prepare("SELECT key, value FROM meta")
-        .expect("prepare");
-    stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })
-    .expect("query")
-    .collect::<Result<BTreeMap<_, _>, _>>()
-    .expect("control rows")
-}
-
-/// The rows present in `after` and absent from `before`.
-pub(super) fn added_control_rows(
-    before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    after
-        .iter()
-        .filter(|(key, _)| !before.contains_key(*key))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
 }
 
 /// The drain returns only once a queued row is durable: a reader opening the
