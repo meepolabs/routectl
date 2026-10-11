@@ -356,3 +356,73 @@ fn closed_label_sets_are_complete_and_distinct() {
     let f1: Vec<&str> = F1Outcome::ALL.iter().map(|o| o.label()).collect();
     assert_eq!(f1, ["repaired", "repaired_lossy", "unrepaired"]);
 }
+
+/// Each row is a client version that is not a safe token. It must share
+/// the no-version cohort's first-N budget rather than open its own, and
+/// must never be stored.
+#[test]
+fn an_unsafe_client_version_shares_the_no_version_cohort() {
+    let oversized = "v".repeat(65);
+    let rows = [
+        ("space", "2.1 beta"),
+        ("control byte", "2.1\u{7}"),
+        ("65 bytes", oversized.as_str()),
+    ];
+    for (name, unsafe_version) in rows {
+        let state = WireCheckState::default();
+        let config = config(3, 1000);
+        for _ in 0..3 {
+            state.admit(anthropic_lane(), None, &config);
+        }
+
+        let admitted = admitted_indices(&state, anthropic_lane(), Some(unsafe_version), &config, 5);
+
+        assert_eq!(
+            admitted,
+            Vec::<usize>::new(),
+            "{name}: shares None's spent budget"
+        );
+        let shard = state.sampler[anthropic_lane().index()]
+            .lock()
+            .expect("sampler lock");
+        assert!(
+            shard.versions.iter().all(|(v, _)| v.is_none()),
+            "{name}: the unsafe version was stored"
+        );
+    }
+}
+
+#[test]
+fn concurrent_admits_on_two_lanes_count_exactly_per_lane() {
+    let state = std::sync::Arc::new(WireCheckState::default());
+    let config = config(4, 10);
+    let threads = 16;
+    let per_thread = 250;
+    let handles: Vec<_> = (0..threads)
+        .map(|t| {
+            let state = std::sync::Arc::clone(&state);
+            let lane = if t % 2 == 0 {
+                anthropic_lane()
+            } else {
+                chat_lane()
+            };
+            std::thread::spawn(move || {
+                let admitted = (0..per_thread)
+                    .filter(|_| state.admit(lane, Some("1.0.0"), &config))
+                    .count();
+                (lane, admitted)
+            })
+        })
+        .collect();
+
+    let mut per_lane = std::collections::HashMap::new();
+    for handle in handles {
+        let (lane, admitted) = handle.join().expect("admit thread");
+        *per_lane.entry(lane.label()).or_insert(0) += admitted;
+    }
+
+    let calls_per_lane = (threads / 2) * per_thread;
+    let expected = 4 + (calls_per_lane - 4) / 10;
+    assert_eq!(per_lane.get(anthropic_lane().label()), Some(&expected));
+    assert_eq!(per_lane.get(chat_lane().label()), Some(&expected));
+}

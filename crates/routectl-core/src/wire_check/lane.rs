@@ -162,6 +162,16 @@ macro_rules! lane_label {
 }
 
 impl Lane {
+    /// Number of distinct lanes: every ingress dialect times every egress
+    /// kind.
+    pub const COUNT: usize = IngressDialect::ALL.len() * EgressKind::ALL.len();
+
+    /// Dense index of this lane in `0..Lane::COUNT`, unique per
+    /// (ingress, egress) pair, for fixed per-lane tables.
+    pub const fn index(self) -> usize {
+        self.ingress as usize * EgressKind::ALL.len() + self.egress as usize
+    }
+
     /// The lane for `ingress` feeding `egress`: FIDELITY exactly when the
     /// egress sends the ingress's own dialect.
     pub fn of(ingress: IngressDialect, egress: EgressKind) -> Self {
@@ -233,6 +243,23 @@ mod tests {
                 assert_eq!(lane.class(), expected, "lane {}", lane.label());
             }
         }
+    }
+
+    #[test]
+    fn lane_indices_are_dense_and_unique_over_every_pair() {
+        let mut seen = [false; Lane::COUNT];
+        for ingress in IngressDialect::ALL {
+            for egress in EgressKind::ALL {
+                let index = Lane::of(ingress, egress).index();
+
+                assert!(index < Lane::COUNT, "index {index} out of range");
+                if let Some(slot) = seen.get_mut(index) {
+                    assert!(!*slot, "duplicate index {index}");
+                    *slot = true;
+                }
+            }
+        }
+        assert!(seen.iter().all(|s| *s), "every index in 0..COUNT is used");
     }
 
     #[test]

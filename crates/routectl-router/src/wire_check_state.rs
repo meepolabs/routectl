@@ -28,6 +28,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use routectl_core::is_safe_token;
 use routectl_core::warn_dedup::{CappedWarnSet, WarnDecision};
 use routectl_core::wire_check::{Lane, Leg, PathClass, RejectionProvenance, WirePath};
 
@@ -199,7 +200,7 @@ pub struct WireCheckSnapshot {
 /// Share one instance by `Arc`; every method takes `&self`.
 #[derive(Debug)]
 pub struct WireCheckState {
-    sampler: Mutex<HashMap<Lane, LaneSampler>>,
+    sampler: [Mutex<LaneSampler>; Lane::COUNT],
     registry: Mutex<Registry>,
     warned: CappedWarnSet<(Lane, WirePath, WarnKind)>,
 }
@@ -207,7 +208,7 @@ pub struct WireCheckState {
 impl Default for WireCheckState {
     fn default() -> Self {
         Self {
-            sampler: Mutex::default(),
+            sampler: std::array::from_fn(|_| Mutex::default()),
             registry: Mutex::default(),
             warned: CappedWarnSet::new(WARN_DEDUP_CAP),
         }
@@ -270,8 +271,10 @@ const fn admit_nth(seen_before: u64, first_n: u64, sample_one_in: u64) -> bool {
 
 impl WireCheckState {
     /// Whether a successful attempt on `lane` from `client_version` gets a
-    /// full check. Allocates only the first time a (lane, version) is
-    /// tracked.
+    /// full check. A version that is not a safe token counts as no version,
+    /// so a hostile or oversized string is never stored. Allocates only the
+    /// first time a (lane, version) is tracked, and only attempts on the
+    /// same lane contend for a lock.
     pub fn admit(
         &self,
         lane: Lane,
@@ -280,8 +283,11 @@ impl WireCheckState {
     ) -> bool {
         let first_n = u64::from(config.first_n);
         let sample_one_in = u64::from(config.sample_one_in.get());
-        let mut sampler = lock(&self.sampler);
-        let entry = sampler.entry(lane).or_default();
+        let client_version = client_version.filter(|v| is_safe_token(v));
+        let Some(shard) = self.sampler.get(lane.index()) else {
+            return false;
+        };
+        let mut entry = lock(shard);
         if let Some((_, seen)) = entry
             .versions
             .iter_mut()

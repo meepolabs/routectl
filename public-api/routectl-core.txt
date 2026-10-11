@@ -3875,8 +3875,10 @@ impl<T> tracing::instrument::Instrument for routectl_core::wire_check::IngressWi
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::IngressWire
 pub struct routectl_core::wire_check::Lane
 impl routectl_core::wire_check::Lane
+pub const routectl_core::wire_check::Lane::COUNT: usize
 pub const fn routectl_core::wire_check::Lane::class(self) -> routectl_core::wire_check::LaneClass
 pub const fn routectl_core::wire_check::Lane::egress(self) -> routectl_core::wire_check::EgressKind
+pub const fn routectl_core::wire_check::Lane::index(self) -> usize
 pub const fn routectl_core::wire_check::Lane::ingress(self) -> routectl_core::wire_check::IngressDialect
 pub const fn routectl_core::wire_check::Lane::label(self) -> &'static str
 pub fn routectl_core::wire_check::Lane::of(routectl_core::wire_check::IngressDialect, routectl_core::wire_check::EgressKind) -> Self
