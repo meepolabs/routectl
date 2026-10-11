@@ -90,6 +90,12 @@ list with more narrative.
   and is always correct. What that rules out is a verdict rewriting traffic
   today on evidence no later boot can find.
 
+- **Field rejections are now parsed and repaired on anthropic-api, Bedrock, and openai-compat lanes.** When one of these upstreams answers a 400 or 422 by naming a request field -- the Anthropic `<path>: ...` location prefix and `"a.b" is not supported ... Use "x.y"` forms, the same two inside Bedrock's flat message (Converse wrapper stripped), or OpenAI `error.param` / `Unsupported parameter: '<x>' is not supported with this model.` -- routectl resolves the path against its closed table of repairable fields, repairs the request on the same target, and retries once. A repair either drops the field or rewrites it to the single accepted value the rejection names; a rejection naming no accepted value, or several, repairs nothing. Only a refused field, or a rewrite to the upstream's own named value, is learned; a refused value on a drop row is repaired for that request only, recorded as `field_lossy_drop_repair` and counted in the new `rc_field_repair_lossy_total`, because a learned drop would strip every valid value from later requests. The `envelope_field_repaired` WARN is now emitted once per repair rather than once per request (at most two per request). Paths outside the table, Gemini, and openai-responses repair nothing. The table currently holds one row, the Anthropic `thinking.display` drop, whose captured rejection refuses a value -- so today that repair serves the request and learns nothing; rewrite rows and further fields plug into the same loop. Each grounded wording is pinned to a captured envelope under `crates/routectl-router/tests/fixtures/rejections/`, and `scripts/capture-rejection.sh` turns a logged rejection into such a fixture (see docs/DEVELOPMENT.md "Capturing an upstream rejection fixture").
+
+- **A learned rewrite verdict now survives restart** (no shipped table row rewrites yet; this is the persistence a rewrite row relies on). Warm rebuild restores a rewrite verdict's value from the capability ledger, decoded strictly against the field's closed accepted set; a malformed value replays as a plain negative and is counted in the new `degraded_value` field of the rebuild log line. Pre-flight then rewrites the field to the restored value before dispatch, logged as `action = field_preflight_rewrite`, and two new fail-open reasons explain a rewrite that did not happen: `no_stored_value` and `value_already_sent`. A field verdict confirms only when its value matches; an observation with a changed value starts a new verdict, so a stale value never acts.
+
+- **Probe re-checks clear a learned field negative only once the clear is durable.** A re-check that finds a field accepted now removes the learned negative only after its `cleared` row is durably written to the ledger. A refused or failed write, or no answer within 10 seconds, leaves the negative acting and the probe retryable; a negative replaced while the probe was out is not cleared. The field-verdict snapshot line gains `rc_probe_clear_persistence_failures_total` (accepted re-checks whose clear could not be made durable) and `rc_probe_oldest_due_ms` (how long the longest-waiting probe job has been due, `-1` when none is). A successful clear logs `probe_clear` at INFO.
+
 - **Pre-flight rewrites stand down while the capability ledger cannot be
   trusted** -- every way a wrong wire-shape verdict is taken back out of
   service is itself a ledger write: the clear a failed re-verification
@@ -138,25 +144,6 @@ list with more narrative.
   the same fields, so reading a summary and then scanning the detail for
   the target it named lands on matching values. Nothing added is a request
   value, a response body, or upstream text.
-
-- **Paid-probe budgets report their accounting health, including budget
-  spent for no call** -- each provider with a configured daily cap now
-  reports that cap beside what the ledger recorded for the current UTC
-  day, whether that record could be read at all, and whether the usage
-  writer can still promise a durable unit. The count read is the durable
-  one rather than a process tally, so a daemon restarted after spending
-  its day's budget reports the spend rather than zero.
-
-  Separately reported, and the reason the surface exists: units that were
-  committed while shutdown had begun, whose caller was never authorized.
-  Budget consumed for no call is invisible everywhere else -- the unit is
-  spent and its ledger row looks like any other, and it is not a writer
-  fault because the write landed -- so a surface reporting only the day's
-  usage and the writer's state under-reports the real budget. It is a
-  process-wide total rather than a per-provider one, since the condition it
-  counts has no provider dimension, and it resets on restart: reconciling a
-  day's budget across a restart means reading it from the logs of the
-  process that emitted it.
 
 - **`catalog set --create` publishes a narrow cell for an uncovered
   upstream** -- correcting a catalog fact (a context window, a rate, a
@@ -560,6 +547,12 @@ list with more narrative.
   (the historical v9 -> v10 step empties it on databases that old); the
   schema version is unchanged -- no behavior change.
 
+- **Free capability probes now only re-check an acting field negative.** A free `count_tokens` probe is queued only when the lane already holds an acting negative on a field that a token count validates, on a lane with a free token count; the field value is captured before pre-flight removes it. A request that merely carries a known field no longer starts discovery: real traffic is the learning source, and probes exist to un-learn.
+
+- **Negative capability learning is gated per target, not per request.** On a fallback chain that mixes a forwarded-credential target with an own-credential one, a rejection from the own-credential target is now learned; previously any forwarded bearer on the request suppressed learning for every target in the chain. A forwarded-credential target still never teaches.
+
+- **An upstream error body over 64 KiB is no longer parsed for client-facing detail.** Each upstream error body is now parsed once, within the existing `MAX_ERROR_BODY_BYTES` cap, and every consumer (the client error envelope and its `param`, the stream terminal error, the failure classifier, the capability matcher) reads that one parse. An over-cap JSON body now yields a status-only client message and no `param`, the same as a non-JSON body.
+
 - **`/status/doctor` reports the daemon's own state instead of re-reading disk.** A poll no longer parses the config file, loads the catalog overlay, or replays the usage ledger: it renders the config and overlay generation the daemon accepted and its resident learned-capability registry. The capability matrix carries `source` (`resident`, or `ledger_replay` for the offline `routectl doctor`, which keeps its replay) and, on a resident panel, `warm` (`outcome`, `class`, `summary`) describing the boot warm; an empty registry after a failed boot warm shows the warm's failure code rather than an empty matrix. The version finding names the config the daemon accepted. Two new `config` findings: `reload`, the last rejected config or overlay reload (a path-free failure class and its age, cleared by the next successful reload), and one `catalog overlay` finding per overlay cell whose write multiplier is below the sentinel. Doctor report schema 14 -> 15.
 
 - **Routine operation no longer fills the log with WARN lines.** Log levels were reviewed across every crate; [docs/LOGGING.md](docs/LOGGING.md) now states the level policy, catalogs every remaining WARN and ERROR with the operator action it calls for, and lists what moved to DEBUG or to counters. The catalog overlay below-sentinel warning logs once at boot and once per reload that changes the overlay revision (it was every status poll). Capability rebuild skips log at DEBUG under one aggregated INFO tally. Access lines for `/health`, `/status` and `/status/*` log at DEBUG. Expected egress transforms log at DEBUG on every lane: sampling and thinking strips, fingerprint and billing withholds, `cache_control` drops on lanes with no breakpoint surface, reasoning skips, the beta retry, and the placeholder Bedrock `toolSpec`. Also at DEBUG: the would-trim shadow misfire, quota-placement fallbacks, feature-naming template misses, and the boot row-cap notes of the K-estimator and calibration warms. Relayed upstream rejections log at WARN instead of ERROR, and the Responses ingress `store=true ignored` notice logs once per process. A real-daemon test pins that polling `/status` and `/status/doctor` adds no WARN, ERROR, field-verdict, rebuild-skip or overlay-defect lines.
@@ -567,6 +560,7 @@ list with more narrative.
 ### Removed
 
 - **The hidden `routectl pricing` alias for `routectl catalog`.** Use `routectl catalog ...`.
+- **Paid capability probes, and the `[fidelity] paid_probe_daily_caps` key** (both added on develop after v0.9.0 and never released). routectl no longer makes paid probe calls, keeps no paid-probe reservation ledger, and no longer reports paid-probe budget rows: `rc_paid_probe_budgets`, `rc_paid_probe_budgets_total`, `rc_paid_probe_budgets_omitted`, and `rc_paid_probe_consumed_unauthorized_total` are gone from the status line, as is the `paid-probe unit committed as shutdown began` WARN. A config written against a development build that still sets `[fidelity] paid_probe_daily_caps` is refused at load, by `config check`, by the edit commands, and by `config migrate` at any version, with an error naming the key to delete. Reservation rows an earlier development build left in the usage database are inert and are not removed. `[fidelity] prefix_impact_opt_in` is unchanged.
 - **The hidden `routectl provider capture-envelope` command** and its `ROUTECTL_BEDROCK_ENVELOPE_CAPTURE` environment variable.
 
 ### Fixed
@@ -576,6 +570,10 @@ list with more narrative.
 - **A new learned beta flag can no longer push a lane past its cap or evict an unrelated fact.** When all 32 learned beta entries on a lane are held by in-progress purges, a new beta-flag observation is now refused (logged as `event=evict reason=beta_lane_cap_leased`) instead of exceeding the per-lane bound, so it can no longer evict an unrelated learned fact through the global cap; it is learned on a later observation once the purge settles.
 
 - **The computer tool is learned and overridden as `computer_use`.** A request carrying the `computer_20250124` tool now derives the `computer_use` capability key, as do the learn-side tool-type and openai-param rejections, so `[capability.overrides.<spec>] unsupported = ["computer_use"]`, a `computer_use` entry in `[capability] essential`, and a `computer_use` catalog prior now apply to it; previously it keyed as `computer` and none of them matched. `computer_toolset_*` tools keep their own `computer_toolset` key. A learned `computer` negative recorded before the upgrade stays under its old key until it decays or is purged with `routectl capability purge`.
+
+- **A learned field rewrite keeps its value across a catalog or overlay revision change.** The replay boundary written on a revision-changing reload or boot restated each surviving verdict without its value, so a rewrite verdict came back unable to act until it was relearned. The restatement now carries the value.
+
+- **A tool the egress withheld or could not translate no longer teaches the capability store.** When an attempt's egress kept a hosted tool off the wire, that attempt's success or rejection is no evidence about the tool, so it is neither learned nor cleared from it.
 
 - **`config migrate` no longer half-applies or silently drops a capability list.** The file is left untouched when a later step refuses after an earlier one succeeded, and a retired `unsupported_features` list whose `[capability.overrides]` destination has the wrong shape is refused (kind `override_shape`) instead of being dropped; a version 1 file that still carries retired capability keys now migrates.
 
@@ -617,7 +615,7 @@ list with more narrative.
 - **Anthropic thinking tokens now reach the usage ledger as reasoning tokens.** Anthropic reports them as `usage.output_tokens_details.thinking_tokens` (on the closing `message_delta` when streaming), but the anthropic-api egress read a flat `usage.reasoning_tokens` that the wire never sends, so every thinking request recorded no reasoning tokens. The nested field is now read on buffered and streamed responses, on both the anthropic-api and Bedrock Invoke lanes. A response without thinking still records none (absent, not zero). Thinking tokens are already inside `output_tokens`, so recorded cost is unchanged; the reasoning column in usage reports and the thinking-capability signal are what change.
 - **A summary-only reasoning item echoed back by a Responses client now keeps its summary on the OpenAI Responses egress.** An item carrying a summary but no `encrypted_content` -- what the server returns when encrypted reasoning is not included -- was dropped whole, summary and all, because re-sending it by its id fails upstream. It now ships as a `reasoning` item carrying the summary with no `id` and no `encrypted_content`, the shape verified against the ChatGPT Codex backend (api.openai.com was not probed). Reasoning text on such an item still has no verified carrier and drops, counted as `reasoning_text_unsigned`. Items with a signature are byte-for-byte unchanged.
 - **`config check` now refuses an openai-responses entry with a misplaced `account_id_ref`.** A `chatgpt-oauth` entry with a static bearer and no `account_id_ref`, or an `api-key` entry carrying one, passed `config check` clean and failed only once `serve` or a hot reload built the provider. The rule now runs in the shared config validation, so `config check` refuses it with the same error; no secret is read to decide it. `oauth://` bearers may still omit `account_id_ref`.
-- **Provider names are capped at 128 bytes.** A provider name keys the durable paid-probe budget, so an unbounded name could create an equally unbounded storage key. `config check`, `serve` startup, and hot reload now refuse a longer name before any reservation is written; the error reports the length and withholds the name. Names within the limit, including ones carrying separator characters, are stored exactly as before.
+- **Provider names are capped at 128 bytes.** A provider name keys runtime and learned state, so an unbounded name could create an equally unbounded key. `config check`, `serve` startup, and hot reload now refuse a longer name; the error reports the length and withholds the name. Names within the limit, including ones carrying separator characters, are stored exactly as before.
 - **The OAuth identity cloak no longer discards a non-Claude-Code client's system prompt, or its image and document system blocks.** On the own-OAuth Anthropic lane the cloak moves the client's system content into the first user message; with no user message it used to drop the whole prompt silently, and any system block without text was dropped too.
   - A history with no user turn but earlier assistant turns now gets one synthetic leading user message carrying the `<system-reminder>`.
   - A request with nothing left once its system content moves (no `messages`, a non-array `messages`, a `messages` entry that is not an object with a string `role`, or only system turns) now fails before anything is sent. The error is a 400 `invalid_request_error` saying routectl refused the request. It never retries the seat, never counts against its circuit breaker, and never teaches the capability registry anything, whatever `class_overrides` or `[retry.classes]` say about status 400, and a configured fallback gets the caller's original request.

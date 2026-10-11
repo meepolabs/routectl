@@ -229,8 +229,10 @@ license.
   error bodies), structural-summary extractor, `[log]`-block override
   seeding
 - `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
-  of an upstream error body carried on `Error::Upstream`, plus its
-  envelope / `error.*` accessors and `upstream_message_or_excerpt`
+  of an upstream error body carried on `Error::Upstream` (read via
+  `Error::parsed_body`), plus its envelope / `error.*` accessors and
+  `upstream_message_or_excerpt`; `UpstreamBody::new` is the only producer,
+  pairing the text with the parse of exactly that text
 - `src/test_utils.rs` -- single source of truth for the cross-crate
   contract-test fixture builders (`scenarios::*`, `user_msg`,
   `get_weather_tool`); gated behind `#[cfg(any(test, feature =
@@ -2745,11 +2747,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_repair.rs` -- the reactive L0 envelope-field repair the
   three dispatch arms drive, and the counterpart of `replay_repair` for the
   field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (one
-  grounded row today: `FieldRepairRow { path, surface, class }` -- the
-  qualified dotted path a real captured rejection named, the private
-  `FieldSurface` enum naming the request-side carriers that produce that wire
-  field, and the `TransformClass` deciding which pre-flight gates an
-  application of that row must clear). The taxonomy is TRANSFORM-KEYED: a row
+  grounded row today: `FieldRepairRow { path, surface, transform, class,
+  count_tokens_validates }` -- the qualified dotted path a real captured
+  rejection named, the private `FieldSurface` enum naming the request-side
+  carriers that produce that wire field, the `FieldTransform` (`Drop`, or
+  `Rewrite { accepted }` over a closed accepted set -- `ValueSlot` via
+  `value_slot_for_capability_key`), the `TransformClass` deciding which
+  pre-flight gates an application of that row must clear, and whether a free
+  token count can re-check it). The taxonomy is TRANSFORM-KEYED: a row
   STATES its class (`Envelope` / `PrefixImpacting`, plus `required_quorum` and
   `requires_target_opt_in`), so nothing infers a cost from a path string and a
   new row declares its own. Both quorum constants live in `config::schema`
@@ -2789,10 +2794,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `apply_sole_candidate_for_tests` -> `apply_candidate` instead. The grounded
   table's SIZE and its row's class both stay asserted, so a permanent row remains
   a deliberate edit.
-  `closed_table_row` is THE single path lookup:
-  it returns the table's own `&'static str`, so no upstream bytes reach any
-  downstream consumer or the operator WARN, and a path with no row mutates
-  nothing. `present_rows(req)` is the scan both arms share -- every closed-table
+  `closed_table()` is THE single row source: a repair only ever holds the
+  table's own `&'static` row, so no upstream bytes reach any downstream
+  consumer or the operator WARN, and a path with no row mutates nothing.
+  `present_rows(req)` is the scan both arms share -- every closed-table
   row the request carries, in table order.
   `Router::plan_field_carry` admits BEFORE dispatch and without
   touching the request, in this order: kill switch -> an admitted kind
@@ -2831,13 +2836,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   rejection names (refusing outright when it names none, and refusing a second
   call outright once one row has been repaired), re-check presence, CHECK the
   allowance
-  (`RepairBudget::can_draw`, a read), drop the field (both carriers, or the
-  egress re-derives it), then DRAW, RELEASE every other candidate's guard -- this
+  (`RepairBudget::can_draw`, a read), apply the row's transform -- drop the
+  field (both carriers, or the egress re-derives it), or rewrite it to the one
+  accepted value the rejection named -- then DRAW, RELEASE every other candidate's guard -- this
   attempt has spent its one repair, so no outcome can settle another row, and
   pinning those slots would starve a sibling request that CAN settle them --
   re-stamp the estimate through
   `dispatch::restamp_calibration_estimate`, and return the rejection status.
-  `repaired_path()` names the row that was dropped, which is what the arm's
+  `repaired_path()` names the row that was repaired, which is what the arm's
   WARN renders. The
   draw follows the mutation so a drop that removes nothing charges nothing, and
   every repaired-state flag is set only on the returned `Some`. A `drop_from`
@@ -2851,20 +2857,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   accepted) and so returns a `Vec` rather than an `Option`; both are no-ops
   without a guard, release-by-drop otherwise.
   `note_field_repair` / `note_field_repair_succeeded` record the
-  `DispatchMeta.field_repair` summary and bump the three counters together,
-  and `emit_field_repair` fires the single per-request content-free WARN.
-  `rejected_field_path` reads the class first and then the
-  `parse_rejected_field_path` seam, whose PRODUCTION body resolves nothing (no
-  envelope parser ships in this stage) -- so the whole arm is inert on real
-  traffic by construction. That claim cannot be made behaviorally (the
-  `cfg(not(test))` body is absent from the test binary), so it is a SOURCE
-  contract: the body's normalized text must EXACTLY equal "discard the two
-  parameters, return None". An exact contract rather than a substring denylist,
-  because an arbitrary `helper(err)?` returning `Option<String>` passes every
-  such needle while making the parser live; the locator fails closed on any
-  missing needle, and both properties are mutation-verified. Under `cfg(test)`
-  that one seam reads a thread-local provisional resolution, which is how
-  `field_repair_tests.rs` covers every arm downstream of it.
+  `DispatchMeta.field_repairs` records and bump the attempted / lossy /
+  succeeded / learned counters, and `emit_field_repair` fires one content-free
+  WARN per repair. `rejected_field` reads the class first
+  (`class_can_name_a_field`: `BadRequest`, or the lifted openai
+  `unsupported_parameter` on `openai-compat`) and then
+  `rejection_parser::parse_rejection` over the error's carried parse. Under
+  `cfg(test)` the `provisional` module's thread-local injection replaces the
+  parser, which is how `field_repair_tests.rs` covers every arm downstream of
+  it.
   `grounded_field_feature_keys(req)` mints the `field:<path>`
   key every present closed-table row can produce for a request (empty when the
   request grounds no closed-table surface). `request_feature_keys(req)` is the
@@ -2999,7 +3000,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Router::rejection_names_field_surface` with the reactive admission so "did the
   upstream name this mutation" has one implementation rather than two answers.
   It applies the transform through `field_repair`'s own `FieldSurface::drop_from`
-  rather than a second implementation, against a SCRATCH clone adopted only on
+  or, for a rewrite verdict, `FieldSurface::rewrite_in` with the verdict's
+  stored value (`FieldVerdictRegistry::verdict_value` at the authorized
+  incarnation) rather than a second implementation, against a SCRATCH clone adopted only on
   a reported success plus a post-condition re-check, so a transform that
   removes nothing (or mutates and then reports failure) yields a request
   byte-equivalent to the original rather than a half-mutated one. Every other
@@ -3007,7 +3010,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   closed-set reason token (`no_grounded_field` / `unsupported_lane` /
   `unattributable_target` / `masked_by_override` / `no_identity` /
   `not_eligible` / `below_quorum` / `no_target_opt_in` /
-  `ambiguous_mutation` / `canary_restored`); the record carries
+  `ambiguous_mutation` / `no_stored_value` / `value_already_sent` /
+  `canary_restored`); the record carries
   only tokens, a
   code-authored path literal, the row's `transform_class` token, a
   `sanitize_for_log`-sanitized state key (an
@@ -3054,7 +3058,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   decision that had none. The WARN carries the HEADLINE decision's own provenance
   rather than an aggregate, since the four values describe ONE identity's evidence.
   Field-by-field reference in `docs/LOGGING.md` "Envelope-field pre-flight
-  decision DEBUG + WARN". `action = field_preflight_drop` is
+  decision DEBUG + WARN". `action` (`field_preflight_drop` or
+  `field_preflight_rewrite`, the acting decision's own token) is
   attached only to a record that ACTED -- labelling a fail-open with it would
   name an action the walk did not take.
   Read-only on the verdict: it draws no `RepairBudget` and claims no
@@ -3215,9 +3220,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   permitted`, the quoted `"a.b" is not supported` form, OpenAI
   `error.code == "unsupported_parameter"` or the exact singular template;
   every other reason, and a bare `error.param`, is `InvalidValue`. `accepted`
-  is always `None` until rows declare an accepted set. Not yet consumed by
-  the field-repair seam (hence the module's non-test `dead_code`
-  expectation). `src/router/rejection_parser_tests.rs` welds it to the
+  is filled only for a rewrite row, and only when the grounded template
+  position names exactly ONE member of the row's closed accepted set.
+  Consumed by `field_repair::rejected_field`.
+  `src/router/rejection_parser_tests.rs` welds it to the
   committed corpus (`tests/fixtures/rejections/**`, the Bedrock validation
   canaries, the forced tool_choice capture and both near-miss sets): every
   envelope's outcome -- row, localized-but-unresolved path, or not
@@ -3463,22 +3469,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   from this lane's translation metrics, the unified-quota shared claim/log state,
   and thinking-cache writes; response-local metadata unaffected. Rationale in module docs
 - `src/router/probe_payload_capture.rs` -- what an admitted request contributes
-  to a probe, and the ONLY path into the queue.
-  `on_admitted_request` is the dispatch-facing wrapper all THREE walks call
-  immediately before their outbound call -- the ADMITTED boundary, past the gate
-  and about to dial, deliberately NOT the success arm. Each passes the per-target
-  `attempt_req` (post-overlay, post-strip, post-pre-flight), so a row an acting
-  pre-flight already stripped activates nothing; pinned by a source guard on the
-  call sites AND by an end-to-end dispatch test that a pre-preflight clone (which
-  survives the source guard) turns red.
-  `activate_probe_lanes_for_admitted_request` mirrors `plan_field_carry`'s
-  refusals through the SHARED `field_repair::attributable_field_lane` (which
-  admits `anthropic-api`, `bedrock` and `openai-compat`; probes then narrow the
-  answer to `anthropic-api`, the only lane they act on) rather than a second
-  base-url read, captures the bounded payload (field value, both beta sources, the
-  Claude-Code classification), and emits the once-per-incarnation beta-retention
-  refusal warning. All `&self` bookkeeping: dials nothing, awaits nothing, never
-  delays the admitted request
+  to a probe, and the ONLY path into the queue. A probe is a RE-CHECK, never
+  discovery: `ProbeFieldCapture::of` takes the attempt's count-validated
+  closed-table fields BEFORE pre-flight (an acting negative is what makes
+  pre-flight drop the field), and `on_admitted_request` -- called by all THREE
+  walks immediately before their outbound call -- queues a re-check only for a
+  field the lane holds an ACTING negative on, on a kind `probe_lane_kind`
+  admits (the shared `field_repair::attributable_field_lane` narrowed to a free
+  token count: `anthropic-api`, or an Anthropic-family model on `bedrock`).
+  The beta context comes from the per-target `attempt_req`. `&self` bookkeeping
+  only: dials nothing, awaits nothing
 - `src/router/probe_seat.rs` -- `ProbeSeat`, `probe_seat_for`,
   `probe_entry_is_attributable`: which seat a probe
   identity's lane names (the first resolved model or pooled member egressing
@@ -3739,7 +3739,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   dropped field verdict's canary state; same rule as boot replay via
   `capability_owner::owner_decision`. Run by `carry_over_learned_from` on a
   config-only reload, and by the boundary commit arm on a revision-changing
-  one
+  one. `with_restated_value` fills a `RecordedLearnedEntry`'s `value` with the
+  field verdict's value at the snapshotted incarnation, only for a row whose
+  repair row writes one (every catalog key and every drop restates with none)
 - `src/router/capability_purge.rs` -- operator-initiated purge of ONE
   `(StateKey, capability)` learned entry, as a TWO-PHASE protocol whose ORDER is the contract (a purge is
   a memory mutation plus a SQLite transaction, and the transaction must not be
@@ -3978,8 +3980,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   version counts toward the cap until then. `owned_snapshot(current_kind)` is
   the display read (only each lane's current-kind version; a row recorded under
   the empty kind is never returned);
-  `recorded_snapshot` / `RecordedLearnedEntry` carry the kind for the owner
-  sweep and the boundary restatement: `generation` / `advance_generation` /
+  `recorded_snapshot` / `RecordedLearnedEntry` carry the kind, the entry's
+  `incarnation`, and a `value` slot (always `None` out of the registry, which
+  holds no values) for the owner sweep and the boundary restatement: `generation` / `advance_generation` /
   `commit_boundary_transition` (promotes the pending generation, or advances,
   plus the catalog-scoped prune under one acquisition), the `*_in_generation`
   entry points returning `GenerationOutcome::{Applied{value,generation}, Stale}`
@@ -4306,7 +4309,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`FieldRepairPlan::commit` -> `FieldRepairGuard::commit`) carries
   `Some(Shape)` on `CapabilityLearnEvent::value`, and
   `routectl-cli`'s `capability_ack_drain` writes it to `upstream_token` (NULL
-  for a drop)
+  for a drop). `FieldValueStore` holds each identity's resident value keyed
+  by the incarnation it was recorded at (`value_at`, `latest`, `record`,
+  `forget`): a lookup naming any other lifecycle answers nothing
 - `src/field_canary.rs` -- per-`FieldVerdictKey` canary and confirmation-quorum
   state, shared behind an `Arc` alongside `FieldVerdictRegistry`'s own
   in-flight set. STATE ONLY, one `Mutex<HashMap<FieldVerdictKey, CanaryState>>`
@@ -4517,8 +4522,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   key does not parse as a `StateKey` bumps `skipped_lane` (before the owner
   and revision checks); a lane-keyed row that fails
   `capability_owner::owner_decision` against the `providers` table the caller
-  passes bumps `skipped_owner`. A missing tombstone replays nothing
-  (fail-closed; the caller writes the fresh boot tombstone)
+  passes bumps `skipped_owner`; a field-namespace row no field-repair guard
+  could have written (namespace reached only after normalization, or a non-live
+  source) bumps `skipped_namespace`. A field row whose repair row writes a value
+  decodes `upstream_token` strictly (`VerdictValue::decode`); a refused token
+  replays as a plain negative and bumps `degraded_value`.
+  `rebuild_capabilities_with_values` also returns `ReplayedFieldValues`
+  (`value_for`, `attach`) for the caller that owns the value store. A missing
+  tombstone replays nothing (fail-closed; the caller writes the fresh boot
+  tombstone)
 - `src/capability_owner.rs` -- the one pure owner predicate
   `owner_decision(lane, recorded_kind, providers) -> OwnerDecision`
   (`Owned | EntryRemoved | KindChanged | KindUnrecorded`): a learned fact
@@ -5581,7 +5593,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   NEWEST tombstone: moving the boundary without re-appending the survivors
   leaves them acting for this process's life and gone at the next restart. Each
   restatement is stamped from the entry's own `last_seen`, never the reload
-  instant, so a reload never extends a verdict's decay life. The tombstone-plus-
+  instant, so a reload never extends a verdict's decay life, and carries the
+  survivor's value (`Router::with_restated_value`) as its `upstream_token` in
+  the live write's encoding, so a rewrite verdict keeps its value across the
+  boundary. The tombstone-plus-
   restatement rows are built by `boundary_batch`, shared with the boot
   revision-mismatch path in `capability_rebuild.rs`. `Failed` or
   `Abandoned` makes `handle_config_reload` reject the reload and keep the
@@ -5603,7 +5618,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   closed. `restate_survivors_past_new_boundary` (revision mismatch) replays
   the slice after the STALE tombstone into a scratch registry under this
   boot's revision (`should_replay` drops catalog-scoped rows, keeps
-  catalog-independent ones), commits `capability_boundary::boundary_batch`
+  catalog-independent ones, each survivor carrying its replayed value via
+  `ReplayedFieldValues::attach`), commits `capability_boundary::boundary_batch`
   (fresh tombstone + restatements) atomically, and only on commit replays
   the same rows into the live registry; on failure (the slice read via
   `try_read_events` OR the batch commit) nothing is committed, an ERROR logs
@@ -5619,7 +5635,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   its own. A failure logs at ERROR; boot never fails on the usage subsystem. `emit_rebuild_log` reports
   the per-verdict tally plus the skip tallies (`skipped_unknown` for an
   unrecognized token, `skipped_revision` for a revision eviction,
-  `skipped_vocab` for an unmappable vocabulary version) with
+  `skipped_vocab` for an unmappable vocabulary version, `skipped_lane`,
+  `skipped_owner`, `skipped_namespace`) and `degraded_value` with
   WARN-on-`REBUILD_ROW_LIMIT`-truncate. Boot never
   fails. Tests in the `#[path]`-included `capability_rebuild_tests.rs`
 - `src/server/cc_pin_drift.rs` -- `CcPinDriftGuard`: warns once per distinct
