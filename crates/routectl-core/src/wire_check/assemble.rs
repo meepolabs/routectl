@@ -14,6 +14,7 @@
 //! a partial document is never returned. Neither `Debug` impl here renders
 //! body content.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde_json::{Map, Value};
@@ -171,10 +172,11 @@ impl StreamAssembler {
     }
 
     /// Fold the next frame. Keepalive frames (empty data or an SSE comment)
-    /// are ignored, as is anything after a failure or after the frame that
-    /// closes the stream.
+    /// are ignored, as is anything after a failure. After the frame that
+    /// closes the stream, only a failure frame still counts (it fails the
+    /// assembly); every other frame is ignored.
     pub fn push(&mut self, frame: SseFrame<'_>) {
-        if self.failure.is_some() || self.closed {
+        if self.failure.is_some() {
             return;
         }
         let frame_len = frame
@@ -187,6 +189,10 @@ impl StreamAssembler {
         }
         let data = frame.data.trim();
         if data.is_empty() || data.starts_with(':') {
+            return;
+        }
+        if self.closed {
+            self.check_after_close(data, frame.event);
             return;
         }
         let input = if data == DONE_SENTINEL {
@@ -240,15 +246,31 @@ impl StreamAssembler {
             return Assembled::Incomplete(IncompleteReason::Disconnect);
         }
         let document = self.fold.finish();
-        if node_count_exceeds(&document, self.budget.max_nodes) {
+        if count_nodes(&document, self.budget.max_nodes) > self.budget.max_nodes {
             return Assembled::Incomplete(IncompleteReason::Budget);
         }
         Assembled::Complete(document)
     }
 
+    fn check_after_close(&mut self, data: &str, event: Option<&str>) {
+        let Ok(Value::Object(body)) = serde_json::from_str::<Value>(data) else {
+            return;
+        };
+        let kind = body.get("type").and_then(Value::as_str).or(event);
+        let failed = match self.dialect {
+            IngressDialect::Anthropic => anthropic::is_failure(kind),
+            IngressDialect::Chat => chat::is_failure(&body),
+            IngressDialect::Responses => responses::is_failure(kind),
+        };
+        if failed {
+            self.fail(IncompleteReason::UpstreamError);
+        }
+    }
+
     fn fail(&mut self, reason: IncompleteReason) {
         self.failure = Some(reason);
         self.fold = Fold::Spent;
+        self.budget.nodes = 0;
     }
 
     #[cfg(test)]
@@ -257,6 +279,16 @@ impl StreamAssembler {
         assembler.budget.max_bytes = max_bytes;
         assembler.budget.max_nodes = max_nodes;
         assembler
+    }
+
+    #[cfg(test)]
+    const fn retained_nodes(&self) -> usize {
+        self.budget.nodes
+    }
+
+    #[cfg(test)]
+    const fn failure(&self) -> Option<IncompleteReason> {
+        self.failure
     }
 }
 
@@ -293,8 +325,8 @@ enum Fold {
 impl Fold {
     fn apply(&mut self, input: Input, budget: &mut Budget) -> Step {
         match self {
-            Self::Anthropic(fold) => fold.apply(input),
-            Self::Chat(fold) => fold.apply(input),
+            Self::Anthropic(fold) => fold.apply(input, budget),
+            Self::Chat(fold) => fold.apply(input, budget),
             Self::Responses(fold) => fold.apply(input, budget),
             Self::Spent => Step::Fold,
         }
@@ -310,11 +342,15 @@ impl Fold {
     }
 }
 
+/// Caps on what one assembly reads and keeps. `nodes` tracks the JSON
+/// values the fold currently retains: every value is charged before it is
+/// stored and credited when it is replaced, so retained state never grows
+/// past the cap. Concatenated text adds no nodes.
 struct Budget {
     max_bytes: usize,
     max_nodes: usize,
     bytes: usize,
-    padded: usize,
+    nodes: usize,
 }
 
 impl Default for Budget {
@@ -323,7 +359,7 @@ impl Default for Budget {
             max_bytes: MAX_ASSEMBLED_BYTES,
             max_nodes: MAX_ASSEMBLED_NODES,
             bytes: 0,
-            padded: 0,
+            nodes: 0,
         }
     }
 }
@@ -334,22 +370,36 @@ impl Budget {
         self.bytes <= self.max_bytes
     }
 
-    /// Null slots created to reach a sparse array index are the only nodes
-    /// a document gains that no input byte paid for, so they are charged
-    /// against the node cap before they are allocated.
-    const fn pad(&mut self, slots: usize) -> bool {
-        self.padded = self.padded.saturating_add(slots);
-        self.padded <= self.max_nodes
+    const fn charge_nodes(&mut self, count: usize) -> bool {
+        let next = self.nodes.saturating_add(count);
+        if next > self.max_nodes {
+            return false;
+        }
+        self.nodes = next;
+        true
+    }
+
+    /// Charge every node of `value`, walking no further than the room left.
+    fn charge(&mut self, value: &Value) -> bool {
+        let room = self.max_nodes.saturating_sub(self.nodes);
+        self.charge_nodes(count_nodes(value, room))
+    }
+
+    fn credit(&mut self, value: &Value) {
+        self.nodes = self
+            .nodes
+            .saturating_sub(count_nodes(value, self.max_nodes));
     }
 }
 
-fn node_count_exceeds(document: &Value, max_nodes: usize) -> bool {
+/// Nodes in `document`, counting no further than `limit + 1`.
+fn count_nodes(document: &Value, limit: usize) -> usize {
     let mut pending = vec![document];
     let mut seen = 0_usize;
     while let Some(node) = pending.pop() {
         seen = seen.saturating_add(1);
-        if seen > max_nodes {
-            return true;
+        if seen > limit {
+            return seen;
         }
         match node {
             Value::Array(items) => pending.extend(items.iter()),
@@ -357,41 +407,133 @@ fn node_count_exceeds(document: &Value, max_nodes: usize) -> bool {
             _ => {}
         }
     }
-    false
+    seen
+}
+
+/// Store `value` at `key`, charging it and crediting what it replaces.
+/// Returns false, storing nothing, when the node cap would be exceeded.
+fn insert(budget: &mut Budget, target: &mut Map<String, Value>, key: String, value: Value) -> bool {
+    if !budget.charge(&value) {
+        return false;
+    }
+    if let Some(old) = target.insert(key, value) {
+        budget.credit(&old);
+    }
+    true
+}
+
+/// Replace a retained root object, charging the new one and crediting the
+/// old.
+fn replace_object(
+    budget: &mut Budget,
+    target: &mut Map<String, Value>,
+    incoming: Map<String, Value>,
+) -> bool {
+    let incoming = Value::Object(incoming);
+    if !budget.charge(&incoming) {
+        return false;
+    }
+    let Value::Object(incoming) = incoming else {
+        return true;
+    };
+    let old = std::mem::replace(target, incoming);
+    budget.credit(&Value::Object(old));
+    true
 }
 
 /// Merge one streamed delta field into `target`: strings concatenate,
 /// arrays extend, objects merge key by key, null is skipped, anything else
-/// replaces.
-fn merge_field(target: &mut Map<String, Value>, key: String, incoming: Value) {
+/// replaces. Returns false when the node cap would be exceeded.
+fn merge_field(
+    budget: &mut Budget,
+    target: &mut Map<String, Value>,
+    key: String,
+    incoming: Value,
+) -> bool {
     if incoming.is_null() {
-        return;
+        return true;
     }
     let Some(existing) = target.get_mut(&key) else {
-        target.insert(key, incoming);
-        return;
+        return insert(budget, target, key, incoming);
     };
     match (existing, incoming) {
-        (Value::String(text), Value::String(more)) => text.push_str(&more),
-        (Value::Array(items), Value::Array(more)) => items.extend(more),
-        (Value::Object(fields), Value::Object(more)) => {
-            for (inner, value) in more {
-                merge_field(fields, inner, value);
-            }
+        (Value::String(text), Value::String(more)) => {
+            text.push_str(&more);
+            true
         }
-        (slot, other) => *slot = other,
+        (Value::Array(items), Value::Array(more)) => {
+            if !more.iter().all(|item| budget.charge(item)) {
+                return false;
+            }
+            items.extend(more);
+            true
+        }
+        (Value::Object(fields), Value::Object(more)) => more
+            .into_iter()
+            .all(|(inner, value)| merge_field(budget, fields, inner, value)),
+        (slot, other) => {
+            if !budget.charge(&other) {
+                return false;
+            }
+            let old = std::mem::replace(slot, other);
+            budget.credit(&old);
+            true
+        }
     }
 }
 
 /// Set `key` to a non-empty string value, ignoring null and empty strings.
-fn set_nonempty(target: &mut Map<String, Value>, key: String, incoming: Value) {
+fn set_nonempty(
+    budget: &mut Budget,
+    target: &mut Map<String, Value>,
+    key: String,
+    incoming: Value,
+) -> bool {
     match incoming {
-        Value::Null => {}
-        Value::String(text) if text.is_empty() => {}
-        other => {
-            target.insert(key, other);
-        }
+        Value::Null => true,
+        Value::String(text) if text.is_empty() => true,
+        other => insert(budget, target, key, other),
     }
+}
+
+/// The object at `key`, created (and charged) when absent or not an object.
+fn object_at<'a>(
+    budget: &mut Budget,
+    target: &'a mut Map<String, Value>,
+    key: &str,
+) -> Option<&'a mut Map<String, Value>> {
+    if !target.get(key).is_some_and(Value::is_object)
+        && !insert(budget, target, key.to_owned(), Value::Object(Map::new()))
+    {
+        return None;
+    }
+    target.get_mut(key).and_then(Value::as_object_mut)
+}
+
+/// The array at `key`, created (and charged) when absent or not an array.
+fn array_at<'a>(
+    budget: &mut Budget,
+    target: &'a mut Map<String, Value>,
+    key: &str,
+) -> Option<&'a mut Vec<Value>> {
+    if !target.get(key).is_some_and(Value::is_array)
+        && !insert(budget, target, key.to_owned(), Value::Array(Vec::new()))
+    {
+        return None;
+    }
+    target.get_mut(key).and_then(Value::as_array_mut)
+}
+
+/// The entry at `index`, created (and charged one node) when absent.
+fn slot_at<'a, T: Default>(
+    budget: &mut Budget,
+    entries: &'a mut BTreeMap<u64, T>,
+    index: u64,
+) -> Option<&'a mut T> {
+    if !entries.contains_key(&index) && !budget.charge_nodes(1) {
+        return None;
+    }
+    Some(entries.entry(index).or_default())
 }
 
 fn index_field(body: &Map<String, Value>, key: &str) -> Option<u64> {

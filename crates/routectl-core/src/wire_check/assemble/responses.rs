@@ -1,5 +1,7 @@
 //! OpenAI Responses: the `response` snapshot on `response.created`,
-//! `response.in_progress` and `response.completed` is the envelope;
+//! `response.in_progress` and the terminal `response.completed` or
+//! `response.incomplete` (a length or content-filter cutoff, which still
+//! delivers the response) is the envelope;
 //! `output` is rebuilt from the item events by `output_index`, so it holds
 //! every item the stream carried even when the terminal snapshot lists
 //! fewer or none. With no item events, the snapshot's own `output` stands.
@@ -8,7 +10,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-use super::{Budget, Input, Step, index_field, merge_field};
+use super::{Budget, Input, Step, array_at, index_field, merge_field, replace_object, slot_at};
+
+const FAILURE_EVENTS: [&str; 3] = ["response.failed", "response.cancelled", "error"];
 
 #[derive(Default)]
 pub(super) struct ResponsesFold {
@@ -54,19 +58,18 @@ impl ResponsesFold {
         let Some(kind) = kind else {
             return Step::Fold;
         };
-        match kind.as_str() {
-            "response.created" | "response.in_progress" => {
-                self.take_snapshot(&mut body);
-                Step::Fold
-            }
-            "response.completed" => {
-                self.take_snapshot(&mut body);
-                Step::Close
-            }
-            "response.failed" | "response.incomplete" | "response.cancelled" | "error" => {
-                Step::UpstreamError
-            }
-            other => self.apply_item_event(other, body, budget),
+        if is_failure(Some(&kind)) {
+            return Step::UpstreamError;
+        }
+        let step = match kind.as_str() {
+            "response.created" | "response.in_progress" => Step::Fold,
+            "response.completed" | "response.incomplete" => Step::Close,
+            other => return self.apply_item_event(other, body, budget),
+        };
+        if self.take_snapshot(&mut body, budget) {
+            step
+        } else {
+            Step::OverBudget
         }
     }
 
@@ -79,9 +82,10 @@ impl ResponsesFold {
         Value::Object(self.snapshot)
     }
 
-    fn take_snapshot(&mut self, body: &mut Map<String, Value>) {
-        if let Some(Value::Object(response)) = body.remove("response") {
-            self.snapshot = response;
+    fn take_snapshot(&mut self, body: &mut Map<String, Value>, budget: &mut Budget) -> bool {
+        match body.remove("response") {
+            Some(Value::Object(response)) => replace_object(budget, &mut self.snapshot, response),
+            _ => true,
         }
     }
 
@@ -97,22 +101,25 @@ impl ResponsesFold {
         let take = |body: &mut Map<String, Value>, key: &str| body.remove(key).unwrap_or_default();
         let (list, edit) = match kind {
             "response.output_item.added" | "response.output_item.done" => {
-                if let Some(Value::Object(item)) = body.remove("item") {
-                    self.items.insert(output_index, item);
-                }
-                return Step::Fold;
+                let Some(Value::Object(incoming)) = body.remove("item") else {
+                    return Step::Fold;
+                };
+                let kept = slot_at(budget, &mut self.items, output_index)
+                    .is_some_and(|item| replace_object(budget, item, incoming));
+                return kept_step(kept);
             }
             "response.function_call_arguments.delta" => {
                 let delta = take(&mut body, "delta");
-                let item = self.items.entry(output_index).or_default();
-                merge_field(item, "arguments".to_owned(), delta);
-                return Step::Fold;
+                let kept = slot_at(budget, &mut self.items, output_index)
+                    .is_some_and(|item| merge_field(budget, item, "arguments".to_owned(), delta));
+                return kept_step(kept);
             }
             "response.function_call_arguments.done" => {
                 let arguments = take(&mut body, "arguments");
-                let item = self.items.entry(output_index).or_default();
-                item.insert("arguments".to_owned(), arguments);
-                return Step::Fold;
+                let kept = slot_at(budget, &mut self.items, output_index).is_some_and(|item| {
+                    super::insert(budget, item, "arguments".to_owned(), arguments)
+                });
+                return kept_step(kept);
             }
             "response.content_part.added" | "response.content_part.done" => (
                 PartList::Content,
@@ -149,18 +156,23 @@ impl ResponsesFold {
             _ => return Step::Fold,
         };
         let part_index = index_field(&body, list.index_key()).unwrap_or(0);
-        let item = self.items.entry(output_index).or_default();
-        if edit_part(item, list, part_index, edit, budget) {
-            Step::Fold
-        } else {
-            Step::OverBudget
-        }
+        let kept = slot_at(budget, &mut self.items, output_index)
+            .is_some_and(|item| edit_part(item, list, part_index, edit, budget));
+        kept_step(kept)
     }
 }
 
+/// Whether a frame of this kind reports a stream failure.
+pub(super) fn is_failure(kind: Option<&str>) -> bool {
+    kind.is_some_and(|kind| FAILURE_EVENTS.contains(&kind))
+}
+
+const fn kept_step(kept: bool) -> Step {
+    if kept { Step::Fold } else { Step::OverBudget }
+}
+
 /// Apply `edit` to `item[list][part_index]`, padding the list with nulls
-/// up to the index. Returns false when the padding would exceed the
-/// budget.
+/// up to the index. Returns false when the node cap would be exceeded.
 fn edit_part(
     item: &mut Map<String, Value>,
     list: PartList,
@@ -168,21 +180,15 @@ fn edit_part(
     edit: PartEdit,
     budget: &mut Budget,
 ) -> bool {
-    let slot = item
-        .entry(list.key())
-        .or_insert_with(|| Value::Array(Vec::new()));
-    if !slot.is_array() {
-        *slot = Value::Array(Vec::new());
-    }
-    let Value::Array(parts) = slot else {
-        return true;
-    };
     let Ok(part_index) = usize::try_from(part_index) else {
+        return false;
+    };
+    let Some(parts) = array_at(budget, item, list.key()) else {
         return false;
     };
     let missing = part_index.saturating_add(1).saturating_sub(parts.len());
     if missing > 0 {
-        if !budget.pad(missing) {
+        if !budget.charge_nodes(missing) {
             return false;
         }
         parts.resize(part_index.saturating_add(1), Value::Null);
@@ -191,22 +197,31 @@ fn edit_part(
         return true;
     };
     match edit {
-        PartEdit::Replace(value) => *part = value,
+        PartEdit::Replace(value) => {
+            if !budget.charge(&value) {
+                return false;
+            }
+            let old = std::mem::replace(part, value);
+            budget.credit(&old);
+            true
+        }
         PartEdit::Append(key, value) => with_object(part, |fields| {
-            merge_field(fields, key.to_owned(), value);
+            merge_field(budget, fields, key.to_owned(), value)
         }),
         PartEdit::Set(key, value) => with_object(part, |fields| {
-            fields.insert(key.to_owned(), value);
+            super::insert(budget, fields, key.to_owned(), value)
         }),
     }
-    true
 }
 
-fn with_object(part: &mut Value, edit: impl FnOnce(&mut Map<String, Value>)) {
+/// Run `edit` on the part as an object; a non-object part (one node)
+/// becomes an empty object (one node), so the swap costs nothing.
+fn with_object(part: &mut Value, edit: impl FnOnce(&mut Map<String, Value>) -> bool) -> bool {
     if !part.is_object() {
         *part = Value::Object(Map::new());
     }
-    if let Value::Object(fields) = part {
-        edit(fields);
+    match part {
+        Value::Object(fields) => edit(fields),
+        _ => true,
     }
 }

@@ -1,7 +1,8 @@
 use serde_json::{Value, json};
 
 use super::{Assembled, IncompleteReason, SseFrame, StreamAssembler, StreamExit};
-use crate::wire_check::lane::IngressDialect;
+use crate::wire_check::diff::diff;
+use crate::wire_check::lane::{IngressDialect, LaneClass};
 
 const ANTHROPIC_STREAM: &str =
     include_str!("../../../routectl-providers/tests/fixtures/anthropic_api/sse_stream.txt");
@@ -449,12 +450,8 @@ fn each_dialect_error_frame_is_an_upstream_error() {
 }
 
 #[test]
-fn responses_non_completed_terminals_are_upstream_errors() {
-    for kind in [
-        "response.failed",
-        "response.incomplete",
-        "response.cancelled",
-    ] {
+fn responses_failure_terminals_are_upstream_errors() {
+    for kind in ["response.failed", "response.cancelled", "error"] {
         let mut frames = without_terminal(IngressDialect::Responses);
         frames.push((
             None,
@@ -467,6 +464,158 @@ fn responses_non_completed_terminals_are_upstream_errors() {
             result,
             Assembled::Incomplete(IncompleteReason::UpstreamError),
             "row {kind}"
+        );
+    }
+}
+
+/// A length cutoff as the upstream sends it (`response.incomplete`) and as
+/// the ingress renderer re-emits it (`response.completed` carrying status
+/// `incomplete`).
+fn cutoff_frames(terminal_kind: &str) -> Vec<(Option<String>, String)> {
+    let snapshot = |status: &str| json!({"id":"resp_cut","object":"response","status":status,"model":"gpt-5","output":[]});
+    let mut terminal = snapshot("incomplete");
+    terminal["incomplete_details"] = json!({"reason": "max_output_tokens"});
+    terminal["usage"] = json!({"input_tokens": 5, "output_tokens": 16, "total_tokens": 21});
+    json_frames(&[
+        json!({"type":"response.created","sequence_number":0,"response":snapshot("in_progress")}),
+        json!({"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"message","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.content_part.added","sequence_number":2,"output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+        json!({"type":"response.output_text.delta","sequence_number":3,"output_index":0,"content_index":0,"delta":"cut off mid"}),
+        json!({"type":terminal_kind,"sequence_number":4,"response":terminal}),
+    ])
+}
+
+#[test]
+fn responses_cutoff_assembles_and_diffs_clean_against_the_client_render() {
+    let upstream = complete(
+        IngressDialect::Responses,
+        &cutoff_frames("response.incomplete"),
+    );
+    let client = complete(
+        IngressDialect::Responses,
+        &cutoff_frames("response.completed"),
+    );
+
+    let outcome = diff(&upstream, &client, LaneClass::Fidelity, &[]);
+
+    assert_eq!(upstream["status"], json!("incomplete"));
+    assert_eq!(
+        upstream["incomplete_details"],
+        json!({"reason": "max_output_tokens"})
+    );
+    assert_eq!(
+        upstream["output"][0]["content"][0]["text"],
+        json!("cut off mid")
+    );
+    assert!(outcome.findings.is_empty(), "{:?}", outcome.findings);
+    assert!(!outcome.truncated);
+}
+
+#[test]
+fn each_dialect_error_after_its_terminal_is_an_upstream_error() {
+    for dialect in IngressDialect::ALL {
+        let mut frames = captured_frames(dialect);
+        frames.push(error_frame(dialect));
+
+        let result = assemble(dialect, &frames, StreamExit::Ended);
+
+        assert_eq!(
+            result,
+            Assembled::Incomplete(IncompleteReason::UpstreamError),
+            "row {}",
+            dialect.label()
+        );
+    }
+}
+
+#[test]
+fn each_dialect_ignores_non_failure_frames_after_its_terminal() {
+    for dialect in IngressDialect::ALL {
+        let mut frames = captured_frames(dialect);
+        frames.push((None, json!({"type": "ping"}).to_string()));
+        frames.push((None, "not json".to_owned()));
+
+        let with_trailer = assemble(dialect, &frames, StreamExit::Ended);
+        let plain = assemble(dialect, &captured_frames(dialect), StreamExit::Ended);
+
+        assert_eq!(with_trailer, plain, "row {}", dialect.label());
+        assert!(
+            matches!(plain, Assembled::Complete(_)),
+            "row {}",
+            dialect.label()
+        );
+    }
+}
+
+#[test]
+fn a_frame_denser_than_the_node_room_fails_and_drops_retained_state() {
+    let mut assembler = StreamAssembler::with_limits(IngressDialect::Anthropic, usize::MAX, 50);
+    assembler.push(SseFrame::new(
+        None,
+        &json!({"type":"message_start","message":{"id":"m","usage":{"input_tokens":1}}})
+            .to_string(),
+    ));
+    let before = assembler.retained_nodes();
+    let dense = json!({"type":"content_block_start","index":0,
+                       "content_block":{"type":"text","text":"","extra":vec![0; 100]}});
+
+    assembler.push(SseFrame::new(None, &dense.to_string()));
+
+    assert!(before > 0, "positive control: message_start is retained");
+    assert_eq!(assembler.failure(), Some(IncompleteReason::Budget));
+    assert_eq!(assembler.retained_nodes(), 0);
+    assert_eq!(
+        assembler.finish(StreamExit::Ended),
+        Assembled::Incomplete(IncompleteReason::Budget)
+    );
+}
+
+#[test]
+fn each_dialect_stops_retaining_once_frames_accumulate_past_the_node_cap() {
+    let max_nodes = 60;
+    for dialect in IngressDialect::ALL {
+        let frame = |index: u64| match dialect {
+            IngressDialect::Anthropic => json!({"type":"content_block_start","index":index,
+                "content_block":{"type":"text","text":"","a":1,"b":2,"c":3}}),
+            IngressDialect::Chat => json!({"id":"c","choices":[{"index":0,"delta":{"tool_calls":[
+                {"index":index,"id":"call","type":"function","function":{"name":"f","arguments":""}}]},
+                "finish_reason":null}]}),
+            IngressDialect::Responses => json!({"type":"response.output_item.added",
+                "output_index":index,"item":{"type":"message","a":1,"b":2,"c":3}}),
+        };
+        let mut assembler = StreamAssembler::with_limits(dialect, usize::MAX, max_nodes);
+        let mut tripped_at = None;
+        let mut peak = 0;
+
+        for index in 0..100 {
+            assembler.push(SseFrame::new(None, &frame(index).to_string()));
+            peak = peak.max(assembler.retained_nodes());
+            if tripped_at.is_none() && assembler.failure().is_some() {
+                tripped_at = Some(index);
+            }
+            if tripped_at.is_some() {
+                assert_eq!(
+                    assembler.retained_nodes(),
+                    0,
+                    "row {} frame {index}",
+                    dialect.label()
+                );
+            }
+        }
+
+        let index =
+            tripped_at.unwrap_or_else(|| panic!("row {}: cap never tripped", dialect.label()));
+        assert!(index > 1, "row {}: each frame alone fits", dialect.label());
+        assert!(
+            peak > 0 && peak <= max_nodes,
+            "row {}: peak {peak}",
+            dialect.label()
+        );
+        assert_eq!(
+            assembler.failure(),
+            Some(IncompleteReason::Budget),
+            "row {}",
+            dialect.label()
         );
     }
 }

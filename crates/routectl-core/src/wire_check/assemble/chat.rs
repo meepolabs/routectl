@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-use super::{Input, Step, index_field, merge_field, set_nonempty};
+use super::{
+    Budget, Input, Step, index_field, insert, merge_field, object_at, set_nonempty, slot_at,
+};
 
 const CHUNK_OBJECT: &str = "chat.completion.chunk";
 const COMPLETION_OBJECT: &str = "chat.completion";
@@ -38,83 +40,82 @@ impl Choice {
         Value::Object(self.fields)
     }
 
-    fn apply_delta(&mut self, delta: Map<String, Value>) {
-        for (key, value) in delta {
-            match (key.as_str(), value) {
-                ("tool_calls", Value::Array(calls)) => {
-                    for call in calls {
-                        self.apply_tool_call(call);
-                    }
-                }
-                ("role", value) => set_nonempty(&mut self.message, key, value),
-                (_, value) => merge_field(&mut self.message, key, value),
-            }
-        }
+    fn apply_delta(&mut self, delta: Map<String, Value>, budget: &mut Budget) -> bool {
+        delta
+            .into_iter()
+            .all(|(key, value)| match (key.as_str(), value) {
+                ("tool_calls", Value::Array(calls)) => calls
+                    .into_iter()
+                    .all(|call| self.apply_tool_call(call, budget)),
+                ("role", value) => set_nonempty(budget, &mut self.message, key, value),
+                (_, value) => merge_field(budget, &mut self.message, key, value),
+            })
     }
 
     /// Ids, types and names are repeated on later fragments by some
     /// upstreams, so they replace; only `function.arguments` joins.
-    fn apply_tool_call(&mut self, call: Value) {
+    fn apply_tool_call(&mut self, call: Value, budget: &mut Budget) -> bool {
         let Value::Object(mut call) = call else {
-            return;
+            return true;
         };
         let index = index_field(&call, "index").unwrap_or(0);
         call.remove("index");
-        let entry = self.tool_calls.entry(index).or_default();
-        for (key, value) in call {
-            match (key.as_str(), value) {
-                ("function", Value::Object(function)) => apply_function(entry, function),
-                ("id" | "type", value) => set_nonempty(entry, key, value),
-                (_, value) => merge_field(entry, key, value),
-            }
-        }
+        let Some(entry) = slot_at(budget, &mut self.tool_calls, index) else {
+            return false;
+        };
+        call.into_iter()
+            .all(|(key, value)| match (key.as_str(), value) {
+                ("function", Value::Object(function)) => apply_function(entry, function, budget),
+                ("id" | "type", value) => set_nonempty(budget, entry, key, value),
+                (_, value) => merge_field(budget, entry, key, value),
+            })
     }
 }
 
-fn apply_function(entry: &mut Map<String, Value>, function: Map<String, Value>) {
-    let slot = entry
-        .entry("function")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !slot.is_object() {
-        *slot = Value::Object(Map::new());
-    }
-    let Value::Object(target) = slot else {
-        return;
+fn apply_function(
+    entry: &mut Map<String, Value>,
+    function: Map<String, Value>,
+    budget: &mut Budget,
+) -> bool {
+    let Some(target) = object_at(budget, entry, "function") else {
+        return false;
     };
-    for (key, value) in function {
+    function.into_iter().all(|(key, value)| {
         if key == "name" {
-            set_nonempty(target, key, value);
+            set_nonempty(budget, target, key, value)
         } else {
-            merge_field(target, key, value);
+            merge_field(budget, target, key, value)
         }
+    })
+}
+
+/// Whether a chunk reports a stream failure: a top-level `error` holding
+/// anything but null or an empty object.
+pub(super) fn is_failure(body: &Map<String, Value>) -> bool {
+    match body.get("error") {
+        None | Some(Value::Null) => false,
+        Some(Value::Object(fields)) => !fields.is_empty(),
+        Some(_) => true,
     }
 }
 
 impl ChatFold {
-    pub(super) fn apply(&mut self, input: Input) -> Step {
+    pub(super) fn apply(&mut self, input: Input, budget: &mut Budget) -> Step {
         let mut body = match input {
             Input::Done => return Step::Close,
             Input::Event { body, .. } => body,
         };
-        if carries_error(&body) {
+        if is_failure(&body) {
             return Step::UpstreamError;
         }
-        if let Some(Value::Array(choices)) = body.remove("choices") {
-            for choice in choices {
-                self.apply_choice(choice);
-            }
-        }
-        for (key, value) in body {
-            match (key.as_str(), value) {
-                ("object", Value::String(object)) if object == CHUNK_OBJECT => {
-                    self.envelope
-                        .insert(key, Value::String(COMPLETION_OBJECT.to_owned()));
-                }
-                ("usage", value) if !value.is_null() => {
-                    self.envelope.insert(key, value);
-                }
-                (_, value) => set_nonempty(&mut self.envelope, key, value),
-            }
+        let choices_kept = match body.remove("choices") {
+            Some(Value::Array(choices)) => choices
+                .into_iter()
+                .all(|choice| self.apply_choice(choice, budget)),
+            _ => true,
+        };
+        if !choices_kept || !self.apply_envelope(body, budget) {
+            return Step::OverBudget;
         }
         if self.every_choice_finished() {
             Step::Terminal
@@ -134,6 +135,22 @@ impl ChatFold {
         Value::Object(self.envelope)
     }
 
+    fn apply_envelope(&mut self, body: Map<String, Value>, budget: &mut Budget) -> bool {
+        body.into_iter()
+            .all(|(key, value)| match (key.as_str(), value) {
+                ("object", Value::String(object)) if object == CHUNK_OBJECT => insert(
+                    budget,
+                    &mut self.envelope,
+                    key,
+                    Value::String(COMPLETION_OBJECT.to_owned()),
+                ),
+                ("usage", value) if !value.is_null() => {
+                    insert(budget, &mut self.envelope, key, value)
+                }
+                (_, value) => set_nonempty(budget, &mut self.envelope, key, value),
+            })
+    }
+
     fn every_choice_finished(&self) -> bool {
         !self.choices.is_empty()
             && self
@@ -142,29 +159,21 @@ impl ChatFold {
                 .all(|choice| choice.fields.contains_key("finish_reason"))
     }
 
-    fn apply_choice(&mut self, choice: Value) {
+    fn apply_choice(&mut self, choice: Value, budget: &mut Budget) -> bool {
         let Value::Object(mut choice) = choice else {
-            return;
+            return true;
         };
         let index = index_field(&choice, "index").unwrap_or(0);
         choice.remove("index");
-        let state = self.choices.entry(index).or_default();
-        for (key, value) in choice {
-            match (key.as_str(), value) {
-                ("delta", Value::Object(delta)) => state.apply_delta(delta),
-                ("finish_reason", value) => set_nonempty(&mut state.fields, key, value),
-                (_, value) => merge_field(&mut state.fields, key, value),
-            }
-        }
-    }
-}
-
-/// A chunk whose top-level `error` holds anything but null or an empty
-/// object reports a mid-stream failure.
-fn carries_error(body: &Map<String, Value>) -> bool {
-    match body.get("error") {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(fields)) => !fields.is_empty(),
-        Some(_) => true,
+        let Some(state) = slot_at(budget, &mut self.choices, index) else {
+            return false;
+        };
+        choice
+            .into_iter()
+            .all(|(key, value)| match (key.as_str(), value) {
+                ("delta", Value::Object(delta)) => state.apply_delta(delta, budget),
+                ("finish_reason", value) => set_nonempty(budget, &mut state.fields, key, value),
+                (_, value) => merge_field(budget, &mut state.fields, key, value),
+            })
     }
 }

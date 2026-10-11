@@ -6,7 +6,11 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-use super::{Input, Step, index_field, merge_field};
+use super::{
+    Budget, Input, Step, index_field, insert, merge_field, object_at, replace_object, slot_at,
+};
+
+const ERROR_EVENT: &str = "error";
 
 #[derive(Default)]
 pub(super) struct AnthropicFold {
@@ -34,34 +38,31 @@ impl Block {
     }
 }
 
+/// Whether a frame of this kind reports a stream failure.
+pub(super) fn is_failure(kind: Option<&str>) -> bool {
+    kind == Some(ERROR_EVENT)
+}
+
 impl AnthropicFold {
-    pub(super) fn apply(&mut self, input: Input) -> Step {
+    pub(super) fn apply(&mut self, input: Input, budget: &mut Budget) -> Step {
         let Input::Event { kind, mut body } = input else {
             return Step::Fold;
         };
-        match kind.as_deref() {
-            Some("message_start") => {
-                if let Some(Value::Object(message)) = body.remove("message") {
-                    self.message = message;
-                }
-                Step::Fold
-            }
-            Some("content_block_start") => {
-                self.start_block(&mut body);
-                Step::Fold
-            }
-            Some("content_block_delta") => {
-                self.apply_block_delta(&mut body);
-                Step::Fold
-            }
-            Some("message_delta") => {
-                self.apply_message_delta(&mut body);
-                Step::Fold
-            }
-            Some("message_stop") => Step::Close,
-            Some("error") => Step::UpstreamError,
-            _ => Step::Fold,
+        if is_failure(kind.as_deref()) {
+            return Step::UpstreamError;
         }
+        let kept = match kind.as_deref() {
+            Some("message_start") => match body.remove("message") {
+                Some(Value::Object(message)) => replace_object(budget, &mut self.message, message),
+                _ => true,
+            },
+            Some("content_block_start") => self.start_block(&mut body, budget),
+            Some("content_block_delta") => self.apply_block_delta(&mut body, budget),
+            Some("message_delta") => self.apply_message_delta(&mut body, budget),
+            Some("message_stop") => return Step::Close,
+            _ => true,
+        };
+        if kept { Step::Fold } else { Step::OverBudget }
     }
 
     pub(super) fn finish(mut self) -> Value {
@@ -71,64 +72,65 @@ impl AnthropicFold {
         Value::Object(self.message)
     }
 
-    fn start_block(&mut self, body: &mut Map<String, Value>) {
+    fn start_block(&mut self, body: &mut Map<String, Value>, budget: &mut Budget) -> bool {
         let index = index_field(body, "index").unwrap_or(0);
-        let block_body = match body.remove("content_block") {
-            Some(Value::Object(block)) => block,
+        let Some(block) = slot_at(budget, &mut self.blocks, index) else {
+            return false;
+        };
+        block.partial_json.clear();
+        let incoming = match body.remove("content_block") {
+            Some(Value::Object(fields)) => fields,
             _ => Map::new(),
         };
-        self.blocks.insert(
-            index,
-            Block {
-                body: block_body,
-                partial_json: String::new(),
-            },
-        );
+        replace_object(budget, &mut block.body, incoming)
     }
 
-    fn apply_block_delta(&mut self, body: &mut Map<String, Value>) {
+    fn apply_block_delta(&mut self, body: &mut Map<String, Value>, budget: &mut Budget) -> bool {
         let index = index_field(body, "index").unwrap_or(0);
         let Some(Value::Object(mut delta)) = body.remove("delta") else {
-            return;
+            return true;
         };
-        let block = self.blocks.entry(index).or_default();
+        let Some(block) = slot_at(budget, &mut self.blocks, index) else {
+            return false;
+        };
         let delta_kind = delta.remove("type");
         match delta_kind.as_ref().and_then(Value::as_str) {
             Some("input_json_delta") => {
                 if let Some(Value::String(part)) = delta.remove("partial_json") {
                     block.partial_json.push_str(&part);
                 }
+                true
             }
-            Some("citations_delta") => {
-                if let Some(citation) = delta.remove("citation") {
-                    merge_field(
-                        &mut block.body,
-                        "citations".to_owned(),
-                        Value::Array(vec![citation]),
-                    );
-                }
-            }
-            _ => {
-                for (key, value) in delta {
-                    merge_field(&mut block.body, key, value);
-                }
-            }
+            Some("citations_delta") => delta.remove("citation").is_none_or(|citation| {
+                merge_field(
+                    budget,
+                    &mut block.body,
+                    "citations".to_owned(),
+                    Value::Array(vec![citation]),
+                )
+            }),
+            _ => delta
+                .into_iter()
+                .all(|(key, value)| merge_field(budget, &mut block.body, key, value)),
         }
     }
 
-    fn apply_message_delta(&mut self, body: &mut Map<String, Value>) {
-        if let Some(Value::Object(delta)) = body.remove("delta") {
-            self.message.extend(delta);
+    fn apply_message_delta(&mut self, body: &mut Map<String, Value>, budget: &mut Budget) -> bool {
+        if let Some(Value::Object(delta)) = body.remove("delta")
+            && !delta
+                .into_iter()
+                .all(|(key, value)| insert(budget, &mut self.message, key, value))
+        {
+            return false;
         }
-        if let Some(Value::Object(usage)) = body.remove("usage") {
-            let slot = self
-                .message
-                .entry("usage")
-                .or_insert_with(|| Value::Object(Map::new()));
-            match slot {
-                Value::Object(existing) => existing.extend(usage),
-                other => *other = Value::Object(usage),
-            }
-        }
+        let Some(Value::Object(usage)) = body.remove("usage") else {
+            return true;
+        };
+        let Some(slot) = object_at(budget, &mut self.message, "usage") else {
+            return false;
+        };
+        usage
+            .into_iter()
+            .all(|(key, value)| insert(budget, slot, key, value))
     }
 }

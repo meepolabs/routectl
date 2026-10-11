@@ -77,8 +77,9 @@ license.
   response, per `SseFrame` (SSE `event:` name + `data:` text), into the
   dialect's non-streamed body; `finish(StreamExit)` returns `Complete` only
   after the terminal frame, else `Incomplete(IncompleteReason)`
-  (disconnect, cancelled, render_failure, upstream_error, budget); byte and
-  node caps; no Debug renders content
+  (disconnect, cancelled, render_failure, upstream_error, budget); byte cap
+  and a retained-node cap charged before each store; a failure frame after
+  the terminal still fails; no Debug renders content
 - `src/wire_check/assemble/anthropic.rs` -- Messages fold: blocks by index,
   `input_json_delta` joined and parsed, `message_delta` stop fields + usage
 - `src/wire_check/assemble/chat.rs` -- Chat Completions fold: per-choice
@@ -86,7 +87,8 @@ license.
   every choice finished or at `[DONE]`; error chunk fails the stream
 - `src/wire_check/assemble/responses.rs` -- Responses fold: response
   snapshot envelope, `output` rebuilt from item / part / delta events by
-  index; failed, incomplete and cancelled terminals fail the stream
+  index; `response.incomplete` (a cutoff) closes like `response.completed`;
+  failed, cancelled and error fail the stream
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for
   unknown Anthropic SSE bytes (skip-serialized; preserves unknown
   content_block types verbatim through the canonical pipeline so Anthropic
