@@ -108,7 +108,24 @@ impl Provider for DepositingProvider {
     }
 }
 
-/// A provider whose every call fails with a fallbackable 503.
+/// Deposit the client's body unchanged into the attempt's tap, as an egress
+/// that sent it and was then refused would.
+fn deposit_ingress_unchanged(req: &ChatRequest) {
+    let (Some(tap), Some(ingress)) = (
+        req.routectl_internal.wire_tap.as_ref(),
+        req.routectl_internal.ingress_wire.as_ref(),
+    ) else {
+        return;
+    };
+    tap.deposit(ingress.bytes.clone());
+}
+
+fn unavailable() -> Error {
+    Error::upstream("unavailable", 503, "down")
+}
+
+/// A provider whose every call deposits the client's body and then fails
+/// with a retryable, fallbackable 503.
 struct UnavailableProvider;
 
 #[async_trait::async_trait]
@@ -122,11 +139,57 @@ impl Provider for UnavailableProvider {
     fn normalize_response(&self, _: Value) -> Result<ChatResponse> {
         Err(Error::normalize_response("unavailable", "unused"))
     }
-    async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
-        Err(Error::upstream("unavailable", 503, "down"))
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        deposit_ingress_unchanged(&req);
+        Err(unavailable())
     }
-    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        Err(Error::upstream("unavailable", 503, "down"))
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        deposit_ingress_unchanged(&req);
+        Err(unavailable())
+    }
+}
+
+/// A provider whose first call deposits the client's body and fails with a
+/// retryable 503; every later call succeeds without depositing anything.
+#[derive(Default)]
+struct FailsOnceThenServesSilently {
+    calls: Mutex<u32>,
+}
+
+impl FailsOnceThenServesSilently {
+    fn first_call(&self, req: &ChatRequest) -> bool {
+        let mut calls = self.calls.lock();
+        *calls += 1;
+        if *calls == 1 {
+            deposit_ingress_unchanged(req);
+            return true;
+        }
+        false
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for FailsOnceThenServesSilently {
+    fn id(&self) -> &'static str {
+        "fails-once"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<Value> {
+        Ok(json!({}))
+    }
+    fn normalize_response(&self, _: Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response("fails-once", "unused"))
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        if self.first_call(&req) {
+            return Err(unavailable());
+        }
+        Ok(ok_response())
+    }
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        if self.first_call(&req) {
+            return Err(unavailable());
+        }
+        Ok(stream::iter([Ok(content_chunk())]).boxed())
     }
 }
 
@@ -181,9 +244,14 @@ fn content_chunk() -> ChatChunk {
 /// `[providers.pN]` an anthropic-api entry so every target's egress kind is
 /// `anthropic-api`.
 fn router(wire_check: &str, chain: Vec<Arc<dyn Provider>>) -> Router {
+    router_retrying(1, wire_check, chain)
+}
+
+/// [`router`] with `max_attempts` calls per chain target.
+fn router_retrying(max_attempts: u32, wire_check: &str, chain: Vec<Arc<dyn Provider>>) -> Router {
     let mut toml_text = format!(
-        "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [wire_check]\n{wire_check}\n"
+        "version = 5\n[retry]\nmax_attempts = {max_attempts}\ninitial_backoff_ms = 0\n\
+         jitter_ms = 0\n[wire_check]\n{wire_check}\n"
     );
     let mut nicknames = Vec::new();
     for idx in 0..chain.len() {
@@ -367,7 +435,7 @@ async fn an_unconsumed_top_level_extras_key_on_a_translation_lane_is_counted() {
 #[tokio::test]
 async fn the_ingress_body_and_a_prior_declared_edit_survive_a_second_chain_attempt() {
     for surface in SURFACES {
-        let serving = Arc::new(DepositingProvider::new(Deposit::IngressWithout(LOST_KEY)));
+        let serving = Arc::new(DepositingProvider::new(Deposit::Nothing));
         let router = router(
             CHECK_EVERY,
             vec![Arc::new(UnavailableProvider), serving.clone()],
@@ -394,9 +462,66 @@ async fn the_ingress_body_and_a_prior_declared_edit_survive_a_second_chain_attem
         assert_eq!(second.routectl_internal.declared_edits, [remove_lost_key()]);
         assert_eq!(
             outcomes(&router.wire_check_snapshot()),
-            [("anthropic->anthropic-api", CheckOutcome::Clean, 1)],
-            "{surface:?}: the carried edit explains the removed key"
+            [("anthropic->anthropic-api", CheckOutcome::Incomplete, 1)],
+            "{surface:?}: the failed attempt's deposit must not stand in for the serving one"
         );
+    }
+}
+
+#[tokio::test]
+async fn a_retry_on_the_same_target_gets_a_fresh_tap() {
+    // Only the complete surface retries a target in place; a stream walks on.
+    let provider = Arc::new(FailsOnceThenServesSilently::default());
+    let router = router_retrying(2, CHECK_EVERY, vec![provider.clone()]);
+
+    dispatch(&router, Surface::Complete, anthropic_request()).await;
+
+    assert_eq!(*provider.calls.lock(), 2, "the 503 was retried");
+    assert_eq!(
+        outcomes(&router.wire_check_snapshot()),
+        [("anthropic->anthropic-api", CheckOutcome::Incomplete, 1)],
+        "the refused call's deposit must not stand in for the retry"
+    );
+}
+
+#[tokio::test]
+async fn admission_is_charged_once_per_attempt() {
+    for surface in SURFACES {
+        let provider = Arc::new(DepositingProvider::new(Deposit::Nothing));
+        let router = router("first_n = 1\nsample_one_in = 1000", vec![provider]);
+
+        dispatch(&router, surface, anthropic_request()).await;
+        dispatch(&router, surface, anthropic_request()).await;
+
+        assert_eq!(
+            outcomes(&router.wire_check_snapshot()),
+            [("anthropic->anthropic-api", CheckOutcome::Incomplete, 1)],
+            "{surface:?}: the first attempt is checked, the second is not"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_tap_handed_to_the_provider_carries_the_admission_decision() {
+    let rows = [
+        ("admitted", CHECK_EVERY, true),
+        ("not admitted", "first_n = 0\nsample_one_in = 1000", false),
+    ];
+    for surface in SURFACES {
+        for (name, wire_check, expected) in rows {
+            let provider = Arc::new(DepositingProvider::new(Deposit::Nothing));
+            let router = router(wire_check, vec![provider.clone()]);
+
+            dispatch(&router, surface, anthropic_request()).await;
+
+            let seen = provider.seen.lock();
+            let tap = seen[0]
+                .routectl_internal
+                .wire_tap
+                .as_ref()
+                .unwrap_or_else(|| panic!("{surface:?} {name}: a tap is installed"));
+            assert_eq!(tap.is_admitted(), expected, "{surface:?} {name}");
+        }
     }
 }
 

@@ -84,14 +84,32 @@ impl fmt::Debug for TapContents {
 /// direction, the body that crossed the wire and the edits it made on one
 /// attempt. Every clone shares one slot, so the copy the router keeps
 /// observes what the provider records on the copy that rode the request.
+///
+/// A tap also carries whether its attempt was admitted for a full check, so
+/// a provider can skip work only an admitted attempt reads. Admission is
+/// fixed when the tap is created and shared by every clone.
 #[derive(Clone, Default)]
 pub struct WireTap {
     slot: Arc<Mutex<TapContents>>,
+    admitted: bool,
     #[cfg(any(test, feature = "test-utils"))]
     drop_on_deposit: Option<&'static str>,
 }
 
 impl WireTap {
+    /// A tap whose attempt is admitted for a full check.
+    pub fn admitted() -> Self {
+        Self {
+            admitted: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this tap's attempt is admitted for a full check.
+    pub const fn is_admitted(&self) -> bool {
+        self.admitted
+    }
+
     /// Record the request body as sent. A later deposit on the same attempt
     /// replaces an earlier one, so the slot holds the last body sent.
     pub fn deposit(&self, egress: Bytes) {
@@ -119,9 +137,26 @@ impl WireTap {
         self.lock().response_edits.push(edit);
     }
 
-    /// Return everything reported so far and empty the slot.
-    pub fn take(&self) -> TapContents {
-        std::mem::take(&mut *self.lock())
+    /// Return the request body and request edits reported so far and empty
+    /// that side of the slot. The response side stays for its own check.
+    pub fn take_request(&self) -> TapContents {
+        let mut slot = self.lock();
+        TapContents {
+            request: slot.request.take(),
+            request_edits: std::mem::take(&mut slot.request_edits),
+            ..TapContents::default()
+        }
+    }
+
+    /// Return the response body and response edits reported so far and
+    /// empty that side of the slot. The request side stays for its own check.
+    pub fn take_response(&self) -> TapContents {
+        let mut slot = self.lock();
+        TapContents {
+            response: slot.response.take(),
+            response_edits: std::mem::take(&mut slot.response_edits),
+            ..TapContents::default()
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, TapContents> {
@@ -155,6 +190,7 @@ fn remove_pointer(body: &Bytes, pointer: &str) -> Option<Bytes> {
 impl fmt::Debug for WireTap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WireTap")
+            .field("admitted", &self.admitted)
             .field("contents", &*self.lock())
             .finish()
     }

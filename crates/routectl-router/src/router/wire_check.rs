@@ -4,8 +4,9 @@
 //!
 //! The check reads only. It runs inline after the provider call returned,
 //! returns `()`, and never touches the response, its status or its error. An
-//! unadmitted success pays one sampler decision and nothing else: no body is
-//! parsed or cloned before [`WireCheckState::admit`] says yes.
+//! unadmitted attempt pays one sampler decision at tap install and nothing
+//! else: no body is parsed or cloned unless [`WireCheckState::admit`] said
+//! yes.
 
 use routectl_core::ChatRequest;
 use routectl_core::wire_check::{
@@ -13,7 +14,7 @@ use routectl_core::wire_check::{
 };
 use serde_json::Value;
 
-use crate::config::{ProviderEntry, WireCheckConfig};
+use crate::config::ProviderEntry;
 use crate::wire_check_state::WireCheckState;
 
 use super::{DispatchTarget, Router};
@@ -52,57 +53,81 @@ pub(super) const fn egress_kind_of(entry: &ProviderEntry) -> EgressKind {
     }
 }
 
-/// Give this provider call a fresh [`WireTap`] and return the router's
-/// handle on it. A request with no captured ingress body has nothing to
-/// compare against, so it gets no tap and its egress records nothing.
-///
-/// Called once per provider call: clones share one slot, so a tap reused
-/// across calls would let an earlier attempt's deposit stand in for a later
-/// attempt that deposited nothing.
-pub(super) fn install_wire_tap(attempt_req: &mut ChatRequest) -> Option<WireTap> {
-    attempt_req.routectl_internal.ingress_wire.as_ref()?;
-    let tap = WireTap::default();
-    attempt_req.routectl_internal.wire_tap = Some(tap.clone());
-    Some(tap)
-}
-
 impl Router {
-    /// Check the request leg of a successful attempt on `target` when the
-    /// sampler admits it.
+    /// Give this provider call a fresh [`WireTap`] and return the router's
+    /// handle on it. A request with no captured ingress body has nothing to
+    /// compare against, so it gets no tap and its egress records nothing.
+    ///
+    /// The sampler decides here, before the call, whether this attempt gets
+    /// a full check, and the decision rides the tap so the provider can skip
+    /// work only an admitted attempt reads. Each attempt is charged exactly
+    /// once; a target with no known egress kind is never admitted.
+    ///
+    /// Called once per provider call: clones share one slot, so a tap reused
+    /// across calls would let an earlier attempt's deposit stand in for a later
+    /// attempt that deposited nothing.
+    pub(super) fn install_wire_tap(
+        &self,
+        target: &DispatchTarget,
+        attempt_req: &mut ChatRequest,
+    ) -> Option<WireTap> {
+        let ingress = attempt_req.routectl_internal.ingress_wire.as_ref()?;
+        let admitted = target.egress_kind.is_some_and(|egress| {
+            self.wire_check.admit(
+                Lane::of(ingress.dialect, egress),
+                ingress.client_version.as_deref(),
+                &self.config.wire_check,
+            )
+        });
+        let tap = if admitted {
+            WireTap::admitted()
+        } else {
+            WireTap::default()
+        };
+        attempt_req.routectl_internal.wire_tap = Some(tap.clone());
+        Some(tap)
+    }
+
+    /// Check the request leg of a successful attempt on `target` when its
+    /// tap was admitted at install.
     pub(super) fn check_request_wire(
         &self,
         target: &DispatchTarget,
         attempt_req: &ChatRequest,
         tap: Option<&WireTap>,
     ) {
-        let (Some(tap), Some(egress)) = (tap, target.egress_kind) else {
+        let Some(tap) = tap.filter(|tap| tap.is_admitted()) else {
             return;
         };
-        check_request_leg(
-            &self.wire_check,
-            &self.config.wire_check,
-            egress,
-            attempt_req,
-            tap,
-        );
+        let Some(lane) = attempt_lane(target, attempt_req) else {
+            return;
+        };
+        compare_request_leg(&self.wire_check, lane, attempt_req, tap);
     }
 }
 
-fn check_request_leg(
+/// The lane an attempt on `target` travels: the client's ingress dialect and
+/// the target's egress kind. `None` when either is unknown.
+fn attempt_lane(target: &DispatchTarget, attempt_req: &ChatRequest) -> Option<Lane> {
+    let ingress = attempt_req.routectl_internal.ingress_wire.as_ref()?;
+    Some(Lane::of(ingress.dialect, target.egress_kind?))
+}
+
+/// Build the request-leg record from the tap's request side and record the
+/// outcome on `lane`. Never consults the sampler: the caller has already
+/// decided this attempt is checked. The response side of the tap stays for
+/// its own check.
+pub(super) fn compare_request_leg(
     state: &WireCheckState,
-    config: &WireCheckConfig,
-    egress: EgressKind,
+    lane: Lane,
     attempt_req: &ChatRequest,
     tap: &WireTap,
 ) {
     let Some(ingress) = attempt_req.routectl_internal.ingress_wire.as_ref() else {
+        state.record_incomplete(lane);
         return;
     };
-    let lane = Lane::of(ingress.dialect, egress);
-    if !state.admit(lane, ingress.client_version.as_deref(), config) {
-        return;
-    }
-    let contents = tap.take();
+    let contents = tap.take_request();
     let edits: Vec<DeclaredEdit> = attempt_req
         .routectl_internal
         .declared_edits

@@ -47,11 +47,11 @@ fn clone_observes_the_originals_deposit_and_declarations() {
 
     provider_copy.deposit(body());
     provider_copy.declare(stream_strip());
-    let seen = router_copy.take();
+    let seen = router_copy.take_request();
 
     assert_eq!(seen.request(), Some(&body()));
     assert_eq!(seen.edits(Leg::Request), [stream_strip()]);
-    let drained = provider_copy.take();
+    let drained = provider_copy.take_request();
     assert!(drained.request().is_none());
     assert!(drained.edits(Leg::Request).is_empty());
 }
@@ -65,8 +65,8 @@ fn each_direction_lands_in_its_own_slot() {
     response_only.deposit_response(response_body());
     response_only.declare_response(finish_reason_rewrite());
 
-    let request_seen = request_only.take();
-    let response_seen = response_only.take();
+    let request_seen = request_only.take_request();
+    let response_seen = response_only.take_response();
 
     let rows = [
         (
@@ -130,10 +130,14 @@ fn deposit_moves_the_buffer_without_copying() {
 
     tap.deposit(sent);
     tap.deposit_response(received);
-    let seen = tap.take();
+    let request_side = tap.take_request();
+    let response_side = tap.take_response();
 
-    assert_eq!(seen.request().map(|b| b.as_ptr()), Some(sent_ptr));
-    assert_eq!(seen.response().map(|b| b.as_ptr()), Some(received_ptr));
+    assert_eq!(request_side.request().map(|b| b.as_ptr()), Some(sent_ptr));
+    assert_eq!(
+        response_side.response().map(|b| b.as_ptr()),
+        Some(received_ptr)
+    );
 }
 
 #[test]
@@ -171,7 +175,7 @@ fn a_later_deposit_replaces_an_earlier_one() {
     tap.deposit(Bytes::from_static(b"{\"second\":2}"));
 
     assert_eq!(
-        tap.take().request(),
+        tap.take_request().request(),
         Some(&Bytes::from_static(b"{\"second\":2}"))
     );
 }
@@ -195,7 +199,8 @@ fn debug_never_renders_body_bytes() {
     let rendered = [
         ("tap", format!("{tap:?}")),
         ("ingress wire", format!("{wire:?}")),
-        ("tap contents", format!("{:?}", tap.take())),
+        ("request side", format!("{:?}", tap.take_request())),
+        ("response side", format!("{:?}", tap.take_response())),
         ("attempt record", format!("{record:?}")),
     ];
 
@@ -235,7 +240,7 @@ fn drop_hook_removes_one_member_from_the_deposit() {
         tap.deposit(Bytes::copy_from_slice(sent));
 
         assert_eq!(
-            observer.take().request().map(Bytes::as_ref),
+            observer.take_request().request().map(Bytes::as_ref),
             Some(expected),
             "row {name}"
         );
@@ -249,5 +254,62 @@ fn drop_hook_leaves_the_response_deposit_untouched() {
 
     tap.deposit_response(upstream.clone());
 
-    assert_eq!(tap.take().response(), Some(&upstream));
+    assert_eq!(tap.take_response().response(), Some(&upstream));
+}
+
+#[test]
+fn draining_the_request_side_leaves_the_response_side_for_its_own_check() {
+    let tap = WireTap::default();
+    tap.deposit_response(response_body());
+    tap.declare_response(finish_reason_rewrite());
+    tap.deposit(body());
+    tap.declare(stream_strip());
+
+    let request_side = tap.take_request();
+    let response_side = tap.take_response();
+
+    assert_eq!(request_side.request(), Some(&body()));
+    assert_eq!(request_side.edits(Leg::Request), [stream_strip()]);
+    assert!(request_side.response().is_none());
+    assert!(request_side.edits(Leg::Response).is_empty());
+    assert_eq!(response_side.response(), Some(&response_body()));
+    assert_eq!(
+        response_side.edits(Leg::Response),
+        [finish_reason_rewrite()]
+    );
+    assert!(response_side.request().is_none());
+    assert!(response_side.edits(Leg::Request).is_empty());
+}
+
+#[test]
+fn draining_the_response_side_leaves_the_request_side_for_its_own_check() {
+    let tap = WireTap::default();
+    tap.deposit(body());
+    tap.declare(stream_strip());
+    tap.deposit_response(response_body());
+
+    let response_side = tap.take_response();
+    let request_side = tap.take_request();
+
+    assert_eq!(response_side.response(), Some(&response_body()));
+    assert!(response_side.request().is_none());
+    assert_eq!(request_side.request(), Some(&body()));
+    assert_eq!(request_side.edits(Leg::Request), [stream_strip()]);
+}
+
+#[test]
+fn admission_is_fixed_at_creation_and_shared_by_every_clone() {
+    let rows = [
+        ("default tap", WireTap::default(), false),
+        ("admitted tap", WireTap::admitted(), true),
+    ];
+
+    for (name, tap, expected) in rows {
+        let provider_copy = tap.clone();
+        provider_copy.deposit(body());
+        let _ = provider_copy.take_request();
+
+        assert_eq!(tap.is_admitted(), expected, "row {name}");
+        assert_eq!(provider_copy.is_admitted(), expected, "row {name} clone");
+    }
 }

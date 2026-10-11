@@ -26,9 +26,10 @@ fn user_agent(value: &str) -> HeaderMap {
 }
 
 #[test]
-fn client_version_prefers_the_claude_cli_version_then_a_safe_product_token() {
+fn client_version_prefers_the_claude_cli_version_then_the_first_safe_product_token() {
     let long_token = format!("client/{}", "9".repeat(80));
-    let cases: [(&str, Option<&str>); 6] = [
+    let unsafe_then_safe = format!("{long_token} client/1.0");
+    let cases: [(&str, Option<&str>); 7] = [
         ("claude-cli/2.1.246 (external, sdk-cli)", Some("2.1.246")),
         (
             "claude-cli/2.1.246.1e8 (external, cli)",
@@ -38,6 +39,7 @@ fn client_version_prefers_the_claude_cli_version_then_a_safe_product_token() {
         ("codex_cli_rs/0.40.0 (Linux)", Some("codex_cli_rs/0.40.0")),
         ("no product token here", None),
         (&long_token, None),
+        (&unsafe_then_safe, Some("client/1.0")),
     ];
 
     for (ua, expected) in cases {

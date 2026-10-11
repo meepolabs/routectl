@@ -35,7 +35,7 @@ const fn dialect_of(provenance: RequestProvenance) -> Option<IngressDialect> {
 
 /// The client's version: a stable Claude Code CLI version when the
 /// user-agent carries one, else the first `product/version` token of the
-/// user-agent when it is a safe token, else none.
+/// user-agent that is a safe token, else none.
 fn client_version(headers: &HeaderMap) -> Option<String> {
     let user_agent = headers.get(USER_AGENT)?.to_str().ok()?;
     if let Some(version) = parse_claude_cli_version(user_agent) {
@@ -43,8 +43,7 @@ fn client_version(headers: &HeaderMap) -> Option<String> {
     }
     user_agent
         .split_whitespace()
-        .find(|token| token.contains('/'))
-        .filter(|token| is_safe_token(token))
+        .find(|token| token.contains('/') && is_safe_token(token))
         .map(str::to_string)
 }
 

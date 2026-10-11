@@ -52,7 +52,6 @@ use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
-use super::wire_check::install_wire_tap;
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
 
 /// Message/event name of the single aggregated reasoning-replay
@@ -632,7 +631,7 @@ impl Router {
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
-                let wire_tap = install_wire_tap(&mut attempt_req);
+                let wire_tap = self.install_wire_tap(target, &mut attempt_req);
                 let result = run_with_timeout(
                     provider_name,
                     provider.as_ref(),
@@ -1611,7 +1610,7 @@ impl Router {
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
-                let wire_tap = install_wire_tap(&mut attempt_req);
+                let wire_tap = self.install_wire_tap(target, &mut attempt_req);
                 let r = try_stream_with_first_content(
                     provider_name,
                     model,
