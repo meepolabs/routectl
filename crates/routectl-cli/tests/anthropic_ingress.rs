@@ -411,6 +411,71 @@ async fn empty_in_band_system_turn_is_omitted_not_refused() {
     }
 }
 
+/// The blank cached system turn Claude Code sends after compaction, between
+/// two user turns. Omitting it must not leave two adjacent user messages in
+/// the upstream body, and its breakpoint -- which already suppressed the
+/// router's own cache placement -- must still reach the upstream.
+#[tokio::test]
+async fn empty_cached_system_turn_between_user_turns_merges_and_keeps_breakpoint() {
+    // Arrange
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+    let body = json!({
+        "model": "heavy",
+        "max_tokens": 16,
+        "system": [{"type": "text", "text": "you are helpful"}],
+        "messages": [
+            {"role": "user", "content": "summary of earlier work"},
+            {"role": "system", "content": [
+                {"type": "text", "text": "", "cache_control": {"type": "ephemeral"}}
+            ]},
+            {"role": "user", "content": "continue"}
+        ]
+    });
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let received = upstream.received_requests().await.unwrap();
+    let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let messages = up["messages"].as_array().expect("messages array");
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        roles.windows(2).all(|w| w[0] != w[1]),
+        "no adjacent same-role messages: {up}"
+    );
+    assert_eq!(roles, vec!["user"], "{up}");
+    assert_eq!(
+        messages[0]["content"],
+        json!([
+            {"type": "text", "text": "summary of earlier work",
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "continue"}
+        ]),
+        "{up}"
+    );
+    assert!(
+        up.get("cache_control").is_none(),
+        "the caller's breakpoint suppresses auto placement: {up}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4-breakpoint cap and TTL ordering rejected at ingress
 // ---------------------------------------------------------------------------

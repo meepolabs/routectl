@@ -38,7 +38,7 @@ use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use serde_json::{Value, json};
 
 use routectl_core::{
-    ChatRequest, ContentPart, CoreHistoryReasoning, Error, KnownContentPart, Message,
+    CacheControl, ChatRequest, ContentPart, CoreHistoryReasoning, Error, KnownContentPart, Message,
     MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role, sanitize_for_log,
 };
 
@@ -1246,6 +1246,8 @@ struct SystemTurnTally<'a> {
     billing_blocks_stripped: usize,
     billing_turns_dropped: usize,
     empty_turns_dropped: usize,
+    breakpoints_moved: usize,
+    breakpoints_dropped: usize,
 }
 
 impl<'a> SystemTurnTally<'a> {
@@ -1256,6 +1258,8 @@ impl<'a> SystemTurnTally<'a> {
             billing_blocks_stripped: 0,
             billing_turns_dropped: 0,
             empty_turns_dropped: 0,
+            breakpoints_moved: 0,
+            breakpoints_dropped: 0,
         }
     }
 
@@ -1275,6 +1279,17 @@ impl<'a> SystemTurnTally<'a> {
         self.empty_turns_dropped = self.empty_turns_dropped.saturating_add(1);
     }
 
+    const fn record_breakpoint(&mut self, fate: BreakpointFate) {
+        match fate {
+            BreakpointFate::Moved => {
+                self.breakpoints_moved = self.breakpoints_moved.saturating_add(1);
+            }
+            BreakpointFate::Dropped => {
+                self.breakpoints_dropped = self.breakpoints_dropped.saturating_add(1);
+            }
+        }
+    }
+
     fn flush(&self) {
         if self.forwarded > 0 {
             tracing::debug!(
@@ -1290,6 +1305,8 @@ impl<'a> SystemTurnTally<'a> {
                 system_blocks_stripped = self.billing_blocks_stripped,
                 system_turns_dropped = self.billing_turns_dropped,
                 system_turns_dropped_empty = self.empty_turns_dropped,
+                system_turn_breakpoints_moved = self.breakpoints_moved,
+                system_turn_breakpoints_dropped = self.breakpoints_dropped,
                 "anthropic-api egress: forwarded Role::System turns screened; Claude Code \
                  billing/attribution blocks are dropped, and a turn left with no content, \
                  or arriving empty or blank-text-only, is omitted entirely",
@@ -1300,8 +1317,9 @@ impl<'a> SystemTurnTally<'a> {
 
 /// Accounted-identity ledger over ONE `messages[]` walk. The invariant is
 /// NOT "in == out": the tool-run fold legitimately collapses N turns into
-/// one message, and the three system-turn terms below are deliberate losses.
-/// Each is counted explicitly, so the identity holds exactly and an
+/// one message, the three system-turn terms below are deliberate losses, and
+/// a same-role pair a dropped system turn left adjacent merges into one
+/// message. Each is counted explicitly, so the identity holds exactly and an
 /// unaccounted drop is a hard error rather than silent deletion.
 #[derive(Default)]
 struct MessageLedger {
@@ -1311,6 +1329,7 @@ struct MessageLedger {
     system_turns_consumed_by_lift: usize,
     system_turns_dropped_by_billing_strip: usize,
     system_turns_dropped_as_empty: usize,
+    merged_across_dropped_system_turn: usize,
 }
 
 impl MessageLedger {
@@ -1326,6 +1345,7 @@ impl MessageLedger {
             .saturating_sub(self.system_turns_consumed_by_lift)
             .saturating_sub(self.system_turns_dropped_by_billing_strip)
             .saturating_sub(self.system_turns_dropped_as_empty)
+            .saturating_sub(self.merged_across_dropped_system_turn)
     }
 
     fn verify(&self, id: &str, emitted: usize) -> Result<()> {
@@ -1339,13 +1359,15 @@ impl MessageLedger {
                 "message translation lost content: emitted {emitted} wire messages, \
                  accounted for {expected} (consumed {}, tool turns {} folded into {} \
                  messages, system turns {} consumed by the legacy lift, {} dropped \
-                 by the billing/attribution screen and {} dropped as empty)",
+                 by the billing/attribution screen and {} dropped as empty, {} \
+                 messages merged across a dropped system turn)",
                 self.consumed,
                 self.tool_turns_consumed,
                 self.tool_runs_emitted,
                 self.system_turns_consumed_by_lift,
                 self.system_turns_dropped_by_billing_strip,
                 self.system_turns_dropped_as_empty,
+                self.merged_across_dropped_system_turn,
             ),
         ))
     }
@@ -1363,7 +1385,7 @@ fn translate_messages_threaded(
     skips: &mut ReasoningSkipTally<'_>,
     system_turns: &mut SystemTurnTally<'_>,
 ) -> Result<(Vec<AnthropicMessage>, MessageLedger)> {
-    let mut out: Vec<AnthropicMessage> = Vec::with_capacity(messages.len());
+    let mut wire = WireMessages::with_capacity(messages.len());
     let mut ledger = MessageLedger {
         consumed: messages.len(),
         ..MessageLedger::default()
@@ -1378,48 +1400,42 @@ fn translate_messages_threaded(
                         ledger.system_turns_consumed_by_lift += 1;
                     }
                     SystemTurnPolicy::Forward => {
-                        let screened = screen_forwarded_system_content(&msg.content);
-                        system_turns.record_billing_stripped(screened.blocks_stripped);
-                        match screened.verdict {
-                            SystemTurnVerdict::Forward(content) => {
-                                out.push(AnthropicMessage {
-                                    role: AnthropicRole::System,
-                                    content: translate_simple_content(&content, envelopes),
-                                });
-                                system_turns.record_forwarded();
-                            }
-                            SystemTurnVerdict::DroppedBilling => {
-                                system_turns.record_billing_dropped_turn();
-                                ledger.system_turns_dropped_by_billing_strip += 1;
-                            }
-                            SystemTurnVerdict::DroppedEmpty => {
-                                system_turns.record_empty_dropped_turn();
-                                ledger.system_turns_dropped_as_empty += 1;
-                            }
-                        }
+                        emit_forwarded_system_turn(
+                            &msg.content,
+                            &mut wire,
+                            &mut ledger,
+                            system_turns,
+                            envelopes,
+                        );
                     }
                 }
                 i += 1;
             }
             Role::User => {
-                out.push(AnthropicMessage {
-                    role: AnthropicRole::User,
-                    content: translate_simple_content(&msg.content, envelopes),
-                });
+                wire.push(
+                    AnthropicMessage {
+                        role: AnthropicRole::User,
+                        content: translate_simple_content(&msg.content, envelopes),
+                    },
+                    &mut ledger,
+                );
                 i += 1;
             }
             Role::Assistant => {
-                out.push(AnthropicMessage {
-                    role: AnthropicRole::Assistant,
-                    content: build_assistant_content(id, i, msg, envelopes, skips)?,
-                });
+                wire.push(
+                    AnthropicMessage {
+                        role: AnthropicRole::Assistant,
+                        content: build_assistant_content(id, i, msg, envelopes, skips)?,
+                    },
+                    &mut ledger,
+                );
                 i += 1;
             }
             Role::Tool => {
                 let (run, run_end) = collect_tool_run(messages, i);
                 ledger.tool_turns_consumed += run.len();
                 ledger.tool_runs_emitted += 1;
-                out.push(build_tool_message(&run, envelopes));
+                wire.push(build_tool_message(&run, envelopes), &mut ledger);
                 i = run_end;
             }
             // This function serves callers whose ingress dialect is
@@ -1436,15 +1452,202 @@ fn translate_messages_threaded(
                     role = %sanitize_for_log(tag),
                     "anthropic egress: unrecognized message role forwarded as user"
                 );
-                out.push(AnthropicMessage {
-                    role: AnthropicRole::User,
-                    content: translate_simple_content(&msg.content, envelopes),
-                });
+                wire.push(
+                    AnthropicMessage {
+                        role: AnthropicRole::User,
+                        content: translate_simple_content(&msg.content, envelopes),
+                    },
+                    &mut ledger,
+                );
                 i += 1;
             }
         }
     }
-    Ok((out, ledger))
+    Ok((wire.messages, ledger))
+}
+
+/// The wire `messages[]` under construction. A forwarded system turn the
+/// screen drops leaves a seam where it stood; the next message pushed across
+/// that seam joins its predecessor when both carry the same conversational
+/// role, so the drop never manufactures an adjacent user/user or
+/// assistant/assistant pair the caller did not send. Mirrors
+/// `build_tool_message`: real Anthropic combines consecutive same-role turns
+/// server-side, but a strict Anthropic-compatible gateway rejects them.
+struct WireMessages {
+    messages: Vec<AnthropicMessage>,
+    after_dropped_system_turn: bool,
+}
+
+/// Where a cache breakpoint carried by a dropped system turn ended up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BreakpointFate {
+    /// Re-anchored on the last block of the preceding wire message that can
+    /// bear one.
+    Moved,
+    /// No preceding wire message had a block that can bear one.
+    Dropped,
+}
+
+impl WireMessages {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            messages: Vec::with_capacity(capacity),
+            after_dropped_system_turn: false,
+        }
+    }
+
+    fn push(&mut self, msg: AnthropicMessage, ledger: &mut MessageLedger) {
+        let across_seam = std::mem::take(&mut self.after_dropped_system_turn);
+        if across_seam
+            && let Some(last) = self.messages.last_mut()
+            && is_same_conversational_role(&last.role, &msg.role)
+        {
+            let mut blocks = content_into_blocks(std::mem::replace(
+                &mut last.content,
+                AnthropicContent::Blocks(Vec::new()),
+            ));
+            blocks.extend(content_into_blocks(msg.content));
+            last.content = AnthropicContent::Blocks(blocks);
+            ledger.merged_across_dropped_system_turn += 1;
+            return;
+        }
+        self.messages.push(msg);
+    }
+
+    /// Record that a forwarded system turn was dropped here. A cache
+    /// breakpoint on it is moved rather than lost: the router counts a
+    /// marker anywhere in `messages[]` as caller-supplied and withholds its
+    /// own placement, so dropping it would ship the request with no
+    /// breakpoint at all. The preceding message ends exactly where the
+    /// dropped turn's prefix ended, so the move keeps the cached prefix and
+    /// the breakpoint count can only fall.
+    fn drop_system_turn(&mut self, breakpoint: Option<CacheControl>) -> Option<BreakpointFate> {
+        self.after_dropped_system_turn = true;
+        let cc = breakpoint?;
+        Some(if self.anchor_breakpoint(cc) {
+            BreakpointFate::Moved
+        } else {
+            BreakpointFate::Dropped
+        })
+    }
+
+    fn anchor_breakpoint(&mut self, cc: CacheControl) -> bool {
+        let Some(last) = self.messages.last_mut() else {
+            return false;
+        };
+        if let AnthropicContent::Text(text) = &last.content {
+            if text.trim().is_empty() {
+                return false;
+            }
+            last.content = AnthropicContent::Blocks(vec![plain_text_block(text.clone())]);
+        }
+        let AnthropicContent::Blocks(blocks) = &mut last.content else {
+            return false;
+        };
+        let Some(slot) = blocks.iter_mut().rev().find_map(breakpoint_slot) else {
+            return false;
+        };
+        // A marker already on the anchor block wins: the two collapse into
+        // one breakpoint at the same prefix boundary.
+        if slot.is_none() {
+            *slot = Some(cc);
+        }
+        true
+    }
+}
+
+const fn is_same_conversational_role(a: &AnthropicRole, b: &AnthropicRole) -> bool {
+    matches!(
+        (a, b),
+        (AnthropicRole::User, AnthropicRole::User)
+            | (AnthropicRole::Assistant, AnthropicRole::Assistant)
+    )
+}
+
+/// Block form of a message's content, for a merge. An empty string carrier
+/// becomes no block: Anthropic rejects an empty text block.
+fn content_into_blocks(content: AnthropicContent) -> Vec<ContentBlock> {
+    match content {
+        AnthropicContent::Text(text) if text.is_empty() => Vec::new(),
+        AnthropicContent::Text(text) => vec![plain_text_block(text)],
+        AnthropicContent::Blocks(blocks) => blocks,
+    }
+}
+
+const fn plain_text_block(text: String) -> ContentBlock {
+    ContentBlock::Text {
+        text,
+        cache_control: None,
+        citations: None,
+    }
+}
+
+/// The `cache_control` slot of a block Anthropic accepts a breakpoint on.
+/// Thinking blocks cannot bear one, and Anthropic rejects a breakpoint on
+/// blank text.
+fn breakpoint_slot(block: &mut ContentBlock) -> Option<&mut Option<CacheControl>> {
+    match block {
+        ContentBlock::Text {
+            text,
+            cache_control,
+            ..
+        } if !text.trim().is_empty() => Some(cache_control),
+        ContentBlock::Text { .. }
+        | ContentBlock::Thinking { .. }
+        | ContentBlock::RedactedThinking { .. } => None,
+        ContentBlock::Image { cache_control, .. }
+        | ContentBlock::Document { cache_control, .. }
+        | ContentBlock::ToolUse { cache_control, .. }
+        | ContentBlock::ToolResult { cache_control, .. }
+        | ContentBlock::Other { cache_control, .. } => Some(cache_control),
+    }
+}
+
+/// Screen one forwarded system turn and either emit it in place or drop it,
+/// charging the drop to its ledger term and carrying its breakpoint over the
+/// seam.
+fn emit_forwarded_system_turn(
+    content: &MessageContent,
+    wire: &mut WireMessages,
+    ledger: &mut MessageLedger,
+    system_turns: &mut SystemTurnTally<'_>,
+    envelopes: &mut EnvelopeUnwrapTally,
+) {
+    let screened = screen_forwarded_system_content(content);
+    system_turns.record_billing_stripped(screened.blocks_stripped);
+    match screened.verdict {
+        SystemTurnVerdict::Forward(kept) => {
+            wire.push(
+                AnthropicMessage {
+                    role: AnthropicRole::System,
+                    content: translate_simple_content(&kept, envelopes),
+                },
+                ledger,
+            );
+            system_turns.record_forwarded();
+            return;
+        }
+        SystemTurnVerdict::DroppedBilling => {
+            system_turns.record_billing_dropped_turn();
+            ledger.system_turns_dropped_by_billing_strip += 1;
+        }
+        SystemTurnVerdict::DroppedEmpty => {
+            system_turns.record_empty_dropped_turn();
+            ledger.system_turns_dropped_as_empty += 1;
+        }
+    }
+    if let Some(fate) = wire.drop_system_turn(last_breakpoint(content)) {
+        system_turns.record_breakpoint(fate);
+    }
+}
+
+/// The last cache breakpoint a turn carries, if any. A turn carrying several
+/// collapses to its last one, the boundary that covers the longest prefix.
+fn last_breakpoint(content: &MessageContent) -> Option<CacheControl> {
+    match content {
+        MessageContent::Parts(parts) => parts.iter().rev().find_map(|p| p.cache_control().cloned()),
+        MessageContent::Text(_) | MessageContent::Null => None,
+    }
 }
 
 /// Screen one forwarded `Role::System` turn's content before it reaches
