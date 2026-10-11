@@ -266,6 +266,7 @@ impl Router {
         let result = self.complete_inner(req, opts, &mut meta).await;
         emit_replay_degradation(&meta);
         emit_field_repair(&meta);
+        self.emit_wire_rejections(&meta);
         emit_field_preflight(&meta);
         Dispatched { meta, result }
     }
@@ -811,6 +812,13 @@ impl Router {
                         return Ok(resp);
                     }
                     Err(mut e) => {
+                        self.settle_failed_attempt(
+                            target,
+                            &attempt_req,
+                            wire_tap.as_ref(),
+                            &e,
+                            meta,
+                        );
                         // The canary's lossy repair is settled only by the
                         // success of ITS re-dispatch; any failure after it
                         // (including a second rejection a later repair then
@@ -1334,6 +1342,7 @@ impl Router {
         let result = self.stream_inner(req, opts, &mut meta).await;
         emit_replay_degradation(&meta);
         emit_field_repair(&meta);
+        self.emit_wire_rejections(&meta);
         emit_field_preflight(&meta);
         DispatchedStream { meta, result }
     }
@@ -1778,6 +1787,13 @@ impl Router {
                         ));
                     }
                     Err(mut e) => {
+                        self.settle_failed_attempt(
+                            target,
+                            &attempt_req,
+                            wire_tap.as_ref(),
+                            &e,
+                            meta,
+                        );
                         let native_cf = match replay_plan.as_ref() {
                             Some(plan) => {
                                 classify_with_attempt(&e, target.provider_kind, plan.attempt())

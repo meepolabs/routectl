@@ -7,7 +7,8 @@
 //!
 //! - the sampler: the first `first_n` successful attempts of each
 //!   (lane, client version) since boot are checked, then one in
-//!   `sample_one_in`. At most [`MAX_TRACKED_VERSIONS_PER_LANE`] versions are
+//!   `sample_one_in`. An attempt is charged when it starts and the charge
+//!   is released if it does not succeed. At most [`MAX_TRACKED_VERSIONS_PER_LANE`] versions are
 //!   tracked per lane; any further version shares one per-lane 1-in-M
 //!   counter, so a client rotating version strings cannot buy unbounded
 //!   full checks or unbounded memory;
@@ -304,6 +305,32 @@ impl WireCheckState {
         let seen = entry.overflow_seen;
         entry.overflow_seen = seen.saturating_add(1);
         admit_nth(seen, 0, sample_one_in)
+    }
+
+    /// Give back the charge one [`Self::admit`] call for `lane` and
+    /// `client_version` made, for an attempt that did not succeed: only
+    /// successful attempts count toward first-N and one-in-M. Decrements the
+    /// same counter that call bumped, saturating at zero. A tracked version
+    /// is never untracked and the tracked list only fills, so a version
+    /// absent from a full list was charged to the overflow counter; one
+    /// absent from a list with room was never charged, and nothing changes.
+    pub fn release(&self, lane: Lane, client_version: Option<&str>) {
+        let client_version = client_version.filter(|v| is_safe_token(v));
+        let Some(shard) = self.sampler.get(lane.index()) else {
+            return;
+        };
+        let mut entry = lock(shard);
+        if let Some((_, seen)) = entry
+            .versions
+            .iter_mut()
+            .find(|(version, _)| version.as_deref() == client_version)
+        {
+            *seen = seen.saturating_sub(1);
+            return;
+        }
+        if entry.versions.len() >= MAX_TRACKED_VERSIONS_PER_LANE {
+            entry.overflow_seen = entry.overflow_seen.saturating_sub(1);
+        }
     }
 
     /// Record a check that had nothing complete to compare.

@@ -67,6 +67,7 @@ mod status;
 mod sticky;
 mod window_gate;
 mod wire_check;
+mod wire_rejection;
 pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_health::CapabilityPersistenceHealth;
 pub use capability_learn::CapabilityLearnEvent;
@@ -1585,6 +1586,10 @@ pub struct DispatchMeta {
     /// post-rejection repair, these the PROACTIVE pre-dispatch rewrite, and
     /// the two are never conflated into one record or one budget charge.
     pub field_preflight: Vec<FieldPreflight>,
+    /// Upstream rejections the walk drew, each classified against the body
+    /// that drew it and waiting for the field-repair outcome. Content-free;
+    /// read once at request resolution.
+    pub(crate) wire_rejections: Vec<wire_rejection::PendingWireRejection>,
 }
 
 /// Closed-set facts about one canonical pre-flight planning decision,
@@ -1775,6 +1780,7 @@ impl DispatchMeta {
             replay_degradation: None,
             field_repairs: Vec::new(),
             field_preflight: Vec::new(),
+            wire_rejections: Vec::new(),
         }
     }
 

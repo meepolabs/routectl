@@ -94,6 +94,69 @@ fn a_version_past_the_per_lane_cap_falls_to_one_in_m() {
 }
 
 #[test]
+fn a_released_charge_is_given_back_to_the_cohort_that_took_it() {
+    let first_n_one = config(1, 1000);
+    let tracked: Vec<String> = (0..MAX_TRACKED_VERSIONS_PER_LANE)
+        .map(|n| format!("1.0.{n}"))
+        .collect();
+    let fill = |state: &WireCheckState| {
+        for version in &tracked {
+            state.admit(anthropic_lane(), Some(version), &first_n_one);
+        }
+    };
+
+    let tracked_state = WireCheckState::default();
+    assert!(tracked_state.admit(anthropic_lane(), Some("2.0.0"), &first_n_one));
+    tracked_state.release(anthropic_lane(), Some("2.0.0"));
+    assert!(
+        tracked_state.admit(anthropic_lane(), Some("2.0.0"), &first_n_one),
+        "a tracked version gets its first-N slot back"
+    );
+
+    let overflow_state = WireCheckState::default();
+    fill(&overflow_state);
+    let overflow_config = config(0, 2);
+    assert!(!overflow_state.admit(anthropic_lane(), Some("9.9.9"), &overflow_config));
+    overflow_state.release(anthropic_lane(), Some("9.9.9"));
+    assert!(
+        !overflow_state.admit(anthropic_lane(), Some("9.9.9"), &overflow_config),
+        "an overflow version gives its charge back to the overflow counter"
+    );
+    assert_eq!(
+        admitted_indices(
+            &overflow_state,
+            anthropic_lane(),
+            Some("1.0.0"),
+            &first_n_one,
+            1
+        ),
+        Vec::<usize>::new(),
+        "and never to a tracked version's first-N window"
+    );
+}
+
+#[test]
+fn a_release_never_underflows_or_starts_tracking_a_version() {
+    let state = WireCheckState::default();
+    let config = config(1, 1000);
+
+    state.release(anthropic_lane(), Some("never-admitted"));
+    state.release(anthropic_lane(), None);
+
+    assert!(
+        state.admit(anthropic_lane(), Some("never-admitted"), &config),
+        "a release with no matching charge changes nothing"
+    );
+    state.release(anthropic_lane(), Some("never-admitted"));
+    state.release(anthropic_lane(), Some("never-admitted"));
+    assert!(state.admit(anthropic_lane(), Some("never-admitted"), &config));
+    assert!(
+        !state.admit(anthropic_lane(), Some("never-admitted"), &config),
+        "the count saturated at zero rather than wrapping"
+    );
+}
+
+#[test]
 fn first_n_zero_admits_only_every_mth_success() {
     let state = WireCheckState::default();
     let config = config(0, 4);

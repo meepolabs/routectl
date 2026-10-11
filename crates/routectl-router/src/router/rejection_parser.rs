@@ -30,13 +30,14 @@
 //! candidates.
 
 use routectl_core::capability::SignalTier;
+use routectl_core::wire_check::WirePath;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
 
 use super::field_repair::{FieldRepairRow, FieldRepairTable, FieldTransform};
 
 /// Statuses a caller-shaped field rejection arrives on. Everything else says
 /// nothing about the request envelope.
-const REJECTION_STATUSES: [u16; 2] = [400, 422];
+pub(super) const REJECTION_STATUSES: [u16; 2] = [400, 422];
 
 /// The Anthropic Messages error type a field rejection carries.
 const ANTHROPIC_INVALID_REQUEST: &str = "invalid_request_error";
@@ -110,6 +111,56 @@ pub(super) fn parse_rejection(
         kind: localized.kind,
         accepted: named_accepted(row, &localized.replacements),
     })
+}
+
+/// Where a rejection says the refused field sits, sanitized for logging.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RejectedWirePath {
+    /// The location in the request body as the upstream named it, array
+    /// indices kept, so it can be looked up in a wire body.
+    pub(super) wire: WirePath,
+    /// The canonical field path: indices dropped and, on Bedrock, the
+    /// Converse field bag removed -- the shape a closed-table row path has.
+    pub(super) field: WirePath,
+}
+
+/// The path a rejection names, whether or not the closed table has a row for
+/// it. Reads only; `None` exactly when [`parse_rejection`] could not localize
+/// the rejection either.
+pub(super) fn rejected_wire_path(
+    provider_kind: &str,
+    status: u16,
+    parsed: Option<&ParsedErrorBody>,
+) -> Option<RejectedWirePath> {
+    let localized = localize(provider_kind, status, parsed?)?;
+    Some(RejectedWirePath {
+        wire: localized
+            .raw
+            .split('.')
+            .fold(WirePath::root(), push_raw_segment),
+        field: WirePath::from_segments(localized.segments.iter().copied()),
+    })
+}
+
+/// `path` extended by one raw dotted segment, which may carry trailing
+/// bracket indices (`tools[0]`). Only called on a path
+/// [`canonical_segments`] accepted, so every bracket holds an index.
+fn push_raw_segment(path: WirePath, segment: &str) -> WirePath {
+    let (name, brackets) = segment.split_once('[').unwrap_or((segment, ""));
+    brackets
+        .split('[')
+        .filter_map(|bracket| bracket.strip_suffix(']'))
+        .fold(push_raw_name(path, name), push_raw_name)
+}
+
+fn push_raw_name(path: WirePath, name: &str) -> WirePath {
+    if name.is_empty() {
+        return path;
+    }
+    match name.parse::<usize>() {
+        Ok(index) if is_index(name) => path.index(index),
+        _ => path.child(name),
+    }
 }
 
 /// The one member of `row`'s closed accepted set among `replacements`, or
@@ -188,6 +239,9 @@ impl Dialect {
 /// the segments borrow upstream text and never leave this module.
 #[derive(Clone, Debug)]
 struct LocalizedPath<'a> {
+    /// The path as the envelope spelled it, already accepted by
+    /// [`canonical_segments`].
+    raw: &'a str,
     segments: Vec<&'a str>,
     ends_in_index: bool,
     tier: SignalTier,
@@ -222,6 +276,7 @@ fn localize<'a>(
         Dialect::OpenAi => localize_openai(parsed),
     }?;
     Some(LocalizedPath {
+        raw: attribution.path,
         segments: canonical_segments(dialect, attribution.path)?,
         ends_in_index: ends_in_index(attribution.path),
         tier: attribution.tier,

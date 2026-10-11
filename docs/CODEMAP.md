@@ -3327,6 +3327,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the ingress JSON against the deposit, TRANSLATION lanes diff canonical
   `provider_extras`; no deposit records `incomplete`). Reads only; never
   changes the response or fails the attempt
+- `src/router/wire_rejection.rs` -- the wire side of a failed attempt, called
+  at the top of both `Err` arms before any repair: releases the attempt's
+  sampler charge (`WireCheckState::release`; only successes count), and on a
+  status in the parser's rejection set runs the full request check unsampled
+  and classifies the named path (`rejected_wire_path`) against the ingress and
+  deposited egress as `client_unchanged | client_changed | routectl_added |
+  unlocalized` (`n_a` on TRANSLATION lanes). Holds a content-free
+  `PendingWireRejection` on `DispatchMeta`; `emit_wire_rejections` joins the
+  field-repair outcome at dispatch end and records the ring entry (WARN on
+  `unrepaired`, deduped)
 - `src/router/beta_withhold.rs` -- per-target withheld client beta set
   (`withhold_betas_on_chain`), resolved pin > override > learned > seed; a
   seed-clear marker on the cell stops the seed withholding; a lapsed learned

@@ -108,7 +108,7 @@ impl Router {
 
 /// The lane an attempt on `target` travels: the client's ingress dialect and
 /// the target's egress kind. `None` when either is unknown.
-fn attempt_lane(target: &DispatchTarget, attempt_req: &ChatRequest) -> Option<Lane> {
+pub(super) fn attempt_lane(target: &DispatchTarget, attempt_req: &ChatRequest) -> Option<Lane> {
     let ingress = attempt_req.routectl_internal.ingress_wire.as_ref()?;
     Some(Lane::of(ingress.dialect, target.egress_kind?))
 }
@@ -123,9 +123,22 @@ pub(super) fn compare_request_leg(
     attempt_req: &ChatRequest,
     tap: &WireTap,
 ) {
+    lend_request_record(attempt_req, tap, |record| match record {
+        Some(record) => compare_request(state, lane, &record),
+        None => state.record_incomplete(lane),
+    });
+}
+
+/// Drain the tap's request side, build the attempt's request-leg record and
+/// lend it to `use_record` before every body it borrows is dropped. `None`
+/// when the request carries no ingress body to build a record from.
+pub(super) fn lend_request_record<R>(
+    attempt_req: &ChatRequest,
+    tap: &WireTap,
+    use_record: impl FnOnce(Option<AttemptRecord<'_>>) -> R,
+) -> R {
     let Some(ingress) = attempt_req.routectl_internal.ingress_wire.as_ref() else {
-        state.record_incomplete(lane);
-        return;
+        return use_record(None);
     };
     let contents = tap.take_request();
     let edits: Vec<DeclaredEdit> = attempt_req
@@ -135,13 +148,17 @@ pub(super) fn compare_request_leg(
         .chain(contents.edits(Leg::Request))
         .cloned()
         .collect();
-    let record = AttemptRecord::new(ingress, attempt_req, contents.request(), &edits);
-    compare_request(state, lane, &record);
+    use_record(Some(AttemptRecord::new(
+        ingress,
+        attempt_req,
+        contents.request(),
+        &edits,
+    )))
 }
 
 /// Diff the request leg and record the outcome. A missing or unparseable
 /// body on either side is `incomplete`, never `clean`.
-fn compare_request(state: &WireCheckState, lane: Lane, record: &AttemptRecord<'_>) {
+pub(super) fn compare_request(state: &WireCheckState, lane: Lane, record: &AttemptRecord<'_>) {
     let Some(sent) = record
         .egress()
         .and_then(|body| serde_json::from_slice::<Value>(body).ok())

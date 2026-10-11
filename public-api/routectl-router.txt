@@ -6093,6 +6093,7 @@ pub fn routectl_router::wire_check_state::WireCheckState::record_compared<'p, I>
 pub fn routectl_router::wire_check_state::WireCheckState::record_incomplete(&self, routectl_core::wire_check::lane::Lane)
 pub fn routectl_router::wire_check_state::WireCheckState::record_local_refusal(&self, routectl_core::wire_check::lane::Lane)
 pub fn routectl_router::wire_check_state::WireCheckState::record_rejection(&self, routectl_core::wire_check::lane::Lane, routectl_core::wire_check::lane::Leg, &routectl_core::wire_check::path::WirePath, routectl_core::wire_check::edits::RejectionProvenance, routectl_router::wire_check_state::F1Outcome)
+pub fn routectl_router::wire_check_state::WireCheckState::release(&self, routectl_core::wire_check::lane::Lane, core::option::Option<&str>)
 pub fn routectl_router::wire_check_state::WireCheckState::snapshot(&self, &routectl_router::WireCheckConfig) -> routectl_router::wire_check_state::WireCheckSnapshot
 impl core::default::Default for routectl_router::wire_check_state::WireCheckState
 pub fn routectl_router::wire_check_state::WireCheckState::default() -> Self
