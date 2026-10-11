@@ -20,6 +20,7 @@ use rand::TryRng;
 use rand::rngs::SysRng;
 use std::collections::HashSet;
 
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
     Result, Role, SystemBlock, SystemContent,
@@ -648,6 +649,11 @@ pub(crate) fn render_value_to_bytes(id: &str, value: Value) -> Result<bytes::Byt
 /// Translation surface for one ingress dialect. See module docs.
 pub trait IngressAdapter: Send + Sync {
     fn id(&self) -> &str;
+
+    /// The wire dialect this ingress parses. Names the lane a request this
+    /// ingress refuses is counted under. NO default impl, like
+    /// [`Self::error_envelope_shape`].
+    fn dialect(&self) -> IngressDialect;
 
     /// Wire shape this ingress uses to render error envelopes. The
     /// generic ingress driver (`handlers::ingress_handle`) branches on

@@ -24,16 +24,19 @@ use routectl_router::runtime_state::CircuitPhase;
 use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
 use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
+use super::wire_check_rows::{WireCheckRows, project as project_wire_check};
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the health panel payload.
 pub const SCHEMA_VERSION: u32 = 6;
 
-/// Per-target health plus learned negatives for the routing surface.
+/// Per-target health plus learned negatives for the routing surface, and the
+/// live wire check's rows inside the status window.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct HealthPanel {
     targets: Vec<TargetHealth>,
     learned_negatives: Vec<LearnedNegative>,
+    wire_check: WireCheckRows,
 }
 
 /// One dispatch target's non-mutating gate health. Field names mirror the
@@ -218,9 +221,12 @@ fn build_from_view(
         .into_iter()
         .map(|entry| map_learned(entry, now, now_ms))
         .collect();
+    let now_unix_secs = u64::try_from(now_ms / 1000).unwrap_or(0);
+    let wire_check = project_wire_check(&view.wire_check_snapshot(), now_unix_secs);
     HealthPanel {
         targets,
         learned_negatives,
+        wire_check,
     }
 }
 
@@ -281,6 +287,10 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 #[cfg(test)]
 #[path = "health_lane_tests.rs"]
 mod lane_tests;
+
+#[cfg(test)]
+#[path = "health_wire_check_tests.rs"]
+mod wire_check_tests;
 
 #[cfg(test)]
 mod tests {
@@ -771,6 +781,7 @@ mod tests {
                 Instant::now(),
                 1_000,
             )],
+            wire_check: project_wire_check(&test_state().router.view().wire_check_snapshot(), 0),
         };
         let text = serde_json::to_string(&panel).unwrap();
         for forbidden in ["body", "error_text", "prompt", "message", "raw"] {

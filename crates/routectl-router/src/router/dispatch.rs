@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, FrontSlot, Provider, ReplayScheme,
     Result,
@@ -44,6 +45,7 @@ use super::class_observe::{
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
+use super::local_refusal::ingress_dialect_of;
 use super::overlays::apply_layered_overlays;
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
 use super::probe_payload_capture::ProbeFieldCapture;
@@ -304,6 +306,7 @@ impl Router {
         // chain keeps its normal auth recovery even on a request that
         // also carries a forwarded bearer.
         let is_forwarded = req.routectl_internal.forwarded_bearer.is_some();
+        let ingress = ingress_dialect_of(&req);
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         let hard_cap = policy.hard_retry_cap();
@@ -409,7 +412,10 @@ impl Router {
             // (advance the chain as an ordinary route-away would).
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
-                StripDecision::StrictReject(err) => return Err(err),
+                StripDecision::StrictReject(err) => {
+                    self.count_local_refusal(ingress, target);
+                    return Err(err);
+                }
                 StripDecision::RouteAway(err) => {
                     last_err = Some(err);
                     if opts.disable_fallbacks {
@@ -1175,6 +1181,7 @@ impl Router {
                             debits,
                             is_probe,
                             is_forwarded,
+                            ingress,
                         );
                         self.observe_for_learning(
                             &e,
@@ -1357,6 +1364,7 @@ impl Router {
         // `use_forwarded_credential` flag drives the model-rewrite
         // bypass and the 401/403/429 terminal re-key.
         let is_forwarded = req.routectl_internal.forwarded_bearer.is_some();
+        let ingress = ingress_dialect_of(&req);
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         // Availability-probe detection (see `complete_with_options`). A
@@ -1437,7 +1445,10 @@ impl Router {
             // hazard routes away for this attempt.
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
-                StripDecision::StrictReject(err) => return Err(err),
+                StripDecision::StrictReject(err) => {
+                    self.count_local_refusal(ingress, target);
+                    return Err(err);
+                }
                 StripDecision::RouteAway(err) => {
                     last_err = Some(err);
                     if opts.disable_fallbacks {
@@ -2010,6 +2021,7 @@ impl Router {
                             debits,
                             is_probe,
                             is_forwarded,
+                            ingress,
                         );
                         self.observe_for_learning(
                             &e,
@@ -2106,7 +2118,14 @@ impl Router {
         debit: bool,
         is_probe: bool,
         is_forwarded: bool,
+        ingress: Option<IngressDialect>,
     ) {
+        if matches!(
+            err,
+            Error::NormalizeRequest(..) | Error::LocalRefusal { .. }
+        ) {
+            self.count_local_refusal(ingress, target);
+        }
         let facts = upstream_facts(err);
         let model = target.nickname.as_deref().unwrap_or("");
         match &cf.class {

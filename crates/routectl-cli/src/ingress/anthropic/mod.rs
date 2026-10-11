@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use axum::http::HeaderMap;
 use serde_json::{Map, Value, json};
 
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     CacheCreation, ChatChunk, ChatRequest, ChatResponse, ReasoningDetail, Result,
     is_responses_family, reasoning_envelope,
@@ -303,6 +304,10 @@ fn encrypted_detail_data(d: &ReasoningDetail) -> Cow<'_, str> {
 impl IngressAdapter for AnthropicIngress {
     fn id(&self) -> &'static str {
         "anthropic"
+    }
+
+    fn dialect(&self) -> IngressDialect {
+        IngressDialect::Anthropic
     }
 
     fn error_envelope_shape(&self) -> ErrorEnvelopeShape {

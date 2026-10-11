@@ -328,6 +328,7 @@ fn emit_class_observability_logs_enforced_and_hard_retry_cap() {
             false,
             false,
             false,
+            None,
         );
     });
 
@@ -2501,6 +2502,7 @@ fn emit_class_observability_bumps_context_window_overflow_on_context_window_clas
         false,
         false,
         false,
+        None,
     );
 
     assert_eq!(

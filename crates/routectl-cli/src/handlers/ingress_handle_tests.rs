@@ -1797,6 +1797,9 @@ impl<A: IngressAdapter> IngressAdapter for RenderChunkFailsOnceAdapter<A> {
     fn id(&self) -> &str {
         self.inner.id()
     }
+    fn dialect(&self) -> routectl_core::wire_check::IngressDialect {
+        self.inner.dialect()
+    }
     fn error_envelope_shape(&self) -> ErrorEnvelopeShape {
         self.inner.error_envelope_shape()
     }
@@ -2007,6 +2010,9 @@ struct RenderResponseFailsAdapter<A: IngressAdapter> {
 impl<A: IngressAdapter> IngressAdapter for RenderResponseFailsAdapter<A> {
     fn id(&self) -> &str {
         self.inner.id()
+    }
+    fn dialect(&self) -> routectl_core::wire_check::IngressDialect {
+        self.inner.dialect()
     }
     fn error_envelope_shape(&self) -> ErrorEnvelopeShape {
         self.inner.error_envelope_shape()

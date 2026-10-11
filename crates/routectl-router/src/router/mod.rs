@@ -45,6 +45,7 @@ mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
 mod learned_lanes;
+mod local_refusal;
 mod opening_lookup;
 mod overlays;
 mod precontent;
@@ -3139,6 +3140,13 @@ impl Router {
     /// reset and the sampler is not advanced.
     pub fn wire_check_snapshot(&self) -> crate::wire_check_state::WireCheckSnapshot {
         self.wire_check.snapshot(&self.config.wire_check)
+    }
+
+    /// The live wire-check state itself, so a test outside this crate can
+    /// seed counters and findings through the state's own recording API.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn wire_check_state_for_tests(&self) -> &crate::wire_check_state::WireCheckState {
+        &self.wire_check
     }
 
     /// Retain the build's sanitized per-pool reports and count their

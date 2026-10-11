@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use routectl_router::router::RouteTargetStatus;
+use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
     EffectiveView, FidelitySnapshot, FieldRepairCounters, LearnedRegistryEntry, Router,
     derive_effective_view,
@@ -79,9 +80,10 @@ impl QueryPricer {
 }
 
 /// A read-only view over one pinned router snapshot. The `router` field is
-/// private, so the only router state a panel can observe is what the six
+/// private, so the only router state a panel can observe is what the seven
 /// methods below expose -- route health, learned negatives, the live
-/// envelope-field repair counters, the per-verdict fidelity rows, the derived
+/// envelope-field repair counters, the per-verdict fidelity rows, the live
+/// wire-check counters and findings, the derived
 /// effective config view (which is computed here so panels never handle raw
 /// `Config`), and the doctor's served inputs (an opaque value only the doctor
 /// gather can read).
@@ -121,6 +123,13 @@ impl StatusRouterView {
     /// router's own module, both behaviorally and by a source guard.
     pub fn fidelity_snapshot(&self) -> FidelitySnapshot {
         self.router.fidelity_snapshot()
+    }
+
+    /// The live wire-check counters and findings ring with the configured
+    /// status window. A pure read: no counter resets and the sampler does not
+    /// advance.
+    pub fn wire_check_snapshot(&self) -> WireCheckSnapshot {
+        self.router.wire_check_snapshot()
     }
 
     /// The derived effective-config view for the config panel, folding the
@@ -176,19 +185,21 @@ mod tests {
     }
 
     #[test]
-    fn view_exposes_only_the_six_read_methods() {
+    fn view_exposes_only_the_seven_read_methods() {
         let handle = handle();
         let view = handle.view();
 
         // The full read surface: route health, learned negatives, live
-        // field-repair counters, the coherent fidelity snapshot, effective view,
-        // the doctor's served inputs. If a future edit widens this surface (e.g.
-        // exposes `&Router` or a dispatch method), it lands here in review against
-        // a facade whose contract is these six calls.
+        // field-repair counters, the coherent fidelity snapshot, the wire-check
+        // snapshot, effective view, the doctor's served inputs. If a future edit
+        // widens this surface (e.g. exposes `&Router` or a dispatch method), it
+        // lands here in review against a facade whose contract is these seven
+        // calls.
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
         let _learned: Vec<LearnedRegistryEntry> = view.learned_capabilities();
         let _counters: FieldRepairCounters = view.field_repair_counters();
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
+        let _wire_check: WireCheckSnapshot = view.wire_check_snapshot();
         let _effective: EffectiveView = view.effective_view();
         let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run());
     }

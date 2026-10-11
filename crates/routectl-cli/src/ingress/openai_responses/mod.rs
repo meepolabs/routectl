@@ -27,6 +27,7 @@
 use std::any::Any;
 
 use axum::http::HeaderMap;
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 use serde_json::Value;
 
@@ -175,6 +176,10 @@ impl IngressStreamState for ResponsesStreamState {
 impl IngressAdapter for ResponsesIngress {
     fn id(&self) -> &'static str {
         "openai-responses"
+    }
+
+    fn dialect(&self) -> IngressDialect {
+        IngressDialect::Responses
     }
 
     fn error_envelope_shape(&self) -> ErrorEnvelopeShape {

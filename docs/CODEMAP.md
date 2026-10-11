@@ -3194,6 +3194,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `LearnedLaneProjection::from_config` (the factory's static resolution
   walk, for doctor and `probe --capabilities`, which hold no router);
   `Router::projection_targets` also feeds `status_targets`
+- `src/router/local_refusal.rs` -- the one counting function behind
+  `rc_request_refused_local_total{lane}`: `Router::count_local_refusal`
+  (attempt ingress dialect x target `EgressKind`, called from
+  `emit_class_observability` for `NormalizeRequest | LocalRefusal` and from
+  both strict-strip refusal returns; no ingress body or unknown egress counts
+  nothing), `Router::record_ingress_refusal` (`<ingress>->local`, for the
+  ingress parse funnel), and `ingress_dialect_of`
 - `src/router/status.rs` -- route-target status facade for the /status
   surface: `RouteTargetStatus` (re-exported from `router` for the crate-root
   path `routectl_router::router::RouteTargetStatus`), `Router::status_targets`
@@ -6570,6 +6577,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Bounded { rows, total, omitted }` carries the real total and the dropped count
   alongside the rows -- a truncated line says how much it hides rather than
   presenting a subset as complete
+- `src/handlers/status/wire_check_rows.rs` -- the health panel's additive
+  `wire_check` section, projected from `Router::wire_check_snapshot` through
+  the facade: `window_secs`, loss rows per (lane, path_class) and check rows
+  per (lane, outcome) last seen inside the window, unrepaired-rejection rows
+  (lane, leg, path, f1_outcome, provenance, ts) from the findings ring, and
+  local-refusal rows per lane. Closed labels, sanitized paths and counts only
 - `src/handlers/status/usage_health.rs` -- `UsageHealthView`, a counters-only
   facade over the usage writer's shared `Arc<UsageCounters>`, with two reads:
   `writer_degraded()` (latching, derived from the monotonic write-error count --

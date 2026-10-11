@@ -33,6 +33,7 @@ pub(crate) mod test_hooks;
 mod types;
 mod usage;
 mod usage_health;
+mod wire_check_rows;
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;

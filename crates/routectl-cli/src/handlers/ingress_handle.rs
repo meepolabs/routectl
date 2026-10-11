@@ -122,7 +122,12 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
         // `Error::Json`; render it as the 400 malformed-body envelope the
         // axum `Json` extractor produced before this path owned the parse.
         Err(Error::Json(_)) => return render_malformed_body(envelope),
-        Err(e) => return map_error(envelope, e),
+        Err(e) => {
+            if matches!(e, Error::Validation(_)) {
+                router.record_ingress_refusal(adapter.dialect());
+            }
+            return map_error(envelope, e);
+        }
     };
     capture_ingress_wire(&headers, &raw_body, &mut req);
 
@@ -1709,6 +1714,10 @@ mod opening_accuracy_boundary_tests;
 #[cfg(test)]
 #[path = "local_refusal_envelope_tests.rs"]
 mod local_refusal_envelope_tests;
+
+#[cfg(test)]
+#[path = "ingress_refusal_count_tests.rs"]
+mod ingress_refusal_count_tests;
 
 #[cfg(test)]
 #[path = "upstream_parse_cap_tests.rs"]

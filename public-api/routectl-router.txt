@@ -5015,6 +5015,8 @@ pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usiz
 pub fn routectl_router::router::Router::publish_probe_incarnation_into(&alloc::sync::Arc<Self>, impl core::ops::function::FnOnce(alloc::sync::Arc<Self>)) -> usize
 pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::record_ingress_refusal(&self, routectl_core::wire_check::lane::IngressDialect)
+impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::run_probe_pass(&self) -> routectl_router::router::ProbePassSummary
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::seat_count_for(&self, &str) -> core::option::Option<usize>
@@ -15877,6 +15879,8 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usize
 pub fn routectl_router::router::Router::publish_probe_incarnation_into(&alloc::sync::Arc<Self>, impl core::ops::function::FnOnce(alloc::sync::Arc<Self>)) -> usize
 pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::record_ingress_refusal(&self, routectl_core::wire_check::lane::IngressDialect)
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::run_probe_pass(&self) -> routectl_router::router::ProbePassSummary
 impl routectl_router::router::Router

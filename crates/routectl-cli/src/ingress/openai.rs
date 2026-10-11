@@ -17,6 +17,7 @@
 use std::any::Any;
 
 use axum::http::HeaderMap;
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
     Result, is_canonical_request_key,
@@ -59,6 +60,10 @@ impl IngressStreamState for OpenAiStreamState {
 impl IngressAdapter for OpenAiIngress {
     fn id(&self) -> &'static str {
         "openai"
+    }
+
+    fn dialect(&self) -> IngressDialect {
+        IngressDialect::Chat
     }
 
     fn error_envelope_shape(&self) -> ErrorEnvelopeShape {
