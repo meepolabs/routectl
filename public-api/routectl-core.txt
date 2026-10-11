@@ -3024,6 +3024,48 @@ pub fn routectl_core::warn_dedup::CappedWarnSet<K>::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::warn_dedup::CappedWarnSet<K>
 impl<T> tracing::instrument::WithSubscriber for routectl_core::warn_dedup::CappedWarnSet<K>
 pub mod routectl_core::wire_check
+pub enum routectl_core::wire_check::Assembled
+pub routectl_core::wire_check::Assembled::Complete(serde_json::value::Value)
+pub routectl_core::wire_check::Assembled::Incomplete(routectl_core::wire_check::IncompleteReason)
+impl core::clone::Clone for routectl_core::wire_check::Assembled
+pub fn routectl_core::wire_check::Assembled::clone(&self) -> routectl_core::wire_check::Assembled
+impl core::cmp::Eq for routectl_core::wire_check::Assembled
+impl core::cmp::PartialEq for routectl_core::wire_check::Assembled
+pub fn routectl_core::wire_check::Assembled::eq(&self, &routectl_core::wire_check::Assembled) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::Assembled
+pub fn routectl_core::wire_check::Assembled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::Assembled
+impl core::marker::Freeze for routectl_core::wire_check::Assembled
+impl core::marker::Send for routectl_core::wire_check::Assembled
+impl core::marker::Sync for routectl_core::wire_check::Assembled
+impl core::marker::Unpin for routectl_core::wire_check::Assembled
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::Assembled
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::Assembled
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::Assembled
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::Assembled where U: core::convert::From<T>
+pub fn routectl_core::wire_check::Assembled::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::Assembled where U: core::convert::Into<T>
+pub type routectl_core::wire_check::Assembled::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::Assembled::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::Assembled where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::Assembled::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::Assembled::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::Assembled where T: core::clone::Clone
+pub type routectl_core::wire_check::Assembled::Owned = T
+pub fn routectl_core::wire_check::Assembled::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::Assembled::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::Assembled where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::Assembled::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::Assembled where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::Assembled::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::Assembled where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::Assembled::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::Assembled where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::Assembled::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::Assembled
+pub fn routectl_core::wire_check::Assembled::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::Assembled
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::Assembled
 pub enum routectl_core::wire_check::EditKind
 pub routectl_core::wire_check::EditKind::Add
 pub routectl_core::wire_check::EditKind::Relocate
@@ -3261,6 +3303,57 @@ impl<T> core::convert::From<T> for routectl_core::wire_check::EgressKind
 pub fn routectl_core::wire_check::EgressKind::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::wire_check::EgressKind
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::EgressKind
+pub enum routectl_core::wire_check::IncompleteReason
+pub routectl_core::wire_check::IncompleteReason::Budget
+pub routectl_core::wire_check::IncompleteReason::Cancelled
+pub routectl_core::wire_check::IncompleteReason::Disconnect
+pub routectl_core::wire_check::IncompleteReason::RenderFailure
+pub routectl_core::wire_check::IncompleteReason::UpstreamError
+impl routectl_core::wire_check::IncompleteReason
+pub const routectl_core::wire_check::IncompleteReason::ALL: [Self; 5]
+pub const fn routectl_core::wire_check::IncompleteReason::label(self) -> &'static str
+impl core::clone::Clone for routectl_core::wire_check::IncompleteReason
+pub fn routectl_core::wire_check::IncompleteReason::clone(&self) -> routectl_core::wire_check::IncompleteReason
+impl core::cmp::Eq for routectl_core::wire_check::IncompleteReason
+impl core::cmp::PartialEq for routectl_core::wire_check::IncompleteReason
+pub fn routectl_core::wire_check::IncompleteReason::eq(&self, &routectl_core::wire_check::IncompleteReason) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::IncompleteReason
+pub fn routectl_core::wire_check::IncompleteReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::IncompleteReason
+pub fn routectl_core::wire_check::IncompleteReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::IncompleteReason
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::IncompleteReason
+impl core::marker::Freeze for routectl_core::wire_check::IncompleteReason
+impl core::marker::Send for routectl_core::wire_check::IncompleteReason
+impl core::marker::Sync for routectl_core::wire_check::IncompleteReason
+impl core::marker::Unpin for routectl_core::wire_check::IncompleteReason
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::IncompleteReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::IncompleteReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::IncompleteReason
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::IncompleteReason where U: core::convert::From<T>
+pub fn routectl_core::wire_check::IncompleteReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::IncompleteReason where U: core::convert::Into<T>
+pub type routectl_core::wire_check::IncompleteReason::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::IncompleteReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::IncompleteReason where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::IncompleteReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::IncompleteReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::IncompleteReason where T: core::clone::Clone
+pub type routectl_core::wire_check::IncompleteReason::Owned = T
+pub fn routectl_core::wire_check::IncompleteReason::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::IncompleteReason::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::IncompleteReason where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::IncompleteReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::IncompleteReason where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::IncompleteReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::IncompleteReason where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::IncompleteReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::IncompleteReason where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::IncompleteReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::IncompleteReason
+pub fn routectl_core::wire_check::IncompleteReason::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::IncompleteReason
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::IncompleteReason
 pub enum routectl_core::wire_check::IngressDialect
 pub routectl_core::wire_check::IngressDialect::Anthropic
 pub routectl_core::wire_check::IngressDialect::Chat
@@ -3510,6 +3603,54 @@ impl<T> core::convert::From<T> for routectl_core::wire_check::RejectionProvenanc
 pub fn routectl_core::wire_check::RejectionProvenance::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::wire_check::RejectionProvenance
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::RejectionProvenance
+pub enum routectl_core::wire_check::StreamExit
+pub routectl_core::wire_check::StreamExit::Cancelled
+pub routectl_core::wire_check::StreamExit::Disconnect
+pub routectl_core::wire_check::StreamExit::Ended
+pub routectl_core::wire_check::StreamExit::RenderFailure
+pub routectl_core::wire_check::StreamExit::UpstreamError
+impl core::clone::Clone for routectl_core::wire_check::StreamExit
+pub fn routectl_core::wire_check::StreamExit::clone(&self) -> routectl_core::wire_check::StreamExit
+impl core::cmp::Eq for routectl_core::wire_check::StreamExit
+impl core::cmp::PartialEq for routectl_core::wire_check::StreamExit
+pub fn routectl_core::wire_check::StreamExit::eq(&self, &routectl_core::wire_check::StreamExit) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::StreamExit
+pub fn routectl_core::wire_check::StreamExit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::StreamExit
+pub fn routectl_core::wire_check::StreamExit::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::StreamExit
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::StreamExit
+impl core::marker::Freeze for routectl_core::wire_check::StreamExit
+impl core::marker::Send for routectl_core::wire_check::StreamExit
+impl core::marker::Sync for routectl_core::wire_check::StreamExit
+impl core::marker::Unpin for routectl_core::wire_check::StreamExit
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::StreamExit
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::StreamExit
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::StreamExit
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::StreamExit where U: core::convert::From<T>
+pub fn routectl_core::wire_check::StreamExit::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::StreamExit where U: core::convert::Into<T>
+pub type routectl_core::wire_check::StreamExit::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::StreamExit::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::StreamExit where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::StreamExit::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::StreamExit::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::StreamExit where T: core::clone::Clone
+pub type routectl_core::wire_check::StreamExit::Owned = T
+pub fn routectl_core::wire_check::StreamExit::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::StreamExit::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::StreamExit where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::StreamExit::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::StreamExit where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::StreamExit::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::StreamExit where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::StreamExit::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::StreamExit where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::StreamExit::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::StreamExit
+pub fn routectl_core::wire_check::StreamExit::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::StreamExit
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::StreamExit
 pub struct routectl_core::wire_check::AttemptRecord<'a>
 impl<'a> routectl_core::wire_check::AttemptRecord<'a>
 pub const fn routectl_core::wire_check::AttemptRecord<'a>::canonical(&self) -> &'a routectl_core::schema::ChatRequest
@@ -3781,6 +3922,83 @@ impl<T> core::convert::From<T> for routectl_core::wire_check::Lane
 pub fn routectl_core::wire_check::Lane::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::wire_check::Lane
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::Lane
+pub struct routectl_core::wire_check::SseFrame<'a>
+pub routectl_core::wire_check::SseFrame::data: &'a str
+pub routectl_core::wire_check::SseFrame::event: core::option::Option<&'a str>
+impl<'a> routectl_core::wire_check::SseFrame<'a>
+pub const fn routectl_core::wire_check::SseFrame<'a>::new(core::option::Option<&'a str>, &'a str) -> Self
+impl core::fmt::Debug for routectl_core::wire_check::SseFrame<'_>
+pub fn routectl_core::wire_check::SseFrame<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::clone::Clone for routectl_core::wire_check::SseFrame<'a>
+pub fn routectl_core::wire_check::SseFrame<'a>::clone(&self) -> routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::cmp::Eq for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::cmp::PartialEq for routectl_core::wire_check::SseFrame<'a>
+pub fn routectl_core::wire_check::SseFrame<'a>::eq(&self, &routectl_core::wire_check::SseFrame<'a>) -> bool
+impl<'a> core::marker::Copy for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::marker::StructuralPartialEq for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::marker::Freeze for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::marker::Send for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::marker::Sync for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::marker::Unpin for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::marker::UnsafeUnpin for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::SseFrame<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::SseFrame<'a>
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::SseFrame<'a> where U: core::convert::From<T>
+pub fn routectl_core::wire_check::SseFrame<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::SseFrame<'a> where U: core::convert::Into<T>
+pub type routectl_core::wire_check::SseFrame<'a>::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::SseFrame<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::SseFrame<'a> where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::SseFrame<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::SseFrame<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::SseFrame<'a> where T: core::clone::Clone
+pub type routectl_core::wire_check::SseFrame<'a>::Owned = T
+pub fn routectl_core::wire_check::SseFrame<'a>::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::SseFrame<'a>::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::SseFrame<'a> where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::SseFrame<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::SseFrame<'a> where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::SseFrame<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::SseFrame<'a> where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::SseFrame<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::SseFrame<'a> where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::SseFrame<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::SseFrame<'a>
+pub fn routectl_core::wire_check::SseFrame<'a>::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::SseFrame<'a>
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::SseFrame<'a>
+pub struct routectl_core::wire_check::StreamAssembler
+impl routectl_core::wire_check::StreamAssembler
+pub fn routectl_core::wire_check::StreamAssembler::finish(self, routectl_core::wire_check::StreamExit) -> routectl_core::wire_check::Assembled
+pub fn routectl_core::wire_check::StreamAssembler::new(routectl_core::wire_check::IngressDialect) -> Self
+pub fn routectl_core::wire_check::StreamAssembler::push(&mut self, routectl_core::wire_check::SseFrame<'_>)
+impl core::fmt::Debug for routectl_core::wire_check::StreamAssembler
+pub fn routectl_core::wire_check::StreamAssembler::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::wire_check::StreamAssembler
+impl core::marker::Send for routectl_core::wire_check::StreamAssembler
+impl core::marker::Sync for routectl_core::wire_check::StreamAssembler
+impl core::marker::Unpin for routectl_core::wire_check::StreamAssembler
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::StreamAssembler
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::StreamAssembler
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::StreamAssembler
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::StreamAssembler where U: core::convert::From<T>
+pub fn routectl_core::wire_check::StreamAssembler::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::StreamAssembler where U: core::convert::Into<T>
+pub type routectl_core::wire_check::StreamAssembler::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::StreamAssembler::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::StreamAssembler where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::StreamAssembler::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::StreamAssembler::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_core::wire_check::StreamAssembler where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::StreamAssembler::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::StreamAssembler where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::StreamAssembler::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::StreamAssembler where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::StreamAssembler::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_core::wire_check::StreamAssembler
+pub fn routectl_core::wire_check::StreamAssembler::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::StreamAssembler
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::StreamAssembler
 pub struct routectl_core::wire_check::TapContents
 impl routectl_core::wire_check::TapContents
 pub fn routectl_core::wire_check::TapContents::edits(&self, routectl_core::wire_check::Leg) -> &[routectl_core::wire_check::DeclaredEdit]

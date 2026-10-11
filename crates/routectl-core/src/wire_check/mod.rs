@@ -13,12 +13,14 @@
     clippy::panic
 )]
 
+mod assemble;
 mod carriage;
 mod diff;
 mod edits;
 mod lane;
 mod path;
 
+pub use assemble::{Assembled, IncompleteReason, SseFrame, StreamAssembler, StreamExit};
 pub use carriage::{AttemptRecord, IngressWire, TapContents, WireTap};
 pub use diff::{DiffOutcome, Finding, MAX_DIFF_DEPTH, MAX_DIFF_NODES, diff};
 pub use edits::{
