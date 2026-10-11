@@ -6,6 +6,11 @@
 //! non-recording edit collector. The fold reads each frame just before it
 //! is sent and never alters it.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use axum::body::Bytes;
+use http_body::{Body, Frame, SizeHint};
 use routectl_core::wire_check::{
     Assembled, IncompleteReason, SseFrame, StreamAssembler, StreamExit,
 };
@@ -31,6 +36,60 @@ pub(super) fn abandon_unrendered(check: Option<ResponseCheck>) {
             StreamExit::RenderFailure,
             &[],
         );
+    }
+}
+
+/// A complete response body that compares itself with the upstream's
+/// answer once it is gone: after its one frame has been taken, or when it
+/// is dropped unread. The compare never runs ahead of the bytes.
+pub(super) struct CheckedBody {
+    body: Option<Bytes>,
+    check: Option<(ResponseCheck, Bytes, ResponseEdits)>,
+}
+
+impl CheckedBody {
+    /// `body`, compared through `check` (when present) with the edits the
+    /// renderer declared while building it.
+    pub(super) fn new(body: Bytes, check: Option<ResponseCheck>, edits: ResponseEdits) -> Self {
+        Self {
+            check: check.map(|check| (check, body.clone(), edits)),
+            body: Some(body),
+        }
+    }
+}
+
+impl Body for CheckedBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Poll::Ready(
+            self.get_mut()
+                .body
+                .take()
+                .filter(|body| !body.is_empty())
+                .map(|body| Ok(Frame::data(body))),
+        )
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.as_ref().is_none_or(Bytes::is_empty)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let len = self.body.as_ref().map_or(0, Bytes::len);
+        SizeHint::with_exact(u64::try_from(len).unwrap_or(u64::MAX))
+    }
+}
+
+impl Drop for CheckedBody {
+    fn drop(&mut self) {
+        if let Some((check, body, edits)) = self.check.take() {
+            check.compare_body(&body, edits.as_slice());
+        }
     }
 }
 

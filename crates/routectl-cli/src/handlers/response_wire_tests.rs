@@ -294,6 +294,21 @@ async fn send(
     stream: bool,
     render: Render,
 ) -> Vec<u8> {
+    let resp = respond(dialect, swap, stream, render).await;
+    to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body")
+        .to_vec()
+}
+
+/// Send one request through the ingress and return the response before
+/// its body is read.
+async fn respond(
+    dialect: Dialect,
+    swap: &Arc<arc_swap::ArcSwap<Router>>,
+    stream: bool,
+    render: Render,
+) -> axum::response::Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -302,7 +317,7 @@ async fn send(
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     let body = Bytes::from(serde_json::to_vec(&dialect.request_body(stream)).expect("json"));
     let state = AppState::for_test(Arc::clone(swap));
-    let resp = match dialect {
+    match dialect {
         Dialect::Anthropic => {
             let adapter = DroppingAdapter::new(AnthropicIngress, dialect, render);
             ingress_handle(state, headers, None, Ok(body), adapter).await
@@ -315,11 +330,7 @@ async fn send(
             let adapter = DroppingAdapter::new(ResponsesIngress, dialect, render);
             ingress_handle(state, headers, None, Ok(body), adapter).await
         }
-    };
-    to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body")
-        .to_vec()
+    }
 }
 
 /// Run one request on `dialect` and return the router's wire-check state
@@ -930,4 +941,405 @@ async fn the_chat_stream_render_loses_an_upstream_system_fingerprint() {
         response_findings(&snapshot),
         [("/system_fingerprint".to_string(), "missing")]
     );
+}
+
+/// Past the early-flush grace the client gets a synthetic `message_start`
+/// before the check exists; the client's document still starts with it.
+#[tokio::test]
+async fn a_warm_held_anthropic_stream_records_a_clean_response_leg() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(Dialect::Anthropic.upstream_path()))
+        .respond_with(sse(Dialect::Anthropic.stream_body(None)).set_delay(WARM_HOLD_UPSTREAM_DELAY))
+        .mount(&server)
+        .await;
+    let router = router(Dialect::Anthropic, &server.uri(), CHECK_EVERY).await;
+    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+
+    let client = send(Dialect::Anthropic, &swap, true, Render::AsShipped).await;
+
+    let snapshot = swap.load().wire_check_snapshot();
+    assert_eq!(
+        response_findings(&snapshot),
+        Vec::<(String, &str)>::new(),
+        "{}",
+        String::from_utf8_lossy(&client)
+    );
+    assert_eq!(
+        outcomes(&snapshot),
+        [(Dialect::Anthropic.lane(), CheckOutcome::Clean, 2)]
+    );
+}
+
+/// Longer than the handler's early-flush grace, so the stream goes
+/// warm-hold.
+const WARM_HOLD_UPSTREAM_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The complete-body compare waits for the body to leave: nothing is
+/// recorded for the response leg while the client has not taken it.
+#[tokio::test]
+async fn a_complete_response_is_compared_only_after_its_body_is_taken() {
+    for dialect in [Dialect::Anthropic, Dialect::Chat] {
+        for consume in [true, false] {
+            let server = upstream(dialect, false, None).await;
+            let router = router(dialect, &server.uri(), CHECK_EVERY).await;
+            let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+
+            let resp = respond(dialect, &swap, false, Render::AsShipped).await;
+            let before = outcomes(&swap.load().wire_check_snapshot());
+            if consume {
+                let body = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+                assert!(!body.is_empty());
+            } else {
+                drop(resp);
+            }
+            let after = outcomes(&swap.load().wire_check_snapshot());
+
+            assert_eq!(
+                before,
+                [(dialect.lane(), CheckOutcome::Clean, 1)],
+                "{dialect:?} consume={consume}: only the request leg before"
+            );
+            assert_eq!(
+                after,
+                [(dialect.lane(), CheckOutcome::Clean, 2)],
+                "{dialect:?} consume={consume}: the response leg after"
+            );
+        }
+    }
+}
+
+/// An Anthropic stream whose one tool call carries `elements` array
+/// members in its input, and an extra block member the client render has
+/// no slot for, so the two documents differ inside the large block.
+fn anthropic_tool_stream(elements: usize) -> String {
+    let items: Vec<String> = (0..elements).map(|n| n.to_string()).collect();
+    let partial = format!("{{\"xs\":[{}]}}", items.join(","));
+    let frames = [
+        (
+            "message_start",
+            json!({"type": "message_start", "message": {
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "upstream",
+            "content": [], "stop_reason": null, "stop_sequence": null,
+            "usage": {"input_tokens": 3, "output_tokens": 0}}}),
+        ),
+        (
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {},
+                              "caller": "direct"}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": partial}}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        (
+            "message_delta",
+            json!({"type": "message_delta",
+            "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+            "usage": {"input_tokens": 3, "output_tokens": 1}}),
+        ),
+        ("message_stop", json!({"type": "message_stop"})),
+    ];
+    frames
+        .iter()
+        .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+        .collect()
+}
+
+/// The compare a finished stream runs on drop is bounded: a document the
+/// diff cannot finish within its node budget records `budget`, and one too
+/// large to assemble records `incomplete`; neither is walked in full or
+/// called `clean`.
+#[tokio::test]
+async fn an_oversize_streamed_document_records_a_bounded_outcome() {
+    let max = routectl_core::wire_check::MAX_DIFF_NODES;
+    let rows = [
+        ("over the diff budget", max * 3 / 4, CheckOutcome::Budget),
+        ("over the assembly cap", max + 1, CheckOutcome::Incomplete),
+    ];
+    for (name, elements, expected) in rows {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(Dialect::Anthropic.upstream_path()))
+            .respond_with(sse(anthropic_tool_stream(elements)))
+            .mount(&server)
+            .await;
+        let router = router(Dialect::Anthropic, &server.uri(), CHECK_EVERY).await;
+        let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+
+        let client = send(Dialect::Anthropic, &swap, true, Render::AsShipped).await;
+
+        assert!(
+            String::from_utf8_lossy(&client).contains("message_stop"),
+            "{name}: the client was served"
+        );
+        let mut recorded = outcomes(&swap.load().wire_check_snapshot());
+        recorded.sort_by_key(|(_, outcome, _)| *outcome != CheckOutcome::Clean);
+        assert_eq!(
+            recorded,
+            [
+                (Dialect::Anthropic.lane(), CheckOutcome::Clean, 1),
+                (Dialect::Anthropic.lane(), expected, 1),
+            ],
+            "{name}"
+        );
+    }
+}
+
+/// An Anthropic stream from its named frames.
+fn anthropic_sse(frames: &[(&str, Value)]) -> ResponseTemplate {
+    sse(frames
+        .iter()
+        .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+        .collect())
+}
+
+fn anthropic_start(id: &str, usage: Option<Value>) -> (&'static str, Value) {
+    let mut message = json!({"id": id, "type": "message", "role": "assistant",
+        "model": "upstream", "content": [], "stop_reason": null, "stop_sequence": null});
+    if let (Some(usage), Some(object)) = (usage, message.as_object_mut()) {
+        object.insert("usage".to_string(), usage);
+    }
+    (
+        "message_start",
+        json!({"type": "message_start", "message": message}),
+    )
+}
+
+fn anthropic_text_block() -> [(&'static str, Value); 3] {
+    [
+        (
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": "ok"}}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+    ]
+}
+
+fn anthropic_delta(stop_reason: &str, usage: Option<Value>) -> (&'static str, Value) {
+    let mut delta = json!({"type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": null}});
+    if let (Some(usage), Some(object)) = (usage, delta.as_object_mut()) {
+        object.insert("usage".to_string(), usage);
+    }
+    ("message_delta", delta)
+}
+
+fn anthropic_stream_with(
+    start: (&'static str, Value),
+    tail: Vec<(&'static str, Value)>,
+) -> ResponseTemplate {
+    let mut frames = vec![start];
+    frames.extend(anthropic_text_block());
+    frames.extend(tail);
+    frames.push(("message_stop", json!({"type": "message_stop"})));
+    anthropic_sse(&frames)
+}
+
+async fn anthropic_run(template: ResponseTemplate, stream: bool) -> WireCheckSnapshot {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(Dialect::Anthropic.upstream_path()))
+        .respond_with(template)
+        .mount(&server)
+        .await;
+    let router = router(Dialect::Anthropic, &server.uri(), CHECK_EVERY).await;
+    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+    send(Dialect::Anthropic, &swap, stream, Render::AsShipped).await;
+    swap.load().wire_check_snapshot()
+}
+
+/// Each Anthropic renderer exception, single-sourced: the row where it
+/// fires records clean only because its site declared the edit (deleting
+/// that one declare call turns exactly that row's findings non-empty), and
+/// the baseline row, where none fires, stays clean with nothing declared.
+#[tokio::test]
+async fn each_declared_anthropic_exception_explains_only_its_own_change() {
+    let usage = json!({"input_tokens": 3, "output_tokens": 1});
+    let opening = json!({"input_tokens": 3, "output_tokens": 0, "cache_read_input_tokens": 5});
+    let rows: Vec<(&str, ResponseTemplate, bool)> = vec![
+        (
+            "baseline (complete)",
+            ResponseTemplate::new(200).set_body_json(Dialect::Anthropic.complete_body(None)),
+            false,
+        ),
+        (
+            "stop_details withheld",
+            ResponseTemplate::new(200).set_body_json(
+                Dialect::Anthropic.complete_body(Some(("stop_details", json!({"type": "x"})))),
+            ),
+            false,
+        ),
+        (
+            "upstream_meta withheld",
+            ResponseTemplate::new(200).set_body_json(
+                Dialect::Anthropic.complete_body(Some(("upstream_meta", json!({"k": 1})))),
+            ),
+            false,
+        ),
+        (
+            "baseline (stream)",
+            anthropic_stream_with(
+                anthropic_start(
+                    "msg_1",
+                    Some(json!({"input_tokens": 3, "output_tokens": 0})),
+                ),
+                vec![anthropic_delta("end_turn", Some(usage.clone()))],
+            ),
+            true,
+        ),
+        (
+            "closing usage fills a missing input count",
+            anthropic_stream_with(
+                anthropic_start("msg_1", None),
+                vec![anthropic_delta(
+                    "end_turn",
+                    Some(json!({"output_tokens": 1})),
+                )],
+            ),
+            true,
+        ),
+        (
+            "closing usage fills a missing output count",
+            anthropic_stream_with(
+                anthropic_start("msg_1", None),
+                vec![anthropic_delta(
+                    "end_turn",
+                    Some(json!({"input_tokens": 3})),
+                )],
+            ),
+            true,
+        ),
+        (
+            "closing usage restates the opening input over a zero placeholder",
+            anthropic_stream_with(
+                anthropic_start("msg_1", Some(opening)),
+                vec![anthropic_delta(
+                    "end_turn",
+                    Some(json!({"input_tokens": 0, "output_tokens": 1})),
+                )],
+            ),
+            true,
+        ),
+        (
+            "message_start id minted for an empty upstream id",
+            anthropic_stream_with(
+                anthropic_start("", Some(json!({"input_tokens": 3, "output_tokens": 0}))),
+                vec![anthropic_delta("end_turn", Some(usage.clone()))],
+            ),
+            true,
+        ),
+        (
+            "frames after message_stop withheld",
+            anthropic_stream_with(
+                anthropic_start(
+                    "msg_1",
+                    Some(json!({"input_tokens": 3, "output_tokens": 0})),
+                ),
+                vec![
+                    anthropic_delta("end_turn", Some(usage.clone())),
+                    anthropic_delta("max_tokens", Some(json!({"output_tokens": 2}))),
+                ],
+            ),
+            true,
+        ),
+        (
+            "message_start usage stamped where the upstream sent none",
+            anthropic_stream_with(
+                anthropic_start("msg_1", None),
+                vec![anthropic_delta("end_turn", None)],
+            ),
+            true,
+        ),
+        (
+            "a repeated stop reason withheld",
+            anthropic_stream_with(
+                anthropic_start("msg_1", None),
+                vec![
+                    anthropic_delta("end_turn", None),
+                    anthropic_delta("max_tokens", None),
+                ],
+            ),
+            true,
+        ),
+    ];
+
+    for (name, template, stream) in rows {
+        let snapshot = anthropic_run(template, stream).await;
+
+        assert_eq!(
+            response_findings(&snapshot),
+            Vec::<(String, &str)>::new(),
+            "{name}"
+        );
+        assert_eq!(
+            outcomes(&snapshot),
+            [(Dialect::Anthropic.lane(), CheckOutcome::Clean, 2)],
+            "{name}"
+        );
+    }
+}
+
+/// The Responses `status` / `incomplete_details` rebuild, single-sourced
+/// per path and per transport: each row differs from the upstream at one
+/// path, and records clean only because the rebuild declared it.
+#[tokio::test]
+async fn the_declared_responses_status_rebuild_explains_only_its_own_change() {
+    let rows: [(&str, (&str, Value)); 2] = [
+        (
+            "status the finish reason cannot name",
+            ("status", json!("incomplete")),
+        ),
+        (
+            "incomplete_details null withheld",
+            ("incomplete_details", Value::Null),
+        ),
+    ];
+    for (name, extra) in rows {
+        for stream in [false, true] {
+            let mut body = Dialect::Responses.stream_body(Some(extra.clone()));
+            if !stream {
+                // The complete render echoes the upstream's timestamp, as in
+                // the shared faithful fixture.
+                body = body.replace("\"created_at\":0", "\"created_at\":1700000000");
+            }
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(Dialect::Responses.upstream_path()))
+                .respond_with(sse(body))
+                .mount(&server)
+                .await;
+            let router = router(Dialect::Responses, &server.uri(), CHECK_EVERY).await;
+            let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+            let client = send(Dialect::Responses, &swap, stream, Render::AsShipped).await;
+            let snapshot = swap.load().wire_check_snapshot();
+
+            assert_eq!(
+                response_findings(&snapshot),
+                Vec::<(String, &str)>::new(),
+                "{name} stream={stream}: {}",
+                String::from_utf8_lossy(&client)
+            );
+            assert_eq!(
+                outcomes(&snapshot),
+                [(Dialect::Responses.lane(), CheckOutcome::Clean, 2)],
+                "{name} stream={stream}"
+            );
+        }
+    }
 }

@@ -31,7 +31,9 @@ use tracing::Instrument;
 use crate::handlers::ingress_wire::capture_ingress_wire;
 use crate::handlers::opening_meter::{OpeningMeter, StreamTurn};
 use crate::handlers::pure_proxy_admission::enforce_pure_proxy_admission;
-use crate::handlers::response_wire::{ClientSink, abandon_unrendered, response_edits_for};
+use crate::handlers::response_wire::{
+    CheckedBody, ClientSink, abandon_unrendered, response_edits_for,
+};
 use crate::handlers::usage_capture::{
     StreamStage, UsageCapture, build_usage_draft, outcome_for_dispatch_err,
 };
@@ -475,14 +477,14 @@ pub(crate) fn render_body_rejection(
 /// canonical response to these exact bytes (single serialize), so the
 /// handler adds no second pass. Named as a seam so the egress bytes +
 /// header are unit-testable without driving a full dispatch.
-fn ok_json_response(body: Bytes) -> Response {
+fn ok_json_response(body: impl Into<Body>) -> Response {
     (
         StatusCode::OK,
         [(
             axum::http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         )],
-        Body::from(body),
+        body.into(),
     )
         .into_response()
 }
@@ -543,9 +545,6 @@ async fn complete_response<A: IngressAdapter>(
             let mut response_edits = response_edits_for(response_check.as_ref());
             match adapter.render_response_declared(resp, &mut response_edits) {
                 Ok(body) => {
-                    if let Some(check) = response_check {
-                        check.compare_body(&body, response_edits.as_slice());
-                    }
                     // Upstream delivered AND we serialized it: this is the
                     // only path where the client receives 200 + body, so
                     // finalize `ok` here rather than before the render.
@@ -568,7 +567,11 @@ async fn complete_response<A: IngressAdapter>(
                     // adapter render now, before the single `to_vec`: the
                     // handler holds only the finished wire bytes and no
                     // longer has the `Value` the trace redactor needs.
-                    let resp = ok_json_response(body);
+                    let resp = ok_json_response(Body::new(CheckedBody::new(
+                        body,
+                        response_check,
+                        response_edits,
+                    )));
                     // Dir 4: egress response headers, captured from the
                     // built response so the trace reflects what the client
                     // receives. Read before returning (no borrow conflict;
@@ -821,7 +824,9 @@ async fn warm_render_task<A: IngressAdapter>(
     let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state(&turn.ctx);
     // Emit-then-dispatch invariant: flush the early frame FIRST, before the
     // dispatch await, so the response head actually flushes.
+    let mut early_sent = Vec::new();
     for ev in adapter.early_frame(state.as_mut()) {
+        let sent = ev.clone();
         if tx.send(ev).await.is_err() {
             // Client vanished before the head flushed -- a genuine
             // disconnect. Leave the guard un-finalized so Drop stamps
@@ -832,6 +837,7 @@ async fn warm_render_task<A: IngressAdapter>(
         // now client-visible, so the transport status the client received
         // is 200 regardless of how the pending dispatch resolves.
         capture.mark_stream_http_committed();
+        early_sent.push(sent);
     }
     // Stamped now, so a client leaving while the dispatch is still pending
     // keeps the opening it was already sent.
@@ -883,7 +889,12 @@ async fn warm_render_task<A: IngressAdapter>(
                 meter.bind_served(&dispatched.meta);
             }
             stamp_opening(&mut capture, turn.meter.as_ref());
-            let client = ClientSink::new(tx, response_check);
+            let mut client = ClientSink::new(tx, response_check);
+            // The early frame went out before the check existed; the
+            // client's document starts with it.
+            for ev in &early_sent {
+                client.check.observe(ev);
+            }
             drive_stream(upstream, adapter, capture, client, router, turn, state).await;
         }
         Err(e) => {

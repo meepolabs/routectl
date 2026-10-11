@@ -1,6 +1,9 @@
 use serde_json::{Map, Value, json};
 
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatResponse, ContentPart, Message, MessageContent};
+
+use crate::ingress::ResponseEdits;
 
 use super::{cache_fields_into, openai_finish_to_anthropic_stop};
 
@@ -12,7 +15,7 @@ use super::{cache_fields_into, openai_finish_to_anthropic_stop};
 /// body shape. Mirrors what `api.anthropic.com /v1/messages` would
 /// emit: `{id, type:"message", role:"assistant", model, content[],
 /// stop_reason, stop_sequence, usage}`.
-pub(super) fn render_messages_response(resp: ChatResponse) -> Value {
+pub(super) fn render_messages_response(resp: ChatResponse, edits: &mut ResponseEdits) -> Value {
     let mut body = Map::new();
     body.insert("id".into(), Value::String(resp.id));
     body.insert("type".into(), Value::String("message".into()));
@@ -96,11 +99,21 @@ pub(super) fn render_messages_response(resp: ChatResponse) -> Value {
         // `stop_details` is a Bedrock-only Anthropic-API extension
         // not in the public Anthropic Messages baseline.
         if k == "stop_details" {
+            edits.declare(
+                EditSite::AnthropicResponseExtrasStrip,
+                "/stop_details",
+                EditKind::Remove,
+            );
             continue;
         }
         // Reserved transport-internal carrier name; must never reach a
         // client even if an upstream coincidentally uses the same key.
         if k == "upstream_meta" {
+            edits.declare(
+                EditSite::AnthropicResponseExtrasStrip,
+                "/upstream_meta",
+                EditKind::Remove,
+            );
             continue;
         }
         body.entry(k.clone()).or_insert_with(|| v.clone());

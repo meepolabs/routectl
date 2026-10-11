@@ -54,10 +54,11 @@ use routectl_core::{
     ReasoningDetailKind, Result, Role, Usage, UsageDelta, is_responses_family, schema::Choice,
 };
 
-use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
+use crate::ingress::{IngressStreamState, ResponseEdits, SseEvent, StreamErrorClass};
 
 use super::render::{
-    function_call_item, output_text_block, render_responses_response, status_from_finish_reason,
+    declare_status_rebuild, function_call_item, output_text_block, render_responses_response,
+    status_from_finish_reason,
 };
 use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 
@@ -81,9 +82,21 @@ pub(super) fn state_mut(s: &mut dyn IngressStreamState) -> &mut ResponsesStreamS
 // render_chunk
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 pub(super) fn render_chunk_internal(
     chunk: ChatChunk,
     state: &mut ResponsesStreamState,
+) -> Result<Vec<SseEvent>> {
+    render_chunk_declared(chunk, state, &mut ResponseEdits::default())
+}
+
+/// Render one chunk, declaring into `edits` every response edit the render
+/// makes on purpose. The terminal body's `status` is fixed by the first
+/// finish reason stashed here, so its rebuild is declared here too.
+pub(super) fn render_chunk_declared(
+    chunk: ChatChunk,
+    state: &mut ResponsesStreamState,
+    edits: &mut ResponseEdits,
 ) -> Result<Vec<SseEvent>> {
     let mut events: Vec<SseEvent> = Vec::new();
 
@@ -112,6 +125,9 @@ pub(super) fn render_chunk_internal(
     if let Some(choice) = chunk.choices.first() {
         emit_delta_events(&choice.delta, state, &mut events);
         if let Some(fr) = choice.finish_reason.as_deref() {
+            if state.pending_finish_reason.is_none() {
+                declare_status_rebuild(Some(fr), edits);
+            }
             stash_finish(fr, chunk.usage.as_ref(), state);
         }
     }

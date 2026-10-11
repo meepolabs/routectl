@@ -28,8 +28,8 @@ use routectl_core::{
 };
 
 use super::{
-    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
-    StreamRequestContext,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
+    StreamErrorClass, StreamRequestContext,
 };
 
 /// The format tag the canonical layer uses for Anthropic-shape
@@ -77,6 +77,9 @@ pub struct AnthropicStreamState {
     /// Stream identifiers cached from first chunk.
     msg_id: Option<String>,
     msg_model: Option<String>,
+    /// True when the `message_start` already sent carried a minted id
+    /// because no upstream id had arrived yet.
+    minted_start_id: bool,
     /// Buffered tool-use deltas keyed by tool call index. We flush them
     /// sequentially at the end of the stream so OpenAI-style interleaved
     /// tool call chunks still produce valid Anthropic block ordering.
@@ -165,12 +168,14 @@ pub mod context_anchor;
 mod parse;
 mod render;
 mod stream;
+mod stream_edits;
+mod stream_opaque;
 
 use parse::translate_request;
 use render::render_messages_response;
 use stream::{
     anthropic_state_mut, close_lingering_opaque_blocks, close_open_block, emit_message_delta,
-    emit_message_start, emit_message_stop, flush_tool_blocks, new_state, render_chunk_internal,
+    emit_message_start, emit_message_stop, flush_tool_blocks, new_state, render_chunk_declared,
     render_error_eos_internal,
 };
 
@@ -332,7 +337,15 @@ impl IngressAdapter for AnthropicIngress {
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
-        crate::ingress::render_value_to_bytes(self.id(), render_messages_response(resp))
+        self.render_response_declared(resp, &mut ResponseEdits::default())
+    }
+
+    fn render_response_declared(
+        &self,
+        resp: ChatResponse,
+        edits: &mut ResponseEdits,
+    ) -> Result<bytes::Bytes> {
+        crate::ingress::render_value_to_bytes(self.id(), render_messages_response(resp, edits))
     }
 
     fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
@@ -362,7 +375,16 @@ impl IngressAdapter for AnthropicIngress {
         chunk: ChatChunk,
         state: &mut dyn IngressStreamState,
     ) -> Result<Vec<SseEvent>> {
-        render_chunk_internal(chunk, anthropic_state_mut(state))
+        self.render_chunk_declared(chunk, state, &mut ResponseEdits::default())
+    }
+
+    fn render_chunk_declared(
+        &self,
+        chunk: ChatChunk,
+        state: &mut dyn IngressStreamState,
+        edits: &mut ResponseEdits,
+    ) -> Result<Vec<SseEvent>> {
+        render_chunk_declared(chunk, anthropic_state_mut(state), edits)
     }
 
     fn render_eos(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
@@ -384,7 +406,13 @@ impl IngressAdapter for AnthropicIngress {
             // Flush a deferred finish_reason (no usage chunk arrived).
             if let Some(fr) = s.pending_finish_reason.take() {
                 let matched = s.pending_matched_stop_sequence.take();
-                emit_message_delta(Some(&fr), matched.as_deref(), None, &mut events);
+                emit_message_delta(
+                    Some(&fr),
+                    matched.as_deref(),
+                    None,
+                    &mut events,
+                    &mut ResponseEdits::default(),
+                );
             }
             emit_message_stop(s, &mut events);
         }

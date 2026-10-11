@@ -32,8 +32,8 @@ use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 use serde_json::Value;
 
 use super::{
-    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
-    StreamRequestContext,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
+    StreamErrorClass, StreamRequestContext,
 };
 
 mod parse;
@@ -206,7 +206,18 @@ impl IngressAdapter for ResponsesIngress {
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
-        crate::ingress::render_value_to_bytes(self.id(), render::render_responses_response(resp)?)
+        self.render_response_declared(resp, &mut ResponseEdits::default())
+    }
+
+    fn render_response_declared(
+        &self,
+        resp: ChatResponse,
+        edits: &mut ResponseEdits,
+    ) -> Result<bytes::Bytes> {
+        crate::ingress::render_value_to_bytes(
+            self.id(),
+            render::render_responses_response_declared(resp, edits)?,
+        )
     }
 
     fn new_stream_state(&self, _ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
@@ -218,7 +229,16 @@ impl IngressAdapter for ResponsesIngress {
         chunk: ChatChunk,
         state: &mut dyn IngressStreamState,
     ) -> Result<Vec<SseEvent>> {
-        stream::render_chunk_internal(chunk, stream::state_mut(state))
+        self.render_chunk_declared(chunk, state, &mut ResponseEdits::default())
+    }
+
+    fn render_chunk_declared(
+        &self,
+        chunk: ChatChunk,
+        state: &mut dyn IngressStreamState,
+        edits: &mut ResponseEdits,
+    ) -> Result<Vec<SseEvent>> {
+        stream::render_chunk_declared(chunk, stream::state_mut(state), edits)
     }
 
     fn render_eos(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent> {

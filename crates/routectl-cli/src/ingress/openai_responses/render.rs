@@ -49,13 +49,25 @@
 
 use serde_json::{Map, Value, json};
 
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{
     ChatResponse, ContentPart, KnownContentPart, Message, MessageContent, ReasoningDetail,
     ReasoningDetailKind, Result, is_responses_family,
 };
 
+use crate::ingress::ResponseEdits;
+
 /// Render a canonical `ChatResponse` into a Responses `response` object.
 pub(super) fn render_responses_response(resp: ChatResponse) -> Result<Value> {
+    render_responses_response_declared(resp, &mut ResponseEdits::default())
+}
+
+/// [`render_responses_response`], declaring into `edits` every response
+/// edit the render makes on purpose.
+pub(super) fn render_responses_response_declared(
+    resp: ChatResponse,
+    edits: &mut ResponseEdits,
+) -> Result<Value> {
     let mut body = Map::new();
     body.insert("object".into(), Value::String("response".into()));
     body.insert("id".into(), Value::String(resp.id));
@@ -65,6 +77,7 @@ pub(super) fn render_responses_response(resp: ChatResponse) -> Result<Value> {
     let first = resp.choices.first();
     let finish_reason = first.and_then(|c| c.finish_reason.as_deref());
 
+    declare_status_rebuild(finish_reason, edits);
     let (status, incomplete_details) = status_from_finish_reason(finish_reason);
     body.insert("status".into(), Value::String(status));
     if let Some(details) = incomplete_details {
@@ -107,6 +120,33 @@ pub(super) fn status_from_finish_reason(finish_reason: Option<&str>) -> (String,
         ),
         Some("error") => ("failed".to_string(), None),
         _ => ("completed".to_string(), None),
+    }
+}
+
+/// The canonical finish reasons [`status_from_finish_reason`] maps back to
+/// the `status` the upstream sent.
+const FAITHFUL_FINISH_REASONS: [&str; 5] =
+    ["stop", "tool_calls", "length", "content_filter", "error"];
+
+/// `status` and `incomplete_details` are rebuilt from the canonical finish
+/// reason, not carried: a reason outside the faithful set becomes
+/// `"completed"`, and an `incomplete_details` the rebuild does not produce
+/// (an upstream `null`, or a reason the finish reason could not name) is
+/// withheld.
+pub(super) fn declare_status_rebuild(finish_reason: Option<&str>, edits: &mut ResponseEdits) {
+    if !finish_reason.is_some_and(|reason| FAITHFUL_FINISH_REASONS.contains(&reason)) {
+        edits.declare(
+            EditSite::ResponsesStatusRewrite,
+            "/status",
+            EditKind::Rewrite,
+        );
+    }
+    if status_from_finish_reason(finish_reason).1.is_none() {
+        edits.declare(
+            EditSite::ResponsesStatusRewrite,
+            "/incomplete_details",
+            EditKind::Remove,
+        );
     }
 }
 

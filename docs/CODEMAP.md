@@ -7080,6 +7080,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   token -- the detector for whether a raw-forward carrier is ever warranted
 - `src/ingress/anthropic/render.rs` -- canonical `ChatResponse` -> Anthropic
   Messages response body shape
+- `src/ingress/anthropic/stream_edits.rs` -- response edits the Anthropic
+  stream renderer declares to the wire check: straggler and repeated-stop
+  drops, closing usage fill and opening-count restatement
+- `src/ingress/anthropic/stream_opaque.rs` -- replays opaque content-block
+  events captured by the Anthropic-API egress onto the client stream,
+  allocating ingress block indexes
 - `src/ingress/anthropic/stream.rs` -- canonical `ChatChunk` -> Anthropic SSE
   events with monotonic terminal-state guard; `new_state` seeds the state from
   `StreamRequestContext`; `emit_message_start` renders the opening chunk's
