@@ -494,6 +494,7 @@ async fn a_multi_flag_envelope_strips_every_named_flag_in_one_retry() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn an_unanchored_envelope_is_not_repaired() {
     let message = format!("Error: {INVOKE_NEVER_ISSUED}");
     let lane = Lane::start(
@@ -508,6 +509,7 @@ async fn an_unanchored_envelope_is_not_repaired() {
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn an_envelope_naming_a_flag_the_client_did_not_send_is_not_repaired() {
     // The captured envelope names two flags this client never sent.
     let lane = Lane::start(
@@ -825,13 +827,19 @@ async fn assert_withheld_flag_absent_at_egress(shape: BedrockApiShape, call: Cal
 }
 
 #[tokio::test]
-#[serial_test::serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
+#[serial_test::serial(
+    bedrock_invoke_anthropic_beta_rejected_by_bedrock,
+    bedrock_invoke_lane_seen
+)]
 async fn invoke_complete_never_sends_a_withheld_flag() {
     assert_withheld_flag_absent_at_egress(BedrockApiShape::Invoke, Call::Complete).await;
 }
 
 #[tokio::test]
-#[serial_test::serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
+#[serial_test::serial(
+    bedrock_invoke_anthropic_beta_rejected_by_bedrock,
+    bedrock_invoke_lane_seen
+)]
 async fn invoke_stream_never_sends_a_withheld_flag() {
     assert_withheld_flag_absent_at_egress(BedrockApiShape::Invoke, Call::Stream).await;
 }
