@@ -189,7 +189,8 @@ pub(super) enum FieldSurface {
     /// [`TEST_RECHECK_KWARG`] key of `chat_template_kwargs`. The grounded row
     /// does not validate on a count, so without this the re-check trigger has
     /// no row to fire on. Also compiled under `test-utils`, so the probe tests
-    /// of other crates can drive a re-check end to end.
+    /// of other crates can drive a re-check end to end through a Router that
+    /// installs it ([`FieldRepairTable::with_synthetic_rows`]).
     #[cfg(any(test, feature = "test-utils"))]
     RecheckFieldForTests,
 }
@@ -690,9 +691,10 @@ const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[
     },
 ];
 
-/// The test-only rewrite row, which a `test-utils` build appends too: no
-/// grounded row writes a value, so this is the only row a valued verdict can be
-/// learned, persisted, or restated through in another crate's tests.
+/// The test-only rewrite row, which [`FieldRepairTable::with_synthetic_rows`]
+/// appends: no grounded row writes a value, so this is the only row a valued
+/// verdict can be learned, persisted, or restated through in another crate's
+/// tests.
 #[cfg(any(test, feature = "test-utils"))]
 const TEST_REWRITE_FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
     path: TEST_REWRITE_PATH,
@@ -704,9 +706,10 @@ const TEST_REWRITE_FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
     count_tokens_validates: true,
 }];
 
-/// The test-only row a free token count validates, which a `test-utils` build
-/// appends too: no grounded row is count-validated, so this is the only row a
-/// re-check probe can be built from in any test, in this crate or another.
+/// The test-only row a free token count validates, which
+/// [`FieldRepairTable::with_synthetic_rows`] appends: no grounded row is
+/// count-validated, so this is the only row a re-check probe can be built from
+/// in any test, in this crate or another.
 #[cfg(any(test, feature = "test-utils"))]
 const TEST_RECHECK_FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
     path: TEST_RECHECK_PATH,
@@ -722,35 +725,86 @@ pub(super) const fn grounded_table() -> &'static [FieldRepairRow] {
     FIELD_REPAIRS
 }
 
-/// The whole closed table this build scans, grounded rows first.
-#[cfg(not(any(test, feature = "test-utils")))]
-pub(super) const fn closed_table() -> &'static [FieldRepairRow] {
-    FIELD_REPAIRS
+/// The rows of [`FieldRepairTable::default`], for unit tests that read the
+/// table without a router.
+#[cfg(test)]
+pub(super) fn closed_table() -> &'static [FieldRepairRow] {
+    FieldRepairTable::default().rows()
 }
 
-/// Test build: the grounded rows, then [`TEST_FIELD_REPAIRS`] (unit tests
-/// only), then [`TEST_REWRITE_FIELD_REPAIRS`] and
-/// [`TEST_RECHECK_FIELD_REPAIRS`], in that order, so a grounded row
-/// keeps its production precedence and the added rows sit behind it.
+/// The closed table one router scans: which rows a rejection can name, a
+/// request can carry, and a persisted verdict can resolve to.
 ///
-/// The divergent surface is deliberately NOT a row here: its presence predicate
-/// answers `true` unconditionally, so a row for it would make every request in
-/// a test build carry it. It reaches `apply`'s fail-closed branch through
-/// [`FieldRepairPlan::apply_candidate`] instead.
-#[cfg(any(test, feature = "test-utils"))]
-pub(super) fn closed_table() -> &'static [FieldRepairRow] {
-    use std::sync::LazyLock;
+/// A value rather than a global so the synthetic rows a test needs reach only
+/// the router that asked for them. Outside a unit-test build the default is
+/// the grounded rows alone, whatever features are enabled; the synthetic
+/// rewrite and re-check rows arrive only through
+/// `Router::with_synthetic_field_rows_for_tests`.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldRepairTable {
+    rows: &'static [FieldRepairRow],
+}
 
-    static ROWS: LazyLock<Vec<FieldRepairRow>> = LazyLock::new(|| {
-        let rows = FIELD_REPAIRS.iter();
+impl Default for FieldRepairTable {
+    /// The grounded rows. A unit-test build also appends every test row, so
+    /// the in-crate suites reach each branch without opting in per router.
+    fn default() -> Self {
         #[cfg(test)]
-        let rows = rows.chain(TEST_FIELD_REPAIRS);
-        rows.chain(TEST_REWRITE_FIELD_REPAIRS)
-            .chain(TEST_RECHECK_FIELD_REPAIRS)
-            .copied()
-            .collect()
-    });
-    &ROWS
+        {
+            Self::with_synthetic_rows()
+        }
+        #[cfg(not(test))]
+        {
+            Self {
+                rows: FIELD_REPAIRS,
+            }
+        }
+    }
+}
+
+impl FieldRepairTable {
+    /// The grounded rows, then [`TEST_FIELD_REPAIRS`] (unit tests only), then
+    /// [`TEST_REWRITE_FIELD_REPAIRS`] and [`TEST_RECHECK_FIELD_REPAIRS`], in
+    /// that order, so a grounded row keeps its production precedence and the
+    /// added rows sit behind it.
+    ///
+    /// The divergent surface is deliberately NOT a row here: its presence
+    /// predicate answers `true` unconditionally, so a row for it would make
+    /// every request carry it. It reaches `apply`'s fail-closed branch through
+    /// [`FieldRepairPlan::apply_candidate`] instead.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn with_synthetic_rows() -> Self {
+        use std::sync::LazyLock;
+
+        static ROWS: LazyLock<Vec<FieldRepairRow>> = LazyLock::new(|| {
+            let rows = FIELD_REPAIRS.iter();
+            #[cfg(test)]
+            let rows = rows.chain(TEST_FIELD_REPAIRS);
+            rows.chain(TEST_REWRITE_FIELD_REPAIRS)
+                .chain(TEST_RECHECK_FIELD_REPAIRS)
+                .copied()
+                .collect()
+        });
+        Self {
+            rows: LazyLock::force(&ROWS).as_slice(),
+        }
+    }
+
+    pub(super) const fn rows(self) -> &'static [FieldRepairRow] {
+        self.rows
+    }
+
+    /// The row whose path is exactly `path`.
+    pub(super) fn row_for_path(self, path: &str) -> Option<&'static FieldRepairRow> {
+        self.rows.iter().find(|row| row.path == path)
+    }
+
+    /// The row a `field:`-namespaced capability key names.
+    fn row_for_capability_key(self, key: &str) -> Option<&'static FieldRepairRow> {
+        self.rows.iter().find(|row| {
+            crate::field_capability::field_capability_key(row.path).as_deref() == Some(key)
+        })
+    }
 }
 
 /// `max_tokens` a probe body carries so the legacy Anthropic thinking shape
@@ -767,13 +821,11 @@ const PROBE_THINKING_MAX_TOKENS: u32 = 2048;
 /// rows a probe may ASK about is decided where payloads are captured
 /// ([`recheck_payloads`]), the only production source of one.
 pub(super) fn apply_probe_payload(
+    table: FieldRepairTable,
     req: &mut ChatRequest,
     payload: &crate::probe_scheduler::ProbePayload,
 ) {
-    let Some(row) = closed_table()
-        .iter()
-        .find(|row| row.path == payload.field_path())
-    else {
+    let Some(row) = table.row_for_path(payload.field_path()) else {
         return;
     };
     row.surface.set_in(req, payload.field_value());
@@ -786,9 +838,11 @@ pub(super) fn apply_probe_payload(
 /// two must describe the same carrier, and splitting them is how a probe
 /// comes to name one field while sending another's value.
 pub(super) fn recheck_payloads(
+    table: FieldRepairTable,
     req: &ChatRequest,
 ) -> impl Iterator<Item = (&'static str, String)> + use<'_> {
-    closed_table()
+    table
+        .rows()
         .iter()
         .filter(|row| row.count_tokens_validates)
         .filter_map(|row| row.surface.value_in(req).map(|value| (row.path, value)))
@@ -877,11 +931,11 @@ pub(super) fn attributable_field_lane<'a>(
 
 /// The transform class of the closed-table row a `field:`-namespaced capability
 /// key names, or `None` for a key this build's table carries no row for.
-pub(super) fn transform_class_of_capability_key(key: &str) -> Option<TransformClass> {
-    closed_table().iter().find_map(|row| {
-        (crate::field_capability::field_capability_key(row.path).as_deref() == Some(key))
-            .then_some(row.class)
-    })
+pub(super) fn transform_class_of_capability_key(
+    table: FieldRepairTable,
+    key: &str,
+) -> Option<TransformClass> {
+    table.row_for_capability_key(key).map(|row| row.class)
 }
 
 /// Whether a negative on `feature_key` for the lane `state_key` of
@@ -894,15 +948,14 @@ pub(super) fn transform_class_of_capability_key(key: &str) -> Option<TransformCl
 /// Every other key -- a non-validated row, a lane with no free count to ask, a
 /// catalog capability, a beta flag -- keeps its decay.
 pub fn negative_recovers_only_by_recheck(
+    table: FieldRepairTable,
     state_key: &str,
     feature_key: &str,
     provider_kind: &str,
 ) -> bool {
-    let validated = closed_table().iter().any(|row| {
-        row.count_tokens_validates
-            && crate::field_capability::field_capability_key(row.path).as_deref()
-                == Some(feature_key)
-    });
+    let validated = table
+        .row_for_capability_key(feature_key)
+        .is_some_and(|row| row.count_tokens_validates);
     validated
         && crate::state_key::StateKey::parse(state_key).is_some_and(|lane| {
             super::count_tokens::seat_can_count_tokens(Some(provider_kind), lane.upstream())
@@ -913,12 +966,10 @@ pub fn negative_recovers_only_by_recheck(
 /// names, or `None` when no row of this build's table names it or the row's
 /// transform carries no value. What decides whether a persisted value token is
 /// read at all: every other key's token is ignored.
-pub fn value_slot_for_capability_key(key: &str) -> Option<ValueSlot> {
-    closed_table().iter().find_map(|row| {
-        (crate::field_capability::field_capability_key(row.path).as_deref() == Some(key))
-            .then(|| row.transform.value_slot())
-            .flatten()
-    })
+pub fn value_slot_for_capability_key(table: FieldRepairTable, key: &str) -> Option<ValueSlot> {
+    table
+        .row_for_capability_key(key)
+        .and_then(|row| row.transform.value_slot())
 }
 
 /// EVERY closed-table row whose surface `req` carries, in table order.
@@ -932,8 +983,12 @@ pub fn value_slot_for_capability_key(key: &str) -> Option<ValueSlot> {
 /// Table order is the ENUMERATION order and nothing else: each row's
 /// decision is computed from that row's own class, verdict, and gates, so
 /// reordering the table reorders the records without changing any of them.
-pub(super) fn present_rows(req: &ChatRequest) -> impl Iterator<Item = FieldRepairRow> + '_ {
-    closed_table()
+pub(super) fn present_rows(
+    table: FieldRepairTable,
+    req: &ChatRequest,
+) -> impl Iterator<Item = FieldRepairRow> + '_ {
+    table
+        .rows()
         .iter()
         .filter(|row| row.surface.present_in(req))
         .copied()
@@ -950,8 +1005,11 @@ pub(super) fn present_rows(req: &ChatRequest) -> impl Iterator<Item = FieldRepai
 /// duplicated carrier logic. A request grounding no closed-table surface
 /// yields an empty vector, leaving every caller's derived key list exactly
 /// as it was before this function existed.
-pub(super) fn grounded_field_feature_keys(req: &ChatRequest) -> Vec<String> {
-    present_rows(req)
+pub(super) fn grounded_field_feature_keys(
+    table: FieldRepairTable,
+    req: &ChatRequest,
+) -> Vec<String> {
+    present_rows(table, req)
         .filter_map(|row| crate::field_capability::field_capability_key(row.path))
         .collect()
 }
@@ -967,7 +1025,7 @@ pub(super) fn grounded_field_feature_keys(req: &ChatRequest) -> Vec<String> {
 /// uses. The diagnostic-only feature-naming-drift path is deliberately NOT
 /// one of those call sites: a field verdict is never a feature-naming-table
 /// candidate, so that diagnostic stays on the bare catalog derivation.
-pub(super) fn request_feature_keys(req: &ChatRequest) -> Vec<String> {
+pub(super) fn request_feature_keys(table: FieldRepairTable, req: &ChatRequest) -> Vec<String> {
     crate::feature_keys::derive_feature_keys(
         req.tools.as_deref().unwrap_or(&[]),
         req.provider_extras.as_ref(),
@@ -978,7 +1036,7 @@ pub(super) fn request_feature_keys(req: &ChatRequest) -> Vec<String> {
         crate::feature_keys::tool_choice_force(req.tool_choice.as_ref())
             .map(|_| crate::feature_keys::FORCED_TOOL_CHOICE.to_string()),
     )
-    .chain(grounded_field_feature_keys(req))
+    .chain(grounded_field_feature_keys(table, req))
     .collect()
 }
 
@@ -995,6 +1053,7 @@ pub(super) fn request_feature_keys(req: &ChatRequest) -> Vec<String> {
 /// The class is read FIRST, so the parser is never consulted for a class
 /// that cannot carry a field rejection.
 fn rejected_field(
+    table: FieldRepairTable,
     class: &FailureClass,
     err: &Error,
     provider_kind: &str,
@@ -1007,7 +1066,7 @@ fn rejected_field(
         return named;
     }
     let status = super::class_observe::upstream_facts(err).status?;
-    parse_rejection(provider_kind, status, err.parsed_body())
+    parse_rejection(table, provider_kind, status, err.parsed_body())
 }
 
 /// Whether a failure class, on a lane of `provider_kind`, can carry a
@@ -1078,6 +1137,9 @@ pub(super) enum FieldSettlementMode {
 /// exit (a repeat rejection, an unrelated error, a fallback hop, a client
 /// disconnect), which learns nothing and strands no slot.
 pub(super) struct FieldRepairPlan<'a> {
+    /// The table the candidates were admitted from, and so the only rows a
+    /// rejection may name for this plan.
+    table: FieldRepairTable,
     candidates: Vec<FieldRepairCandidate<'a>>,
     /// Index into `candidates` of the row a successful [`Self::apply`] dropped.
     /// `None` until one succeeds, which is what makes the one-repair ceiling a
@@ -1233,6 +1295,7 @@ impl FieldRepairPlan<'_> {
             .enumerate()
             .find_map(|(idx, candidate)| {
                 Router::rejection_names_field_surface(
+                    self.table,
                     candidate.surface,
                     native_class,
                     rejection,
@@ -1341,9 +1404,10 @@ impl FieldRepairPlan<'_> {
     #[cfg(all(test, not(debug_assertions)))]
     pub(super) fn divergent_for_tests() -> Self {
         Self {
+            table: FieldRepairTable::default(),
             candidates: vec![FieldRepairCandidate {
                 // Outside the closed table deliberately: the surface is not a
-                // row (see `closed_table`), and this path exists only so the
+                // row (see `FieldRepairTable`), and this path exists only so the
                 // candidate is well formed.
                 path: "divergent.surface.for.tests",
                 surface: FieldSurface::DivergentForTests,
@@ -1549,7 +1613,8 @@ impl Router {
         // The identities come from the CLOSED TABLE plus the request, never
         // from upstream text: every row whose surface this attempt actually
         // carries, in table source order.
-        let candidates: Vec<FieldRepairCandidate<'a>> = present_rows(attempt_req)
+        let table = self.field_repair_table();
+        let candidates: Vec<FieldRepairCandidate<'a>> = present_rows(table, attempt_req)
             .filter_map(|row| {
                 // A NON-SETTLING walk admits the row guardless: it repairs for
                 // the answer it returns and can persist nothing, so it claims
@@ -1585,6 +1650,7 @@ impl Router {
             return None;
         }
         Some(FieldRepairPlan {
+            table,
             candidates,
             repaired: None,
             repaired_kind: None,
@@ -1618,12 +1684,13 @@ impl Router {
     /// mutation under two identities.
     ///
     pub(super) fn rejection_names_field_surface(
+        table: FieldRepairTable,
         surface: FieldSurface,
         native_class: &FailureClass,
         err: &Error,
         provider_kind: &str,
     ) -> Option<NamedRejection> {
-        rejected_field(native_class, err, provider_kind)
+        rejected_field(table, native_class, err, provider_kind)
             .filter(|named| named.row.surface == surface)
     }
 
@@ -1633,12 +1700,13 @@ impl Router {
     /// The am-I-flying-blind predicate, read through the SAME resolver the repair's
     /// own candidate selection uses.
     pub(super) fn rejection_localizes_no_field(
+        table: FieldRepairTable,
         native_class: &FailureClass,
         err: &Error,
         provider_kind: &str,
     ) -> bool {
         class_can_name_a_field(native_class, provider_kind)
-            && rejected_field(native_class, err, provider_kind).is_none()
+            && rejected_field(table, native_class, err, provider_kind).is_none()
     }
 
     /// Record that the field repair fired for this request, for the
@@ -2025,6 +2093,7 @@ mod table_tests {
         ] {
             assert!(
                 rejected_field(
+                    crate::router::FieldRepairTable::default(),
                     &FailureClass::BadRequest,
                     &rejection_naming(unknown, "Extra inputs are not permitted"),
                     ANTHROPIC_API_KIND,
@@ -2038,6 +2107,7 @@ mod table_tests {
         // empty table or a parser that never answers.
         assert!(
             rejected_field(
+                crate::router::FieldRepairTable::default(),
                 &FailureClass::BadRequest,
                 &rejection_naming("thinking.enabled.display", "Extra inputs are not permitted"),
                 ANTHROPIC_API_KIND,
@@ -2248,8 +2318,13 @@ mod table_tests {
             "Input should be 'summarized', 'omitted'",
         );
 
-        let named = rejected_field(&FailureClass::BadRequest, &captured, ANTHROPIC_API_KIND)
-            .expect("the captured display rejection names its row");
+        let named = rejected_field(
+            crate::router::FieldRepairTable::default(),
+            &FailureClass::BadRequest,
+            &captured,
+            ANTHROPIC_API_KIND,
+        )
+        .expect("the captured display rejection names its row");
 
         assert_eq!(named.row.path, "thinking.enabled.display");
         assert_eq!(named.row.surface, FieldSurface::AnthropicThinkingDisplay);
@@ -2265,11 +2340,23 @@ mod table_tests {
         // Control: the shape below resolves on its own lane, so each refusal
         // is about the one input that changed.
         assert!(
-            rejected_field(&FailureClass::BadRequest, &captured, ANTHROPIC_API_KIND).is_some(),
+            rejected_field(
+                crate::router::FieldRepairTable::default(),
+                &FailureClass::BadRequest,
+                &captured,
+                ANTHROPIC_API_KIND
+            )
+            .is_some(),
             "premise: the captured rejection resolves on anthropic-api",
         );
         assert!(
-            rejected_field(&FailureClass::BadRequest, &captured, "gemini").is_none(),
+            rejected_field(
+                crate::router::FieldRepairTable::default(),
+                &FailureClass::BadRequest,
+                &captured,
+                "gemini"
+            )
+            .is_none(),
             "a lane kind with no parser names nothing",
         );
         for unparsed in [
@@ -2286,7 +2373,13 @@ mod table_tests {
             ),
         ] {
             assert!(
-                rejected_field(&FailureClass::BadRequest, &unparsed, ANTHROPIC_API_KIND).is_none(),
+                rejected_field(
+                    crate::router::FieldRepairTable::default(),
+                    &FailureClass::BadRequest,
+                    &unparsed,
+                    ANTHROPIC_API_KIND
+                )
+                .is_none(),
                 "an error carrying no parsed envelope names nothing: {unparsed:?}",
             );
         }
@@ -2305,7 +2398,13 @@ mod table_tests {
         let _injection = provisional::inject("thinking.display");
 
         assert!(
-            rejected_field(&FailureClass::BadRequest, &captured, ANTHROPIC_API_KIND).is_none(),
+            rejected_field(
+                crate::router::FieldRepairTable::default(),
+                &FailureClass::BadRequest,
+                &captured,
+                ANTHROPIC_API_KIND
+            )
+            .is_none(),
             "an injected path with no row resolves to nothing, whatever the body says",
         );
     }
@@ -2369,6 +2468,7 @@ mod table_tests {
         let _injection = provisional::inject("thinking.enabled.display");
         assert!(
             rejected_field(
+                crate::router::FieldRepairTable::default(),
                 &FailureClass::RateLimited,
                 &Error::upstream("p", 429, "{}"),
                 ANTHROPIC_API_KIND,

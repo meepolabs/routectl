@@ -442,7 +442,7 @@ impl Router {
         target: &DispatchTarget,
         surface: DispatchSurface,
     ) -> (ChatRequest, Vec<FieldPreflight>, FieldPreflightPlan<'a>) {
-        let mut rows = present_rows(original_req).peekable();
+        let mut rows = present_rows(self.field_repair_table(), original_req).peekable();
         if rows.peek().is_none() {
             return (
                 original_req.clone(),
@@ -548,6 +548,7 @@ impl Router {
         // re-check, so the repair simply keeps applying.
         let key = if edit == PreflightEdit::Drop
             && !super::field_repair::negative_recovers_only_by_recheck(
+                self.field_repair_table(),
                 key.registry_key(),
                 key.capability_key(),
                 key.provider_kind(),
@@ -952,7 +953,13 @@ impl Router {
         provider_kind: &str,
     ) -> Option<CanaryRepair> {
         let surface = plan.canary_surface()?;
-        let named = Self::rejection_names_field_surface(surface, native_class, err, provider_kind)?;
+        let named = Self::rejection_names_field_surface(
+            self.field_repair_table(),
+            surface,
+            native_class,
+            err,
+            provider_kind,
+        )?;
         let lossy_path = (named.kind == RejectionKind::InvalidValue).then_some(named.row.path);
         if lossy_path.is_some()
             && let Some(canary) = plan.canary.take()

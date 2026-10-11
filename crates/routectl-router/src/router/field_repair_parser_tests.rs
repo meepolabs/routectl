@@ -504,6 +504,7 @@ fn a_rejection_whose_class_cannot_name_a_field_is_not_counted_as_blind() {
     // every class would satisfy the refusals below while making the counter dead.
     assert!(
         !Router::rejection_localizes_no_field(
+            crate::router::FieldRepairTable::default(),
             &FailureClass::BadRequest,
             &named,
             ANTHROPIC_API_KIND,
@@ -512,6 +513,7 @@ fn a_rejection_whose_class_cannot_name_a_field_is_not_counted_as_blind() {
     );
     assert!(
         Router::rejection_localizes_no_field(
+            crate::router::FieldRepairTable::default(),
             &FailureClass::BadRequest,
             &unnamed,
             ANTHROPIC_API_KIND,
@@ -542,7 +544,12 @@ fn a_rejection_whose_class_cannot_name_a_field_is_not_counted_as_blind() {
         FailureClass::Unknown,
     ] {
         assert!(
-            !Router::rejection_localizes_no_field(&class, &named, ANTHROPIC_API_KIND),
+            !Router::rejection_localizes_no_field(
+                crate::router::FieldRepairTable::default(),
+                &class,
+                &named,
+                ANTHROPIC_API_KIND
+            ),
             "{class:?} says nothing about the request envelope, so it is not evidence \
              about the parser",
         );

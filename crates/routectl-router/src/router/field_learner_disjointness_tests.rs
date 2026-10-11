@@ -98,7 +98,13 @@ fn no_closed_table_row_resolves_a_generic_capability_in_any_repair_kind() {
             let classified = classify(&err, Some(kind));
 
             assert!(
-                rejected_field(&classified.class, &err, kind).is_some(),
+                rejected_field(
+                    crate::router::FieldRepairTable::default(),
+                    &classified.class,
+                    &err,
+                    kind
+                )
+                .is_some(),
                 "control: {kind} ({shape}) names `{}` to the field parser under {:?}",
                 row.path,
                 classified.class,

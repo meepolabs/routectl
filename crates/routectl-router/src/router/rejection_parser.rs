@@ -32,7 +32,7 @@
 use routectl_core::capability::SignalTier;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
 
-use super::field_repair::{FieldRepairRow, FieldTransform, closed_table};
+use super::field_repair::{FieldRepairRow, FieldRepairTable, FieldTransform};
 
 /// Statuses a caller-shaped field rejection arrives on. Everything else says
 /// nothing about the request envelope.
@@ -94,6 +94,7 @@ pub(super) struct NamedRejection {
 /// in an array index names one element, not the field a row describes, so it
 /// has no row either.
 pub(super) fn parse_rejection(
+    table: FieldRepairTable,
     provider_kind: &str,
     status: u16,
     parsed: Option<&ParsedErrorBody>,
@@ -102,7 +103,7 @@ pub(super) fn parse_rejection(
     if localized.ends_in_index {
         return None;
     }
-    let row = resolve(&localized.segments)?;
+    let row = resolve(table, &localized.segments)?;
     Some(NamedRejection {
         row,
         tier: localized.tier,
@@ -322,8 +323,9 @@ fn unsupported_parameter(message: &str) -> Option<&str> {
         .strip_suffix(OPENAI_UNSUPPORTED_SUFFIX)
 }
 
-fn resolve(segments: &[&str]) -> Option<&'static FieldRepairRow> {
-    closed_table()
+fn resolve(table: FieldRepairTable, segments: &[&str]) -> Option<&'static FieldRepairRow> {
+    table
+        .rows()
         .iter()
         .find(|row| row.path.split('.').eq(segments.iter().copied()))
 }

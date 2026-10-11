@@ -358,7 +358,7 @@ impl Router {
         // dropped early, so the release path is the guard's `Drop` on every
         // exit -- including a cancelled future, since this whole call runs
         // inside a `tokio::time::timeout`.
-        let req = build_probe_request(&seat, payload);
+        let req = build_probe_request(self.field_repair_table(), &seat, payload);
         let outcome = match seat.provider.count_tokens(req).await {
             // A count came back for a body carrying the field under test: the
             // upstream accepts the field the negative says it refuses.
@@ -366,6 +366,7 @@ impl Router {
             // A well-formed zero establishes nothing about the field.
             Ok(_) => FreeValidatorOutcome::Inconclusive,
             Err(err) => super::probe_failure_class::rechecked_field_rejection(
+                self.field_repair_table(),
                 &err,
                 key.provider_kind(),
                 payload.field_path(),
@@ -579,6 +580,7 @@ const PROBE_MESSAGE_TEXT: &str = "ping";
 /// `max_tokens` is left unset here and filled with the probe default by
 /// `apply_probe_payload`.
 pub(super) fn build_probe_request(
+    table: super::field_repair::FieldRepairTable,
     seat: &super::probe_seat::ProbeSeat,
     payload: &crate::probe_scheduler::ProbePayload,
 ) -> routectl_core::ChatRequest {
@@ -614,6 +616,6 @@ pub(super) fn build_probe_request(
     // CLIENT-traffic classification census, which exists to report what clients
     // send.
     req.routectl_internal.background_probe = true;
-    super::field_repair::apply_probe_payload(&mut req, payload);
+    super::field_repair::apply_probe_payload(table, &mut req, payload);
     req
 }

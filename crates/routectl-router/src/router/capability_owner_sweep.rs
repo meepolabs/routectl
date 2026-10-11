@@ -40,17 +40,20 @@ impl Router {
     /// key, every drop -- carries none, whatever the store holds.
     #[must_use]
     pub fn with_restated_value(&self, recorded: RecordedLearnedEntry) -> RecordedLearnedEntry {
-        let value = super::value_slot_for_capability(&recorded.entry.feature_key)
-            .and(StateKey::parse(&recorded.entry.state_key))
-            .and_then(|lane| {
-                let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
-                    lane,
-                    recorded.entry.feature_key.clone(),
-                    recorded.provider_kind.clone(),
-                );
-                self.field_verdicts
-                    .verdict_value(&key, recorded.incarnation)
-            });
+        let value = super::value_slot_for_capability(
+            self.field_repair_table(),
+            &recorded.entry.feature_key,
+        )
+        .and(StateKey::parse(&recorded.entry.state_key))
+        .and_then(|lane| {
+            let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
+                lane,
+                recorded.entry.feature_key.clone(),
+                recorded.provider_kind.clone(),
+            );
+            self.field_verdicts
+                .verdict_value(&key, recorded.incarnation)
+        });
         RecordedLearnedEntry { value, ..recorded }
     }
 

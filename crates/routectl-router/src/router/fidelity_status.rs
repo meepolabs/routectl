@@ -402,8 +402,10 @@ impl Router {
         let key =
             FieldVerdictKey::from_capability_key(lane, entry.feature_key.clone(), provider_kind);
         let snapshot = self.field_verdicts().canaries().snapshot(&key);
-        let class =
-            crate::router::field_repair::transform_class_of_capability_key(&entry.feature_key);
+        let class = crate::router::field_repair::transform_class_of_capability_key(
+            self.field_repair_table(),
+            &entry.feature_key,
+        );
         let confirmations = snapshot.map_or(0, |s| s.confirmations);
         FieldVerdictStatus {
             state_key: sanitize_for_log(&entry.state_key),

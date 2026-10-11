@@ -241,7 +241,8 @@ fn the_generic_learn_entry_refuses_a_field_namespace_key() {
         ..Default::default()
     });
     assert!(
-        super::field_repair::request_feature_keys(&req).contains(&field_key()),
+        super::field_repair::request_feature_keys(crate::router::FieldRepairTable::default(), &req)
+            .contains(&field_key()),
         "premise: the membership gate would admit the key",
     );
 

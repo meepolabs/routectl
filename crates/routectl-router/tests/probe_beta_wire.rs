@@ -158,7 +158,7 @@ async fn canonical_requests(
         .aliases
         .insert("default".to_string(), AliasValue::Single("m1".to_string()));
 
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_synthetic_field_rows_for_tests();
     let mut models = BTreeMap::new();
     let mut resolved = ResolvedModel::new("m1", "p1", provider, "claude-sonnet-4-5");
     if model_beta.is_some() {

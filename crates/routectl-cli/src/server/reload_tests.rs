@@ -2559,7 +2559,7 @@ fn probe_router_with_counting_provider() -> (Router, Arc<AtomicUsize>) {
         "default".to_string(),
         routectl_router::config::AliasValue::Single("m1".to_string()),
     );
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_synthetic_field_rows_for_tests();
     let mut models = std::collections::BTreeMap::new();
     models.insert(
         "m1".to_string(),
@@ -2842,7 +2842,7 @@ fn stalling_probe_router() -> (Router, Arc<AtomicUsize>) {
         "default".to_string(),
         routectl_router::config::AliasValue::Single("m1".to_string()),
     );
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_synthetic_field_rows_for_tests();
     let mut models = std::collections::BTreeMap::new();
     models.insert(
         "m1".to_string(),

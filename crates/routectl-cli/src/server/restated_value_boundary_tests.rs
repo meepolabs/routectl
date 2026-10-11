@@ -123,7 +123,7 @@ fn config() -> (Arc<Config>, tempfile::TempDir) {
 /// A Router at `revision` dispatching to `seat`, with durable capability
 /// writes assumed so pre-flight is not suspended.
 fn router_at(config: &Arc<Config>, revision: u64, seat: Arc<Seat>) -> Router {
-    let mut router = Router::new(Arc::clone(config));
+    let mut router = Router::new(Arc::clone(config)).with_synthetic_field_rows_for_tests();
     let models = BTreeMap::from([(
         NICKNAME.to_string(),
         Arc::new(ResolvedModel::new(

@@ -206,7 +206,7 @@ fn config() -> Config {
 /// suspension itself is asserted against a fixture that omits the opt-in, in the
 /// crate's own `field_preflight_persistence_tests`.
 fn router_with(seat: Arc<Seat>) -> Router {
-    let mut router = Router::new(Arc::new(config()));
+    let mut router = Router::new(Arc::new(config())).with_synthetic_field_rows_for_tests();
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
         NICKNAME.to_string(),

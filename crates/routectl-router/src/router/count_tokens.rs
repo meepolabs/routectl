@@ -414,7 +414,10 @@ impl Router {
         // count never claims a canary (the surface is excluded upstream of the
         // cadence tick), so there is no settlement to owe here.
         // Captured before pre-flight -- see `complete_inner`.
-        let probe_fields = super::probe_payload_capture::ProbeFieldCapture::of(&attempt_req);
+        let probe_fields = super::probe_payload_capture::ProbeFieldCapture::of(
+            self.field_repair_table(),
+            &attempt_req,
+        );
         let (preflighted_req, preflight_records, _field_preflight_plan) =
             self.plan_field_preflight(&attempt_req, &target, DispatchSurface::CountTokens);
         attempt_req = preflighted_req;
@@ -519,7 +522,10 @@ impl Router {
                     //   disproved.
                     if let Some(plan) = field_plan.take() {
                         if let Some(repair) = reactive_repair {
-                            let features = super::field_repair::request_feature_keys(req);
+                            let features = super::field_repair::request_feature_keys(
+                                self.field_repair_table(),
+                                req,
+                            );
                             // The `learned` claim is derived from what the commit
                             // actually PERSISTED, never asserted alongside it: a
                             // non-settling plan commits nothing, and a summary that

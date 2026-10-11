@@ -316,16 +316,19 @@ fn only_a_row_a_token_count_validates_is_captured_for_a_probe() {
     req.system = Some(routectl_core::SystemContent::Text(
         super::field_repair::TEST_PREFIX_SENTINEL.to_string(),
     ));
-    let present: Vec<&str> = super::field_repair::present_rows(&req)
-        .map(|row| row.path)
-        .collect();
+    let present: Vec<&str> =
+        super::field_repair::present_rows(crate::router::FieldRepairTable::default(), &req)
+            .map(|row| row.path)
+            .collect();
     assert!(
         present.contains(&GROUNDED_PATH)
             && present.contains(&super::field_repair::TEST_PREFIX_IMPACTING_PATH),
         "premise: the request carries un-validated rows too: {present:?}"
     );
 
-    let captured: Vec<(&str, String)> = super::field_repair::recheck_payloads(&req).collect();
+    let captured: Vec<(&str, String)> =
+        super::field_repair::recheck_payloads(crate::router::FieldRepairTable::default(), &req)
+            .collect();
 
     assert_eq!(
         captured,
@@ -351,7 +354,11 @@ fn a_probe_payload_applies_its_own_row_and_nothing_else() {
     .expect("the payload constructor bounds VALUES, not paths");
     let mut req = routectl_core::ChatRequest::default();
     let before = serde_json::to_value(&req).expect("serializable");
-    super::field_repair::apply_probe_payload(&mut req, &unknown);
+    super::field_repair::apply_probe_payload(
+        crate::router::FieldRepairTable::default(),
+        &mut req,
+        &unknown,
+    );
     assert_eq!(
         serde_json::to_value(&req).expect("serializable"),
         before,
@@ -370,7 +377,11 @@ fn a_probe_payload_applies_its_own_row_and_nothing_else() {
     )
     .expect("a modeled value");
     let mut req = routectl_core::ChatRequest::default();
-    super::field_repair::apply_probe_payload(&mut req, &recheck);
+    super::field_repair::apply_probe_payload(
+        crate::router::FieldRepairTable::default(),
+        &mut req,
+        &recheck,
+    );
     assert_eq!(
         req.chat_template_kwargs,
         Some(serde_json::json!({ super::field_repair::TEST_RECHECK_KWARG: "summarized" })),

@@ -215,7 +215,7 @@ pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CanaryPosture, CapabilityPersistenceHealth,
     DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot, FieldPreflight,
-    FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
+    FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldRepairTable, FieldVerdictStatus,
     LearnedLaneProjection, OpeningLane, PreflightBlockedReason, ProbeClearAcknowledgement,
     ResolvedLearnedLane, Router, RouterOptions, acting_field_verdicts, class_debits,
 };

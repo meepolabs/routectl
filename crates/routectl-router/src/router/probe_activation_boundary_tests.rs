@@ -115,7 +115,8 @@ async fn an_acting_negative_on_a_row_a_count_does_not_validate_queues_nothing() 
     let mut req = routectl_core::ChatRequest::default();
     req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
     assert!(
-        super::field_repair::present_rows(&req).any(|row| row.path == GROUNDED_PATH),
+        super::field_repair::present_rows(crate::router::FieldRepairTable::default(), &req)
+            .any(|row| row.path == GROUNDED_PATH),
         "premise: the request carries the un-validated row"
     );
 
@@ -350,7 +351,10 @@ fn a_target_whose_base_url_is_not_attributable_activates_no_lane() {
         "p1",
         Some("anthropic-api"),
         false,
-        &ProbeFieldCapture::of(&grounding_request()),
+        &ProbeFieldCapture::of(
+            crate::router::FieldRepairTable::default(),
+            &grounding_request(),
+        ),
         &grounding_request(),
     );
 
@@ -433,7 +437,7 @@ fn only_a_kind_with_a_free_token_count_queues_a_re_check() {
             "p0",
             Some(row.kind),
             false,
-            &ProbeFieldCapture::of(&req),
+            &ProbeFieldCapture::of(crate::router::FieldRepairTable::default(), &req),
             &req,
         );
 
@@ -462,7 +466,10 @@ fn a_request_grounding_nothing_activates_no_lane() {
         "p1",
         Some("anthropic-api"),
         false,
-        &ProbeFieldCapture::of(&ChatRequest::default()),
+        &ProbeFieldCapture::of(
+            crate::router::FieldRepairTable::default(),
+            &ChatRequest::default(),
+        ),
         &ChatRequest::default(),
     );
 

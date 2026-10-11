@@ -72,7 +72,7 @@ async fn resident_after_warm_rebuild(
     let config = Arc::clone(config);
     let usage = usage.clone();
     tokio::task::spawn_blocking(move || {
-        let router = Router::new(Arc::clone(&config));
+        let router = Router::new(Arc::clone(&config)).with_synthetic_field_rows_for_tests();
         crate::server::capability_rebuild::warm_capability_registry_from_ledger(
             &config.usage.db_path,
             &router,

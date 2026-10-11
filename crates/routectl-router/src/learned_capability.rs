@@ -210,9 +210,15 @@ impl LearnedEntry {
     /// lapse would instead admit it as a generic re-probe (or a reactive repair
     /// slot) and let any ordinary success clear it with no durable
     /// acknowledgement.
-    fn has_lapsed(&self, key: &RegistryKey, now: Instant) -> bool {
+    fn has_lapsed(
+        &self,
+        table: crate::router::FieldRepairTable,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> bool {
         self.is_expired(now)
             && !crate::router::negative_recovers_only_by_recheck(
+                table,
                 &key.state_key,
                 &key.feature_key,
                 &key.provider_kind,
@@ -667,6 +673,12 @@ pub struct LearnedCapabilityRegistry {
     /// observe -- and `-D warnings` is right to flag it.
     #[cfg(any(test, feature = "test-utils"))]
     snapshot_reads: std::sync::atomic::AtomicUsize,
+    /// The closed field-repair table the lapse rule and boot replay read, when
+    /// one other than the default was installed. Shared by every Router
+    /// generation attached to this registry, so a reload keeps the table its
+    /// predecessor ran with. Lock-free: set at most once, before any read that
+    /// matters, and outside the lock order below.
+    field_repair_table: std::sync::OnceLock<crate::router::FieldRepairTable>,
     /// Test-only hook fired by `observe_in_generation_with_observations`
     /// itself, AFTER its own `guarded_for` call has returned (every lock it
     /// took already released) and BEFORE the outcome goes back to the
@@ -1085,6 +1097,7 @@ impl LearnedCapabilityRegistry {
             acquire_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-utils"))]
             snapshot_reads: std::sync::atomic::AtomicUsize::new(0),
+            field_repair_table: std::sync::OnceLock::new(),
             #[cfg(test)]
             post_observe_hook: Mutex::new(None),
         }
@@ -1364,7 +1377,7 @@ impl LearnedCapabilityRegistry {
                     if matches!(decision, RoutingDecision::Allow) {
                         return RoutingDecision::Allow;
                     }
-                    if !entry.has_lapsed(&key, now) || entry.in_flight {
+                    if !entry.has_lapsed(self.field_repair_table(), &key, now) || entry.in_flight {
                         return decision;
                     }
                     // Lapsed and unclaimed: fall through to claim the probe.
@@ -1400,7 +1413,8 @@ impl LearnedCapabilityRegistry {
                 let decision = entry.acting_decision();
                 if matches!(decision, RoutingDecision::Allow) {
                     RoutingDecision::Allow
-                } else if !entry.has_lapsed(key, now) || entry.in_flight {
+                } else if !entry.has_lapsed(self.field_repair_table(), key, now) || entry.in_flight
+                {
                     decision
                 } else {
                     entry.in_flight = true;
@@ -1436,11 +1450,12 @@ impl LearnedCapabilityRegistry {
     ) -> NegativeState {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
         let entries = self.entries.read();
-        Self::negative_state_in(&entries, &key, now)
+        Self::negative_state_in(self.field_repair_table(), &entries, &key, now)
     }
 
     /// [`Self::negative_state`]'s body, reading from an already-held guard.
     fn negative_state_in(
+        table: crate::router::FieldRepairTable,
         entries: &BTreeMap<RegistryKey, LearnedEntry>,
         key: &RegistryKey,
         now: Instant,
@@ -1451,7 +1466,7 @@ impl LearnedCapabilityRegistry {
         if !matches!(entry.verdict, EntryVerdict::Negative) || !entry.is_acting() {
             return NegativeState::Absent;
         }
-        if entry.has_lapsed(key, now) {
+        if entry.has_lapsed(table, key, now) {
             NegativeState::Lapsed
         } else {
             NegativeState::Acting
@@ -1836,6 +1851,19 @@ impl LearnedCapabilityRegistry {
                 feature_key: key.feature_key.clone(),
             })
             .collect()
+    }
+
+    /// The closed field-repair table this registry and every Router attached to
+    /// it read: the installed one, or the build's default.
+    pub fn field_repair_table(&self) -> crate::router::FieldRepairTable {
+        self.field_repair_table.get().copied().unwrap_or_default()
+    }
+
+    /// Install `table` as this registry's closed field-repair table. Only the
+    /// first install takes effect; a registry never changes tables under the
+    /// verdicts it holds.
+    pub fn set_field_repair_table(&self, table: crate::router::FieldRepairTable) {
+        let _ = self.field_repair_table.set(table);
     }
 
     /// Install the seed whose cells may carry a marker. Markers already
@@ -3355,7 +3383,7 @@ impl LearnedCapabilityRegistry {
             provider_kind,
             |entries, _leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                Self::negative_state_in(entries, &key, now)
+                Self::negative_state_in(self.field_repair_table(), entries, &key, now)
             },
         ) {
             // A read reports the resident entry's own metadata; `Reserved` and
@@ -3415,6 +3443,7 @@ impl LearnedCapabilityRegistry {
         // immediately dropped them, claiming ordering; that was false twice over --
         // a lock released before the read orders nothing, and a field key is
         // catalog-generation independent so there was no admission to order anyway.
+        let table = self.field_repair_table();
         let entries = self.entries.read();
         let leases = self.purge_leases.read();
         entries
@@ -3433,7 +3462,7 @@ impl LearnedCapabilityRegistry {
             // then report a verdict acting that no dispatch would act on.
             .filter_map(|(key, entry)| {
                 matches!(
-                    Self::negative_state_in(&entries, key, now),
+                    Self::negative_state_in(table, &entries, key, now),
                     NegativeState::Acting
                 )
                 .then_some((
@@ -3479,7 +3508,7 @@ impl LearnedCapabilityRegistry {
             provider_kind,
             |entries, _leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                let state = Self::negative_state_in(entries, &key, now);
+                let state = Self::negative_state_in(self.field_repair_table(), entries, &key, now);
                 (
                     state,
                     entries.get(&key).map(|e| FieldActingFacts {

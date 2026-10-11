@@ -3631,6 +3631,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `header_extras` betas). Two stages, because the router refuses to
   activate for a loopback base URL: the real router yields the two canonical
   requests, then a real `AnthropicApiProvider` emits headers from them
+- `tests/synthetic_field_rows.rs` -- the synthetic rewrite and re-check
+  field-repair rows reach a Router only through
+  `Router::with_synthetic_field_rows_for_tests`. Built with `test-utils` on and
+  `cfg(test)` off -- the shape of any build that unifies the feature -- it pins
+  that a Router without the seam repairs nothing through the synthetic rewrite
+  row (one attempt, the client's value untouched), with the seamed Router's
+  rewritten retry as the positive control
 - `tests/rejection_fixtures.rs` -- every file under
   `tests/fixtures/rejections/<dialect>/` is the `{note, status, lifted_type?,
   body}` shape `scripts/capture-rejection.sh` writes, under a dialect from its

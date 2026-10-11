@@ -143,7 +143,10 @@ impl Router {
             direction: ObservationDirection::Verified,
             signal_tier: SignalTier::SelfIdentifying,
             source: EvidenceSource::Live,
-            request_features: super::field_repair::request_feature_keys(req),
+            request_features: super::field_repair::request_feature_keys(
+                self.field_repair_table(),
+                req,
+            ),
         });
     }
 
@@ -195,7 +198,8 @@ impl Router {
             ) {
                 continue;
             }
-            let mut request_features = super::field_repair::request_feature_keys(req);
+            let mut request_features =
+                super::field_repair::request_feature_keys(self.field_repair_table(), req);
             request_features.push(feature_key.clone());
             self.mint_learned_negative(
                 LearnedMint {

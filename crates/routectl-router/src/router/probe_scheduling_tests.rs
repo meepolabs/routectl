@@ -310,7 +310,10 @@ fn an_admitted_request_grounding_the_closed_table_activates_its_lane() {
         "anthropic",
         Some("anthropic-api"),
         false,
-        &super::probe_payload_capture::ProbeFieldCapture::of(&req),
+        &super::probe_payload_capture::ProbeFieldCapture::of(
+            crate::router::FieldRepairTable::default(),
+            &req,
+        ),
         &req,
     );
 
@@ -333,7 +336,10 @@ fn a_burst_of_admitted_requests_on_one_lane_activates_exactly_once() {
             "anthropic",
             Some("anthropic-api"),
             false,
-            &super::probe_payload_capture::ProbeFieldCapture::of(&req),
+            &super::probe_payload_capture::ProbeFieldCapture::of(
+                crate::router::FieldRepairTable::default(),
+                &req,
+            ),
             &req,
         );
     }
@@ -356,7 +362,10 @@ fn an_admitted_request_grounding_nothing_activates_no_lane() {
         "anthropic",
         Some("anthropic-api"),
         false,
-        &super::probe_payload_capture::ProbeFieldCapture::of(&ChatRequest::default()),
+        &super::probe_payload_capture::ProbeFieldCapture::of(
+            crate::router::FieldRepairTable::default(),
+            &ChatRequest::default(),
+        ),
         &ChatRequest::default(),
     );
 
@@ -377,7 +386,10 @@ fn a_forwarded_credential_target_activates_no_lane() {
         "anthropic",
         Some("anthropic-api"),
         true,
-        &super::probe_payload_capture::ProbeFieldCapture::of(&grounding_request()),
+        &super::probe_payload_capture::ProbeFieldCapture::of(
+            crate::router::FieldRepairTable::default(),
+            &grounding_request(),
+        ),
         &grounding_request(),
     );
 
@@ -397,7 +409,10 @@ fn a_target_off_the_acting_lane_activates_no_lane() {
             "anthropic",
             kind,
             false,
-            &super::probe_payload_capture::ProbeFieldCapture::of(&grounding_request()),
+            &super::probe_payload_capture::ProbeFieldCapture::of(
+                crate::router::FieldRepairTable::default(),
+                &grounding_request(),
+            ),
             &grounding_request(),
         );
     }
@@ -418,7 +433,10 @@ fn an_admitted_request_activates_a_free_validator_first() {
         "anthropic",
         Some("anthropic-api"),
         false,
-        &super::probe_payload_capture::ProbeFieldCapture::of(&grounding_request()),
+        &super::probe_payload_capture::ProbeFieldCapture::of(
+            crate::router::FieldRepairTable::default(),
+            &grounding_request(),
+        ),
         &grounding_request(),
     );
     let lease = router.lease_due_probe(now).expect("the queued job is due");
@@ -445,7 +463,9 @@ fn a_body_an_acting_preflight_already_stripped_activates_no_lane() {
     // activation should have refused. Every present row is dropped rather
     // than only the first, so the premise holds as the closed table grows.
     let mut req = grounding_request();
-    let rows: Vec<_> = super::field_repair::present_rows(&req).collect();
+    let rows: Vec<_> =
+        super::field_repair::present_rows(crate::router::FieldRepairTable::default(), &req)
+            .collect();
     assert!(
         !rows.is_empty(),
         "premise: the fixture grounds at least one closed-table surface"
@@ -468,7 +488,10 @@ fn a_body_an_acting_preflight_already_stripped_activates_no_lane() {
         "anthropic",
         Some("anthropic-api"),
         false,
-        &super::probe_payload_capture::ProbeFieldCapture::of(&req),
+        &super::probe_payload_capture::ProbeFieldCapture::of(
+            crate::router::FieldRepairTable::default(),
+            &req,
+        ),
         &req,
     );
 

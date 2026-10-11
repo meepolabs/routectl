@@ -2205,7 +2205,7 @@ mod grounded_field_feature_keys_tests {
     fn a_request_carrying_the_grounded_surface_yields_its_minted_key() {
         let req = req_on(ALIAS);
 
-        let keys = grounded_field_feature_keys(&req);
+        let keys = grounded_field_feature_keys(crate::router::FieldRepairTable::default(), &req);
 
         assert_eq!(
             keys,
@@ -2220,7 +2220,7 @@ mod grounded_field_feature_keys_tests {
         req.routectl_internal.anthropic_thinking_display = None;
         req.reasoning = None;
 
-        let keys = grounded_field_feature_keys(&req);
+        let keys = grounded_field_feature_keys(crate::router::FieldRepairTable::default(), &req);
 
         assert!(
             keys.is_empty(),
@@ -2234,7 +2234,7 @@ mod grounded_field_feature_keys_tests {
         let mut req = req_on(ALIAS);
         req.routectl_internal.anthropic_thinking_display = None;
 
-        let keys = grounded_field_feature_keys(&req);
+        let keys = grounded_field_feature_keys(crate::router::FieldRepairTable::default(), &req);
 
         assert_eq!(
             keys,
@@ -2272,7 +2272,7 @@ mod forced_tool_choice_key_tests {
         ] {
             let req = req_with_tool_choice(Some(tc.clone()));
 
-            let keys = request_feature_keys(&req);
+            let keys = request_feature_keys(crate::router::FieldRepairTable::default(), &req);
 
             assert_eq!(keys, vec![FORCED.to_string()], "tool_choice {tc}");
         }
@@ -2290,7 +2290,7 @@ mod forced_tool_choice_key_tests {
         ] {
             let req = req_with_tool_choice(tc.clone());
 
-            let keys = request_feature_keys(&req);
+            let keys = request_feature_keys(crate::router::FieldRepairTable::default(), &req);
 
             assert!(
                 keys.is_empty(),
@@ -2308,7 +2308,7 @@ mod forced_tool_choice_key_tests {
             json!({"type": "web_search_20250305", "name": "web_search"}),
         )]);
 
-        let keys = request_feature_keys(&req);
+        let keys = request_feature_keys(crate::router::FieldRepairTable::default(), &req);
 
         assert_eq!(keys, vec!["web_search".to_string(), FORCED.to_string()]);
     }

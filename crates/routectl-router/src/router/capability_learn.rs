@@ -880,7 +880,8 @@ impl Router {
         // misbehaving upstream cannot plant a routing entry the act side could
         // never look up. This is the gate the original cross-namespace check
         // meant to be: correct now that both sides meet on identical keys.
-        let request_features = super::field_repair::request_feature_keys(req);
+        let request_features =
+            super::field_repair::request_feature_keys(self.field_repair_table(), req);
         if !request_features.contains(&feature_key) {
             return;
         }
@@ -1360,7 +1361,12 @@ impl Router {
         // explicitly before this is reached -- see
         // `observe_unlocalized_field_rejection`. What arrives is an unremapped
         // class.
-        if !Self::rejection_localizes_no_field(&cf.class, err, provider_kind) {
+        if !Self::rejection_localizes_no_field(
+            self.field_repair_table(),
+            &cf.class,
+            err,
+            provider_kind,
+        ) {
             return;
         }
         if !dedupe.insert(LearnDedupeKey::FieldParserUnlocalized {

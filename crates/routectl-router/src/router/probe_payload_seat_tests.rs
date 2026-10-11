@@ -135,7 +135,11 @@ fn a_display_probe_body_serializes_an_active_thinking_object_through_the_real_no
     )
     .expect("a modeled display value");
 
-    let probe = super::probe_lifecycle::build_probe_request(&seat, &payload);
+    let probe = super::probe_lifecycle::build_probe_request(
+        crate::router::FieldRepairTable::default(),
+        &seat,
+        &payload,
+    );
 
     let real = routectl_providers::anthropic_api::AnthropicApiProvider::new(
         routectl_providers::anthropic_api::AnthropicApiConfig::new("p1", "literal-key"),

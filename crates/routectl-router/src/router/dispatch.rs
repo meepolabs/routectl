@@ -427,7 +427,7 @@ impl Router {
             // Captured BEFORE pre-flight: an acting negative is what makes
             // pre-flight drop the field, and it is that field a re-check asks
             // about.
-            let probe_fields = ProbeFieldCapture::of(&attempt_req);
+            let probe_fields = ProbeFieldCapture::of(self.field_repair_table(), &attempt_req);
             let (preflighted_req, preflight_records, field_canary) =
                 self.plan_field_preflight(&attempt_req, target, DispatchSurface::Complete);
             attempt_req = preflighted_req;
@@ -727,7 +727,10 @@ impl Router {
                         // would resurrect a verdict this request disproved.
                         if let Some(plan) = field_plan.take() {
                             if let Some(repair) = reactive_repair {
-                                let features = super::field_repair::request_feature_keys(&req);
+                                let features = super::field_repair::request_feature_keys(
+                                    self.field_repair_table(),
+                                    &req,
+                                );
                                 // The `learned` claim is derived from what the commit
                                 // actually PERSISTED, never asserted alongside it: a
                                 // non-settling plan commits nothing, and a summary that
@@ -759,7 +762,10 @@ impl Router {
                         }
                         if let Some(plan) = std::mem::take(&mut field_canary).into_canary() {
                             if canary_repair_attempted {
-                                let features = super::field_repair::request_feature_keys(&req);
+                                let features = super::field_repair::request_feature_keys(
+                                    self.field_repair_table(),
+                                    &req,
+                                );
                                 meta.learned_capabilities.extend(plan.settle_confirmed(
                                     self.field_verdicts(),
                                     canary_reject_status,
@@ -1445,7 +1451,7 @@ impl Router {
             // surface is excluded upstream of the cadence tick), so there is
             // no settlement to owe here.
             // Captured before pre-flight -- see `complete_inner`.
-            let probe_fields = ProbeFieldCapture::of(&attempt_req);
+            let probe_fields = ProbeFieldCapture::of(self.field_repair_table(), &attempt_req);
             let (preflighted_req, preflight_records, _field_preflight_plan) =
                 self.plan_field_preflight(&attempt_req, target, DispatchSurface::Stream);
             attempt_req = preflighted_req;
@@ -1717,7 +1723,10 @@ impl Router {
                         // would resurrect a verdict this request disproved.
                         if let Some(plan) = field_plan.take() {
                             if let Some(repair) = reactive_repair {
-                                let features = super::field_repair::request_feature_keys(&req);
+                                let features = super::field_repair::request_feature_keys(
+                                    self.field_repair_table(),
+                                    &req,
+                                );
                                 // The `learned` claim is derived from what the commit
                                 // actually PERSISTED, never asserted alongside it: a
                                 // non-settling plan commits nothing, and a summary that

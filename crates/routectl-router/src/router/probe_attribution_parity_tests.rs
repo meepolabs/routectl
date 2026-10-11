@@ -370,7 +370,10 @@ fn activation_admits(shape: &Shape, req: &ChatRequest) -> bool {
         &target.provider_name,
         target.provider_kind,
         target.use_forwarded_credential,
-        &super::probe_payload_capture::ProbeFieldCapture::of(req),
+        &super::probe_payload_capture::ProbeFieldCapture::of(
+            crate::router::FieldRepairTable::default(),
+            req,
+        ),
         req,
     );
     router.probe_scheduler_snapshot().activations_total > 0

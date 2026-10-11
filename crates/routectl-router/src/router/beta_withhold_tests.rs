@@ -412,7 +412,11 @@ async fn the_withheld_set_reaches_every_dispatch_surface_without_feature_keys() 
     let (router, provider) = dispatch_router(true);
     let req = betas(&["fx-seed-only", "fx-unknown"]);
     assert!(
-        super::super::field_repair::request_feature_keys(&req).is_empty(),
+        super::super::field_repair::request_feature_keys(
+            crate::router::FieldRepairTable::default(),
+            &req
+        )
+        .is_empty(),
         "premise: the request carries zero feature keys",
     );
 

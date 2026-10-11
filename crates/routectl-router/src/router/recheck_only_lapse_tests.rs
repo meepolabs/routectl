@@ -176,14 +176,19 @@ fn only_a_lane_with_a_free_count_makes_a_validated_row_recheck_only() {
     let lane_key = lane("m1").as_lane_key().to_string();
 
     assert!(super::negative_recovers_only_by_recheck(
-        &lane_key, &key, KIND
+        crate::router::FieldRepairTable::default(),
+        &lane_key,
+        &key,
+        KIND
     ));
     assert!(!super::negative_recovers_only_by_recheck(
+        crate::router::FieldRepairTable::default(),
         &lane_key,
         &key,
         "openai-compat"
     ));
     assert!(!super::negative_recovers_only_by_recheck(
+        crate::router::FieldRepairTable::default(),
         &lane_key,
         &field_key(GROUNDED_PATH),
         KIND

@@ -4039,7 +4039,10 @@ fn an_ordinary_system_prompt_carries_no_test_only_closed_table_row() {
     );
 
     // The FEATURE KEYS the request grounds: the envelope row's alone.
-    let keys = super::super::field_repair::grounded_field_feature_keys(&ordinary);
+    let keys = super::super::field_repair::grounded_field_feature_keys(
+        crate::router::FieldRepairTable::default(),
+        &ordinary,
+    );
     assert_eq!(
         keys,
         vec![grounded_key()],
@@ -4063,7 +4066,11 @@ fn an_ordinary_system_prompt_carries_no_test_only_closed_table_row() {
     // above are about the predicate rather than about a row that never matches.
     let opted_in = req_both_rows(ALIAS);
     assert_eq!(
-        super::super::field_repair::grounded_field_feature_keys(&opted_in).len(),
+        super::super::field_repair::grounded_field_feature_keys(
+            crate::router::FieldRepairTable::default(),
+            &opted_in
+        )
+        .len(),
         2,
         "control: the sentinel prompt grounds both rows' keys",
     );

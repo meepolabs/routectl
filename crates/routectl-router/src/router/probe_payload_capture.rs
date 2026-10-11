@@ -35,9 +35,12 @@ pub(super) struct ProbeFieldCapture {
 
 impl ProbeFieldCapture {
     /// Capture `req`'s count-validated closed-table fields.
-    pub(super) fn of(req: &routectl_core::ChatRequest) -> Self {
+    pub(super) fn of(
+        table: super::field_repair::FieldRepairTable,
+        req: &routectl_core::ChatRequest,
+    ) -> Self {
         Self {
-            fields: super::field_repair::recheck_payloads(req).collect(),
+            fields: super::field_repair::recheck_payloads(table, req).collect(),
         }
     }
 }

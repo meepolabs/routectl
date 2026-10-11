@@ -70,7 +70,8 @@ impl LearnedCapabilityRegistry {
                     key.capability_key(),
                     key.provider_kind(),
                 );
-                Self::negative_state_in(entries, &registry_key, now) != NegativeState::Absent
+                Self::negative_state_in(self.field_repair_table(), entries, &registry_key, now)
+                    != NegativeState::Absent
             },
         );
         match outcome {
@@ -149,7 +150,9 @@ impl LearnedCapabilityRegistry {
                     key.capability_key(),
                     key.provider_kind(),
                 );
-                if Self::negative_state_in(entries, &registry_key, now) == NegativeState::Absent {
+                if Self::negative_state_in(self.field_repair_table(), entries, &registry_key, now)
+                    == NegativeState::Absent
+                {
                     return false;
                 }
                 match entries.get_mut(&registry_key) {

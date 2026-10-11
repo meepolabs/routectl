@@ -155,7 +155,8 @@ impl Router {
         let Some(provider_kind) = target.provider_kind else {
             return;
         };
-        let request_features = super::field_repair::request_feature_keys(req);
+        let request_features =
+            super::field_repair::request_feature_keys(self.field_repair_table(), req);
         let ctx = detector_context(req, &request_features);
         let observations = capability_detect::detect(&ctx, resp);
         if observations.is_empty() {

@@ -959,7 +959,7 @@ impl routectl_core::Provider for CountingProvider {
 /// Scheduler state after one admitted request queued a free probe and one pass
 /// settled it.
 fn settled_probe_state() -> routectl_router::ProbeSchedulerSnapshot {
-    let mut router = fixture_router();
+    let mut router = fixture_router().with_synthetic_field_rows_for_tests();
     let mut models = std::collections::BTreeMap::new();
     models.insert(
         NICKNAME.to_string(),

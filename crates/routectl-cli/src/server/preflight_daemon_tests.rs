@@ -234,7 +234,7 @@ fn daemon_config() -> (Arc<Config>, tempfile::TempDir) {
 
 /// A Router over `config` resolving to `recorder`.
 fn router_with(config: &Arc<Config>, recorder: Arc<Recorder>) -> Router {
-    let mut router = Router::new(Arc::clone(config));
+    let mut router = Router::new(Arc::clone(config)).with_synthetic_field_rows_for_tests();
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
         NICKNAME.to_string(),

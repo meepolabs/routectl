@@ -582,7 +582,9 @@ fn reconcile_field_value(
     values: &mut ReplayedFieldValues,
     summary: &mut CapabilityRebuildSummary,
 ) {
-    let Some(slot) = crate::router::value_slot_for_capability(&row.capability) else {
+    let Some(slot) =
+        crate::router::value_slot_for_capability(registry.field_repair_table(), &row.capability)
+    else {
         return;
     };
     let value = decode_row_value(row, slot, summary);

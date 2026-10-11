@@ -43,7 +43,12 @@ enum Outcome {
 
 fn outcome(kind: &str, status: u16, body: &str) -> Outcome {
     let body = UpstreamBody::new(body);
-    if let Some(named) = parse_rejection(kind, status, body.parsed()) {
+    if let Some(named) = parse_rejection(
+        crate::router::FieldRepairTable::default(),
+        kind,
+        status,
+        body.parsed(),
+    ) {
         return Outcome::Row(named.row.path, named.tier, named.kind);
     }
     match body.parsed().and_then(|p| localize(kind, status, p)) {
@@ -281,7 +286,13 @@ fn near_miss_messages_resolve_to_no_row() {
     for (name, kind, body) in bodies {
         let parsed = UpstreamBody::new(body);
         assert!(
-            parse_rejection(kind, 400, parsed.parsed()).is_none(),
+            parse_rejection(
+                crate::router::FieldRepairTable::default(),
+                kind,
+                400,
+                parsed.parsed()
+            )
+            .is_none(),
             "near miss {name} resolved to a row",
         );
         checked += 1;
@@ -290,7 +301,13 @@ fn near_miss_messages_resolve_to_no_row() {
     assert!(checked > 20, "premise: both near-miss sets were read");
     let control = UpstreamBody::new(anthropic_body(DISPLAY_MESSAGE));
     assert!(
-        parse_rejection(ANTHROPIC, 400, control.parsed()).is_some(),
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            400,
+            control.parsed()
+        )
+        .is_some(),
         "the same harness resolves a grounded message",
     );
 }
@@ -345,8 +362,13 @@ fn each_arm_assigns_its_tier() {
 
     for (name, kind, body, tier) in cases {
         let body = UpstreamBody::new(body);
-        let named = parse_rejection(kind, 400, body.parsed())
-            .unwrap_or_else(|| panic!("{name}: resolves the display row"));
+        let named = parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            kind,
+            400,
+            body.parsed(),
+        )
+        .unwrap_or_else(|| panic!("{name}: resolves the display row"));
         assert_eq!(named.row.path, DISPLAY_PATH, "{name}");
         assert_eq!(named.tier, tier, "{name}");
         assert_eq!(named.accepted, None, "{name}");
@@ -439,8 +461,13 @@ fn each_classification_rule_assigns_its_kind() {
 
     for (name, provider_kind, body, kind) in cases {
         let body = UpstreamBody::new(body);
-        let named = parse_rejection(provider_kind, 400, body.parsed())
-            .unwrap_or_else(|| panic!("{name}: resolves the display row"));
+        let named = parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            provider_kind,
+            400,
+            body.parsed(),
+        )
+        .unwrap_or_else(|| panic!("{name}: resolves the display row"));
         assert_eq!(named.row.path, DISPLAY_PATH, "{name}");
         assert_eq!(named.kind, kind, "{name}");
     }
@@ -451,7 +478,13 @@ fn a_path_ending_in_an_index_names_no_row() {
     let message = |path: &str| anthropic_body(&format!("{path}: Extra inputs are not permitted"));
     let control = UpstreamBody::new(message("thinking.enabled.0.display"));
     assert_eq!(
-        parse_rejection(ANTHROPIC, 400, control.parsed()).map(|n| n.row.path),
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            400,
+            control.parsed()
+        )
+        .map(|n| n.row.path),
         Some(DISPLAY_PATH),
         "premise: an interior index still canonicalizes onto the row",
     );
@@ -464,7 +497,13 @@ fn a_path_ending_in_an_index_names_no_row() {
         let body = UpstreamBody::new(message(path));
 
         assert!(
-            parse_rejection(ANTHROPIC, 400, body.parsed()).is_none(),
+            parse_rejection(
+                crate::router::FieldRepairTable::default(),
+                ANTHROPIC,
+                400,
+                body.parsed()
+            )
+            .is_none(),
             "{path}",
         );
         assert_eq!(
@@ -503,11 +542,25 @@ fn openai_responses_has_no_parser_and_no_committed_rejection_fixture() {
         "unsupported_parameter",
     ));
     assert!(
-        parse_rejection(OPENAI_COMPAT, 400, structured.parsed()).is_some(),
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            OPENAI_COMPAT,
+            400,
+            structured.parsed()
+        )
+        .is_some(),
         "premise: the same envelope resolves on openai-compat",
     );
 
-    assert!(parse_rejection(OPENAI_RESPONSES, 400, structured.parsed()).is_none());
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            OPENAI_RESPONSES,
+            400,
+            structured.parsed()
+        )
+        .is_none()
+    );
     assert!(
         rejections_dir().is_dir() && !rejections_dir().join(OPENAI_RESPONSES).exists(),
         "a committed Responses rejection fixture must come with a deliberate parser arm",
@@ -525,7 +578,13 @@ fn the_unsupported_parameter_template_must_match_exactly() {
         let body = UpstreamBody::new(openai_body(message, None));
 
         assert!(
-            parse_rejection(OPENAI_COMPAT, 400, body.parsed()).is_none(),
+            parse_rejection(
+                crate::router::FieldRepairTable::default(),
+                OPENAI_COMPAT,
+                400,
+                body.parsed()
+            )
+            .is_none(),
             "{message}",
         );
     }
@@ -551,7 +610,12 @@ fn indices_and_the_converse_field_bag_canonicalize_onto_the_row() {
         };
         let body = UpstreamBody::new(body);
 
-        let named = parse_rejection(kind, 400, body.parsed());
+        let named = parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            kind,
+            400,
+            body.parsed(),
+        );
 
         assert_eq!(
             named.map(|n| n.row.path),
@@ -568,7 +632,15 @@ fn the_converse_field_bag_is_only_removed_on_bedrock() {
     );
     let body = UpstreamBody::new(anthropic_body(&message));
 
-    assert!(parse_rejection(ANTHROPIC, 400, body.parsed()).is_none());
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            400,
+            body.parsed()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -581,13 +653,25 @@ fn a_non_ascii_or_over_long_param_resolves_to_none() {
         let body = UpstreamBody::new(openai_body("rejected", Some(param)));
 
         assert!(
-            parse_rejection(OPENAI_COMPAT, 400, body.parsed()).is_none(),
+            parse_rejection(
+                crate::router::FieldRepairTable::default(),
+                OPENAI_COMPAT,
+                400,
+                body.parsed()
+            )
+            .is_none(),
             "{param:?}",
         );
     }
     let control = UpstreamBody::new(openai_body("rejected", Some(short_with_index)));
     assert!(
-        parse_rejection(OPENAI_COMPAT, 400, control.parsed()).is_some(),
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            OPENAI_COMPAT,
+            400,
+            control.parsed()
+        )
+        .is_some(),
         "the same path, bounded, resolves",
     );
 }
@@ -597,7 +681,13 @@ fn the_named_row_is_a_table_entry_holding_no_body_bytes() {
     let body = UpstreamBody::new(anthropic_body(DISPLAY_MESSAGE));
     let body_bytes = body.text().as_bytes().as_ptr_range();
 
-    let named = parse_rejection(ANTHROPIC, 400, body.parsed()).expect("display row");
+    let named = parse_rejection(
+        crate::router::FieldRepairTable::default(),
+        ANTHROPIC,
+        400,
+        body.parsed(),
+    )
+    .expect("display row");
 
     assert!(
         closed_table()
@@ -622,8 +712,24 @@ fn an_over_cap_or_absent_parse_resolves_to_none() {
     let over_cap = UpstreamBody::new(format!("{}{filler}", anthropic_body(DISPLAY_MESSAGE)));
     assert!(over_cap.parsed().is_none(), "premise: over cap is unparsed");
 
-    assert!(parse_rejection(ANTHROPIC, 400, over_cap.parsed()).is_none());
-    assert!(parse_rejection(ANTHROPIC, 400, None::<&ParsedErrorBody>).is_none());
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            400,
+            over_cap.parsed()
+        )
+        .is_none()
+    );
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            400,
+            None::<&ParsedErrorBody>
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -631,14 +737,52 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
     let anthropic = UpstreamBody::new(anthropic_body(DISPLAY_MESSAGE));
     let openai = UpstreamBody::new(openai_body("rejected", Some(DISPLAY_PATH)));
     assert!(
-        parse_rejection(ANTHROPIC, 422, anthropic.parsed()).is_some(),
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            422,
+            anthropic.parsed()
+        )
+        .is_some(),
         "premise: the body resolves on a parsed kind and rejection status",
     );
 
-    assert!(parse_rejection("gemini", 400, anthropic.parsed()).is_none());
-    assert!(parse_rejection("gemini", 400, openai.parsed()).is_none());
-    assert!(parse_rejection(ANTHROPIC, 500, anthropic.parsed()).is_none());
-    assert!(parse_rejection(ANTHROPIC, 429, anthropic.parsed()).is_none());
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            "gemini",
+            400,
+            anthropic.parsed()
+        )
+        .is_none()
+    );
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            "gemini",
+            400,
+            openai.parsed()
+        )
+        .is_none()
+    );
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            500,
+            anthropic.parsed()
+        )
+        .is_none()
+    );
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            429,
+            anthropic.parsed()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -647,7 +791,15 @@ fn an_anthropic_message_outside_an_invalid_request_error_resolves_to_none() {
         json!({"type": "error", "error": {"type": "overloaded_error", "message": DISPLAY_MESSAGE}});
     let body = UpstreamBody::new(body.to_string());
 
-    assert!(parse_rejection(ANTHROPIC, 400, body.parsed()).is_none());
+    assert!(
+        parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            400,
+            body.parsed()
+        )
+        .is_none()
+    );
 }
 
 /// Mutation check: read candidates from every quoted token in the message
@@ -749,8 +901,13 @@ fn the_accepted_value_fills_only_for_exactly_one_named_member() {
     for (name, message, kind, expected) in cases {
         let body = UpstreamBody::new(anthropic_body(&message));
 
-        let named = parse_rejection(ANTHROPIC, 400, body.parsed())
-            .unwrap_or_else(|| panic!("{name}: resolves the rewrite row"));
+        let named = parse_rejection(
+            crate::router::FieldRepairTable::default(),
+            ANTHROPIC,
+            400,
+            body.parsed(),
+        )
+        .unwrap_or_else(|| panic!("{name}: resolves the rewrite row"));
 
         assert_eq!(named.row.path, TEST_REWRITE_PATH, "{name}");
         assert_eq!(named.kind, kind, "{name}");
@@ -762,7 +919,13 @@ fn the_accepted_value_fills_only_for_exactly_one_named_member() {
 fn a_drop_row_never_carries_an_accepted_value() {
     let body = UpstreamBody::new(anthropic_body(DISPLAY_MESSAGE));
 
-    let named = parse_rejection(ANTHROPIC, 400, body.parsed()).expect("display row");
+    let named = parse_rejection(
+        crate::router::FieldRepairTable::default(),
+        ANTHROPIC,
+        400,
+        body.parsed(),
+    )
+    .expect("display row");
 
     assert_eq!(
         named.accepted, None,

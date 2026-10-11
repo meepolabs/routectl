@@ -90,15 +90,19 @@ pub(super) fn probe_outcome_for_class(
 /// have minted it. A refused VALUE does not re-confirm: it says the field is
 /// accepted, and the negative claims it is not.
 pub(super) fn rechecked_field_rejection(
+    table: super::field_repair::FieldRepairTable,
     err: &routectl_core::Error,
     provider_kind: &str,
     field_path: &str,
 ) -> Option<routectl_core::capability::SignalTier> {
-    let row = super::field_repair::closed_table()
-        .iter()
-        .find(|row| row.path == field_path)?;
+    let row = table.row_for_path(field_path)?;
     let native = routectl_core::failure_class::classify(err, Some(provider_kind)).class;
-    let named =
-        super::Router::rejection_names_field_surface(row.surface, &native, err, provider_kind)?;
+    let named = super::Router::rejection_names_field_surface(
+        table,
+        row.surface,
+        &native,
+        err,
+        provider_kind,
+    )?;
     (named.kind == super::rejection_parser::RejectionKind::UnsupportedField).then_some(named.tier)
 }

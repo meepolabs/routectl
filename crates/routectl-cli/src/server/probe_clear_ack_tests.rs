@@ -75,7 +75,8 @@ fn lane_router() -> Router {
         models,
         aliases,
         ..Config::default()
-    }));
+    }))
+    .with_synthetic_field_rows_for_tests();
     let mut resolved = BTreeMap::new();
     resolved.insert(
         NICKNAME.to_string(),
