@@ -13,6 +13,7 @@ use crate::config::ProviderEntry;
 use crate::learned_capability::{BetaLaneReading, ProbeClaim};
 
 use super::class_observe::{DispatchSurface, UpstreamFacts, matched_by_label};
+use super::edit_declare::{declare_learned_strip, strip_before};
 use super::{DispatchTarget, ProbeAdmission, Router, operator_betas};
 
 /// A request feature key (e.g. `web_search`, `structured_output`). Same
@@ -531,6 +532,7 @@ impl Router {
             keys: target.strip_capabilities.to_vec(),
             strict,
         };
+        let before = strip_before(target, attempt_req);
         let outcome = StripInterceptor.apply(attempt_req, &ctx);
         let outcome_token = match &outcome {
             Outcome::Stripped => "applied",
@@ -557,6 +559,9 @@ impl Router {
         );
         match outcome {
             Outcome::Stripped => {
+                if let Some(before) = &before {
+                    declare_learned_strip(attempt_req, before);
+                }
                 self.metrics.incr_strip();
                 StripDecision::Proceed
             }

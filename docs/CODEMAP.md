@@ -3328,6 +3328,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays`, `operator_betas`, `operator_payload_extras`, the
   `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
+- `src/router/edit_declare.rs` -- router-side wire-check edit declarations:
+  each transform that changes a fidelity-lane body (model rename, operator
+  payload extras, context reduction, cache placement, field repair,
+  pre-flight, canary, learned capability strip, replay strip) pushes a
+  `DeclaredEdit` onto the attempt's `declared_edits` at the site that makes
+  it, using the egress wire pointer; nothing is declared on a translation
+  lane. Site coverage in `src/router/edit_declare_tests.rs` plus the
+  `*_declare_tests.rs` fragments of the repair, pre-flight, canary and strip
+  suites
 - `src/router/wire_check.rs` -- the live request-leg wire check on a successful
   attempt: `egress_kind_of` (provider entry -> `EgressKind`, Bedrock shape and
   Mantle sub-lanes distinct; set once on each `DispatchTarget` at chain

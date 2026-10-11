@@ -459,7 +459,11 @@ async fn the_ingress_body_and_a_prior_declared_edit_survive_a_second_chain_attem
             .as_ref()
             .unwrap_or_else(|| panic!("{surface:?}: the ingress body was dropped"));
         assert_eq!(carried.bytes, posted);
-        assert_eq!(second.routectl_internal.declared_edits, [remove_lost_key()]);
+        assert_eq!(
+            second.routectl_internal.declared_edits.first(),
+            Some(&remove_lost_key()),
+            "{surface:?}: the pre-overlay edit leads this attempt's own declarations"
+        );
         assert_eq!(
             outcomes(&router.wire_check_snapshot()),
             [("anthropic->anthropic-api", CheckOutcome::Incomplete, 1)],

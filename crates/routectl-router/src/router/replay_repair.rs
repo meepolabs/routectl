@@ -42,6 +42,7 @@ use routectl_core::{
 
 use crate::learned_replay::{ReplayLearnKey, ReplayProbeGuard};
 
+use super::edit_declare::{declare_replay_strip, replay_strip_ids};
 use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
 
 /// The carried-artifact admission for one dispatch target: the single-flight
@@ -135,9 +136,11 @@ pub(super) fn strip_replay_artifacts_recalibrating(
     lane: ReplayScheme,
     meta: &mut DispatchMeta,
 ) -> bool {
+    let removed_ids = replay_strip_ids(attempt_req, |detail| is_removable(detail, lane));
     if !strip_replay_artifacts(attempt_req, lane) {
         return false;
     }
+    declare_replay_strip(attempt_req, &removed_ids);
     super::dispatch::restamp_calibration_estimate(attempt_req, meta);
     true
 }

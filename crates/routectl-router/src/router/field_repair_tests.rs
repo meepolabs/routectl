@@ -2317,3 +2317,5 @@ mod forced_tool_choice_key_tests {
 include!("field_repair_parser_tests.rs");
 include!("field_repair_tier_tests.rs");
 include!("field_repair_rewrite_tests.rs");
+
+include!("field_repair_declare_tests.rs");

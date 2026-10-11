@@ -40,11 +40,13 @@ use std::time::Instant;
 use routectl_core::Error;
 use routectl_core::capability::SignalTier;
 use routectl_core::failure_class::FailureClass;
+use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey};
 use crate::field_verdict_value::{ValueSlot, VerdictValue};
 
+use super::edit_declare::{declare_field_edit, fidelity_dialect};
 use super::rejection_parser::{
     NamedRejection, OPENAI_UNSUPPORTED_CODE, RejectionKind, parse_rejection,
 };
@@ -1171,6 +1173,9 @@ pub(super) struct FieldRepairPlan<'a> {
     /// records it, so an inferred attribution persists without acting until an
     /// independent request corroborates it.
     repaired_tier: Option<SignalTier>,
+    /// The wire dialect the attempt shares with its client, for declaring the
+    /// repair's edit; `None` on a translation lane.
+    wire: Option<IngressDialect>,
 }
 
 /// One admitted row: the closed-table path, surface and transform, plus the
@@ -1221,6 +1226,13 @@ impl FieldEdit {
         match self {
             Self::Drop => false,
             Self::Rewrite(value) => surface.carries(req, value),
+        }
+    }
+
+    const fn declared_kind(self) -> EditKind {
+        match self {
+            Self::Drop => EditKind::Remove,
+            Self::Rewrite(_) => EditKind::Rewrite,
         }
     }
 
@@ -1393,6 +1405,13 @@ impl FieldRepairPlan<'_> {
             charged,
             "can_draw held before the mutation, so the draw after it cannot fail",
         );
+        declare_field_edit(
+            attempt_req,
+            self.wire,
+            EditSite::FieldRepair,
+            surface,
+            edit.declared_kind(),
+        );
         self.repaired = Some(idx);
         // Every OTHER candidate's guard is released now rather than held to
         // settlement. This attempt has spent its one repair on `idx`, so no
@@ -1433,6 +1452,7 @@ impl FieldRepairPlan<'_> {
             repaired_kind: None,
             rewritten: None,
             repaired_tier: None,
+            wire: None,
         }
     }
 
@@ -1671,6 +1691,7 @@ impl Router {
             repaired_kind: None,
             rewritten: None,
             repaired_tier: None,
+            wire: fidelity_dialect(target, attempt_req),
         })
     }
 

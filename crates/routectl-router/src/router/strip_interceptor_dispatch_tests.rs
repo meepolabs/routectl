@@ -574,3 +574,5 @@ async fn count_tokens_clean_passthrough_emits_no_class_event() {
         "a clean passthrough must not emit the class-decision event",
     );
 }
+
+include!("learned_strip_declare_tests.rs");

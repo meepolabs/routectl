@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::config::{Config, ProviderEntry};
 
+use super::edit_declare::{fidelity_dialect, operator_extras_edits};
 use super::{AUTH_HEADERS, DispatchTarget, LIST_VALUED_HEADERS, MANAGED_HEADERS};
 
 /// Compose the layered configuration overlays into the per-attempt
@@ -36,6 +37,16 @@ pub(super) fn apply_layered_overlays(
         provider_headers,
         &target.model.header_extras,
         req,
+    );
+    let operator_payload = operator_payload_extras(
+        &target.provider_name,
+        provider_payload,
+        target.model.payload_extras.as_ref(),
+    );
+    let operator_edits = operator_extras_edits(
+        fidelity_dialect(target, req),
+        req.provider_extras.as_ref(),
+        operator_payload.as_deref(),
     );
     merge_payload_extras(
         &target.provider_name,
@@ -160,11 +171,8 @@ pub(super) fn apply_layered_overlays(
     // flags outside this floor, and the log-safe summary still see the
     // complete set.
     internal.operator_betas = operator_betas(provider_headers, &target.model.header_extras);
-    internal.operator_payload_extras = operator_payload_extras(
-        &target.provider_name,
-        provider_payload,
-        target.model.payload_extras.as_ref(),
-    );
+    internal.operator_payload_extras = operator_payload;
+    internal.declared_edits.extend(operator_edits);
     req.routectl_internal = internal;
 }
 

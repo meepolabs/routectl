@@ -85,6 +85,7 @@
 use std::time::Instant;
 
 use routectl_core::capability::SignalTier;
+use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_canary::{CanaryClaimGuard, CanaryOutcome, ModifiedRequestGuard};
@@ -92,6 +93,7 @@ use crate::field_verdict::{FieldVerdictKey, PreflightAuthorization};
 use crate::field_verdict_value::VerdictValue;
 
 use super::class_observe::DispatchSurface;
+use super::edit_declare::{declare_field_edit, fidelity_dialect};
 use super::field_repair::{
     FieldRepairRow, FieldSurface, FieldTransform, TransformClass, field_repair_admits_kind,
     present_rows,
@@ -211,6 +213,13 @@ enum PreflightEdit {
 }
 
 impl PreflightEdit {
+    const fn declared_kind(self) -> EditKind {
+        match self {
+            Self::Drop => EditKind::Remove,
+            Self::Rewrite(_) => EditKind::Rewrite,
+        }
+    }
+
     const fn action_token(self) -> &'static str {
         match self {
             Self::Drop => FIELD_PREFLIGHT_ACTION_DROP,
@@ -251,6 +260,9 @@ pub(super) struct FieldPreflightPlan<'a> {
     /// `expect(dead_code)` is needed (unlike the guard's previous single-slot
     /// shape): the vector is written through, which is use enough for the lint.
     accounting: Vec<ModifiedRequestGuard<'a>>,
+    /// The wire dialect the attempt shares with its client, for declaring a
+    /// canary's repaired retry; `None` on a translation lane.
+    wire: Option<IngressDialect>,
 }
 
 /// The canary claim plus the identity and generation its settlement must carry.
@@ -461,7 +473,10 @@ impl Router {
         // adopted rather than reverting it.
         let mut planned = original_req.clone();
         let mut records = Vec::new();
-        let mut plan = FieldPreflightPlan::default();
+        let mut plan = FieldPreflightPlan {
+            wire: fidelity_dialect(target, original_req),
+            ..FieldPreflightPlan::default()
+        };
         for row in rows {
             // The canary slot is offered to a row only while it is still free:
             // the arm settles one plan, so a second claim could never be
@@ -653,6 +668,13 @@ impl Router {
             .begin_modified_request(key, authorization.incarnation)
             .ok_or(FIELD_PREFLIGHT_NOT_ELIGIBLE)?;
         *planned = adopted;
+        declare_field_edit(
+            planned,
+            fidelity_dialect(target, planned),
+            EditSite::Preflight,
+            row.surface,
+            edit.declared_kind(),
+        );
         // Counted HERE, at the one site that swaps the rewritten body in, so the
         // count cannot outrun what actually went upstream: a decision refused by
         // any gate above never reaches this line, and the routine fail-open is
@@ -975,6 +997,13 @@ impl Router {
         if !surface.drop_from(attempt_req) {
             return None;
         }
+        declare_field_edit(
+            attempt_req,
+            plan.wire,
+            EditSite::Canary,
+            surface,
+            EditKind::Remove,
+        );
         let charged = budget.draw();
         debug_assert!(
             charged,

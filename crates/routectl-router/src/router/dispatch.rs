@@ -42,6 +42,9 @@ use super::capability_observe::{UntranslatedCapabilities, install_translation_re
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
+use super::edit_declare::{
+    declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
+};
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
@@ -399,6 +402,7 @@ impl Router {
             // this target's `upstream` as before.
             if !target.use_forwarded_credential {
                 attempt_req.model = model.to_string();
+                declare_model_rename(&mut attempt_req, target, &req.model);
             }
             // v0.6: layered config compose. The provider's
             // header_extras + payload_extras are looked up by
@@ -457,6 +461,7 @@ impl Router {
                 provider_cfg,
                 provider_name,
                 model,
+                fidelity_dialect(target, &attempt_req),
                 &mut attempt_req,
                 meta,
             );
@@ -481,6 +486,12 @@ impl Router {
                 &auto_cache_plan,
                 cache_target_gates(provider_cfg),
                 k_suppressed,
+            );
+            declare_cache_placement(
+                &mut attempt_req,
+                target,
+                cache_decision,
+                auto_cache_plan.front_slot,
             );
             // Cache observability: stamp the per-marker decision tokens so
             // the outcome log and the usage ledger can see what was decided,
@@ -1446,6 +1457,7 @@ impl Router {
             // requested model verbatim instead of rewriting to `upstream`.
             if !target.use_forwarded_credential {
                 attempt_req.model = model.to_string();
+                declare_model_rename(&mut attempt_req, target, &req.model);
             }
             apply_layered_overlays(&self.config, target, &mut attempt_req);
             // INTERCEPTOR HOOK (see `complete_inner`): strip runs after
@@ -1484,6 +1496,7 @@ impl Router {
                 provider_cfg,
                 provider_name,
                 model,
+                fidelity_dialect(target, &attempt_req),
                 &mut attempt_req,
                 meta,
             );
@@ -1502,6 +1515,12 @@ impl Router {
                 &auto_cache_plan,
                 cache_target_gates(provider_cfg),
                 k_suppressed,
+            );
+            declare_cache_placement(
+                &mut attempt_req,
+                target,
+                cache_decision,
+                auto_cache_plan.front_slot,
             );
             // Cache observability: see `complete_inner`. Stamp the per-marker
             // decision tokens and emit the per-request decision at debug. No
@@ -2681,16 +2700,21 @@ fn apply_context_reduction(
     provider_cfg: Option<&crate::config::ProviderEntry>,
     provider_name: &str,
     model: &str,
+    wire: Option<IngressDialect>,
     attempt_req: &mut ChatRequest,
     meta: &mut DispatchMeta,
 ) {
     let effective = config.reduction.enabled
         && provider_cfg.and_then(crate::config::ProviderEntry::reduction_enabled) != Some(false);
+    let before = wire.map(|_| Arc::clone(&attempt_req.messages));
     let outcome = if effective {
         Some(apply_json_minify(attempt_req))
     } else {
         None
     };
+    if let (Some(ReductionOutcome::Applied(_)), Some(before)) = (&outcome, &before) {
+        declare_reduction(attempt_req, wire, before);
+    }
     let token = reduction_strategy_token(effective, outcome.as_ref());
     meta.reduction_strategy = Some(token);
     // Both payload-carrying outcomes describe a pass that actually examined

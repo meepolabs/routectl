@@ -39,6 +39,7 @@ mod chain;
 mod class_observe;
 mod count_tokens;
 mod dispatch;
+mod edit_declare;
 mod feature_filter;
 pub(crate) mod fidelity_status;
 mod field_preflight;
