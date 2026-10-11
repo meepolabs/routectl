@@ -5092,9 +5092,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   uses: a purge reports success only after `Committed`. `CapabilityBatch` also
   carries the `incarnation` a `cleared` row establishes as its key's PURGE FLOOR,
   which the writer records in a NON-EVICTING per-key map (an LRU was a
-  correctness hole: an evicted floor re-admits a delayed pre-purge event and
-  re-appends the negative the operator removed; the map's bound is the number of
-  distinct keys an operator purges in one process lifetime)
+  correctness hole: an evicted floor re-admits a delayed pre-clear event and
+  re-appends the negative the clear removed; the map holds one entry per
+  distinct key any committed `cleared` row named in one process lifetime, live
+  drain clears included, with no fixed cap)
 - `src/cost.rs` -- pure leaf-safe cost estimation:
   `estimate_cost(&UsageRecord, &Rates)` and the aggregate-token entry point
   `estimate_cost_tokens(input, output, reasoning, cache_read, cache_write_5m,

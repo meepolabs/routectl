@@ -441,9 +441,10 @@ pub enum CapabilityEventWrite {
     /// would restore state that boundary evicted. Nothing was written, and
     /// nothing should be: the event describes a catalog revision the daemon left.
     SupersededByBoundary,
-    /// An operator purge of the same key has already superseded this event's
-    /// incarnation. Nothing was written, and nothing should be: the operator was
-    /// told that verdict was removed.
+    /// A committed clear of the same key (an operator purge, or any other durable
+    /// `cleared` row) has already superseded this event's incarnation. Nothing
+    /// was written, and nothing should be: that verdict is already recorded as
+    /// removed.
     SupersededByPurge,
     /// The durable write was attempted and did not land, or could not be
     /// submitted at all (no connection, a saturated channel, capture disabled).
@@ -490,12 +491,17 @@ const CLEARED_VERDICT: &str = "cleared";
 ///
 /// A plain map, NEVER evicting. An LRU was wrong here: eviction is a correctness
 /// hole, not a memory trade-off -- once a key's floor is gone, an event delayed
-/// past the eviction is admitted again and re-appends the negative the operator
-/// removed. The bound is the OPERATOR's: an entry exists only for a key someone
-/// purged, so the map's size is the number of distinct purged keys for the life
-/// of the process. A daemon nobody purges holds none, and an operator would have
-/// to purge distinct keys by the million to make this a memory question -- at
-/// which point the purge rate, not the map, is the fault.
+/// past the eviction is admitted again and re-appends the negative the clear
+/// removed. An entry exists for every key a committed `cleared` row named during
+/// the life of the process, whichever producer wrote it: an operator purge or
+/// seed lift, a boundary batch's seed-clear restatement, or a clear from the
+/// best-effort live drain (a settled probe, a disproved canary, a successful
+/// replay carry). So the map holds one small entry per distinct cleared key, and
+/// nothing caps it at a fixed size: lanes and provider kinds come from config,
+/// but beta-flag capability keys are open-ended. What paces its growth is that
+/// each live clear needs a resident negative to remove, so a new key costs an
+/// upstream rejection that taught the negative and a later success that cleared
+/// it. A daemon that never clears a key holds none, and a restart empties it.
 fn fresh_purge_floors() -> std::collections::HashMap<PurgeFloorKey, u64> {
     std::collections::HashMap::new()
 }

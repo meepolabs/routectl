@@ -31,13 +31,14 @@ pub struct UsageCounters {
     write_errors: AtomicU64,
     prune_errors: AtomicU64,
     capability_events_enqueued: AtomicU64,
-    /// Capability events the writer dropped because an operator purge of the same
-    /// key had already superseded them.
+    /// Capability events the writer dropped because a committed clear of the same
+    /// key had already superseded them: an operator purge, or any other durable
+    /// `cleared` row, including a live-traffic or probe clear.
     ///
-    /// Expected to be zero on a daemon nobody purges, and small and bounded on
-    /// one that does: it counts genuinely delayed pre-purge metadata, not
+    /// Expected to be zero on a daemon that never clears a key, and small on one
+    /// that does: it counts genuinely delayed metadata from before the clear, not
     /// failures. A LARGE value means events are queueing for long enough to
-    /// straddle purges, which is a throughput signal rather than a correctness
+    /// straddle clears, which is a throughput signal rather than a correctness
     /// one -- the drop itself is the protection working.
     capability_events_superseded: AtomicU64,
     /// Capability writes the channel refused because it was FULL: the writer is
@@ -254,10 +255,10 @@ impl UsageHandle {
     }
 
     /// [`Self::try_send_capability_event_in_generation`] carrying the event's own
-    /// INCARNATION, so the writer can drop it if a purge of the same key has
-    /// since superseded it. Every producer that has an incarnation passes it;
-    /// zero means "no per-key ordering claim", which the floor treats as
-    /// superseded by any purge.
+    /// INCARNATION, so the writer can drop it if a committed clear of the same
+    /// key has since superseded it. Every producer that has an incarnation
+    /// passes it; zero means "no per-key ordering claim", which the floor treats
+    /// as superseded by any committed clear of the key.
     pub fn try_send_capability_event_at(
         &self,
         event: CapabilityEvent,
