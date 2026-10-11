@@ -36,8 +36,7 @@
 use std::path::Path;
 
 use routectl_router::{
-    CapabilityRebuildSummary, LearnedCapabilityRegistry, ReplayTombstone, Router,
-    rebuild_capabilities_with_values,
+    CapabilityRebuildSummary, ReplayTombstone, Router, rebuild_capabilities_with_values,
 };
 use routectl_usage::{BatchCommit, CapabilityEvent, UsageHandle};
 
@@ -270,10 +269,7 @@ fn restate_survivors_past_new_boundary(
     let slice = SliceReader::new(boundary, rows);
 
     let live = router.learned_registry();
-    let scratch =
-        LearnedCapabilityRegistry::new(live.decay(), live.inferred_window(), live.max_entries());
-    scratch.set_seed_scope(live.seed_scope());
-    scratch.set_field_repair_table(live.field_repair_table());
+    let scratch = live.empty_rebuild_scratch();
     let (_, values) = rebuild_capabilities_with_values(&slice, &scratch, &router.config.providers);
     let survivors: Vec<_> = scratch
         .recorded_snapshot()

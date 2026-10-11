@@ -676,8 +676,8 @@ pub struct LearnedCapabilityRegistry {
     /// The closed field-repair table the lapse rule and boot replay read, when
     /// one other than the default was installed. Shared by every Router
     /// generation attached to this registry, so a reload keeps the table its
-    /// predecessor ran with. Lock-free: set at most once, before any read that
-    /// matters, and outside the lock order below.
+    /// predecessor ran with. Lock-free and outside the lock order below: set at
+    /// most once, and the first read fixes the default if nothing was set.
     field_repair_table: std::sync::OnceLock<crate::router::FieldRepairTable>,
     /// Test-only hook fired by `observe_in_generation_with_observations`
     /// itself, AFTER its own `guarded_for` call has returned (every lock it
@@ -1854,16 +1854,35 @@ impl LearnedCapabilityRegistry {
     }
 
     /// The closed field-repair table this registry and every Router attached to
-    /// it read: the installed one, or the build's default.
-    pub fn field_repair_table(&self) -> crate::router::FieldRepairTable {
-        self.field_repair_table.get().copied().unwrap_or_default()
+    /// it read: the installed one, or the build's default. The first read
+    /// fixes the table, so nothing installed later can change the rows a
+    /// verdict was already decided against.
+    pub(crate) fn field_repair_table(&self) -> crate::router::FieldRepairTable {
+        *self
+            .field_repair_table
+            .get_or_init(crate::router::FieldRepairTable::default)
     }
 
-    /// Install `table` as this registry's closed field-repair table. Only the
-    /// first install takes effect; a registry never changes tables under the
-    /// verdicts it holds.
-    pub fn set_field_repair_table(&self, table: crate::router::FieldRepairTable) {
-        let _ = self.field_repair_table.set(table);
+    /// Install `table` as this registry's closed field-repair table. Fails,
+    /// handing `table` back, once a table is fixed: by an earlier install or by
+    /// any read.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn set_field_repair_table(
+        &self,
+        table: crate::router::FieldRepairTable,
+    ) -> Result<(), crate::router::FieldRepairTable> {
+        self.field_repair_table.set(table)
+    }
+
+    /// An empty registry to replay a rebuild into before it is committed to
+    /// this one: same tuning, seed scope and field-repair table, no entries.
+    pub fn empty_rebuild_scratch(&self) -> Self {
+        let scratch = Self {
+            field_repair_table: std::sync::OnceLock::from(self.field_repair_table()),
+            ..Self::new(self.decay(), self.inferred_window(), self.max_entries())
+        };
+        scratch.set_seed_scope(self.seed_scope());
+        scratch
     }
 
     /// Install the seed whose cells may carry a marker. Markers already
@@ -5277,3 +5296,7 @@ mod beta_cap_tests;
 #[cfg(test)]
 #[path = "learned_capability_seed_clear_tests.rs"]
 mod seed_clear_tests;
+
+#[cfg(test)]
+#[path = "learned_capability_field_table_tests.rs"]
+mod field_table_tests;

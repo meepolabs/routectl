@@ -790,6 +790,19 @@ impl FieldRepairTable {
         }
     }
 
+    /// The grounded rows alone, which a unit-test build's default is not.
+    #[cfg(test)]
+    pub(crate) const fn grounded_only() -> Self {
+        Self {
+            rows: FIELD_REPAIRS,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn row_count(self) -> usize {
+        self.rows.len()
+    }
+
     pub(super) const fn rows(self) -> &'static [FieldRepairRow] {
         self.rows
     }

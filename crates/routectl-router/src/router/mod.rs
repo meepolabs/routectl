@@ -84,7 +84,7 @@ pub use fidelity_status::{
     observe_field_verdict_for_tests, plant_acting_field_verdict_for_tests,
     seed_distinct_fidelity_counters_for_tests,
 };
-pub use field_repair::FieldRepairTable;
+pub(crate) use field_repair::FieldRepairTable;
 pub(crate) use field_repair::negative_recovers_only_by_recheck;
 pub(crate) use field_repair::value_slot_for_capability_key as value_slot_for_capability;
 #[cfg(any(test, feature = "test-utils"))]
@@ -2933,13 +2933,15 @@ impl Router {
     /// count-validated verdict end to end. A Router built without this call
     /// scans exactly the production table, whatever features are enabled.
     ///
-    /// Call before any request or replay: the table is fixed once installed.
+    /// Call before any request or replay: the table's first install or read
+    /// fixes it, and this panics once it is fixed.
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     #[must_use]
     pub fn with_synthetic_field_rows_for_tests(self) -> Self {
         self.learned_capabilities
-            .set_field_repair_table(FieldRepairTable::with_synthetic_rows());
+            .set_field_repair_table(FieldRepairTable::with_synthetic_rows())
+            .expect("synthetic field rows installed before the table was read or set");
         self
     }
 
