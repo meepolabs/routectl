@@ -543,7 +543,15 @@ impl Router {
         // the restored field, and a rewrite verdict's canary is always answered
         // with a refused value, so it could never confirm and would drop a
         // field the client set; a rewrite verdict re-verifies through decay.
-        let key = if edit == PreflightEdit::Drop {
+        // A verdict the free count re-check owns is never canaried either: an
+        // unrepaired success would clear it, and its only recovery is that
+        // re-check, so the repair simply keeps applying.
+        let key = if edit == PreflightEdit::Drop
+            && !super::field_repair::negative_recovers_only_by_recheck(
+                key.registry_key(),
+                key.capability_key(),
+                key.provider_kind(),
+            ) {
             let claim = self.try_claim_canary(
                 key,
                 row,

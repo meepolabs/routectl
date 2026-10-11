@@ -84,6 +84,7 @@ pub use fidelity_status::{
     observe_field_verdict_for_tests, plant_acting_field_verdict_for_tests,
     seed_distinct_fidelity_counters_for_tests,
 };
+pub(crate) use field_repair::negative_recovers_only_by_recheck;
 pub(crate) use field_repair::value_slot_for_capability_key as value_slot_for_capability;
 #[cfg(any(test, feature = "test-utils"))]
 pub use field_repair::{
@@ -3147,6 +3148,10 @@ mod probe_test_support;
 #[cfg(test)]
 #[path = "probe_activation_boundary_tests.rs"]
 mod probe_activation_boundary_tests;
+
+#[cfg(test)]
+#[path = "recheck_only_lapse_tests.rs"]
+mod recheck_only_lapse_tests;
 
 #[cfg(test)]
 #[path = "probe_worker_tests.rs"]

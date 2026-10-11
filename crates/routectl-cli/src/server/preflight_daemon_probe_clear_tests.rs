@@ -227,3 +227,141 @@ async fn a_resolved_recheck_writes_one_cleared_row_and_a_warm_rebuild_keeps_it_c
     drop(live);
     daemon.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// A negative already LAPSED at boot is still recovered only by the re-check
+// ---------------------------------------------------------------------------
+
+/// Seed the ledger, before the daemon boots, with a boundary tombstone at this
+/// config's revision pair and one live `broken` row on the re-check key -- the
+/// state a previous session leaves behind. Through a writer of its own that is
+/// drained before returning, so the daemon's boot warm is the only reader.
+async fn seed_recheck_negative_before_boot(config: &Arc<Config>) {
+    let (usage, writer) = routectl_usage::UsageWriter::start(
+        config.usage.db_path.clone(),
+        routectl_usage::CHANNEL_CAPACITY,
+        0,
+        true,
+    );
+    let now = crate::server::ledger_reader::epoch_ms_now();
+    let catalog = i64::from(Router::new(Arc::clone(config)).catalog_version());
+    let rows = vec![
+        routectl_usage::CapabilityEvent::tombstone(now - 5_000, catalog, 0),
+        routectl_usage::CapabilityEvent {
+            ts: now - 4_000,
+            lane_key: STATE_KEY.to_string(),
+            capability: recheck_key(),
+            verdict: "broken".to_string(),
+            phase: "f1".to_string(),
+            source: "live".to_string(),
+            tier: "self-identifying".to_string(),
+            evidence_class: None,
+            upstream_token: None,
+            catalog_version: catalog,
+            overlay_revision: 0,
+            provider_kind: Some("anthropic-api".to_string()),
+            vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
+        },
+    ];
+    let committer = usage.clone();
+    let committed =
+        tokio::task::spawn_blocking(move || committer.commit_capability_events_blocking(rows, 1))
+            .await
+            .expect("seed thread");
+    assert!(
+        matches!(committed, routectl_usage::BatchCommit::Committed { .. }),
+        "premise: the seeded session must land: {committed:?}",
+    );
+    drop(usage);
+    crate::server::test_support::drain_usage_writer_strict(writer).await;
+}
+
+/// THE SPAN for a negative whose decay window has already ENDED when the daemon
+/// boots: replayed by the boot warm at zero confirmations, it keeps acting
+/// through an ordinary successful request carrying the field, and only the free
+/// re-check -- acknowledged durable -- clears it.
+///
+/// A zero decay window makes the replayed row lapsed the moment it is restated,
+/// independent of how long the host has been up.
+///
+/// Mutation check: let a re-check-only negative lapse like any other (drop the
+/// re-check rule from the registry's lapse predicate) -> red at the
+/// still-acting assertion: the ordinary 200 clears the negative and its
+/// `cleared` row lands with no probe having run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recheck_negative_lapsed_at_boot_survives_an_ordinary_success_until_the_recheck_clears_it()
+ {
+    let (config, dir) = daemon_config();
+    let mut lapsing = (*config).clone();
+    lapsing.capability.decay_hours = 0;
+    let config = Arc::new(lapsing);
+    let db_path = config.usage.db_path.clone();
+    seed_recheck_negative_before_boot(&config).await;
+    let recorder = Arc::new(Recorder::default());
+    let daemon = spawn_daemon(
+        Arc::clone(&config),
+        dir,
+        router_with(&config, Arc::clone(&recorder)),
+    )
+    .await;
+    let live = daemon.live_router();
+    let replayed = live
+        .learned_capability_snapshot()
+        .into_iter()
+        .find(|entry| entry.state_key == STATE_KEY && entry.feature_key == recheck_key())
+        .expect("premise: the boot warm replayed the negative");
+    assert!(
+        replayed.expires_at <= std::time::Instant::now(),
+        "premise: the replayed negative's decay window has already ended",
+    );
+    drop(live);
+
+    let mut body = body_with_field();
+    body["chat_template_kwargs"] = json!({ routectl_router::TEST_RECHECK_KWARG: "summarized" });
+    assert_eq!(
+        post_inference(&daemon, &body).await,
+        reqwest::StatusCode::OK
+    );
+
+    let live = daemon.live_router();
+    assert!(
+        recheck_acting(&live),
+        "the lapsed negative is still resident after the ordinary success",
+    );
+    assert_eq!(
+        recheck_ledger_verdicts(&db_path),
+        ["broken"],
+        "the ordinary success wrote no clear",
+    );
+    assert_eq!(
+        live.probe_scheduler_snapshot().activations_total,
+        1,
+        "the request queued the re-check, which activates only on an ACTING negative",
+    );
+
+    let summary = live.run_probe_pass().await;
+
+    assert!(
+        summary.free_validators_run > 0,
+        "the re-check ran: {summary:?}"
+    );
+    let snap = live.probe_scheduler_snapshot();
+    assert_eq!(
+        (snap.resolved_total, snap.clear_persistence_failures_total),
+        (1, 0),
+        "the clear was acknowledged durable and the job resolved",
+    );
+    assert!(!recheck_acting(&live), "the re-check cleared the negative");
+    assert_eq!(
+        recheck_ledger_verdicts(&db_path),
+        vec!["broken".to_string(), "cleared".to_string()],
+        "exactly one cleared row landed, after the seed",
+    );
+    assert!(
+        !resident_after_warm_rebuild(&config, daemon.usage()).await,
+        "a second warm rebuild from the ledger keeps the negative cleared",
+    );
+
+    drop(live);
+    daemon.shutdown().await;
+}

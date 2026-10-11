@@ -203,6 +203,22 @@ impl LearnedEntry {
         matches!(self.verdict, EntryVerdict::Negative) && now >= self.expires_at
     }
 
+    /// Whether this entry, stored under `key`, has lapsed into a decay
+    /// re-verification: [`Self::is_expired`], except that a negative whose
+    /// only recovery is the free token-count re-check never lapses. That
+    /// re-check removes it only after its clear is acknowledged durable; a
+    /// lapse would instead admit it as a generic re-probe (or a reactive repair
+    /// slot) and let any ordinary success clear it with no durable
+    /// acknowledgement.
+    fn has_lapsed(&self, key: &RegistryKey, now: Instant) -> bool {
+        self.is_expired(now)
+            && !crate::router::negative_recovers_only_by_recheck(
+                &key.state_key,
+                &key.feature_key,
+                &key.provider_kind,
+            )
+    }
+
     /// The routing decision for this entry when it `is_acting`, keyed on
     /// (verdict, phase, source):
     ///
@@ -1348,7 +1364,7 @@ impl LearnedCapabilityRegistry {
                     if matches!(decision, RoutingDecision::Allow) {
                         return RoutingDecision::Allow;
                     }
-                    if !entry.is_expired(now) || entry.in_flight {
+                    if !entry.has_lapsed(&key, now) || entry.in_flight {
                         return decision;
                     }
                     // Lapsed and unclaimed: fall through to claim the probe.
@@ -1384,7 +1400,7 @@ impl LearnedCapabilityRegistry {
                 let decision = entry.acting_decision();
                 if matches!(decision, RoutingDecision::Allow) {
                     RoutingDecision::Allow
-                } else if !entry.is_expired(now) || entry.in_flight {
+                } else if !entry.has_lapsed(key, now) || entry.in_flight {
                     decision
                 } else {
                     entry.in_flight = true;
@@ -1435,7 +1451,7 @@ impl LearnedCapabilityRegistry {
         if !matches!(entry.verdict, EntryVerdict::Negative) || !entry.is_acting() {
             return NegativeState::Absent;
         }
-        if entry.is_expired(now) {
+        if entry.has_lapsed(key, now) {
             NegativeState::Lapsed
         } else {
             NegativeState::Acting

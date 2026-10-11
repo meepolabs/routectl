@@ -544,7 +544,7 @@ the whole information content of a fail-open:
 | `ambiguous_mutation` | The transform was authorized but removed nothing, or reported success while its field was still present. Fails open to a byte-equivalent original |
 | `no_stored_value` | The verdict is authorized, but its field is repaired by writing a value rather than by dropping it, and the verdict carries no stored value for the incarnation it acts on (none was recorded, or the ledger token was refused on replay). Neither applied nor canaried |
 | `value_already_sent` | The verdict is authorized and carries a stored value, but the request already sends exactly that value. Nothing to rewrite |
-| `canary_restored` | This request is the re-verification canary: the tested field was RESTORED rather than dropped, and the upstream's answer re-verifies or disproves the verdict |
+| `canary_restored` | This request is the re-verification canary: the tested field was RESTORED rather than dropped, and the upstream's answer re-verifies or disproves the verdict. Never reported for a verdict on a field a free token count re-checks (on a lane that has such a count): that verdict's only recovery is the re-check, so its repair keeps applying instead |
 | `capability_writer_unhealthy` | Durable capability-event persistence cannot currently be guaranteed, so learned pre-flight is suspended for EVERY verdict. Not a verdict gate: it says nothing about whether the verdict is right, only that a wrong one could not be durably retracted (the clear, the purge, and the confirmation are all capability-event writes). Held while ANY of three monotonic failure counters is nonzero -- a store fault, a capability write the channel refused as full, or one it refused as closed -- so a SINGLE failure holds it for the life of the process, including one that happened at boot before the gate was wired. Ordinary usage-record drops are excluded: telemetry falling behind says nothing about capability persistence. Reactive forward-and-repair is unaffected and still serves every request -- see the status token of the same name |
 
 Content-free by construction, at BOTH tiers. Every field is a closed-set
@@ -1551,7 +1551,9 @@ working.
 ### `expire_probe` (INFO)
 
 Emitted when a lapsed learned negative is admitted for its single
-re-probe.
+re-probe. Never emitted for a field negative a free token count re-checks
+(on a lane that has such a count): that negative does not lapse, and only
+the re-check, acknowledged durable (`probe_clear`), retracts it.
 
 | Field | Type | Meaning |
 |---|---|---|

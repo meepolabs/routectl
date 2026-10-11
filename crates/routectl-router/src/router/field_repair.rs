@@ -884,6 +884,31 @@ pub(super) fn transform_class_of_capability_key(key: &str) -> Option<TransformCl
     })
 }
 
+/// Whether a negative on `feature_key` for the lane `state_key` of
+/// `provider_kind` is recovered ONLY by the free token-count re-check.
+///
+/// True for a closed-table row a free count validates, on a kind and upstream
+/// that has such a count. Such a negative never decays into the generic
+/// re-probe: an ordinary successful completion that carried the field cannot
+/// clear it, and only the queued re-check, acknowledged durable, retracts it.
+/// Every other key -- a non-validated row, a lane with no free count to ask, a
+/// catalog capability, a beta flag -- keeps its decay.
+pub fn negative_recovers_only_by_recheck(
+    state_key: &str,
+    feature_key: &str,
+    provider_kind: &str,
+) -> bool {
+    let validated = closed_table().iter().any(|row| {
+        row.count_tokens_validates
+            && crate::field_capability::field_capability_key(row.path).as_deref()
+                == Some(feature_key)
+    });
+    validated
+        && crate::state_key::StateKey::parse(state_key).is_some_and(|lane| {
+            super::count_tokens::seat_can_count_tokens(Some(provider_kind), lane.upstream())
+        })
+}
+
 /// The value slot of the closed-table row a `field:`-namespaced capability key
 /// names, or `None` when no row of this build's table names it or the row's
 /// transform carries no value. What decides whether a persisted value token is
