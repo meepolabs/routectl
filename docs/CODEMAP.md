@@ -57,6 +57,11 @@ license.
   response-side sites), `PathClass`, `RejectionProvenance` label sets
 - `src/wire_check/lane.rs` -- `IngressDialect`, `EgressKind`, `Lane::of`
   (FIDELITY iff same wire dialect), `LaneClass`, `Leg`; static labels
+- `src/wire_check/diff.rs` -- `diff`: total structural compare of two
+  `serde_json::Value` bodies into content-free `Finding`s (`WirePath` +
+  `PathClass`); FIDELITY order-aware array alignment with declared-edit
+  suppression and Relocate pairing, TRANSLATION top-level unconsumed
+  extras; depth 64 / 200k-node budget sets `DiffOutcome.truncated`
 - `src/wire_check/carriage.rs` -- `IngressWire`, clone-shared per-attempt
   `WireTap` with per-direction slots (request deposit / declare, response
   deposit / declare, take; test-utils drop-on-deposit hook on the request

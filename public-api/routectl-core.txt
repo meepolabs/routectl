@@ -3527,6 +3527,94 @@ impl<T> core::convert::From<T> for routectl_core::wire_check::DeclaredEdit
 pub fn routectl_core::wire_check::DeclaredEdit::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::wire_check::DeclaredEdit
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::DeclaredEdit
+pub struct routectl_core::wire_check::DiffOutcome
+pub routectl_core::wire_check::DiffOutcome::findings: alloc::vec::Vec<routectl_core::wire_check::Finding>
+pub routectl_core::wire_check::DiffOutcome::truncated: bool
+impl core::clone::Clone for routectl_core::wire_check::DiffOutcome
+pub fn routectl_core::wire_check::DiffOutcome::clone(&self) -> routectl_core::wire_check::DiffOutcome
+impl core::cmp::Eq for routectl_core::wire_check::DiffOutcome
+impl core::cmp::PartialEq for routectl_core::wire_check::DiffOutcome
+pub fn routectl_core::wire_check::DiffOutcome::eq(&self, &routectl_core::wire_check::DiffOutcome) -> bool
+impl core::default::Default for routectl_core::wire_check::DiffOutcome
+pub fn routectl_core::wire_check::DiffOutcome::default() -> routectl_core::wire_check::DiffOutcome
+impl core::fmt::Debug for routectl_core::wire_check::DiffOutcome
+pub fn routectl_core::wire_check::DiffOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::DiffOutcome
+impl core::marker::Freeze for routectl_core::wire_check::DiffOutcome
+impl core::marker::Send for routectl_core::wire_check::DiffOutcome
+impl core::marker::Sync for routectl_core::wire_check::DiffOutcome
+impl core::marker::Unpin for routectl_core::wire_check::DiffOutcome
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::DiffOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::DiffOutcome
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::DiffOutcome
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::DiffOutcome where U: core::convert::From<T>
+pub fn routectl_core::wire_check::DiffOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::DiffOutcome where U: core::convert::Into<T>
+pub type routectl_core::wire_check::DiffOutcome::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::DiffOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::DiffOutcome where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::DiffOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::DiffOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::DiffOutcome where T: core::clone::Clone
+pub type routectl_core::wire_check::DiffOutcome::Owned = T
+pub fn routectl_core::wire_check::DiffOutcome::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::DiffOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::DiffOutcome where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::DiffOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::DiffOutcome where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::DiffOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::DiffOutcome where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::DiffOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::DiffOutcome where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::DiffOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::DiffOutcome
+pub fn routectl_core::wire_check::DiffOutcome::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::DiffOutcome
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::DiffOutcome
+pub struct routectl_core::wire_check::Finding
+pub routectl_core::wire_check::Finding::class: routectl_core::wire_check::PathClass
+pub routectl_core::wire_check::Finding::path: routectl_core::wire_check::WirePath
+impl core::clone::Clone for routectl_core::wire_check::Finding
+pub fn routectl_core::wire_check::Finding::clone(&self) -> routectl_core::wire_check::Finding
+impl core::cmp::Eq for routectl_core::wire_check::Finding
+impl core::cmp::PartialEq for routectl_core::wire_check::Finding
+pub fn routectl_core::wire_check::Finding::eq(&self, &routectl_core::wire_check::Finding) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::Finding
+pub fn routectl_core::wire_check::Finding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::Finding
+pub fn routectl_core::wire_check::Finding::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::Finding
+impl core::marker::Freeze for routectl_core::wire_check::Finding
+impl core::marker::Send for routectl_core::wire_check::Finding
+impl core::marker::Sync for routectl_core::wire_check::Finding
+impl core::marker::Unpin for routectl_core::wire_check::Finding
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::Finding
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::Finding
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::Finding
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::Finding where U: core::convert::From<T>
+pub fn routectl_core::wire_check::Finding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::Finding where U: core::convert::Into<T>
+pub type routectl_core::wire_check::Finding::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::Finding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::Finding where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::Finding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::Finding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::Finding where T: core::clone::Clone
+pub type routectl_core::wire_check::Finding::Owned = T
+pub fn routectl_core::wire_check::Finding::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::Finding::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::Finding where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::Finding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::Finding where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::Finding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::Finding where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::Finding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::Finding where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::Finding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::Finding
+pub fn routectl_core::wire_check::Finding::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::Finding
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::Finding
 pub struct routectl_core::wire_check::IngressWire
 pub routectl_core::wire_check::IngressWire::bytes: bytes::bytes::Bytes
 pub routectl_core::wire_check::IngressWire::client_version: core::option::Option<alloc::string::String>
@@ -3759,9 +3847,12 @@ impl<T> core::convert::From<T> for routectl_core::wire_check::WireTap
 pub fn routectl_core::wire_check::WireTap::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::wire_check::WireTap
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::WireTap
+pub const routectl_core::wire_check::MAX_DIFF_DEPTH: usize
+pub const routectl_core::wire_check::MAX_DIFF_NODES: usize
 pub const routectl_core::wire_check::MAX_WIRE_PATH_DEPTH: usize
 pub const routectl_core::wire_check::MAX_WIRE_PATH_LEN: usize
 pub const routectl_core::wire_check::WILDCARD_SEGMENT: &str
+pub fn routectl_core::wire_check::diff(&serde_json::value::Value, &serde_json::value::Value, routectl_core::wire_check::LaneClass, &[routectl_core::wire_check::DeclaredEdit]) -> routectl_core::wire_check::DiffOutcome
 pub enum routectl_core::BreakpointPosition
 pub routectl_core::BreakpointPosition::Messages
 pub routectl_core::BreakpointPosition::System

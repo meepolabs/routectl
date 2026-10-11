@@ -1,5 +1,5 @@
-//! Contract types for comparing what a client sent with what routectl sent
-//! upstream on the same attempt.
+//! Contract types and the diff engine for comparing what a client sent with
+//! what routectl sent upstream on the same attempt.
 //!
 //! Everything here is content-free by construction: a [`WirePath`] carries
 //! only sanitized key names and indices, the closed enums label findings,
@@ -14,11 +14,13 @@
 )]
 
 mod carriage;
+mod diff;
 mod edits;
 mod lane;
 mod path;
 
 pub use carriage::{AttemptRecord, IngressWire, TapContents, WireTap};
+pub use diff::{DiffOutcome, Finding, MAX_DIFF_DEPTH, MAX_DIFF_NODES, diff};
 pub use edits::{
     DeclaredEdit, EditKind, EditPatternError, EditSite, PathClass, RejectionProvenance,
 };
