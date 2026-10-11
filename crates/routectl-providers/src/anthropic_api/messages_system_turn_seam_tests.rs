@@ -464,14 +464,13 @@ fn seam_skipped_count(events: &[CapturedEvent]) -> Option<&str> {
 
 /// A tool_result run after a dropped turn never merges into a preceding
 /// user message holding anything but tool_result blocks, whatever carrier
-/// that content arrived in: the string form, and a block list of text, an
-/// image, or a document. Translation succeeds (the ledger verify inside
+/// that content arrived in: a block list of text, an image, or a document
+/// (the string form is a row of the reorder table above). Translation succeeds (the ledger verify inside
 /// `translate_messages` accepts the skip), the pair stays two messages, and
 /// the tool_result leads the second.
 #[test]
 fn tool_result_after_a_dropped_turn_never_merges_behind_non_tool_result_content() {
-    let cases: [(&str, Message, &str); 4] = [
-        ("string carrier", st_user("prior text"), "text"),
+    let cases: [(&str, Message, &str); 3] = [
         (
             "text block",
             seam_user_parts(vec![st_text_part("prior text")]),
