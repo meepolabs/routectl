@@ -3210,11 +3210,12 @@ pub routectl_core::wire_check::EditSite::StreamFlagForce
 pub routectl_core::wire_check::EditSite::StreamOptionsInjection
 pub routectl_core::wire_check::EditSite::StreamStragglerDrop
 pub routectl_core::wire_check::EditSite::StreamStrip
+pub routectl_core::wire_check::EditSite::ThinkingSamplingClamp
 pub routectl_core::wire_check::EditSite::ThinkingStripForcedToolUse
 pub routectl_core::wire_check::EditSite::ToolIdSanitize
 pub routectl_core::wire_check::EditSite::UrlFieldRelocate
 impl routectl_core::wire_check::EditSite
-pub const routectl_core::wire_check::EditSite::ALL: [Self; 47]
+pub const routectl_core::wire_check::EditSite::ALL: [Self; 48]
 pub const fn routectl_core::wire_check::EditSite::label(self) -> &'static str
 impl core::clone::Clone for routectl_core::wire_check::EditSite
 pub fn routectl_core::wire_check::EditSite::clone(&self) -> routectl_core::wire_check::EditSite

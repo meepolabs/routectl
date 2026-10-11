@@ -697,6 +697,12 @@ pub(crate) fn normalize_deferring_format_key_warn(
         // from the same request and one request is one action.
         // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=the_canonical_system_billing_strip_counts_one_policy_action
         fingerprint.record();
+        if let Some(system) = req.system.as_ref() {
+            super::wire_edits::declare_canonical_billing_strip(
+                super::wire_edits::tap_of(req),
+                system,
+            );
+        }
     }
 
     // The wire system field and the messages array are two halves of one
@@ -730,6 +736,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // `Strip` both strip -- real-Anthropic-safe. The dispatch layer
     // resolves the per-model policy onto `routectl_internal`; library
     // callers that never set it get `Auto` = strip.
+    let tap = super::wire_edits::tap_of(req);
     let hr = req
         .routectl_internal
         .history_reasoning
@@ -772,6 +779,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     );
     let mut anthropic_messages =
         translate_messages(id, &messages, system_turns, &mut envelopes, fingerprint)?;
+    super::wire_edits::declare_tool_id_sanitize(tap, &messages);
 
     // When context_management emulation is active, re-inject cached
     // thinking blocks before ToolUse blocks per the clear_thinking_20251015
@@ -810,11 +818,14 @@ pub(crate) fn normalize_deferring_format_key_warn(
     let tools = if suppress_tools {
         None
     } else {
-        req.tools.as_ref().map(|ts| translate_tools(ts, hosted_mcp))
+        req.tools
+            .as_ref()
+            .map(|ts| translate_tools(ts, hosted_mcp, tap))
     };
 
     let (temperature, top_p) =
         clamp_sampling_for_thinking(thinking.as_ref(), req.temperature, req.top_p);
+    super::wire_edits::declare_sampling_clamp(tap, req, temperature, top_p);
 
     // Fold the OpenAI-dialect `parallel_tool_calls` toggle (riding
     // provider_extras) into Anthropic's native `disable_parallel_tool_use`
@@ -832,6 +843,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
             has_tools,
             has_wire_tools,
             hosted_mcp,
+            tap,
         ),
         parallel,
         has_wire_tools,
@@ -940,13 +952,14 @@ pub(crate) fn normalize_deferring_format_key_warn(
              (cold-start or TTL eviction)"
         );
     }
-    strip_thinking_when_tool_choice_forces_use(id, &mut body);
+    strip_thinking_when_tool_choice_forces_use(id, &mut body, tap);
     // Late enforcer, runs LAST: output_config.effort is present IFF the
     // assembled body carries thinking with type == adaptive. Reads the
     // final body shape, so any earlier pass that stripped thinking
     // (cache-miss soft-fail above, tool_choice strip just now) is
     // correctly reflected -- no stale `adaptive` flag is trusted.
     reconcile_output_config_effort(req, &mut body);
+    super::wire_edits::declare_effort_edits(tap, req, &body);
     // Sampling analogue of the enforcer above, same final-body discipline:
     // assembly forces temperature=1.0 (dropping top_p) when thinking is
     // composed, and the strip passes above may then remove thinking. Recompute

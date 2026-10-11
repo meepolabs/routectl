@@ -26,6 +26,8 @@ use serde_json::Value;
 
 use routectl_core::{ChatRequest, Error};
 
+use super::wire_edits;
+
 mod billing;
 mod identity;
 mod obfuscate;
@@ -358,8 +360,15 @@ pub fn cloak_oauth_egress(
     config: &CloakConfig,
 ) -> Result<CloakResult, CloakRefusal> {
     validate_sensitive_words(&config.sensitive_words).map_err(CloakRefusal::SensitiveWords)?;
+    let tap = wire_edits::tap_of(req);
     let mut tally = CloakPolicyTally::default();
+    let client_system_blocks = match req.system.as_ref() {
+        Some(routectl_core::SystemContent::Blocks(blocks)) => Some(blocks.len()),
+        _ => None,
+    };
+    let before = wire_edits::CloakView::capture(tap, body, client_system_blocks);
     strip_billing_block(body);
+    wire_edits::declare_cloak_billing_strip(tap, before.as_ref());
     if is_non_cc {
         // `strict_mode` is the operator choosing to DROP the client system
         // rather than relocate it, so the losses past that switch are
@@ -374,12 +383,23 @@ pub fn cloak_oauth_egress(
             })
             .map_err(CloakRefusal::Relocation)?;
         tally.absorb_relocation(outcome);
+        wire_edits::declare_cloak_relocation(tap, before.as_ref(), body);
         mint_metadata_user_id(body, identity);
+        wire_edits::declare_cloak_user_id(tap, before.as_ref(), body);
     }
+    let names_before = wire_edits::ToolNames::capture(tap, body);
     let mut tool_reverse = normalize_tool_names_to_mcp(body);
     apply_tool_rename(body, &config.tool_rename, &mut tool_reverse);
-    obfuscate_sensitive_words(body, &config.sensitive_words)
+    let names_after = wire_edits::ToolNames::capture(tap, body);
+    wire_edits::declare_cloak_tool_names(
+        tap,
+        names_before.as_ref(),
+        names_after.as_ref(),
+        !tool_reverse.is_empty(),
+    );
+    let obfuscated = obfuscate_sensitive_words(body, &config.sensitive_words)
         .map_err(CloakRefusal::SensitiveWords)?;
+    wire_edits::declare_cloak_obfuscation(tap, obfuscated.system, obfuscated.messages);
     // Tool-array canonicalization: stable-sort `tools[]` by name so a non-CC
     // client that shuffles tool order request-to-request presents a stable
     // cache prefix. Gated on the SAME `is_non_cc` branch the identity rewrite
@@ -394,6 +414,8 @@ pub fn cloak_oauth_egress(
     // stand-down class deliberately does not cover it -- the pass never runs.
     if is_non_cc && config.normalize_tools {
         tally.absorb_tool_sort(sort_custom_tools_by_name(body));
+        let sorted = wire_edits::ToolNames::capture(tap, body);
+        wire_edits::declare_cloak_tool_sort(tap, names_after.as_ref(), sorted.as_ref());
     }
     tally.flush(req);
     Ok(CloakResult { tool_reverse })

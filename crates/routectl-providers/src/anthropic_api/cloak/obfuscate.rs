@@ -145,17 +145,25 @@ pub fn validate_sensitive_words(words: &[String]) -> Result<(), SensitiveWordsBo
 ///
 /// A list outside the bounds is refused before the body is touched; the
 /// caller must then not send the body, since the terms would travel
-/// unmarked.
+/// unmarked. On success, reports which surfaces it rewrote.
 pub(super) fn obfuscate_sensitive_words(
     body: &mut Value,
     words: &[String],
-) -> Result<(), SensitiveWordsBoundError> {
+) -> Result<ObfuscatedSurfaces, SensitiveWordsBoundError> {
     let Some(matcher) = SensitiveWordMatcher::build(words)? else {
-        return Ok(());
+        return Ok(ObfuscatedSurfaces::default());
     };
-    obfuscate_system(body, &matcher);
-    obfuscate_messages(body, &matcher);
-    Ok(())
+    Ok(ObfuscatedSurfaces {
+        system: obfuscate_system(body, &matcher),
+        messages: obfuscate_messages(body, &matcher),
+    })
+}
+
+/// Which surfaces of the body one obfuscation pass rewrote.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct ObfuscatedSurfaces {
+    pub(super) system: bool,
+    pub(super) messages: bool,
 }
 
 /// A normalized, deduplicated set of sensitive words compiled into one
@@ -462,63 +470,63 @@ fn push_obfuscated(out: &mut String, matched: &str) {
 
 /// Obfuscate sensitive words in `body["system"]` (string form, or an array
 /// of blocks).
-fn obfuscate_system(body: &mut Value, matcher: &SensitiveWordMatcher) {
+fn obfuscate_system(body: &mut Value, matcher: &SensitiveWordMatcher) -> bool {
     match body.get_mut("system") {
-        Some(Value::String(s)) => {
-            if let Some(ob) = matcher.obfuscate(s) {
-                *s = ob;
-            }
+        Some(Value::String(s)) => obfuscate_in_place(s, matcher),
+        Some(Value::Array(blocks)) => blocks.iter_mut().fold(false, |hit, block| {
+            obfuscate_content_block(block, matcher) | hit
+        }),
+        _ => false,
+    }
+}
+
+fn obfuscate_in_place(s: &mut String, matcher: &SensitiveWordMatcher) -> bool {
+    match matcher.obfuscate(s) {
+        Some(ob) => {
+            *s = ob;
+            true
         }
-        Some(Value::Array(blocks)) => {
-            for block in blocks.iter_mut() {
-                obfuscate_content_block(block, matcher);
-            }
-        }
-        _ => {}
+        None => false,
     }
 }
 
 /// Obfuscate sensitive words in `body["messages"][].content` (string form,
 /// or an array of content blocks).
-fn obfuscate_messages(body: &mut Value, matcher: &SensitiveWordMatcher) {
+fn obfuscate_messages(body: &mut Value, matcher: &SensitiveWordMatcher) -> bool {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
+        return false;
     };
+    let mut hit = false;
     for msg in messages.iter_mut() {
-        match msg.get_mut("content") {
-            Some(Value::String(s)) => {
-                if let Some(ob) = matcher.obfuscate(s) {
-                    *s = ob;
-                }
-            }
-            Some(Value::Array(blocks)) => {
-                for block in blocks.iter_mut() {
-                    obfuscate_content_block(block, matcher);
-                }
-            }
-            _ => {}
-        }
+        hit |= match msg.get_mut("content") {
+            Some(Value::String(s)) => obfuscate_in_place(s, matcher),
+            Some(Value::Array(blocks)) => blocks.iter_mut().fold(false, |hit, block| {
+                obfuscate_content_block(block, matcher) | hit
+            }),
+            _ => false,
+        };
     }
+    hit
 }
 
 /// Obfuscate one system or message content block in place: a text block's
 /// `text`, or a document block's inline text. Blocks of any other type are
 /// left untouched.
-fn obfuscate_content_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
+fn obfuscate_content_block(block: &mut Value, matcher: &SensitiveWordMatcher) -> bool {
     match block.get("type").and_then(Value::as_str) {
         Some("text") => obfuscate_text_block(block, matcher),
         Some("document") => obfuscate_document_block(block, matcher),
-        _ => {}
+        _ => false,
     }
 }
 
 /// Obfuscate the `text` field of a `{type:"text"}` content block in place.
 /// Blocks of any other type are left untouched.
-fn obfuscate_text_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
+fn obfuscate_text_block(block: &mut Value, matcher: &SensitiveWordMatcher) -> bool {
     if block.get("type").and_then(Value::as_str) != Some("text") {
-        return;
+        return false;
     }
-    obfuscate_string_field(block, "text", matcher);
+    obfuscate_string_field(block, "text", matcher)
 }
 
 /// Obfuscate the text a document block carries inline in its `source`: the
@@ -528,40 +536,36 @@ fn obfuscate_text_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
 /// A base64, URL, or file source is opaque here -- its bytes are encoded or
 /// fetched upstream -- so a sensitive word inside one travels unmarked. The
 /// block's `title` and `context` are not scanned.
-fn obfuscate_document_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
+fn obfuscate_document_block(block: &mut Value, matcher: &SensitiveWordMatcher) -> bool {
     let Some(source) = block.get_mut("source") else {
-        return;
+        return false;
     };
     match source.get("type").and_then(Value::as_str) {
         Some("text") => obfuscate_string_field(source, "data", matcher),
         Some("content") => match source.get_mut("content") {
-            Some(Value::String(s)) => {
-                if let Some(ob) = matcher.obfuscate(s) {
-                    *s = ob;
-                }
-            }
-            Some(Value::Array(blocks)) => {
-                for inner in blocks.iter_mut() {
-                    obfuscate_text_block(inner, matcher);
-                }
-            }
-            _ => {}
+            Some(Value::String(s)) => obfuscate_in_place(s, matcher),
+            Some(Value::Array(blocks)) => blocks.iter_mut().fold(false, |hit, inner| {
+                obfuscate_text_block(inner, matcher) | hit
+            }),
+            _ => false,
         },
-        _ => {}
+        _ => false,
     }
 }
 
 /// Rewrite the string at `obj[key]` when it holds a match; any other shape,
 /// or no match, leaves the object byte-identical.
-fn obfuscate_string_field(obj: &mut Value, key: &str, matcher: &SensitiveWordMatcher) {
+fn obfuscate_string_field(obj: &mut Value, key: &str, matcher: &SensitiveWordMatcher) -> bool {
     let Some(text) = obj.get(key).and_then(Value::as_str) else {
-        return;
+        return false;
     };
     if let Some(ob) = matcher.obfuscate(text)
         && let Some(map) = obj.as_object_mut()
     {
         map.insert(key.into(), Value::String(ob));
+        return true;
     }
+    false
 }
 
 #[cfg(test)]

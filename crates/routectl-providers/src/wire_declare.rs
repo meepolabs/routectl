@@ -4,13 +4,21 @@
 //! Every entry point is a no-op when the request carries no tap, so an
 //! attempt nobody checks pays one `Option` test per site.
 
-#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "anthropic-api"
+))]
 use std::borrow::Cow;
 
 use bytes::Bytes;
 use routectl_core::ChatRequest;
 use routectl_core::wire_check::WireTap;
-#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "anthropic-api"
+))]
 use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite};
 
 /// The tap riding `req`, if a caller is listening.
@@ -35,7 +43,11 @@ pub fn serialize_and_deposit(
 /// Declare one request-body edit. A pattern the edit register refuses is
 /// dropped with a DEBUG naming only the site: the unexplained difference
 /// then surfaces as a finding, which is the safe direction.
-#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "anthropic-api"
+))]
 pub fn declare(tap: &WireTap, site: EditSite, path: impl Into<Cow<'static, str>>, kind: EditKind) {
     match DeclaredEdit::new(site, path, kind) {
         Ok(edit) => tap.declare(edit),
@@ -60,7 +72,11 @@ pub fn member_pointer(parent: &str, key: &str) -> Option<String> {
 /// Declare the body `stream` flag the provider forces to `forced`: an Add
 /// when the canonical request left it unset, a Rewrite when it asked for
 /// the other mode.
-#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "anthropic-api"
+))]
 pub fn declare_stream_flag(req: &ChatRequest, forced: bool) {
     let Some(tap) = tap(req) else {
         return;

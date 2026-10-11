@@ -17,6 +17,7 @@
 
 use serde_json::{Value, json};
 
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{CustomTool, ToolDef};
 
 use super::types::AnthropicTool;
@@ -115,11 +116,21 @@ impl HostedMcpToolWithholdTally {
 pub(super) fn translate_tools(
     tools: &[ToolDef],
     tally: &mut HostedMcpToolWithholdTally,
+    tap: Option<&WireTap>,
 ) -> Vec<AnthropicTool> {
-    tally.tools_withheld += tools
+    for (index, _) in tools
         .iter()
-        .filter(|td| is_responses_hosted_mcp(td))
-        .count();
+        .enumerate()
+        .filter(|(_, td)| is_responses_hosted_mcp(td))
+    {
+        tally.tools_withheld += 1;
+        super::wire_edits::declare(
+            tap,
+            EditSite::HostedToolWithhold,
+            format!("/tools/{index}"),
+            EditKind::Remove,
+        );
+    }
     tools
         .iter()
         .filter(|td| !is_responses_hosted_mcp(td))
@@ -138,6 +149,7 @@ pub(super) fn translate_tool_choice_withholding_hosted_mcp(
     has_tools: bool,
     has_wire_tools: bool,
     tally: &mut HostedMcpToolWithholdTally,
+    tap: Option<&WireTap>,
 ) -> Option<Value> {
     let is_hosted_mcp = tc
         .and_then(Value::as_object)
@@ -148,6 +160,12 @@ pub(super) fn translate_tool_choice_withholding_hosted_mcp(
         return translate_tool_choice(tc, has_tools);
     }
     tally.tool_choice_withheld = true;
+    let kind = if has_wire_tools {
+        EditKind::Rewrite
+    } else {
+        EditKind::Remove
+    };
+    super::wire_edits::declare(tap, EditSite::HostedToolWithhold, "/tool_choice", kind);
     has_wire_tools.then(|| json!({"type": "auto"}))
 }
 

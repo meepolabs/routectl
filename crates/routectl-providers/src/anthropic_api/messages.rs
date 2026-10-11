@@ -201,6 +201,7 @@ pub(super) fn normalize_replay_invariants<'a>(
     let mut affected_messages: BoundedLogSample<usize> = BoundedLogSample::new();
     let mut dropped_turn_count: usize = 0;
     let mut dropped_turn_indices: BoundedLogSample<usize> = BoundedLogSample::new();
+    let tap = super::wire_edits::tap_of(req);
     for (i, msg) in req.messages.iter().enumerate() {
         let MessageContent::Parts(parts) = &msg.content else {
             // Text / Null content cannot carry a Thinking block.
@@ -214,6 +215,12 @@ pub(super) fn normalize_replay_invariants<'a>(
             .cloned()
             .collect();
         let stripped_here = original_len.saturating_sub(kept.len());
+        super::wire_edits::declare_unsigned_thinking_strip(
+            tap,
+            i,
+            parts,
+            is_unsigned_thinking_part,
+        );
         if stripped_here > 0 {
             dropped_blocks += stripped_here;
             affected_message_count += 1;
@@ -248,6 +255,12 @@ pub(super) fn normalize_replay_invariants<'a>(
             // next tool_result turn.
             dropped_turn_count += 1;
             dropped_turn_indices.push(i);
+            super::wire_edits::declare(
+                tap,
+                routectl_core::wire_check::EditSite::SignatureStrip,
+                format!("/messages/{i}"),
+                routectl_core::wire_check::EditKind::Remove,
+            );
             continue;
         }
         out.push(Message {

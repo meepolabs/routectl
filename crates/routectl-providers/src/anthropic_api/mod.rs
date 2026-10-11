@@ -18,6 +18,7 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
 
 use routectl_core::identity::anthropic::is_anthropic_api_host;
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, Result, TokenCount,
     UpstreamBody, debug_upstream_error_body, sanitize_for_log, trace_outgoing_body,
@@ -74,6 +75,7 @@ mod system;
 mod tools;
 pub(crate) mod types;
 pub(crate) mod types_sse;
+pub(crate) mod wire_edits;
 
 /// Provider-kind discriminator string used in tracing fields. See
 /// the openai_compat module for the rationale.
@@ -164,9 +166,11 @@ impl Provider for AnthropicApiProvider {
         self.record_mantle_span_fields();
         let forwarded_leg = self.forwarded_leg(&req);
         let mut body = self.normalize_request(&req)?;
+        let tap = wire_edits::tap_of(&req);
         // Ensure stream is absent / false for the non-streaming path.
         if let Some(obj) = body.as_object_mut() {
             obj.remove("stream");
+            wire_edits::declare_stream_strip(tap, req.stream);
             // `api.anthropic.com` (especially the OAuth-Bearer
             // flavor) rejects `anthropic_beta` as a top-level body
             // field with `Extra inputs are not permitted`. Betas
@@ -175,7 +179,14 @@ impl Provider for AnthropicApiProvider {
             // body-shape egress keeps the field via its own assembly
             // path, so this strip is scoped to the api.anthropic.com
             // egress.
-            obj.remove("anthropic_beta");
+            if obj.remove("anthropic_beta").is_some() {
+                wire_edits::declare(
+                    tap,
+                    EditSite::AnthropicBetaStrip,
+                    "/anthropic_beta",
+                    EditKind::Remove,
+                );
+            }
         }
 
         // Cloak the outgoing body on the OAuth anthropic-api surface:
@@ -195,7 +206,8 @@ impl Provider for AnthropicApiProvider {
         // cloak flag) so a `cloak.mode = never` provider on this credential
         // still ships an accepted body. See `extras::normalize_claude_sampling`.
         if self.is_cloak_lane(&req) {
-            extras::normalize_claude_sampling(&self.cfg.id, &mut body);
+            let dropped = extras::normalize_claude_sampling(&self.cfg.id, &mut body);
+            wire_edits::declare_removed_keys(tap, EditSite::ClaudeSamplingNormalize, &dropped);
         }
 
         // Emit the outgoing body at trace level so a grep by
@@ -231,6 +243,8 @@ impl Provider for AnthropicApiProvider {
         {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
+        let body_bytes = bytes::Bytes::from(body_bytes);
+        let sent_copy = tap.map(|_| body_bytes.clone());
 
         let (rb, beta_decision) = self.build_headers(
             self.client.post(self.messages_url()),
@@ -255,6 +269,9 @@ impl Provider for AnthropicApiProvider {
         // the resolved token (and, on the mantle lane, after signing).
         // Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        if let (Some(tap), Some(sent)) = (tap, sent_copy) {
+            tap.deposit(sent);
+        }
         let resp = self
             .client
             .execute(request)
@@ -403,12 +420,21 @@ impl Provider for AnthropicApiProvider {
         self.record_mantle_span_fields();
         let forwarded_leg = self.forwarded_leg(&req);
         let mut body = self.normalize_request(&req)?;
+        let tap = wire_edits::tap_of(&req);
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), serde_json::Value::Bool(true));
+            crate::wire_declare::declare_stream_flag(&req, true);
             // See note on the complete() path: api.anthropic.com
             // rejects `anthropic_beta` as a body field; the HTTP
             // header carries them via build_headers.
-            obj.remove("anthropic_beta");
+            if obj.remove("anthropic_beta").is_some() {
+                wire_edits::declare(
+                    tap,
+                    EditSite::AnthropicBetaStrip,
+                    "/anthropic_beta",
+                    EditKind::Remove,
+                );
+            }
         }
 
         // See complete(): cloak the OAuth anthropic-api body before
@@ -422,7 +448,8 @@ impl Provider for AnthropicApiProvider {
         // seat rejects, gated on the lane, as the last body mutation before
         // the trace. See `extras::normalize_claude_sampling`.
         if self.is_cloak_lane(&req) {
-            extras::normalize_claude_sampling(&self.cfg.id, &mut body);
+            let dropped = extras::normalize_claude_sampling(&self.cfg.id, &mut body);
+            wire_edits::declare_removed_keys(tap, EditSite::ClaudeSamplingNormalize, &dropped);
         }
 
         // NOTE: this trace reflects the pre-resign body; the cch token
@@ -443,6 +470,8 @@ impl Provider for AnthropicApiProvider {
         {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
+        let body_bytes = bytes::Bytes::from(body_bytes);
+        let sent_copy = tap.map(|_| body_bytes.clone());
 
         let (rb, beta_decision) = self.build_headers(
             self.client.post(self.messages_url()),
@@ -463,6 +492,9 @@ impl Provider for AnthropicApiProvider {
         // Dir 2: outgoing request headers (incl. auth) for the stream
         // path. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        if let (Some(tap), Some(sent)) = (tap, sent_copy) {
+            tap.deposit(sent);
+        }
         let resp = self
             .client
             .execute(request)
@@ -1193,3 +1225,8 @@ mod client_beta_floor_site_tests;
 #[cfg(test)]
 #[path = "mod_cloak_refusal_tests.rs"]
 mod cloak_refusal_tests;
+
+// Each send site deposits exactly the bytes the upstream received.
+#[cfg(test)]
+#[path = "mod_wire_tap_tests.rs"]
+mod wire_tap_tests;

@@ -282,7 +282,8 @@ pub use aws_error::{VALIDATION_EXCEPTION_TYPE, aws_exception_type_is};
 #[cfg(any(
     feature = "openai-compat",
     feature = "openai-responses",
-    feature = "gemini"
+    feature = "gemini",
+    feature = "anthropic-api"
 ))]
 pub(crate) mod wire_declare;
 

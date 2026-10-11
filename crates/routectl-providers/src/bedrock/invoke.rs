@@ -19,7 +19,10 @@
 
 use serde_json::Value;
 
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, ChatResponse, Error, Result, sanitize_for_log};
+
+use crate::anthropic_api::wire_edits;
 
 use super::BedrockConfig;
 use super::betas::{operator_floor, withhold_betas};
@@ -147,7 +150,9 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
 
     // Stream flag is decided at HTTP level (different endpoint suffix),
     // not via a body field, so strip any leftover.
+    let tap = wire_edits::tap_of(req);
     obj.remove("stream");
+    wire_edits::declare_stream_strip(tap, req.stream);
 
     // Drop the Claude Code billing/attribution system block before the
     // body hits AWS. The body is in Anthropic wire shape (the shared
@@ -177,7 +182,8 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // Anthropic instead honors a PER-BLOCK marker inside a content block,
     // where a single marker caches all prefixes up to ~20 blocks before
     // it. Lower the top-level marker to the last eligible block.
-    lower_top_level_cache_control_to_per_block(&cfg.id, obj);
+    let lowered = lower_top_level_cache_control_to_per_block(&cfg.id, obj);
+    declare_cache_marker_lowering(tap, lowered);
 
     // Bedrock's InvokeModel takes the model identifier in the URL path
     // (`/model/{model_id}/invoke`), not the body. The Anthropic API
@@ -185,7 +191,9 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // normalize` honors -- but Bedrock's strict-schema validator
     // rejects a body-side `model` with "Extra inputs are not
     // permitted". Strip it here on the Bedrock-Invoke seam.
-    obj.remove("model");
+    if obj.remove("model").is_some() {
+        wire_edits::declare(tap, EditSite::UrlFieldRelocate, "/model", EditKind::Remove);
+    }
 
     // Anthropic (and Invoke, carrying its body) rejects a tool_choice with
     // nothing to select. Remove an orphaned tool_choice on the body that
@@ -385,14 +393,15 @@ fn strip_client_metadata(
 /// Drop-only fallback (top-level removed, no per-block added) is the safe
 /// path under any uncertainty: the original top-level body is broken, so
 /// re-emitting it is never correct.
+///
+/// Returns what changed in the body: `None` when there was no top-level
+/// marker, otherwise whether and where the marker landed.
 fn lower_top_level_cache_control_to_per_block(
     provider_id: &str,
     obj: &mut serde_json::Map<String, Value>,
-) {
+) -> Option<Lowered> {
     // Always remove the top-level marker first; that alone stops the 400.
-    let Some(cc) = obj.remove("cache_control") else {
-        return;
-    };
+    let cc = obj.remove("cache_control")?;
     // `cc` stays in scope for the whole function, so borrow the ttl for
     // logging rather than allocating a String.
     let ttl = cc.get("ttl").and_then(Value::as_str).unwrap_or("");
@@ -402,18 +411,18 @@ fn lower_top_level_cache_control_to_per_block(
             provider = provider_id,
             "bedrock-invoke egress: top-level cache_control dropped (no messages array to host a per-block marker)"
         );
-        return;
+        return Some(Lowered::Dropped);
     };
 
     // Compute the insertion on a CANDIDATE clone; do NOT mutate the live
     // `obj["messages"]` until the result is validated.
     let mut candidate = messages.clone();
-    let Some(kind) = insert_marker_on_candidate(&mut candidate, &cc) else {
+    let Some(placement) = insert_marker_on_candidate(&mut candidate, &cc) else {
         tracing::warn!(
             provider = provider_id,
             "bedrock-invoke egress: top-level cache_control dropped (no eligible content block to host a per-block marker)"
         );
-        return;
+        return Some(Lowered::Dropped);
     };
 
     // Re-validate the FULL breakpoint sequence across tools -> system ->
@@ -426,12 +435,12 @@ fn lower_top_level_cache_control_to_per_block(
             error = %e,
             "bedrock-invoke egress: top-level cache_control dropped (lowering would violate the breakpoint invariants)"
         );
-        return;
+        return Some(Lowered::Dropped);
     }
 
     // Valid -> commit the candidate.
     obj.insert("messages".into(), Value::Array(candidate));
-    match kind {
+    match placement.kind {
         InsertKind::NewTextBlock => tracing::debug!(
             provider = provider_id,
             ttl = %sanitize_for_log(ttl),
@@ -448,9 +457,67 @@ fn lower_top_level_cache_control_to_per_block(
             "bedrock-invoke egress: top-level cache_control removed; last eligible block already marked"
         ),
     }
+    Some(Lowered::Placed(placement))
+}
+
+/// The outcome of a lowering that found a top-level marker.
+enum Lowered {
+    /// The marker was removed and placed nowhere.
+    Dropped,
+    /// The marker was removed and placed on a block.
+    Placed(MarkerPlacement),
+}
+
+/// Where the lowering put the marker: the message, and the block within it.
+#[derive(Clone, Copy)]
+struct MarkerPlacement {
+    kind: InsertKind,
+    message: usize,
+    block: usize,
+}
+
+/// Declare the lowering's edits: the top-level marker removed and, when it
+/// landed, the per-block marker added (or the trailing string turn
+/// rewritten into the block that carries it).
+fn declare_cache_marker_lowering(
+    tap: Option<&routectl_core::wire_check::WireTap>,
+    lowered: Option<Lowered>,
+) {
+    let Some(lowered) = lowered else {
+        return;
+    };
+    wire_edits::declare(
+        tap,
+        EditSite::CacheMarkerLowering,
+        "/cache_control",
+        EditKind::Remove,
+    );
+    let Lowered::Placed(placement) = lowered else {
+        return;
+    };
+    let message = placement.message;
+    match placement.kind {
+        InsertKind::NewTextBlock => wire_edits::declare(
+            tap,
+            EditSite::CacheMarkerLowering,
+            format!("/messages/{message}/content"),
+            EditKind::Rewrite,
+        ),
+        InsertKind::ExistingBlock => wire_edits::declare(
+            tap,
+            EditSite::CacheMarkerLowering,
+            format!(
+                "/messages/{message}/content/{}/cache_control",
+                placement.block
+            ),
+            EditKind::Add,
+        ),
+        InsertKind::AlreadyMarked => {}
+    }
 }
 
 /// How the candidate placed the marker; drives the commit-time debug log.
+#[derive(Clone, Copy)]
 enum InsertKind {
     /// A trailing string-content message was converted to a one-element
     /// text block carrying the marker.
@@ -466,10 +533,10 @@ enum InsertKind {
 /// first eligible block found is the target. A trailing string-content
 /// message converts to a single text block carrying the marker.
 ///
-/// Returns `Some(kind)` describing the placement, or `None` if there was
-/// no eligible target (caller drops the marker).
-fn insert_marker_on_candidate(messages: &mut [Value], cc: &Value) -> Option<InsertKind> {
-    for msg in messages.iter_mut().rev() {
+/// Returns `Some(placement)` describing where the marker went, or `None` if
+/// there was no eligible target (caller drops the marker).
+fn insert_marker_on_candidate(messages: &mut [Value], cc: &Value) -> Option<MarkerPlacement> {
+    for (message, msg) in messages.iter_mut().enumerate().rev() {
         let Some(content) = msg.get_mut("content") else {
             continue;
         };
@@ -489,14 +556,18 @@ fn insert_marker_on_candidate(messages: &mut [Value], cc: &Value) -> Option<Inse
                 "text": text,
                 "cache_control": cc.clone(),
             })]);
-            return Some(InsertKind::NewTextBlock);
+            return Some(MarkerPlacement {
+                kind: InsertKind::NewTextBlock,
+                message,
+                block: 0,
+            });
         }
 
         let Some(blocks) = content.as_array_mut() else {
             continue;
         };
-        for block in blocks.iter_mut().rev() {
-            let Some(map) = block.as_object_mut() else {
+        for (block, value) in blocks.iter_mut().enumerate().rev() {
+            let Some(map) = value.as_object_mut() else {
                 continue;
             };
             let is_eligible = map
@@ -510,10 +581,18 @@ fn insert_marker_on_candidate(messages: &mut [Value], cc: &Value) -> Option<Inse
                 // Already caches at/after this point; adding would
                 // duplicate and risk the breakpoint cap. Top-level
                 // removal alone is the fix here.
-                return Some(InsertKind::AlreadyMarked);
+                return Some(MarkerPlacement {
+                    kind: InsertKind::AlreadyMarked,
+                    message,
+                    block,
+                });
             }
             map.insert("cache_control".into(), cc.clone());
-            return Some(InsertKind::ExistingBlock);
+            return Some(MarkerPlacement {
+                kind: InsertKind::ExistingBlock,
+                message,
+                block,
+            });
         }
     }
     None
@@ -646,6 +725,11 @@ mod beta_merge_tests;
 #[cfg(test)]
 #[path = "invoke_drop_counter_tests.rs"]
 mod drop_counter_tests;
+
+// Each body edit this seam makes is declared on the attempt's wire tap.
+#[cfg(test)]
+#[path = "invoke_wire_edits_tests.rs"]
+mod wire_edits_tests;
 
 #[cfg(test)]
 mod tests {

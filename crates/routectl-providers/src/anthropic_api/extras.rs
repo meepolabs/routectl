@@ -16,6 +16,7 @@
 
 use serde_json::Value;
 
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
 
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
@@ -703,8 +704,9 @@ pub(super) fn reconcile_sampling_params(provider_id: &str, req: &ChatRequest, bo
     let Some(obj) = body.as_object_mut() else {
         return;
     };
-    let temp_changed = set_optional_f64(obj, "temperature", temperature);
-    let top_p_changed = set_optional_f64(obj, "top_p", top_p);
+    let tap = super::wire_edits::tap_of(req);
+    let temp_changed = set_optional_f64(obj, "temperature", temperature, tap);
+    let top_p_changed = set_optional_f64(obj, "top_p", top_p, tap);
     if temp_changed || top_p_changed {
         tracing::debug!(
             provider = provider_id,
@@ -741,9 +743,12 @@ const OAUTH_OWN_ANTHROPIC_LANE: &str = "oauth-own-anthropic";
 /// sampling by allowlist already, so calling it there would only multiply
 /// events on a path Claude Code polls heavily, breaking the one-event-per-
 /// request contract.
-pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) {
+///
+/// Returns the top-level keys it removed, so the dispatch site can declare
+/// them.
+pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) -> Vec<&'static str> {
     let Some(obj) = body.as_object_mut() else {
-        return;
+        return Vec::new();
     };
     let mut dropped: Vec<&'static str> = Vec::new();
     if obj.remove("temperature").is_some() {
@@ -753,7 +758,7 @@ pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) {
         dropped.push("top_p");
     }
     if dropped.is_empty() {
-        return;
+        return dropped;
     }
     tracing::debug!(
         provider = provider_id,
@@ -761,29 +766,39 @@ pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) {
         dropped_params = dropped.join(","),
         "stripped sampling params the OAuth seat rejects on api.anthropic.com"
     );
+    dropped
 }
 
 /// Set `key` to `value` on `obj`, or remove it when `value` is None
 /// (mirroring the wire's `skip_serializing_if = "Option::is_none"`).
 /// Returns true iff the emitted field actually changed, so the caller only
-/// logs a real correction.
+/// logs a real correction; a change is declared on `tap`.
 fn set_optional_f64(
     obj: &mut serde_json::Map<String, Value>,
-    key: &str,
+    key: &'static str,
     value: Option<f64>,
+    tap: Option<&WireTap>,
 ) -> bool {
-    match value {
+    let kind = match value {
         Some(v) => {
             let next = Value::from(v);
             if obj.get(key) == Some(&next) {
-                false
-            } else {
-                obj.insert(key.to_string(), next);
-                true
+                return false;
+            }
+            match obj.insert(key.to_string(), next) {
+                Some(_) => EditKind::Rewrite,
+                None => EditKind::Add,
             }
         }
-        None => obj.remove(key).is_some(),
-    }
+        None => {
+            if obj.remove(key).is_none() {
+                return false;
+            }
+            EditKind::Remove
+        }
+    };
+    super::wire_edits::declare(tap, EditSite::SamplingReconcile, format!("/{key}"), kind);
+    true
 }
 
 /// Remove `output_config.effort` from `body`, preserving any orthogonal
@@ -824,7 +839,11 @@ fn remove_output_config_effort(body: &mut Value) {
 /// final wire body, regardless of whether `thinking` was composed by
 /// `build_thinking` or layered in by some future provider-extras path
 /// that bypasses `is_routectl_managed_key`.
-pub(super) fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body: &mut Value) {
+pub(super) fn strip_thinking_when_tool_choice_forces_use(
+    provider_id: &str,
+    body: &mut Value,
+    tap: Option<&WireTap>,
+) {
     let Some(obj) = body.as_object_mut() else {
         return;
     };
@@ -846,6 +865,12 @@ pub(super) fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body
         return;
     };
     obj.remove("thinking");
+    super::wire_edits::declare(
+        tap,
+        EditSite::ThinkingStripForcedToolUse,
+        "/thinking",
+        EditKind::Remove,
+    );
     tracing::debug!(
         provider = provider_id,
         tool_choice_type = %sanitize_for_log(&ttype),

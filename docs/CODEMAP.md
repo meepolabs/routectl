@@ -896,6 +896,10 @@ license.
   pass over case-folded text in fixed-size windows), plus the list's
   count and folded-length bounds (`validate_sensitive_words`,
   `MAX_SENSITIVE_WORDS`, `MAX_SENSITIVE_WORD_FOLDED_CHARS`)
+- `src/anthropic_api/wire_edits.rs` -- content-free declarations of the
+  request-body edits the anthropic-api and Bedrock Invoke egresses make,
+  onto the attempt's `WireTap` (`declare`, the cloak `CloakView` /
+  `ToolNames` snapshots taken only when a tap is present)
 
 ### openai_compat
 

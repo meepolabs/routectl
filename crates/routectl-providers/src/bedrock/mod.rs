@@ -334,12 +334,19 @@ impl BedrockProvider {
 
         let url = self.inference_url(false);
 
-        let body_str = serde_json::to_vec(&body)
-            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
+        let body_str = bytes::Bytes::from(
+            serde_json::to_vec(&body)
+                .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?,
+        );
+        let tap = crate::anthropic_api::wire_edits::tap_of(req);
+        let sent_copy = tap.map(|_| body_str.clone());
 
         let request = self
             .build_signed_request(body_str, req, &url, "application/json")
             .await?;
+        if let (Some(tap), Some(sent)) = (tap, sent_copy) {
+            tap.deposit(sent);
+        }
 
         let resp = self
             .client
@@ -434,12 +441,19 @@ impl BedrockProvider {
 
         let url = self.inference_url(true);
 
-        let body_str = serde_json::to_vec(&body)
-            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
+        let body_str = bytes::Bytes::from(
+            serde_json::to_vec(&body)
+                .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?,
+        );
+        let tap = crate::anthropic_api::wire_edits::tap_of(req);
+        let sent_copy = tap.map(|_| body_str.clone());
 
         let request = self
             .build_signed_request(body_str, req, &url, "application/vnd.amazon.eventstream")
             .await?;
+        if let (Some(tap), Some(sent)) = (tap, sent_copy) {
+            tap.deposit(sent);
+        }
 
         let resp = self
             .client
@@ -525,8 +539,10 @@ impl BedrockProvider {
             self.runtime_origin,
             endpoint::count_tokens_path(&self.cfg.model_id)
         );
-        let body_str = serde_json::to_vec(&body)
-            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
+        let body_str = bytes::Bytes::from(
+            serde_json::to_vec(&body)
+                .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?,
+        );
         let request = self
             .build_signed_request(body_str, req, &url, "application/json")
             .await?;
@@ -620,7 +636,7 @@ impl BedrockProvider {
     /// 5. Emit the dir-2 outgoing header trace.
     async fn build_signed_request(
         &self,
-        body_str: Vec<u8>,
+        body_str: bytes::Bytes,
         req: &ChatRequest,
         url: &str,
         accept: &str,
@@ -1159,6 +1175,11 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &UpstreamBody, 
 #[cfg(test)]
 #[path = "redirect_tests.rs"]
 mod redirect_tests;
+
+// Each send site deposits exactly the bytes the upstream received.
+#[cfg(test)]
+#[path = "wire_tap_tests.rs"]
+mod wire_tap_tests;
 
 #[cfg(test)]
 #[path = "error_parse_tests.rs"]

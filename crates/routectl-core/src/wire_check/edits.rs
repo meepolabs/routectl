@@ -78,6 +78,9 @@ pub enum EditSite {
     ClaudeSamplingNormalize,
     /// Provider: reconciliation of mutually exclusive sampling parameters.
     SamplingReconcile,
+    /// Provider: sampling parameters pinned to the values thinking mode
+    /// requires.
+    ThinkingSamplingClamp,
     /// Provider: thinking removed because `tool_choice` forces tool use.
     ThinkingStripForcedToolUse,
     /// Provider: the body `stream` flag removed.
@@ -160,7 +163,7 @@ pub enum EditSite {
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 48] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -174,6 +177,7 @@ impl EditSite {
         Self::Cloak,
         Self::ClaudeSamplingNormalize,
         Self::SamplingReconcile,
+        Self::ThinkingSamplingClamp,
         Self::ThinkingStripForcedToolUse,
         Self::StreamStrip,
         Self::AnthropicBetaStrip,
@@ -226,6 +230,7 @@ impl EditSite {
             Self::Cloak => "cloak",
             Self::ClaudeSamplingNormalize => "claude_sampling_normalize",
             Self::SamplingReconcile => "sampling_reconcile",
+            Self::ThinkingSamplingClamp => "thinking_sampling_clamp",
             Self::ThinkingStripForcedToolUse => "thinking_strip_forced_tool_use",
             Self::StreamStrip => "stream_strip",
             Self::AnthropicBetaStrip => "anthropic_beta_strip",
