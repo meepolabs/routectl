@@ -20,23 +20,25 @@ use serde_json::Value;
 
 use super::class_observe::upstream_facts;
 use super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR;
-use super::rejection_parser::{REJECTION_STATUSES, RejectedWirePath, rejected_wire_path};
+use super::rejection_parser::{REJECTION_STATUSES, RawPath, RejectedWirePath, rejected_wire_path};
 use super::wire_check::{SampleCharge, attempt_lane, compare_request, lend_request_record};
 use super::{DispatchMeta, DispatchTarget, FieldRepair, Router};
 use crate::wire_check_state::F1Outcome;
 
 /// One rejected attempt, classified before any repair touched its request
 /// and waiting for the field-repair outcome. Holds no body content: a
-/// sanitized pointer, closed labels, the target's sanitized state key and
-/// a position in the request's repair records.
+/// sanitized pointer, the unmasked field path the join needs (never
+/// rendered, opaque to `Debug`), closed labels, the target's sanitized state
+/// key and a position in the request's repair records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWireRejection {
     lane: Lane,
     /// Where the rejection says the field sits in the request body; the
     /// root pointer when it named no path.
     path: WirePath,
-    /// The canonical field path a repair record names, when localized.
-    field: Option<WirePath>,
+    /// The canonical field path a repair record names, unmasked, when
+    /// localized. Joined against repair records only; `path` is what renders.
+    field: Option<RawPath>,
     provenance: RejectionProvenance,
     state_key: String,
     /// How many repair records the request held when the rejection
@@ -168,7 +170,7 @@ const UNION_TAG: &str = "type";
 /// for the same field recorded at or after the rejection. A repair whose
 /// retry did not succeed left the rejection unrepaired.
 fn f1_outcome(pending: &PendingWireRejection, repairs: &[FieldRepair]) -> F1Outcome {
-    let Some(field) = pending.field.as_ref().filter(|field| !field.is_coarsened()) else {
+    let Some(field) = pending.field.as_ref() else {
         return F1Outcome::Unrepaired;
     };
     let repair = repairs

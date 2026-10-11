@@ -174,3 +174,32 @@ async fn a_stream_failing_after_first_content_keeps_its_charge() {
         "the failed stream spent the only first-N slot"
     );
 }
+
+#[tokio::test]
+async fn a_retry_on_the_same_target_is_charged_once_after_the_failed_attempt_gives_back() {
+    // Only the complete surface retries a target in place; a stream walks on.
+    let provider = Arc::new(ScriptedProvider::new([Step::Fail, Step::ServeLosing]));
+    let router = router_retrying(
+        2,
+        "first_n = 2\nsample_one_in = 1000",
+        vec![provider.clone()],
+    );
+
+    let mut checked = Vec::new();
+    for _ in 0..3 {
+        dispatch(&router, Surface::Complete, anthropic_request()).await;
+        checked.push(loss_checks(&router));
+    }
+
+    assert_eq!(
+        *provider.calls.lock(),
+        4,
+        "premise: only the first 503 was retried"
+    );
+    assert_eq!(
+        checked,
+        [1, 2, 2],
+        "the failed attempt gives its slot back and the retry takes one, so the next \
+         request gets the second first-N slot and the one after it gets none"
+    );
+}

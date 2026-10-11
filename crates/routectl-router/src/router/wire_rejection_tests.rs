@@ -8,17 +8,24 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::stream::{self, BoxStream, StreamExt};
-use routectl_core::wire_check::{IngressDialect, IngressWire};
+use routectl_core::wire_check::{
+    EgressKind, IngressDialect, IngressWire, Lane, RejectionProvenance,
+};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Error, Message,
     MessageContent, Provider, Result, Role,
 };
 use serde_json::{Value, json};
 
-use super::super::field_repair::{TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL};
+use super::super::field_repair::{
+    FIELD_ACTION_DROP_REPAIR, FIELD_REASON_UPSTREAM_REJECTION, TEST_UNSUPPORTED_PATH,
+    TEST_UNSUPPORTED_SENTINEL,
+};
+use super::super::rejection_parser::rejected_wire_path;
+use super::PendingWireRejection;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
-use crate::router::{Router, RouterOptions};
+use crate::router::{DispatchMeta, FieldRepair, Router, RouterOptions};
 use crate::wire_check_state::{CheckOutcome, F1Outcome, WireCheckSnapshot};
 
 const ALIAS: &str = "a";
@@ -452,4 +459,80 @@ async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns(
             assert_eq!(warned, warns, "{surface:?} {name}");
         }
     }
+}
+
+const CONTAINER_KEY_PATH: &str = "metadata.user_id";
+const CONTAINER_KEY: &str = "user_id";
+const STATE_KEY: &str = "p0";
+
+/// A pending rejection for an anthropic-api 400 naming `metadata.user_id`,
+/// recorded before any repair.
+fn container_key_rejection() -> PendingWireRejection {
+    let err = rejection(CONTAINER_KEY_PATH, REFUSED_FIELD);
+    let named = rejected_wire_path("anthropic-api", 400, err.parsed_body())
+        .expect("premise: the rejection localizes");
+    PendingWireRejection {
+        lane: Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi),
+        path: named.wire,
+        field: Some(named.field),
+        provenance: RejectionProvenance::ClientUnchanged,
+        state_key: STATE_KEY.to_string(),
+        repairs_before: 0,
+    }
+}
+
+fn repair_of(field_path: &'static str, succeeded: bool) -> FieldRepair {
+    FieldRepair {
+        action: FIELD_ACTION_DROP_REPAIR,
+        state_key: STATE_KEY.to_string(),
+        field_path,
+        reason: FIELD_REASON_UPSTREAM_REJECTION,
+        repair_attempted: true,
+        repair_succeeded: succeeded,
+        learned: false,
+    }
+}
+
+#[test]
+fn a_rejected_container_key_joins_its_repair_by_the_unmasked_field() {
+    let rows: [(&str, Vec<FieldRepair>, F1Outcome); 3] = [
+        (
+            "a successful repair of the same key",
+            vec![repair_of(CONTAINER_KEY_PATH, true)],
+            F1Outcome::Repaired,
+        ),
+        ("no repair", vec![], F1Outcome::Unrepaired),
+        (
+            "a successful repair of a sibling key",
+            vec![repair_of("metadata.other_id", true)],
+            F1Outcome::Unrepaired,
+        ),
+    ];
+    for (name, repairs, expected) in rows {
+        let router = router(NEVER_SAMPLED, vec![]);
+        let mut meta = DispatchMeta::for_alias(ALIAS);
+        meta.wire_rejections.push(container_key_rejection());
+        meta.field_repairs = repairs;
+
+        router.emit_wire_rejections(&meta);
+
+        assert_eq!(
+            rejections(&router.wire_check_snapshot()),
+            [("/metadata/*".to_string(), "client_unchanged", expected)],
+            "{name}: the rendered path stays masked"
+        );
+    }
+}
+
+#[test]
+fn a_pending_rejection_debug_never_shows_the_unmasked_key() {
+    let pending = container_key_rejection();
+
+    let rendered = format!("{pending:?}");
+
+    assert!(
+        rendered.contains("/metadata/*"),
+        "premise: the masked path renders: {rendered}"
+    );
+    assert!(!rendered.contains(CONTAINER_KEY), "{rendered}");
 }

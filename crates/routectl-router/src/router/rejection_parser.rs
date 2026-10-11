@@ -29,6 +29,8 @@
 //! fills it; none or several leave it empty, so a rewrite never picks between
 //! candidates.
 
+use std::fmt;
+
 use routectl_core::capability::SignalTier;
 use routectl_core::wire_check::WirePath;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
@@ -120,12 +122,38 @@ pub(super) struct RejectedWirePath {
     /// indices kept, sanitized for logging.
     pub(super) wire: WirePath,
     /// The same location unmasked, one segment per key or index, to look up
-    /// in a wire body. Every key is a bounded identifier-byte name; never
-    /// logged or rendered.
-    pub(super) locator: Vec<String>,
-    /// The canonical field path: indices dropped and, on Bedrock, the
-    /// Converse field bag removed -- the shape a closed-table row path has.
-    pub(super) field: WirePath,
+    /// in a wire body.
+    pub(super) locator: RawPath,
+    /// The canonical field path, unmasked: indices dropped and, on Bedrock,
+    /// the Converse field bag removed -- the shape a closed-table row path
+    /// has, so a repair record can be matched against it.
+    pub(super) field: RawPath,
+}
+
+/// Path segments exactly as a rejection named them, for lookups and joins
+/// only. A key may be client data, so `Debug` prints the segment count and
+/// nothing else, and the segments never reach a rendered surface.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct RawPath(Vec<String>);
+
+impl RawPath {
+    fn new<'s>(segments: impl IntoIterator<Item = &'s str>) -> Self {
+        Self(segments.into_iter().map(str::to_owned).collect())
+    }
+
+    pub(super) fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+
+    pub(super) fn segments(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+}
+
+impl fmt::Debug for RawPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RawPath({} segments)", self.0.len())
+    }
 }
 
 /// The path a rejection names, whether or not the closed table has a row for
@@ -142,8 +170,8 @@ pub(super) fn rejected_wire_path(
         wire: raw_segments
             .iter()
             .fold(WirePath::root(), |path, name| push_raw_name(path, name)),
-        locator: raw_segments.iter().map(|name| (*name).to_owned()).collect(),
-        field: WirePath::from_segments(localized.segments.iter().copied()),
+        locator: RawPath::new(raw_segments.iter().copied()),
+        field: RawPath::new(localized.segments.iter().copied()),
     })
 }
 
