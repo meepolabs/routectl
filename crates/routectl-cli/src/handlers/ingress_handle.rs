@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
+use crate::handlers::ingress_wire::capture_ingress_wire;
 use crate::handlers::opening_meter::{OpeningMeter, StreamTurn};
 use crate::handlers::pure_proxy_admission::enforce_pure_proxy_admission;
 use crate::handlers::usage_capture::{
@@ -123,6 +124,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
         Err(Error::Json(_)) => return render_malformed_body(envelope),
         Err(e) => return map_error(envelope, e),
     };
+    capture_ingress_wire(&headers, &raw_body, &mut req);
 
     // Forwarded-mode capture gate (first-party passthrough): stash the
     // inbound bearer for opt-in relay to the upstream ONLY when the MITM

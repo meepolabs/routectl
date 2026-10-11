@@ -65,6 +65,7 @@ mod state_slots;
 mod status;
 mod sticky;
 mod window_gate;
+mod wire_check;
 pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_health::CapabilityPersistenceHealth;
 pub use capability_learn::CapabilityLearnEvent;
@@ -1873,6 +1874,12 @@ struct DispatchTarget {
     /// when the provider entry could not be looked up (a legacy /
     /// direct-construction path that never set it).
     provider_kind: Option<&'static str>,
+    /// The wire body this target's provider entry sends, derived once at
+    /// chain expansion alongside `provider_kind`, which cannot tell the
+    /// Bedrock shapes or the Mantle sub-lanes apart. Names the live wire
+    /// check's lane; `None` when the provider entry could not be looked up,
+    /// and such a target is never checked.
+    egress_kind: Option<routectl_core::wire_check::EgressKind>,
     /// Per-target replacement for the removed request-global forwarded
     /// check. `true` when this target's provider entry is an
     /// `AnthropicApi` provider with `credential_source: Forwarded`;

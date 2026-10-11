@@ -319,6 +319,7 @@ impl Router {
             // a seat constructor may have already populated).
             target.use_forwarded_credential =
                 provider_entry.is_some_and(|entry| entry.forwarded_base_url().is_some());
+            target.egress_kind = provider_entry.map(super::wire_check::egress_kind_of);
             if target.class_overrides.is_empty()
                 && let Some(entry) = provider_entry
             {
@@ -519,6 +520,7 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
     DispatchTarget {
         provider_name: m.provider_name.clone(),
         provider_kind: None,
+        egress_kind: None,
         use_forwarded_credential: false,
         // v0.6.0 dispatch keys the breaker by nickname so two models
         // on one provider quarantine independently.
@@ -584,6 +586,7 @@ pub(super) fn dispatch_target_for_seat(
     DispatchTarget {
         provider_name: seat.provider_name.clone(),
         provider_kind,
+        egress_kind: None,
         use_forwarded_credential: false,
         state_key: seat.state_key_for(&m.nickname),
         // The member entry, not the OAuth account identity below: the lane is

@@ -52,6 +52,7 @@ use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
+use super::wire_check::install_wire_tap;
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
 
 /// Message/event name of the single aggregated reasoning-replay
@@ -631,6 +632,7 @@ impl Router {
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
+                let wire_tap = install_wire_tap(&mut attempt_req);
                 let result = run_with_timeout(
                     provider_name,
                     provider.as_ref(),
@@ -645,6 +647,7 @@ impl Router {
                     Ok(mut resp) => {
                         self.record_success(state_key);
                         probe_guard.disarm();
+                        self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
                         // Stamp the served upstream provider name only
                         // when the served target opts in
                         // (`visible_routectl_provider`, default true).
@@ -1608,6 +1611,7 @@ impl Router {
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
+                let wire_tap = install_wire_tap(&mut attempt_req);
                 let r = try_stream_with_first_content(
                     provider_name,
                     model,
@@ -1654,6 +1658,7 @@ impl Router {
                         // BreakerAccounting owns the tail. Disarm so a drop here
                         // does not free a slot a later probe may hold.
                         probe_guard.disarm();
+                        self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
                         // First content proves the capability is not rejected:
                         // clear any learned negative this dispatch re-probed,
                         // and ride each clear out on the meta so the ledger

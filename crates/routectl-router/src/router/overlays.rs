@@ -119,7 +119,15 @@ pub(super) fn apply_layered_overlays(
     let captured_originating_claude_code_session =
         req.routectl_internal.originating_claude_code_session;
     let captured_background_probe = req.routectl_internal.background_probe;
+    // The client's body and the edits declared before this attempt are what
+    // the live wire check compares this attempt's egress against: inbound
+    // data, not per-model knobs, so they ride across every chain attempt.
+    // The wire tap is per provider call and is deliberately NOT carried.
+    let captured_ingress_wire = req.routectl_internal.ingress_wire.take();
+    let captured_declared_edits = std::mem::take(&mut req.routectl_internal.declared_edits);
     let mut internal = RoutectlInternal::default();
+    internal.ingress_wire = captured_ingress_wire;
+    internal.declared_edits = captured_declared_edits;
     internal.originating_claude_code_session = captured_originating_claude_code_session;
     internal.background_probe = captured_background_probe;
     internal.reasoning_dialect = target.reasoning_dialect.map(std::convert::Into::into);

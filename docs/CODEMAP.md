@@ -3311,6 +3311,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays`, `operator_betas`, `operator_payload_extras`, the
   `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
+- `src/router/wire_check.rs` -- the live request-leg wire check on a successful
+  attempt: `egress_kind_of` (provider entry -> `EgressKind`, Bedrock shape and
+  Mantle sub-lanes distinct; set once on each `DispatchTarget` at chain
+  expansion), `install_wire_tap` (a fresh `WireTap` per provider call on both
+  surfaces, only when the request carries an ingress body), and
+  `Router::check_request_wire` (after the sampler admits, FIDELITY lanes diff
+  the ingress JSON against the deposit, TRANSLATION lanes diff canonical
+  `provider_extras`; no deposit records `incomplete`). Reads only; never
+  changes the response or fails the attempt
 - `src/router/beta_withhold.rs` -- per-target withheld client beta set
   (`withhold_betas_on_chain`), resolved pin > override > learned > seed; a
   seed-clear marker on the cell stops the seed withholding; a lapsed learned
@@ -6143,6 +6152,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   An `Error::LocalRefusal` renders as a 400 `invalid_request_error` whose
   envelope and stream terminal match an upstream 400 carrying the same
   refusal (pinned in `local_refusal_envelope_tests.rs`)
+- `src/handlers/ingress_wire.rs` -- `capture_ingress_wire`: right after parse,
+  attaches the posted body (refcount), its dialect (from `provenance`) and the
+  client version (stable Claude CLI version, else the first safe
+  user-agent `product/version` token) as `routectl_internal.ingress_wire`
 - `src/handlers/pure_proxy_metrics.rs` -- forwarded-mode (pure-proxy) ingress
   admission-rejection counter + structured rejection log.
   `PureProxyRejectionReason` (closed 2-variant enum: `TokenMissing` /
