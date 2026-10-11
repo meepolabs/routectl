@@ -256,3 +256,173 @@ fn moved_breakpoint_collapses_into_one_already_on_the_anchor() {
         "got {blocks:?}"
     );
 }
+
+fn seam_signed_reasoning_assistant(text: &str) -> Message {
+    Message {
+        reasoning_details: vec![ReasoningDetail {
+            kind: ReasoningDetailKind::Text,
+            id: Some("d0".into()),
+            format: Some(ANTHROPIC_FORMAT.into()),
+            index: Some(0),
+            payload: serde_json::json!({"text": "plan", "signature": "sig"}),
+        }],
+        ..st_assistant(text)
+    }
+}
+
+/// Wire type tag of every block in `msg`, in order; a string carrier reads
+/// as one text block.
+fn seam_block_kinds(msg: &AnthropicMessage) -> Vec<&'static str> {
+    match &msg.content {
+        AnthropicContent::Text(_) => vec!["text"],
+        AnthropicContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Text { .. } => "text",
+                ContentBlock::Thinking { .. } => "thinking",
+                ContentBlock::RedactedThinking { .. } => "redacted_thinking",
+                ContentBlock::ToolResult { .. } => "tool_result",
+                ContentBlock::ToolUse { .. } => "tool_use",
+                _ => "other",
+            })
+            .collect(),
+    }
+}
+
+/// A merge that would need a reorder to be legal is skipped: a tool_result
+/// run after a user text turn, and an assistant turn opening with signed
+/// thinking after an assistant text turn, each stay two messages in their
+/// original block order. Each skip is counted on the screen line, and the
+/// ledger verify inside `translate_messages` would fail the call if a
+/// skipped merge were charged as a merge.
+#[test]
+fn merge_across_a_dropped_turn_is_skipped_when_it_would_need_a_reorder() {
+    let cases: [(&str, Message, Message, &str, Vec<&str>); 2] = [
+        (
+            "user text / empty / tool_result",
+            st_user("prior text"),
+            st_tool("call_1", "result"),
+            "user",
+            vec!["tool_result"],
+        ),
+        (
+            "assistant text / empty / assistant thinking",
+            st_assistant("old text"),
+            seam_signed_reasoning_assistant("new text"),
+            "assistant",
+            vec!["thinking", "text"],
+        ),
+    ];
+    for (name, before, after, role, after_kinds) in cases {
+        // Arrange
+        let messages = vec![before, st_system(MessageContent::Parts(vec![])), after];
+
+        // Act
+        let mut out = Vec::new();
+        let events = capture_events(|| out = st_forward(&messages));
+
+        // Assert
+        assert_eq!(st_roles(&out), vec![role, role], "{name}");
+        assert_eq!(seam_block_kinds(&out[0]), vec!["text"], "{name}");
+        assert_eq!(seam_block_kinds(&out[1]), after_kinds, "{name}");
+        let line = events
+            .iter()
+            .find(|e| e.field("system_turn_merges_skipped").is_some())
+            .unwrap_or_else(|| panic!("{name}: no screen line: {events:?}"));
+        assert_eq!(
+            line.field("system_turn_merges_skipped"),
+            Some("1"),
+            "{name}"
+        );
+    }
+}
+
+/// Positive control for the skip: merges that stay legal without a reorder
+/// still fire. A tool_result run joins a preceding tool_result-only user
+/// message, a user text joins after a tool_result, and an assistant turn
+/// whose thinking sits in the EARLIER message keeps it first.
+#[test]
+fn merge_across_a_dropped_turn_still_fires_when_order_stays_legal() {
+    let cases: [(&str, Vec<Message>, &str, Vec<&str>); 3] = [
+        (
+            "tool_result / empty / tool_result",
+            vec![
+                st_tool("call_1", "one"),
+                st_system(MessageContent::Parts(vec![])),
+                st_tool("call_2", "two"),
+            ],
+            "user",
+            vec!["tool_result", "tool_result"],
+        ),
+        (
+            "tool_result / empty / user text",
+            vec![
+                st_tool("call_1", "one"),
+                st_system(MessageContent::Parts(vec![])),
+                st_user("follow-up"),
+            ],
+            "user",
+            vec!["tool_result", "text"],
+        ),
+        (
+            "assistant thinking / empty / assistant text",
+            vec![
+                seam_signed_reasoning_assistant("first"),
+                st_system(MessageContent::Parts(vec![])),
+                st_assistant("second"),
+            ],
+            "assistant",
+            vec!["thinking", "text", "text"],
+        ),
+    ];
+    for (name, messages, role, kinds) in cases {
+        // Act
+        let mut out = Vec::new();
+        let events = capture_events(|| out = st_forward(&messages));
+
+        // Assert
+        assert_eq!(st_roles(&out), vec![role], "{name}");
+        assert_eq!(seam_block_kinds(&out[0]), kinds, "{name}");
+        let line = events
+            .iter()
+            .find(|e| e.field("system_turn_merges_skipped").is_some())
+            .unwrap_or_else(|| panic!("{name}: no screen line: {events:?}"));
+        assert_eq!(
+            line.field("system_turn_merges_skipped"),
+            Some("0"),
+            "{name}"
+        );
+    }
+}
+
+/// A skipped merge still keeps the dropped turn's breakpoint: it lands on
+/// the preceding message's last block, and the request carries exactly one.
+#[test]
+fn dropped_turn_breakpoint_moves_when_the_merge_is_skipped() {
+    // Arrange
+    let messages = vec![
+        st_user("prior text"),
+        seam_blank_cached_turn(),
+        st_tool("call_1", "result"),
+    ];
+
+    // Act
+    let out = st_forward(&messages);
+
+    // Assert
+    assert_eq!(st_roles(&out), vec!["user", "user"]);
+    let AnthropicContent::Blocks(blocks) = &out[0].content else {
+        panic!(
+            "the anchor message must be in block form: {:?}",
+            out[0].content
+        );
+    };
+    assert!(
+        matches!(
+            &blocks[..],
+            [ContentBlock::Text { text, cache_control: Some(_), .. }] if text == "prior text"
+        ),
+        "got {blocks:?}"
+    );
+    assert_eq!(seam_breakpoint_count(&out), 1);
+}

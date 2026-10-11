@@ -1248,6 +1248,7 @@ struct SystemTurnTally<'a> {
     empty_turns_dropped: usize,
     breakpoints_moved: usize,
     breakpoints_dropped: usize,
+    merges_skipped: usize,
 }
 
 impl<'a> SystemTurnTally<'a> {
@@ -1260,6 +1261,7 @@ impl<'a> SystemTurnTally<'a> {
             empty_turns_dropped: 0,
             breakpoints_moved: 0,
             breakpoints_dropped: 0,
+            merges_skipped: 0,
         }
     }
 
@@ -1277,6 +1279,10 @@ impl<'a> SystemTurnTally<'a> {
 
     const fn record_empty_dropped_turn(&mut self) {
         self.empty_turns_dropped = self.empty_turns_dropped.saturating_add(1);
+    }
+
+    const fn record_merges_skipped(&mut self, skipped: usize) {
+        self.merges_skipped = self.merges_skipped.saturating_add(skipped);
     }
 
     const fn record_breakpoint(&mut self, fate: BreakpointFate) {
@@ -1307,6 +1313,7 @@ impl<'a> SystemTurnTally<'a> {
                 system_turns_dropped_empty = self.empty_turns_dropped,
                 system_turn_breakpoints_moved = self.breakpoints_moved,
                 system_turn_breakpoints_dropped = self.breakpoints_dropped,
+                system_turn_merges_skipped = self.merges_skipped,
                 "anthropic-api egress: forwarded Role::System turns screened; Claude Code \
                  billing/attribution blocks are dropped, and a turn left with no content, \
                  or arriving empty or blank-text-only, is omitted entirely",
@@ -1463,6 +1470,7 @@ fn translate_messages_threaded(
             }
         }
     }
+    system_turns.record_merges_skipped(wire.merges_skipped);
     Ok((wire.messages, ledger))
 }
 
@@ -1473,9 +1481,14 @@ fn translate_messages_threaded(
 /// assistant/assistant pair the caller did not send. Mirrors
 /// `build_tool_message`: real Anthropic combines consecutive same-role turns
 /// server-side, but a strict Anthropic-compatible gateway rejects them.
+///
+/// The merge is best-effort: when joining the two would need a reorder to
+/// be legal (see `merge_keeps_block_order_legal`), the pair is left
+/// adjacent, the same shape a caller-sent same-role pair ships as.
 struct WireMessages {
     messages: Vec<AnthropicMessage>,
     after_dropped_system_turn: bool,
+    merges_skipped: usize,
 }
 
 /// Where a cache breakpoint carried by a dropped system turn ended up.
@@ -1493,6 +1506,7 @@ impl WireMessages {
         Self {
             messages: Vec::with_capacity(capacity),
             after_dropped_system_turn: false,
+            merges_skipped: 0,
         }
     }
 
@@ -1502,6 +1516,11 @@ impl WireMessages {
             && let Some(last) = self.messages.last_mut()
             && is_same_conversational_role(&last.role, &msg.role)
         {
+            if !merge_keeps_block_order_legal(last, &msg) {
+                self.merges_skipped += 1;
+                self.messages.push(msg);
+                return;
+            }
             let mut blocks = content_into_blocks(std::mem::replace(
                 &mut last.content,
                 AnthropicContent::Blocks(Vec::new()),
@@ -1561,6 +1580,47 @@ const fn is_same_conversational_role(a: &AnthropicRole, b: &AnthropicRole) -> bo
         (a, b),
         (AnthropicRole::User, AnthropicRole::User)
             | (AnthropicRole::Assistant, AnthropicRole::Assistant)
+    )
+}
+
+/// Whether appending `later`'s blocks to `earlier` yields a message Anthropic
+/// accepts without reordering anything: `tool_result` blocks must lead a
+/// user message, and thinking blocks must lead an assistant message. Thinking
+/// already in `earlier` stays first, so only `later` is checked for it.
+fn merge_keeps_block_order_legal(earlier: &AnthropicMessage, later: &AnthropicMessage) -> bool {
+    match later.role {
+        AnthropicRole::User => {
+            !(starts_with_tool_result(&later.content) && has_non_tool_result(&earlier.content))
+        }
+        AnthropicRole::Assistant => !has_thinking(&later.content),
+        AnthropicRole::System => true,
+    }
+}
+
+fn starts_with_tool_result(content: &AnthropicContent) -> bool {
+    matches!(
+        content,
+        AnthropicContent::Blocks(blocks)
+            if matches!(blocks.first(), Some(ContentBlock::ToolResult { .. }))
+    )
+}
+
+fn has_non_tool_result(content: &AnthropicContent) -> bool {
+    match content {
+        AnthropicContent::Text(text) => !text.is_empty(),
+        AnthropicContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| !matches!(b, ContentBlock::ToolResult { .. })),
+    }
+}
+
+fn has_thinking(content: &AnthropicContent) -> bool {
+    matches!(
+        content,
+        AnthropicContent::Blocks(blocks) if blocks.iter().any(|b| matches!(
+            b,
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+        ))
     )
 }
 
