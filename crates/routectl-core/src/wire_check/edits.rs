@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 
 use super::path::{MAX_WIRE_PATH_DEPTH, MAX_WIRE_PATH_LEN, WILDCARD_SEGMENT, WirePath};
+use crate::safe_token::is_safe_token;
 
 /// Patterns that would exempt a whole container from detection. A transform
 /// that broke anything under one of these would otherwise go unseen.
@@ -107,11 +108,30 @@ pub enum EditSite {
     StreamEnvelopeStamp,
     /// Response: cached-token usage added.
     CachedTokensAdd,
+    /// Response: Chat Completions envelope fields stamped onto a complete
+    /// body.
+    ResponseEnvelopeStamp,
+    /// Response: the upstream model id replaced by the client-visible label.
+    ResponseModelRelabel,
+    /// Response: the serving provider's name added to a complete body.
+    ProviderAttributionAdd,
+    /// Response: the Anthropic `stop_details` and `upstream_meta` top-level
+    /// members withheld from the client.
+    AnthropicResponseExtrasStrip,
+    /// Response: missing token counts filled on the closing Anthropic
+    /// `message_delta` usage.
+    AnthropicStreamUsageFill,
+    /// Response: the Responses `status` and `incomplete_details` rebuilt
+    /// from the canonical finish reason.
+    ResponsesStatusRewrite,
+    /// Response: stream frames arriving after the terminal frame, or a
+    /// repeated stop reason, withheld from the client.
+    StreamStragglerDrop,
 }
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 35] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -140,6 +160,13 @@ impl EditSite {
         Self::FinishReasonRewrite,
         Self::StreamEnvelopeStamp,
         Self::CachedTokensAdd,
+        Self::ResponseEnvelopeStamp,
+        Self::ResponseModelRelabel,
+        Self::ProviderAttributionAdd,
+        Self::AnthropicResponseExtrasStrip,
+        Self::AnthropicStreamUsageFill,
+        Self::ResponsesStatusRewrite,
+        Self::StreamStragglerDrop,
     ];
 
     /// Static label for logs and counters.
@@ -173,6 +200,13 @@ impl EditSite {
             Self::FinishReasonRewrite => "finish_reason_rewrite",
             Self::StreamEnvelopeStamp => "stream_envelope_stamp",
             Self::CachedTokensAdd => "cached_tokens_add",
+            Self::ResponseEnvelopeStamp => "response_envelope_stamp",
+            Self::ResponseModelRelabel => "response_model_relabel",
+            Self::ProviderAttributionAdd => "provider_attribution_add",
+            Self::AnthropicResponseExtrasStrip => "anthropic_response_extras_strip",
+            Self::AnthropicStreamUsageFill => "anthropic_stream_usage_fill",
+            Self::ResponsesStatusRewrite => "responses_status_rewrite",
+            Self::StreamStragglerDrop => "stream_straggler_drop",
         }
     }
 }
@@ -187,8 +221,9 @@ pub enum EditPatternError {
     /// The pattern is not an RFC 6901 pointer (it does not start with `/`).
     #[error("edit pattern is not a JSON pointer")]
     NotAPointer,
-    /// The pattern can never match a [`WirePath`]: an empty or non-token
-    /// segment, or more segments or bytes than a path carries.
+    /// The pattern can never match a [`WirePath`]: a malformed `~` escape,
+    /// a segment that decodes to an empty or non-token key, or more segments
+    /// or bytes than a path carries.
     #[error("edit pattern can never match a wire path")]
     Unmatchable,
 }
@@ -258,14 +293,38 @@ fn validate_pattern(pattern: &str) -> Result<(), EditPatternError> {
     };
     let matchable = pattern.len() <= MAX_WIRE_PATH_LEN
         && rest.split('/').count() <= MAX_WIRE_PATH_DEPTH
-        && rest
-            .split('/')
-            .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic()));
+        && rest.split('/').all(segment_can_match);
     if matchable {
         Ok(())
     } else {
         Err(EditPatternError::Unmatchable)
     }
+}
+
+/// A [`WirePath`] renders every non-token key as the wildcard, so a pattern
+/// segment can match only the wildcard itself or the escape of a key that
+/// passes [`is_safe_token`].
+fn segment_can_match(segment: &str) -> bool {
+    segment == WILDCARD_SEGMENT || decode_segment(segment).is_some_and(|key| is_safe_token(&key))
+}
+
+/// Decode one RFC 6901 segment; `None` when a `~` is not followed by `0` or
+/// `1`.
+fn decode_segment(segment: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(segment.len());
+    let mut chars = segment.chars();
+    while let Some(c) = chars.next() {
+        if c == '~' {
+            match chars.next()? {
+                '0' => decoded.push('~'),
+                '1' => decoded.push('/'),
+                _ => return None,
+            }
+        } else {
+            decoded.push(c);
+        }
+    }
+    Some(decoded)
 }
 
 /// How a path differs between the two bodies a check compares. Closed; it is

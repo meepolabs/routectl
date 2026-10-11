@@ -3047,6 +3047,8 @@ impl<T> tracing::instrument::Instrument for routectl_core::wire_check::EditPatte
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::EditPatternError
 pub enum routectl_core::wire_check::EditSite
 pub routectl_core::wire_check::EditSite::AnthropicBetaStrip
+pub routectl_core::wire_check::EditSite::AnthropicResponseExtrasStrip
+pub routectl_core::wire_check::EditSite::AnthropicStreamUsageFill
 pub routectl_core::wire_check::EditSite::AuthSurfaceGate
 pub routectl_core::wire_check::EditSite::CacheMarkerLowering
 pub routectl_core::wire_check::EditSite::CachePlacement
@@ -3064,18 +3066,23 @@ pub routectl_core::wire_check::EditSite::ModelRename
 pub routectl_core::wire_check::EditSite::OperatorPayloadExtras
 pub routectl_core::wire_check::EditSite::PrefixRewrite
 pub routectl_core::wire_check::EditSite::Preflight
+pub routectl_core::wire_check::EditSite::ProviderAttributionAdd
 pub routectl_core::wire_check::EditSite::ReplayStrip
+pub routectl_core::wire_check::EditSite::ResponseEnvelopeStamp
+pub routectl_core::wire_check::EditSite::ResponseModelRelabel
 pub routectl_core::wire_check::EditSite::ResponsesPassthroughSplice
+pub routectl_core::wire_check::EditSite::ResponsesStatusRewrite
 pub routectl_core::wire_check::EditSite::SamplingReconcile
 pub routectl_core::wire_check::EditSite::SignatureStrip
 pub routectl_core::wire_check::EditSite::StreamEnvelopeStamp
 pub routectl_core::wire_check::EditSite::StreamOptionsInjection
+pub routectl_core::wire_check::EditSite::StreamStragglerDrop
 pub routectl_core::wire_check::EditSite::StreamStrip
 pub routectl_core::wire_check::EditSite::ThinkingStripForcedToolUse
 pub routectl_core::wire_check::EditSite::ToolIdSanitize
 pub routectl_core::wire_check::EditSite::UrlFieldRelocate
 impl routectl_core::wire_check::EditSite
-pub const routectl_core::wire_check::EditSite::ALL: [Self; 28]
+pub const routectl_core::wire_check::EditSite::ALL: [Self; 35]
 pub const fn routectl_core::wire_check::EditSite::label(self) -> &'static str
 impl core::clone::Clone for routectl_core::wire_check::EditSite
 pub fn routectl_core::wire_check::EditSite::clone(&self) -> routectl_core::wire_check::EditSite
@@ -3426,11 +3433,16 @@ pub fn routectl_core::wire_check::RejectionProvenance::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::wire_check::RejectionProvenance
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::RejectionProvenance
 pub struct routectl_core::wire_check::AttemptRecord<'a>
-pub routectl_core::wire_check::AttemptRecord::canonical: &'a routectl_core::schema::ChatRequest
-pub routectl_core::wire_check::AttemptRecord::edits: &'a [routectl_core::wire_check::DeclaredEdit]
-pub routectl_core::wire_check::AttemptRecord::egress: core::option::Option<&'a bytes::bytes::Bytes>
-pub routectl_core::wire_check::AttemptRecord::ingress: &'a routectl_core::wire_check::IngressWire
-pub routectl_core::wire_check::AttemptRecord::rejection: core::option::Option<&'a routectl_core::error::Error>
+impl<'a> routectl_core::wire_check::AttemptRecord<'a>
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::canonical(&self) -> &'a routectl_core::schema::ChatRequest
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::edits(&self, routectl_core::wire_check::Leg) -> &'a [routectl_core::wire_check::DeclaredEdit]
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::egress(&self) -> core::option::Option<&'a bytes::bytes::Bytes>
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::ingress(&self) -> &'a routectl_core::wire_check::IngressWire
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::new(&'a routectl_core::wire_check::IngressWire, &'a routectl_core::schema::ChatRequest, core::option::Option<&'a bytes::bytes::Bytes>, &'a [routectl_core::wire_check::DeclaredEdit]) -> Self
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::rejection(&self) -> core::option::Option<&'a routectl_core::error::Error>
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::upstream_response(&self) -> core::option::Option<&'a bytes::bytes::Bytes>
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::with_rejection(self, &'a routectl_core::error::Error) -> Self
+pub const fn routectl_core::wire_check::AttemptRecord<'a>::with_response(self, core::option::Option<&'a bytes::bytes::Bytes>, &'a [routectl_core::wire_check::DeclaredEdit]) -> Self
 impl core::fmt::Debug for routectl_core::wire_check::AttemptRecord<'_>
 pub fn routectl_core::wire_check::AttemptRecord<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'a> core::clone::Clone for routectl_core::wire_check::AttemptRecord<'a>
@@ -3604,8 +3616,10 @@ pub fn routectl_core::wire_check::Lane::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::wire_check::Lane
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::Lane
 pub struct routectl_core::wire_check::TapContents
-pub routectl_core::wire_check::TapContents::edits: alloc::vec::Vec<routectl_core::wire_check::DeclaredEdit>
-pub routectl_core::wire_check::TapContents::egress: core::option::Option<bytes::bytes::Bytes>
+impl routectl_core::wire_check::TapContents
+pub fn routectl_core::wire_check::TapContents::edits(&self, routectl_core::wire_check::Leg) -> &[routectl_core::wire_check::DeclaredEdit]
+pub const fn routectl_core::wire_check::TapContents::request(&self) -> core::option::Option<&bytes::bytes::Bytes>
+pub const fn routectl_core::wire_check::TapContents::response(&self) -> core::option::Option<&bytes::bytes::Bytes>
 impl core::clone::Clone for routectl_core::wire_check::TapContents
 pub fn routectl_core::wire_check::TapContents::clone(&self) -> routectl_core::wire_check::TapContents
 impl core::default::Default for routectl_core::wire_check::TapContents
@@ -3704,7 +3718,9 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::WireP
 pub struct routectl_core::wire_check::WireTap
 impl routectl_core::wire_check::WireTap
 pub fn routectl_core::wire_check::WireTap::declare(&self, routectl_core::wire_check::DeclaredEdit)
+pub fn routectl_core::wire_check::WireTap::declare_response(&self, routectl_core::wire_check::DeclaredEdit)
 pub fn routectl_core::wire_check::WireTap::deposit(&self, bytes::bytes::Bytes)
+pub fn routectl_core::wire_check::WireTap::deposit_response(&self, bytes::bytes::Bytes)
 pub fn routectl_core::wire_check::WireTap::take(&self) -> routectl_core::wire_check::TapContents
 impl core::clone::Clone for routectl_core::wire_check::WireTap
 pub fn routectl_core::wire_check::WireTap::clone(&self) -> routectl_core::wire_check::WireTap

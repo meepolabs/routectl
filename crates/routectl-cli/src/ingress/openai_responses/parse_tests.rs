@@ -74,7 +74,7 @@ fn alias_header_overrides_wire_model() {
 }
 
 #[test]
-fn stamps_openai_provenance() {
+fn stamps_responses_provenance() {
     // Arrange
     let body = json!({ "model": "m", "input": "hi" });
 
@@ -84,7 +84,7 @@ fn stamps_openai_provenance() {
     // Assert
     assert_eq!(
         req.routectl_internal.provenance,
-        routectl_core::RequestProvenance::OpenaiIngress
+        routectl_core::RequestProvenance::ResponsesIngress
     );
 }
 

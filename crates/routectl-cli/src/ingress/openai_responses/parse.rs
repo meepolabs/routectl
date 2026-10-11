@@ -226,7 +226,7 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         req.model = alias;
     }
 
-    req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::ResponsesIngress;
 
     // Capture the INBOUND per-conversation key: a curated allowlist header
     // first, else the body's top-level `prompt_cache_key`. Read AFTER the

@@ -52,13 +52,16 @@ license.
 - `src/wire_check/path.rs` -- `WirePath`: sanitized RFC 6901 pointer
   (non-token segment -> `*`, depth 8, 256 bytes, sealed on overflow)
 - `src/wire_check/edits.rs` -- `DeclaredEdit` (site, pointer pattern,
-  `EditKind`) with the blanket-container refusal and one-segment `*`
-  matching; closed `EditSite`, `PathClass`, `RejectionProvenance` label sets
+  `EditKind`) with the blanket-container refusal, RFC 6901 segment
+  validation and one-segment `*` matching; closed `EditSite` (request- and
+  response-side sites), `PathClass`, `RejectionProvenance` label sets
 - `src/wire_check/lane.rs` -- `IngressDialect`, `EgressKind`, `Lane::of`
   (FIDELITY iff same wire dialect), `LaneClass`, `Leg`; static labels
 - `src/wire_check/carriage.rs` -- `IngressWire`, clone-shared per-attempt
-  `WireTap` (deposit / declare / take; test-utils drop-on-deposit hook),
-  borrowed `AttemptRecord`; no Debug renders body bytes
+  `WireTap` with per-direction slots (request deposit / declare, response
+  deposit / declare, take; test-utils drop-on-deposit hook on the request
+  leg), opaque `TapContents` and borrowed `AttemptRecord` read per `Leg`;
+  no Debug renders body bytes
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for
   unknown Anthropic SSE bytes (skip-serialized; preserves unknown
   content_block types verbatim through the canonical pipeline so Anthropic

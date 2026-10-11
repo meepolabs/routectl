@@ -33,6 +33,15 @@ fn constructor_refuses_each_blanket_pattern() {
 #[test]
 fn constructor_accepts_narrow_patterns() {
     let rows = [
+        ("escaped tilde and slash", "/metadata/a~0b~1c"),
+        (
+            "64-byte segment",
+            "/metadata/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+        ),
+        (
+            "64-byte key whose escape is longer",
+            "/metadata/~0kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+        ),
         ("cache marker", "/messages/*/content/*/cache_control"),
         ("concrete tool", "/tools/1"),
         ("tool field", "/tools/*/name"),
@@ -50,7 +59,22 @@ fn constructor_accepts_narrow_patterns() {
 #[test]
 fn constructor_refuses_patterns_that_cannot_match() {
     let nine_deep = "/a/b/c/d/e/f/g/h/i";
-    let rows: [(&str, &'static str, EditPatternError); 5] = [
+    let rows: [(&str, &'static str, EditPatternError); 8] = [
+        (
+            "invalid escape",
+            "/metadata/a~2b",
+            EditPatternError::Unmatchable,
+        ),
+        (
+            "trailing tilde",
+            "/metadata/ab~",
+            EditPatternError::Unmatchable,
+        ),
+        (
+            "65-byte segment",
+            "/metadata/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+            EditPatternError::Unmatchable,
+        ),
         (
             "no leading slash",
             "messages/0",
@@ -149,7 +173,7 @@ fn escaped_segments_match_their_escaped_pattern() {
     let path = WirePath::from_segments(["metadata", "a/b~c"]);
 
     assert!(edit("/metadata/a~1b~0c").matches(&path));
-    assert!(!edit("/metadata/a/b~c").matches(&path));
+    assert!(!edit("/metadata/a/b~0c").matches(&path));
 }
 
 #[test]
