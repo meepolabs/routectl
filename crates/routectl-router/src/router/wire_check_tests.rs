@@ -662,3 +662,6 @@ fn each_provider_entry_shape_derives_its_egress_kind() {
         assert_eq!(egress_kind_of(&only_entry(&body)), expected, "{name}");
     }
 }
+
+#[path = "wire_check_charge_tests.rs"]
+mod wire_check_charge_tests;

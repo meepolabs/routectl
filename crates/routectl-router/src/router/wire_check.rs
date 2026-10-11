@@ -8,6 +8,8 @@
 //! else: no body is parsed or cloned unless [`WireCheckState::admit`] said
 //! yes.
 
+use std::sync::Arc;
+
 use routectl_core::ChatRequest;
 use routectl_core::wire_check::{
     AttemptRecord, DeclaredEdit, DiffOutcome, EgressKind, Lane, LaneClass, Leg, WireTap, diff,
@@ -55,13 +57,16 @@ pub(super) const fn egress_kind_of(entry: &ProviderEntry) -> EgressKind {
 
 impl Router {
     /// Give this provider call a fresh [`WireTap`] and return the router's
-    /// handle on it. A request with no captured ingress body has nothing to
-    /// compare against, so it gets no tap and its egress records nothing.
+    /// handle on it, with the sampler charge the attempt took. A request with
+    /// no captured ingress body has nothing to compare against, so it gets no
+    /// tap, takes no charge, and its egress records nothing.
     ///
     /// The sampler decides here, before the call, whether this attempt gets
     /// a full check, and the decision rides the tap so the provider can skip
     /// work only an admitted attempt reads. Each attempt is charged exactly
-    /// once; a target with no known egress kind is never admitted.
+    /// once; a target with no known egress kind is never admitted and takes
+    /// no charge. The charge is given back when the returned [`SampleCharge`]
+    /// drops, unless the attempt succeeded and called [`SampleCharge::keep`].
     ///
     /// Called once per provider call: clones share one slot, so a tap reused
     /// across calls would let an earlier attempt's deposit stand in for a later
@@ -70,14 +75,25 @@ impl Router {
         &self,
         target: &DispatchTarget,
         attempt_req: &mut ChatRequest,
-    ) -> Option<WireTap> {
-        let ingress = attempt_req.routectl_internal.ingress_wire.as_ref()?;
-        let admitted = target.egress_kind.is_some_and(|egress| {
-            self.wire_check.admit(
-                Lane::of(ingress.dialect, egress),
-                ingress.client_version.as_deref(),
-                &self.config.wire_check,
-            )
+    ) -> (Option<WireTap>, SampleCharge) {
+        let Some(ingress) = attempt_req.routectl_internal.ingress_wire.as_ref() else {
+            return (None, SampleCharge(None));
+        };
+        let charge = target.egress_kind.map(|egress| {
+            let lane = Lane::of(ingress.dialect, egress);
+            let client_version = ingress.client_version.as_deref();
+            let admitted = self
+                .wire_check
+                .admit(lane, client_version, &self.config.wire_check);
+            let charged = Charged {
+                state: Arc::clone(&self.wire_check),
+                lane,
+                client_version: client_version.map(Box::from),
+            };
+            (charged, admitted)
+        });
+        let (charge, admitted) = charge.map_or((None, false), |(charged, admitted)| {
+            (Some(charged), admitted)
         });
         let tap = if admitted {
             WireTap::admitted()
@@ -85,7 +101,7 @@ impl Router {
             WireTap::default()
         };
         attempt_req.routectl_internal.wire_tap = Some(tap.clone());
-        Some(tap)
+        (Some(tap), SampleCharge(charge))
     }
 
     /// Check the request leg of a successful attempt on `target` when its
@@ -103,6 +119,41 @@ impl Router {
             return;
         };
         compare_request_leg(&self.wire_check, lane, attempt_req, tap);
+    }
+}
+
+/// One attempt's charge against the success sampler. Only successful
+/// attempts count toward first-N and one-in-M, so the charge is given back
+/// when this drops -- on a failed attempt and on one whose future is
+/// dropped before the provider answers alike -- unless [`Self::keep`] was
+/// called. Held by the dispatch loop only, never by the tap, so each charge
+/// is given back at most once.
+#[must_use = "dropping the charge gives it back; a successful attempt calls `keep`"]
+#[derive(Debug)]
+pub(super) struct SampleCharge(Option<Charged>);
+
+#[derive(Debug)]
+struct Charged {
+    state: Arc<WireCheckState>,
+    lane: Lane,
+    client_version: Option<Box<str>>,
+}
+
+impl SampleCharge {
+    /// Keep the charge: the attempt succeeded, and a success spends its
+    /// sampler slot whether or not it was admitted.
+    pub(super) fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for SampleCharge {
+    fn drop(&mut self) {
+        if let Some(charged) = self.0.take() {
+            charged
+                .state
+                .release(charged.lane, charged.client_version.as_deref());
+        }
     }
 }
 

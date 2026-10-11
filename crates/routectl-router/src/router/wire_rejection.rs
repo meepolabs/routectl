@@ -21,7 +21,7 @@ use serde_json::Value;
 use super::class_observe::upstream_facts;
 use super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR;
 use super::rejection_parser::{REJECTION_STATUSES, RejectedWirePath, rejected_wire_path};
-use super::wire_check::{attempt_lane, compare_request, lend_request_record};
+use super::wire_check::{SampleCharge, attempt_lane, compare_request, lend_request_record};
 use super::{DispatchMeta, DispatchTarget, FieldRepair, Router};
 use crate::wire_check_state::F1Outcome;
 
@@ -45,7 +45,7 @@ pub struct PendingWireRejection {
 }
 
 impl Router {
-    /// Settle the wire check for an attempt that did not succeed. Releases
+    /// Settle the wire check for an attempt that did not succeed. Gives back
     /// the attempt's sampler charge whether or not it was admitted, then,
     /// for a status in the rejection set, compares the request leg and
     /// records the rejection's provenance on `meta`.
@@ -57,18 +57,14 @@ impl Router {
         target: &DispatchTarget,
         attempt_req: &ChatRequest,
         tap: Option<&WireTap>,
+        charge: SampleCharge,
         err: &Error,
         meta: &mut DispatchMeta,
     ) {
+        drop(charge);
         let (Some(tap), Some(lane)) = (tap, attempt_lane(target, attempt_req)) else {
             return;
         };
-        let client_version = attempt_req
-            .routectl_internal
-            .ingress_wire
-            .as_ref()
-            .and_then(|wire| wire.client_version.as_deref());
-        self.wire_check.release(lane, client_version);
         let Some(status) = upstream_facts(err)
             .status
             .filter(|status| REJECTION_STATUSES.contains(status))

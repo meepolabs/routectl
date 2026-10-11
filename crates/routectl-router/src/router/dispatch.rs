@@ -649,7 +649,7 @@ impl Router {
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
-                let wire_tap = self.install_wire_tap(target, &mut attempt_req);
+                let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
                 let result = run_with_timeout(
                     provider_name,
                     provider.as_ref(),
@@ -664,6 +664,7 @@ impl Router {
                     Ok(mut resp) => {
                         self.record_success(state_key);
                         probe_guard.disarm();
+                        sample_charge.keep();
                         self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
                         // Stamp the served upstream provider name only
                         // when the served target opts in
@@ -827,6 +828,7 @@ impl Router {
                             target,
                             &attempt_req,
                             wire_tap.as_ref(),
+                            sample_charge,
                             &e,
                             meta,
                         );
@@ -1649,7 +1651,7 @@ impl Router {
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
-                let wire_tap = self.install_wire_tap(target, &mut attempt_req);
+                let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
                 let r = try_stream_with_first_content(
                     provider_name,
                     model,
@@ -1696,6 +1698,7 @@ impl Router {
                         // BreakerAccounting owns the tail. Disarm so a drop here
                         // does not free a slot a later probe may hold.
                         probe_guard.disarm();
+                        sample_charge.keep();
                         self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
                         // First content proves the capability is not rejected:
                         // clear any learned negative this dispatch re-probed,
@@ -1810,6 +1813,7 @@ impl Router {
                             target,
                             &attempt_req,
                             wire_tap.as_ref(),
+                            sample_charge,
                             &e,
                             meta,
                         );
