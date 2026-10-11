@@ -233,7 +233,8 @@ pub enum EditPatternError {
 /// kind of change.
 ///
 /// The pattern is an RFC 6901 pointer whose segments are escaped the same
-/// way as a [`WirePath`]; a `*` segment matches exactly one segment.
+/// way as a [`WirePath`]; a `*` segment matches exactly one array index or
+/// masked key, never a token-shaped object key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeclaredEdit {
     site: EditSite,
@@ -270,14 +271,22 @@ impl DeclaredEdit {
     }
 
     /// True if the pattern matches `path`: the same number of segments, each
-    /// pattern segment either `*` or equal to the path's segment.
+    /// pattern segment equal to the path's segment, or `*` where the path's
+    /// segment is an array index or a masked key. A `*` never matches a
+    /// token-shaped object key. A coarsened path matches nothing: it names
+    /// an ancestor, and a declaration there would hide a deeper change.
     pub fn matches(&self, path: &WirePath) -> bool {
+        if path.is_coarsened() {
+            return false;
+        }
         let mut pattern = self.path.split('/').skip(1);
-        let mut actual = path.segments();
+        let mut actual = path.segments().enumerate();
         loop {
             match (pattern.next(), actual.next()) {
                 (None, None) => return true,
-                (Some(want), Some(got)) if want == WILDCARD_SEGMENT || want == got => {}
+                (Some(WILDCARD_SEGMENT), Some((position, _)))
+                    if path.is_wildcard_segment(position) => {}
+                (Some(want), Some((_, got))) if want != WILDCARD_SEGMENT && want == got => {}
                 _ => return false,
             }
         }

@@ -4,6 +4,17 @@ use super::{DeclaredEdit, EditKind, EditPatternError, EditSite, PathClass, Rejec
 use crate::safe_token::is_safe_token;
 use crate::wire_check::path::WirePath;
 
+/// A path where each all-digit segment is an array index and every other
+/// segment is an object key.
+fn path_of(segments: &[&str]) -> WirePath {
+    segments.iter().fold(WirePath::root(), |path, segment| {
+        match segment.parse::<usize>() {
+            Ok(index) => path.index(index),
+            Err(_) => path.child(segment),
+        }
+    })
+}
+
 fn edit(pattern: &'static str) -> DeclaredEdit {
     DeclaredEdit::new(EditSite::CachePlacement, pattern, EditKind::Add)
         .unwrap_or_else(|e| panic!("pattern {pattern:?} refused: {e}"))
@@ -107,7 +118,7 @@ fn constructor_refuses_patterns_that_cannot_match() {
 
 #[test]
 fn wildcard_matches_exactly_one_segment() {
-    let rows: [(&str, &'static str, &[&str], bool); 9] = [
+    let rows: [(&str, &'static str, &[&str], bool); 11] = [
         ("concrete exact", "/tools/1", &["tools", "1"], true),
         ("concrete other index", "/tools/1", &["tools", "2"], false),
         (
@@ -152,10 +163,22 @@ fn wildcard_matches_exactly_one_segment() {
             &["metadata", "a b"],
             true,
         ),
+        (
+            "wildcard never matches a safe key",
+            "/metadata/*",
+            &["metadata", "user_id"],
+            false,
+        ),
+        (
+            "concrete index matches an index",
+            "/tools/7/name",
+            &["tools", "7", "name"],
+            true,
+        ),
     ];
 
     for (name, pattern, segments, expected) in rows {
-        let path = WirePath::from_segments(segments.iter().copied());
+        let path = path_of(segments);
 
         assert_eq!(edit(pattern).matches(&path), expected, "row {name}");
     }
@@ -165,7 +188,20 @@ fn wildcard_matches_exactly_one_segment() {
 fn tools_child_pattern_never_matches_a_grandchild() {
     let pattern = edit("/tools/1");
 
-    assert!(!pattern.matches(&WirePath::from_segments(["tools", "1", "name"])));
+    assert!(!pattern.matches(&path_of(&["tools", "1", "name"])));
+}
+
+#[test]
+fn coarsened_path_matches_no_pattern() {
+    let deep = path_of(&["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
+    let rows = [
+        ("exact rendered text", "/a/b/c/d/e/f/g/h"),
+        ("wildcard tail", "/a/b/c/d/e/f/g/*"),
+    ];
+
+    for (name, pattern) in rows {
+        assert!(!edit(pattern).matches(&deep), "row {name}");
+    }
 }
 
 #[test]

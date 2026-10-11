@@ -54,10 +54,12 @@ license.
   comparing a client's request body with the body routectl sent upstream on
   the same attempt; module-scope deny of indexing/unwrap/expect/panic
 - `src/wire_check/path.rs` -- `WirePath`: sanitized RFC 6901 pointer
-  (non-token segment -> `*`, depth 8, 256 bytes, sealed on overflow)
+  (non-token segment -> `*`, depth 8, 256 bytes, coarsened on overflow;
+  remembers index / masked-key segments for wildcard matching)
 - `src/wire_check/edits.rs` -- `DeclaredEdit` (site, pointer pattern,
   `EditKind`) with the blanket-container refusal, RFC 6901 segment
-  validation and one-segment `*` matching; closed `EditSite` (request- and
+  validation and one-segment `*` matching (index or masked key only, never
+  a coarsened path); closed `EditSite` (request- and
   response-side sites), `PathClass`, `RejectionProvenance` label sets
 - `src/wire_check/lane.rs` -- `IngressDialect`, `EgressKind`, `Lane::of`
   (FIDELITY iff same wire dialect), `LaneClass`, `Leg`; static labels

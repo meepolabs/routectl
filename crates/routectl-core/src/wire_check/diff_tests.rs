@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{DiffOutcome, Finding, MAX_DIFF_DEPTH, MAX_DIFF_NODES, diff};
+use super::{DiffOutcome, Finding, MAX_DIFF_DEPTH, MAX_DIFF_NODES, Walker, diff};
 use crate::wire_check::edits::{DeclaredEdit, EditKind, EditSite, PathClass};
 use crate::wire_check::lane::LaneClass;
 use crate::wire_check::path::WirePath;
@@ -494,4 +494,146 @@ fn findings_come_out_in_a_deterministic_order() {
             finding("/n", PathClass::Added),
         ]
     );
+}
+
+#[test]
+fn integer_and_float_compare_exactly_at_the_64_bit_boundaries() {
+    let two_pow_53 = 9_007_199_254_740_992_u64;
+    let rows: [(&str, Value, Value, bool); 9] = [
+        (
+            "2^53 vs its float",
+            json!(two_pow_53),
+            json!(9_007_199_254_740_992.0),
+            true,
+        ),
+        (
+            "2^53 + 1 vs the float 2^53",
+            json!(two_pow_53 + 1),
+            json!(9_007_199_254_740_992.0),
+            false,
+        ),
+        (
+            "u64::MAX vs its nearest float",
+            json!(u64::MAX),
+            json!(u64::MAX as f64),
+            false,
+        ),
+        (
+            "i64::MIN vs its float",
+            json!(i64::MIN),
+            json!(i64::MIN as f64),
+            true,
+        ),
+        (
+            "i64::MIN + 1 vs the float i64::MIN",
+            json!(i64::MIN + 1),
+            json!(i64::MIN as f64),
+            false,
+        ),
+        ("negative zero vs zero", json!(-0.0), json!(0), true),
+        ("zero vs negative zero", json!(0), json!(-0.0), true),
+        ("integer vs fractional float", json!(2), json!(2.5), false),
+        ("float vs float", json!(0.5), json!(0.5), true),
+    ];
+
+    for (name, input, output, equal) in rows {
+        let outcome = fidelity(&json!({"n": input}), &json!({"n": output}), &[]);
+
+        let expected = if equal {
+            vec![]
+        } else {
+            vec![finding("/n", PathClass::Changed)]
+        };
+        assert_eq!(outcome.findings, expected, "row {name}");
+    }
+}
+
+#[test]
+fn array_work_stays_inside_the_node_budget() {
+    let rows = [
+        ("one huge pair", 1_000_000_usize, 1),
+        ("many arrays each under the cap", 60_000, 8),
+    ];
+
+    for (name, len, count) in rows {
+        let array = Value::Array((0..len).map(|n| json!(n)).collect());
+        let body = Value::Object((0..count).map(|k| (k.to_string(), array.clone())).collect());
+        let mut walker = Walker::new(&[]);
+
+        walker.compare(&body, &body, &WirePath::root(), 0);
+
+        assert!(walker.truncated, "row {name}");
+        assert!(
+            walker.visited <= MAX_DIFF_NODES && walker.collected <= MAX_DIFF_NODES,
+            "row {name}: visited {} collected {}",
+            walker.visited,
+            walker.collected
+        );
+    }
+}
+
+#[test]
+fn declaration_at_a_coarsened_ancestor_suppresses_nothing() {
+    let deep_in = json!({"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": 1}}}}}}}}});
+    let deep_out = json!({"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": 2}}}}}}}}});
+    let wide = "~".repeat(64);
+    let long_in = json!({&wide: {&wide: {"x": 1}}});
+    let long_out = json!({&wide: {&wide: {"x": 2}}});
+    let long_ancestor: &'static str = Box::leak(format!("/{}", "~0".repeat(64)).into_boxed_str());
+    let rows: [(&str, Value, Value, &'static str, &str); 2] = [
+        (
+            "depth cap",
+            deep_in,
+            deep_out,
+            "/a/b/c/d/e/f/g/h",
+            "/a/b/c/d/e/f/g/h",
+        ),
+        (
+            "length cap",
+            long_in,
+            long_out,
+            long_ancestor,
+            long_ancestor,
+        ),
+    ];
+
+    for (name, input, output, pattern, rendered) in rows {
+        let declared = [edit(pattern, EditKind::Rewrite)];
+
+        let outcome = fidelity(&input, &output, &declared);
+
+        let pointers: Vec<&str> = outcome.findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(pointers, [rendered], "row {name}");
+        assert!(
+            outcome.findings.iter().all(|f| f.path.is_coarsened()),
+            "row {name}"
+        );
+    }
+}
+
+#[test]
+fn wildcard_declaration_spares_safe_sibling_keys() {
+    let input = json!({"x": {"unsafe key": 1, "safe": 1}});
+    let output = json!({"x": {"unsafe key": 2, "safe": 2}});
+    let rows: [(&str, Vec<DeclaredEdit>, Vec<Finding>); 2] = [
+        (
+            "undeclared",
+            vec![],
+            vec![
+                finding("/x/safe", PathClass::Changed),
+                finding("/x/*", PathClass::Changed),
+            ],
+        ),
+        (
+            "wildcard declared",
+            vec![edit("/x/*", EditKind::Rewrite)],
+            vec![finding("/x/safe", PathClass::Changed)],
+        ),
+    ];
+
+    for (name, declared, expected) in rows {
+        let outcome = fidelity(&input, &output, &declared);
+
+        assert_eq!(outcome.findings, expected, "row {name}");
+    }
 }

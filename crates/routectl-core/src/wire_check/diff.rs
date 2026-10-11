@@ -22,7 +22,8 @@ use super::path::WirePath;
 pub const MAX_DIFF_DEPTH: usize = 64;
 
 /// Most nodes one diff visits. Every value a comparison, fingerprint or
-/// finding touches counts once per touch.
+/// finding touches counts once per touch, and every element of an array
+/// pair is charged before the pair is aligned.
 pub const MAX_DIFF_NODES: usize = 200_000;
 
 /// One difference between the two bodies.
@@ -142,6 +143,9 @@ struct Walker<'v, 'e> {
     visited: usize,
     truncated: bool,
     findings: Vec<Recorded<'v>>,
+    /// Array elements materialized for alignment.
+    #[cfg(test)]
+    collected: usize,
 }
 
 impl<'v, 'e> Walker<'v, 'e> {
@@ -151,6 +155,8 @@ impl<'v, 'e> Walker<'v, 'e> {
             visited: 0,
             truncated: false,
             findings: Vec::new(),
+            #[cfg(test)]
+            collected: 0,
         }
     }
 
@@ -177,6 +183,21 @@ impl<'v, 'e> Walker<'v, 'e> {
             return false;
         }
         self.visited += 1;
+        true
+    }
+
+    /// Charges `count` array elements up front, before anything sized by
+    /// the arrays is allocated or scanned; truncates instead when they do
+    /// not fit in the remaining budget.
+    const fn charge_elements(&mut self, count: usize) -> bool {
+        if self.truncated {
+            return false;
+        }
+        if count > MAX_DIFF_NODES - self.visited {
+            self.truncated = true;
+            return false;
+        }
+        self.visited += count;
         true
     }
 
@@ -268,12 +289,19 @@ impl<'v, 'e> Walker<'v, 'e> {
         path: &WirePath,
         depth: usize,
     ) {
+        if !self.charge_elements(input.len().saturating_add(output.len())) {
+            return;
+        }
         let sides = Sides {
             input: self.undeclared_elements(input, path, PathClass::Missing),
             output: self.undeclared_elements(output, path, PathClass::Added),
             path,
             depth,
         };
+        #[cfg(test)]
+        {
+            self.collected += sides.input.len() + sides.output.len();
+        }
         let alignment = self.align(&sides);
         if self.truncated {
             return;
@@ -300,10 +328,7 @@ impl<'v, 'e> Walker<'v, 'e> {
         }
         let mut kept = Vec::with_capacity(elements.len());
         for (index, value) in elements.iter().enumerate() {
-            if !self.charge() {
-                break;
-            }
-            let child = index_path(path, index);
+            let child = path.index(index);
             let shifts = self.edits.iter().any(|edit| {
                 let kind = edit.kind();
                 kind != EditKind::Relocate && explains(kind, class) && edit.matches(&child)
@@ -414,7 +439,7 @@ impl<'v, 'e> Walker<'v, 'e> {
             let Some(&(index, value)) = sides.input.get(i) else {
                 continue;
             };
-            let child = index_path(sides.path, index);
+            let child = sides.path.index(index);
             if alignment.is_matched(i) {
                 self.record(child, PathClass::Moved, None);
                 continue;
@@ -428,7 +453,7 @@ impl<'v, 'e> Walker<'v, 'e> {
             if self.truncated {
                 return;
             }
-            self.record(index_path(sides.path, index), PathClass::Added, Some(value));
+            self.record(sides.path.index(index), PathClass::Added, Some(value));
         }
     }
 
@@ -536,7 +561,7 @@ impl<'v, 'e> Walker<'v, 'e> {
             let candidate = self
                 .findings
                 .get(position)
-                .filter(|f| f.class == opposite)
+                .filter(|f| f.class == opposite && !f.path.is_coarsened())
                 .and_then(|f| f.value);
             if candidate.is_some_and(|value| self.same(moved, value, 0)) {
                 return Some(position);
@@ -578,10 +603,6 @@ const fn explains(kind: EditKind, class: PathClass) -> bool {
     )
 }
 
-fn index_path(path: &WirePath, index: usize) -> WirePath {
-    path.child(&index.to_string())
-}
-
 fn scalars_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
@@ -595,7 +616,9 @@ fn scalars_equal(a: &Value, b: &Value) -> bool {
 fn numbers_equal(a: &Number, b: &Number) -> bool {
     match (integer(a), integer(b)) {
         (Some(x), Some(y)) => x == y,
-        _ => a.as_f64() == b.as_f64(),
+        (Some(x), None) => b.as_f64().is_some_and(|f| integer_equals_float(x, f)),
+        (None, Some(y)) => a.as_f64().is_some_and(|f| integer_equals_float(y, f)),
+        (None, None) => a.as_f64() == b.as_f64(),
     }
 }
 
@@ -603,6 +626,22 @@ fn integer(n: &Number) -> Option<i128> {
     n.as_i64()
         .map(i128::from)
         .or_else(|| n.as_u64().map(i128::from))
+}
+
+/// Exclusive upper bound of `u64`, exactly representable as an `f64`.
+const U64_END: f64 = 18_446_744_073_709_551_616.0;
+
+/// Inclusive lower bound of `i64`, exactly representable as an `f64`.
+const I64_START: f64 = -9_223_372_036_854_775_808.0;
+
+/// True only when `float` is finite, integral, inside the 64-bit integer
+/// range and converts to exactly `int`. Comparing through `f64` instead
+/// would call integers above 2^53 equal to a neighboring float.
+fn integer_equals_float(int: i128, float: f64) -> bool {
+    float.is_finite()
+        && float.fract() == 0.0
+        && (I64_START..U64_END).contains(&float)
+        && float as i128 == int
 }
 
 /// Bits of the number as an `f64`, with `-0.0` folded onto `0.0` so that

@@ -10,13 +10,14 @@ use crate::safe_token::is_safe_token;
 pub const MAX_WIRE_PATH_DEPTH: usize = 8;
 
 /// Most bytes a rendered [`WirePath`] occupies. A segment that would push
-/// the pointer past this bound seals it: that segment and every later one
-/// are dropped, so a sealed pointer names an ancestor of the location and
+/// the pointer past this bound coarsens it: that segment and every later one
+/// are dropped, so a coarsened pointer names an ancestor of the location and
 /// never skips a middle segment.
 pub const MAX_WIRE_PATH_LEN: usize = 256;
 
 /// Segment that stands in for a key that is not token-shaped. In an edit
-/// pattern the same segment matches exactly one segment of any value.
+/// pattern the same segment matches exactly one array index or one such
+/// masked key, never a token-shaped object key.
 pub const WILDCARD_SEGMENT: &str = "*";
 
 /// RFC 6901 JSON pointer over a wire body, safe to log or use as a label.
@@ -25,13 +26,19 @@ pub const WILDCARD_SEGMENT: &str = "*";
 /// non-ASCII, longer than 64 bytes) is replaced by [`WILDCARD_SEGMENT`], so
 /// a client-chosen key can never inject arbitrary text. The pointer is
 /// bounded to [`MAX_WIRE_PATH_DEPTH`] segments and [`MAX_WIRE_PATH_LEN`]
-/// bytes. The root pointer is the empty string.
+/// bytes; a pointer that dropped a segment to stay inside either bound is
+/// coarsened. The root pointer is the empty string.
+///
+/// Besides the rendered text, a pointer remembers which of its segments an
+/// edit-pattern wildcard may match: array indices and masked keys.
 ///
 /// Equality, ordering and hashing compare the rendered pointer only.
 #[derive(Debug, Clone, Default)]
 pub struct WirePath {
     pointer: String,
-    sealed: bool,
+    coarsened: bool,
+    /// Bit `i` is set when segment `i` is an array index or a masked key.
+    wildcard_mask: u8,
 }
 
 impl WirePath {
@@ -39,11 +46,12 @@ impl WirePath {
     pub const fn root() -> Self {
         Self {
             pointer: String::new(),
-            sealed: false,
+            coarsened: false,
+            wildcard_mask: 0,
         }
     }
 
-    /// Build a pointer from raw (unescaped) segments, in order.
+    /// Build a pointer from raw (unescaped) object keys, in order.
     pub fn from_segments<'s, I>(segments: I) -> Self
     where
         I: IntoIterator<Item = &'s str>,
@@ -53,27 +61,61 @@ impl WirePath {
             .fold(Self::root(), |path, segment| path.child(segment))
     }
 
-    /// This pointer extended by one raw (unescaped) segment. Returns an
-    /// unchanged copy once the depth bound is reached, and a sealed copy
-    /// when the length bound would be exceeded.
+    /// This pointer extended by one raw (unescaped) object key. Returns a
+    /// coarsened copy, without the key, once either bound would be exceeded.
     pub fn child(&self, segment: &str) -> Self {
-        if self.sealed || self.depth() >= MAX_WIRE_PATH_DEPTH {
-            return self.clone();
+        if is_safe_token(segment) {
+            self.push(&segment.replace('~', "~0").replace('/', "~1"), false)
+        } else {
+            self.push(WILDCARD_SEGMENT, true)
         }
-        let escaped = escape_segment(segment);
-        if self.pointer.len() + 1 + escaped.len() > MAX_WIRE_PATH_LEN {
+    }
+
+    /// This pointer extended by one array index. Returns a coarsened copy,
+    /// without the index, once either bound would be exceeded.
+    pub fn index(&self, index: usize) -> Self {
+        self.push(&index.to_string(), true)
+    }
+
+    /// True when a segment was dropped to keep the pointer inside its
+    /// bounds, so it names an ancestor of the location rather than the
+    /// location itself.
+    pub const fn is_coarsened(&self) -> bool {
+        self.coarsened
+    }
+
+    /// True when segment `position` is an array index or a masked key.
+    pub(super) fn is_wildcard_segment(&self, position: usize) -> bool {
+        u32::try_from(position)
+            .ok()
+            .and_then(|shift| 1u8.checked_shl(shift))
+            .is_some_and(|bit| self.wildcard_mask & bit != 0)
+    }
+
+    fn push(&self, escaped: &str, wildcard: bool) -> Self {
+        let depth = self.depth();
+        if self.coarsened
+            || depth >= MAX_WIRE_PATH_DEPTH
+            || self.pointer.len() + 1 + escaped.len() > MAX_WIRE_PATH_LEN
+        {
             return Self {
-                pointer: self.pointer.clone(),
-                sealed: true,
+                coarsened: true,
+                ..self.clone()
             };
         }
+        let bit = u32::try_from(depth)
+            .ok()
+            .and_then(|shift| 1u8.checked_shl(shift))
+            .filter(|_| wildcard)
+            .unwrap_or(0);
         let mut pointer = String::with_capacity(self.pointer.len() + 1 + escaped.len());
         pointer.push_str(&self.pointer);
         pointer.push('/');
-        pointer.push_str(&escaped);
+        pointer.push_str(escaped);
         Self {
             pointer,
-            sealed: false,
+            coarsened: false,
+            wildcard_mask: self.wildcard_mask | bit,
         }
     }
 
@@ -125,13 +167,6 @@ impl fmt::Display for WirePath {
     }
 }
 
-fn escape_segment(segment: &str) -> String {
-    if !is_safe_token(segment) {
-        return WILDCARD_SEGMENT.to_string();
-    }
-    segment.replace('~', "~0").replace('/', "~1")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{MAX_WIRE_PATH_DEPTH, MAX_WIRE_PATH_LEN, WirePath};
@@ -177,6 +212,24 @@ mod tests {
 
         assert_eq!(path.depth(), MAX_WIRE_PATH_DEPTH);
         assert_eq!(path.as_str(), "/a/a/a/a/a/a/a/a");
+        assert!(path.is_coarsened());
+    }
+
+    #[test]
+    fn a_pointer_inside_its_bounds_is_not_coarsened() {
+        let path = WirePath::from_segments(["a"; MAX_WIRE_PATH_DEPTH]);
+
+        assert!(!path.is_coarsened());
+    }
+
+    #[test]
+    fn only_indices_and_masked_keys_are_wildcard_segments() {
+        let path = WirePath::root().child("tools").index(3).child("a b");
+
+        let flags: Vec<bool> = (0..4).map(|i| path.is_wildcard_segment(i)).collect();
+
+        assert_eq!(path.as_str(), "/tools/3/*");
+        assert_eq!(flags, [false, true, true, false]);
     }
 
     #[test]
@@ -192,6 +245,7 @@ mod tests {
             path.as_str().len()
         );
         assert_eq!(path.as_str(), format!("/{}", "~0".repeat(64)));
+        assert!(path.is_coarsened());
     }
 
     #[test]

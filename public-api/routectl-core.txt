@@ -4047,6 +4047,8 @@ pub fn routectl_core::wire_check::WirePath::as_str(&self) -> &str
 pub fn routectl_core::wire_check::WirePath::child(&self, &str) -> Self
 pub fn routectl_core::wire_check::WirePath::depth(&self) -> usize
 pub fn routectl_core::wire_check::WirePath::from_segments<'s, I>(I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = &'s str>
+pub fn routectl_core::wire_check::WirePath::index(&self, usize) -> Self
+pub const fn routectl_core::wire_check::WirePath::is_coarsened(&self) -> bool
 pub const fn routectl_core::wire_check::WirePath::root() -> Self
 pub fn routectl_core::wire_check::WirePath::segments(&self) -> impl core::iter::traits::iterator::Iterator<Item = &str>
 impl core::clone::Clone for routectl_core::wire_check::WirePath
