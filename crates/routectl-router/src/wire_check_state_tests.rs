@@ -23,8 +23,15 @@ fn chat_lane() -> Lane {
     Lane::of(IngressDialect::Chat, EgressKind::OpenaiCompat)
 }
 
+/// A path where each all-digit segment is an array index and every other
+/// segment is an object key.
 fn path(segments: &[&str]) -> WirePath {
-    WirePath::from_segments(segments.iter().copied())
+    segments.iter().fold(WirePath::root(), |path, segment| {
+        match segment.parse::<usize>() {
+            Ok(index) => path.index(index),
+            Err(_) => path.child(segment),
+        }
+    })
 }
 
 /// Indices (0-based) of the calls `admit` accepted out of `calls` attempts.

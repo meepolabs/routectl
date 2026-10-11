@@ -112,45 +112,32 @@ pub fn declare_sampling_clamp(
     }
 }
 
-/// Declare the tool-call id rewrites the wire charset forces. The ids are
+/// Declare each assistant `tool_use` block whose `id` the wire charset
+/// forces a rewrite of, at its canonical message and block index -- the
+/// client's own indices on the Anthropic ingress, the one lane whose diff
+/// reads them. Chat-shaped `tool_calls` and tool turns reach this egress
+/// only from a translating ingress, where no path is compared. The ids are
 /// re-sanitized to learn whether any changes; the walk runs only with a tap.
 pub fn declare_tool_id_sanitize(tap: Option<&WireTap>, messages: &[Message]) {
     if tap.is_none() {
         return;
     }
-    let rewrites = |id: &str| matches!(crate::tool_id::sanitize_tool_id(id), Cow::Owned(_));
-    let use_id_rewritten = messages.iter().any(|msg| {
-        let in_parts = match &msg.content {
-            MessageContent::Parts(parts) => parts.iter().any(|part| {
-                matches!(part, ContentPart::Known(KnownContentPart::ToolUse { id, .. }) if rewrites(id))
-            }),
-            MessageContent::Text(_) | MessageContent::Null => false,
+    for (index, msg) in messages.iter().enumerate() {
+        let (Role::Assistant, MessageContent::Parts(parts)) = (&msg.role, &msg.content) else {
+            continue;
         };
-        let in_calls = msg.tool_calls.iter().flatten().any(|call| {
-            call.get("id")
-                .and_then(Value::as_str)
-                .is_some_and(rewrites)
-        });
-        in_parts || in_calls
-    });
-    let result_id_rewritten = messages.iter().any(|msg| {
-        matches!(msg.role, Role::Tool) && msg.tool_call_id.as_deref().is_some_and(rewrites)
-    });
-    if use_id_rewritten {
-        declare(
-            tap,
-            EditSite::ToolIdSanitize,
-            "/messages/*/content/*/id",
-            EditKind::Rewrite,
-        );
-    }
-    if result_id_rewritten {
-        declare(
-            tap,
-            EditSite::ToolIdSanitize,
-            "/messages/*/content/*/tool_use_id",
-            EditKind::Rewrite,
-        );
+        for (block, part) in parts.iter().enumerate() {
+            if let ContentPart::Known(KnownContentPart::ToolUse { id, .. }) = part
+                && matches!(crate::tool_id::sanitize_tool_id(id), Cow::Owned(_))
+            {
+                declare(
+                    tap,
+                    EditSite::ToolIdSanitize,
+                    format!("/messages/{index}/content/{block}/id"),
+                    EditKind::Rewrite,
+                );
+            }
+        }
     }
 }
 
@@ -354,7 +341,8 @@ fn declare_relocation_landing(tap: Option<&WireTap>, before: &CloakView, body: &
     }
 }
 
-/// Declare the minted `metadata.user_id`.
+/// Declare the minted `metadata.user_id`. Keys under `metadata` render
+/// masked, so the member is named by the wildcard.
 pub(super) fn declare_cloak_user_id(
     tap: Option<&WireTap>,
     before: Option<&CloakView>,
@@ -368,8 +356,8 @@ pub(super) fn declare_cloak_user_id(
     }
     let (path, kind) = match before.user_id {
         UserIdState::NoMetadata => ("/metadata", EditKind::Add),
-        UserIdState::Absent => ("/metadata/user_id", EditKind::Add),
-        UserIdState::Empty => ("/metadata/user_id", EditKind::Rewrite),
+        UserIdState::Absent => ("/metadata/*", EditKind::Add),
+        UserIdState::Empty => ("/metadata/*", EditKind::Rewrite),
         UserIdState::Set => return,
     };
     declare(tap, EditSite::Cloak, path, kind);

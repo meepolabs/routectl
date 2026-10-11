@@ -779,7 +779,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     );
     let mut anthropic_messages =
         translate_messages(id, &messages, system_turns, &mut envelopes, fingerprint)?;
-    super::wire_edits::declare_tool_id_sanitize(tap, &messages);
+    super::wire_edits::declare_tool_id_sanitize(tap, &req.messages);
 
     // When context_management emulation is active, re-inject cached
     // thinking blocks before ToolUse blocks per the clear_thinking_20251015

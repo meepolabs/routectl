@@ -261,7 +261,7 @@ async fn a_rejected_path_is_classified_by_where_it_came_from() {
             IngressDialect::Anthropic,
             unchanged,
             |_| Err(rejection("metadata.user_id", REFUSED_FIELD)),
-            "/metadata/user_id",
+            "/metadata/*",
             "client_unchanged",
         ),
         (
@@ -291,7 +291,7 @@ async fn a_rejected_path_is_classified_by_where_it_came_from() {
             IngressDialect::Chat,
             unchanged,
             |_| Err(rejection("metadata.user_id", REFUSED_FIELD)),
-            "/metadata/user_id",
+            "/metadata/*",
             "n_a",
         ),
     ];

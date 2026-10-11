@@ -3,8 +3,10 @@
 
 use std::borrow::Cow;
 
-use super::path::{MAX_WIRE_PATH_DEPTH, MAX_WIRE_PATH_LEN, WILDCARD_SEGMENT, WirePath};
-use crate::safe_token::is_safe_token;
+use super::path::{
+    MAX_WIRE_PATH_DEPTH, MAX_WIRE_PATH_LEN, WILDCARD_SEGMENT, WirePath, is_identifier_key,
+    opens_user_keyed,
+};
 
 /// Patterns that would exempt a whole container from detection. A transform
 /// that broke anything under one of these would otherwise go unseen.
@@ -279,9 +281,9 @@ pub enum EditPatternError {
     /// The pattern is not an RFC 6901 pointer (it does not start with `/`).
     #[error("edit pattern is not a JSON pointer")]
     NotAPointer,
-    /// The pattern can never match a [`WirePath`]: a malformed `~` escape,
-    /// a segment that decodes to an empty or non-token key, or more segments
-    /// or bytes than a path carries.
+    /// The pattern can never match a [`WirePath`]: a segment that is
+    /// neither an index, the wildcard nor a key a path renders verbatim, or
+    /// more segments or bytes than a path carries.
     #[error("edit pattern can never match a wire path")]
     Unmatchable,
 }
@@ -290,9 +292,9 @@ pub enum EditPatternError {
 /// it. Carries no body content: only the site, a pointer pattern and the
 /// kind of change.
 ///
-/// The pattern is an RFC 6901 pointer whose segments are escaped the same
-/// way as a [`WirePath`]; a `*` segment matches exactly one array index or
-/// masked key, never a token-shaped object key.
+/// The pattern is an RFC 6901 pointer whose segments are spelled the way a
+/// [`WirePath`] renders them; a `*` segment matches exactly one array index
+/// or masked key, never a verbatim object key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeclaredEdit {
     site: EditSite,
@@ -331,24 +333,37 @@ impl DeclaredEdit {
     /// True if the pattern matches `path`: the same number of segments, each
     /// pattern segment equal to the path's segment, or `*` where the path's
     /// segment is an array index or a masked key. A `*` never matches a
-    /// token-shaped object key. A coarsened path matches nothing: it names
+    /// verbatim object key. A coarsened path matches nothing: it names
     /// an ancestor, and a declaration there would hide a deeper change.
     pub fn matches(&self, path: &WirePath) -> bool {
-        if path.is_coarsened() {
-            return false;
-        }
-        let mut pattern = self.path.split('/').skip(1);
-        let mut actual = path.segments().enumerate();
-        loop {
-            match (pattern.next(), actual.next()) {
-                (None, None) => return true,
-                (Some(WILDCARD_SEGMENT), Some((position, _)))
-                    if path.is_wildcard_segment(position) => {}
-                (Some(want), Some((_, got))) if want != WILDCARD_SEGMENT && want == got => {}
-                _ => return false,
+        pattern_matches(&self.path, path)
+    }
+}
+
+/// [`DeclaredEdit::matches`] over a bare pattern.
+pub(super) fn pattern_matches(pattern: &str, path: &WirePath) -> bool {
+    if path.is_coarsened() {
+        return false;
+    }
+    let mut pattern = pattern.split('/').skip(1);
+    let mut actual = path.segments().enumerate();
+    loop {
+        match (pattern.next(), actual.next()) {
+            (None, None) => return true,
+            (Some(WILDCARD_SEGMENT), Some((position, _))) if path.is_wildcard_segment(position) => {
             }
+            (Some(want), Some((_, got))) if want != WILDCARD_SEGMENT && want == got => {}
+            _ => return false,
         }
     }
+}
+
+/// True when `pattern` has no `*` segment, so it matches exactly the one
+/// path that renders as the pattern itself.
+pub(super) fn is_concrete_pattern(pattern: &str) -> bool {
+    !pattern
+        .split('/')
+        .any(|segment| segment == WILDCARD_SEGMENT)
 }
 
 fn validate_pattern(pattern: &str) -> Result<(), EditPatternError> {
@@ -360,7 +375,7 @@ fn validate_pattern(pattern: &str) -> Result<(), EditPatternError> {
     };
     let matchable = pattern.len() <= MAX_WIRE_PATH_LEN
         && rest.split('/').count() <= MAX_WIRE_PATH_DEPTH
-        && rest.split('/').all(segment_can_match);
+        && segments_can_match(rest);
     if matchable {
         Ok(())
     } else {
@@ -368,30 +383,23 @@ fn validate_pattern(pattern: &str) -> Result<(), EditPatternError> {
     }
 }
 
-/// A [`WirePath`] renders every non-token key as the wildcard, so a pattern
-/// segment can match only the wildcard itself or the escape of a key that
-/// passes [`is_safe_token`].
-fn segment_can_match(segment: &str) -> bool {
-    segment == WILDCARD_SEGMENT || decode_segment(segment).is_some_and(|key| is_safe_token(&key))
-}
-
-/// Decode one RFC 6901 segment; `None` when a `~` is not followed by `0` or
-/// `1`.
-fn decode_segment(segment: &str) -> Option<String> {
-    let mut decoded = String::with_capacity(segment.len());
-    let mut chars = segment.chars();
-    while let Some(c) = chars.next() {
-        if c == '~' {
-            match chars.next()? {
-                '0' => decoded.push('~'),
-                '1' => decoded.push('/'),
-                _ => return None,
+/// A [`WirePath`] segment is an index, the wildcard or a verbatim
+/// identifier key, and below a client-keyed object every key renders as the
+/// wildcard; a pattern segment that no path can render is unmatchable.
+fn segments_can_match(rest: &str) -> bool {
+    let mut ancestors: Vec<&str> = Vec::new();
+    let mut masked = false;
+    for segment in rest.split('/') {
+        let is_index = !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit());
+        if segment != WILDCARD_SEGMENT && !is_index {
+            if masked || !is_identifier_key(segment) {
+                return false;
             }
-        } else {
-            decoded.push(c);
+            masked = opens_user_keyed(&ancestors, segment);
         }
+        ancestors.push(segment);
     }
-    Some(decoded)
+    true
 }
 
 /// How a path differs between the two bodies a check compares. Closed; it is

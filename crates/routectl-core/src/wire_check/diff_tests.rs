@@ -10,12 +10,18 @@ fn edit(pattern: &'static str, kind: EditKind) -> DeclaredEdit {
         .unwrap_or_else(|e| panic!("pattern {pattern:?} refused: {e}"))
 }
 
+/// A finding at `pointer`, each all-digit segment an array index and every
+/// other segment an object key.
 fn finding(pointer: &str, class: PathClass) -> Finding {
-    let path = if pointer.is_empty() {
-        WirePath::root()
-    } else {
-        WirePath::from_segments(pointer.trim_start_matches('/').split('/'))
-    };
+    let path = pointer
+        .split('/')
+        .skip(1)
+        .fold(WirePath::root(), |path, segment| {
+            match segment.parse::<usize>() {
+                Ok(index) => path.index(index),
+                Err(_) => path.child(segment),
+            }
+        });
     Finding { path, class }
 }
 
@@ -576,10 +582,11 @@ fn array_work_stays_inside_the_node_budget() {
 fn declaration_at_a_coarsened_ancestor_suppresses_nothing() {
     let deep_in = json!({"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": 1}}}}}}}}});
     let deep_out = json!({"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": 2}}}}}}}}});
-    let wide = "~".repeat(64);
-    let long_in = json!({&wide: {&wide: {"x": 1}}});
-    let long_out = json!({&wide: {&wide: {"x": 2}}});
-    let long_ancestor: &'static str = Box::leak(format!("/{}", "~0".repeat(64)).into_boxed_str());
+    let wide = "k".repeat(32);
+    let wide_chain = |leaf: i32| (0..8).fold(json!({"x": leaf}), |inner, _| json!({&wide: inner}));
+    let long_in = wide_chain(1);
+    let long_out = wide_chain(2);
+    let long_ancestor: &'static str = Box::leak(format!("/{wide}").repeat(7).into_boxed_str());
     let rows: [(&str, Value, Value, &'static str, &str); 2] = [
         (
             "depth cap",
@@ -636,4 +643,81 @@ fn wildcard_declaration_spares_safe_sibling_keys() {
 
         assert_eq!(outcome.findings, expected, "row {name}");
     }
+}
+
+/// `count` thinking blocks under `/messages/0/content`, all removed on the
+/// way out.
+fn stripped_blocks(count: usize) -> (Value, Value) {
+    let blocks: Vec<Value> = (0..count)
+        .map(|n| json!({"type": "thinking", "thinking": n}))
+        .collect();
+    (
+        json!({"messages": [{"content": blocks}]}),
+        json!({"messages": [{"content": []}]}),
+    )
+}
+
+fn leaked(pattern: String) -> &'static str {
+    Box::leak(pattern.into_boxed_str())
+}
+
+#[test]
+fn concrete_declarations_cost_one_probe_per_element() {
+    let count = 20_000;
+    let (input, output) = stripped_blocks(count);
+    let declared: Vec<DeclaredEdit> = (0..count)
+        .map(|n| edit(leaked(format!("/messages/0/content/{n}")), EditKind::Remove))
+        .collect();
+    let mut walker = Walker::new(&declared);
+
+    walker.compare(&input, &output, &WirePath::root(), 0);
+
+    assert!(!walker.truncated);
+    assert!(walker.findings.is_empty());
+    assert!(
+        walker.visited <= MAX_DIFF_NODES,
+        "visited {}",
+        walker.visited
+    );
+    assert!(
+        walker.probes <= 2 * count,
+        "{} register probes for {count} elements",
+        walker.probes
+    );
+}
+
+#[test]
+fn wildcard_matching_is_charged_to_the_node_budget() {
+    let count = 20_000;
+    let (input, output) = stripped_blocks(count);
+    let declared: Vec<DeclaredEdit> = (0..2_000)
+        .map(|n| edit(leaked(format!("/messages/*/content/{n}")), EditKind::Remove))
+        .collect();
+    let mut walker = Walker::new(&declared);
+
+    walker.compare(&input, &output, &WirePath::root(), 0);
+
+    assert!(walker.truncated);
+    assert!(
+        walker.visited <= MAX_DIFF_NODES,
+        "visited {}",
+        walker.visited
+    );
+    assert!(
+        walker.probes <= MAX_DIFF_NODES + count,
+        "{} register probes",
+        walker.probes
+    );
+}
+
+#[test]
+fn a_register_larger_than_the_budget_truncates_before_walking() {
+    let declared: Vec<DeclaredEdit> = (0..=MAX_DIFF_NODES)
+        .map(|n| edit(leaked(format!("/k/{n}")), EditKind::Remove))
+        .collect();
+
+    let outcome = fidelity(&json!({"a": 1}), &json!({"a": 2}), &declared);
+
+    assert!(outcome.truncated);
+    assert!(outcome.findings.is_empty());
 }

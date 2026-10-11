@@ -113,12 +113,16 @@ pub(super) fn parse_rejection(
     })
 }
 
-/// Where a rejection says the refused field sits, sanitized for logging.
+/// Where a rejection says the refused field sits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RejectedWirePath {
     /// The location in the request body as the upstream named it, array
-    /// indices kept, so it can be looked up in a wire body.
+    /// indices kept, sanitized for logging.
     pub(super) wire: WirePath,
+    /// The same location unmasked, one segment per key or index, to look up
+    /// in a wire body. Every key is a bounded identifier-byte name; never
+    /// logged or rendered.
+    pub(super) locator: Vec<String>,
     /// The canonical field path: indices dropped and, on Bedrock, the
     /// Converse field bag removed -- the shape a closed-table row path has.
     pub(super) field: WirePath,
@@ -133,30 +137,31 @@ pub(super) fn rejected_wire_path(
     parsed: Option<&ParsedErrorBody>,
 ) -> Option<RejectedWirePath> {
     let localized = localize(provider_kind, status, parsed?)?;
+    let raw_segments: Vec<&str> = localized.raw.split('.').flat_map(split_brackets).collect();
     Some(RejectedWirePath {
-        wire: localized
-            .raw
-            .split('.')
-            .fold(WirePath::root(), push_raw_segment),
+        wire: raw_segments
+            .iter()
+            .fold(WirePath::root(), |path, name| push_raw_name(path, name)),
+        locator: raw_segments.iter().map(|name| (*name).to_owned()).collect(),
         field: WirePath::from_segments(localized.segments.iter().copied()),
     })
 }
 
-/// `path` extended by one raw dotted segment, which may carry trailing
-/// bracket indices (`tools[0]`). Only called on a path
+/// One raw dotted segment split into its name and trailing bracket indices
+/// (`tools[0]` -> `tools`, `0`), empty names dropped. Only called on a path
 /// [`canonical_segments`] accepted, so every bracket holds an index.
-fn push_raw_segment(path: WirePath, segment: &str) -> WirePath {
+fn split_brackets(segment: &str) -> impl Iterator<Item = &str> {
     let (name, brackets) = segment.split_once('[').unwrap_or((segment, ""));
-    brackets
-        .split('[')
-        .filter_map(|bracket| bracket.strip_suffix(']'))
-        .fold(push_raw_name(path, name), push_raw_name)
+    std::iter::once(name)
+        .chain(
+            brackets
+                .split('[')
+                .filter_map(|bracket| bracket.strip_suffix(']')),
+        )
+        .filter(|name| !name.is_empty())
 }
 
 fn push_raw_name(path: WirePath, name: &str) -> WirePath {
-    if name.is_empty() {
-        return path;
-    }
     match name.parse::<usize>() {
         Ok(index) if is_index(name) => path.index(index),
         _ => path.child(name),

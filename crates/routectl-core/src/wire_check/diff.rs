@@ -14,16 +14,18 @@ use std::ops::Range;
 
 use serde_json::{Map, Number, Value};
 
-use super::edits::{DeclaredEdit, EditKind, PathClass};
+use super::edits::{DeclaredEdit, EditKind, PathClass, is_concrete_pattern, pattern_matches};
 use super::lane::LaneClass;
-use super::path::WirePath;
+use super::path::{MAX_WIRE_PATH_DEPTH, WirePath};
 
 /// Deepest nesting level the engine descends to; the root is level 0.
 pub const MAX_DIFF_DEPTH: usize = 64;
 
 /// Most nodes one diff visits. Every value a comparison, fingerprint or
-/// finding touches counts once per touch, and every element of an array
-/// pair is charged before the pair is aligned.
+/// finding touches counts once per touch, every element of an array pair is
+/// charged before the pair is aligned, every declared edit is charged once
+/// when the register is indexed, and every wildcard pattern tried against a
+/// path counts once per try.
 pub const MAX_DIFF_NODES: usize = 200_000;
 
 /// One difference between the two bodies.
@@ -66,6 +68,9 @@ pub struct DiffOutcome {
 /// `translation_unconsumed`. Nothing nested is compared.
 pub fn diff(input: &Value, output: &Value, lane: LaneClass, edits: &[DeclaredEdit]) -> DiffOutcome {
     let mut walker = Walker::new(edits);
+    if walker.truncated {
+        return walker.finish();
+    }
     match lane {
         LaneClass::Fidelity => {
             walker.compare(input, output, &WirePath::root(), 0);
@@ -138,26 +143,100 @@ impl Alignment {
     }
 }
 
+/// Set of [`EditKind`]s, one bit per kind.
+#[derive(Clone, Copy, Default)]
+struct Kinds(u8);
+
+impl Kinds {
+    const fn bit(kind: EditKind) -> u8 {
+        match kind {
+            EditKind::Remove => 1,
+            EditKind::Add => 2,
+            EditKind::Rewrite => 4,
+            EditKind::Relocate => 8,
+        }
+    }
+
+    const fn with(self, kind: EditKind) -> Self {
+        Self(self.0 | Self::bit(kind))
+    }
+
+    const fn contains(self, kind: EditKind) -> bool {
+        self.0 & Self::bit(kind) != 0
+    }
+
+    /// True when a kind other than Relocate explains `class`.
+    fn shifts(self, class: PathClass) -> bool {
+        [EditKind::Remove, EditKind::Add, EditKind::Rewrite]
+            .into_iter()
+            .any(|kind| self.contains(kind) && explains(kind, class))
+    }
+}
+
+/// The declared edits, indexed so that a concrete pattern costs one lookup
+/// whatever the number of declarations; only wildcard patterns of the
+/// path's depth are tried one by one.
+#[derive(Default)]
+struct Register<'e> {
+    concrete: HashMap<&'e str, Kinds>,
+    wildcards: [Vec<&'e DeclaredEdit>; MAX_WIRE_PATH_DEPTH + 1],
+}
+
+impl<'e> Register<'e> {
+    fn new(edits: &'e [DeclaredEdit]) -> Self {
+        let mut register = Self::default();
+        for edit in edits {
+            let pattern = edit.path();
+            if is_concrete_pattern(pattern) {
+                let kinds = register.concrete.entry(pattern).or_default();
+                *kinds = kinds.with(edit.kind());
+            } else if let Some(bucket) = register.wildcards.get_mut(pattern_depth(pattern)) {
+                bucket.push(edit);
+            }
+        }
+        register
+    }
+
+    fn is_empty(&self) -> bool {
+        self.concrete.is_empty() && self.wildcards.iter().all(Vec::is_empty)
+    }
+}
+
+fn pattern_depth(pattern: &str) -> usize {
+    pattern.bytes().filter(|b| *b == b'/').count()
+}
+
 struct Walker<'v, 'e> {
-    edits: &'e [DeclaredEdit],
+    register: Register<'e>,
     visited: usize,
     truncated: bool,
     findings: Vec<Recorded<'v>>,
     /// Array elements materialized for alignment.
     #[cfg(test)]
     collected: usize,
+    /// Register probes: concrete lookups plus wildcard patterns tried.
+    #[cfg(test)]
+    probes: usize,
 }
 
 impl<'v, 'e> Walker<'v, 'e> {
-    const fn new(edits: &'e [DeclaredEdit]) -> Self {
-        Self {
-            edits,
+    /// A walker over `edits`, each charged once to the node budget; one
+    /// that cannot afford its register starts truncated.
+    fn new(edits: &'e [DeclaredEdit]) -> Self {
+        let mut walker = Self {
+            register: Register::default(),
             visited: 0,
             truncated: false,
             findings: Vec::new(),
             #[cfg(test)]
             collected: 0,
+            #[cfg(test)]
+            probes: 0,
+        };
+        if walker.charge_elements(edits.len()) {
+            walker.register = Register::new(edits);
         }
+        walker
     }
 
     fn finish(self) -> DiffOutcome {
@@ -209,18 +288,53 @@ impl<'v, 'e> Walker<'v, 'e> {
         self.charge()
     }
 
-    fn explanation(&self, path: &WirePath, class: PathClass) -> Explanation {
-        let mut explanation = Explanation::Undeclared;
-        for edit in self.edits.iter().filter(|edit| edit.matches(path)) {
-            match (edit.kind(), class) {
-                (EditKind::Relocate, PathClass::Missing | PathClass::Added) => {
-                    explanation = Explanation::RelocationEnd;
-                }
-                (kind, class) if explains(kind, class) => return Explanation::Declared,
-                _ => {}
+    /// Every kind declared at a pattern matching `path`. Each wildcard
+    /// pattern tried is charged; `None` once the budget is exhausted.
+    fn declared_kinds(&mut self, path: &WirePath) -> Option<Kinds> {
+        if path.is_coarsened() {
+            return Some(Kinds::default());
+        }
+        #[cfg(test)]
+        {
+            self.probes += 1;
+        }
+        let mut kinds = self
+            .register
+            .concrete
+            .get(path.as_str())
+            .copied()
+            .unwrap_or_default();
+        let Some(bucket) = self.register.wildcards.get(path.depth()) else {
+            return Some(kinds);
+        };
+        for edit in bucket {
+            if self.truncated || self.visited >= MAX_DIFF_NODES {
+                self.truncated = true;
+                return None;
+            }
+            self.visited += 1;
+            #[cfg(test)]
+            {
+                self.probes += 1;
+            }
+            if pattern_matches(edit.path(), path) {
+                kinds = kinds.with(edit.kind());
             }
         }
-        explanation
+        Some(kinds)
+    }
+
+    /// How the edits declared at `path` account for a `class` difference
+    /// there; `None` once the budget is exhausted.
+    fn explanation(&mut self, path: &WirePath, class: PathClass) -> Option<Explanation> {
+        let kinds = self.declared_kinds(path)?;
+        let relocated = kinds.contains(EditKind::Relocate);
+        Some(match class {
+            _ if kinds.shifts(class) => Explanation::Declared,
+            PathClass::Moved if relocated => Explanation::Declared,
+            PathClass::Missing | PathClass::Added if relocated => Explanation::RelocationEnd,
+            _ => Explanation::Undeclared,
+        })
     }
 
     fn record(&mut self, path: WirePath, class: PathClass, value: Option<&'v Value>) {
@@ -228,9 +342,9 @@ impl<'v, 'e> Walker<'v, 'e> {
             return;
         }
         let relocation_end = match self.explanation(&path, class) {
-            Explanation::Declared => return,
-            Explanation::Undeclared => false,
-            Explanation::RelocationEnd => true,
+            None | Some(Explanation::Declared) => return,
+            Some(Explanation::Undeclared) => false,
+            Some(Explanation::RelocationEnd) => true,
         };
         self.findings.push(Recorded {
             path,
@@ -302,6 +416,9 @@ impl<'v, 'e> Walker<'v, 'e> {
         {
             self.collected += sides.input.len() + sides.output.len();
         }
+        if self.truncated {
+            return;
+        }
         let alignment = self.align(&sides);
         if self.truncated {
             return;
@@ -315,7 +432,7 @@ impl<'v, 'e> Walker<'v, 'e> {
     }
 
     /// The elements no declared edit of `class` names. Each element an edit
-    /// does name is recorded (and so suppressed) and dropped from the
+    /// does name is charged as a suppressed finding and dropped from the
     /// alignment.
     fn undeclared_elements(
         &mut self,
@@ -323,18 +440,19 @@ impl<'v, 'e> Walker<'v, 'e> {
         path: &WirePath,
         class: PathClass,
     ) -> Vec<Element<'v>> {
-        if self.edits.is_empty() {
+        if self.register.is_empty() {
             return elements.iter().enumerate().collect();
         }
         let mut kept = Vec::with_capacity(elements.len());
         for (index, value) in elements.iter().enumerate() {
             let child = path.index(index);
-            let shifts = self.edits.iter().any(|edit| {
-                let kind = edit.kind();
-                kind != EditKind::Relocate && explains(kind, class) && edit.matches(&child)
-            });
-            if shifts {
-                self.record(child, class, Some(value));
+            let Some(kinds) = self.declared_kinds(&child) else {
+                return kept;
+            };
+            if kinds.shifts(class) {
+                if !self.charge() {
+                    return kept;
+                }
             } else {
                 kept.push((index, value));
             }

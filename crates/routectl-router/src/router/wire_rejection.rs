@@ -123,8 +123,8 @@ fn provenance_of(
     rejected: Option<&RejectedWirePath>,
 ) -> RejectionProvenance {
     let Some(path) = rejected
-        .map(|named| &named.wire)
-        .filter(|path| !path.is_coarsened())
+        .filter(|named| !named.wire.is_coarsened())
+        .map(|named| named.locator.as_slice())
     else {
         return RejectionProvenance::Unlocalized;
     };
@@ -146,20 +146,18 @@ fn provenance_of(
     }
 }
 
-/// The value at `path` in `body`. A rejection names a tagged-union member
-/// by its tag (`thinking.enabled.display` for `{"thinking": {"type":
-/// "enabled", "display": ..}}`), so a segment an object lacks but carries as
-/// its own `type` tag is consumed without descending.
-fn locate<'v>(body: &'v Value, path: &WirePath) -> Option<&'v Value> {
-    path.segments().try_fold(body, |node, segment| {
-        let key = segment.replace("~1", "/").replace("~0", "~");
-        match node {
-            Value::Object(map) => map.get(&key).or_else(|| {
-                (map.get(UNION_TAG).and_then(Value::as_str) == Some(key.as_str())).then_some(node)
-            }),
-            Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
-            _ => None,
-        }
+/// The value at `path` (raw keys and indices) in `body`. A rejection names a
+/// tagged-union member by its tag (`thinking.enabled.display` for
+/// `{"thinking": {"type": "enabled", "display": ..}}`), so a segment an
+/// object lacks but carries as its own `type` tag is consumed without
+/// descending.
+fn locate<'v>(body: &'v Value, path: &[String]) -> Option<&'v Value> {
+    path.iter().try_fold(body, |node, key| match node {
+        Value::Object(map) => map.get(key).or_else(|| {
+            (map.get(UNION_TAG).and_then(Value::as_str) == Some(key.as_str())).then_some(node)
+        }),
+        Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
+        _ => None,
     })
 }
 

@@ -290,12 +290,13 @@ pub(super) fn apply_installation_id(
 
 /// Declare the installation-id stamp against the `client_metadata` it lands
 /// on: a new key in an object the request carried, otherwise a whole new
-/// object (or a rewrite of a non-object value).
+/// object (or a rewrite of a non-object value). Keys under `client_metadata`
+/// render masked, so the stamped member is named by the wildcard.
 fn declare_installation_id(tap: &WireTap, client_metadata: Option<&Value>) {
     let site = EditSite::InstallationIdStamp;
     match client_metadata {
         Some(Value::Object(obj)) => {
-            let path = format!("/client_metadata/{INSTALLATION_ID_METADATA_KEY}");
+            let path = "/client_metadata/*";
             let kind = if obj.contains_key(INSTALLATION_ID_METADATA_KEY) {
                 EditKind::Rewrite
             } else {

@@ -5,7 +5,7 @@
 //! site's.
 
 use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite, Leg, WireTap};
-use routectl_core::{ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, Role};
+use routectl_core::{ChatRequest, ContentPart, KnownContentPart, Message};
 use serde_json::{Value, json};
 
 use super::super::cloak::{ClaudeCodeIdentity, CloakConfig, ToolRename, cloak_oauth_egress};
@@ -77,27 +77,25 @@ fn with_assistant_parts(parts: Value) -> ChatRequest {
     req
 }
 
-fn tool_exchange(id: &str) -> ChatRequest {
-    let mut req = base(json!({}));
-    let call: Message = serde_json::from_value(json!({
-        "role": "assistant",
-        "content": null,
-        "tool_calls": [{"id": id, "type": "function", "function": {"name": "f", "arguments": "{}"}}],
-    }))
-    .expect("assistant tool call");
-    let result = Message {
-        refusal: None,
-        role: Role::Tool,
-        content: MessageContent::Text("ok".into()),
-        reasoning: None,
-        reasoning_details: vec![],
-        name: None,
-        tool_call_id: Some(id.into()),
-        tool_calls: None,
-    };
+/// An assistant turn carrying a text block then one `tool_use` block per
+/// id, answered by one `tool_result` block per id.
+fn tool_use_exchange(ids: &[&str]) -> ChatRequest {
+    let uses: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"type": "tool_use", "id": id, "name": "f", "input": {}}))
+        .collect();
+    let results: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"type": "tool_result", "tool_use_id": id, "content": "ok"}))
+        .collect();
+    let mut parts = vec![json!({"type": "text", "text": "calling"})];
+    parts.extend(uses);
+    let mut req = with_assistant_parts(Value::Array(parts));
     let mut messages: Vec<Message> = req.messages.to_vec();
-    messages.push(call);
-    messages.push(result);
+    if let Some(last) = messages.last_mut() {
+        *last = serde_json::from_value(json!({"role": "user", "content": results}))
+            .expect("tool result turn");
+    }
     req.messages = messages.into();
     req
 }
@@ -172,12 +170,9 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
     AssemblyRow {
         name: "tool-use id rewritten to the wire charset",
         site: EditSite::ToolIdSanitize,
-        firing: || tool_exchange("call.a:1"),
-        idle: || tool_exchange("call_a1"),
-        expected: &[
-            (EditKind::Rewrite, "/messages/*/content/*/id"),
-            (EditKind::Rewrite, "/messages/*/content/*/tool_use_id"),
-        ],
+        firing: || tool_use_exchange(&["call_a1", "call.a:1"]),
+        idle: || tool_use_exchange(&["call_a1", "call_b2"]),
+        expected: &[(EditKind::Rewrite, "/messages/1/content/2/id")],
     },
     AssemblyRow {
         name: "unsigned thinking block stripped",
@@ -350,7 +345,7 @@ fn the_cloak_user_id_mint_declares_only_a_minted_value() {
 
     assert_eq!(
         cloak_edits(fresh, true, &CloakConfig::default()),
-        owned(&[(EditKind::Add, "/metadata/user_id")])
+        owned(&[(EditKind::Add, "/metadata/*")])
     );
     assert!(cloak_edits(set, true, &CloakConfig::default()).is_empty());
 }

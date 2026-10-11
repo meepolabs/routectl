@@ -474,7 +474,7 @@ fn the_api_key_lane_forwards_max_output_tokens_without_a_gate_declaration() {
 }
 
 #[test]
-fn an_installation_id_lands_beside_client_metadata_keys_as_a_concrete_add() {
+fn an_installation_id_lands_beside_client_metadata_keys_as_a_masked_add() {
     let mut cfg = config("http://127.0.0.1:9", AuthKind::ChatgptOauth);
     cfg.installation_id = Some("iid-1".into());
     let req = ChatRequest {
@@ -487,7 +487,7 @@ fn an_installation_id_lands_beside_client_metadata_keys_as_a_concrete_add() {
     assert!(has(
         &edits,
         EditSite::InstallationIdStamp,
-        "/client_metadata/x-codex-installation-id",
+        "/client_metadata/*",
         EditKind::Add
     ));
 }

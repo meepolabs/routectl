@@ -44,15 +44,9 @@ fn constructor_refuses_each_blanket_pattern() {
 #[test]
 fn constructor_accepts_narrow_patterns() {
     let rows = [
-        ("escaped tilde and slash", "/metadata/a~0b~1c"),
-        (
-            "64-byte segment",
-            "/metadata/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
-        ),
-        (
-            "64-byte key whose escape is longer",
-            "/metadata/~0kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
-        ),
+        ("masked key under metadata", "/metadata/*"),
+        ("32-byte key", "/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"),
+        ("hyphenated key", "/client_metadata"),
         ("cache marker", "/messages/*/content/*/cache_control"),
         ("concrete tool", "/tools/1"),
         ("tool field", "/tools/*/name"),
@@ -70,20 +64,21 @@ fn constructor_accepts_narrow_patterns() {
 #[test]
 fn constructor_refuses_patterns_that_cannot_match() {
     let nine_deep = "/a/b/c/d/e/f/g/h/i";
-    let rows: [(&str, &'static str, EditPatternError); 8] = [
+    let rows: [(&str, &'static str, EditPatternError); 10] = [
+        ("escaped key", "/a~0b~1c", EditPatternError::Unmatchable),
         (
-            "invalid escape",
-            "/metadata/a~2b",
+            "33-byte key",
+            "/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
             EditPatternError::Unmatchable,
         ),
         (
-            "trailing tilde",
-            "/metadata/ab~",
+            "verbatim key under metadata",
+            "/metadata/user_id",
             EditPatternError::Unmatchable,
         ),
         (
-            "65-byte segment",
-            "/metadata/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+            "verbatim key under a tool schema",
+            "/tools/0/input_schema/properties",
             EditPatternError::Unmatchable,
         ),
         (
@@ -107,6 +102,7 @@ fn constructor_refuses_patterns_that_cannot_match() {
             nine_deep,
             EditPatternError::Unmatchable,
         ),
+        ("leading digit key", "/1st", EditPatternError::Unmatchable),
     ];
 
     for (name, pattern, expected) in rows {
@@ -118,7 +114,7 @@ fn constructor_refuses_patterns_that_cannot_match() {
 
 #[test]
 fn wildcard_matches_exactly_one_segment() {
-    let rows: [(&str, &'static str, &[&str], bool); 11] = [
+    let rows: [(&str, &'static str, &[&str], bool); 12] = [
         ("concrete exact", "/tools/1", &["tools", "1"], true),
         ("concrete other index", "/tools/1", &["tools", "2"], false),
         (
@@ -158,15 +154,21 @@ fn wildcard_matches_exactly_one_segment() {
             true,
         ),
         (
-            "unsafe key surfaces as wildcard",
-            "/metadata/*",
-            &["metadata", "a b"],
+            "wildcard matches a non-identifier key",
+            "/x/*",
+            &["x", "a b"],
             true,
         ),
         (
-            "wildcard never matches a safe key",
+            "wildcard matches a key masked under metadata",
             "/metadata/*",
             &["metadata", "user_id"],
+            true,
+        ),
+        (
+            "wildcard never matches a verbatim key",
+            "/x/*",
+            &["x", "user_id"],
             false,
         ),
         (
@@ -202,14 +204,6 @@ fn coarsened_path_matches_no_pattern() {
     for (name, pattern) in rows {
         assert!(!edit(pattern).matches(&deep), "row {name}");
     }
-}
-
-#[test]
-fn escaped_segments_match_their_escaped_pattern() {
-    let path = WirePath::from_segments(["metadata", "a/b~c"]);
-
-    assert!(edit("/metadata/a~1b~0c").matches(&path));
-    assert!(!edit("/metadata/a/b~0c").matches(&path));
 }
 
 #[test]
