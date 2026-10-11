@@ -79,6 +79,7 @@ pub(crate) mod seat_pool;
 pub(crate) mod state_key;
 #[cfg(test)]
 pub(crate) mod test_secret;
+pub mod wire_check_state;
 
 pub use activation::{
     ActivatedChange, ActivationDelta, ActivationEntry, ActivationState, ActivationStatus,
@@ -139,7 +140,7 @@ pub use config::{
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
     RegistryEntry, RemovedPaidProbeCapsError, RetiredCapabilityKeysError, RetryPolicy,
     SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig, UsageConfig, VersionTooNewError,
-    WindowGateConfig, is_config_provider_kind, preflight_config_version,
+    WindowGateConfig, WireCheckConfig, is_config_provider_kind, preflight_config_version,
     preflight_legacy_mitm_credential_source, preflight_removed_paid_probe_caps,
     preflight_retired_capability_keys, validate_cache_pricing_retired,
 };

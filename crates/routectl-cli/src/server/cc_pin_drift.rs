@@ -18,7 +18,7 @@
 
 use axum::http::HeaderMap;
 
-use crate::warn_dedup::{CappedWarnSet, WarnDecision};
+use routectl_core::warn_dedup::{CappedWarnSet, WarnDecision};
 
 /// Log target both events on this guard carry. Distinct from the MITM
 /// check's target so an operator can filter the two questions apart.
@@ -42,7 +42,7 @@ const CC_PIN_DRIFT_WARN_CAP: usize = 1024;
 /// different versions alternating through one routectl would otherwise
 /// re-warn on every request forever, each one making the other's record
 /// stale. The bounded dedup decision itself lives in
-/// `warn_dedup::CappedWarnSet`; this type owns the comparison,
+/// `routectl_core::warn_dedup::CappedWarnSet`; this type owns the comparison,
 /// the log target, and the field vocabulary.
 #[derive(Debug)]
 pub struct CcPinDriftGuard {

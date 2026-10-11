@@ -23,7 +23,8 @@ pub use schema::{
     HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter, OverrideEntry,
     PREFIX_QUORUM, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
     ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection, ServerAuth,
-    ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
+    ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, WireCheckConfig,
+    is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -208,6 +209,14 @@ pub struct Config {
     /// block deliberately does not expose.
     #[serde(default)]
     pub fidelity: FidelityConfig,
+
+    /// Operator-facing `[wire_check]` block. Sampling knobs for the live
+    /// wire check on successful attempts, plus the status window. A missing
+    /// block keeps `WireCheckConfig::default()`. Hot-reloadable: each router
+    /// build reads its own copy, while the per-(lane, version) counts the
+    /// sampler keeps survive a reload.
+    #[serde(default)]
+    pub wire_check: WireCheckConfig,
 
     /// Operator-facing LEGACY `[cache_pricing]` field-level override table
     /// for the baked catalog economics rows (`crate::catalog`). Slated for

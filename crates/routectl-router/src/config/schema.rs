@@ -1,6 +1,7 @@
 //! Config value types.
 
 use std::collections::BTreeMap;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
 use routectl_providers::anthropic_api::{AuthKind, CloakConfig};
@@ -423,6 +424,63 @@ impl Default for SeatQuotaConfig {
     fn default() -> Self {
         Self {
             enabled: default_true(),
+        }
+    }
+}
+
+/// Operator-facing `[wire_check]` config block: how often the live wire
+/// check compares a client's request body with the body routectl sent
+/// upstream on a successful attempt. A missing `[wire_check]` table
+/// deserializes to `WireCheckConfig::default()`.
+///
+/// Successful attempts are checked for the first `first_n` attempts of each
+/// (lane, client version) since boot, then one in every `sample_one_in`.
+/// Rejected attempts are always checked and are not governed by this block.
+/// There is no on/off key: the check never changes a request, so the only
+/// operator choice is its cost.
+///
+/// `sample_one_in` and `window_secs` are non-zero by type, so a zero is
+/// refused at load with the key named. `#[non_exhaustive]` leaves room for
+/// later knobs without breaking callers; `#[serde(deny_unknown_fields)]`
+/// rejects a typo'd key at config-load time instead of silently ignoring it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct WireCheckConfig {
+    /// Successful attempts checked per (lane, client version) since boot
+    /// before sampling starts. Default 8.
+    #[serde(default = "default_wire_check_first_n")]
+    pub first_n: u32,
+    /// After the first `first_n`, one successful attempt in this many is
+    /// checked. Must be at least 1. Default 100.
+    #[serde(default = "default_wire_check_sample_one_in")]
+    pub sample_one_in: NonZeroU32,
+    /// How far back, in seconds, a counter's last sighting still counts as
+    /// current on the status surface. Must be greater than 0. Default 86400.
+    #[serde(default = "default_wire_check_window_secs")]
+    pub window_secs: NonZeroU64,
+}
+
+const fn default_wire_check_first_n() -> u32 {
+    8
+}
+
+const fn default_wire_check_sample_one_in() -> NonZeroU32 {
+    const DEFAULT: NonZeroU32 = NonZeroU32::new(100).expect("non-zero literal");
+    DEFAULT
+}
+
+const fn default_wire_check_window_secs() -> NonZeroU64 {
+    const DEFAULT: NonZeroU64 = NonZeroU64::new(86_400).expect("non-zero literal");
+    DEFAULT
+}
+
+impl Default for WireCheckConfig {
+    fn default() -> Self {
+        Self {
+            first_n: default_wire_check_first_n(),
+            sample_one_in: default_wire_check_sample_one_in(),
+            window_secs: default_wire_check_window_secs(),
         }
     }
 }
@@ -3242,6 +3300,10 @@ mod seat_quota_config_tests;
 #[cfg(test)]
 #[path = "fidelity_config_tests.rs"]
 mod fidelity_config_tests;
+
+#[cfg(test)]
+#[path = "wire_check_config_tests.rs"]
+mod wire_check_config_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

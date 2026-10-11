@@ -1984,6 +1984,34 @@
         }
       },
       "type": "object"
+    },
+    "WireCheckConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[wire_check]` config block: how often the live wire\ncheck compares a client's request body with the body routectl sent\nupstream on a successful attempt. A missing `[wire_check]` table\ndeserializes to `WireCheckConfig::default()`.\n\nSuccessful attempts are checked for the first `first_n` attempts of each\n(lane, client version) since boot, then one in every `sample_one_in`.\nRejected attempts are always checked and are not governed by this block.\nThere is no on/off key: the check never changes a request, so the only\noperator choice is its cost.\n\n`sample_one_in` and `window_secs` are non-zero by type, so a zero is\nrefused at load with the key named. `#[non_exhaustive]` leaves room for\nlater knobs without breaking callers; `#[serde(deny_unknown_fields)]`\nrejects a typo'd key at config-load time instead of silently ignoring it.",
+      "properties": {
+        "first_n": {
+          "default": 8,
+          "description": "Successful attempts checked per (lane, client version) since boot\nbefore sampling starts. Default 8.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sample_one_in": {
+          "default": 100,
+          "description": "After the first `first_n`, one successful attempt in this many is\nchecked. Must be at least 1. Default 100.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "window_secs": {
+          "default": 86400,
+          "description": "How far back, in seconds, a counter's last sighting still counts as\ncurrent on the status surface. Must be greater than 0. Default 86400.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2160,6 +2188,15 @@
         "enabled": false
       },
       "description": "Operator-facing `[window_gate]` block. Kill switch for the\nproactive context-window gate. A missing block leaves the gate\ndisabled, which is byte-identical to no gate at all; `enabled = true`\nopts in. Hot-reloadable -- the flag is read per chain\nresolution, so a live config swap applies without a restart."
+    },
+    "wire_check": {
+      "$ref": "#/$defs/WireCheckConfig",
+      "default": {
+        "first_n": 8,
+        "sample_one_in": 100,
+        "window_secs": 86400
+      },
+      "description": "Operator-facing `[wire_check]` block. Sampling knobs for the live\nwire check on successful attempts, plus the status window. A missing\nblock keeps `WireCheckConfig::default()`. Hot-reloadable: each router\nbuild reads its own copy, while the per-(lane, version) counts the\nsampler keeps survive a reload."
     }
   },
   "title": "Config",

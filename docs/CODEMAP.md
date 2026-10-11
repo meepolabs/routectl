@@ -46,6 +46,10 @@ license.
   closed `TranslationReason` (`HostedToolWithheld`, `TranslationRejected`)
   carrying only the date-stripped `TranslationKey`, never a label, URL or
   header; deduped, first-seen order; skipped for background probes
+- `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
+  dedup decision shared by the cli's `proxy::metrics::WarnOnce` and
+  `server::cc_pin_drift` and the router's wire-check WARN. Decides only --
+  it emits nothing itself
 - `src/wire_check/mod.rs` -- wire-check contract root: content-free types for
   comparing a client's request body with the body routectl sent upstream on
   the same attempt; module-scope deny of indexing/unwrap/expect/panic
@@ -3970,6 +3974,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   upstream): one constructor and one first-`#` parser over the serialized
   `provider_entry#upstream` ledger `lane_key`; no `Display`, only the
   sanitized `for_log`. Distinct from the runtime breaker `state_key`
+- `src/wire_check_state.rs` -- `WireCheckState`, the live wire check's
+  process-lifetime state shared by `Arc` across hot reloads: the sampler
+  (`admit`: first `first_n` per (lane, client version), at most 8 versions
+  per lane, then 1 in `sample_one_in`), the closed-label counters
+  `rc_wire_loss_total{lane,path_class}` / `rc_wire_check_total{lane,outcome}`
+  / `rc_request_refused_local_total{lane}` with last-seen seconds, a
+  128-entry content-free findings ring (`WireFinding`, `F1Outcome`), and the
+  path-only WARN deduped per (lane, path, kind); `Router::wire_check_snapshot`
+  reads it without mutating
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain
   pre-filter; walks `ToolDef::Other(v)["type"]` strings through
   `canonical_tool_key` (strips date suffixes, e.g. `_20250305`, and keys the
@@ -7051,7 +7064,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   closed dims (`Leg` / `ResultClass` / `PathClass`), open/closed streams, idle
   aborts, unknown forwarded paths, and TLS handshake failures/timeouts;
   `WarnOnce::warn_once(method, path)` dedups a per-path warning over a shared
-  `warn_dedup::CappedWarnSet`. By
+  `routectl_core::warn_dedup::CappedWarnSet`. By
   construction no token / credential / body ever enters a counter dimension or
   a log line -- the only inputs are the small closed enums plus method + path
 - `src/proxy/mitm.rs` -- per-connection TLS termination + HTTP/1.1 serving.
@@ -7420,9 +7433,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   builder `main` installs via `init`) and `EscapingFields`, the field
   formatter that escapes control, format, separator and default-ignorable
   characters
-- `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
-  dedup decision shared by `proxy::metrics::WarnOnce` and
-  `server::cc_pin_drift`. Decides only -- it emits nothing itself
 - `src/test_usage_dir.rs` -- `usage_dir()` (`cfg(test)`): a fresh usage-ledger
   dir under the testkit temp reaper's per-process dir, for fixtures whose
   writer thread may open the DB after the test's own scope has ended

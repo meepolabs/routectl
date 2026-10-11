@@ -21,7 +21,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::warn_dedup::{CappedWarnSet, WarnDecision};
+use routectl_core::warn_dedup::{CappedWarnSet, WarnDecision};
 
 /// Which leg of the proxy a request/stream belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,7 +255,7 @@ impl ProxyMetrics {
 /// Dedups repeated WARN emissions for the same `(method, path)` pair.
 ///
 /// The bounded warn-once decision itself lives in
-/// `warn_dedup::CappedWarnSet`; this type owns the KEY shape, the
+/// `routectl_core::warn_dedup::CappedWarnSet`; this type owns the KEY shape, the
 /// cap's rationale, and the two log lines. The cap matters because the key
 /// is request-derived (the exact path a client sends), so an attacker or a
 /// runaway client bug would otherwise grow the set for the life of the

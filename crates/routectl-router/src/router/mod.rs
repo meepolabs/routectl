@@ -449,6 +449,12 @@ pub struct Router {
     /// back an operator-facing snapshot, so a reload that silently zeroed
     /// them would make a diffed rate compute garbage with no indication why.
     metrics: Arc<RouterMetrics>,
+    /// Live wire-check sampler, counters and findings ring. Shared on a
+    /// hot-reload rebuild by `carry_over_metrics_from` for the same reason
+    /// as `metrics`: the counters back an operator-facing surface, and the
+    /// sampler's per-(lane, version) counts must not restart their first-N
+    /// window on every config swap.
+    wire_check: Arc<crate::wire_check_state::WireCheckState>,
     /// `true` iff `config.providers` contains a `ProviderEntry::AnthropicApi`
     /// with `credential_source == Forwarded`. Computed ONCE here at
     /// construction (a full `config.providers` scan) rather than re-scanned
@@ -1135,7 +1141,16 @@ impl RouterMetrics {
     /// `pub` snapshot functions -- no dependency edge back into router.
     /// Debug-rendered because each `(lane, class)` key set grows as fix/sweep
     /// arms land, so neither can be a fixed set of named tracing fields.
-    fn log_snapshot(&self, quota_refused_by_admission_total: u64) {
+    ///
+    /// `rc_wire_loss_total`, `rc_wire_check_total` and
+    /// `rc_request_refused_local_total` ride it the same way: they live on the
+    /// router's wire-check state, not here, and are Debug-rendered
+    /// `(lane, label, count)` lists because their keys appear as traffic does.
+    fn log_snapshot(
+        &self,
+        quota_refused_by_admission_total: u64,
+        wire_check: &crate::wire_check_state::CounterLog,
+    ) {
         let quota = self.quota_placement_totals();
         let pool = self.pool_totals();
         #[cfg(feature = "bedrock")]
@@ -1180,6 +1195,9 @@ impl RouterMetrics {
             rc_bedrock_validation_unmatched_total = self.bedrock_validation_unmatched_total(),
             rc_translation_drop_counts = ?routectl_providers::translation_drop_metrics::translation_drop_snapshot(),
             rc_translation_policy_action_counts = ?routectl_providers::translation_drop_metrics::translation_policy_action_snapshot(),
+            rc_wire_loss_total = ?wire_check.loss,
+            rc_wire_check_total = ?wire_check.checks,
+            rc_request_refused_local_total = ?wire_check.local_refusals,
             "router metrics snapshot"
         );
         #[cfg(not(feature = "bedrock"))]
@@ -1223,6 +1241,9 @@ impl RouterMetrics {
             rc_pool_removed_pin_repick_total = pool.removed_pin_repick,
             rc_translation_drop_counts = ?routectl_providers::translation_drop_metrics::translation_drop_snapshot(),
             rc_translation_policy_action_counts = ?routectl_providers::translation_drop_metrics::translation_policy_action_snapshot(),
+            rc_wire_loss_total = ?wire_check.loss,
+            rc_wire_check_total = ?wire_check.checks,
+            rc_request_refused_local_total = ?wire_check.local_refusals,
             "router metrics snapshot"
         );
     }
@@ -2143,6 +2164,7 @@ impl Router {
             overlay_revision: 0,
             catalog_overlay: Arc::default(),
             metrics: Arc::new(RouterMetrics::default()),
+            wire_check: Arc::default(),
             has_forwarded_provider,
             volatile_prefix_warned: Mutex::new(HashSet::new()),
             prefix_rewrite_warned: Arc::new(AtomicBool::new(false)),
@@ -2566,6 +2588,7 @@ impl Router {
     /// Router is about to discard.
     pub fn carry_over_metrics_from(&mut self, previous: &Self) {
         self.metrics = Arc::clone(&previous.metrics);
+        self.wire_check = Arc::clone(&previous.wire_check);
     }
 
     /// Carry the previous Router's per-lane token-estimate correction
@@ -3099,8 +3122,16 @@ impl Router {
     /// body content ever reaches this call -- every field is a counter name
     /// plus its numeric value.
     pub fn log_metrics_snapshot(&self) {
+        let wire_check = self.wire_check_snapshot().counter_log();
         self.metrics
-            .log_snapshot(self.quota_store.refused_by_admission_total());
+            .log_snapshot(self.quota_store.refused_by_admission_total(), &wire_check);
+    }
+
+    /// A copy of the live wire-check counters and findings ring, with the
+    /// status window this router's config sets. Reads only: no counter is
+    /// reset and the sampler is not advanced.
+    pub fn wire_check_snapshot(&self) -> crate::wire_check_state::WireCheckSnapshot {
+        self.wire_check.snapshot(&self.config.wire_check)
     }
 
     /// Retain the build's sanitized per-pool reports and count their

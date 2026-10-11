@@ -35,6 +35,7 @@ pub(crate) mod tool_pairing;
 mod translation_report;
 pub mod upstream_meta;
 pub(crate) mod volatile;
+pub mod warn_dedup;
 pub mod wire_check;
 
 /// Shared canonical-request / canonical-response builders for the
@@ -106,6 +107,7 @@ pub use volatile::{
     CallerPrefixAdvisory, CallerPrefixFinding, PrefixComponent, VolatileConfidence, VolatileKind,
     VolatileReport, scan_caller_prefix_advisory, scan_volatile,
 };
+pub use warn_dedup::{CappedWarnSet, WarnDecision};
 
 /// Cross-crate cap on `body_excerpt` fields in upstream-error tracing
 /// logs. Sized to fit a typical AWS IAM error body (User ARN + action +

@@ -1,0 +1,358 @@
+use routectl_core::wire_check::{
+    EgressKind, IngressDialect, Lane, Leg, PathClass, RejectionProvenance, WirePath,
+};
+
+use super::{
+    CheckOutcome, F1Outcome, FINDINGS_RING_CAPACITY, MAX_TRACKED_VERSIONS_PER_LANE, WireCheckState,
+};
+use crate::config::{Config, WireCheckConfig};
+
+fn config(first_n: u32, sample_one_in: u32) -> WireCheckConfig {
+    let config: Config = toml::from_str(&format!(
+        "version = 5\n[wire_check]\nfirst_n = {first_n}\nsample_one_in = {sample_one_in}\n"
+    ))
+    .expect("wire_check config parses");
+    config.wire_check
+}
+
+fn anthropic_lane() -> Lane {
+    Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi)
+}
+
+fn chat_lane() -> Lane {
+    Lane::of(IngressDialect::Chat, EgressKind::OpenaiCompat)
+}
+
+fn path(segments: &[&str]) -> WirePath {
+    WirePath::from_segments(segments.iter().copied())
+}
+
+/// Indices (0-based) of the calls `admit` accepted out of `calls` attempts.
+fn admitted_indices(
+    state: &WireCheckState,
+    lane: Lane,
+    version: Option<&str>,
+    config: &WireCheckConfig,
+    calls: usize,
+) -> Vec<usize> {
+    (0..calls)
+        .filter(|_| state.admit(lane, version, config))
+        .collect()
+}
+
+#[test]
+fn sampler_admits_first_n_then_exactly_one_in_m_per_lane_and_version() {
+    let state = WireCheckState::default();
+    let config = config(3, 5);
+
+    let admitted = admitted_indices(&state, anthropic_lane(), Some("2.1.0"), &config, 3 + 5 * 4);
+
+    assert_eq!(admitted, vec![0, 1, 2, 7, 12, 17, 22]);
+}
+
+#[test]
+fn each_version_and_each_lane_gets_its_own_first_n() {
+    let state = WireCheckState::default();
+    let config = config(2, 1000);
+    for _ in 0..10 {
+        state.admit(anthropic_lane(), Some("1.0.0"), &config);
+    }
+
+    let rows = [
+        ("new version, same lane", anthropic_lane(), Some("1.0.1")),
+        ("no version, same lane", anthropic_lane(), None),
+        ("same version, other lane", chat_lane(), Some("1.0.0")),
+    ];
+    for (name, lane, version) in rows {
+        assert_eq!(
+            admitted_indices(&state, lane, version, &config, 10),
+            vec![0, 1],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_version_past_the_per_lane_cap_falls_to_one_in_m() {
+    let state = WireCheckState::default();
+    let config = config(4, 10);
+    let tracked: Vec<String> = (0..MAX_TRACKED_VERSIONS_PER_LANE)
+        .map(|n| format!("1.0.{n}"))
+        .collect();
+    for version in &tracked {
+        state.admit(anthropic_lane(), Some(version), &config);
+    }
+
+    let overflow = admitted_indices(&state, anthropic_lane(), Some("9.9.9"), &config, 20);
+
+    assert_eq!(overflow, vec![9, 19], "no first-N window past the cap");
+    assert_eq!(
+        admitted_indices(&state, anthropic_lane(), Some("1.0.0"), &config, 3),
+        vec![0, 1, 2],
+        "a version tracked before the cap keeps its own first-N window"
+    );
+}
+
+#[test]
+fn first_n_zero_admits_only_every_mth_success() {
+    let state = WireCheckState::default();
+    let config = config(0, 4);
+
+    let admitted = admitted_indices(&state, chat_lane(), None, &config, 12);
+
+    assert_eq!(admitted, vec![3, 7, 11]);
+}
+
+#[test]
+fn only_a_finished_untruncated_comparison_with_no_findings_is_clean() {
+    let lost = path(&["metadata", "user_id"]);
+    type Row<'a> = (&'a str, &'a [(&'a WirePath, PathClass)], bool, CheckOutcome);
+    let rows: [Row<'_>; 4] = [
+        ("no findings", &[], false, CheckOutcome::Clean),
+        (
+            "a finding",
+            &[(&lost, PathClass::Missing)],
+            false,
+            CheckOutcome::Loss,
+        ),
+        ("truncated, no findings", &[], true, CheckOutcome::Budget),
+        (
+            "truncated with a finding",
+            &[(&lost, PathClass::Missing)],
+            true,
+            CheckOutcome::Budget,
+        ),
+    ];
+    for (name, findings, truncated, expected) in rows {
+        let state = WireCheckState::default();
+
+        let outcome = state.record_compared(
+            anthropic_lane(),
+            Leg::Request,
+            findings.iter().copied(),
+            truncated,
+        );
+
+        assert_eq!(outcome, expected, "{name}");
+        let checks = state.snapshot(&WireCheckConfig::default()).checks;
+        assert_eq!(checks.len(), 1, "{name}");
+        assert_eq!(checks[0].outcome, expected, "{name}");
+        assert_eq!(checks[0].reading.count, 1, "{name}");
+    }
+}
+
+#[test]
+fn an_incomplete_check_is_counted_incomplete_not_clean() {
+    let state = WireCheckState::default();
+
+    state.record_incomplete(anthropic_lane());
+
+    let checks = state.snapshot(&WireCheckConfig::default()).checks;
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].outcome, CheckOutcome::Incomplete);
+    assert_eq!(checks[0].lane, anthropic_lane());
+}
+
+#[test]
+fn a_loss_bumps_its_lane_and_class_counter_and_enters_the_ring_with_its_leg() {
+    let state = WireCheckState::default();
+    let lost = path(&["stop_sequences"]);
+
+    state.record_compared(
+        chat_lane(),
+        Leg::Response,
+        [(&lost, PathClass::Changed)],
+        false,
+    );
+
+    let snapshot = state.snapshot(&WireCheckConfig::default());
+    assert_eq!(snapshot.loss.len(), 1);
+    assert_eq!(snapshot.loss[0].lane, chat_lane());
+    assert_eq!(snapshot.loss[0].path_class, PathClass::Changed);
+    assert_eq!(snapshot.loss[0].reading.count, 1);
+    let finding = &snapshot.findings[0];
+    assert_eq!(finding.leg, Leg::Response);
+    assert_eq!(finding.path, lost);
+    assert_eq!(finding.class, Some(PathClass::Changed));
+    assert_eq!(finding.f1_outcome, None);
+}
+
+#[test]
+fn the_ring_holds_at_most_its_capacity_keeping_the_newest() {
+    let state = WireCheckState::default();
+    let total = FINDINGS_RING_CAPACITY + 72;
+
+    for n in 0..total {
+        state.record_rejection(
+            anthropic_lane(),
+            Leg::Request,
+            &path(&["tools", &n.to_string()]),
+            RejectionProvenance::ClientUnchanged,
+            F1Outcome::Repaired,
+        );
+    }
+
+    let findings = state.snapshot(&WireCheckConfig::default()).findings;
+    assert_eq!(findings.len(), FINDINGS_RING_CAPACITY);
+    assert_eq!(findings[0].path, path(&["tools", "72"]), "oldest kept");
+    assert_eq!(
+        findings[FINDINGS_RING_CAPACITY - 1].path,
+        path(&["tools", &(total - 1).to_string()]),
+        "newest kept last"
+    );
+}
+
+#[test]
+fn a_local_refusal_counts_per_lane() {
+    let state = WireCheckState::default();
+    let local = Lane::of(IngressDialect::Responses, EgressKind::Local);
+
+    state.record_local_refusal(local);
+    state.record_local_refusal(local);
+
+    let refusals = state.snapshot(&WireCheckConfig::default()).local_refusals;
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(refusals[0].lane.label(), "responses->local");
+    assert_eq!(refusals[0].reading.count, 2);
+}
+
+#[test]
+fn counter_window_includes_its_edge_and_excludes_past_it() {
+    let reading = super::CounterReading {
+        count: 1,
+        last_seen_unix_secs: 1_000,
+    };
+
+    assert!(reading.seen_within(60, 1_060));
+    assert!(!reading.seen_within(60, 1_061));
+    assert!(
+        reading.seen_within(60, 900),
+        "a clock step back stays in window"
+    );
+}
+
+const BODY_SENTINEL: &str = "planted body sentinel 7f3a";
+
+fn wire_check_warns(
+    events: &[routectl_testkit::CapturedEvent],
+) -> Vec<&routectl_testkit::CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| e.target == "routectl_router::wire_check" && e.level == tracing::Level::WARN)
+        .collect()
+}
+
+#[test]
+fn a_repeated_loss_warns_once_while_its_counter_reaches_the_call_count() {
+    let state = WireCheckState::default();
+    let lost = path(&["messages", "0", BODY_SENTINEL]);
+    let calls = 5;
+
+    let events = routectl_testkit::capture_events(|| {
+        for _ in 0..calls {
+            state.record_compared(
+                anthropic_lane(),
+                Leg::Request,
+                [(&lost, PathClass::Missing)],
+                false,
+            );
+        }
+    });
+
+    let warns = wire_check_warns(&events);
+    assert_eq!(warns.len(), 1);
+    let warn = warns[0];
+    assert_eq!(warn.field("lane"), Some("anthropic->anthropic-api"));
+    assert_eq!(warn.field("leg"), Some("request"));
+    assert_eq!(warn.field("path"), Some("/messages/0/*"));
+    assert_eq!(warn.field("path_class"), Some("missing"));
+    for (name, value) in &warn.fields {
+        assert!(!value.contains(BODY_SENTINEL), "field {name} = {value}");
+    }
+    assert!(!warn.message.contains(BODY_SENTINEL));
+    let snapshot = state.snapshot(&WireCheckConfig::default());
+    assert_eq!(snapshot.loss[0].reading.count, calls);
+    assert_eq!(snapshot.findings.len(), calls as usize);
+}
+
+#[test]
+fn a_different_lane_path_or_class_warns_separately() {
+    let state = WireCheckState::default();
+    let a = path(&["temperature"]);
+    let b = path(&["top_p"]);
+
+    let events = routectl_testkit::capture_events(|| {
+        for (lane, p, class) in [
+            (anthropic_lane(), &a, PathClass::Missing),
+            (anthropic_lane(), &a, PathClass::Missing),
+            (chat_lane(), &a, PathClass::Missing),
+            (anthropic_lane(), &b, PathClass::Missing),
+            (anthropic_lane(), &a, PathClass::Changed),
+        ] {
+            state.record_compared(lane, Leg::Request, [(p, class)], false);
+        }
+    });
+
+    assert_eq!(wire_check_warns(&events).len(), 4);
+}
+
+#[test]
+fn only_an_unrepaired_rejection_warns_and_only_once_per_path() {
+    let state = WireCheckState::default();
+    let rejected = path(&["thinking"]);
+
+    let events = routectl_testkit::capture_events(|| {
+        for f1 in [
+            F1Outcome::Repaired,
+            F1Outcome::RepairedLossy,
+            F1Outcome::Unrepaired,
+            F1Outcome::Unrepaired,
+        ] {
+            state.record_rejection(
+                anthropic_lane(),
+                Leg::Request,
+                &rejected,
+                RejectionProvenance::RoutectlAdded,
+                f1,
+            );
+        }
+    });
+
+    let warns = wire_check_warns(&events);
+    assert_eq!(warns.len(), 1);
+    assert_eq!(warns[0].field("f1_outcome"), Some("unrepaired"));
+    assert_eq!(warns[0].field("provenance"), Some("routectl_added"));
+    assert_eq!(warns[0].field("path"), Some("/thinking"));
+    assert_eq!(
+        state.snapshot(&WireCheckConfig::default()).findings.len(),
+        4
+    );
+}
+
+#[test]
+fn snapshot_reads_do_not_advance_the_sampler_or_change_the_registry() {
+    let state = WireCheckState::default();
+    let config = config(2, 1000);
+    assert!(state.admit(anthropic_lane(), None, &config));
+    state.record_incomplete(anthropic_lane());
+    let before = state.snapshot(&config);
+
+    for _ in 0..10 {
+        state.snapshot(&config);
+    }
+
+    assert_eq!(state.snapshot(&config), before);
+    assert!(
+        state.admit(anthropic_lane(), None, &config),
+        "the second success is still inside first_n"
+    );
+    assert!(!state.admit(anthropic_lane(), None, &config));
+}
+
+#[test]
+fn closed_label_sets_are_complete_and_distinct() {
+    let outcomes: Vec<&str> = CheckOutcome::ALL.iter().map(|o| o.label()).collect();
+    assert_eq!(outcomes, ["clean", "loss", "budget", "incomplete"]);
+    let f1: Vec<&str> = F1Outcome::ALL.iter().map(|o| o.label()).collect();
+    assert_eq!(f1, ["repaired", "repaired_lossy", "unrepaired"]);
+}

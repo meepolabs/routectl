@@ -1,5 +1,5 @@
-//! `CappedWarnSet`: the bounded warn-once dedup primitive both drift /
-//! anomaly warnings in this crate are built on.
+//! `CappedWarnSet`: the bounded warn-once dedup primitive that drift,
+//! anomaly and wire-loss warnings across the workspace are built on.
 //!
 //! The shape it factors out. A warning keyed on request-derived data must
 //! fire once per distinct key rather than once per request, or it trains an
@@ -34,13 +34,16 @@ pub enum WarnDecision {
     /// The cap is full and this key is not in the set. The caller should
     /// stay silent about the KEY, and emit its one-time cap notice iff
     /// `notice` is true.
-    CapReached { notice: bool },
+    CapReached {
+        /// Whether this caller is the one to emit the one-time cap notice.
+        notice: bool,
+    },
 }
 
 /// A bounded set of keys already warned about, plus the one-shot flag for
-/// the cap notice. `cap` is explicit per instance: the two current callers
-/// bound different key spaces for different reasons, and one shared
-/// constant would tie a change in either to the other.
+/// the cap notice. `cap` is explicit per instance: callers bound different
+/// key spaces for different reasons, and one shared constant would tie a
+/// change in any one of them to the others.
 #[derive(Debug)]
 pub struct CappedWarnSet<K: Eq + Hash> {
     seen: Mutex<HashSet<K>>,
@@ -49,6 +52,7 @@ pub struct CappedWarnSet<K: Eq + Hash> {
 }
 
 impl<K: Eq + Hash> CappedWarnSet<K> {
+    /// An empty set that records at most `cap` keys.
     pub fn new(cap: usize) -> Self {
         Self {
             seen: Mutex::new(HashSet::new()),
@@ -98,7 +102,11 @@ impl<K: Eq + Hash> CappedWarnSet<K> {
     }
 
     /// Keys currently recorded.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(
+        clippy::len_without_is_empty,
+        reason = "a test probe of the bound, not a collection API"
+    )]
     pub fn len(&self) -> usize {
         match self.seen.lock() {
             Ok(seen) => seen.len(),
@@ -107,13 +115,13 @@ impl<K: Eq + Hash> CappedWarnSet<K> {
     }
 
     /// Whether the one-shot cap notice has already been handed out.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn cap_noted(&self) -> bool {
         self.cap_noted.load(Ordering::Relaxed)
     }
 
     /// Poison the lock so callers' recovery paths are reachable in tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn poison_for_test(&self) {
         let _unused = self.seen.lock();
         panic!("poisoning the dedup lock on purpose");

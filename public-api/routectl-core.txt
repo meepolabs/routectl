@@ -2945,6 +2945,84 @@ pub fn routectl_core::upstream_meta::UpstreamMeta::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::UpstreamMeta
 impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::UpstreamMeta
 pub const routectl_core::upstream_meta::OVERAGE_CLAIM: &str
+pub mod routectl_core::warn_dedup
+pub enum routectl_core::warn_dedup::WarnDecision
+pub routectl_core::warn_dedup::WarnDecision::AlreadyWarned
+pub routectl_core::warn_dedup::WarnDecision::CapReached
+pub routectl_core::warn_dedup::WarnDecision::CapReached::notice: bool
+pub routectl_core::warn_dedup::WarnDecision::Emit
+impl core::clone::Clone for routectl_core::warn_dedup::WarnDecision
+pub fn routectl_core::warn_dedup::WarnDecision::clone(&self) -> routectl_core::warn_dedup::WarnDecision
+impl core::cmp::Eq for routectl_core::warn_dedup::WarnDecision
+impl core::cmp::PartialEq for routectl_core::warn_dedup::WarnDecision
+pub fn routectl_core::warn_dedup::WarnDecision::eq(&self, &routectl_core::warn_dedup::WarnDecision) -> bool
+impl core::fmt::Debug for routectl_core::warn_dedup::WarnDecision
+pub fn routectl_core::warn_dedup::WarnDecision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::warn_dedup::WarnDecision
+impl core::marker::StructuralPartialEq for routectl_core::warn_dedup::WarnDecision
+impl core::marker::Freeze for routectl_core::warn_dedup::WarnDecision
+impl core::marker::Send for routectl_core::warn_dedup::WarnDecision
+impl core::marker::Sync for routectl_core::warn_dedup::WarnDecision
+impl core::marker::Unpin for routectl_core::warn_dedup::WarnDecision
+impl core::marker::UnsafeUnpin for routectl_core::warn_dedup::WarnDecision
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::warn_dedup::WarnDecision
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::warn_dedup::WarnDecision
+impl<T, U> core::convert::Into<U> for routectl_core::warn_dedup::WarnDecision where U: core::convert::From<T>
+pub fn routectl_core::warn_dedup::WarnDecision::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::warn_dedup::WarnDecision where U: core::convert::Into<T>
+pub type routectl_core::warn_dedup::WarnDecision::Error = core::convert::Infallible
+pub fn routectl_core::warn_dedup::WarnDecision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::warn_dedup::WarnDecision where U: core::convert::TryFrom<T>
+pub type routectl_core::warn_dedup::WarnDecision::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::warn_dedup::WarnDecision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::warn_dedup::WarnDecision where T: core::clone::Clone
+pub type routectl_core::warn_dedup::WarnDecision::Owned = T
+pub fn routectl_core::warn_dedup::WarnDecision::clone_into(&self, &mut T)
+pub fn routectl_core::warn_dedup::WarnDecision::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::warn_dedup::WarnDecision where T: 'static + ?core::marker::Sized
+pub fn routectl_core::warn_dedup::WarnDecision::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::warn_dedup::WarnDecision where T: ?core::marker::Sized
+pub fn routectl_core::warn_dedup::WarnDecision::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::warn_dedup::WarnDecision where T: ?core::marker::Sized
+pub fn routectl_core::warn_dedup::WarnDecision::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::warn_dedup::WarnDecision where T: core::clone::Clone
+pub unsafe fn routectl_core::warn_dedup::WarnDecision::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::warn_dedup::WarnDecision
+pub fn routectl_core::warn_dedup::WarnDecision::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::warn_dedup::WarnDecision
+impl<T> tracing::instrument::WithSubscriber for routectl_core::warn_dedup::WarnDecision
+pub struct routectl_core::warn_dedup::CappedWarnSet<K: core::cmp::Eq + core::hash::Hash>
+impl<K: core::cmp::Eq + core::hash::Hash> routectl_core::warn_dedup::CappedWarnSet<K>
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::admit(&self, K) -> routectl_core::warn_dedup::WarnDecision
+pub const fn routectl_core::warn_dedup::CappedWarnSet<K>::cap(&self) -> usize
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::new(usize) -> Self
+impl<K: core::fmt::Debug + core::cmp::Eq + core::hash::Hash> core::fmt::Debug for routectl_core::warn_dedup::CappedWarnSet<K>
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<K> !core::marker::Freeze for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<K> core::marker::Send for routectl_core::warn_dedup::CappedWarnSet<K> where K: core::marker::Send
+impl<K> core::marker::Sync for routectl_core::warn_dedup::CappedWarnSet<K> where K: core::marker::Send
+impl<K> core::marker::Unpin for routectl_core::warn_dedup::CappedWarnSet<K> where K: core::marker::Unpin
+impl<K> core::marker::UnsafeUnpin for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<K> core::panic::unwind_safe::RefUnwindSafe for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<K> core::panic::unwind_safe::UnwindSafe for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<T, U> core::convert::Into<U> for routectl_core::warn_dedup::CappedWarnSet<K> where U: core::convert::From<T>
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::warn_dedup::CappedWarnSet<K> where U: core::convert::Into<T>
+pub type routectl_core::warn_dedup::CappedWarnSet<K>::Error = core::convert::Infallible
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::warn_dedup::CappedWarnSet<K> where U: core::convert::TryFrom<T>
+pub type routectl_core::warn_dedup::CappedWarnSet<K>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_core::warn_dedup::CappedWarnSet<K> where T: 'static + ?core::marker::Sized
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::warn_dedup::CappedWarnSet<K> where T: ?core::marker::Sized
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::warn_dedup::CappedWarnSet<K> where T: ?core::marker::Sized
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_core::warn_dedup::CappedWarnSet<K>
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<T> tracing::instrument::WithSubscriber for routectl_core::warn_dedup::CappedWarnSet<K>
 pub mod routectl_core::wire_check
 pub enum routectl_core::wire_check::EditKind
 pub routectl_core::wire_check::EditKind::Add
@@ -5261,6 +5339,51 @@ impl<T> core::convert::From<T> for routectl_core::VolatileKind
 pub fn routectl_core::VolatileKind::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::VolatileKind
 impl<T> tracing::instrument::WithSubscriber for routectl_core::VolatileKind
+pub enum routectl_core::WarnDecision
+pub routectl_core::WarnDecision::AlreadyWarned
+pub routectl_core::WarnDecision::CapReached
+pub routectl_core::WarnDecision::CapReached::notice: bool
+pub routectl_core::WarnDecision::Emit
+impl core::clone::Clone for routectl_core::warn_dedup::WarnDecision
+pub fn routectl_core::warn_dedup::WarnDecision::clone(&self) -> routectl_core::warn_dedup::WarnDecision
+impl core::cmp::Eq for routectl_core::warn_dedup::WarnDecision
+impl core::cmp::PartialEq for routectl_core::warn_dedup::WarnDecision
+pub fn routectl_core::warn_dedup::WarnDecision::eq(&self, &routectl_core::warn_dedup::WarnDecision) -> bool
+impl core::fmt::Debug for routectl_core::warn_dedup::WarnDecision
+pub fn routectl_core::warn_dedup::WarnDecision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::warn_dedup::WarnDecision
+impl core::marker::StructuralPartialEq for routectl_core::warn_dedup::WarnDecision
+impl core::marker::Freeze for routectl_core::warn_dedup::WarnDecision
+impl core::marker::Send for routectl_core::warn_dedup::WarnDecision
+impl core::marker::Sync for routectl_core::warn_dedup::WarnDecision
+impl core::marker::Unpin for routectl_core::warn_dedup::WarnDecision
+impl core::marker::UnsafeUnpin for routectl_core::warn_dedup::WarnDecision
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::warn_dedup::WarnDecision
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::warn_dedup::WarnDecision
+impl<T, U> core::convert::Into<U> for routectl_core::warn_dedup::WarnDecision where U: core::convert::From<T>
+pub fn routectl_core::warn_dedup::WarnDecision::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::warn_dedup::WarnDecision where U: core::convert::Into<T>
+pub type routectl_core::warn_dedup::WarnDecision::Error = core::convert::Infallible
+pub fn routectl_core::warn_dedup::WarnDecision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::warn_dedup::WarnDecision where U: core::convert::TryFrom<T>
+pub type routectl_core::warn_dedup::WarnDecision::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::warn_dedup::WarnDecision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::warn_dedup::WarnDecision where T: core::clone::Clone
+pub type routectl_core::warn_dedup::WarnDecision::Owned = T
+pub fn routectl_core::warn_dedup::WarnDecision::clone_into(&self, &mut T)
+pub fn routectl_core::warn_dedup::WarnDecision::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::warn_dedup::WarnDecision where T: 'static + ?core::marker::Sized
+pub fn routectl_core::warn_dedup::WarnDecision::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::warn_dedup::WarnDecision where T: ?core::marker::Sized
+pub fn routectl_core::warn_dedup::WarnDecision::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::warn_dedup::WarnDecision where T: ?core::marker::Sized
+pub fn routectl_core::warn_dedup::WarnDecision::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::warn_dedup::WarnDecision where T: core::clone::Clone
+pub unsafe fn routectl_core::warn_dedup::WarnDecision::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::warn_dedup::WarnDecision
+pub fn routectl_core::warn_dedup::WarnDecision::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::warn_dedup::WarnDecision
+impl<T> tracing::instrument::WithSubscriber for routectl_core::warn_dedup::WarnDecision
 #[non_exhaustive] pub struct routectl_core::AnthropicUnifiedQuota
 pub routectl_core::AnthropicUnifiedQuota::extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::AnthropicUnifiedQuota::overage_status: core::option::Option<alloc::string::String>
@@ -5558,6 +5681,38 @@ impl<T> core::convert::From<T> for routectl_core::CallerPrefixFinding
 pub fn routectl_core::CallerPrefixFinding::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::CallerPrefixFinding
 impl<T> tracing::instrument::WithSubscriber for routectl_core::CallerPrefixFinding
+pub struct routectl_core::CappedWarnSet<K: core::cmp::Eq + core::hash::Hash>
+impl<K: core::cmp::Eq + core::hash::Hash> routectl_core::warn_dedup::CappedWarnSet<K>
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::admit(&self, K) -> routectl_core::warn_dedup::WarnDecision
+pub const fn routectl_core::warn_dedup::CappedWarnSet<K>::cap(&self) -> usize
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::new(usize) -> Self
+impl<K: core::fmt::Debug + core::cmp::Eq + core::hash::Hash> core::fmt::Debug for routectl_core::warn_dedup::CappedWarnSet<K>
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<K> !core::marker::Freeze for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<K> core::marker::Send for routectl_core::warn_dedup::CappedWarnSet<K> where K: core::marker::Send
+impl<K> core::marker::Sync for routectl_core::warn_dedup::CappedWarnSet<K> where K: core::marker::Send
+impl<K> core::marker::Unpin for routectl_core::warn_dedup::CappedWarnSet<K> where K: core::marker::Unpin
+impl<K> core::marker::UnsafeUnpin for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<K> core::panic::unwind_safe::RefUnwindSafe for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<K> core::panic::unwind_safe::UnwindSafe for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<T, U> core::convert::Into<U> for routectl_core::warn_dedup::CappedWarnSet<K> where U: core::convert::From<T>
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::warn_dedup::CappedWarnSet<K> where U: core::convert::Into<T>
+pub type routectl_core::warn_dedup::CappedWarnSet<K>::Error = core::convert::Infallible
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::warn_dedup::CappedWarnSet<K> where U: core::convert::TryFrom<T>
+pub type routectl_core::warn_dedup::CappedWarnSet<K>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_core::warn_dedup::CappedWarnSet<K> where T: 'static + ?core::marker::Sized
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::warn_dedup::CappedWarnSet<K> where T: ?core::marker::Sized
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::warn_dedup::CappedWarnSet<K> where T: ?core::marker::Sized
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_core::warn_dedup::CappedWarnSet<K>
+pub fn routectl_core::warn_dedup::CappedWarnSet<K>::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::warn_dedup::CappedWarnSet<K>
+impl<T> tracing::instrument::WithSubscriber for routectl_core::warn_dedup::CappedWarnSet<K>
 pub struct routectl_core::ChatChunk
 pub routectl_core::ChatChunk::choices: alloc::vec::Vec<routectl_core::schema::ChunkChoice>
 pub routectl_core::ChatChunk::id: alloc::string::String

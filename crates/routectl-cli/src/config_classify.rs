@@ -47,6 +47,7 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
     "cache_pricing",
     "capability",
     "fidelity",
+    "wire_check",
 ];
 
 /// Diff the previous config against the new one and return the names of

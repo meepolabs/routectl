@@ -64,6 +64,7 @@ overlays merge, what's reserved.
 **Operating the daemon**
 - [Log knobs (`[log]`)](#log-knobs-log)
 - [Usage accounting (`[usage]`)](#usage-accounting-usage)
+- [Live wire check (`[wire_check]`)](#live-wire-check-wire_check)
 - [Reading usage (`routectl usage`)](#reading-usage-routectl-usage)
 - [Diagnostics (doctor / probe)](#diagnostics-routectl-doctor-and-routectl-provider-probe)
 - [Inspecting a request offline (`prompt-size`)](#inspecting-a-request-offline-routectl-prompt-size)
@@ -183,6 +184,10 @@ version = 5           # config schema version; see "Config schema version"
 
 [usage]               # usage-accounting subsystem: enabled, db_path,
                       # retention_days. Optional.
+
+[wire_check]          # live wire-check sampling (first_n, sample_one_in,
+                      # window_secs). Optional; default 8 / 100 / 86400.
+                      # Observe-only -- never changes a request.
 
 [registry."<glob>"]   # per-upstream pricing for cost estimation.
                       # Optional; no defaults shipped.
@@ -2522,6 +2527,58 @@ retention_days = 90                     # prune rows older than this; default 90
 - `retention_days` -- on daemon startup, rows older than this many days
   are pruned from the database. Hot-reloads; the new value applies at
   the next startup-time prune.
+
+## Live wire check (`[wire_check]`)
+
+routectl can compare the body a client sent with the body it sent upstream
+on the same attempt, and count every difference no routectl transform
+declared. The optional `[wire_check]` block sets how often a successful
+attempt is checked and how long a finding stays current on the status
+surface. A missing block deserializes to the defaults below.
+
+```toml
+[wire_check]
+# Successful attempts checked per (lane, client version) since boot
+# before sampling starts. Default 8.
+first_n = 8
+# After that, one successful attempt in this many is checked. Must be
+# at least 1. Default 100.
+sample_one_in = 100
+# How far back, in seconds, a counter's last sighting still counts as
+# current on the status surface. Must be greater than 0. Default 86400.
+window_secs = 86400
+```
+
+- **`first_n`** (integer, default `8`) -- a lane is one ingress dialect
+  feeding one egress kind (for example `anthropic->anthropic-api`). Each
+  lane checks its first `first_n` successful attempts per client version
+  after boot, so a new client release is checked straight away. At most
+  8 client versions are tracked per lane; attempts from any further
+  version are checked at the 1-in-`sample_one_in` rate only. `0` skips
+  the first-N window entirely.
+- **`sample_one_in`** (integer >= 1, default `100`) -- past `first_n`,
+  one successful attempt in this many is checked. `1` checks every
+  successful attempt. `0` fails config load.
+- **`window_secs`** (integer > 0, default `86400`) -- the status surface
+  shows a loss or local-refusal counter only while its last sighting is
+  inside this window. The counters themselves are cumulative since boot
+  and survive a config reload. `0` fails config load.
+- **There is no on/off key.** The check never changes what is sent and
+  never fails a request; the only operator choice is how much it costs.
+  An attempt the upstream rejects is always checked, whatever these
+  knobs say.
+- **What it reports.** Three counters ride the router's metrics snapshot
+  log line: `rc_wire_loss_total{lane,path_class}`,
+  `rc_wire_check_total{lane,outcome}` (outcome `clean`, `loss`, `budget`
+  or `incomplete` -- a check that ran out of budget or had nothing
+  complete to compare is never counted clean) and
+  `rc_request_refused_local_total{lane}`. A loss, or an upstream
+  rejection field repair could not fix, logs one WARN per (lane, path,
+  kind) at target `routectl_router::wire_check`. Every label and path is
+  content-free: paths are sanitized JSON pointers, never body values.
+- **Hot-reloadable.** A config swap applies the new values to the next
+  admit decision; the per-(lane, version) counts and every counter carry
+  across the reload.
 
 ## MITM front-proxy (`[mitm]`)
 

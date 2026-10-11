@@ -2157,6 +2157,78 @@ fn carry_over_metrics_from_shares_storage_across_a_rebuild() {
 }
 
 #[test]
+fn wire_check_counters_and_sampler_survive_carry_over_metrics_from() {
+    use routectl_core::wire_check::{EgressKind, IngressDialect, Lane, Leg, PathClass, WirePath};
+
+    let lane = Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi);
+    let lost = WirePath::from_segments(["metadata"]);
+    let config: Config =
+        toml::from_str("version = 5\n[wire_check]\nfirst_n = 2\nsample_one_in = 1000\n")
+            .expect("parse");
+    let config = Arc::new(config);
+    let before = Router::new(config.clone());
+    assert!(before.wire_check.admit(lane, None, &config.wire_check));
+    before
+        .wire_check
+        .record_compared(lane, Leg::Request, [(&lost, PathClass::Missing)], false);
+    before.wire_check.record_local_refusal(lane);
+    let mut after = Router::new(config.clone());
+
+    after.carry_over_metrics_from(&before);
+
+    let snapshot = after.wire_check_snapshot();
+    assert_eq!(snapshot.loss.len(), 1);
+    assert_eq!(snapshot.loss[0].reading.count, 1);
+    assert_eq!(snapshot.checks.len(), 1);
+    assert_eq!(snapshot.local_refusals.len(), 1);
+    assert_eq!(snapshot.findings.len(), 1);
+    assert!(
+        after.wire_check.admit(lane, None, &config.wire_check),
+        "the second success continues the carried first-N window"
+    );
+    assert!(
+        !before.wire_check.admit(lane, None, &config.wire_check),
+        "both routers advance one shared sampler"
+    );
+}
+
+#[test]
+fn log_snapshot_carries_the_wire_check_counters() {
+    use routectl_core::wire_check::{EgressKind, IngressDialect, Lane, Leg, PathClass, WirePath};
+
+    let router = Router::new(Arc::new(Config::default()));
+    let lane = Lane::of(IngressDialect::Chat, EgressKind::OpenaiCompat);
+    let lost = WirePath::from_segments(["seed"]);
+    router
+        .wire_check
+        .record_compared(lane, Leg::Request, [(&lost, PathClass::Missing)], false);
+    router
+        .wire_check
+        .record_local_refusal(Lane::of(IngressDialect::Chat, EgressKind::Local));
+
+    let events = routectl_testkit::capture_events(|| {
+        router.log_metrics_snapshot();
+    });
+
+    let snapshot = events
+        .iter()
+        .find(|e| e.message == "router metrics snapshot")
+        .expect("one snapshot event");
+    assert_eq!(
+        snapshot.field("rc_wire_loss_total"),
+        Some(r#"[("chat->openai-compat", "missing", 1)]"#)
+    );
+    assert_eq!(
+        snapshot.field("rc_wire_check_total"),
+        Some(r#"[("chat->openai-compat", "loss", 1)]"#)
+    );
+    assert_eq!(
+        snapshot.field("rc_request_refused_local_total"),
+        Some(r#"[("chat->local", 1)]"#)
+    );
+}
+
+#[test]
 fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
     // Arrange: bump a couple of counters so the snapshot's assertions
     // pin real numbers, not just field presence.
