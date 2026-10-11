@@ -186,14 +186,6 @@ struct UnsweptPolicyClass {
 
 const UNSWEPT_POLICY_CLASSES: &[UnsweptPolicyClass] = &[
     UnsweptPolicyClass {
-        class: "client_fingerprint_stripped",
-        file: "anthropic_api/request.rs",
-        reason: "the cloak lane's fingerprint withhold; its transforms live in a nested module \
-         directory the flat marker sweep refuses to descend into, so no marker on this \
-         file would ever be parsed",
-        test: "the_canonical_system_billing_strip_counts_one_policy_action",
-    },
-    UnsweptPolicyClass {
         class: "cloak_classified_non_cc",
         file: "anthropic_api/client.rs",
         reason: "the anthropic-api cloak's classification split; its transforms live in a nested \
@@ -234,15 +226,6 @@ const UNSWEPT_POLICY_CLASSES: &[UnsweptPolicyClass] = &[
          rides upstream verbatim; counted from the orchestrator for the same nested-directory \
          reason",
         test: "duplicate_tool_names_count_one_tool_sort_stand_down",
-    },
-    UnsweptPolicyClass {
-        class: "hosted_mcp_tool_withheld",
-        file: "anthropic_api/request.rs",
-        reason: "an OpenAI Responses hosted-MCP tool carries the caller's remote-server \
-         credentials and is withheld from the Anthropic-shaped tool list; counted from the \
-         lane's request orchestrator, which sits beside the nested cloak module directory the \
-         flat marker sweep refuses to descend into",
-        test: "an_anthropic_request_carrying_a_hosted_mcp_tool_counts_one_policy_action",
     },
 ];
 

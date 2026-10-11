@@ -201,6 +201,14 @@ const CALLER_ATTRIBUTED_HELPERS: &[(&str, &str, &str)] = &[
 ///   arm gains a counter and a marker.
 const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
     (
+        "anthropic_api/request.rs",
+        "emit",
+        "output_config.format keys omitted",
+        "uncounted request-side loss: the aggregated DEBUG for the `name` / `strict` keys \
+         Anthropic's structured-output format cannot carry, emitted once per request by every \
+         Claude seam; no lane counts it",
+    ),
+    (
         "bedrock/converse/eventstream.rs",
         "handle_converse_frame",
         "skipping eventstream frame with no",
@@ -264,52 +272,40 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
          loss costs model output rather than caller content",
     ),
     (
-        "openai_compat/request.rs",
-        "check_dropped_anthropic_fields",
-        "top-level cache_control dropped",
-        "uncounted request-side loss: the top-level cache breakpoint has no openai-compat wire field, declared by this DEBUG and by the strict-mode rejection only",
+        "bedrock/invoke.rs",
+        "lower_top_level_cache_control_to_per_block",
+        "no messages array to host a per-block marker",
+        "uncounted request-side loss: a top-level cache breakpoint with no messages array to \
+         lower onto is removed, declared by this WARN only",
     ),
     (
-        "openai_compat/request.rs",
-        "check_dropped_anthropic_fields",
-        "anthropic_beta flags dropped",
-        "uncounted request-side loss: Anthropic beta flags have no openai-compat wire field, declared by this DEBUG and by the strict-mode rejection only",
+        "bedrock/invoke.rs",
+        "lower_top_level_cache_control_to_per_block",
+        "no eligible content block to host a per-block marker",
+        "uncounted request-side loss: the same breakpoint removal when no content block can \
+         carry the lowered marker, declared by this WARN only",
     ),
     (
-        "openai_compat/request.rs",
-        "check_dropped_anthropic_fields",
-        "per-block cache_control on system dropped",
-        "uncounted request-side loss: system block cache breakpoints do not survive the lowering to one system message, declared by this DEBUG and strict mode only",
+        "bedrock/invoke.rs",
+        "lower_top_level_cache_control_to_per_block",
+        "lowering would violate the breakpoint invariants",
+        "uncounted request-side loss: the same breakpoint removal when the lowered arrangement \
+         would break the breakpoint invariants, declared by this WARN only",
     ),
     (
-        "openai_compat/request.rs",
-        "check_dropped_anthropic_fields",
-        "tool cache_control dropped",
-        "uncounted request-side loss: a custom tool's cache breakpoint has no openai-compat wire field, declared by this DEBUG and strict mode only",
+        "bedrock/invoke.rs",
+        "normalize_request",
+        "additional_model_request_fields attempted to override",
+        "uncounted policy action: an operator extra naming a managed key is refused on this \
+         lane, declared by this WARN only, where the Converse lane counts the same refusal",
     ),
     (
-        "openai_compat/request.rs",
-        "check_dropped_anthropic_fields",
-        "per-block cache_control dropped",
-        "uncounted request-side loss: a message part's cache breakpoint is stripped by the content lift, declared by this DEBUG and strict mode only",
-    ),
-    (
-        "openai_compat/request.rs",
-        "merge_extras",
-        "anthropic `metadata` object dropped",
-        "uncounted request-side loss: the ingress-swept metadata object is withheld from strict openai-compat hosts, declared by this DEBUG only",
-    ),
-    (
-        "openai_compat/request.rs",
-        "merge_extras",
-        "forward-compat extra has no openai-compat equivalent",
-        "uncounted request-side loss: a swept forward-compat extra with no openai-compat field is dropped by design, declared by this DEBUG only",
-    ),
-    (
-        "openai_compat/request.rs",
-        "merge_extras",
-        "extras attempted to override routectl-managed key",
-        "uncounted request-side loss: an extras entry naming a routectl-managed key is refused so it cannot replace assembled fields, declared by this WARN only",
+        "bedrock/invoke.rs",
+        "strip_billing_system_field",
+        "billing/attribution system block dropped",
+        "uncounted policy action: the client fingerprint is withheld from the assembled body, \
+         declared by this DEBUG only, because this lane's fingerprint surfaces do not yet share \
+         one per-request tally",
     ),
     (
         "openai_responses/client.rs",
@@ -380,6 +376,16 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
 /// symbol passes every weld in this repository. Content-pinned by
 /// `(file, symbol)`, so a count that moves either way is a review moment.
 const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
+    (
+        "anthropic_api/request.rs",
+        "normalize_deferring_format_key_warn",
+        2,
+    ),
+    (
+        "anthropic_api/request.rs",
+        "response_format_to_anthropic_format",
+        5,
+    ),
     ("bedrock/converse/extras.rs", "insert_operator_extras", 1),
     ("bedrock/converse/extras.rs", "insert_provider_extras", 1),
     ("bedrock/converse/messages.rs", "flush", 3),
@@ -426,6 +432,12 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("gemini/request.rs", "report_withheld_ingress_extras", 1),
     ("gemini/request.rs", "strip_client_metadata", 1),
     ("gemini/request.rs", "tool_call_to_function_call_part", 1),
+    (
+        "openai_compat/request.rs",
+        "check_dropped_anthropic_fields",
+        5,
+    ),
+    ("openai_compat/request.rs", "merge_extras", 3),
     ("openai_compat/request.rs", "project_system", 2),
     (
         "openai_compat/wire_lift/mod.rs",
@@ -576,6 +588,14 @@ const EXPECTED_UNDECLARED_LOSS_MARKERS: &[(&str, &str, &str, &str)] = &[
 /// so deleting two would stay green.
 const STRUCTURAL_BESIDE_A_LOSS_LOG: &[(&str, &str, &str, &str)] = &[
     (
+        "anthropic_api/request.rs",
+        "response_format_to_anthropic_format",
+        "asks for the default unstructured output",
+        "the symbol's loss logs belong to the malformed-directive arms and the counted \
+         unknown-tag arm; this marker covers only the plain-text mode, which maps to nothing \
+         and loses nothing",
+    ),
+    (
         "bedrock/converse/messages.rs",
         "translate_messages",
         "an empty translated block vec carries no content",
@@ -600,6 +620,14 @@ const STRUCTURAL_BESIDE_A_LOSS_LOG: &[(&str, &str, &str, &str)] = &[
         "a whitespace-only system block carries no instruction text",
         "the symbol's loss logs are the billing-attribution strips, a different arm; this marker \
          covers only the empty-block skip, which removes no instruction text",
+    ),
+    (
+        "openai_compat/request.rs",
+        "merge_extras",
+        "withholding the leftover object loses no format twice",
+        "the symbol's loss logs belong to the counted metadata, forward-compat and managed-key \
+         arms; this marker covers only the swept `output_config`, whose format the \
+         response_format lift already translated or counted",
     ),
     (
         "openai_compat/wire_lift/response_format.rs",

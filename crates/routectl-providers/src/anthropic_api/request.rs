@@ -111,6 +111,7 @@ pub(crate) use crate::translation_drop_metrics::ClientFingerprintStripTally;
 /// routectl withholds it from this upstream whatever the upstream would make
 /// of it. Takes the request so a background probe records nothing -- see
 /// `super::probe_aware_metrics`.
+/// TRANSLATION-DROP: policy-action class=hosted_mcp_tool_withheld test=an_anthropic_request_carrying_a_hosted_mcp_tool_counts_one_policy_action
 fn flush_hosted_mcp_tally(hosted_mcp: &HostedMcpToolWithholdTally, req: &ChatRequest) {
     if hosted_mcp.withheld() && super::is_client_traffic(req) {
         crate::translation_drop_metrics::record_translation_policy_action(
@@ -138,6 +139,41 @@ fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally, req: &Chat
         crate::translation_drop_metrics::record_translation_policy_action(
             super::LANE,
             "client_fingerprint_stripped",
+        );
+    }
+}
+
+/// Per-request record that the canonical `response_format` carried a type tag
+/// [`response_format_to_anthropic_format`] cannot map. Caller-owned for the
+/// same reason as [`ClientFingerprintStripTally`]: the assembly that records
+/// into it serves two telemetry lanes, so each lane flushes it under its own
+/// lane constant, outside every fallible step.
+#[must_use = "an unrecognized response_format counts nothing until its lane flushes it"]
+#[derive(Debug, Default)]
+pub(crate) struct UnrecognizedResponseFormatTally {
+    dropped: bool,
+}
+
+impl UnrecognizedResponseFormatTally {
+    const fn record(&mut self) {
+        self.dropped = true;
+    }
+
+    /// Whether this request's structured-output directive was dropped for an
+    /// unrecognized type tag.
+    pub(crate) const fn dropped(&self) -> bool {
+        self.dropped
+    }
+}
+
+/// Count this request's unrecognized `response_format` on the anthropic lane.
+/// Takes the request so a background probe records nothing -- see
+/// `super::probe_aware_metrics`.
+fn flush_response_format_tally(tally: &UnrecognizedResponseFormatTally, req: &ChatRequest) {
+    if tally.dropped() && super::is_client_traffic(req) {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "response_format_unrepresentable",
         );
     }
 }
@@ -189,25 +225,25 @@ pub(crate) const fn clamp_sampling_for_thinking(
 ///
 /// Returns the mapped format plus which unrepresentable keys the source
 /// carried, so the caller can fold them into the single per-request
-/// diagnostic. Returns `None` for an absent or unrecognized shape so the
-/// caller emits nothing. Shared with the Bedrock-Converse bag builder so both
-/// Claude seams map the directive the same way.
-pub(crate) fn response_format_to_anthropic_format(
-    response_format: &Value,
-) -> Option<(Value, DroppedFormatKeys)> {
+/// diagnostic. A plain `text` directive maps to nothing and loses nothing;
+/// every other outcome drops the directive with a WARN, and the
+/// unrecognized-type outcome is reported separately so each lane sharing this
+/// converter can count it under its own lane. Shared with the Bedrock-Converse
+/// bag builder so both Claude seams map the directive the same way.
+pub(crate) fn response_format_to_anthropic_format(response_format: &Value) -> AnthropicFormat {
     let Some(obj) = response_format.as_object() else {
         tracing::warn!(
             "response_format is not an object; dropping structured-output \
              directive on Anthropic egress"
         );
-        return None;
+        return AnthropicFormat::Malformed;
     };
     let Some(kind) = obj.get("type").and_then(Value::as_str) else {
         tracing::warn!(
             "response_format carries no string type token; dropping \
              structured-output directive on Anthropic egress"
         );
-        return None;
+        return AnthropicFormat::Malformed;
     };
     match kind {
         "json_schema" => {
@@ -216,14 +252,14 @@ pub(crate) fn response_format_to_anthropic_format(
                     "response_format json_schema is absent or not an object; \
                      dropping structured-output directive on Anthropic egress"
                 );
-                return None;
+                return AnthropicFormat::Malformed;
             };
             let Some(schema) = js.get("schema").cloned() else {
                 tracing::warn!(
                     "response_format json_schema carries no json_schema.schema; \
                      dropping structured-output directive on Anthropic egress"
                 );
-                return None;
+                return AnthropicFormat::Malformed;
             };
             let mut format = serde_json::Map::new();
             format.insert("type".into(), Value::from("json_schema"));
@@ -232,21 +268,47 @@ pub(crate) fn response_format_to_anthropic_format(
                 name: js.contains_key("name"),
                 strict: js.contains_key("strict"),
             };
-            Some((Value::Object(format), dropped))
+            AnthropicFormat::Mapped(Value::Object(format), dropped)
         }
-        "json_object" => Some((
+        "json_object" => AnthropicFormat::Mapped(
             serde_json::json!({"type": "json_object"}),
             DroppedFormatKeys::default(),
-        )),
+        ),
+        // TRANSLATION-DROP: structural -- `text` asks for the default unstructured
+        // output, which a body with no `output_config.format` already gets.
+        "text" => AnthropicFormat::PlainText,
+        // `output_config.format` has no member for a structured-output mode
+        // outside the ones above, and a guessed mapping would constrain the
+        // output in a way the caller never asked for. Each lane sharing this
+        // converter counts the drop once per request under its own lane.
+        // TRANSLATION-DROP: lane=anthropic class=response_format_unrepresentable test=an_unrecognized_response_format_is_absent_from_the_anthropic_body_and_counted
+        // TRANSLATION-DROP: lane=bedrock-invoke class=response_format_unrepresentable test=an_unrecognized_response_format_is_absent_from_the_invoke_body_and_counted
+        // TRANSLATION-DROP: lane=bedrock-converse class=response_format_unrepresentable test=an_unrecognized_response_format_is_absent_from_the_converse_bag_and_counted
         other => {
             tracing::warn!(
                 response_format_type = other,
                 "unrecognized response_format shape; dropping structured-output \
                  directive on Anthropic egress"
             );
-            None
+            AnthropicFormat::UnrecognizedType
         }
     }
+}
+
+/// What [`response_format_to_anthropic_format`] made of a canonical
+/// `response_format`.
+pub(crate) enum AnthropicFormat {
+    /// The directive maps onto `output_config.format`, with the source keys
+    /// that format cannot carry.
+    Mapped(Value, DroppedFormatKeys),
+    /// The default unstructured mode: nothing to map and nothing lost.
+    PlainText,
+    /// A type tag outside `json_schema` / `json_object` / `text`. Dropped, and
+    /// counted by each lane on its own drop counter.
+    UnrecognizedType,
+    /// Not an object, no string type token, or a `json_schema` with no
+    /// schema. Dropped with the WARN only.
+    Malformed,
 }
 
 /// Insert `format` under `output_config.format` in `obj`, preserving any
@@ -575,7 +637,9 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// which telemetry lane the request is on, and this function serves two
 /// (anthropic-api through [`normalize`], bedrock-invoke through its own
 /// seam). `hosted_mcp` is the same shape of caller-owned tally for the
-/// Responses hosted-MCP tools withheld from the translated `tools` list.
+/// Responses hosted-MCP tools withheld from the translated `tools` list, and
+/// `response_format` for a structured-output directive dropped for an
+/// unrecognized type tag.
 ///
 /// Every other caller wants [`normalize`], which emits before returning.
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
@@ -591,6 +655,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     forward_system_turns: bool,
     fingerprint: &mut ClientFingerprintStripTally,
     hosted_mcp: &mut HostedMcpToolWithholdTally,
+    response_format: &mut UnrecognizedResponseFormatTally,
 ) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; log once at
@@ -630,15 +695,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         // it carries. Recorded into the request's tally rather than counted
         // here, because the legacy-lift branch below withholds the SAME class
         // from the same request and one request is one action.
-        //
-        // NO TRANSLATION-DROP MARKER HERE, deliberately: this file lies
-        // outside the census's swept surfaces, so a marker on it is never
-        // parsed and cannot fail -- one was verified to survive being replaced
-        // by an unparseable verdict with every weld green. A pin that cannot
-        // fail is worse than none, because it reads as enforcement. The
-        // covering tests are named below; widening the census to this surface
-        // is filed separately.
-        // Covered by: the_canonical_system_billing_strip_counts_one_policy_action
+        // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=the_canonical_system_billing_strip_counts_one_policy_action
         fingerprint.record();
     }
 
@@ -702,9 +759,8 @@ pub(crate) fn normalize_deferring_format_key_warn(
             );
             // Same class, same tally, for the same reason stated at the
             // canonical-system site above -- one record per request, not one
-            // per surface that withheld the fingerprint. No marker here for
-            // the same census-scope reason.
-            // Covered by: the_legacy_lift_billing_strip_counts_one_policy_action
+            // per surface that withheld the fingerprint.
+            // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=the_legacy_lift_billing_strip_counts_one_policy_action
             fingerprint.record();
         }
         lifted_content.as_ref().map(translate_system)
@@ -815,12 +871,17 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // provider_extras merge so an Anthropic-ingress round-trip that already
     // carried output_config.format keeps its value (caller wins).
     let mut dropped_format_keys = DroppedFormatKeys::default();
-    if let Some(rf) = req.response_format.as_ref()
-        && let Some((format, dropped)) = response_format_to_anthropic_format(rf)
-        && let Some(obj) = body.as_object_mut()
-    {
-        dropped_format_keys = dropped;
-        set_output_config_format(obj, format);
+    if let Some(rf) = req.response_format.as_ref() {
+        match response_format_to_anthropic_format(rf) {
+            AnthropicFormat::Mapped(format, dropped) => {
+                if let Some(obj) = body.as_object_mut() {
+                    dropped_format_keys = dropped;
+                    set_output_config_format(obj, format);
+                }
+            }
+            AnthropicFormat::UnrecognizedType => response_format.record(),
+            AnthropicFormat::PlainText | AnthropicFormat::Malformed => {}
+        }
     }
 
     // Scrub the two keys Anthropic's output_config.format cannot represent,
@@ -949,6 +1010,7 @@ pub(crate) fn normalize(
     }
     let mut fingerprint = ClientFingerprintStripTally::default();
     let mut hosted_mcp = HostedMcpToolWithholdTally::default();
+    let mut response_format = UnrecognizedResponseFormatTally::default();
     let assembled = normalize_deferring_format_key_warn(
         id,
         req,
@@ -959,6 +1021,7 @@ pub(crate) fn normalize(
         forward_system_turns,
         &mut fingerprint,
         &mut hosted_mcp,
+        &mut response_format,
     );
     // Flushed on BOTH arms and outside every fallible step of the assembly: a
     // request whose entire system IS the fingerprint block assembles to no
@@ -968,6 +1031,7 @@ pub(crate) fn normalize(
     // precisely the requests that withhold the most.
     flush_fingerprint_tally(&fingerprint, req);
     flush_hosted_mcp_tally(&hosted_mcp, req);
+    flush_response_format_tally(&response_format, req);
     let (body, deferred) = assembled?;
     deferred.warn(id);
     Ok(body)

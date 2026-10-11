@@ -450,6 +450,7 @@ async fn a_withheld_flag_pinned_by_header_extras_is_sent() {
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 async fn a_multi_flag_envelope_strips_every_named_flag_in_one_retry() {
     // Arrange: the captured three-flag envelope, triggered by the one named
     // flag the request's withheld set does not already name.
@@ -813,11 +814,13 @@ async fn assert_withheld_flag_absent_at_egress(shape: BedrockApiShape, call: Cal
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 async fn invoke_complete_never_sends_a_withheld_flag() {
     assert_withheld_flag_absent_at_egress(BedrockApiShape::Invoke, Call::Complete).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 async fn invoke_stream_never_sends_a_withheld_flag() {
     assert_withheld_flag_absent_at_egress(BedrockApiShape::Invoke, Call::Stream).await;
 }

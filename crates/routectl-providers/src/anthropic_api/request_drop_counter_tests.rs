@@ -334,3 +334,101 @@ fn a_request_with_no_billing_block_records_no_policy_action() {
     assert_eq!(after, before, "nothing was withheld, so nothing is counted");
     assert_eq!(body["system"][0]["text"], "you are helpful");
 }
+
+// ---------------------------------------------------------------------------
+// The unrecognized response_format drop.
+// ---------------------------------------------------------------------------
+
+/// The `(anthropic, response_format_unrepresentable)` drop counter. Every test
+/// reaching it carries `anthropic_response_format_unrepresentable`.
+fn response_format_drop_count() -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == super::LANE && e.drop_class == "response_format_unrepresentable")
+        .map_or(0, |e| e.drop_count)
+}
+
+fn with_response_format(format: serde_json::Value) -> ChatRequest {
+    ChatRequest {
+        response_format: Some(format),
+        ..base_req()
+    }
+}
+
+/// SINGLE-SOURCE pin: the request's only loss is the unrecognized tag.
+#[test]
+#[serial_test::serial(anthropic_response_format_unrepresentable)]
+fn an_unrecognized_response_format_is_absent_from_the_anthropic_body_and_counted() {
+    // Arrange
+    let req = with_response_format(serde_json::json!({"type": "zz_grammar_mode"}));
+
+    // Act
+    let before = response_format_drop_count();
+    let body = assemble(&req);
+    let after = response_format_drop_count();
+
+    // Assert
+    let rendered = serde_json::to_string(&body).expect("the body must serialize");
+    assert!(!rendered.contains("zz_grammar_mode"), "{rendered}");
+    assert!(body.get("output_config").is_none(), "{rendered}");
+    assert_eq!(after - before, 1);
+}
+
+/// A caller-supplied `output_config` whose schema nests past the repair
+/// walk's depth bound. It rides `provider_extras` past the converter, so the
+/// repair that rejects it runs AFTER the directive has been dropped.
+pub fn schema_past_the_repair_depth_bound() -> serde_json::Value {
+    let mut schema = serde_json::json!({"type": "object", "properties": {}});
+    for _ in 0..300 {
+        schema = serde_json::json!({"type": "object", "properties": {"a": schema}});
+    }
+    serde_json::json!({"output_config": {"format": {"type": "json_schema", "schema": schema}}})
+}
+
+/// The flush runs on the Err arm too: the directive is dropped by the
+/// converter, then the schema repair rejects the request.
+#[test]
+#[serial_test::serial(anthropic_response_format_unrepresentable)]
+fn an_unrecognized_response_format_still_counts_when_assembly_fails() {
+    // Arrange
+    let mut req = with_response_format(serde_json::json!({"type": "zz_grammar_mode"}));
+    req.provider_extras = Some(schema_past_the_repair_depth_bound());
+
+    // Act
+    let before = response_format_drop_count();
+    let outcome = normalize("test", &req, false, false, None, false, true);
+    let after = response_format_drop_count();
+
+    // Assert
+    assert!(outcome.is_err(), "the fixture must fail assembly");
+    assert_eq!(after - before, 1);
+}
+
+/// Each row leaves the counter untouched: a mapped format, the default
+/// plain-text mode, and a background probe carrying the unrecognized tag.
+#[test]
+#[serial_test::serial(anthropic_response_format_unrepresentable)]
+fn response_formats_that_lose_nothing_or_are_not_client_traffic_count_nothing() {
+    let mut probe = with_response_format(serde_json::json!({"type": "zz_grammar_mode"}));
+    probe.routectl_internal.background_probe = true;
+    let rows = [
+        (
+            "json_object",
+            with_response_format(serde_json::json!({"type": "json_object"})),
+        ),
+        (
+            "text",
+            with_response_format(serde_json::json!({"type": "text"})),
+        ),
+        ("background probe", probe),
+    ];
+    for (row, req) in rows {
+        // Act
+        let before = response_format_drop_count();
+        let _ = assemble(&req);
+        let after = response_format_drop_count();
+
+        // Assert
+        assert_eq!(after, before, "row {row}");
+    }
+}

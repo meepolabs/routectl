@@ -75,8 +75,10 @@ pub fn normalize(
     // Seams the OpenAI-compat wire can't represent: Anthropic-only
     // fields dropped from the body, plus unmodeled content blocks that
     // are forwarded verbatim. Default mode warns + continues; strict
-    // mode 400s on either.
-    check_dropped_anthropic_fields(id, req, strict_translation)?;
+    // mode 400s on either, having dropped nothing. The lenient tally is
+    // flushed here, ahead of every later fallible step, so a request that
+    // dropped a field and then failed translation still counts.
+    check_dropped_anthropic_fields(id, req, strict_translation)?.flush();
 
     let mut body =
         serde_json::to_value(req).map_err(|e| Error::normalize_request(id, e.to_string()))?;
@@ -150,12 +152,14 @@ pub fn normalize(
     // gated by the managed-key allow-list -- without this, a request
     // body of `provider_extras = {"messages":[...]}` could replace
     // the assembled messages.
+    let mut withheld = ExtrasWithholdTally::default();
     if let Some(extras) = payload_extras {
-        merge_extras(id, obj, extras, DEFAULT_EXTRAS_SOURCE);
+        merge_extras(id, obj, extras, DEFAULT_EXTRAS_SOURCE, &mut withheld);
     }
     if let Some(extras) = req.provider_extras.as_ref() {
-        merge_extras(id, obj, extras, PROVIDER_EXTRAS_SOURCE);
+        merge_extras(id, obj, extras, PROVIDER_EXTRAS_SOURCE, &mut withheld);
     }
+    withheld.flush();
 
     Ok(body)
 }
@@ -257,6 +261,76 @@ fn apply_system_projection(
     Ok(())
 }
 
+/// Per-request record of the canonical fields this lane's wire has no slot
+/// for. A FLAG per class rather than a count: the `(lane, class)` counters are
+/// per REQUEST, so four cache breakpoints dropped from four surfaces of one
+/// request are one drop event. Strict mode rejects instead of dropping, so its
+/// tally is discarded with the error and nothing is counted.
+#[must_use = "a canonical-field drop counts nothing until the tally is flushed"]
+#[derive(Debug, Default)]
+struct CanonicalFieldDropTally {
+    cache_control: bool,
+    anthropic_beta: bool,
+}
+
+impl CanonicalFieldDropTally {
+    fn flush(&self) {
+        if self.cache_control {
+            crate::translation_drop_metrics::record_translation_drop(
+                super::LANE,
+                "cache_control_unsupported",
+            );
+        }
+        if self.anthropic_beta {
+            crate::translation_drop_metrics::record_translation_drop(
+                super::LANE,
+                "anthropic_beta_unsupported",
+            );
+        }
+    }
+}
+
+/// Per-request record of the extras entries [`merge_extras`] kept off the
+/// wire, across both of its calls, so a request withholding several keys
+/// through either source is still one event per class.
+#[must_use = "an extras withhold counts nothing until the tally is flushed"]
+#[derive(Debug, Default)]
+struct ExtrasWithholdTally {
+    metadata: bool,
+    forward_compat_extra: bool,
+    provider_managed_key: bool,
+    operator_managed_key: bool,
+}
+
+impl ExtrasWithholdTally {
+    fn flush(&self) {
+        if self.metadata {
+            crate::translation_drop_metrics::record_translation_drop(
+                super::LANE,
+                "metadata_unsupported",
+            );
+        }
+        if self.forward_compat_extra {
+            crate::translation_drop_metrics::record_translation_drop(
+                super::LANE,
+                "forward_compat_extra_unrepresentable",
+            );
+        }
+        if self.provider_managed_key {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "provider_extra_managed_key_conflict",
+            );
+        }
+        if self.operator_managed_key {
+            crate::translation_drop_metrics::record_translation_policy_action(
+                super::LANE,
+                "operator_extra_managed_key_conflict",
+            );
+        }
+    }
+}
+
 /// Shallow-merge `extras` into `obj` with a routectl-managed-keys
 /// allow-list. Drop when an extras entry tries to override a key
 /// routectl owns (model, messages, stream, tools, etc.). The
@@ -276,6 +350,7 @@ fn merge_extras(
     obj: &mut serde_json::Map<String, Value>,
     extras: &Value,
     source: &'static str,
+    withheld: &mut ExtrasWithholdTally,
 ) {
     let Some(extra_obj) = extras.as_object() else {
         return;
@@ -289,12 +364,32 @@ fn merge_extras(
                 // `Unsupported parameter(s): metadata`. The drop is by
                 // design on every such request; log the key only, never the
                 // object's contents (may carry PII like user_id).
+                // TRANSLATION-DROP: lane=openai-compat class=metadata_unsupported test=an_ingress_metadata_object_is_absent_from_the_openai_compat_wire_and_counted
+                withheld.metadata = true;
                 tracing::debug!(
                     provider = id,
                     source = source,
                     "openai-compat egress: Anthropic `metadata` object dropped (not valid on OpenAI wire)"
                 );
             } else if source == PROVIDER_EXTRAS_SOURCE {
+                match k.as_str() {
+                    // TRANSLATION-DROP: structural -- the response_format lift reads
+                    // `output_config.format` off the request before this merge and
+                    // counts its own loss when the format has no equivalent here,
+                    // so withholding the leftover object loses no format twice.
+                    "output_config" => {}
+                    // A canonical key arriving through the extras bag would
+                    // replace a field routectl assembled; the wire would carry
+                    // it, and routectl refuses it to keep its own value
+                    // authoritative.
+                    // TRANSLATION-DROP: policy-action class=provider_extra_managed_key_conflict test=a_provider_extra_naming_a_canonical_key_is_refused_and_counted
+                    key if is_canonical_request_key(key) => withheld.provider_managed_key = true,
+                    // The swept Anthropic-only fields (`context_management`,
+                    // `mcp_servers`, ...) have no field on this wire, and strict
+                    // hosts 400 on them, so the upstream compels the loss.
+                    // TRANSLATION-DROP: lane=openai-compat class=forward_compat_extra_unrepresentable test=a_forward_compat_extra_is_absent_from_the_openai_compat_wire_and_counted
+                    _ => withheld.forward_compat_extra = true,
+                }
                 tracing::debug!(
                     provider = id,
                     source = source,
@@ -302,6 +397,10 @@ fn merge_extras(
                     "forward-compat extra has no openai-compat equivalent; dropped"
                 );
             } else {
+                // The operator's configured value would ride fine; routectl
+                // refuses it so its own assembled field stays authoritative.
+                // TRANSLATION-DROP: policy-action class=operator_extra_managed_key_conflict test=an_operator_extra_naming_a_managed_key_is_refused_and_counted
+                withheld.operator_managed_key = true;
                 tracing::warn!(
                     provider = id,
                     source = source,
@@ -369,25 +468,38 @@ fn is_routectl_managed_key(key: &str) -> bool {
 ///   NOT dropped: default mode forwards them verbatim for the
 ///   upstream to accept or reject.
 ///
-/// Default mode logs + returns `Ok(())`; strict mode collects both
-/// kinds of finding and returns an `Error::Validation` (HTTP 400) so
-/// the operator sees them before the upstream does.
-fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> Result<()> {
+/// Default mode logs and returns the request's drop tally for the caller to
+/// flush once; strict mode collects both kinds of finding and returns an
+/// `Error::Validation` (HTTP 400) so the operator sees them before the
+/// upstream does.
+fn check_dropped_anthropic_fields(
+    id: &str,
+    req: &ChatRequest,
+    strict: bool,
+) -> Result<CanonicalFieldDropTally> {
     let mut findings: Vec<String> = Vec::new();
+    let mut tally = CanonicalFieldDropTally::default();
     let mut record = |msg: String| {
         if strict {
             findings.push(msg);
         }
     };
 
+    // The four cache-breakpoint arms share one class: no surface of this
+    // wire carries a breakpoint, so each is the same loss, counted once per
+    // request however many surfaces carried one.
+    // TRANSLATION-DROP: lane=openai-compat class=cache_control_unsupported test=a_top_level_cache_control_is_absent_from_the_openai_compat_wire_and_counted
     if req.cache_control.is_some() {
+        tally.cache_control = true;
         debug!(
             provider = id,
             "openai-compat egress: top-level cache_control dropped (prompt caching not supported)",
         );
         record("top-level cache_control".into());
     }
+    // TRANSLATION-DROP: lane=openai-compat class=anthropic_beta_unsupported test=anthropic_beta_flags_are_absent_from_the_openai_compat_wire_and_counted
     if !req.anthropic_beta.is_empty() {
+        tally.anthropic_beta = true;
         debug!(
             provider = id,
             beta_flags = ?req.anthropic_beta,
@@ -397,7 +509,9 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
     }
     if let Some(routectl_core::SystemContent::Blocks(blocks)) = &req.system {
         let any_cc = blocks.iter().any(|b| b.cache_control.is_some());
+        // TRANSLATION-DROP: lane=openai-compat class=cache_control_unsupported test=a_system_block_cache_control_is_absent_from_the_openai_compat_wire_and_counted
         if any_cc {
+            tally.cache_control = true;
             debug!(
                 provider = id,
                 "openai-compat egress: per-block cache_control on system dropped",
@@ -424,6 +538,8 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
             } else if let ToolDef::Custom(c) = t
                 && c.cache_control.is_some()
             {
+                // TRANSLATION-DROP: lane=openai-compat class=cache_control_unsupported test=a_tool_cache_control_is_absent_from_the_openai_compat_wire_and_counted
+                tally.cache_control = true;
                 debug!(
                     provider = id,
                     tool = %sanitize_for_log(&c.name),
@@ -447,7 +563,9 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
                         record(format!("forward-compat block `{type_tag}` on message {i}"));
                     }
                     routectl_core::ContentPart::Known(k) => {
+                        // TRANSLATION-DROP: lane=openai-compat class=cache_control_unsupported test=a_message_part_cache_control_is_absent_from_the_openai_compat_wire_and_counted
                         if k.cache_control().is_some() {
+                            tally.cache_control = true;
                             debug!(
                                 provider = id,
                                 message_index = i,
@@ -472,7 +590,7 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
             findings.join("; ")
         )));
     }
-    Ok(())
+    Ok(tally)
 }
 
 /// True when the canonical request carries assistant reasoning that
@@ -1002,6 +1120,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(openai_compat_provider_extra_managed_key_conflict)]
     fn responses_reasoning_remainder_dropped() {
         // A Responses-ingress request carrying reasoning summary/context/mode
         // routed to an openai-compat egress must NOT emit those keys on the
@@ -1028,6 +1147,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(openai_compat_provider_extra_managed_key_conflict)]
     fn responses_reasoning_summary_only_remainder_dropped() {
         let mut req = simple_req("gpt-4o");
         req.provider_extras = Some(json!({"reasoning": {"summary": "concise"}}));
@@ -1044,6 +1164,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(openai_compat_provider_extra_managed_key_conflict)]
     fn provider_extras_cannot_override_routectl_managed_keys() {
         // Stray routectl-managed keys in
         // `provider_extras = {"messages": [...], "model": "..."}`
@@ -1106,6 +1227,7 @@ mod tests {
     /// the same body shape (the WARN vs DEBUG choice is reviewable in
     /// source; the drop is asserted here).
     #[test]
+    #[serial_test::serial(openai_compat_operator_extra_managed_key_conflict)]
     fn default_extras_cannot_override_routectl_managed_keys() {
         let mut req = simple_req("gpt-4o");
         req.seed = Some(7);
@@ -1143,6 +1265,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(openai_compat_metadata_unsupported)]
     fn anthropic_metadata_is_dropped_from_openai_compat_body() {
         // The Anthropic ingress sweeps the inbound `metadata` object into
         // provider_extras. Strict openai-compat hosts (NIM, vLLM-strict,
@@ -1171,6 +1294,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(
+        openai_compat_operator_extra_managed_key_conflict,
+        openai_compat_provider_extra_managed_key_conflict
+    )]
     fn extras_cannot_re_inject_top_level_system() {
         // Regression: the `system` lowering above strips the top-level
         // `system` key. If extras (default or provider) could
@@ -1884,4 +2011,5 @@ mod tests {
 
     include!("request_system_tests.rs");
     include!("request_drop_level_tests.rs");
+    include!("request_drop_counter_tests.rs");
 }

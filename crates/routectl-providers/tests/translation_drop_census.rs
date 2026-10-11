@@ -1,7 +1,8 @@
 //! Census over the `TRANSLATION-DROP:` verdict markers carried by the four
 //! request-translation surfaces (`openai_compat/wire_lift/`,
 //! `bedrock/converse/`, `gemini/`, `openai_responses/`), plus the single
-//! files swept beside them (`openai_compat/request.rs`).
+//! files swept on their own (`openai_compat/request.rs`,
+//! `anthropic_api/request.rs`, `bedrock/invoke.rs`).
 //!
 //! This file owns the GRAMMAR RULES and the pinned population. The parser
 //! itself lives in `translation_drop_census/marker.rs` as a shared module, so
@@ -32,7 +33,7 @@
 //! - A counted verdict (`lane=`, `policy-action`) missing `class=` or `test=`.
 //!   A counted loss with no class has no counter literal to weld against; one
 //!   with no test has nothing pinning the behavior.
-//! - A `lane=` value outside the four fixed spellings.
+//! - A `lane=` value outside the six fixed spellings.
 //! - `lane=` on a `policy-action` marker. The policy vocabulary welds on class
 //!   alone; a lane on the marker would cover three call sites while implying
 //!   every hand-typed lane literal in the tree was covered.
@@ -88,15 +89,17 @@ use marker::{
 /// surface's total, which is precisely how the test-code cut described above
 /// would have hidden the `gemini/schema.rs` markers.
 const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
+    ("anthropic_api/request.rs", 7),
     ("bedrock/converse/extras.rs", 4),
     ("bedrock/converse/messages.rs", 22),
     ("bedrock/converse/system.rs", 3),
     ("bedrock/converse/tools.rs", 10),
+    ("bedrock/invoke.rs", 1),
     ("gemini/cloudcode.rs", 2),
     ("gemini/mod.rs", 1),
     ("gemini/request.rs", 19),
     ("gemini/schema.rs", 7),
-    ("openai_compat/request.rs", 2),
+    ("openai_compat/request.rs", 12),
     ("openai_compat/wire_lift/content.rs", 6),
     ("openai_compat/wire_lift/response_format.rs", 4),
     ("openai_compat/wire_lift/thinking.rs", 3),
@@ -113,9 +116,9 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
-const EXPECTED_LANE_MARKERS: usize = 64;
-const EXPECTED_POLICY_ACTION_MARKERS: usize = 14;
-const EXPECTED_STRUCTURAL_MARKERS: usize = 49;
+const EXPECTED_LANE_MARKERS: usize = 75;
+const EXPECTED_POLICY_ACTION_MARKERS: usize = 19;
+const EXPECTED_STRUCTURAL_MARKERS: usize = 51;
 
 /// The `fidelity-risk` register: a same-dialect-reachable candidate, which is
 /// a worse defect to be FILED rather than an accepted drop. Pinned by CONTENT
@@ -459,7 +462,7 @@ fn every_surface_contributes_markers_the_parse_recovered() {
     assert_eq!(
         lanes,
         LANES.iter().copied().collect::<BTreeSet<&str>>(),
-        "the recovered lane values are not the four fixed spellings"
+        "the recovered lane values are not the fixed spellings"
     );
 }
 
@@ -553,13 +556,44 @@ fn a_policy_action_verdict_with_no_class_is_a_parse_error() {
 }
 
 #[test]
-fn a_lane_outside_the_four_spellings_is_a_parse_error() {
-    let why = parse_stub("lane=bedrock-converce class=image_url_unrepresentable test=t_drops")
-        .expect_err("a misspelled lane is a phantom lane whose rate reads zero forever");
-    assert!(
-        why.contains("bedrock-converce") && why.contains("fixed"),
-        "unexpected reason: {why}"
-    );
+fn every_fixed_lane_spelling_parses_as_a_counted_verdict() {
+    // The acceptance half of the closed lane list, one row per spelling, so a
+    // lane dropped from the list is named by the row that fails.
+    for lane in [
+        "anthropic",
+        "bedrock-converse",
+        "bedrock-invoke",
+        "gemini",
+        "openai-compat",
+        "openai-responses",
+    ] {
+        let markers = parse_stub(&format!("lane={lane} class=some_class test=some_test"))
+            .unwrap_or_else(|why| panic!("row {lane}: a fixed spelling must parse: {why}"));
+        assert_eq!(
+            markers.first().map(|m| &m.verdict),
+            Some(&Verdict::Lane(lane.to_string())),
+            "row {lane}"
+        );
+    }
+}
+
+#[test]
+fn a_lane_outside_the_fixed_spellings_is_a_parse_error() {
+    // The refusal half, one row per near miss: the anthropic egress's crate
+    // feature name, a hyphen-less carrier, and a misspelling.
+    for lane in [
+        "anthropic-api",
+        "bedrock",
+        "bedrock-invok",
+        "bedrock-converce",
+    ] {
+        let why = parse_stub(&format!("lane={lane} class=some_class test=some_test"))
+            .expect_err("a misspelled lane is a phantom lane whose rate reads zero forever");
+        assert!(
+            why.contains(lane) && why.contains("fixed"),
+            "row {lane}: unexpected reason: {why}"
+        );
+    }
 }
 
 #[test]
@@ -849,8 +883,13 @@ fn every_cfg_test_path_sidecar_is_on_the_exclusion_list() {
     // (An earlier version of this test scanned for an INNER `#![cfg(test)]`
     // attribute, which appears in zero files repo-wide -- a green test proving
     // nothing.)
-    for file in expect(surface_files()) {
-        let source = expect(read_source(&file));
+    //
+    // A sidecar outside the swept population is never read as production
+    // source -- a single-file surface's siblings are not swept -- so only a
+    // sidecar the sweep reads owes an entry.
+    let swept = expect(surface_files());
+    for file in &swept {
+        let source = expect(read_source(file));
         let lines: Vec<&str> = source.lines().collect();
         for (index, line) in lines.iter().enumerate() {
             if line.trim() != "#[cfg(test)]" {
@@ -867,6 +906,9 @@ fn every_cfg_test_path_sidecar_is_on_the_exclusion_list() {
             };
             let surface = file.rsplit_once('/').map_or("", |(dir, _)| dir);
             let relative = format!("{surface}/{sidecar}");
+            if !swept.contains(&relative) {
+                continue;
+            }
             assert!(
                 EXPECTED_TEST_FILES.contains(&relative.as_str()),
                 "{file} gates {sidecar} behind cfg(test), so it is test code, but it is not on \

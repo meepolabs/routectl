@@ -34,6 +34,11 @@ fn marked_tool() -> ToolDef {
 }
 
 #[test]
+#[serial_test::serial(
+    openai_compat_cache_control_unsupported,
+    openai_compat_anthropic_beta_unsupported,
+    openai_compat_metadata_unsupported
+)]
 fn anthropic_only_field_drops_log_once_at_debug() {
     // Arrange: one row per carrier, each a request carrying only that field.
     let mut top_level = simple_req("m");

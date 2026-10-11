@@ -54,10 +54,8 @@ pub const METRICS_MODULE: &str = "translation_drop_metrics.rs";
 /// lanes a `lane=` verdict may name, bounded by which surfaces the census
 /// sweeps. This list is the TELEMETRY population: every lane whose
 /// translate/build path counts the requests it processed. A lane can be
-/// instrumented without its source being swept -- `anthropic-api` is, because
-/// its translation path spans a nested module directory the flat marker sweep
-/// refuses -- and conflating the two makes standing up a lane's denominator
-/// look like a grammar violation.
+/// instrumented without its source being swept, and conflating the two makes
+/// standing up a lane's denominator look like a grammar violation.
 ///
 /// Pinned rather than derived for the reason every register here is: a
 /// harvest-derived list is satisfied by whatever it found, so a denominator
@@ -65,6 +63,7 @@ pub const METRICS_MODULE: &str = "translation_drop_metrics.rs";
 pub const DENOMINATOR_LANES: &[&str] = &[
     "anthropic",
     "bedrock-converse",
+    "bedrock-invoke",
     "gemini",
     "openai-compat",
     "openai-responses",

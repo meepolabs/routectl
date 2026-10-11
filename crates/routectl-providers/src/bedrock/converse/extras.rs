@@ -13,8 +13,8 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
 
-use crate::anthropic_api::request::DroppedFormatKeys;
 use crate::anthropic_api::request::build_thinking;
+use crate::anthropic_api::request::{AnthropicFormat, DroppedFormatKeys};
 use crate::anthropic_api::types::ThinkingConfig;
 use crate::effort::clamp_effort_to_supported;
 
@@ -266,17 +266,27 @@ fn insert_provider_extras(
 /// admission-time capability gate (an operator `[capability.overrides]`
 /// `unsupported` declaration) is what routes those away -- forwarding the inert bag key
 /// here is harmless (AWS ignores unknown bag fields for such models).
+///
+/// An unrecognized type tag is counted here, once per request: this runs once
+/// per bag assembly and nothing it does can fail afterwards.
 fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) -> DroppedFormatKeys {
     let Some(rf) = req.response_format.as_ref() else {
         return DroppedFormatKeys::default();
     };
-    let Some((format, dropped)) =
-        crate::anthropic_api::request::response_format_to_anthropic_format(rf)
-    else {
-        return DroppedFormatKeys::default();
-    };
-    crate::anthropic_api::request::set_output_config_format(bag, format);
-    dropped
+    match crate::anthropic_api::request::response_format_to_anthropic_format(rf) {
+        AnthropicFormat::Mapped(format, dropped) => {
+            crate::anthropic_api::request::set_output_config_format(bag, format);
+            dropped
+        }
+        AnthropicFormat::UnrecognizedType => {
+            crate::translation_drop_metrics::record_translation_drop(
+                super::LANE,
+                "response_format_unrepresentable",
+            );
+            DroppedFormatKeys::default()
+        }
+        AnthropicFormat::PlainText | AnthropicFormat::Malformed => DroppedFormatKeys::default(),
+    }
 }
 
 /// Reuse build_thinking from the Anthropic egress so the legacy vs
@@ -958,6 +968,7 @@ mod tests {
     /// withhold -- parallel to the Bedrock-Invoke test
     /// `structured_outputs_beta_survives_a_withheld_entry_naming_it`.
     #[test]
+    #[serial_test::serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
     fn structured_outputs_beta_survives_a_converse_withheld_entry_naming_it() {
         use serde_json::json;
 
@@ -1208,6 +1219,7 @@ mod tests {
     /// shipped bag rather than opted into by the client, so a withheld entry
     /// naming it cannot drop it.
     #[test]
+    #[serial_test::serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
     fn updates_display_unions_its_beta_past_a_withheld_entry_naming_it() {
         for adaptive in [false, true] {
             // Arrange
@@ -1631,5 +1643,34 @@ mod tests {
             "nothing collided, so no conflict WARN is owed; got: {events:?}"
         );
         assert_eq!(after, before);
+    }
+
+    /// SINGLE-SOURCE pin for this lane's unrecognized `response_format` drop:
+    /// absent from the emitted bag, counted once, and a mapped directive
+    /// beside it as the positive control.
+    #[test]
+    #[serial_test::serial(bedrock_converse_response_format_unrepresentable)]
+    fn an_unrecognized_response_format_is_absent_from_the_converse_bag_and_counted() {
+        // Arrange
+        let cfg = fake_cfg();
+        let mut dropped = req_with_thinking();
+        dropped.response_format = Some(serde_json::json!({"type": "zz_grammar_mode"}));
+        let mut mapped = req_with_thinking();
+        mapped.response_format = Some(serde_json::json!({"type": "json_object"}));
+
+        // Act
+        let before = bag_drop_count("response_format_unrepresentable");
+        let dropped_bag = emitted_bag(&cfg, &dropped);
+        let between = bag_drop_count("response_format_unrepresentable");
+        let mapped_bag = emitted_bag(&cfg, &mapped);
+        let after = bag_drop_count("response_format_unrepresentable");
+
+        // Assert
+        let rendered = serde_json::to_string(&dropped_bag).expect("bag serializes");
+        assert!(!rendered.contains("zz_grammar_mode"), "{rendered}");
+        assert!(dropped_bag.get("output_config").is_none(), "{rendered}");
+        assert_eq!(between - before, 1);
+        assert_eq!(mapped_bag["output_config"]["format"]["type"], "json_object");
+        assert_eq!(after, between, "a mapped directive loses nothing");
     }
 }

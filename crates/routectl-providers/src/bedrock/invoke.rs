@@ -28,6 +28,18 @@ use super::betas::{operator_floor, withhold_betas};
 /// the Anthropic API's `anthropic-version: 2023-06-01` header.
 const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
 
+/// Provider-kind discriminator string for this Bedrock shape, read back by
+/// `BedrockApiShape::provider_kind_str`. Homed on the shape's own module for
+/// the same reason as the Converse spelling.
+pub(crate) const PROVIDER_KIND: &str = "bedrock-invoke";
+
+/// The lane spelling every translation counter call on this egress uses.
+/// Bound to `PROVIDER_KIND` so the telemetry lane and the `provider_kind=`
+/// tracing field can never drift apart. A lane of its own, never the
+/// anthropic lane: the body is assembled by the shared Anthropic normalizer,
+/// but crediting that lane would mix Bedrock's volume into its rates.
+pub(crate) const LANE: &str = PROVIDER_KIND;
+
 /// Build the InvokeModel request body from a routectl `ChatRequest`.
 ///
 /// For Anthropic Claude models the body is Anthropic Messages JSON
@@ -35,7 +47,13 @@ const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
 /// vendors, prefer Converse (vendor-neutral) -- the InvokeModel adapter
 /// here does not currently shape Mistral/Llama/Cohere bodies.
 pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value> {
-    let (mut body, deferred) = crate::anthropic_api::request::normalize_deferring_format_key_warn(
+    // The one point every Invoke request passes exactly once, on both the Ok
+    // and the Err arm, ahead of the first fallible step: this lane's
+    // request-volume DENOMINATOR. Exactly one call site per lane.
+    crate::translation_drop_metrics::record_translation_lane_seen(LANE);
+    let mut response_format =
+        crate::anthropic_api::request::UnrecognizedResponseFormatTally::default();
+    let assembled = crate::anthropic_api::request::normalize_deferring_format_key_warn(
         &cfg.id,
         req,
         cfg.adaptive_thinking.unwrap_or(false),
@@ -55,18 +73,23 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         // for the same reason as the flag above -- a default changing
         // elsewhere must not start shipping the shape to Bedrock.
         false,
-        // Bedrock-Invoke is its OWN telemetry lane and is NOT YET
-        // instrumented -- it carries no denominator and no counters today.
         // The fingerprint strip inside the shared assembly is real here too,
-        // but recording it against the anthropic-api lane would credit that
-        // lane with this one's volume, so the tally is driven and dropped.
-        // Nothing is lost by dropping it: there is no rate on this lane for
-        // the record to feed. Standing this lane up owns that work.
+        // and this lane does not count it yet: the Invoke seam strips the
+        // fingerprint again on the assembled body below, so a per-request
+        // count needs those surfaces sharing one tally. Recording it against
+        // the anthropic lane instead would credit that lane with this one's
+        // volume, so the tally is driven and dropped.
         &mut crate::anthropic_api::request::ClientFingerprintStripTally::default(),
         // Same reason: the hosted-MCP tool withhold still happens on this
-        // lane's body; only its count has no lane to land on yet.
+        // lane's body and is not counted on it yet.
         &mut crate::anthropic_api::request::HostedMcpToolWithholdTally::default(),
-    )?;
+        &mut response_format,
+    );
+    // Flushed on BOTH arms of the assembly, so a request that dropped its
+    // directive and then failed is still in the numerator its denominator
+    // already counted.
+    flush_response_format_tally(&response_format);
+    let (mut body, deferred) = assembled?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::NormalizeRequest(
             cfg.id.clone(),
@@ -93,15 +116,8 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
 
     // Drop the request's withheld client flags (the router fills that set
     // from its seed and learned beta verdicts); every other flag reaches the
-    // wire verbatim, and the operator floor is never withheld. The
-    // withheld-rejected signal is discarded: this lane carries no
-    // translation counters (see the fingerprint tally above).
-    let _ = withhold_betas(
-        &cfg.id,
-        obj,
-        &req.routectl_internal.withheld_betas,
-        &operator_floor(cfg, req),
-    );
+    // wire verbatim, and the operator floor is never withheld.
+    withhold_client_betas(cfg, req, obj);
 
     // Merge any additional model request fields at the top level
     // with the same routectl-managed-keys allow-list as the Anthropic
@@ -217,6 +233,42 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     }
 
     Ok(body)
+}
+
+/// Count this request's unrecognized `response_format` on the Invoke lane.
+fn flush_response_format_tally(
+    tally: &crate::anthropic_api::request::UnrecognizedResponseFormatTally,
+) {
+    if tally.dropped() {
+        crate::translation_drop_metrics::record_translation_drop(
+            LANE,
+            "response_format_unrepresentable",
+        );
+    }
+}
+
+/// Apply the shared Bedrock beta withhold to the body and count a withheld
+/// client flag once per request, not once per flag.
+fn withhold_client_betas(
+    cfg: &BedrockConfig,
+    req: &ChatRequest,
+    obj: &mut serde_json::Map<String, Value>,
+) {
+    // The router put each withheld flag in the set because its seed or a
+    // learned verdict says this lane's upstream rejects it, so the upstream
+    // compels the loss.
+    // TRANSLATION-DROP: lane=bedrock-invoke class=anthropic_beta_rejected_by_bedrock test=invoke_rejected_beta_withhold_bumps_the_drop_counter_once
+    if withhold_betas(
+        &cfg.id,
+        obj,
+        &req.routectl_internal.withheld_betas,
+        &operator_floor(cfg, req),
+    ) {
+        crate::translation_drop_metrics::record_translation_drop(
+            LANE,
+            "anthropic_beta_rejected_by_bedrock",
+        );
+    }
 }
 
 /// Top-level Bedrock-Invoke body keys (Anthropic-shape today) that
@@ -589,6 +641,11 @@ mod orphan_tool_choice_tests;
 #[cfg(test)]
 #[path = "invoke_beta_merge_tests.rs"]
 mod beta_merge_tests;
+
+// This lane's translation telemetry: its denominator and its drop counts.
+#[cfg(test)]
+#[path = "invoke_drop_counter_tests.rs"]
+mod drop_counter_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1179,6 +1236,7 @@ mod tests {
     /// so the union runs AFTER the withhold -- running it earlier lets the
     /// withhold drop the flag and ship the gated field ungated.
     #[test]
+    #[serial_test::serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
     fn structured_outputs_beta_survives_a_withheld_entry_naming_it() {
         let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
         let cfg = fake_cfg();

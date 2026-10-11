@@ -57,11 +57,13 @@ use marker::{SURFACES, census, expect, holds_task_id, production_files};
 /// population; it is not a claim that the file carries a marker, because most
 /// arms on this path lose nothing.
 const INSCOPE_FILES: &[&str] = &[
+    "anthropic_api/request.rs",
     "bedrock/converse/extras.rs",
     "bedrock/converse/messages.rs",
     "bedrock/converse/request.rs",
     "bedrock/converse/system.rs",
     "bedrock/converse/tools.rs",
+    "bedrock/invoke.rs",
     "gemini/cloudcode.rs",
     "gemini/mod.rs",
     "gemini/request.rs",

@@ -23,14 +23,22 @@ const WITHHELD_BETAS: [&str; 3] = [
 const ACCEPTED_CLIENT_BETA: &str = "interleaved-thinking-2025-05-14";
 const DROP_CLASS: &str = "anthropic_beta_rejected_by_bedrock";
 
-/// The Converse lane's counter for the withheld set. Every test in this
-/// binary that reaches the Converse arm is serialized on the same guard,
-/// because the registry is process-global and the runner is threaded.
-fn converse_drop_count() -> u64 {
+/// The withheld-set counter on `lane`. Every test in this binary that reaches
+/// a lane's arm is serialized on that lane's guard, because the registry is
+/// process-global and the runner is threaded.
+fn drop_count(lane: &str) -> u64 {
     translation_drop_snapshot()
         .into_iter()
-        .find(|e| e.lane == "bedrock-converse" && e.drop_class == DROP_CLASS)
+        .find(|e| e.lane == lane && e.drop_class == DROP_CLASS)
         .map_or(0, |e| e.drop_count)
+}
+
+fn converse_drop_count() -> u64 {
+    drop_count("bedrock-converse")
+}
+
+fn invoke_drop_count() -> u64 {
+    drop_count("bedrock-invoke")
 }
 
 fn provider(api_shape: BedrockApiShape, anthropic_beta: Vec<String>) -> BedrockProvider {
@@ -131,6 +139,7 @@ fn assert_operator_floor_forwards_a_rejected_beta(api_shape: BedrockApiShape) {
 }
 
 #[test]
+#[serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 fn invoke_withholds_bedrock_rejected_client_betas() {
     assert_withheld_betas_are_dropped_and_the_rest_kept(BedrockApiShape::Invoke);
 }
@@ -142,6 +151,7 @@ fn converse_withholds_bedrock_rejected_client_betas() {
 }
 
 #[test]
+#[serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 fn invoke_operator_floor_forwards_a_bedrock_rejected_beta() {
     assert_operator_floor_forwards_a_rejected_beta(BedrockApiShape::Invoke);
 }
@@ -153,6 +163,7 @@ fn converse_operator_floor_forwards_a_bedrock_rejected_beta() {
 }
 
 #[test]
+#[serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 fn a_request_carrying_only_rejected_client_betas_ships_no_beta_field() {
     // Arrange
     let provider = provider(BedrockApiShape::Invoke, Vec::new());
@@ -183,6 +194,41 @@ fn bedrock_rejected_beta_withhold_bumps_the_drop_counter_once() {
 
     // Assert
     assert_eq!(converse_drop_count() - before, 1);
+}
+
+#[test]
+#[serial(
+    bedrock_invoke_anthropic_beta_rejected_by_bedrock,
+    bedrock_converse_anthropic_beta_rejected_by_bedrock
+)]
+fn invoke_rejected_beta_withhold_bumps_the_drop_counter_once() {
+    // Arrange: three withheld flags in one request are one drop event, on the
+    // Invoke lane and not on Converse.
+    let provider = provider(BedrockApiShape::Invoke, Vec::new());
+    let (invoke_before, converse_before) = (invoke_drop_count(), converse_drop_count());
+
+    // Act
+    let betas = wire_betas(&provider, BedrockApiShape::Invoke);
+
+    // Assert
+    assert_eq!(betas, json!([ACCEPTED_CLIENT_BETA]));
+    assert_eq!(invoke_drop_count() - invoke_before, 1);
+    assert_eq!(converse_drop_count(), converse_before);
+}
+
+#[test]
+#[serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
+fn invoke_request_without_rejected_betas_counts_no_withhold() {
+    // Arrange: the floor asserts all three, so nothing is withheld.
+    let floor: Vec<String> = WITHHELD_BETAS.iter().map(|b| (*b).to_string()).collect();
+    let provider = provider(BedrockApiShape::Invoke, floor);
+    let before = invoke_drop_count();
+
+    // Act
+    let _ = wire_betas(&provider, BedrockApiShape::Invoke);
+
+    // Assert
+    assert_eq!(invoke_drop_count(), before);
 }
 
 #[test]
@@ -231,6 +277,7 @@ fn assert_header_extras_pinned_rejected_beta_is_forwarded(api_shape: BedrockApiS
 }
 
 #[test]
+#[serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 fn invoke_header_extras_pinned_rejected_beta_is_forwarded() {
     assert_header_extras_pinned_rejected_beta_is_forwarded(BedrockApiShape::Invoke);
 }
@@ -248,7 +295,7 @@ fn assert_request_without_a_withheld_set_ships_every_client_beta(api_shape: Bedr
     let provider = provider(api_shape, Vec::new());
     let mut req = request_with_client_betas();
     req.routectl_internal.withheld_betas = std::sync::Arc::default();
-    let before = converse_drop_count();
+    let before = drop_count(api_shape.provider_kind_str());
 
     // Act
     let body = provider.normalize_request(&req).expect("bedrock normalize");
@@ -267,11 +314,11 @@ fn assert_request_without_a_withheld_set_ships_every_client_beta(api_shape: Bedr
             WITHHELD_BETAS[2]
         ])
     );
-    assert_eq!(converse_drop_count(), before);
+    assert_eq!(drop_count(api_shape.provider_kind_str()), before);
 }
 
 #[test]
-#[serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
+#[serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 fn invoke_request_without_a_withheld_set_ships_every_client_beta() {
     assert_request_without_a_withheld_set_ships_every_client_beta(BedrockApiShape::Invoke);
 }

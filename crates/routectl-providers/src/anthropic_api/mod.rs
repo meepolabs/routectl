@@ -1154,7 +1154,7 @@ mod envelope_unwrap_tests;
 // for the withheld client fingerprint.
 #[cfg(test)]
 #[path = "request_drop_counter_tests.rs"]
-mod request_drop_counter_tests;
+pub(crate) mod request_drop_counter_tests;
 
 // Background probe traffic must not mutate client-facing shared state: the
 // unified-quota claim record and the context-management thinking cache.
