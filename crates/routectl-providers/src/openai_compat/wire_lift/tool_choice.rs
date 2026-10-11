@@ -21,6 +21,7 @@
 use serde_json::Value;
 use tracing::warn;
 
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, Result};
 
 use super::reject_or_drop_unrepresentable;
@@ -46,6 +47,7 @@ pub fn lift(
         }
         None => {
             obj.remove("tool_choice");
+            declare_tool_choice_removed(req);
         }
     }
 
@@ -75,6 +77,7 @@ pub fn lift(
             "forcing tool_choice with no tools to force",
         )?;
         obj.remove("tool_choice");
+        declare_tool_choice_removed(req);
     }
 
     // Bump the per-request counters at the lift's single exit rather than
@@ -96,6 +99,18 @@ pub fn lift(
     }
 
     Ok(())
+}
+
+/// Declare the client's `tool_choice` removed from the body.
+fn declare_tool_choice_removed(req: &ChatRequest) {
+    if let Some(tap) = crate::wire_declare::tap(req) {
+        crate::wire_declare::declare(
+            tap,
+            EditSite::DialectFieldStrip,
+            "/tool_choice",
+            EditKind::Remove,
+        );
+    }
 }
 
 /// True when the wire body carries no usable `tools` array (absent or

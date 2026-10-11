@@ -33,11 +33,13 @@
 use serde_json::{Map, Value};
 
 use routectl_core::ChatRequest;
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 
 use super::AuthKind;
 use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
 use crate::effort::{clamp_effort_to_supported, level_from_budget};
 use crate::translation_drop_metrics::record_translation_drop;
+use crate::wire_declare::declare;
 
 /// Set `request.reasoning` from `req.reasoning` plus the Responses-dialect
 /// remainder the ingress stashed under `provider_extras["reasoning"]`.
@@ -51,7 +53,11 @@ use crate::translation_drop_metrics::record_translation_drop;
 /// unconditionally and omits reasoning entirely -- regardless of any
 /// computed effort, budget, or overlay sub-key. An explicit
 /// `effort: "none"` is reasoning-OFF and omits reasoning the same way.
-pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest) {
+pub(super) fn apply_reasoning(
+    request: &mut ResponsesRequest,
+    req: &ChatRequest,
+    tap: Option<&WireTap>,
+) {
     let overlay = responses_reasoning_overlay(req);
 
     // An explicit `effort: "none"` is a reasoning-OFF request; treat it like
@@ -64,6 +70,14 @@ pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest)
         .and_then(|r| r.effort.as_deref())
         .is_some_and(|e| e == "none");
     if effort_disabled {
+        if let Some(tap) = tap {
+            declare(
+                tap,
+                EditSite::DialectFieldStrip,
+                "/reasoning",
+                EditKind::Remove,
+            );
+        }
         return;
     }
 
@@ -74,8 +88,21 @@ pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest)
             // takes effort, not a budget) rather than dropping it. A clamp
             // that returns `None` (reasoning-OFF) leaves effort unset.
             let effort = match r.effort.as_deref() {
-                Some(e) => clamp_effort_to_supported(e, &req.routectl_internal.effort_levels)
-                    .map(std::borrow::Cow::into_owned),
+                Some(e) => clamp_effort_to_supported(e, &req.routectl_internal.effort_levels).map(
+                    |clamped| {
+                        if matches!(clamped, std::borrow::Cow::Owned(_))
+                            && let Some(tap) = tap
+                        {
+                            declare(
+                                tap,
+                                EditSite::EffortInjection,
+                                "/reasoning/effort",
+                                EditKind::Rewrite,
+                            );
+                        }
+                        clamped.into_owned()
+                    },
+                ),
                 None => r.max_tokens.and_then(|budget| {
                     let level = level_from_budget(budget);
                     clamp_effort_to_supported(level, &req.routectl_internal.effort_levels)
@@ -111,7 +138,17 @@ pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest)
             extra.insert("summary".into(), other);
             None
         }
-        None => Some("auto".into()),
+        None => {
+            if let Some(tap) = tap {
+                declare(
+                    tap,
+                    EditSite::ReasoningSummaryDefault,
+                    "/reasoning/summary",
+                    EditKind::Add,
+                );
+            }
+            Some("auto".into())
+        }
     };
 
     request.reasoning = Some(ResponsesReasoning {
@@ -223,6 +260,7 @@ pub(super) fn apply_installation_id(
     request: &mut ResponsesRequest,
     auth_kind: AuthKind,
     installation_id: Option<&str>,
+    tap: Option<&WireTap>,
 ) {
     if auth_kind != AuthKind::ChatgptOauth {
         return;
@@ -230,6 +268,9 @@ pub(super) fn apply_installation_id(
     let Some(iid) = installation_id else {
         return;
     };
+    if let Some(tap) = tap {
+        declare_installation_id(tap, request.client_metadata.as_ref());
+    }
     let stamped = Value::String(iid.to_string());
     match request
         .client_metadata
@@ -244,6 +285,26 @@ pub(super) fn apply_installation_id(
             obj.insert(INSTALLATION_ID_METADATA_KEY.into(), stamped);
             request.client_metadata = Some(Value::Object(obj));
         }
+    }
+}
+
+/// Declare the installation-id stamp against the `client_metadata` it lands
+/// on: a new key in an object the request carried, otherwise a whole new
+/// object (or a rewrite of a non-object value).
+fn declare_installation_id(tap: &WireTap, client_metadata: Option<&Value>) {
+    let site = EditSite::InstallationIdStamp;
+    match client_metadata {
+        Some(Value::Object(obj)) => {
+            let path = format!("/client_metadata/{INSTALLATION_ID_METADATA_KEY}");
+            let kind = if obj.contains_key(INSTALLATION_ID_METADATA_KEY) {
+                EditKind::Rewrite
+            } else {
+                EditKind::Add
+            };
+            declare(tap, site, path, kind);
+        }
+        Some(_) => declare(tap, site, "/client_metadata", EditKind::Rewrite),
+        None => declare(tap, site, "/client_metadata", EditKind::Add),
     }
 }
 
@@ -262,10 +323,28 @@ pub(super) fn apply_installation_id(
 /// Runs AFTER `merge_provider_extras`, so a `verbosity` sibling lifted into
 /// `provider_extras["text"]` survives and the format is merged alongside it.
 /// A caller-supplied `text.format` (already present) is left untouched.
-pub(super) fn apply_response_format(request: &mut ResponsesRequest, req: &ChatRequest) {
+pub(super) fn apply_response_format(
+    request: &mut ResponsesRequest,
+    req: &ChatRequest,
+    tap: Option<&WireTap>,
+) {
     let Some(rf) = req.response_format.as_ref() else {
         return;
     };
+    if let Some(tap) = tap
+        && json_schema_name_defaults(rf)
+        && request
+            .text
+            .as_ref()
+            .is_none_or(|tc| tc.inner.get("format").is_none())
+    {
+        declare(
+            tap,
+            EditSite::RequiredFieldDefault,
+            "/text/format/name",
+            EditKind::Add,
+        );
+    }
     // The tally is created and flushed inside this same infallible function,
     // so the flush cannot be stranded behind a `?`: every request that can
     // record a loss here also reaches the flush.
@@ -287,6 +366,18 @@ pub(super) fn apply_response_format(request: &mut ResponsesRequest, req: &ChatRe
             });
         }
     }
+}
+
+/// True when `response_format` is a usable `json_schema` directive whose
+/// `name` [`responses_text_format`] fills with the default.
+fn json_schema_name_defaults(response_format: &Value) -> bool {
+    response_format.get("type").and_then(Value::as_str) == Some("json_schema")
+        && response_format
+            .get("json_schema")
+            .and_then(Value::as_object)
+            .is_some_and(|js| {
+                js.contains_key("schema") && !js.get("name").is_some_and(Value::is_string)
+            })
 }
 
 /// Per-REQUEST tally for the structured-output directive's drops on this
@@ -455,7 +546,11 @@ const REASONING_ENCRYPTED_INCLUDE: &str = "reasoning.encrypted_content";
 ///
 /// Runs after `merge_provider_extras` so it reflects a provider_extras
 /// override of `store`.
-pub(super) fn finalize_reasoning_include(request: &mut ResponsesRequest, req: &ChatRequest) {
+pub(super) fn finalize_reasoning_include(
+    request: &mut ResponsesRequest,
+    req: &ChatRequest,
+    tap: Option<&WireTap>,
+) {
     if request.store {
         return;
     }
@@ -468,6 +563,14 @@ pub(super) fn finalize_reasoning_include(request: &mut ResponsesRequest, req: &C
         .any(|s| s == REASONING_ENCRYPTED_INCLUDE)
     {
         return;
+    }
+    if let Some(tap) = tap {
+        declare(
+            tap,
+            EditSite::ReasoningIncludeInjection,
+            "/include",
+            EditKind::Add,
+        );
     }
     request
         .include

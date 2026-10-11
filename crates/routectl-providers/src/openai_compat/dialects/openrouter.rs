@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, Error, Result};
 
 use super::super::dialect::ReasoningDialect;
@@ -39,6 +40,10 @@ impl Dialect for OpenRouterDialect {
                 .map_err(|e| Error::normalize_request(id, e.to_string()))?;
             if value.as_object().is_some_and(|o| !o.is_empty()) {
                 obj.insert("reasoning".into(), value);
+                if let Some(tap) = crate::wire_declare::tap(req) {
+                    let site = EditSite::EffortInjection;
+                    crate::wire_declare::declare(tap, site, "/reasoning", EditKind::Add);
+                }
             }
         }
         Ok(())

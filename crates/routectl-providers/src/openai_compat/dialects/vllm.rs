@@ -13,6 +13,7 @@
 
 use serde_json::{Value, json};
 
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, Message, Result};
 
 use super::super::dialect::ReasoningDialect;
@@ -57,11 +58,21 @@ impl Dialect for VllmDialect {
                 "chat_template_kwargs".into(),
                 json!({ "enable_thinking": reasoning_enabled_for_wire(req) }),
             );
+            if let Some(tap) = crate::wire_declare::tap(req) {
+                crate::wire_declare::declare(
+                    tap,
+                    EditSite::EffortInjection,
+                    "/chat_template_kwargs",
+                    EditKind::Add,
+                );
+            }
         }
+        let tap = crate::wire_declare::tap(req);
         if let Some(effort) = derive_reasoning_effort(req) {
             insert_reasoning_effort(
                 obj,
                 clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels),
+                tap,
             );
         }
         // History-reasoning shaping (strip vs preserve) is owned by

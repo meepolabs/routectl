@@ -20,6 +20,7 @@
 use serde_json::Value;
 use tracing::{debug, warn};
 
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
     ChatRequest, Error, Message, Result, ToolDef, is_canonical_request_key, sanitize_for_log,
 };
@@ -42,6 +43,18 @@ const DEFAULT_EXTRAS_SOURCE: &str = "payload_extras";
 /// dropped; an Anthropic-only beta field showing up in extras is NOT
 /// an operator misconfiguration.
 const PROVIDER_EXTRAS_SOURCE: &str = "provider_extras";
+
+/// Canonical top-level keys this egress removes from the serialized body
+/// before the dialect runs, with the edit site each removal declares.
+/// `system` (lowered into `messages`) and `provider_extras` (merged into the
+/// top level) are carriers whose content stays on the wire, so they declare
+/// nothing here.
+const STRIPPED_TOP_LEVEL_KEYS: [(&str, EditSite); 4] = [
+    ("reasoning", EditSite::DialectFieldStrip),
+    ("chat_template_kwargs", EditSite::DialectFieldStrip),
+    ("cache_control", EditSite::CacheMarkerStrip),
+    ("anthropic_beta", EditSite::AnthropicBetaStrip),
+];
 
 /// Translate a canonical [`ChatRequest`] into an openai-compat wire body,
 /// applying the reasoning dialect, history-reasoning policy, and merged
@@ -87,15 +100,17 @@ pub fn normalize(
         .as_object_mut()
         .ok_or_else(|| Error::normalize_request(id, "serialized request is not an object"))?;
 
+    let tap = crate::wire_declare::tap(req);
+    declare_fingerprint_strip(tap, &system);
     apply_system_projection(id, obj, system)?;
 
     // Dialects that need `chat_template_kwargs` re-inject it themselves.
     obj.remove("system");
-    obj.remove("reasoning");
     obj.remove("provider_extras");
-    obj.remove("chat_template_kwargs");
-    obj.remove("cache_control");
-    obj.remove("anthropic_beta");
+    let stripped: Vec<(&str, EditSite)> = STRIPPED_TOP_LEVEL_KEYS
+        .into_iter()
+        .filter(|(key, _)| obj.remove(*key).is_some())
+        .collect();
 
     let dyn_dialect = dialect.as_dyn();
     let dialect_strips = dyn_dialect.strip_history_reasoning();
@@ -136,11 +151,11 @@ pub fn normalize(
     match history_reasoning {
         HistoryReasoning::Auto => {
             if dialect_strips {
-                strip_history_reasoning(id, obj)?;
+                strip_history_reasoning(id, obj, tap)?;
             }
         }
         HistoryReasoning::Strip => {
-            strip_history_reasoning(id, obj)?;
+            strip_history_reasoning(id, obj, tap)?;
         }
         HistoryReasoning::Preserve => {
             dyn_dialect.preserve_history_reasoning(id, obj)?;
@@ -154,12 +169,14 @@ pub fn normalize(
     // the assembled messages.
     let mut withheld = ExtrasWithholdTally::default();
     if let Some(extras) = payload_extras {
-        merge_extras(id, obj, extras, DEFAULT_EXTRAS_SOURCE, &mut withheld);
+        merge_extras(id, obj, extras, DEFAULT_EXTRAS_SOURCE, &mut withheld, tap);
     }
     if let Some(extras) = req.provider_extras.as_ref() {
-        merge_extras(id, obj, extras, PROVIDER_EXTRAS_SOURCE, &mut withheld);
+        merge_extras(id, obj, extras, PROVIDER_EXTRAS_SOURCE, &mut withheld, tap);
     }
     withheld.flush();
+    declare_stripped_keys(tap, obj, &stripped);
+    declare_effort_withheld(tap, obj, req);
 
     Ok(body)
 }
@@ -176,6 +193,8 @@ struct SystemProjection {
     /// `messages` with the block withheld from every `Role::System` turn.
     /// `None` when no turn carried it, so the serialized array stands.
     messages: Option<Vec<Message>>,
+    /// True when the block was withheld from the top-level `system`.
+    system_withheld: bool,
 }
 
 fn project_system(
@@ -222,7 +241,11 @@ fn project_system(
         );
     }
 
-    SystemProjection { lowered, messages }
+    SystemProjection {
+        lowered,
+        messages,
+        system_withheld,
+    }
 }
 
 /// Count this request's fingerprint withhold, if any, once.
@@ -232,6 +255,21 @@ fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally) {
             super::LANE,
             "client_fingerprint_stripped",
         );
+    }
+}
+
+/// Declare the withhold from the top-level `system`, which reaches this wire
+/// as the leading system-role message: its content is rewritten, or the
+/// message is gone when nothing but the block was there.
+fn declare_fingerprint_strip(tap: Option<&WireTap>, system: &SystemProjection) {
+    let Some(tap) = tap.filter(|_| system.system_withheld) else {
+        return;
+    };
+    let site = EditSite::ClientFingerprintStrip;
+    if system.lowered.is_some() {
+        crate::wire_declare::declare(tap, site, "/messages/0/content", EditKind::Rewrite);
+    } else {
+        crate::wire_declare::declare(tap, site, "/messages/0", EditKind::Remove);
     }
 }
 
@@ -351,6 +389,7 @@ fn merge_extras(
     extras: &Value,
     source: &'static str,
     withheld: &mut ExtrasWithholdTally,
+    tap: Option<&WireTap>,
 ) {
     let Some(extra_obj) = extras.as_object() else {
         return;
@@ -408,9 +447,66 @@ fn merge_extras(
                     "extras attempted to override routectl-managed key; dropped"
                 );
             }
+            if source == PROVIDER_EXTRAS_SOURCE {
+                declare_member(tap, EditSite::ManagedExtrasStrip, k, EditKind::Remove);
+            }
             continue;
         }
+        if source == DEFAULT_EXTRAS_SOURCE {
+            let kind = if obj.contains_key(k) {
+                EditKind::Rewrite
+            } else {
+                EditKind::Add
+            };
+            declare_member(tap, EditSite::OperatorPayloadExtras, k, kind);
+        }
         obj.insert(k.clone(), v.clone());
+    }
+}
+
+/// Declare the removal of each stripped top-level key the finished body
+/// still lacks. A dialect that re-injects a key (vLLM's
+/// `chat_template_kwargs`, OpenRouter's `reasoning`) leaves nothing removed
+/// to declare.
+fn declare_stripped_keys(
+    tap: Option<&WireTap>,
+    obj: &serde_json::Map<String, Value>,
+    stripped: &[(&str, EditSite)],
+) {
+    for &(key, site) in stripped {
+        if !obj.contains_key(key) {
+            declare_member(tap, site, key, EditKind::Remove);
+        }
+    }
+}
+
+/// The canonical effort reaches this wire only as a dialect's flat
+/// `reasoning_effort`. When the finished body carries none (a dialect with
+/// no effort field, reasoning disabled, or `effort: "none"`), declare the
+/// field a Chat client spells it as removed.
+fn declare_effort_withheld(
+    tap: Option<&WireTap>,
+    obj: &serde_json::Map<String, Value>,
+    req: &ChatRequest,
+) {
+    let carried = req.reasoning.as_ref().is_some_and(|r| r.effort.is_some());
+    if carried && !obj.contains_key("reasoning_effort") {
+        declare_member(
+            tap,
+            EditSite::DialectFieldStrip,
+            "reasoning_effort",
+            EditKind::Remove,
+        );
+    }
+}
+
+/// Declare an edit at top-level member `key`, when a tap is listening and
+/// the key can be named by a pointer.
+fn declare_member(tap: Option<&WireTap>, site: EditSite, key: &str, kind: EditKind) {
+    if let Some(tap) = tap
+        && let Some(path) = crate::wire_declare::member_pointer("", key)
+    {
+        crate::wire_declare::declare(tap, site, path, kind);
     }
 }
 

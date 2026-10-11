@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::Value;
 
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{ChatRequest, Error, Message, MessageContent, Result};
 
 use crate::openai_compat::util::build_reasoning_detail;
@@ -55,16 +56,29 @@ pub(super) fn reasoning_enabled_for_wire(req: &ChatRequest) -> bool {
 ///
 /// Shared by the OpenAI, DeepSeek and vLLM dialects so the omit contract has
 /// exactly one implementation.
+///
+/// Declares the insert as an Add, plus a Rewrite when the clamp replaced
+/// the requested level (an owned value), so a client that sent the field
+/// flat sees its changed level explained.
 pub(super) fn insert_reasoning_effort(
     obj: &mut serde_json::Map<String, Value>,
     clamped: Option<std::borrow::Cow<'_, str>>,
+    tap: Option<&WireTap>,
 ) {
-    if let Some(effort) = clamped {
-        obj.insert(
-            "reasoning_effort".into(),
-            Value::String(effort.into_owned()),
-        );
+    let Some(effort) = clamped else {
+        return;
+    };
+    if let Some(tap) = tap {
+        let path = "/reasoning_effort";
+        crate::wire_declare::declare(tap, EditSite::EffortInjection, path, EditKind::Add);
+        if matches!(effort, std::borrow::Cow::Owned(_)) {
+            crate::wire_declare::declare(tap, EditSite::EffortInjection, path, EditKind::Rewrite);
+        }
     }
+    obj.insert(
+        "reasoning_effort".into(),
+        Value::String(effort.into_owned()),
+    );
 }
 
 /// Derive a `reasoning_effort` string from the canonical reasoning config.
@@ -218,21 +232,44 @@ pub(super) fn lift_delta_reasoning_content(
 pub(in crate::openai_compat) fn strip_history_reasoning(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
+    tap: Option<&WireTap>,
 ) -> Result<()> {
     let messages = obj
         .get_mut("messages")
         .and_then(|v| v.as_array_mut())
         .ok_or_else(|| Error::normalize_request(id, "messages is not an array"))?;
 
-    for msg in messages.iter_mut() {
-        if let Some(m) = msg.as_object_mut() {
-            m.remove("reasoning_content");
-            m.remove("reasoning_details");
-            m.remove("reasoning");
+    for (index, msg) in messages.iter_mut().enumerate() {
+        let Some(m) = msg.as_object_mut() else {
+            continue;
+        };
+        let mut removed = false;
+        for key in HISTORY_REASONING_KEYS {
+            removed |= m.remove(key).is_some();
+        }
+        if removed && let Some(tap) = tap {
+            declare_history_reasoning_strip(tap, index);
         }
     }
     Ok(())
 }
+
+/// Declare every reasoning slot of message `index` removed: the ingress may
+/// have renamed the client's slot (`reasoning_content` coalesces onto
+/// `reasoning`), so the removal is declared under each spelling.
+fn declare_history_reasoning_strip(tap: &WireTap, index: usize) {
+    for key in HISTORY_REASONING_KEYS {
+        crate::wire_declare::declare(
+            tap,
+            EditSite::HistoryReasoningStrip,
+            format!("/messages/{index}/{key}"),
+            EditKind::Remove,
+        );
+    }
+}
+
+/// The per-message reasoning slots the history strip removes.
+const HISTORY_REASONING_KEYS: [&str; 3] = ["reasoning_content", "reasoning_details", "reasoning"];
 
 /// Preserve outgoing assistant reasoning as a `reasoning_content`
 /// string field. DeepSeek v4+ and recent vLLM require this on
@@ -421,9 +458,21 @@ pub(super) const SAMPLING_DROP: &[&str] = &[
     "top_logprobs",
 ];
 
-pub(super) fn drop_sampling_params(obj: &mut serde_json::Map<String, Value>) {
+pub(super) fn drop_sampling_params(
+    obj: &mut serde_json::Map<String, Value>,
+    tap: Option<&WireTap>,
+) {
     for key in SAMPLING_DROP {
-        obj.remove(*key);
+        if obj.remove(*key).is_some()
+            && let Some(tap) = tap
+        {
+            crate::wire_declare::declare(
+                tap,
+                EditSite::SamplingParamsStrip,
+                format!("/{key}"),
+                EditKind::Remove,
+            );
+        }
     }
 }
 
@@ -449,7 +498,7 @@ mod tests {
             "reasoning_details": [{"type":"reasoning.text","text":"d"}],
             "reasoning": "r",
         }]));
-        strip_history_reasoning("test", &mut obj).unwrap();
+        strip_history_reasoning("test", &mut obj, None).unwrap();
         let m = obj["messages"][0].as_object().unwrap();
         assert!(m.get("reasoning_content").is_none());
         assert!(m.get("reasoning_details").is_none());
@@ -462,7 +511,7 @@ mod tests {
     fn strip_history_reasoning_no_op_when_no_reasoning_fields() {
         let mut obj = body_with_messages(json!([{"role":"user","content":"hi"}]));
         let before = obj["messages"][0].clone();
-        strip_history_reasoning("test", &mut obj).unwrap();
+        strip_history_reasoning("test", &mut obj, None).unwrap();
         assert_eq!(obj["messages"][0], before);
     }
 

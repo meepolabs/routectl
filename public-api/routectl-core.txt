@@ -3171,30 +3171,42 @@ pub routectl_core::wire_check::EditSite::AnthropicResponseExtrasStrip
 pub routectl_core::wire_check::EditSite::AnthropicStreamUsageFill
 pub routectl_core::wire_check::EditSite::AuthSurfaceGate
 pub routectl_core::wire_check::EditSite::CacheMarkerLowering
+pub routectl_core::wire_check::EditSite::CacheMarkerStrip
 pub routectl_core::wire_check::EditSite::CachePlacement
 pub routectl_core::wire_check::EditSite::CachedTokensAdd
 pub routectl_core::wire_check::EditSite::Canary
 pub routectl_core::wire_check::EditSite::ClaudeSamplingNormalize
+pub routectl_core::wire_check::EditSite::ClientFingerprintStrip
 pub routectl_core::wire_check::EditSite::Cloak
 pub routectl_core::wire_check::EditSite::ContextReduction
+pub routectl_core::wire_check::EditSite::DialectFieldStrip
 pub routectl_core::wire_check::EditSite::EffortInjection
 pub routectl_core::wire_check::EditSite::FieldRepair
 pub routectl_core::wire_check::EditSite::FinishReasonRewrite
+pub routectl_core::wire_check::EditSite::HistoryReasoningStrip
 pub routectl_core::wire_check::EditSite::HostedToolWithhold
+pub routectl_core::wire_check::EditSite::InstallationIdStamp
 pub routectl_core::wire_check::EditSite::LearnedRepair
+pub routectl_core::wire_check::EditSite::ManagedExtrasStrip
+pub routectl_core::wire_check::EditSite::MaxTokensRename
 pub routectl_core::wire_check::EditSite::ModelRename
 pub routectl_core::wire_check::EditSite::OperatorPayloadExtras
 pub routectl_core::wire_check::EditSite::PrefixRewrite
 pub routectl_core::wire_check::EditSite::Preflight
 pub routectl_core::wire_check::EditSite::ProviderAttributionAdd
+pub routectl_core::wire_check::EditSite::ReasoningIncludeInjection
+pub routectl_core::wire_check::EditSite::ReasoningSummaryDefault
 pub routectl_core::wire_check::EditSite::ReplayStrip
+pub routectl_core::wire_check::EditSite::RequiredFieldDefault
 pub routectl_core::wire_check::EditSite::ResponseEnvelopeStamp
 pub routectl_core::wire_check::EditSite::ResponseModelRelabel
 pub routectl_core::wire_check::EditSite::ResponsesPassthroughSplice
 pub routectl_core::wire_check::EditSite::ResponsesStatusRewrite
+pub routectl_core::wire_check::EditSite::SamplingParamsStrip
 pub routectl_core::wire_check::EditSite::SamplingReconcile
 pub routectl_core::wire_check::EditSite::SignatureStrip
 pub routectl_core::wire_check::EditSite::StreamEnvelopeStamp
+pub routectl_core::wire_check::EditSite::StreamFlagForce
 pub routectl_core::wire_check::EditSite::StreamOptionsInjection
 pub routectl_core::wire_check::EditSite::StreamStragglerDrop
 pub routectl_core::wire_check::EditSite::StreamStrip
@@ -3202,7 +3214,7 @@ pub routectl_core::wire_check::EditSite::ThinkingStripForcedToolUse
 pub routectl_core::wire_check::EditSite::ToolIdSanitize
 pub routectl_core::wire_check::EditSite::UrlFieldRelocate
 impl routectl_core::wire_check::EditSite
-pub const routectl_core::wire_check::EditSite::ALL: [Self; 35]
+pub const routectl_core::wire_check::EditSite::ALL: [Self; 47]
 pub const fn routectl_core::wire_check::EditSite::label(self) -> &'static str
 impl core::clone::Clone for routectl_core::wire_check::EditSite
 pub fn routectl_core::wire_check::EditSite::clone(&self) -> routectl_core::wire_check::EditSite

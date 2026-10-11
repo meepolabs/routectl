@@ -1,0 +1,98 @@
+//! Egress-side reporting into the per-attempt wire tap: the body bytes a
+//! provider sends and the body edits it declares on the way.
+//!
+//! Every entry point is a no-op when the request carries no tap, so an
+//! attempt nobody checks pays one `Option` test per site.
+
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+use std::borrow::Cow;
+
+use bytes::Bytes;
+use routectl_core::ChatRequest;
+use routectl_core::wire_check::WireTap;
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite};
+
+/// The tap riding `req`, if a caller is listening.
+pub const fn tap(req: &ChatRequest) -> Option<&WireTap> {
+    req.routectl_internal.wire_tap.as_ref()
+}
+
+/// Serialize the outgoing body once and record those exact bytes in the
+/// tap. The returned bytes are what the caller sends: the tap holds a
+/// refcount on the same buffer, never a second serialization.
+pub fn serialize_and_deposit(
+    req: &ChatRequest,
+    body: &serde_json::Value,
+) -> serde_json::Result<Bytes> {
+    let bytes = Bytes::from(serde_json::to_vec(body)?);
+    if let Some(tap) = tap(req) {
+        tap.deposit(bytes.clone());
+    }
+    Ok(bytes)
+}
+
+/// Declare one request-body edit. A pattern the edit register refuses is
+/// dropped with a DEBUG naming only the site: the unexplained difference
+/// then surfaces as a finding, which is the safe direction.
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+pub fn declare(tap: &WireTap, site: EditSite, path: impl Into<Cow<'static, str>>, kind: EditKind) {
+    match DeclaredEdit::new(site, path, kind) {
+        Ok(edit) => tap.declare(edit),
+        Err(e) => tracing::debug!(
+            site = site.label(),
+            error = %e,
+            "wire-check edit declaration refused"
+        ),
+    }
+}
+
+/// RFC 6901 pointer for member `key` under `parent` (`""` for the top
+/// level), or `None` when the key is not token-shaped: such a key renders
+/// as a wildcard in a finding, and a top-level wildcard pattern is refused
+/// as a blanket exemption.
+#[cfg(feature = "openai-compat")]
+pub fn member_pointer(parent: &str, key: &str) -> Option<String> {
+    routectl_core::is_safe_token(key)
+        .then(|| format!("{parent}/{}", key.replace('~', "~0").replace('/', "~1")))
+}
+
+/// Declare the body `stream` flag the provider forces to `forced`: an Add
+/// when the canonical request left it unset, a Rewrite when it asked for
+/// the other mode.
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+pub fn declare_stream_flag(req: &ChatRequest, forced: bool) {
+    let Some(tap) = tap(req) else {
+        return;
+    };
+    match req.stream {
+        None => declare(tap, EditSite::StreamFlagForce, "/stream", EditKind::Add),
+        Some(requested) if requested != forced => {
+            declare(tap, EditSite::StreamFlagForce, "/stream", EditKind::Rewrite);
+        }
+        Some(_) => {}
+    }
+}
+
+#[cfg(all(test, feature = "openai-compat"))]
+mod tests {
+    use super::member_pointer;
+
+    #[test]
+    fn member_pointer_escapes_token_keys_and_refuses_the_rest() {
+        let rows: [(&str, &str, &str, Option<&str>); 4] = [
+            ("plain key", "", "metadata", Some("/metadata")),
+            (
+                "nested key",
+                "/client_metadata",
+                "a~b",
+                Some("/client_metadata/a~0b"),
+            ),
+            ("slash key", "", "a/b", Some("/a~1b")),
+            ("whitespace key", "", "has space", None),
+        ];
+        for (name, parent, key, want) in rows {
+            assert_eq!(member_pointer(parent, key).as_deref(), want, "{name}");
+        }
+    }
+}

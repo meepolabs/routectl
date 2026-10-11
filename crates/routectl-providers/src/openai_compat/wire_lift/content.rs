@@ -24,6 +24,7 @@
 
 use serde_json::{Map, Value};
 
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, Result};
 
 use super::reject_or_drop_unrepresentable;
@@ -78,7 +79,7 @@ pub fn lift(id: &str, obj: &mut Map<String, Value>, req: &ChatRequest, strict: b
 fn lift_tallied(
     id: &str,
     obj: &mut Map<String, Value>,
-    _req: &ChatRequest,
+    req: &ChatRequest,
     strict: bool,
     tally: &mut ContentDropTally,
 ) -> Result<()> {
@@ -112,9 +113,18 @@ fn lift_tallied(
         // tool_result / thinking content block would emit the field
         // into the openai-compat wire body and 400 strict hosts.
         // Caught by `contract_egress::scenario_5_cache_control_positions::openai_compat_egress`.
-        for part in parts.iter_mut() {
-            if let Some(obj) = part.as_object_mut() {
-                obj.remove("cache_control");
+        let tap = crate::wire_declare::tap(req);
+        for (part_idx, part) in parts.iter_mut().enumerate() {
+            if let Some(obj) = part.as_object_mut()
+                && obj.remove("cache_control").is_some()
+                && let Some(tap) = tap
+            {
+                crate::wire_declare::declare(
+                    tap,
+                    EditSite::CacheMarkerStrip,
+                    format!("/messages/{msg_idx}/content/{part_idx}/cache_control"),
+                    EditKind::Remove,
+                );
             }
         }
     }

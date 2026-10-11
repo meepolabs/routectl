@@ -102,6 +102,35 @@ pub enum EditSite {
     AuthSurfaceGate,
     /// Provider: preserved Responses input items spliced back in.
     ResponsesPassthroughSplice,
+    /// Provider: the body `stream` flag set to the transport mode the
+    /// provider drives.
+    StreamFlagForce,
+    /// Provider: prompt-cache markers removed for an upstream with no cache
+    /// surface.
+    CacheMarkerStrip,
+    /// Provider: a field the upstream's dialect does not accept removed.
+    DialectFieldStrip,
+    /// Provider: sampling parameters removed for a model that rejects them.
+    SamplingParamsStrip,
+    /// Provider: `max_tokens` renamed to `max_completion_tokens`.
+    MaxTokensRename,
+    /// Provider: reasoning removed from echoed assistant history.
+    HistoryReasoningStrip,
+    /// Provider: a forwarded extra withheld because routectl manages its key
+    /// or the upstream rejects it.
+    ManagedExtrasStrip,
+    /// Provider: a field the upstream requires written with routectl's own
+    /// value.
+    RequiredFieldDefault,
+    /// Provider: the default reasoning summary mode added.
+    ReasoningSummaryDefault,
+    /// Provider: the encrypted-reasoning `include` entry added.
+    ReasoningIncludeInjection,
+    /// Provider: the per-installation id stamped into `client_metadata`.
+    InstallationIdStamp,
+    /// Provider: the Claude Code billing/attribution block withheld from
+    /// the system prompt sent to a third-party upstream.
+    ClientFingerprintStrip,
     /// Response: a finish reason mapped to the client dialect's value.
     FinishReasonRewrite,
     /// Response: streaming envelope fields stamped onto each chunk.
@@ -131,7 +160,7 @@ pub enum EditSite {
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 47] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -157,6 +186,18 @@ impl EditSite {
         Self::StreamOptionsInjection,
         Self::AuthSurfaceGate,
         Self::ResponsesPassthroughSplice,
+        Self::StreamFlagForce,
+        Self::CacheMarkerStrip,
+        Self::DialectFieldStrip,
+        Self::SamplingParamsStrip,
+        Self::MaxTokensRename,
+        Self::HistoryReasoningStrip,
+        Self::ManagedExtrasStrip,
+        Self::RequiredFieldDefault,
+        Self::ReasoningSummaryDefault,
+        Self::ReasoningIncludeInjection,
+        Self::InstallationIdStamp,
+        Self::ClientFingerprintStrip,
         Self::FinishReasonRewrite,
         Self::StreamEnvelopeStamp,
         Self::CachedTokensAdd,
@@ -197,6 +238,18 @@ impl EditSite {
             Self::StreamOptionsInjection => "stream_options_injection",
             Self::AuthSurfaceGate => "auth_surface_gate",
             Self::ResponsesPassthroughSplice => "responses_passthrough_splice",
+            Self::StreamFlagForce => "stream_flag_force",
+            Self::CacheMarkerStrip => "cache_marker_strip",
+            Self::DialectFieldStrip => "dialect_field_strip",
+            Self::SamplingParamsStrip => "sampling_params_strip",
+            Self::MaxTokensRename => "max_tokens_rename",
+            Self::HistoryReasoningStrip => "history_reasoning_strip",
+            Self::ManagedExtrasStrip => "managed_extras_strip",
+            Self::RequiredFieldDefault => "required_field_default",
+            Self::ReasoningSummaryDefault => "reasoning_summary_default",
+            Self::ReasoningIncludeInjection => "reasoning_include_injection",
+            Self::InstallationIdStamp => "installation_id_stamp",
+            Self::ClientFingerprintStrip => "client_fingerprint_strip",
             Self::FinishReasonRewrite => "finish_reason_rewrite",
             Self::StreamEnvelopeStamp => "stream_envelope_stamp",
             Self::CachedTokensAdd => "cached_tokens_add",

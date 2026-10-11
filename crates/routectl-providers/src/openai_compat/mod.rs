@@ -37,6 +37,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tracing::debug;
 
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, Result, UpstreamBody,
     debug_upstream_error_body, sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
@@ -283,27 +284,26 @@ impl OpenAiCompatProvider {
         Ok(headers)
     }
 
-    /// Build the outgoing chat/completions request. On the mantle lane the
-    /// body is serialized to bytes (the content-type is already stamped by
-    /// `build_headers`) so the signer can hash the exact transmitted body;
-    /// the first-party lane keeps the stock `.json(&body)` builder
-    /// byte-for-byte. The returned request is UNSIGNED -- the caller signs
-    /// it on the mantle lane via `sign_mantle`.
+    /// Build the outgoing chat/completions request. The body is serialized
+    /// to bytes once (the content-type is already stamped by
+    /// `build_headers`), deposited into the request's wire tap, and sent as
+    /// those same bytes; the mantle signer hashes them too. The returned
+    /// request is UNSIGNED -- the caller signs it on the mantle lane via
+    /// `sign_mantle`.
     fn build_request(
         &self,
+        req: &ChatRequest,
         url: &str,
         headers: HeaderMap,
         body: &Value,
     ) -> Result<reqwest::Request> {
-        let rb = self.client.post(url).headers(headers);
-        let rb = if self.is_mantle() {
-            let body_bytes = serde_json::to_vec(body)
-                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-            rb.body(body_bytes)
-        } else {
-            rb.json(body)
-        };
-        rb.build()
+        let body_bytes = crate::wire_declare::serialize_and_deposit(req, body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        self.client
+            .post(url)
+            .headers(headers)
+            .body(body_bytes)
+            .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))
     }
 }
@@ -342,6 +342,7 @@ impl Provider for OpenAiCompatProvider {
         let mut body = self.normalize_request(&req)?;
         // Force non-streaming.
         body["stream"] = Value::Bool(false);
+        crate::wire_declare::declare_stream_flag(&req, false);
 
         let headers = self.build_headers(&req)?;
         let url = self.completions_url();
@@ -353,12 +354,8 @@ impl Provider for OpenAiCompatProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        // Mantle lane: serialize to signable bytes (content-type already
-        // stamped by build_headers) so the signer can hash the exact
-        // transmitted body; the first-party lane keeps the stock `.json()`
-        // builder byte-for-byte.
         #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
-        let mut request = self.build_request(&url, headers, &body)?;
+        let mut request = self.build_request(&req, &url, headers, &body)?;
         // Mantle lane: sign the built request before any header trace or
         // execute so the trace shows the real auth header and the signed
         // input matches the transmitted bytes. A no-op on the first-party
@@ -469,6 +466,7 @@ impl Provider for OpenAiCompatProvider {
         self.record_mantle_span_fields();
         let mut body = self.normalize_request(&req)?;
         body["stream"] = Value::Bool(true);
+        crate::wire_declare::declare_stream_flag(&req, true);
 
         // Auto-inject `stream_options.include_usage = true` so the
         // upstream emits a terminal usage chunk + finish_reason.
@@ -478,7 +476,11 @@ impl Provider for OpenAiCompatProvider {
         // fully successful stream. Operator-supplied `stream_options`
         // (default_extras / provider_extras) always wins; the opt-out
         // toggle is `disable_stream_include_usage = true`.
-        ensure_stream_options_include_usage(&mut body, self.cfg.disable_stream_include_usage);
+        ensure_stream_options_include_usage(
+            &mut body,
+            self.cfg.disable_stream_include_usage,
+            crate::wire_declare::tap(&req),
+        );
 
         let headers = self.build_headers(&req)?;
         let url = self.completions_url();
@@ -487,10 +489,8 @@ impl Provider for OpenAiCompatProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        // Mantle lane: serialize to signable bytes (see complete()); the
-        // first-party lane keeps the stock `.json()` builder byte-for-byte.
         #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
-        let mut request = self.build_request(&url, headers, &body)?;
+        let mut request = self.build_request(&req, &url, headers, &body)?;
         // Mantle lane: sign the built stream request before trace/execute
         // (see complete()). No-op on the first-party lane.
         #[cfg(feature = "bedrock")]
@@ -927,7 +927,7 @@ fn choice_tail_mut(tails: &mut Vec<ChoiceTail>, index: u32) -> Option<&mut Choic
 /// Private to the module: the single caller is `stream()` below.
 /// Promoting to `pub(crate)` would expose an order-dependent contract
 /// the type system cannot enforce.
-fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
+fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool, tap: Option<&WireTap>) {
     if disabled {
         return;
     }
@@ -937,11 +937,25 @@ fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
     let Some(obj) = body.as_object_mut() else {
         return;
     };
+    let created = !obj.contains_key("stream_options");
     let entry = obj
         .entry("stream_options".to_string())
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
     if let Some(so) = entry.as_object_mut() {
         so.insert("include_usage".to_string(), Value::Bool(true));
+        if let Some(tap) = tap {
+            let path = if created {
+                "/stream_options"
+            } else {
+                "/stream_options/include_usage"
+            };
+            crate::wire_declare::declare(
+                tap,
+                EditSite::StreamOptionsInjection,
+                path,
+                EditKind::Add,
+            );
+        }
     }
 }
 
@@ -1591,21 +1605,21 @@ mod helper_tests {
     #[test]
     fn injects_when_absent_and_not_disabled() {
         let mut body = json!({"model": "x", "stream": true});
-        ensure_stream_options_include_usage(&mut body, false);
+        ensure_stream_options_include_usage(&mut body, false, None);
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
     #[test]
     fn opt_out_suppresses_injection() {
         let mut body = json!({"model": "x", "stream": true});
-        ensure_stream_options_include_usage(&mut body, true);
+        ensure_stream_options_include_usage(&mut body, true, None);
         assert!(body.get("stream_options").is_none());
     }
 
     #[test]
     fn preserves_operator_supplied_true() {
         let mut body = json!({"stream_options": {"include_usage": true, "other": 1}});
-        ensure_stream_options_include_usage(&mut body, false);
+        ensure_stream_options_include_usage(&mut body, false, None);
         assert_eq!(body["stream_options"]["include_usage"], true);
         // Existing sibling fields untouched.
         assert_eq!(body["stream_options"]["other"], 1);
@@ -1616,14 +1630,14 @@ mod helper_tests {
         // Operator opted out via extras -- explicit `false` must win
         // over the auto-inject, not silently flip to true.
         let mut body = json!({"stream_options": {"include_usage": false}});
-        ensure_stream_options_include_usage(&mut body, false);
+        ensure_stream_options_include_usage(&mut body, false, None);
         assert_eq!(body["stream_options"]["include_usage"], false);
     }
 
     #[test]
     fn creates_stream_options_object_when_other_keys_present_outside() {
         let mut body = json!({"stream_options": {"unrelated_key": "v"}});
-        ensure_stream_options_include_usage(&mut body, false);
+        ensure_stream_options_include_usage(&mut body, false, None);
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["stream_options"]["unrelated_key"], "v");
     }
@@ -2086,6 +2100,10 @@ mod helper_tests {
 #[cfg(test)]
 #[path = "parse_once_tests.rs"]
 mod parse_once_tests;
+
+#[cfg(test)]
+#[path = "wire_tap_tests.rs"]
+mod wire_tap_tests;
 
 #[cfg(all(test, feature = "bedrock"))]
 mod mantle_header_tests {

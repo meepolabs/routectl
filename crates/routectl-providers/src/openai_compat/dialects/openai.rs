@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{ChatRequest, Result};
 
 use super::super::dialect::ReasoningDialect;
@@ -29,26 +30,40 @@ impl Dialect for OpenAiDialect {
         obj: &mut serde_json::Map<String, Value>,
         req: &ChatRequest,
     ) -> Result<()> {
+        let tap = crate::wire_declare::tap(req);
         if let Some(effort) = req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
             // Vanilla OpenAI has no disable token, so omission is the disable
             // form -- a `None` clamp must never become a positive level.
             insert_reasoning_effort(
                 obj,
                 clamp_effort_to_supported(effort, &req.routectl_internal.effort_levels),
+                tap,
             );
         }
         if profile_for(&req.model).drops_sampling_params {
-            drop_sampling_params(obj);
+            drop_sampling_params(obj, tap);
             // Real OpenAI rejects `max_tokens` on o-series / gpt-5 reasoning
             // models and requires `max_completion_tokens`. The OpenAI ingress
             // renames the inbound `max_completion_tokens` to canonical
             // `max_tokens`; restore it here for reasoning models only.
             if let Some(v) = obj.remove("max_tokens") {
                 obj.insert("max_completion_tokens".into(), v);
+                declare_max_tokens_rename(tap);
             }
         }
         Ok(())
     }
+}
+
+/// A client that sent `max_tokens` sees it leave as
+/// `max_completion_tokens`.
+fn declare_max_tokens_rename(tap: Option<&WireTap>) {
+    let Some(tap) = tap else {
+        return;
+    };
+    let site = EditSite::MaxTokensRename;
+    crate::wire_declare::declare(tap, site, "/max_tokens", EditKind::Remove);
+    crate::wire_declare::declare(tap, site, "/max_completion_tokens", EditKind::Add);
 }
 
 #[cfg(test)]

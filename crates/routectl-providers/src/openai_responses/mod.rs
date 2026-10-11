@@ -182,6 +182,7 @@ impl Provider for OpenAiResponsesProvider {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
         }
+        crate::wire_declare::declare_stream_flag(&req, true);
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
@@ -193,13 +194,11 @@ impl Provider for OpenAiResponsesProvider {
         let token = self.cfg.auth.token().await?;
 
         let rb = self.build_headers(self.client.post(self.responses_url()), &req, &token)?;
-        // Serialize to bytes so the mantle signer can sign over the exact
-        // transmitted body; the content-type is stamped explicitly (rather
-        // than via `.json()`) so both lanes emit one deterministic header.
-        // The first-party lane is byte-unchanged: `serde_json::to_vec`
-        // produces the same bytes `.json()` did and the content-type is
-        // identical.
-        let body_bytes = serde_json::to_vec(&body)
+        // Serialize to bytes once: the wire tap records them, the mantle
+        // signer signs over them, and they are what is transmitted. The
+        // content-type is stamped explicitly (rather than via `.json()`) so
+        // both lanes emit one deterministic header.
+        let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
         #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
         let mut request = rb
@@ -401,6 +400,7 @@ impl Provider for OpenAiResponsesProvider {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
         }
+        crate::wire_declare::declare_stream_flag(&req, true);
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
@@ -408,10 +408,9 @@ impl Provider for OpenAiResponsesProvider {
         let token = self.cfg.auth.token().await?;
 
         let rb = self.build_headers(self.client.post(self.responses_url()), &req, &token)?;
-        // See complete(): serialize to bytes + explicit content-type so the
-        // mantle signer signs the exact transmitted body; first-party lane
-        // byte-unchanged.
-        let body_bytes = serde_json::to_vec(&body)
+        // See complete(): serialize once, deposit, sign and send the same
+        // bytes with an explicit content-type.
+        let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
         #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
         let mut request = rb
@@ -804,3 +803,7 @@ mod reasoning_continuity_tests;
 #[cfg(test)]
 #[path = "stream_terminal_tests.rs"]
 mod stream_terminal_tests;
+
+#[cfg(test)]
+#[path = "wire_tap_tests.rs"]
+mod wire_tap_tests;

@@ -453,9 +453,11 @@ impl GeminiProvider {
         let key = self.cfg.auth.token().await?;
         let url = self.generate_url(&req.model);
         let rb = self.build_headers(self.client.post(&url), &req, &key)?;
+        let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
         let request = rb
             .header("content-type", "application/json")
-            .json(&body)
+            .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -503,9 +505,11 @@ impl GeminiProvider {
         // only -- header_extras must NOT flow on this path. The short UA is
         // applied to the shared client at build time.
         let rb = auth::apply_bearer(self.client.post(&url), &token)?;
+        let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
         let request = rb
             .header("content-type", "application/json")
-            .json(&body)
+            .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -555,10 +559,12 @@ impl GeminiProvider {
         let key = self.cfg.auth.token().await?;
         let url = self.stream_url(&req.model);
         let rb = self.build_headers(self.client.post(&url), &req, &key)?;
+        let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
         let request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
-            .json(&body)
+            .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -596,10 +602,12 @@ impl GeminiProvider {
 
         let url = self.cloudcode_stream_url();
         let rb = auth::apply_bearer(self.client.post(&url), &token)?;
+        let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
         let request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
-            .json(&body)
+            .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -862,6 +870,10 @@ mod parse_once_tests;
 #[cfg(test)]
 #[path = "redirect_tests.rs"]
 mod redirect_tests;
+
+#[cfg(test)]
+#[path = "wire_tap_tests.rs"]
+mod wire_tap_tests;
 
 #[cfg(test)]
 mod e2e_tests {

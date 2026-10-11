@@ -48,13 +48,15 @@ impl Dialect for DeepSeekDialect {
         obj: &mut serde_json::Map<String, Value>,
         req: &ChatRequest,
     ) -> Result<()> {
+        let tap = crate::wire_declare::tap(req);
         if profile_for(&req.model).drops_sampling_params {
-            drop_sampling_params(obj);
+            drop_sampling_params(obj, tap);
         }
         if let Some(effort) = derive_reasoning_effort(req) {
             insert_reasoning_effort(
                 obj,
                 clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels),
+                tap,
             );
         }
         // History-reasoning shaping (strip vs preserve) is owned by

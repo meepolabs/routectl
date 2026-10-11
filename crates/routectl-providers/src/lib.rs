@@ -277,6 +277,15 @@ pub(crate) mod aws_error;
 ))]
 pub use aws_error::{VALIDATION_EXCEPTION_TYPE, aws_exception_type_is};
 
+// Egress-side wire-tap reporting: deposit the bytes sent and declare the
+// body edits made on the way. Gated on the egresses that report through it.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
+pub(crate) mod wire_declare;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 

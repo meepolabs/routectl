@@ -8,6 +8,7 @@
 
 use serde_json::Value;
 
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, CustomTool, Result, ToolDef};
 
 use super::reject_or_drop_unrepresentable;
@@ -28,7 +29,7 @@ pub fn lift(
 
     let mut lifted: Vec<Value> = Vec::with_capacity(tools.len());
     let mut dropped_non_custom = false;
-    for tool in tools {
+    for (index, tool) in tools.iter().enumerate() {
         match tool {
             ToolDef::Custom(c) => {
                 lifted.push(custom_to_openai(c));
@@ -69,6 +70,7 @@ pub fn lift(
                         &format!("tool `{tool_name}`"),
                         &format!("Anthropic builtin / non-custom tool `{builtin}`"),
                     )?;
+                    declare_tool_removed(req, index);
                     // Do not push -- tool is dropped.
                 }
             }
@@ -92,6 +94,18 @@ pub fn lift(
     }
 
     Ok(())
+}
+
+/// Declare the client's tool at `index` removed from `tools`.
+fn declare_tool_removed(req: &ChatRequest, index: usize) {
+    if let Some(tap) = crate::wire_declare::tap(req) {
+        crate::wire_declare::declare(
+            tap,
+            EditSite::DialectFieldStrip,
+            format!("/tools/{index}"),
+            EditKind::Remove,
+        );
+    }
 }
 
 fn custom_to_openai(c: &CustomTool) -> Value {

@@ -471,6 +471,12 @@ license.
   `push_distinct_lazily` / `is_full` are narrowed further to `anthropic-api`,
   their only caller. The per-request tally types stay per translator
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
+- `src/wire_declare.rs` -- egress-side wire-tap reporting for openai-compat,
+  openai-responses and gemini: `serialize_and_deposit` (serialize the body
+  once, deposit those bytes into the request's `WireTap`, return them for
+  `.body()`), `declare` (a refused pattern is dropped at DEBUG, never sent),
+  `member_pointer` and `declare_stream_flag`; every entry point is a no-op
+  when the request carries no tap
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin,
   User-Agent override, and the host-keyed proxy policy (every builder takes
   the client's base URL; a loopback host gets `no_proxy()`); tests in

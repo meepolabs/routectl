@@ -13,7 +13,12 @@
 //! `true`, matching codex's `ResponsesApiRequest` default.
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
-use routectl_core::{ChatRequest, ResponsesPassthroughItem, Result};
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
+use routectl_core::{
+    ChatRequest, ContentPart, KnownContentPart, MessageContent, ResponsesPassthroughItem, Result,
+    Role,
+};
+use serde_json::Value;
 
 use super::messages::build_input;
 use super::system::{flush_fingerprint_tally, translate_system};
@@ -43,9 +48,12 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     // (an expected transform).
     crate::sampling_drop_guard::log_dropped_sampling_fields(&cfg.id, req, &[]);
 
+    let tap = crate::wire_declare::tap(req);
     let mut fingerprint = ClientFingerprintStripTally::default();
-    let instructions = translate_system(req, &mut fingerprint).unwrap_or_default();
-    let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req);
+    let instructions = translate_system(req, &mut fingerprint);
+    declare_instructions(tap, instructions.is_some(), &fingerprint);
+    let instructions = instructions.unwrap_or_default();
+    let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req, tap);
     // Flushed before the input build's `?`, so a request that withheld the
     // fingerprint and then failed translation still counts.
     flush_fingerprint_tally(&fingerprint);
@@ -80,19 +88,27 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         },
     };
 
-    extras::apply_reasoning(&mut request, req);
+    if let Some(tap) = tap {
+        declare_lane_gates(tap, cfg.auth_kind, req);
+    }
+    extras::apply_reasoning(&mut request, req, tap);
     extras::merge_provider_extras(&mut request, req, cfg.auth_kind);
     // Runs after merge_provider_extras so the stamp lands on the merged
     // object; the resolved id wins over any request-carried value.
-    extras::apply_installation_id(&mut request, cfg.auth_kind, cfg.installation_id.as_deref());
+    extras::apply_installation_id(
+        &mut request,
+        cfg.auth_kind,
+        cfg.installation_id.as_deref(),
+        tap,
+    );
     // Honor the canonical structured-output directive onto `text.format`.
     // Runs after merge_provider_extras so a `verbosity` sibling lifted into
     // provider_extras["text"] survives and the format merges alongside it.
-    extras::apply_response_format(&mut request, req);
+    extras::apply_response_format(&mut request, req, tap);
     // Runs last: the encrypted-reasoning include depends on the final
     // `store` value (which merge_provider_extras may have flipped) and
     // on whether the operator pinned `include` explicitly.
-    extras::finalize_reasoning_include(&mut request, req);
+    extras::finalize_reasoning_include(&mut request, req, tap);
 
     Ok(request)
 }
@@ -117,13 +133,126 @@ fn build_input_with_passthrough(
     id: &str,
     auth_kind: AuthKind,
     req: &ChatRequest,
+    tap: Option<&WireTap>,
 ) -> Result<Vec<ResponseInput>> {
     let items = build_input(id, auth_kind, &req.messages)?;
     let modeled: Vec<ResponseInput> = items.into_iter().map(ResponseInput::Item).collect();
-    Ok(merge_passthrough(
-        modeled,
-        &req.routectl_internal.responses_input_passthrough,
-    ))
+    let passthrough = &req.routectl_internal.responses_input_passthrough;
+    let merged = merge_passthrough(modeled, passthrough);
+    if let Some(tap) = tap {
+        declare_passthrough_relocations(tap, &merged, passthrough);
+    }
+    Ok(merged)
+}
+
+/// Declare a Relocate for each spliced passthrough item that left at a
+/// different `input[]` index than it arrived at. Its inbound index is its
+/// modeled prefix plus the passthroughs before it; a modeled item that
+/// expands to a different egress-item count shifts it.
+fn declare_passthrough_relocations(
+    tap: &WireTap,
+    merged: &[ResponseInput],
+    passthrough: &[ResponsesPassthroughItem],
+) {
+    let egress_positions = merged
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| matches!(item, ResponseInput::Passthrough(_)))
+        .map(|(position, _)| position);
+    for (ordinal, (item, egress)) in passthrough.iter().zip(egress_positions).enumerate() {
+        let inbound = item.modeled_prefix.saturating_add(ordinal);
+        if inbound == egress {
+            continue;
+        }
+        for position in [inbound, egress] {
+            crate::wire_declare::declare(
+                tap,
+                EditSite::ResponsesPassthroughSplice,
+                format!("/input/{position}"),
+                EditKind::Relocate,
+            );
+        }
+    }
+}
+
+/// Declare the `instructions` edits: the field is always sent, so a
+/// request without a system prompt gains an empty one, and a withheld
+/// fingerprint block rewrites it (to the empty string when nothing else
+/// was there).
+fn declare_instructions(
+    tap: Option<&WireTap>,
+    has_system: bool,
+    fingerprint: &ClientFingerprintStripTally,
+) {
+    let Some(tap) = tap else {
+        return;
+    };
+    if !has_system {
+        crate::wire_declare::declare(
+            tap,
+            EditSite::RequiredFieldDefault,
+            "/instructions",
+            EditKind::Add,
+        );
+    }
+    if fingerprint.stripped() {
+        crate::wire_declare::declare(
+            tap,
+            EditSite::ClientFingerprintStrip,
+            "/instructions",
+            EditKind::Rewrite,
+        );
+    }
+}
+
+/// Declare the fields this egress writes or withholds by lane, whatever the
+/// request carried: `store` is always sent with routectl's value (the
+/// ingress never forwards the client's), `parallel_tool_calls` is always
+/// sent `true` (the extras allowlist does not forward the client's), and the
+/// ChatGPT-OAuth lane never sends `max_output_tokens`.
+fn declare_lane_gates(tap: &WireTap, auth_kind: AuthKind, req: &ChatRequest) {
+    let extras = req.provider_extras.as_ref().and_then(|v| v.as_object());
+    let extra = |key: &str| extras.and_then(|o| o.get(key));
+    let site = EditSite::RequiredFieldDefault;
+    crate::wire_declare::declare(tap, site, "/store", EditKind::Add);
+    crate::wire_declare::declare(tap, site, "/store", EditKind::Rewrite);
+    let parallel_kind = match extra("parallel_tool_calls") {
+        None => Some(EditKind::Add),
+        Some(Value::Bool(true)) => None,
+        Some(_) => Some(EditKind::Rewrite),
+    };
+    if let Some(kind) = parallel_kind {
+        crate::wire_declare::declare(tap, site, "/parallel_tool_calls", kind);
+    }
+    if auth_kind == AuthKind::ChatgptOauth && req.max_tokens.is_some() {
+        crate::wire_declare::declare(
+            tap,
+            EditSite::AuthSurfaceGate,
+            "/max_output_tokens",
+            EditKind::Remove,
+        );
+    }
+    if auth_kind == AuthKind::BedrockMantle && carries_user_file_url(req) {
+        crate::wire_declare::declare(
+            tap,
+            EditSite::AuthSurfaceGate,
+            "/input/*/content/*/file_url",
+            EditKind::Remove,
+        );
+    }
+}
+
+/// True when a user turn carries a file part with a `file_url`, which the
+/// Mantle lane leaves off the wire.
+fn carries_user_file_url(req: &ChatRequest) -> bool {
+    req.messages.iter().any(|m| {
+        matches!(m.role, Role::User)
+            && matches!(&m.content, MessageContent::Parts(parts) if parts.iter().any(|p| matches!(
+                p,
+                ContentPart::Known(KnownContentPart::File { file, .. })
+                    if file.get("file_url").and_then(Value::as_str).is_some_and(|u| !u.is_empty())
+            )))
+    })
 }
 
 /// Splice preserved passthrough items back into the modeled egress

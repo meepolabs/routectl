@@ -170,6 +170,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "gemini/request_extras_boundary_tests.rs",
     "gemini/request_fingerprint_tests.rs",
     "gemini/sse_tests.rs",
+    "gemini/wire_tap_tests.rs",
     "openai_responses/auth_wiring_tests.rs",
     "openai_responses/e2e_tests.rs",
     "openai_responses/excerpt_tests.rs",
@@ -191,6 +192,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "openai_responses/sse_tests.rs",
     "openai_responses/sse_tool_args_tests.rs",
     "openai_responses/stream_terminal_tests.rs",
+    "openai_responses/wire_tap_tests.rs",
 ];
 
 // ---------------------------------------------------------------------------
