@@ -7,8 +7,7 @@ use crate::config::Config;
 const PROVIDER: &str = "p0";
 
 const ANTHROPIC_REMOTE: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
-const ANTHROPIC_LOOPBACK: &str =
-    "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:8889\"\n";
+const ANTHROPIC_LOOPBACK: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:18080\"\n";
 const COMPAT_REMOTE: &str = "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
 const COMPAT_LOOPBACK: &str = "kind = \"openai-compat\"\nbase_url = \"http://localhost:11434/v1\"\napi_key_ref = \"literal:k\"\n";
 const COMPAT_LOOPBACK_V4: &str = "kind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:8000/v1\"\napi_key_ref = \"literal:k\"\n";

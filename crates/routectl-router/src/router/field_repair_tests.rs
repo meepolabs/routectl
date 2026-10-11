@@ -502,7 +502,7 @@ fn remapping_seat(status: u16, answer: Answer) -> (Router, Arc<Observed>) {
 /// which this stage must not attribute a rejection to at all.
 fn loopback_seat(answer: Answer) -> (Router, Arc<Observed>) {
     let mut config: Config = toml::from_str(
-        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:8889\"\n",
+        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:18080\"\n",
     )
     .expect("valid test toml");
     config
@@ -1091,7 +1091,7 @@ async fn a_loopback_target_repairs_nothing_and_mints_nothing() {
     // repairing unguarded.
     let _injection = provisional::inject(REJECTED_PATH);
     let mut config: Config = toml::from_str(
-        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:8889\"\n",
+        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:18080\"\n",
     )
     .expect("valid test toml");
     config
