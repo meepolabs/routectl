@@ -67,6 +67,7 @@ fn choices() -> [Value; 2] {
 }
 
 #[test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn an_empty_tool_list_takes_the_tool_choice_with_it() {
     for choice in choices() {
         // Arrange
@@ -91,6 +92,7 @@ fn an_empty_tool_list_takes_the_tool_choice_with_it() {
 }
 
 #[test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn a_non_empty_tool_list_ships_both() {
     // Arrange -- control: the same request with a tool to select.
     let cfg = cfg();

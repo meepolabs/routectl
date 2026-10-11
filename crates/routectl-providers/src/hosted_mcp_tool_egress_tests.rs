@@ -146,7 +146,8 @@ fn assert_no_mcp_value(lane: &str, body: &str) {
 #[test]
 #[serial_test::serial(
     anthropic_hosted_mcp_tool_withheld,
-    bedrock_converse_builtin_tool_unrepresentable
+    bedrock_converse_builtin_tool_unrepresentable,
+    bedrock_invoke_lane_seen
 )]
 fn a_hosted_mcp_tool_never_reaches_an_anthropic_shaped_body_and_the_function_tool_survives() {
     // Arrange
@@ -221,7 +222,7 @@ fn an_anthropic_request_carrying_a_hosted_mcp_tool_counts_one_policy_action() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
+#[serial_test::serial(anthropic_hosted_mcp_tool_withheld, bedrock_invoke_lane_seen)]
 fn a_bedrock_invoke_withhold_is_not_credited_to_the_anthropic_lane() {
     // Arrange
     let req = mcp_and_function_request();
@@ -257,6 +258,7 @@ fn a_background_probe_carrying_a_hosted_mcp_tool_counts_nothing() {
 }
 
 #[test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn an_anthropic_builtin_still_forwards_verbatim() {
     // Arrange -- positive control: an Anthropic server tool rides
     // `ToolDef::Other` exactly like the hosted-MCP tool does.
@@ -329,7 +331,7 @@ fn anthropic_shaped_bodies(req: &ChatRequest) -> [(&'static str, Value); 2] {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
+#[serial_test::serial(anthropic_hosted_mcp_tool_withheld, bedrock_invoke_lane_seen)]
 fn a_hosted_mcp_tool_choice_becomes_auto_and_names_nothing_on_an_anthropic_shaped_body() {
     // Arrange
     let req = with_tool_choice(mcp_and_function_request(), hosted_mcp_tool_choice());
@@ -354,7 +356,7 @@ fn a_hosted_mcp_tool_choice_becomes_auto_and_names_nothing_on_an_anthropic_shape
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
+#[serial_test::serial(anthropic_hosted_mcp_tool_withheld, bedrock_invoke_lane_seen)]
 fn a_hosted_mcp_tool_choice_with_no_tool_left_on_the_wire_is_omitted() {
     // Arrange -- the only tool is the withheld one, so there is nothing for
     // even an `auto` choice to select.
@@ -377,7 +379,7 @@ fn a_hosted_mcp_tool_choice_with_no_tool_left_on_the_wire_is_omitted() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
+#[serial_test::serial(anthropic_hosted_mcp_tool_withheld, bedrock_invoke_lane_seen)]
 fn anthropic_tool_choices_beside_a_withheld_hosted_mcp_tool_are_unchanged() {
     for choice in [
         json!({"type": "tool", "name": FUNCTION_NAME}),

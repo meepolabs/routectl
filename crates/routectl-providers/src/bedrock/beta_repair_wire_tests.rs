@@ -332,6 +332,7 @@ async fn assert_repairs_once(shape: BedrockApiShape, call: Call, message: &str) 
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn invoke_complete_retries_once_without_the_named_flag() {
     assert_repairs_once(BedrockApiShape::Invoke, Call::Complete, INVOKE_NEVER_ISSUED).await;
 }
@@ -343,6 +344,7 @@ async fn converse_complete_retries_once_on_the_prefixed_envelope() {
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn invoke_stream_retries_once_before_any_byte_reaches_the_caller() {
     assert_repairs_once(BedrockApiShape::Invoke, Call::Stream, INVOKE_NEVER_ISSUED).await;
 }
@@ -354,6 +356,7 @@ async fn converse_stream_retries_once_before_any_byte_reaches_the_caller() {
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn invoke_count_tokens_retries_once_without_the_named_flag() {
     assert_repairs_once(
         BedrockApiShape::Invoke,
@@ -388,6 +391,7 @@ async fn assert_success_records_the_stripped_flag(shape: BedrockApiShape, call: 
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn invoke_complete_success_records_the_stripped_flag() {
     assert_success_records_the_stripped_flag(BedrockApiShape::Invoke, Call::Complete).await;
 }
@@ -398,6 +402,7 @@ async fn converse_stream_success_records_the_stripped_flag() {
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn a_count_tokens_repair_retries_but_records_nothing() {
     // Arrange: a token-count rejection says nothing about inference.
     let lane = Lane::start(
@@ -426,6 +431,7 @@ async fn a_count_tokens_repair_retries_but_records_nothing() {
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn a_withheld_flag_pinned_by_header_extras_is_sent() {
     // Arrange
     let lane = Lane::start(
@@ -450,7 +456,10 @@ async fn a_withheld_flag_pinned_by_header_extras_is_sent() {
 }
 
 #[tokio::test]
-#[serial_test::serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
+#[serial_test::serial(
+    bedrock_invoke_anthropic_beta_rejected_by_bedrock,
+    bedrock_invoke_lane_seen
+)]
 async fn a_multi_flag_envelope_strips_every_named_flag_in_one_retry() {
     // Arrange: the captured three-flag envelope, triggered by the one named
     // flag the request's withheld set does not already name.
@@ -513,6 +522,7 @@ async fn an_envelope_naming_a_flag_the_client_did_not_send_is_not_repaired() {
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn an_envelope_naming_an_operator_floor_flag_is_not_repaired() {
     let lane = Lane::start(
         BedrockApiShape::Invoke,
@@ -560,6 +570,7 @@ async fn the_non_naming_envelope_is_not_repaired() {
 }
 
 #[tokio::test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 async fn a_retry_that_draws_another_beta_rejection_is_not_repaired_again() {
     // Arrange: stripping the first named flag exposes a second one.
     const SECOND: &str = "zz-second-2099-01-01";

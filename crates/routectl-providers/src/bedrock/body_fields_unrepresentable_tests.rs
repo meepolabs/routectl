@@ -128,6 +128,7 @@ fn cells() -> impl Iterator<Item = (Carrier, Seam)> {
 }
 
 #[test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn mcp_servers_never_reaches_either_carrier_from_any_seam() {
     // Arrange
     let mut leaks = Vec::new();
@@ -158,6 +159,7 @@ fn mcp_servers_never_reaches_either_carrier_from_any_seam() {
 /// fields to the carrier, so the absence of `mcp_servers` is the drop and
 /// not a fixture that never reached the wire.
 #[test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn an_adjacent_forward_compat_field_from_the_same_seam_survives_on_both_carriers() {
     // Arrange
     let mut lost = Vec::new();
@@ -183,6 +185,7 @@ fn is_drop_event(event: &routectl_testkit::CapturedEvent) -> bool {
 }
 
 #[test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn the_mcp_servers_drop_logs_the_field_name_and_never_the_connector_token() {
     // Arrange
     let mut problems = Vec::new();
@@ -217,6 +220,7 @@ fn the_mcp_servers_drop_logs_the_field_name_and_never_the_connector_token() {
 }
 
 #[test]
+#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn a_body_without_mcp_servers_logs_no_drop() {
     for carrier in CARRIERS {
         // Arrange
