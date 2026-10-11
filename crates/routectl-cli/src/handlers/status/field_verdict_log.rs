@@ -273,6 +273,8 @@ fn emit_if_admitted(
         rc_probe_backing_off = probes.backing_off,
         rc_probe_last_settlement = probe_settlement_token(probes),
         rc_probe_next_retry_ms = next_retry_ms(probes),
+        rc_probe_oldest_due_ms = oldest_due_ms(probes),
+        rc_probe_clear_persistence_failures_total = probes.clear_persistence_failures_total,
         "{FIDELITY_SNAPSHOT_MESSAGE}",
     );
 }
@@ -320,12 +322,13 @@ impl FidelityGate {
     }
 }
 
-/// Fingerprint of everything the line carries EXCEPT `rc_probe_next_retry_ms`.
+/// Fingerprint of everything the line carries EXCEPT the two clock-derived fields,
+/// `rc_probe_next_retry_ms` and `rc_probe_oldest_due_ms`.
 ///
-/// That one field is a countdown: it moves on every poll while nothing an operator
-/// acts on has changed, so including it would admit a line per poll and defeat the
-/// gate. Every other field on the line is a count, a token, or a rendered row with
-/// no clock-derived content. The `?`-rendered fields are hashed through the same
+/// Both move on every poll while nothing an operator acts on has changed -- one
+/// counts down, the other up -- so including either would admit a line per poll and
+/// defeat the gate. Every other field on the line is a count, a token, or a rendered
+/// row with no clock-derived content. The `?`-rendered fields are hashed through the same
 /// `Debug` rendering the line uses, so a field added to a row type moves the
 /// fingerprint without this function having to learn about it.
 fn line_fingerprint(
@@ -345,6 +348,7 @@ fn line_fingerprint(
         counters.preflight_actions,
         counters.parser_unlocalized,
         snapshot.probes.activations_total,
+        snapshot.probes.clear_persistence_failures_total,
     ] {
         count.hash(&mut hasher);
     }
@@ -466,6 +470,20 @@ fn next_retry_ms(probes: &routectl_router::ProbeSchedulerSnapshot) -> i64 {
 
 /// Rendered next-retry for a scheduler with nothing backing off.
 pub(super) const NO_NEXT_RETRY: i64 = -1;
+
+/// How long the longest-waiting leasable job has been due, in whole
+/// milliseconds, or -1 when no job is leasable.
+///
+/// The same negative sentinel as [`next_retry_ms`], for the same reason: zero is
+/// a real answer (a job that became due this instant).
+fn oldest_due_ms(probes: &routectl_router::ProbeSchedulerSnapshot) -> i64 {
+    probes.oldest_due_age.map_or(NO_DUE_PROBE, |age| {
+        i64::try_from(age.as_millis()).unwrap_or(i64::MAX)
+    })
+}
+
+/// Rendered oldest-due age for a scheduler with no leasable job.
+pub(super) const NO_DUE_PROBE: i64 = -1;
 
 #[cfg(test)]
 #[path = "field_verdict_log_tests.rs"]

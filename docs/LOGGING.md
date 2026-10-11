@@ -565,9 +565,9 @@ The line is emitted ON CHANGE, with an HOURLY HEARTBEAT. Building the surface
 (a `/status/health`, `/status/doctor`, or `/status` request) offers a line to a
 daemon-wide gate, which admits it only when the line's content differs from the
 last admitted one, or when an hour has passed since that one. The content
-comparison covers every field on the line except the one clock-derived field
-(`rc_probe_next_retry_ms`), which counts down on every poll while nothing an
-operator acts on has changed. So a dashboard polling every few seconds over a
+comparison covers every field on the line except the two clock-derived fields
+(`rc_probe_next_retry_ms` and `rc_probe_oldest_due_ms`), which count down and up
+on every poll while nothing an operator acts on has changed. So a dashboard polling every few seconds over a
 quiet daemon yields one line an hour, and a change shows up on the next poll. The
 heartbeat is what tells "nothing changed" apart from "no one is polling".
 
@@ -621,6 +621,8 @@ consume the slots real traffic needs.
 | `rc_probe_queued` / `rc_probe_in_flight` / `rc_probe_backing_off` | The bounded scheduler's own queue state, read from the scheduler rather than re-derived -- so these are the numbers it enforces its bounds against |
 | `rc_probe_last_settlement` | The most recently settled free-probe outcome (`resolved` / `retryable` / `deferred` / `spent_free_step` / `timed_out` / `abandoned`), or `none` before any has settled. AGGREGATE, not per-lane: on a multi-lane deployment this names whichever lane settled last, so it is an existence-and-kind signal rather than an attribution -- the per-kind lifetime counters carry the distribution. A per-lane history would be a store with its own bound, eviction rule, and reload carry |
 | `rc_probe_next_retry_ms` | Milliseconds until the EARLIEST backing-off job may be leased again, or `-1` when nothing is backing off. A negative sentinel rather than an absent field because ZERO is a real answer here (a backoff that already elapsed, leasable next tick). Derived from the deadlines jobs already carry -- no new state, no timer -- and bounded by the same ceiling the backoff itself is |
+| `rc_probe_oldest_due_ms` | Milliseconds the longest-waiting LEASABLE probe job has been due, or `-1` when none is. Growth with `rc_probe_in_flight` at the concurrency bound means the worker is not keeping up; growth with nothing in flight means it is not ticking. The same negative sentinel as `rc_probe_next_retry_ms`, for the same reason: zero is a real answer (a job due this instant). Clock-derived like that field, so it is excluded from the change gate's content comparison |
+| `rc_probe_clear_persistence_failures_total` | LIFETIME re-checks the upstream ACCEPTED whose `cleared` row could not be made durable -- the writer refused it (capture off, a full or closed channel), the write failed, a boundary or purge superseded it, or no answer came within the acknowledgement timeout. Each left its negative acting and its job retryable, so a rising count with a flat `rc_field_verdicts_learned_total` is a lane routectl has proven accepts a field and is still stripping it |
 
 The two alarm halves are reported TOGETHER deliberately: one is exposure
 that might yet be disproved, the other is exposure that was, and either
@@ -1335,10 +1337,12 @@ The latch SCOPES differ, because the conditions do:
 
 ### Probe counters (`ProbeSchedulerSnapshot`)
 
-These are TELEMETRY on the router's snapshot accessor, not an
-operator-rendered surface: nothing in `status` or `doctor` prints them today,
-and a consumer reads them through `Router::probe_scheduler_snapshot()`. One is
-worth naming because it is the only signal its condition produces:
+These are TELEMETRY on the router's snapshot accessor, and a consumer reads
+them through `Router::probe_scheduler_snapshot()`. Most are not rendered by
+`status` or `doctor`; the two probe-health ones below are, on the field-verdict
+snapshot line (`rc_probe_clear_persistence_failures_total` and
+`rc_probe_oldest_due_ms`). Three are worth naming because each is the only
+signal its condition produces:
 
 - `payload_refusals_total` -- lanes not probed because their beta context was
   refused. A lane counted here produces no job, no settlement, and no
@@ -1357,7 +1361,11 @@ A re-check that clears a negative logs `"probe_clear"` at INFO from
 `routectl_router::router::probe_lifecycle` (sanitized `state_key`,
 `capability_key`). Two DEBUG lines explain a re-check that did not clear:
 `"probe_clear_stale"` (the negative moved while the probe was in flight) and
-`"probe_clear_not_durable"` (the clear was not acknowledged durable).
+`"probe_clear_not_durable"` (the clear was not acknowledged durable). The
+daemon's acknowledgement (`routectl_cli::server::probe_clear_ack`) says why at
+DEBUG with a closed `outcome` token (`write_failed`, `superseded_by_boundary`,
+`superseded_by_purge`) for a clear it refused at admission or whose write did not
+land.
 
 ### `learn` (WARN)
 

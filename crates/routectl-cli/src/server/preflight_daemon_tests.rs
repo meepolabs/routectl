@@ -479,3 +479,4 @@ include!("preflight_daemon_rewrite_tests.rs");
 include!("preflight_daemon_observability_tests.rs");
 include!("preflight_daemon_health_tests.rs");
 include!("preflight_daemon_tier_tests.rs");
+include!("preflight_daemon_probe_clear_tests.rs");

@@ -5728,6 +5728,23 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   recovery is a restart. `install_capability_health(router, usage)` is consuming
   and called once from `serve.rs`; a reload needs none, since
   `carry_over_learned_from` attaches the outgoing installation
+- `src/server/probe_clear_ack.rs` -- `UsageProbeClearAck`, the daemon's
+  implementation of the router's `ProbeClearAcknowledgement`: submits a
+  re-check probe's `cleared` row through
+  `UsageHandle::admit_acknowledged_capability_event` and answers durable ONLY
+  for `CapabilityEventWrite::is_durable()` -- a refused admission, a failed
+  write, or a boundary- or purge-superseded row all keep the negative acting and
+  the job retryable. The row is built by `usage_capture::cleared_capability_row`,
+  the one `cleared` mapping the dispatch drain shares, so it is LIVE-source (the
+  warm rebuild skips a field row of any other source). Revision stamps are read
+  from the PUBLISHED router through a `Weak` to the daemon's swap, because the
+  installation outlives the boot router across rebuilds and a Router holding a
+  strong reference would keep itself alive. `install_probe_clear_ack(router,
+  usage, live)` is consuming and called once from `serve.rs` inside
+  `Arc::new_cyclic` around the swap; a reload needs none, since
+  `carry_over_learned_from` attaches the outgoing installation. Sidecar
+  `probe_clear_ack_tests.rs` drives a real writer (closed channel, committed,
+  purge-superseded, revision stamp, dropped swap)
 - `src/server/test_support.rs` -- `cfg(test)` helpers shared by more than one
   server sidecar: `isolate_usage_db` (points a config's usage DB at a tempdir),
   `drain_usage_writer_strict` (awaits a writer's full drain), the async
@@ -6388,13 +6405,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `rc_acting_field_verdicts{,_total}`, the per-verdict
   `rc_field_verdict_rows{,_total,_omitted}`, the process-global
   `rc_usage_writer_degraded`, and the
-  probe scheduler's `rc_probe_*` state. ONE line because the facts are only
+  probe scheduler's `rc_probe_*` state (including the probe-health
+  `rc_probe_clear_persistence_failures_total` and `rc_probe_oldest_due_ms`). ONE line because the facts are only
   interpretable together (a confirmation count without its required quorum
   cannot be read as sufficient or short). `writer_degraded` is passed IN rather
   than read here, because it is a counter read on the facade the caller holds.
   AT MOST ONE LINE PER REQUEST, and only when due: the daemon-scoped
   `FidelityGate` (held on `StatusState`) admits a line when its fingerprint --
-  every field except the `rc_probe_next_retry_ms` countdown -- differs from the
+  every field except the clock-derived `rc_probe_next_retry_ms` and
+  `rc_probe_oldest_due_ms` -- differs from the
   last admitted one, or `SNAPSHOT_HEARTBEAT` (1h) has passed since it, checked
   and set under one lock; an unchanged snapshot stays silent across polls. Not
   per panel build either: the `/status` aggregate builds
@@ -8185,12 +8204,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   a cancellation. The observer is per-call, not a process global -- measured: a global
   one-shot is claimed by whichever daemon boots first and failed all six concurrent
   cases. Shared fixtures stay in this host file; the scenario bodies above are split
-  across three `include!`d fragments kept under the size ceiling:
+  across `include!`d fragments kept under the size ceiling (the tier fragment is
+  `preflight_daemon_tier_tests.rs`):
   `preflight_daemon_rewrite_tests.rs` (feature rewrite/forward and the canary),
   `preflight_daemon_observability_tests.rs` (status/doctor INFO snapshots, the
-  cap-zero free-validation lane, and per-endpoint event emission), and
+  cap-zero free-validation lane, and per-endpoint event emission),
   `preflight_daemon_health_tests.rs` (the LIVE acknowledgment path and its
-  incarnation/confirmation guards)
+  incarnation/confirmation guards), and `preflight_daemon_probe_clear_tests.rs`
+  (a re-check probe the upstream accepts, after a router rebuild, writes one
+  durable `cleared` row through the daemon's own writer, and a warm rebuild from
+  that ledger does not resurrect the negative)
 - `tests/preflight_observability_e2e.rs` -- hermetic runtime acceptance for the
   pre-flight observability floor: a real `serve_on_listener` daemon on an
   OS-assigned loopback port, a per-test tempdir usage ledger, and a provider

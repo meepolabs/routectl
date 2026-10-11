@@ -616,7 +616,17 @@ async fn serve_inner(
     // embedder's, a test's -- carries none, which suspends learned pre-flight and
     // is fail safe by construction.
     let router = super::capability_health::install_capability_health(router, &usage_handle);
-    let router_swap = Arc::new(ArcSwap::from_pointee(router));
+    // The probe-clear acknowledgement, installed on the same terms as the health
+    // read above and carried across every rebuild the same way. It is handed a WEAK
+    // reference to the swap it is about to be published into, so each clear is
+    // stamped with the revision pair of the router serving at the time rather than
+    // the boot router's. Without it a re-check probe never clears a disproved
+    // negative: the router reads an absent installation as not durable.
+    let router_swap = Arc::new_cyclic(|live| {
+        let router =
+            super::probe_clear_ack::install_probe_clear_ack(router, &usage_handle, live.clone());
+        ArcSwap::from_pointee(router)
+    });
     // Publish the LIVE swap to this call's observer, if it was given one.
     //
     // This is what lets an assembled-daemon test drive the router the running daemon

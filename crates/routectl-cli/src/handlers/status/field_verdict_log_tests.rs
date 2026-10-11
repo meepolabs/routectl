@@ -262,6 +262,7 @@ fn every_count_is_reported_even_at_zero() {
         "rc_probe_queued",
         "rc_probe_in_flight",
         "rc_probe_backing_off",
+        "rc_probe_clear_persistence_failures_total",
     ] {
         assert_eq!(
             info.field(field),
@@ -281,7 +282,45 @@ fn every_count_is_reported_even_at_zero() {
         "and nothing backing off reports the sentinel, which is distinct from a zero \
          wait (a backoff that already elapsed)",
     );
+    assert_eq!(
+        info.field("rc_probe_oldest_due_ms"),
+        Some(NO_DUE_PROBE.to_string().as_str()),
+        "and nothing leasable reports the sentinel, which is distinct from a job \
+         that became due this instant",
+    );
     assert_eq!(info.field("rc_usage_writer_degraded"), Some("false"));
+}
+
+/// The two probe-health fields carry the scheduler snapshot's own values.
+///
+/// Driven with values no other field on the line holds, so a field wired to a
+/// sibling's value or to its own sentinel is red here.
+///
+/// Mutation checks: emit `rc_probe_clear_persistence_failures_total` from any
+/// other probe count -> red; emit `rc_probe_oldest_due_ms` as `NO_DUE_PROBE`
+/// unconditionally, or from `next_retry_in` -> red.
+#[test]
+fn the_probe_health_fields_carry_the_scheduler_values() {
+    let mut snapshot = fresh_view().fidelity_snapshot();
+    snapshot.probes.clear_persistence_failures_total = 7;
+    snapshot.probes.oldest_due_age = Some(Duration::from_millis(1_234));
+    snapshot.probes.next_retry_in = Some(Duration::from_millis(98_765));
+
+    let info = captured_snapshot(|| {
+        emit_if_admitted(
+            &snapshot,
+            WRITER_HEALTHY,
+            &FidelityEmission::always(),
+            &FidelityGate::default(),
+            Instant::now(),
+        );
+    });
+
+    assert_eq!(
+        info.field("rc_probe_clear_persistence_failures_total"),
+        Some("7"),
+    );
+    assert_eq!(info.field("rc_probe_oldest_due_ms"), Some("1234"));
 }
 
 // ---------------------------------------------------------------------------
@@ -760,7 +799,7 @@ const fn unchanged(_: &mut FidelitySnapshot) {}
 ///
 /// Mutation checks: drop the `gate.admit` early return -> red on the unchanged-polls
 /// row (10 lines); hash `rc_probe_next_retry_ms` into the fingerprint -> red on the
-/// next-retry row.
+/// next-retry row; hash `rc_probe_oldest_due_ms` -> red on the oldest-due row.
 #[test]
 fn the_gate_emits_on_change_or_heartbeat_and_not_on_unchanged_polls() {
     let view = fresh_view();
@@ -791,6 +830,16 @@ fn the_gate_emits_on_change_or_heartbeat_and_not_on_unchanged_polls() {
             expected_lines: 0,
         },
         GateStep {
+            name: "an oldest-due count-up alone emits nothing",
+            polls: 3,
+            advance: Duration::from_secs(5),
+            change: |snap| {
+                let age = snap.probes.oldest_due_age.unwrap_or_default();
+                snap.probes.oldest_due_age = Some(age + Duration::from_secs(1));
+            },
+            expected_lines: 0,
+        },
+        GateStep {
             name: "a next-retry countdown alone emits nothing",
             polls: 3,
             advance: Duration::from_secs(5),
@@ -800,12 +849,12 @@ fn the_gate_emits_on_change_or_heartbeat_and_not_on_unchanged_polls() {
             },
             expected_lines: 0,
         },
-        // The last admitted line was the counter change; five 5s polls have
+        // The last admitted line was the counter change; eight 5s polls have
         // passed since, so this lands one second short of the heartbeat.
         GateStep {
             name: "just under the heartbeat with no change emits nothing",
             polls: 1,
-            advance: SNAPSHOT_HEARTBEAT.saturating_sub(Duration::from_secs(26)),
+            advance: SNAPSHOT_HEARTBEAT.saturating_sub(Duration::from_secs(41)),
             change: unchanged,
             expected_lines: 0,
         },
@@ -1020,6 +1069,11 @@ fn a_change_to_any_reported_input_emits_a_line() {
             name: "probes backing off",
             setup: no_setup,
             change: |i| i.snapshot.probes.backing_off += 1,
+        },
+        FingerprintRow {
+            name: "clear persistence failures",
+            setup: no_setup,
+            change: |i| i.snapshot.probes.clear_persistence_failures_total += 1,
         },
         FingerprintRow {
             name: "probe settlement",

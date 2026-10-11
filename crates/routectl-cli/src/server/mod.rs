@@ -25,6 +25,7 @@ pub mod file_watch;
 pub mod k_rebuild;
 pub mod ledger_reader;
 mod metrics_driver;
+mod probe_clear_ack;
 mod probe_driver;
 pub mod purge_settlement;
 mod reload;

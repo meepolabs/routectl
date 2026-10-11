@@ -18,6 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use routectl_core::Error;
 use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 use routectl_core::failure_class::classify;
+use routectl_router::router::CapabilityClearedEvent;
 use routectl_router::{CURRENT_VOCAB_VERSION, DispatchMeta, ObservationDirection};
 use routectl_usage::{CapabilityEvent, Outcome, UsageHandle, UsageRecord};
 use serde_json::Value;
@@ -662,21 +663,7 @@ pub(crate) fn drain_capability_events(
     }
     for ev in &meta.cleared_capabilities {
         usage.try_send_capability_event_at(
-            CapabilityEvent {
-                ts,
-                lane_key: ev.state_key.clone(),
-                capability: ev.capability_key.clone(),
-                verdict: Verdict::Cleared.as_str().to_string(),
-                phase: String::new(),
-                source: EvidenceSource::Live.as_str().to_string(),
-                tier: String::new(),
-                evidence_class: None,
-                upstream_token: None,
-                catalog_version,
-                overlay_revision,
-                provider_kind: persisted_provider_kind(&ev.provider_kind),
-                vocab_version: Some(CURRENT_VOCAB_VERSION),
-            },
+            cleared_row_at(ev, ts, catalog_version, overlay_revision),
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that
             // produced it: the writer compares it against the key's purge
@@ -684,6 +671,48 @@ pub(crate) fn drain_capability_events(
             // while a genuine post-purge relearn still lands.
             ev.incarnation,
         );
+    }
+}
+
+/// The `cleared` ledger row for `ev`: `live` source, no phase / tier /
+/// evidence / value, stamped with the boundary revision pair.
+///
+/// The one mapping for a cleared row, shared by the dispatch drain and the
+/// acknowledged probe clear, so the replayer reads both identically.
+pub(crate) fn cleared_capability_row(
+    ev: &CapabilityClearedEvent,
+    ts: i64,
+    catalog_version: u32,
+    overlay_revision: u64,
+) -> CapabilityEvent {
+    cleared_row_at(
+        ev,
+        ts,
+        i64::from(catalog_version),
+        i64::try_from(overlay_revision).unwrap_or(i64::MAX),
+    )
+}
+
+fn cleared_row_at(
+    ev: &CapabilityClearedEvent,
+    ts: i64,
+    catalog_version: i64,
+    overlay_revision: i64,
+) -> CapabilityEvent {
+    CapabilityEvent {
+        ts,
+        lane_key: ev.state_key.clone(),
+        capability: ev.capability_key.clone(),
+        verdict: Verdict::Cleared.as_str().to_string(),
+        phase: String::new(),
+        source: EvidenceSource::Live.as_str().to_string(),
+        tier: String::new(),
+        evidence_class: None,
+        upstream_token: None,
+        catalog_version,
+        overlay_revision,
+        provider_kind: persisted_provider_kind(&ev.provider_kind),
+        vocab_version: Some(CURRENT_VOCAB_VERSION),
     }
 }
 
