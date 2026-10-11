@@ -20,7 +20,10 @@ use routectl_core::{ChatRequest, ChatResponse, Error, Provider, Result, TokenCou
 use serde_json::{Value, json};
 
 use super::Router;
-use super::probe_test_support::{BoxStreamAlias, GROUNDED_PATH, grounding_request};
+use super::probe_test_support::{
+    BoxStreamAlias, GROUNDED_PATH, RECHECK_PATH, RECHECK_VALUE, grounding_request,
+    plant_acting_negative, recheck_value,
+};
 use crate::config::{AliasValue, Config, ModelEntry, ProviderEntry};
 use crate::field_verdict::FieldVerdictKey;
 use crate::probe_scheduler::{FreeValidatorOutcome, ProbePayload, ProbeValidator};
@@ -300,11 +303,8 @@ async fn reordering_the_nicknames_leaves_the_end_to_end_probe_unchanged() {
 
     assert_eq!((north_ran, south_ran), (1, 1));
     assert_eq!(
-        north
-            .routectl_internal
-            .anthropic_thinking_display
-            .as_deref(),
-        Some("summarized"),
+        recheck_value(&north),
+        Some(RECHECK_VALUE),
         "the probe must carry the admitted field"
     );
     assert_eq!(format!("{north:?}"), format!("{south:?}"));
@@ -312,12 +312,15 @@ async fn reordering_the_nicknames_leaves_the_end_to_end_probe_unchanged() {
 
 /// Admit a grounding request through the north nickname, which carries the
 /// same extras in both routers so the captured payload is identical, then run
-/// the worker and return the count_tokens request it dialed.
+/// the worker and return the count_tokens request it dialed. The lane holds an
+/// acting negative on the re-check row first, since a probe only ever
+/// re-checks one.
 async fn admitted_then_probed(
     build: fn(&Arc<CapturingProvider>) -> Router,
 ) -> (ChatRequest, usize) {
     let provider = Arc::new(CapturingProvider::default());
     let router = build(&provider);
+    plant_acting_negative(&router, lane_key().lane(), RECHECK_PATH, "anthropic-api");
     let mut admitted = grounding_request();
     admitted.model = NORTH.to_string();
     router

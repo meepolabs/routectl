@@ -728,6 +728,7 @@ fn a_lease_refused_beta_is_learned_by_a_same_request_retry_once_a_lease_releases
         report.record(&[FLAG.to_string()]);
         router.settle_attempt_success(
             &report,
+            &UntranslatedCapabilities::default(),
             &target,
             &req,
             dedupe,

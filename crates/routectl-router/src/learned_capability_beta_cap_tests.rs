@@ -222,7 +222,7 @@ fn a_new_beta_on_a_fully_leased_lane_is_refused_until_a_lease_releases() {
     // Act
     let mut outcome = None;
     let events = routectl_testkit::capture_events(|| {
-        outcome = Some(reg.observe(
+        outcome = reg.observe(
             LANE,
             &newcomer,
             KIND,
@@ -231,7 +231,7 @@ fn a_new_beta_on_a_fully_leased_lane_is_refused_until_a_lease_releases() {
             EvidenceSource::Live,
             None,
             base + secs(100),
-        ));
+        );
     });
 
     // Assert
