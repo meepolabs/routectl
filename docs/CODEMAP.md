@@ -2780,9 +2780,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   while leaving every inequality green. A CONSUMER mutation (an arm wired to the
   wrong constant) compiles too, since it leaves every literal intact, and is
   caught by `each_class_consumes_the_co_located_quorum_constant_for_its_own_tier`.
-  A TEST build appends `TEST_FIELD_REPAIRS` -- one prefix-impacting row whose
+  A unit-test build appends `TEST_FIELD_REPAIRS` -- one prefix-impacting row whose
   surface is a system prompt matching the EXACT `TEST_PREFIX_SENTINEL` text --
-  through `closed_table()`, which is what keeps every branch of those gates
+  through `FieldRepairTable::default()`, which is what keeps every branch of those gates
   reachable while the grounded table ships no content row. The sentinel is what
   SCOPES it: a broad "has a system prompt" predicate would give every fixture in
   the workspace that sets `system` a closed-table row production cannot produce,
@@ -2794,11 +2794,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `apply_sole_candidate_for_tests` -> `apply_candidate` instead. The grounded
   table's SIZE and its row's class both stay asserted, so a permanent row remains
   a deliberate edit.
-  `closed_table()` is THE single row source: a repair only ever holds the
-  table's own `&'static` row, so no upstream bytes reach any downstream
-  consumer or the operator WARN, and a path with no row mutates nothing.
-  `present_rows(req)` is the scan both arms share -- every closed-table
-  row the request carries, in table order.
+  `FieldRepairTable` is THE single row source: a value held by the learned
+  registry every Router generation shares (`Router::field_repair_table`), passed
+  into every scan, resolver, and payload builder. Outside a unit-test build its
+  default is `FIELD_REPAIRS` alone whatever features are enabled; the synthetic
+  rewrite and re-check rows (`TEST_REWRITE_*` / `TEST_RECHECK_*`) reach a
+  Router only through `Router::with_synthetic_field_rows_for_tests`
+  (test-utils), pinned by `tests/synthetic_field_rows.rs`. A repair only ever
+  holds the table's own `&'static` row, so no upstream bytes reach any
+  downstream consumer or the operator WARN, and a path with no row mutates
+  nothing. `present_rows(table, req)` is the scan both arms share -- every
+  closed-table row the request carries, in table order.
+  `negative_recovers_only_by_recheck` answers whether a negative on a key is
+  owned by the free token-count re-check (a count-validated row, on a kind and
+  upstream with a free count): such a negative never lapses into a re-probe
+  and is never canaried.
   `Router::plan_field_carry` admits BEFORE dispatch and without
   touching the request, in this order: kill switch -> an admitted kind
   (`anthropic-api`, `bedrock`, `openai-compat`) -> NOT a forwarded-credential
@@ -2895,7 +2905,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   so the planned body is the one both a remote count and every local read of
   the request measure. It scans EVERY present row
   (`field_repair::present_rows`) rather than the first: a request can carry
-  rows of two transform classes at once, and each clears its own gates. Each
+  rows of two transform classes at once, and each clears its own gates. A
+  verdict the free re-check owns (`negative_recovers_only_by_recheck`) is never
+  canaried, since an unrepaired success would clear it. Each
   row's transform is adopted onto the body the previous row's decision
   produced, so two authorized rows compose onto one body while a refusal in
   between leaves the accumulated body untouched. Table order is the
@@ -3210,7 +3222,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   them. A lifted path must be a bounded ASCII
   token; it is canonicalized (interior numeric and `[n]` indices dropped, a
   leading Converse `additionalModelRequestFields` bag removed on Bedrock)
-  and resolved against `closed_table()`, so only the table's own row ever
+  and resolved against the Router's `FieldRepairTable`, so only the table's own row ever
   leaves the module -- a path with no row, or whose last raw segment is an
   index (`tools.0`, `tools[0]`), resolves to `None`. Tiers: a
   structured param or a message whose reason matches a captured template is
@@ -4051,7 +4063,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   merely timing out. `effective_persistence_generation` returns the pending
   generation when a boundary is in flight, otherwise the active one; it is what
   every event producer reads to stamp its row.
-  Also: `retune` / `decay` /
+  Also: `LearnedEntry::has_lapsed` is the decay rule every read applies -- a
+  key whose negative only the free re-check recovers
+  (`negative_recovers_only_by_recheck`, read against the registry's
+  `field_repair_table`) never lapses. Also: `retune` / `decay` /
   `inferred_window` / `max_entries` (hot-reloadable behind the same lock; applied
   in `carry_over_learned_from` for a config-only reload, and deferred to
   `Router::apply_capability_tuning` at publication for a revision-changing one,
@@ -4531,7 +4546,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `capability_owner::owner_decision` against the `providers` table the caller
   passes bumps `skipped_owner`; a field-namespace row no field-repair guard
   could have written (namespace reached only after normalization, or a non-live
-  source) bumps `skipped_namespace`. A field row whose repair row writes a value
+  source on any verdict but `cleared` -- a re-check probe's clear is
+  probe-sourced) bumps `skipped_namespace`. A field row whose repair row writes a value
   decodes `upstream_token` strictly (`VerdictValue::decode`); a refused token
   replays as a plain negative and bumps `degraded_value`.
   `rebuild_capabilities_with_values` also returns `ReplayedFieldValues`
@@ -5030,7 +5046,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   else. NOT the boundary batch beside it: this establishes nothing, so it passes
   the SAME boundary-generation check and per-key purge floor a best-effort event
   passes, through the writer's one shared `persist_capability_event` body rather
-  than a copy of it. It DOES honour the `usage.enabled` gate (the batch
+  than a copy of it. A committed single `cleared` event raises its key's purge
+  floor exactly as a batch clear does, before the acknowledgement is sent, so a
+  delayed negative at the cleared incarnation is refused; a repeated clear AT
+  the floor is admitted (durable), an older one is not. It DOES honour the
+  `usage.enabled` gate (the batch
   deliberately bypasses it): an operator who turned capture off wrote no row, so
   no verdict may become eligible on the strength of one, and the refusal is
   REPORTED rather than silent. A refused admission is CLASSIFIED by the channel's
@@ -5758,9 +5778,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `UsageHandle::admit_acknowledged_capability_event` and answers durable ONLY
   for `CapabilityEventWrite::is_durable()` -- a refused admission, a failed
   write, or a boundary- or purge-superseded row all keep the negative acting and
-  the job retryable. The row is built by `usage_capture::cleared_capability_row`,
-  the one `cleared` mapping the dispatch drain shares, so it is LIVE-source (the
-  warm rebuild skips a field row of any other source). Revision stamps are read
+  the job retryable. The row is built by `usage_capture::probe_cleared_capability_row`
+  over the one `cleared` mapping the dispatch drain shares, stamped with
+  `EvidenceSource::Probe` (the drain stamps `Live`); the warm rebuild admits a
+  probe-sourced field `cleared` row while still skipping probe-sourced field
+  negatives. Revision stamps are read
   from the PUBLISHED router through a `Weak` to the daemon's swap, because the
   installation outlives the boot router across rebuilds and a Router holding a
   strong reference would keep itself alive. `install_probe_clear_ack(router,
