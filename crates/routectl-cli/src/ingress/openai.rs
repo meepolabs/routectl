@@ -17,7 +17,7 @@
 use std::any::Any;
 
 use axum::http::HeaderMap;
-use routectl_core::wire_check::IngressDialect;
+use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
     Result, is_canonical_request_key,
@@ -26,8 +26,8 @@ use serde_json::{Map, Value};
 
 use super::normalize_client_betas;
 use super::{
-    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
-    StreamRequestContext, read_alias_header,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
+    StreamErrorClass, StreamRequestContext, read_alias_header,
     session_key::{first_session_header, resolve_session_key},
 };
 
@@ -218,7 +218,15 @@ impl IngressAdapter for OpenAiIngress {
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
-        crate::ingress::render_value_to_bytes(self.id(), render_openai_response_value(resp)?)
+        self.render_response_declared(resp, &mut ResponseEdits::default())
+    }
+
+    fn render_response_declared(
+        &self,
+        resp: ChatResponse,
+        edits: &mut ResponseEdits,
+    ) -> Result<bytes::Bytes> {
+        crate::ingress::render_value_to_bytes(self.id(), render_openai_response_value(resp, edits)?)
     }
 
     fn new_stream_state(&self, _ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
@@ -238,6 +246,15 @@ impl IngressAdapter for OpenAiIngress {
         chunk: ChatChunk,
         state: &mut dyn IngressStreamState,
     ) -> Result<Vec<SseEvent>> {
+        self.render_chunk_declared(chunk, state, &mut ResponseEdits::default())
+    }
+
+    fn render_chunk_declared(
+        &self,
+        chunk: ChatChunk,
+        state: &mut dyn IngressStreamState,
+        edits: &mut ResponseEdits,
+    ) -> Result<Vec<SseEvent>> {
         // No tool_use dedup needed on the streaming path: the canonical
         // `ChunkDelta` has no `MessageContent::Parts` slot (`content` is
         // `Option<String>`, tool calls ride `tool_calls`), so a streamed
@@ -253,7 +270,7 @@ impl IngressAdapter for OpenAiIngress {
         // Normalize any non-spec upstream stop value to a valid OpenAI
         // finish_reason (see `map_openai_finish_reason`). OpenAI-out
         // only -- the Anthropic ingress keeps the raw stop_reason.
-        let chunk = normalize_finish_reason_in_chunk(chunk);
+        let chunk = normalize_finish_reason_in_chunk(chunk, edits);
         let mut value = serde_json::to_value(&chunk)
             .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
         // Stamp the OpenAI streaming envelope a strict SDK requires on
@@ -263,7 +280,7 @@ impl IngressAdapter for OpenAiIngress {
         // created are held on the stream state so every chunk shares one
         // value. OpenAI-dialect only -- the Anthropic ingress renders
         // chunks through its own module.
-        apply_openai_chunk_envelope(&mut value, openai_state_mut(state));
+        apply_openai_chunk_envelope(&mut value, openai_state_mut(state), edits);
         let data = serde_json::to_string(&value)
             .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
         Ok(vec![SseEvent::unnamed(data)])
@@ -312,7 +329,7 @@ impl IngressAdapter for OpenAiIngress {
 /// `ChatResponse`. Kept separate from the trait `render_response` so the
 /// dialect-specific render logic stays directly testable while the trait
 /// method finishes with the single shared serialize.
-fn render_openai_response_value(resp: ChatResponse) -> Result<Value> {
+fn render_openai_response_value(resp: ChatResponse, edits: &mut ResponseEdits) -> Result<Value> {
     // OpenAI-side mirror of the Anthropic ingress's tool_use dedup
     // (see `strip_tool_use_parts_when_tool_calls_present`). Strip
     // duplicate `tool_use` content blocks before the bare serde so
@@ -329,7 +346,7 @@ fn render_openai_response_value(resp: ChatResponse) -> Result<Value> {
     // finish_reason (see `map_openai_finish_reason`). OpenAI-out only:
     // the Anthropic ingress renders through its own module and keeps the
     // raw stop_reason claude-code depends on.
-    let resp = normalize_finish_reason_in_response(resp);
+    let resp = normalize_finish_reason_in_response(resp, edits);
     let mut value = serde_json::to_value(&resp)
         .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))?;
     // Surface Anthropic/Bedrock cache-read counts under the standard
@@ -341,14 +358,14 @@ fn render_openai_response_value(resp: ChatResponse) -> Result<Value> {
     // `prompt_tokens_details` key. Lives in the OpenAI dialect, not
     // the canonical type, so the Anthropic ingress keeps its own
     // vocabulary.
-    surface_cached_tokens_in_usage(&mut value);
+    surface_cached_tokens_in_usage(&mut value, edits);
     // Stamp the OpenAI Chat-Completions envelope literals a strict SDK
     // (openai-python) and dialect peers require: `object`, a non-empty
     // `id`, a non-zero `created`, and a (nullable) `system_fingerprint`.
     // Kept here at the OpenAI-dialect render boundary, not on the
     // dialect-neutral canonical `ChatResponse`, so the Anthropic ingress
     // keeps its own wire shape (hub-and-spoke).
-    apply_openai_response_envelope(&mut value);
+    apply_openai_response_envelope(&mut value, edits);
     Ok(value)
 }
 
@@ -405,15 +422,38 @@ fn ensure_created(obj: &mut Map<String, Value>) {
 /// non-zero `created`, and a `system_fingerprint` (mirrored from the
 /// upstream value when it rode through `extras`, else explicit `null` so
 /// the key a strict SDK reads is always present).
-fn apply_openai_response_envelope(value: &mut Value) {
+fn apply_openai_response_envelope(value: &mut Value, edits: &mut ResponseEdits) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
+    let before = obj.clone();
     obj.insert("object".into(), Value::from("chat.completion"));
     ensure_nonempty_id(obj);
     ensure_created(obj);
     obj.entry("system_fingerprint").or_insert(Value::Null);
+    for (path, key) in RESPONSE_ENVELOPE_MEMBERS {
+        match (before.get(key), obj.get(key)) {
+            (None, Some(_)) => edits.declare(EditSite::ResponseEnvelopeStamp, path, EditKind::Add),
+            (Some(old), Some(new)) if old != new => {
+                edits.declare(EditSite::ResponseEnvelopeStamp, path, EditKind::Rewrite);
+            }
+            _ => {}
+        }
+    }
 }
+
+/// The members the complete-body envelope stamp may write, as (pointer,
+/// key).
+const RESPONSE_ENVELOPE_MEMBERS: [(&str, &str); 4] = [
+    ("/object", "object"),
+    ("/id", "id"),
+    ("/created", "created"),
+    ("/system_fingerprint", "system_fingerprint"),
+];
+
+/// The members the streaming envelope stamp writes on every chunk, whatever
+/// the upstream sent there.
+const STREAM_ENVELOPE_PATHS: [&str; 4] = ["/object", "/id", "/created", "/system_fingerprint"];
 
 /// Stamp the OpenAI streaming envelope onto a serialized `ChatChunk` body:
 /// `object:"chat.completion.chunk"`, a stream-stable `id`, a stream-stable
@@ -423,10 +463,18 @@ fn apply_openai_response_envelope(value: &mut Value) {
 /// mint). The first non-empty upstream chunk id SEEDS the held id; once
 /// set (seeded or minted), later chunk ids never overwrite it, so the
 /// stream exposes one stable id end to end.
-fn apply_openai_chunk_envelope(value: &mut Value, state: &mut OpenAiStreamState) {
+fn apply_openai_chunk_envelope(
+    value: &mut Value,
+    state: &mut OpenAiStreamState,
+    edits: &mut ResponseEdits,
+) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
+    for path in STREAM_ENVELOPE_PATHS {
+        edits.declare(EditSite::StreamEnvelopeStamp, path, EditKind::Add);
+        edits.declare(EditSite::StreamEnvelopeStamp, path, EditKind::Rewrite);
+    }
     obj.insert("object".into(), Value::from("chat.completion.chunk"));
 
     let wire_id = obj
@@ -744,11 +792,15 @@ fn map_openai_finish_reason(reason: &str) -> Option<&'static str> {
 /// Rewrite every non-spec `Choice.finish_reason` in a `ChatResponse` to a
 /// valid OpenAI value via `map_openai_finish_reason`. Already-valid
 /// values pass through untouched.
-fn normalize_finish_reason_in_response(mut resp: ChatResponse) -> ChatResponse {
+fn normalize_finish_reason_in_response(
+    mut resp: ChatResponse,
+    edits: &mut ResponseEdits,
+) -> ChatResponse {
     for choice in &mut resp.choices {
         if let Some(reason) = choice.finish_reason.as_deref()
             && let Some(mapped) = map_openai_finish_reason(reason)
         {
+            declare_finish_reason_rewrite(edits);
             choice.finish_reason = Some(mapped.to_string());
         }
     }
@@ -758,15 +810,24 @@ fn normalize_finish_reason_in_response(mut resp: ChatResponse) -> ChatResponse {
 /// Rewrite every non-spec `ChunkChoice.finish_reason` in a `ChatChunk` to
 /// a valid OpenAI value. Streaming analog of
 /// `normalize_finish_reason_in_response`.
-fn normalize_finish_reason_in_chunk(mut chunk: ChatChunk) -> ChatChunk {
+fn normalize_finish_reason_in_chunk(mut chunk: ChatChunk, edits: &mut ResponseEdits) -> ChatChunk {
     for choice in &mut chunk.choices {
         if let Some(reason) = choice.finish_reason.as_deref()
             && let Some(mapped) = map_openai_finish_reason(reason)
         {
+            declare_finish_reason_rewrite(edits);
             choice.finish_reason = Some(mapped.to_string());
         }
     }
     chunk
+}
+
+fn declare_finish_reason_rewrite(edits: &mut ResponseEdits) {
+    edits.declare(
+        EditSite::FinishReasonRewrite,
+        "/choices/*/finish_reason",
+        EditKind::Rewrite,
+    );
 }
 
 /// Mirror the canonical Anthropic-vocabulary `usage.cache_read_input_tokens`
@@ -781,7 +842,7 @@ fn normalize_finish_reason_in_chunk(mut chunk: ChatChunk) -> ChatChunk {
 /// `prompt_tokens_details`, only the `cached_tokens` sub-key is set,
 /// preserving any sibling fields. `cache_read_input_tokens` is left in
 /// place (additive).
-fn surface_cached_tokens_in_usage(value: &mut Value) {
+fn surface_cached_tokens_in_usage(value: &mut Value, edits: &mut ResponseEdits) {
     let Some(usage) = value.get_mut("usage").and_then(|u| u.as_object_mut()) else {
         return;
     };
@@ -792,6 +853,15 @@ fn surface_cached_tokens_in_usage(value: &mut Value) {
     if cached == 0 {
         return;
     }
+    let (path, kind) = match usage.get("prompt_tokens_details") {
+        None => ("/usage/prompt_tokens_details", EditKind::Add),
+        Some(details) if details.get("cached_tokens").is_some() => (
+            "/usage/prompt_tokens_details/cached_tokens",
+            EditKind::Rewrite,
+        ),
+        Some(_) => ("/usage/prompt_tokens_details/cached_tokens", EditKind::Add),
+    };
+    edits.declare(EditSite::CachedTokensAdd, path, kind);
     let details = usage
         .entry("prompt_tokens_details")
         .or_insert_with(|| Value::Object(Map::new()));

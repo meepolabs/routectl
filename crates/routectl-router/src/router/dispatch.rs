@@ -57,6 +57,7 @@ use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
+use super::wire_response::{declare_model_relabel, declare_provider_attribution};
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
 
 /// Message/event name of the single aggregated reasoning-replay
@@ -682,6 +683,7 @@ impl Router {
                         // provider's value leaks through.
                         if target.visible_routectl_provider {
                             resp.routectl_provider = Some(provider_name.to_string());
+                            declare_provider_attribution(wire_tap.as_ref());
                         } else {
                             resp.routectl_provider = None;
                         }
@@ -690,6 +692,8 @@ impl Router {
                         // else the client's requested alias. Internal
                         // accounting keys off `DispatchMeta`, not this field.
                         resp.model = resolve_reported_model(target, &req.model);
+                        declare_model_relabel(wire_tap.as_ref());
+                        self.carry_response_check(target, &attempt_req, wire_tap.as_ref(), meta);
                         // A 2xx proves the capability is not rejected: clear
                         // any learned negative this dispatch re-probed, and
                         // ride each clear out on the meta so the ledger records
@@ -1729,6 +1733,8 @@ impl Router {
                         // so the label is cloned per Ok chunk. `Err` passes
                         // through byte-for-byte unchanged.
                         let label = resolve_reported_model(target, &req.model);
+                        declare_model_relabel(wire_tap.as_ref());
+                        self.carry_response_check(target, &attempt_req, wire_tap.as_ref(), meta);
                         let relabeled = stream.map(move |item| match item {
                             Ok(mut chunk) => {
                                 chunk.model = label.clone();

@@ -509,3 +509,39 @@ fn a_passthrough_left_in_place_declares_no_relocation() {
         "{edits:?}"
     );
 }
+
+#[tokio::test]
+async fn a_response_checking_tap_assembles_the_upstream_stream_on_both_sends() {
+    for stream in [false, true] {
+        let wire_tap =
+            WireTap::checking_response(routectl_core::wire_check::IngressDialect::Responses);
+        let mut req = request();
+        req.routectl_internal.wire_tap = Some(wire_tap.clone());
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(completed_sse()),
+            )
+            .mount(&server)
+            .await;
+        let provider = OpenAiResponsesProvider::new(config(&server.uri(), AuthKind::ChatgptOauth));
+
+        if stream {
+            let mut chunks = provider.stream(req).await.expect("stream open");
+            while futures::StreamExt::next(&mut chunks).await.is_some() {}
+        } else {
+            provider.complete(req).await.expect("complete");
+        }
+
+        let assembled =
+            wire_tap.finish_response_stream(routectl_core::wire_check::StreamExit::Ended);
+        let Some(routectl_core::wire_check::Assembled::Complete(document)) = assembled else {
+            panic!("stream={stream}: expected an assembled stream, got {assembled:?}");
+        };
+        assert_eq!(document["id"], "resp_1", "stream={stream}");
+        assert_eq!(document["status"], "completed", "stream={stream}");
+    }
+}

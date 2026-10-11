@@ -3356,6 +3356,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `PendingWireRejection` on `DispatchMeta`; `emit_wire_rejections` joins the
   field-repair outcome at dispatch end and records the ring entry (WARN on
   `unrepaired`, deduped)
+- `src/router/wire_response.rs` -- the response leg of the live wire check:
+  `ResponseCheck` (public, opaque), carried on `DispatchMeta::response_check`
+  from the serving attempt when the sampler admitted it on a FIDELITY lane;
+  the ingress renderer calls `compare_body` / `compare_stream` with the client
+  document, which diffs it against the upstream body or folded stream with
+  `Leg::Response`; an unfinished or unreadable side records `incomplete`.
+  Declares the router's own response edits (model relabel, provider
+  attribution)
 - `src/router/beta_withhold.rs` -- per-target withheld client beta set
   (`withhold_betas_on_chain`), resolved pin > override > learned > seed; a
   seed-clear marker on the cell stops the seed withholding; a lapsed learned
@@ -6192,6 +6200,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   attaches the posted body (refcount), its dialect (from `provenance`) and the
   client version (stable Claude CLI version, else the first safe
   user-agent `product/version` token) as `routectl_internal.ingress_wire`
+- `src/handlers/response_wire.rs` -- client side of the response-leg wire
+  check: `ClientSink` / `ClientStreamCheck` fold every frame `drive_stream`
+  sends (read-only, before the send) into a `StreamAssembler` only when the
+  dispatch carried a `ResponseCheck`, and compare at drop with the exit each
+  `drive_stream` return names (disconnect, upstream error, render failure,
+  natural end; cancelled by default); `response_edits_for` /
+  `abandon_unrendered` serve the complete path
 - `src/handlers/pure_proxy_metrics.rs` -- forwarded-mode (pure-proxy) ingress
   admission-rejection counter + structured rejection log.
   `PureProxyRejectionReason` (closed 2-variant enum: `TokenMissing` /
@@ -6986,6 +7001,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   on the re-injected `api.anthropic.com` inference leg, shared between the
   proxy set site and the `handlers::ingress_handle` forwarded-mode
   capture/admission read sites so the two cannot drift on the literal
+- `src/ingress/response_edits.rs` -- `ResponseEdits`: collector a renderer
+  declares its intended response edits into (`render_response_declared` /
+  `render_chunk_declared` on `IngressAdapter`); records only when the
+  attempt's response is checked
 - `src/ingress/session_key.rs` -- shared inbound per-conversation
   session-key resolution: `OPENAI_SESSION_HEADERS` (the ordered, grounded
   allowlist of session headers the OpenAI-shaped ingresses accept, and the

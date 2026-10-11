@@ -21,7 +21,8 @@ use futures::StreamExt;
 use routectl_core::Error;
 use routectl_core::ForwardedBearer;
 use routectl_core::ParsedErrorBody;
-use routectl_router::{DispatchedStream, RouterOptions};
+use routectl_core::wire_check::StreamExit;
+use routectl_router::{DispatchedStream, ResponseCheck, RouterOptions};
 use routectl_usage::{Outcome, UsageHandle, UsageRecord};
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -30,6 +31,7 @@ use tracing::Instrument;
 use crate::handlers::ingress_wire::capture_ingress_wire;
 use crate::handlers::opening_meter::{OpeningMeter, StreamTurn};
 use crate::handlers::pure_proxy_admission::enforce_pure_proxy_admission;
+use crate::handlers::response_wire::{ClientSink, abandon_unrendered, response_edits_for};
 use crate::handlers::usage_capture::{
     StreamStage, UsageCapture, build_usage_draft, outcome_for_dispatch_err,
 };
@@ -508,7 +510,8 @@ async fn complete_response<A: IngressAdapter>(
     // this same value the usage ledger's `session_id` column was seeded
     // from (`build_usage_draft`) -- one derivation, read twice.
     let session_key = req.routectl_internal.inbound_session_key.clone();
-    let dispatched = router.complete_with_options(req, opts).await;
+    let mut dispatched = router.complete_with_options(req, opts).await;
+    let response_check = dispatched.meta.response_check.take();
     capture.observe_meta(
         &dispatched.meta,
         router.catalog_version(),
@@ -537,8 +540,12 @@ async fn complete_response<A: IngressAdapter>(
             // Non-streaming first byte == the response being ready.
             capture.mark_first_byte();
             capture.observe_response(&resp);
-            match adapter.render_response(resp) {
+            let mut response_edits = response_edits_for(response_check.as_ref());
+            match adapter.render_response_declared(resp, &mut response_edits) {
                 Ok(body) => {
+                    if let Some(check) = response_check {
+                        check.compare_body(&body, response_edits.as_slice());
+                    }
                     // Upstream delivered AND we serialized it: this is the
                     // only path where the client receives 200 + body, so
                     // finalize `ok` here rather than before the render.
@@ -573,6 +580,7 @@ async fn complete_response<A: IngressAdapter>(
                     // Upstream gave a good response but we could not
                     // serialize it to wire bytes -> the client receives an
                     // error, so the row must not say `ok`.
+                    abandon_unrendered(response_check);
                     capture.observe_error(&e);
                     capture.finalize(Outcome::UpstreamError);
                     map_error(envelope, e)
@@ -691,7 +699,8 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
     };
 
     match fast {
-        Some(dispatched) => {
+        Some(mut dispatched) => {
+            let response_check = dispatched.meta.response_check.take();
             capture.observe_meta(
                 &dispatched.meta,
                 router.catalog_version(),
@@ -713,8 +722,16 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
                     // `adapter` + `capture` move INTO the render task, which
                     // finalizes on every stream exit (see `drive_stream`).
                     tokio::spawn(
-                        render_stream_task(upstream, adapter, capture, tx, router, turn)
-                            .instrument(parent_span),
+                        render_checked_stream_task(
+                            upstream,
+                            adapter,
+                            capture,
+                            tx,
+                            router,
+                            turn,
+                            response_check,
+                        )
+                        .instrument(parent_span),
                     );
                     build_sse_response(rx, &egress_id)
                 }
@@ -833,7 +850,7 @@ async fn warm_render_task<A: IngressAdapter>(
     // never a breaker/probe debit (the dispatch never resolves to an error).
     // Biased + `tx.closed()` first matches the `drive_stream` select so both
     // paths react to the same disconnect signal identically.
-    let dispatched = tokio::select! {
+    let mut dispatched = tokio::select! {
         biased;
         () = tx.closed() => {
             tracing::debug!(
@@ -845,6 +862,7 @@ async fn warm_render_task<A: IngressAdapter>(
         }
         dispatched = &mut fut => dispatched,
     };
+    let response_check = dispatched.meta.response_check.take();
     capture.observe_meta(
         &dispatched.meta,
         router.catalog_version(),
@@ -865,7 +883,8 @@ async fn warm_render_task<A: IngressAdapter>(
                 meter.bind_served(&dispatched.meta);
             }
             stamp_opening(&mut capture, turn.meter.as_ref());
-            drive_stream(upstream, adapter, capture, tx, router, turn, state).await;
+            let client = ClientSink::new(tx, response_check);
+            drive_stream(upstream, adapter, capture, client, router, turn, state).await;
         }
         Err(e) => {
             // Pre-content dispatch failure AFTER the SSE head committed: the
@@ -893,6 +912,7 @@ async fn warm_render_task<A: IngressAdapter>(
 /// the synthetic `message_start` emits on the first content chunk as
 /// before). The warm-hold path (`warm_render_task`) shares `drive_stream`
 /// but pre-flushes the early frame and owns the still-pending future.
+#[cfg(test)]
 async fn render_stream_task<A: IngressAdapter>(
     upstream: futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
     adapter: A,
@@ -901,8 +921,23 @@ async fn render_stream_task<A: IngressAdapter>(
     router: Arc<routectl_router::Router>,
     turn: StreamTurn,
 ) {
+    render_checked_stream_task(upstream, adapter, capture, tx, router, turn, None).await;
+}
+
+/// [`render_stream_task`] carrying the answering attempt's response check,
+/// when it has one.
+async fn render_checked_stream_task<A: IngressAdapter>(
+    upstream: futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+    adapter: A,
+    capture: UsageCapture,
+    tx: tokio::sync::mpsc::Sender<SseEvent>,
+    router: Arc<routectl_router::Router>,
+    turn: StreamTurn,
+    response_check: Option<ResponseCheck>,
+) {
     let state: Box<dyn IngressStreamState> = adapter.new_stream_state(&turn.ctx);
-    drive_stream(upstream, adapter, capture, tx, router, turn, state).await;
+    let client = ClientSink::new(tx, response_check);
+    drive_stream(upstream, adapter, capture, client, router, turn, state).await;
 }
 
 /// Drive the upstream chunk stream through the ingress adapter, emitting
@@ -936,11 +971,15 @@ async fn drive_stream<A: IngressAdapter>(
     >,
     adapter: A,
     mut capture: UsageCapture,
-    tx: tokio::sync::mpsc::Sender<SseEvent>,
+    client: ClientSink,
     router: Arc<routectl_router::Router>,
     turn: StreamTurn,
     mut state: Box<dyn IngressStreamState>,
 ) {
+    let ClientSink {
+        tx,
+        check: mut client_check,
+    } = client;
     let StreamTurn {
         session_key,
         mut meter,
@@ -966,6 +1005,7 @@ async fn drive_stream<A: IngressAdapter>(
                     reason = "client_disconnected",
                     "client disconnected mid-stream; cancelling upstream"
                 );
+                client_check.end(StreamExit::Disconnect);
                 return;
             }
             item = upstream.next() => item,
@@ -982,7 +1022,7 @@ async fn drive_stream<A: IngressAdapter>(
                     meter.observe_opening_chunk(&chunk);
                     OpeningMeter::terminal_candidate(&chunk)
                 });
-                match adapter.render_chunk(chunk, state.as_mut()) {
+                match adapter.render_chunk_declared(chunk, state.as_mut(), client_check.edits()) {
                     Ok(events) => {
                         if let (Some(meter), Some(candidate)) = (meter.as_mut(), candidate)
                             && meter.accept_rendered(candidate, &events)
@@ -992,11 +1032,13 @@ async fn drive_stream<A: IngressAdapter>(
                             stamp_opening(&mut capture, Some(meter));
                         }
                         for ev in events {
+                            client_check.observe(&ev);
                             if tx.send(ev).await.is_err() {
                                 // Client disconnected mid-stream. The
                                 // guard stays un-finalized, so Drop
                                 // stamps `client_disconnect` -- no
                                 // explicit call needed.
+                                client_check.end(StreamExit::Disconnect);
                                 return;
                             }
                             // First successful body send: the SSE head is
@@ -1033,6 +1075,7 @@ async fn drive_stream<A: IngressAdapter>(
                         let class = crate::ingress::StreamErrorClass::from_error(&render_err);
                         capture.observe_error(&render_err);
                         capture.finalize(Outcome::UpstreamError);
+                        client_check.end(StreamExit::RenderFailure);
                         for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                             let _ = tx.send(ev).await;
                         }
@@ -1064,6 +1107,7 @@ async fn drive_stream<A: IngressAdapter>(
                 capture.observe_error(&e);
                 capture.mark_stream_stage(StreamStage::MidStream);
                 capture.finalize(Outcome::UpstreamError);
+                client_check.end(StreamExit::UpstreamError);
                 for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                     if tx.send(ev).await.is_err() {
                         // Client disconnected before we could deliver the
@@ -1077,9 +1121,11 @@ async fn drive_stream<A: IngressAdapter>(
         }
     }
     for ev in adapter.render_eos(state.as_mut()) {
+        client_check.observe(&ev);
         if tx.send(ev).await.is_err() {
             // Client disconnected during EOS render. The guard stays
             // un-finalized, so Drop stamps `client_disconnect`.
+            client_check.end(StreamExit::Disconnect);
             return;
         }
         // Covers an EOS-only stream (no content chunk ever sent): the
@@ -1100,6 +1146,7 @@ async fn drive_stream<A: IngressAdapter>(
         meter.settle_completed();
     }
     capture.finalize(Outcome::Ok);
+    client_check.end(StreamExit::Ended);
 }
 
 /// Merge a metered stream's opening diagnostics into its usage row; a no-op

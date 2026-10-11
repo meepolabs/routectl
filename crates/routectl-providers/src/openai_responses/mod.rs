@@ -273,12 +273,14 @@ impl Provider for OpenAiResponsesProvider {
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
         futures::pin_mut!(event_stream);
+        let response_tap = crate::wire_declare::response_tap(&req);
         let mut completed_body: Option<Value> = None;
         let mut terminal_kind: Option<String> = None;
         let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event);
         let mut accumulated_items: Vec<Value> = Vec::new();
         while let Some(result) = event_stream.next().await {
             let event = result.map_err(|e| Error::Streaming(e.to_string()))?;
+            crate::wire_declare::push_frame(response_tap.as_ref(), &event.event, &event.data);
             if event.data.is_empty() {
                 continue;
             }
@@ -470,6 +472,7 @@ impl Provider for OpenAiResponsesProvider {
         let auth_kind = self.cfg.auth_kind;
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
+        let response_tap = crate::wire_declare::response_tap(&req);
 
         let stream = async_stream::stream! {
             let mut pending_upstream_meta = upstream_meta;
@@ -483,6 +486,7 @@ impl Provider for OpenAiResponsesProvider {
                         return;
                     }
                     Ok(event) => {
+                        crate::wire_declare::push_frame(response_tap.as_ref(), &event.event, &event.data);
                         // Filter empty `data:` lines (keepalives).
                         if event.data.is_empty() {
                             continue;

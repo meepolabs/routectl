@@ -404,6 +404,7 @@ impl BedrockProvider {
                 "complete_success_body",
             );
         }
+        let body_bytes = crate::wire_declare::deposit_response(req, body_bytes);
         let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         // Trace upstream success body pre-normalize. Distinct
         // provider_kind per shape so operators can grep
@@ -509,6 +510,7 @@ impl BedrockProvider {
             &self.cfg.region,
             &endpoint,
             resp.bytes_stream(),
+            crate::wire_declare::response_tap(req),
         );
         Ok(routectl_core::wrap_stream_with_summary(
             stream,

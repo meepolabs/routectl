@@ -3,6 +3,7 @@ use bytes::Bytes;
 use super::{AttemptRecord, IngressWire, WireTap};
 use crate::error::Error;
 use crate::schema::ChatRequest;
+use crate::wire_check::assemble::{Assembled, IncompleteReason, SseFrame, StreamExit};
 use crate::wire_check::edits::{DeclaredEdit, EditKind, EditSite};
 use crate::wire_check::lane::{IngressDialect, Leg};
 
@@ -312,4 +313,68 @@ fn admission_is_fixed_at_creation_and_shared_by_every_clone() {
         assert_eq!(tap.is_admitted(), expected, "row {name}");
         assert_eq!(provider_copy.is_admitted(), expected, "row {name} clone");
     }
+}
+
+const CHAT_FRAMES: [&str; 2] = [
+    r#"{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+    "[DONE]",
+];
+
+fn push_chat_frames(tap: &WireTap) {
+    for data in CHAT_FRAMES {
+        tap.push_response_frame(SseFrame::new(None, data));
+    }
+}
+
+#[test]
+fn only_a_response_checking_tap_folds_stream_frames() {
+    let rows = [
+        ("default tap", WireTap::default(), false),
+        ("request-only admitted tap", WireTap::admitted(), false),
+        (
+            "response-checking tap",
+            WireTap::checking_response(IngressDialect::Chat),
+            true,
+        ),
+    ];
+
+    for (name, tap, folds) in rows {
+        push_chat_frames(&tap.clone());
+
+        let assembled = tap.finish_response_stream(StreamExit::Ended);
+
+        assert_eq!(assembled.is_some(), folds, "row {name}");
+        assert_eq!(tap.checks_response(), folds, "row {name}");
+    }
+}
+
+#[test]
+fn a_finished_stream_assembles_the_frames_every_clone_pushed() {
+    let tap = WireTap::checking_response(IngressDialect::Chat);
+    push_chat_frames(&tap.clone());
+
+    let assembled = tap.finish_response_stream(StreamExit::Ended);
+
+    let Some(Assembled::Complete(document)) = assembled else {
+        panic!("expected a complete document, got {assembled:?}");
+    };
+    assert_eq!(
+        document.pointer("/choices/0/message/content"),
+        Some(&serde_json::json!("hi"))
+    );
+}
+
+#[test]
+fn an_unfinished_stream_reports_its_exit_and_frames_after_finish_are_ignored() {
+    let tap = WireTap::checking_response(IngressDialect::Chat);
+    tap.push_response_frame(SseFrame::new(None, r#"{"choices":[]}"#));
+
+    let assembled = tap.finish_response_stream(StreamExit::Disconnect);
+    push_chat_frames(&tap);
+
+    assert_eq!(
+        assembled,
+        Some(Assembled::Incomplete(IncompleteReason::Disconnect))
+    );
+    assert_eq!(tap.finish_response_stream(StreamExit::Ended), None);
 }

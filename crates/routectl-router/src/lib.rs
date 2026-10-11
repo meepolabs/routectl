@@ -218,7 +218,7 @@ pub use router::{
     DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot, FieldPreflight,
     FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
     LearnedLaneProjection, OpeningLane, PreflightBlockedReason, ProbeClearAcknowledgement,
-    ResolvedLearnedLane, Router, RouterOptions, acting_field_verdicts, class_debits,
+    ResolvedLearnedLane, ResponseCheck, Router, RouterOptions, acting_field_verdicts, class_debits,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{

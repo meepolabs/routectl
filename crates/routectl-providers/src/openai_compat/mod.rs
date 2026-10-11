@@ -423,6 +423,7 @@ impl Provider for OpenAiCompatProvider {
                 crate::http_client::body_cap_exceeded_message(),
             ));
         }
+        let body_bytes = crate::wire_declare::deposit_response(&req, body_bytes);
         let raw: Value = serde_json::from_slice(&body_bytes)
             .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
 
@@ -544,6 +545,7 @@ impl Provider for OpenAiCompatProvider {
         // async_stream::stream! lets us hold mutable local state (think_acc)
         // across yield points, which filter_map/FnMut cannot do.
         let mut event_stream = resp.bytes_stream().eventsource();
+        let response_tap = crate::wire_declare::response_tap(&req);
 
         let out = async_stream::stream! {
             let mut think_acc = ThinkTagAccumulator::new();
@@ -586,6 +588,7 @@ impl Provider for OpenAiCompatProvider {
                     }
                 };
 
+                crate::wire_declare::push_frame(response_tap.as_ref(), &event.event, &event.data);
                 let data = event.data;
                 let trimmed = data.trim();
                 if trimmed == "[DONE]" {

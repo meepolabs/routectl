@@ -40,6 +40,36 @@ pub fn serialize_and_deposit(
     Ok(bytes)
 }
 
+/// Record the complete upstream response body when the attempt checks its
+/// response, and hand the same buffer back for parsing: the tap holds a
+/// refcount on it, never a copy.
+pub fn deposit_response(req: &ChatRequest, body: Vec<u8>) -> Bytes {
+    let body = Bytes::from(body);
+    if let Some(tap) = tap(req).filter(|tap| tap.checks_response()) {
+        tap.deposit_response(body.clone());
+    }
+    body
+}
+
+/// A handle on the tap for a stream reader to fold upstream frames into,
+/// present only when the attempt checks its response. A stream nobody
+/// checks gets `None` and pays one `Option` test per frame.
+pub fn response_tap(req: &ChatRequest) -> Option<WireTap> {
+    tap(req).filter(|tap| tap.checks_response()).cloned()
+}
+
+/// Fold one upstream server-sent event into `tap`'s response assembler.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "anthropic-api"
+))]
+pub fn push_frame(tap: Option<&WireTap>, event: &str, data: &str) {
+    if let Some(tap) = tap {
+        tap.push_response_frame(routectl_core::wire_check::SseFrame::new(Some(event), data));
+    }
+}
+
 /// Declare one request-body edit. A pattern the edit register refuses is
 /// dropped with a DEBUG naming only the site: the unexplained difference
 /// then surfaces as a finding, which is the safe direction.

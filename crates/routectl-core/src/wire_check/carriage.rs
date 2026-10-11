@@ -2,13 +2,15 @@
 //!
 //! The ingress body rides the canonical request; the egress body, the
 //! upstream response and the edits a provider makes on either direction come
-//! back through a [`WireTap`] whose clones share one slot. None of these types render body bytes through `Debug`.
+//! back through a [`WireTap`] whose clones share one slot. None of these
+//! types render body bytes through `Debug`.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
 
+use super::assemble::{Assembled, SseFrame, StreamAssembler, StreamExit};
 use super::edits::DeclaredEdit;
 use super::lane::{IngressDialect, Leg};
 use crate::error::Error;
@@ -38,9 +40,9 @@ impl fmt::Debug for IngressWire {
 /// What a provider reported through a [`WireTap`] on one attempt, kept per
 /// direction.
 ///
-/// The response side holds a complete upstream body today. A streamed
-/// response folds frame by frame instead; its fold state takes a slot of its
-/// own beside the complete one, which the private fields leave room for.
+/// The response side holds a complete upstream body. A streamed response
+/// folds frame by frame in the tap instead and is taken with
+/// [`WireTap::finish_response_stream`].
 #[derive(Clone, Default)]
 pub struct TapContents {
     request: Option<Bytes>,
@@ -85,19 +87,21 @@ impl fmt::Debug for TapContents {
 /// attempt. Every clone shares one slot, so the copy the router keeps
 /// observes what the provider records on the copy that rode the request.
 ///
-/// A tap also carries whether its attempt was admitted for a full check, so
-/// a provider can skip work only an admitted attempt reads. Admission is
-/// fixed when the tap is created and shared by every clone.
+/// A tap also carries whether its attempt was admitted for a full check,
+/// and whether that check covers the response, so a provider can skip work
+/// only a checked attempt reads. Both are fixed when the tap is created and
+/// shared by every clone.
 #[derive(Clone, Default)]
 pub struct WireTap {
-    slot: Arc<Mutex<TapContents>>,
+    slot: Arc<Mutex<Slot>>,
     admitted: bool,
+    response_dialect: Option<IngressDialect>,
     #[cfg(any(test, feature = "test-utils"))]
     drop_on_deposit: Option<&'static str>,
 }
 
 impl WireTap {
-    /// A tap whose attempt is admitted for a full check.
+    /// A tap whose attempt is admitted for a full request check.
     pub fn admitted() -> Self {
         Self {
             admitted: true,
@@ -105,9 +109,25 @@ impl WireTap {
         }
     }
 
+    /// A tap whose attempt is admitted for a full check of both directions,
+    /// the response arriving in `dialect`.
+    pub fn checking_response(dialect: IngressDialect) -> Self {
+        Self {
+            admitted: true,
+            response_dialect: Some(dialect),
+            ..Self::default()
+        }
+    }
+
     /// Whether this tap's attempt is admitted for a full check.
     pub const fn is_admitted(&self) -> bool {
         self.admitted
+    }
+
+    /// Whether this tap's attempt checks the response direction, so the
+    /// provider should report what the upstream answered.
+    pub const fn checks_response(&self) -> bool {
+        self.response_dialect.is_some()
     }
 
     /// Record the request body as sent. A later deposit on the same attempt
@@ -118,29 +138,60 @@ impl WireTap {
             Some(pointer) => remove_pointer(&egress, pointer).unwrap_or(egress),
             None => egress,
         };
-        self.lock().request = Some(egress);
+        self.lock().contents.request = Some(egress);
     }
 
     /// Record the complete upstream response body as received. A later
     /// deposit on the same attempt replaces an earlier one.
     pub fn deposit_response(&self, upstream: Bytes) {
-        self.lock().response = Some(upstream);
+        self.lock().contents.response = Some(upstream);
+    }
+
+    /// Fold one upstream stream frame into the tap's response assembler,
+    /// creating it on the first frame. Does nothing on a tap that does not
+    /// check the response, so an unchecked stream never builds an
+    /// assembler.
+    pub fn push_response_frame(&self, frame: SseFrame<'_>) {
+        let Some(dialect) = self.response_dialect else {
+            return;
+        };
+        let mut slot = self.lock();
+        if slot.upstream_stream_taken {
+            return;
+        }
+        slot.upstream_stream
+            .get_or_insert_with(|| StreamAssembler::new(dialect))
+            .push(frame);
+    }
+
+    /// Take the response assembler and finish it as the stream ended by
+    /// `exit`. `None` when no frame was ever folded. Frames pushed after
+    /// this are ignored, so a reader still running after the check ended
+    /// builds nothing.
+    pub fn finish_response_stream(&self, exit: StreamExit) -> Option<Assembled> {
+        let assembler = {
+            let mut slot = self.lock();
+            slot.upstream_stream_taken = true;
+            slot.upstream_stream.take()
+        }?;
+        Some(assembler.finish(exit))
     }
 
     /// Append an edit made to the request body.
     pub fn declare(&self, edit: DeclaredEdit) {
-        self.lock().request_edits.push(edit);
+        self.lock().contents.request_edits.push(edit);
     }
 
     /// Append an edit made to the response body.
     pub fn declare_response(&self, edit: DeclaredEdit) {
-        self.lock().response_edits.push(edit);
+        self.lock().contents.response_edits.push(edit);
     }
 
     /// Return the request body and request edits reported so far and empty
     /// that side of the slot. The response side stays for its own check.
     pub fn take_request(&self) -> TapContents {
-        let mut slot = self.lock();
+        let mut guard = self.lock();
+        let slot = &mut guard.contents;
         TapContents {
             request: slot.request.take(),
             request_edits: std::mem::take(&mut slot.request_edits),
@@ -151,7 +202,8 @@ impl WireTap {
     /// Return the response body and response edits reported so far and
     /// empty that side of the slot. The request side stays for its own check.
     pub fn take_response(&self) -> TapContents {
-        let mut slot = self.lock();
+        let mut guard = self.lock();
+        let slot = &mut guard.contents;
         TapContents {
             response: slot.response.take(),
             response_edits: std::mem::take(&mut slot.response_edits),
@@ -159,9 +211,17 @@ impl WireTap {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, TapContents> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Slot> {
         self.slot.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// The state every clone of one [`WireTap`] shares.
+#[derive(Default)]
+struct Slot {
+    contents: TapContents,
+    upstream_stream: Option<StreamAssembler>,
+    upstream_stream_taken: bool,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -189,9 +249,12 @@ fn remove_pointer(body: &Bytes, pointer: &str) -> Option<Bytes> {
 
 impl fmt::Debug for WireTap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let slot = self.lock();
         f.debug_struct("WireTap")
             .field("admitted", &self.admitted)
-            .field("contents", &*self.lock())
+            .field("response_dialect", &self.response_dialect)
+            .field("contents", &slot.contents)
+            .field("upstream_stream", &slot.upstream_stream)
             .finish()
     }
 }

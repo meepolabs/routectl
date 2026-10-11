@@ -11,6 +11,7 @@ pub mod opening_diagnostics;
 pub(crate) mod opening_meter;
 pub mod pure_proxy_admission;
 pub mod pure_proxy_metrics;
+mod response_wire;
 pub mod responses;
 pub mod status;
 pub mod usage_capture;

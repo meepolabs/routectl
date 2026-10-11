@@ -3998,6 +3998,7 @@ pub routectl_router::router::DispatchMeta::reduction_strings_rejected: core::opt
 pub routectl_router::router::DispatchMeta::reduction_strings_skipped: core::option::Option<u64>
 pub routectl_router::router::DispatchMeta::replay_degradation: core::option::Option<routectl_router::router::ReplayDegradation>
 pub routectl_router::router::DispatchMeta::resolved_alias: alloc::string::String
+pub routectl_router::router::DispatchMeta::response_check: core::option::Option<routectl_router::ResponseCheck>
 pub routectl_router::router::DispatchMeta::selection_decision: core::option::Option<&'static str>
 pub routectl_router::router::DispatchMeta::served_forwarded_credential: bool
 pub routectl_router::router::DispatchMeta::served_model: core::option::Option<alloc::string::String>
@@ -4871,6 +4872,58 @@ impl<T> typenum::type_operators::Same for routectl_router::ResolvedLearnedLane
 pub type routectl_router::ResolvedLearnedLane::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ResolvedLearnedLane where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ResolvedLearnedLane::into_shared(self) -> Shared
+pub struct routectl_router::router::ResponseCheck
+impl routectl_router::ResponseCheck
+pub fn routectl_router::ResponseCheck::compare_body(self, &[u8], &[routectl_core::wire_check::edits::DeclaredEdit])
+pub fn routectl_router::ResponseCheck::compare_stream(self, routectl_core::wire_check::assemble::Assembled, routectl_core::wire_check::assemble::StreamExit, &[routectl_core::wire_check::edits::DeclaredEdit])
+pub const fn routectl_router::ResponseCheck::lane(&self) -> routectl_core::wire_check::lane::Lane
+impl core::clone::Clone for routectl_router::ResponseCheck
+pub fn routectl_router::ResponseCheck::clone(&self) -> routectl_router::ResponseCheck
+impl core::fmt::Debug for routectl_router::ResponseCheck
+pub fn routectl_router::ResponseCheck::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::ResponseCheck
+impl core::marker::Send for routectl_router::ResponseCheck
+impl core::marker::Sync for routectl_router::ResponseCheck
+impl core::marker::Unpin for routectl_router::ResponseCheck
+impl core::marker::UnsafeUnpin for routectl_router::ResponseCheck
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::ResponseCheck
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::ResponseCheck
+impl<T, U> core::convert::Into<U> for routectl_router::ResponseCheck where U: core::convert::From<T>
+pub fn routectl_router::ResponseCheck::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ResponseCheck where U: core::convert::Into<T>
+pub type routectl_router::ResponseCheck::Error = core::convert::Infallible
+pub fn routectl_router::ResponseCheck::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ResponseCheck where U: core::convert::TryFrom<T>
+pub type routectl_router::ResponseCheck::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ResponseCheck::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::ResponseCheck where T: core::clone::Clone
+pub type routectl_router::ResponseCheck::Owned = T
+pub fn routectl_router::ResponseCheck::clone_into(&self, &mut T)
+pub fn routectl_router::ResponseCheck::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::ResponseCheck where T: core::clone::Clone
+pub fn routectl_router::ResponseCheck::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::ResponseCheck where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ResponseCheck::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ResponseCheck where T: ?core::marker::Sized
+pub fn routectl_router::ResponseCheck::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ResponseCheck where T: ?core::marker::Sized
+pub fn routectl_router::ResponseCheck::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::ResponseCheck where T: core::clone::Clone
+pub unsafe fn routectl_router::ResponseCheck::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::ResponseCheck
+pub fn routectl_router::ResponseCheck::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::ResponseCheck where T: core::clone::Clone
+pub fn routectl_router::ResponseCheck::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::ResponseCheck
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ResponseCheck where T: ?core::marker::Sized
+pub fn routectl_router::ResponseCheck::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ResponseCheck::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ResponseCheck
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ResponseCheck
+impl<T> typenum::type_operators::Same for routectl_router::ResponseCheck
+pub type routectl_router::ResponseCheck::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ResponseCheck where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ResponseCheck::into_shared(self) -> Shared
 pub struct routectl_router::router::RouteTargetStatus
 pub routectl_router::router::RouteTargetStatus::gate: routectl_router::runtime_state::ProviderGateStatus
 pub routectl_router::router::RouteTargetStatus::learned_lane: core::option::Option<routectl_router::StateKey>
@@ -11638,6 +11691,7 @@ pub routectl_router::DispatchMeta::reduction_strings_rejected: core::option::Opt
 pub routectl_router::DispatchMeta::reduction_strings_skipped: core::option::Option<u64>
 pub routectl_router::DispatchMeta::replay_degradation: core::option::Option<routectl_router::router::ReplayDegradation>
 pub routectl_router::DispatchMeta::resolved_alias: alloc::string::String
+pub routectl_router::DispatchMeta::response_check: core::option::Option<routectl_router::ResponseCheck>
 pub routectl_router::DispatchMeta::selection_decision: core::option::Option<&'static str>
 pub routectl_router::DispatchMeta::served_forwarded_credential: bool
 pub routectl_router::DispatchMeta::served_model: core::option::Option<alloc::string::String>
@@ -15658,6 +15712,58 @@ impl<T> typenum::type_operators::Same for routectl_router::ResolvedModelBuild
 pub type routectl_router::ResolvedModelBuild::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ResolvedModelBuild where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ResolvedModelBuild::into_shared(self) -> Shared
+pub struct routectl_router::ResponseCheck
+impl routectl_router::ResponseCheck
+pub fn routectl_router::ResponseCheck::compare_body(self, &[u8], &[routectl_core::wire_check::edits::DeclaredEdit])
+pub fn routectl_router::ResponseCheck::compare_stream(self, routectl_core::wire_check::assemble::Assembled, routectl_core::wire_check::assemble::StreamExit, &[routectl_core::wire_check::edits::DeclaredEdit])
+pub const fn routectl_router::ResponseCheck::lane(&self) -> routectl_core::wire_check::lane::Lane
+impl core::clone::Clone for routectl_router::ResponseCheck
+pub fn routectl_router::ResponseCheck::clone(&self) -> routectl_router::ResponseCheck
+impl core::fmt::Debug for routectl_router::ResponseCheck
+pub fn routectl_router::ResponseCheck::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::ResponseCheck
+impl core::marker::Send for routectl_router::ResponseCheck
+impl core::marker::Sync for routectl_router::ResponseCheck
+impl core::marker::Unpin for routectl_router::ResponseCheck
+impl core::marker::UnsafeUnpin for routectl_router::ResponseCheck
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::ResponseCheck
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::ResponseCheck
+impl<T, U> core::convert::Into<U> for routectl_router::ResponseCheck where U: core::convert::From<T>
+pub fn routectl_router::ResponseCheck::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ResponseCheck where U: core::convert::Into<T>
+pub type routectl_router::ResponseCheck::Error = core::convert::Infallible
+pub fn routectl_router::ResponseCheck::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ResponseCheck where U: core::convert::TryFrom<T>
+pub type routectl_router::ResponseCheck::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ResponseCheck::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::ResponseCheck where T: core::clone::Clone
+pub type routectl_router::ResponseCheck::Owned = T
+pub fn routectl_router::ResponseCheck::clone_into(&self, &mut T)
+pub fn routectl_router::ResponseCheck::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::ResponseCheck where T: core::clone::Clone
+pub fn routectl_router::ResponseCheck::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::ResponseCheck where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ResponseCheck::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ResponseCheck where T: ?core::marker::Sized
+pub fn routectl_router::ResponseCheck::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ResponseCheck where T: ?core::marker::Sized
+pub fn routectl_router::ResponseCheck::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::ResponseCheck where T: core::clone::Clone
+pub unsafe fn routectl_router::ResponseCheck::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::ResponseCheck
+pub fn routectl_router::ResponseCheck::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::ResponseCheck where T: core::clone::Clone
+pub fn routectl_router::ResponseCheck::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::ResponseCheck
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ResponseCheck where T: ?core::marker::Sized
+pub fn routectl_router::ResponseCheck::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ResponseCheck::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ResponseCheck
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ResponseCheck
+impl<T> typenum::type_operators::Same for routectl_router::ResponseCheck
+pub type routectl_router::ResponseCheck::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ResponseCheck where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ResponseCheck::into_shared(self) -> Shared
 pub struct routectl_router::RetiredCapabilityKeysError
 pub routectl_router::RetiredCapabilityKeysError::paths: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::RetiredCapabilityKeysError

@@ -4119,11 +4119,15 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::WireP
 pub struct routectl_core::wire_check::WireTap
 impl routectl_core::wire_check::WireTap
 pub fn routectl_core::wire_check::WireTap::admitted() -> Self
+pub fn routectl_core::wire_check::WireTap::checking_response(routectl_core::wire_check::IngressDialect) -> Self
+pub const fn routectl_core::wire_check::WireTap::checks_response(&self) -> bool
 pub fn routectl_core::wire_check::WireTap::declare(&self, routectl_core::wire_check::DeclaredEdit)
 pub fn routectl_core::wire_check::WireTap::declare_response(&self, routectl_core::wire_check::DeclaredEdit)
 pub fn routectl_core::wire_check::WireTap::deposit(&self, bytes::bytes::Bytes)
 pub fn routectl_core::wire_check::WireTap::deposit_response(&self, bytes::bytes::Bytes)
+pub fn routectl_core::wire_check::WireTap::finish_response_stream(&self, routectl_core::wire_check::StreamExit) -> core::option::Option<routectl_core::wire_check::Assembled>
 pub const fn routectl_core::wire_check::WireTap::is_admitted(&self) -> bool
+pub fn routectl_core::wire_check::WireTap::push_response_frame(&self, routectl_core::wire_check::SseFrame<'_>)
 pub fn routectl_core::wire_check::WireTap::take_request(&self) -> routectl_core::wire_check::TapContents
 pub fn routectl_core::wire_check::WireTap::take_response(&self) -> routectl_core::wire_check::TapContents
 impl core::clone::Clone for routectl_core::wire_check::WireTap

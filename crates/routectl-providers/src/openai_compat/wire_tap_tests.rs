@@ -680,3 +680,49 @@ fn stream_options_injection_names_the_member_it_creates() {
         assert_eq!(got, want.into_iter().collect::<Vec<_>>(), "{name}");
     }
 }
+
+/// Drive one call with a tap that checks the response and return what the
+/// tap holds of the upstream's answer: the complete body, or the document
+/// its stream assembled to.
+async fn response_held(stream: bool) -> Value {
+    let server = MockServer::start().await;
+    let template = if stream {
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(sse_body())
+    } else {
+        ResponseTemplate::new(200).set_body_json(ok_completion())
+    };
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(template)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatProvider::new(config(&server.uri(), ReasoningDialect::OpenAi));
+    let wire_tap = WireTap::checking_response(routectl_core::wire_check::IngressDialect::Chat);
+    let mut req = request("gpt-4o");
+    req.routectl_internal.wire_tap = Some(wire_tap.clone());
+
+    if stream {
+        let mut chunks = provider.stream(req).await.expect("stream open");
+        while futures::StreamExt::next(&mut chunks).await.is_some() {}
+        match wire_tap.finish_response_stream(routectl_core::wire_check::StreamExit::Ended) {
+            Some(routectl_core::wire_check::Assembled::Complete(document)) => document,
+            other => panic!("expected an assembled stream, got {other:?}"),
+        }
+    } else {
+        provider.complete(req).await.expect("complete");
+        let body = wire_tap.take_response();
+        serde_json::from_slice(body.response().expect("deposited")).expect("json body")
+    }
+}
+
+#[tokio::test]
+async fn a_response_checking_tap_holds_what_the_upstream_answered() {
+    let complete = response_held(false).await;
+    let streamed = response_held(true).await;
+
+    assert_eq!(complete, ok_completion());
+    assert_eq!(streamed["choices"][0]["message"]["content"], "ok");
+    assert_eq!(streamed["choices"][0]["finish_reason"], "stop");
+}

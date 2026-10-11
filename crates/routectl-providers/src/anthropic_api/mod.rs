@@ -354,6 +354,7 @@ impl Provider for AnthropicApiProvider {
                 "complete_success_body",
             );
         }
+        let body_bytes = crate::wire_declare::deposit_response(&req, body_bytes);
         let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         // Trace upstream success body pre-normalize.
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
@@ -574,6 +575,7 @@ impl Provider for AnthropicApiProvider {
         let tool_reverse = cloak_result.map(|r| r.tool_reverse).unwrap_or_default();
 
         let base_state = stream_state_for(&provider_id, &self.cfg.base_url);
+        let response_tap = crate::wire_declare::response_tap(&req);
         let stream = async_stream::stream! {
             let mut state = base_state;
             state.tool_reverse = tool_reverse;
@@ -596,6 +598,7 @@ impl Provider for AnthropicApiProvider {
                         return;
                     }
                     Ok(event) => {
+                        crate::wire_declare::push_frame(response_tap.as_ref(), &event.event, &event.data);
                         let trimmed = event.data.trim();
                         // OpenRouter's `/v1/messages` endpoint appends
                         // an OpenAI-style `data: [DONE]` sentinel after

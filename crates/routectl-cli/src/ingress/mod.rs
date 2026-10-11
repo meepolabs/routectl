@@ -30,7 +30,10 @@ use serde_json::Value;
 pub mod anthropic;
 pub mod openai;
 pub mod openai_responses;
+mod response_edits;
 pub mod session_key;
+
+pub use response_edits::ResponseEdits;
 
 /// Header used by harnesses that can override the canonical `model`
 /// field directly to pin routing to a specific configured alias.
@@ -693,6 +696,16 @@ pub trait IngressAdapter: Send + Sync {
     /// that final serialization uniformly across adapters.
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes>;
 
+    /// [`Self::render_response`], declaring into `edits` every response edit
+    /// the render makes on purpose. Same bytes either way.
+    fn render_response_declared(
+        &self,
+        resp: ChatResponse,
+        _edits: &mut ResponseEdits,
+    ) -> Result<bytes::Bytes> {
+        self.render_response(resp)
+    }
+
     /// Test-only convenience: render a `ChatResponse` and decode the wire
     /// bytes back into a `serde_json::Value` so the large existing suite of
     /// `Value`-asserting render tests keeps expressing itself against the
@@ -748,6 +761,17 @@ pub trait IngressAdapter: Send + Sync {
         chunk: ChatChunk,
         state: &mut dyn IngressStreamState,
     ) -> Result<Vec<SseEvent>>;
+
+    /// [`Self::render_chunk`], declaring into `edits` every response edit
+    /// the render makes on purpose. Same events either way.
+    fn render_chunk_declared(
+        &self,
+        chunk: ChatChunk,
+        state: &mut dyn IngressStreamState,
+        _edits: &mut ResponseEdits,
+    ) -> Result<Vec<SseEvent>> {
+        self.render_chunk(chunk, state)
+    }
 
     /// Final SSE events to emit after the upstream stream ends. OpenAI
     /// emits `[DONE]`; Anthropic may emit a final `message_stop` if

@@ -63,7 +63,10 @@ impl Router {
     ///
     /// The sampler decides here, before the call, whether this attempt gets
     /// a full check, and the decision rides the tap so the provider can skip
-    /// work only an admitted attempt reads. Each attempt is charged exactly
+    /// work only an admitted attempt reads. On a FIDELITY lane an admitted
+    /// attempt checks its response too; a TRANSLATION lane's response is a
+    /// different dialect from the upstream's, so only its request is
+    /// checked. Each attempt is charged exactly
     /// once; a target with no known egress kind is never admitted and takes
     /// no charge. The charge is given back when the returned [`SampleCharge`]
     /// drops, unless the attempt succeeded and called [`SampleCharge::keep`].
@@ -90,15 +93,17 @@ impl Router {
                 lane,
                 client_version: client_version.map(Box::from),
             };
-            (charged, admitted)
+            (charged, admitted.then_some(lane))
         });
-        let (charge, admitted) = charge.map_or((None, false), |(charged, admitted)| {
+        let (charge, admitted) = charge.map_or((None, None), |(charged, admitted)| {
             (Some(charged), admitted)
         });
-        let tap = if admitted {
-            WireTap::admitted()
-        } else {
-            WireTap::default()
+        let tap = match admitted {
+            Some(lane) if lane.class() == LaneClass::Fidelity => {
+                WireTap::checking_response(lane.ingress())
+            }
+            Some(_) => WireTap::admitted(),
+            None => WireTap::default(),
         };
         attempt_req.routectl_internal.wire_tap = Some(tap.clone());
         (Some(tap), SampleCharge(charge))

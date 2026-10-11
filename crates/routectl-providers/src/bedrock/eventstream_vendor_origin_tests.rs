@@ -48,6 +48,7 @@ async fn decode(shape: BedrockApiShape, region: &str, endpoint: &str) -> Vec<Cha
         region,
         &endpoint,
         futures::stream::iter(vec![Ok(Bytes::from(wire))]),
+        None,
     )
     .map(|c| c.expect("no stream error"))
     .collect()

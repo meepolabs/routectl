@@ -69,6 +69,7 @@ mod sticky;
 mod window_gate;
 mod wire_check;
 mod wire_rejection;
+mod wire_response;
 pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_health::CapabilityPersistenceHealth;
 pub use capability_learn::CapabilityLearnEvent;
@@ -111,6 +112,7 @@ use routectl_core::capability::FailurePhase;
 use routectl_core::capability::SignalTier;
 use runtime_gate::{LearnedProbeGuard, ProbeAdmission};
 pub use status::RouteTargetStatus;
+pub use wire_response::ResponseCheck;
 
 #[cfg(test)]
 use crate::runtime_state::CircuitPhase;
@@ -1591,6 +1593,10 @@ pub struct DispatchMeta {
     /// that drew it and waiting for the field-repair outcome. Content-free;
     /// read once at request resolution.
     pub(crate) wire_rejections: Vec<wire_rejection::PendingWireRejection>,
+    /// The response-direction wire check of the attempt that answered,
+    /// when the sampler admitted it on a FIDELITY lane. The ingress
+    /// renderer takes it and hands it the document the client received.
+    pub response_check: Option<ResponseCheck>,
 }
 
 /// Closed-set facts about one canonical pre-flight planning decision,
@@ -1782,6 +1788,7 @@ impl DispatchMeta {
             field_repairs: Vec::new(),
             field_preflight: Vec::new(),
             wire_rejections: Vec::new(),
+            response_check: None,
         }
     }
 

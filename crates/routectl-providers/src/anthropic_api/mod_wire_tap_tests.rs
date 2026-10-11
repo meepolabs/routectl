@@ -335,3 +335,63 @@ async fn the_stream_sampling_strip_is_declared() {
         [(EditKind::Remove, "/top_p".to_string())]
     );
 }
+
+/// What the upstream answered, as the tap holds it after one call through a
+/// tap of `kind`: the complete body or the assembled stream.
+#[derive(Debug, PartialEq, Eq)]
+enum ResponseSeen {
+    Body(Vec<u8>),
+    Stream(routectl_core::wire_check::Assembled),
+    Nothing,
+}
+
+async fn response_seen(tap: WireTap, stream: bool) -> ResponseSeen {
+    let (mut req, _) = billing_request(stream);
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    send(req, stream).await;
+    if let Some(body) = tap.take_response().response() {
+        return ResponseSeen::Body(body.to_vec());
+    }
+    tap.finish_response_stream(routectl_core::wire_check::StreamExit::Ended)
+        .map_or(ResponseSeen::Nothing, ResponseSeen::Stream)
+}
+
+#[tokio::test]
+#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
+async fn a_response_checking_tap_holds_what_the_upstream_answered() {
+    let checking =
+        || WireTap::checking_response(routectl_core::wire_check::IngressDialect::Anthropic);
+
+    let complete = response_seen(checking(), false).await;
+    let streamed = response_seen(checking(), true).await;
+
+    assert_eq!(
+        complete,
+        ResponseSeen::Body(COMPLETE_BODY.as_bytes().to_vec())
+    );
+    let ResponseSeen::Stream(routectl_core::wire_check::Assembled::Complete(document)) = streamed
+    else {
+        panic!("expected an assembled stream, got {streamed:?}");
+    };
+    assert_eq!(document["id"], "msg_d");
+    assert_eq!(document["stop_reason"], "end_turn");
+}
+
+#[tokio::test]
+#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
+async fn a_tap_not_checking_the_response_holds_no_response() {
+    let rows = [
+        ("unadmitted complete", WireTap::default(), false),
+        ("unadmitted stream", WireTap::default(), true),
+        ("request-only complete", WireTap::admitted(), false),
+        ("request-only stream", WireTap::admitted(), true),
+    ];
+
+    for (name, tap, stream) in rows {
+        assert_eq!(
+            response_seen(tap, stream).await,
+            ResponseSeen::Nothing,
+            "{name}"
+        );
+    }
+}

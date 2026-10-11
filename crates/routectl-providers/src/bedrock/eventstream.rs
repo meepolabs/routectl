@@ -31,6 +31,7 @@ use bytes::Bytes;
 use futures::stream::{BoxStream, Stream};
 use serde_json::Value;
 
+use routectl_core::wire_check::{SseFrame, WireTap};
 use routectl_core::{ChatChunk, Error, OpeningUsageOrigin, Result};
 
 use super::BedrockApiShape;
@@ -42,13 +43,39 @@ use crate::anthropic_api::sse::SseState;
 /// owns everything up to the decoded `Message`.
 struct InvokeFrameHandler {
     sse_state: SseState,
+    response_tap: Option<WireTap>,
 }
 
 impl FrameHandler for InvokeFrameHandler {
     fn on_frame(&mut self, provider_id: &str, message: Message) -> Result<Vec<ChatChunk>> {
+        if let Some(tap) = self.response_tap.as_ref() {
+            fold_invoke_frame(tap, &message);
+        }
         handle_invoke_frame(provider_id, message, &mut self.sse_state)
             .map(|maybe| maybe.into_iter().collect())
     }
+}
+
+/// Fold the Anthropic Messages event a `chunk` frame carries into `tap`'s
+/// response assembler. Any other frame folds nothing; an exception frame
+/// ends the stream through the provider's own error, which the caller
+/// reports as the stream's exit.
+fn fold_invoke_frame(tap: &WireTap, message: &Message) {
+    if !matches!(frame::frame_type(message), frame::FrameType::Event("chunk")) {
+        return;
+    }
+    let Some(decoded) = serde_json::from_slice::<Value>(message.payload())
+        .ok()
+        .and_then(|outer| {
+            outer
+                .get("bytes")
+                .and_then(Value::as_str)
+                .and_then(|b64| B64_STANDARD.decode(b64).ok())
+        })
+    else {
+        return;
+    };
+    tap.push_response_frame(SseFrame::new(None, &String::from_utf8_lossy(&decoded)));
 }
 
 /// Decode Bedrock InvokeModel-stream frames into routectl `ChatChunk`s.
@@ -67,13 +94,14 @@ pub fn invoke_stream<S>(
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
-    invoke_stream_from(provider_id, byte_stream, true)
+    invoke_stream_from(provider_id, byte_stream, true, None)
 }
 
 fn invoke_stream_from<S>(
     provider_id: String,
     byte_stream: S,
     from_vendor_endpoint: bool,
+    response_tap: Option<WireTap>,
 ) -> BoxStream<'static, Result<ChatChunk>>
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -84,7 +112,10 @@ where
     } else {
         sse_state
     };
-    let handler = InvokeFrameHandler { sse_state };
+    let handler = InvokeFrameHandler {
+        sse_state,
+        response_tap,
+    };
     frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Invoke)
 }
 
@@ -97,13 +128,16 @@ pub(crate) fn response_stream<S>(
     region: &str,
     endpoint: &reqwest::Url,
     byte_stream: S,
+    response_tap: Option<WireTap>,
 ) -> BoxStream<'static, Result<ChatChunk>>
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
     let from_vendor = super::endpoint::is_bedrock_runtime_endpoint(region, endpoint);
     match shape {
-        BedrockApiShape::Invoke => invoke_stream_from(provider_id, byte_stream, from_vendor),
+        BedrockApiShape::Invoke => {
+            invoke_stream_from(provider_id, byte_stream, from_vendor, response_tap)
+        }
         BedrockApiShape::Converse => {
             super::converse::eventstream_stream_from(provider_id, byte_stream, from_vendor)
         }
