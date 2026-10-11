@@ -832,3 +832,116 @@ fn debug_renders_no_frame_or_document_content() {
     assert!(!rendered.contains(secret), "{rendered}");
     assert!(rendered.contains("data_len"), "{rendered}");
 }
+
+#[test]
+fn chat_choice_arriving_after_the_others_finished_is_a_disconnect() {
+    let frames = json_frames(&[
+        json!({"id":"c","choices":[{"index":0,"delta":{"content":"a"},"finish_reason":null}]}),
+        json!({"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+        json!({"id":"c","choices":[{"index":1,"delta":{"content":"b"},"finish_reason":null}]}),
+    ]);
+
+    let cut = assemble(IngressDialect::Chat, &frames, StreamExit::Ended);
+    let first_two = assemble(IngressDialect::Chat, &frames[..2], StreamExit::Ended);
+
+    assert!(
+        matches!(first_two, Assembled::Complete(_)),
+        "positive control: {first_two:?}"
+    );
+    assert_eq!(cut, Assembled::Incomplete(IncompleteReason::Disconnect));
+}
+
+fn anthropic_tool_input_frames(partial_json: &str) -> Vec<(Option<String>, String)> {
+    json_frames(&[
+        json!({"type":"message_start","message":{"id":"m","type":"message","role":"assistant"}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"n","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":partial_json}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+#[test]
+fn anthropic_parsed_tool_input_is_charged_against_the_node_cap() {
+    let max_nodes = 40;
+    let rows = [
+        ("dense input over the cap", vec![0; 100], false),
+        ("small input within the cap", vec![0; 3], true),
+    ];
+
+    for (name, items, fits) in rows {
+        let partial = json!({"items": items}).to_string();
+        let mut assembler =
+            StreamAssembler::with_limits(IngressDialect::Anthropic, usize::MAX, max_nodes);
+        feed(&mut assembler, &anthropic_tool_input_frames(&partial));
+
+        let result = assembler.finish(StreamExit::Ended);
+
+        if fits {
+            assert!(
+                matches!(result, Assembled::Complete(_)),
+                "row {name}: {result:?}"
+            );
+        } else {
+            assert_eq!(
+                result,
+                Assembled::Incomplete(IncompleteReason::Budget),
+                "row {name}"
+            );
+        }
+    }
+}
+
+fn responses_snapshot_frames(first: usize, second: usize) -> Vec<(Option<String>, String)> {
+    let snapshot = |kind: &str, status: &str, len: usize| json!({"type":kind,"response":{"id":"r","status":status,"metadata":vec![0; len]}});
+    json_frames(&[
+        snapshot("response.created", "in_progress", first),
+        snapshot("response.completed", "completed", second),
+    ])
+}
+
+#[test]
+fn replacing_a_large_snapshot_is_charged_net_of_what_it_frees() {
+    let max_nodes = 1_000;
+    let rows = [
+        ("two snapshots each over half the cap", 600, 600, true),
+        ("replacement alone over the cap", 600, 1_200, false),
+    ];
+
+    for (name, first, second, fits) in rows {
+        let mut assembler =
+            StreamAssembler::with_limits(IngressDialect::Responses, usize::MAX, max_nodes);
+        feed(&mut assembler, &responses_snapshot_frames(first, second));
+
+        let result = assembler.finish(StreamExit::Ended);
+
+        if fits {
+            assert!(
+                matches!(result, Assembled::Complete(_)),
+                "row {name}: {result:?}"
+            );
+        } else {
+            assert_eq!(
+                result,
+                Assembled::Incomplete(IncompleteReason::Budget),
+                "row {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn anthropic_fold_refuses_parsed_tool_input_over_the_node_room() {
+    let partial = json!({"items": vec![0; 100]}).to_string();
+    let mut assembler = StreamAssembler::with_limits(IngressDialect::Anthropic, usize::MAX, 40);
+    feed(&mut assembler, &anthropic_tool_input_frames(&partial));
+    let StreamAssembler {
+        fold, mut budget, ..
+    } = assembler;
+    let retained = budget.nodes;
+
+    let document = fold.finish(&mut budget);
+
+    assert!(retained > 0, "positive control: the frames were retained");
+    assert!(document.is_none());
+    assert_eq!(budget.nodes, retained);
+}

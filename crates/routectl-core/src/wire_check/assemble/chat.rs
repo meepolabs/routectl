@@ -117,11 +117,7 @@ impl ChatFold {
         if !choices_kept || !self.apply_envelope(body, budget) {
             return Step::OverBudget;
         }
-        if self.every_choice_finished() {
-            Step::Terminal
-        } else {
-            Step::Fold
-        }
+        Step::Fold
     }
 
     pub(super) fn finish(mut self) -> Value {
@@ -151,7 +147,7 @@ impl ChatFold {
             })
     }
 
-    fn every_choice_finished(&self) -> bool {
+    pub(super) fn every_choice_finished(&self) -> bool {
         !self.choices.is_empty()
             && self
                 .choices

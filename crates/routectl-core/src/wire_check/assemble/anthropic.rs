@@ -27,14 +27,17 @@ struct Block {
 impl Block {
     /// The non-streamed body carries a tool block's input as a parsed
     /// object; a buffer that does not parse is kept as its raw text so the
-    /// difference stays visible.
-    fn finish(mut self) -> Value {
+    /// difference stays visible. None when the parsed input would exceed
+    /// the node cap.
+    fn finish(mut self, budget: &mut Budget) -> Option<Value> {
         if !self.partial_json.is_empty() {
             let input = serde_json::from_str::<Value>(&self.partial_json)
                 .unwrap_or(Value::String(self.partial_json));
-            self.body.insert("input".to_owned(), input);
+            if !insert(budget, &mut self.body, "input".to_owned(), input) {
+                return None;
+            }
         }
-        Value::Object(self.body)
+        Some(Value::Object(self.body))
     }
 }
 
@@ -65,11 +68,15 @@ impl AnthropicFold {
         if kept { Step::Fold } else { Step::OverBudget }
     }
 
-    pub(super) fn finish(mut self) -> Value {
-        let content = self.blocks.into_values().map(Block::finish).collect();
+    pub(super) fn finish(mut self, budget: &mut Budget) -> Option<Value> {
+        let content = self
+            .blocks
+            .into_values()
+            .map(|block| block.finish(budget))
+            .collect::<Option<Vec<_>>>()?;
         self.message
             .insert("content".to_owned(), Value::Array(content));
-        Value::Object(self.message)
+        Some(Value::Object(self.message))
     }
 
     fn start_block(&mut self, body: &mut Map<String, Value>, budget: &mut Budget) -> bool {

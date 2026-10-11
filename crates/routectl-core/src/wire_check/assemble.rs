@@ -137,7 +137,6 @@ pub struct StreamAssembler {
     dialect: IngressDialect,
     fold: Fold,
     budget: Budget,
-    terminal: bool,
     closed: bool,
     failure: Option<IncompleteReason>,
 }
@@ -147,7 +146,7 @@ impl fmt::Debug for StreamAssembler {
         f.debug_struct("StreamAssembler")
             .field("dialect", &self.dialect)
             .field("bytes", &self.budget.bytes)
-            .field("terminal", &self.terminal)
+            .field("closed", &self.closed)
             .field("failure", &self.failure)
             .finish_non_exhaustive()
     }
@@ -165,7 +164,6 @@ impl StreamAssembler {
             dialect,
             fold,
             budget: Budget::default(),
-            terminal: false,
             closed: false,
             failure: None,
         }
@@ -215,11 +213,7 @@ impl StreamAssembler {
         };
         match self.fold.apply(input, &mut self.budget) {
             Step::Fold => {}
-            Step::Terminal => self.terminal = true,
-            Step::Close => {
-                self.terminal = true;
-                self.closed = true;
-            }
+            Step::Close => self.closed = true,
             Step::UpstreamError => self.fail(IncompleteReason::UpstreamError),
             Step::OverBudget => self.fail(IncompleteReason::Budget),
         }
@@ -227,8 +221,10 @@ impl StreamAssembler {
 
     /// End the assembly. A failure recorded while folding wins, then a
     /// non-normal `exit`, then a missing terminal frame (reported as
-    /// [`IncompleteReason::Disconnect`]: the stream stopped early).
-    pub fn finish(self, exit: StreamExit) -> Assembled {
+    /// [`IncompleteReason::Disconnect`]: the stream stopped early). Whether
+    /// the terminal arrived is judged on the final state, so a later frame
+    /// can still un-finish a response that looked whole.
+    pub fn finish(mut self, exit: StreamExit) -> Assembled {
         if let Some(reason) = self.failure {
             return Assembled::Incomplete(reason);
         }
@@ -242,10 +238,12 @@ impl StreamAssembler {
         if let Some(reason) = exit_reason {
             return Assembled::Incomplete(reason);
         }
-        if !self.terminal {
+        if !self.closed && !self.fold.is_whole() {
             return Assembled::Incomplete(IncompleteReason::Disconnect);
         }
-        let document = self.fold.finish();
+        let Some(document) = self.fold.finish(&mut self.budget) else {
+            return Assembled::Incomplete(IncompleteReason::Budget);
+        };
         if count_nodes(&document, self.budget.max_nodes) > self.budget.max_nodes {
             return Assembled::Incomplete(IncompleteReason::Budget);
         }
@@ -306,8 +304,6 @@ enum Input {
 /// What a dialect fold made of one frame.
 enum Step {
     Fold,
-    /// The response is whole; later frames may still add to it.
-    Terminal,
     /// The response is whole and nothing after this frame belongs to it.
     Close,
     UpstreamError,
@@ -332,12 +328,23 @@ impl Fold {
         }
     }
 
-    fn finish(self) -> Value {
+    /// Whether the folded state is a whole response even though no frame
+    /// closed the stream.
+    fn is_whole(&self) -> bool {
         match self {
-            Self::Anthropic(fold) => fold.finish(),
-            Self::Chat(fold) => fold.finish(),
-            Self::Responses(fold) => fold.finish(),
-            Self::Spent => Value::Null,
+            Self::Chat(fold) => fold.every_choice_finished(),
+            Self::Anthropic(_) | Self::Responses(_) | Self::Spent => false,
+        }
+    }
+
+    /// The assembled document, or None when building it would exceed the
+    /// node cap.
+    fn finish(self, budget: &mut Budget) -> Option<Value> {
+        match self {
+            Self::Anthropic(fold) => fold.finish(budget),
+            Self::Chat(fold) => Some(fold.finish()),
+            Self::Responses(fold) => Some(fold.finish()),
+            Self::Spent => None,
         }
     }
 }
@@ -381,14 +388,22 @@ impl Budget {
 
     /// Charge every node of `value`, walking no further than the room left.
     fn charge(&mut self, value: &Value) -> bool {
-        let room = self.max_nodes.saturating_sub(self.nodes);
-        self.charge_nodes(count_nodes(value, room))
+        self.swap(None, value)
     }
 
-    fn credit(&mut self, value: &Value) {
-        self.nodes = self
-            .nodes
-            .saturating_sub(count_nodes(value, self.max_nodes));
+    /// Account for `incoming` taking the place of `old`: admitted when the
+    /// retained count minus `old` plus `incoming` stays within the cap.
+    /// Leaves the count unchanged on refusal.
+    fn swap(&mut self, old: Option<&Value>, incoming: &Value) -> bool {
+        let freed = old.map_or(0, |old| count_nodes(old, self.max_nodes));
+        let base = self.nodes.saturating_sub(freed);
+        let room = self.max_nodes.saturating_sub(base);
+        let added = count_nodes(incoming, room);
+        if added > room {
+            return false;
+        }
+        self.nodes = base.saturating_add(added);
+        true
     }
 }
 
@@ -413,12 +428,21 @@ fn count_nodes(document: &Value, limit: usize) -> usize {
 /// Store `value` at `key`, charging it and crediting what it replaces.
 /// Returns false, storing nothing, when the node cap would be exceeded.
 fn insert(budget: &mut Budget, target: &mut Map<String, Value>, key: String, value: Value) -> bool {
-    if !budget.charge(&value) {
+    if !budget.swap(target.get(&key), &value) {
         return false;
     }
-    if let Some(old) = target.insert(key, value) {
-        budget.credit(&old);
+    target.insert(key, value);
+    true
+}
+
+/// Overwrite `slot` with `incoming`, charging it and crediting the old
+/// value. Returns false, changing nothing, when the node cap would be
+/// exceeded.
+fn replace(budget: &mut Budget, slot: &mut Value, incoming: Value) -> bool {
+    if !budget.swap(Some(slot), &incoming) {
+        return false;
     }
+    *slot = incoming;
     true
 }
 
@@ -429,16 +453,12 @@ fn replace_object(
     target: &mut Map<String, Value>,
     incoming: Map<String, Value>,
 ) -> bool {
-    let incoming = Value::Object(incoming);
-    if !budget.charge(&incoming) {
-        return false;
+    let mut slot = Value::Object(std::mem::take(target));
+    let kept = replace(budget, &mut slot, Value::Object(incoming));
+    if let Value::Object(fields) = slot {
+        *target = fields;
     }
-    let Value::Object(incoming) = incoming else {
-        return true;
-    };
-    let old = std::mem::replace(target, incoming);
-    budget.credit(&Value::Object(old));
-    true
+    kept
 }
 
 /// Merge one streamed delta field into `target`: strings concatenate,
@@ -471,14 +491,7 @@ fn merge_field(
         (Value::Object(fields), Value::Object(more)) => more
             .into_iter()
             .all(|(inner, value)| merge_field(budget, fields, inner, value)),
-        (slot, other) => {
-            if !budget.charge(&other) {
-                return false;
-            }
-            let old = std::mem::replace(slot, other);
-            budget.credit(&old);
-            true
-        }
+        (slot, other) => replace(budget, slot, other),
     }
 }
 

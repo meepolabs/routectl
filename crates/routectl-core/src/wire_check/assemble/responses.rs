@@ -197,14 +197,7 @@ fn edit_part(
         return true;
     };
     match edit {
-        PartEdit::Replace(value) => {
-            if !budget.charge(&value) {
-                return false;
-            }
-            let old = std::mem::replace(part, value);
-            budget.credit(&old);
-            true
-        }
+        PartEdit::Replace(value) => super::replace(budget, part, value),
         PartEdit::Append(key, value) => with_object(part, |fields| {
             merge_field(budget, fields, key.to_owned(), value)
         }),
