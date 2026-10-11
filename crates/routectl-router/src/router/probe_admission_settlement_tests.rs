@@ -297,9 +297,9 @@ async fn reached_admission_settled_by_guard_not_by_set() {
         .learned_capabilities
         .import_entries(vec![lapsed_negative("prov_a#upstream-model", &cap)]);
 
-    let (d, events) = routectl_testkit::with_capture(
+    let (d, events) = Box::pin(routectl_testkit::with_capture(
         router.complete_with_options(req_with_web_search(), RouterOptions::default()),
-    )
+    ))
     .await;
     assert!(d.result.is_ok(), "the re-probe reaches m_a and succeeds");
 
@@ -341,9 +341,9 @@ async fn reached_terminal_drop_emits_terminal_settlement() {
         .learned_capabilities
         .import_entries(vec![lapsed_negative("prov_a#upstream-model", &cap)]);
 
-    let (d, events) = routectl_testkit::with_capture(
+    let (d, events) = Box::pin(routectl_testkit::with_capture(
         router.complete_with_options(req_with_web_search(), RouterOptions::default()),
-    )
+    ))
     .await;
     assert!(d.result.is_err(), "the terminal error returns terminally");
 
@@ -383,14 +383,14 @@ async fn future_drop_releases_unreached_admission() {
         .learned_capabilities
         .import_entries(vec![lapsed_negative("prov_b#upstream-model", &cap)]);
 
-    let ((), events) = routectl_testkit::with_capture(async {
+    let ((), events) = Box::pin(routectl_testkit::with_capture(async {
         let fut = router.complete_with_options(req_with_web_search(), RouterOptions::default());
         let cancelled = tokio::time::timeout(Duration::from_millis(150), fut).await;
         assert!(
             cancelled.is_err(),
             "the slow completion must keep the future pending until it is dropped",
         );
-    })
+    }))
     .await;
 
     assert!(
@@ -421,9 +421,9 @@ async fn unreached_admission_emits_probe_settlement_event() {
         .learned_capabilities
         .import_entries(vec![lapsed_negative("prov_b#upstream-model", &cap)]);
 
-    let (d, events) = routectl_testkit::with_capture(
+    let (d, events) = Box::pin(routectl_testkit::with_capture(
         router.complete_with_options(req_with_web_search(), RouterOptions::default()),
-    )
+    ))
     .await;
     assert!(d.result.is_ok());
 

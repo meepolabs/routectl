@@ -138,8 +138,10 @@ fn rewrite_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
 
 /// Drive one completion request and return its meta plus the captured events.
 async fn complete_once(router: &Router, req: ChatRequest) -> (DispatchMeta, Vec<CapturedEvent>) {
-    let (dispatched, events) =
-        with_capture(router.complete_with_options(req, RouterOptions::new())).await;
+    let (dispatched, events) = Box::pin(with_capture(
+        router.complete_with_options(req, RouterOptions::new()),
+    ))
+    .await;
     (dispatched.meta, events)
 }
 
@@ -149,7 +151,7 @@ async fn first_request_for_a_session_records_a_baseline_without_classifying() {
     let router = router_over(&["m1"], 1);
 
     // Act
-    let (meta, events) = complete_once(&router, keyed_req(&["a", "b", "c"])).await;
+    let (meta, events) = Box::pin(complete_once(&router, keyed_req(&["a", "b", "c"]))).await;
 
     // Assert: a first-seen session has nothing to compare against, so no
     // event code and no WARN -- the bounded false negative a restart accepts.
@@ -162,10 +164,10 @@ async fn first_request_for_a_session_records_a_baseline_without_classifying() {
 async fn a_pure_append_turn_stamps_stable() {
     // Arrange
     let router = router_over(&["m1"], 1);
-    complete_once(&router, keyed_req(&["a", "b"])).await;
+    Box::pin(complete_once(&router, keyed_req(&["a", "b"]))).await;
 
     // Act
-    let (meta, events) = complete_once(&router, keyed_req(&["a", "b", "c"])).await;
+    let (meta, events) = Box::pin(complete_once(&router, keyed_req(&["a", "b", "c"]))).await;
 
     // Assert
     assert_eq!(meta.prefix_epoch_event, Some(0));
@@ -178,11 +180,11 @@ async fn the_detector_observes_once_per_client_request_not_once_per_attempt() {
     // client request. An observation inside the chain loop would advance the
     // epoch on every pass.
     let router = router_over(&["m1", "m2"], 2);
-    let (baseline, _) = complete_once(&router, keyed_req(&["a", "b", "c"])).await;
+    let (baseline, _) = Box::pin(complete_once(&router, keyed_req(&["a", "b", "c"]))).await;
     assert_eq!(baseline.attempt_count, 4, "the whole chain must be walked");
 
     // Act: one rewriting request across the same four-pass walk.
-    let (meta, events) = complete_once(&router, keyed_req(&["A", "b", "c"])).await;
+    let (meta, events) = Box::pin(complete_once(&router, keyed_req(&["A", "b", "c"]))).await;
 
     // Assert: exactly one rewrite was observed for the request, so the epoch
     // advanced by one and the next identical turn reads Stable against the
@@ -194,7 +196,7 @@ async fn the_detector_observes_once_per_client_request_not_once_per_attempt() {
         1,
         "retries and fallback hops must not each emit an observation",
     );
-    let (after, _) = complete_once(&router, keyed_req(&["A", "b", "c", "d"])).await;
+    let (after, _) = Box::pin(complete_once(&router, keyed_req(&["A", "b", "c", "d"]))).await;
     assert_eq!(
         after.prefix_epoch_event,
         Some(0),
@@ -208,8 +210,10 @@ async fn a_request_without_a_session_key_records_no_state_and_no_warn() {
     let router = router_over(&["m1"], 1);
 
     // Act: two turns whose prefix visibly changes between them.
-    let (first, first_events) = complete_once(&router, unkeyed_req(&["a", "b", "c"])).await;
-    let (second, second_events) = complete_once(&router, unkeyed_req(&["A", "b", "c"])).await;
+    let (first, first_events) =
+        Box::pin(complete_once(&router, unkeyed_req(&["a", "b", "c"]))).await;
+    let (second, second_events) =
+        Box::pin(complete_once(&router, unkeyed_req(&["A", "b", "c"]))).await;
 
     // Assert
     assert_eq!(first.prefix_epoch_event, None);
@@ -223,11 +227,12 @@ async fn a_request_without_a_session_key_records_no_state_and_no_warn() {
 async fn repeated_rewrites_warn_exactly_once_per_process_but_keep_stamping_the_event() {
     // Arrange
     let router = router_over(&["m1"], 1);
-    complete_once(&router, keyed_req(&["a", "b", "c"])).await;
+    Box::pin(complete_once(&router, keyed_req(&["a", "b", "c"]))).await;
 
     // Act
-    let (first, first_events) = complete_once(&router, keyed_req(&["A", "b", "c"])).await;
-    let (second, second_events) = complete_once(&router, keyed_req(&["B", "b", "c"])).await;
+    let (first, first_events) = Box::pin(complete_once(&router, keyed_req(&["A", "b", "c"]))).await;
+    let (second, second_events) =
+        Box::pin(complete_once(&router, keyed_req(&["B", "b", "c"]))).await;
 
     // Assert: the WARN is edge-triggered per process; the event code carries
     // the unsuppressed volume.
@@ -249,10 +254,14 @@ async fn a_shortening_turn_reseeds_with_no_warn() {
     // Arrange: a summary-replaces-history compaction -- shorter AND different
     // bytes, which must never read as a client rewrite.
     let router = router_over(&["m1"], 1);
-    complete_once(&router, keyed_req(&["a", "b", "c", "d", "e"])).await;
+    Box::pin(complete_once(
+        &router,
+        keyed_req(&["a", "b", "c", "d", "e"]),
+    ))
+    .await;
 
     // Act
-    let (meta, events) = complete_once(&router, keyed_req(&["summary", "e"])).await;
+    let (meta, events) = Box::pin(complete_once(&router, keyed_req(&["summary", "e"]))).await;
 
     // Assert
     assert_eq!(
@@ -291,10 +300,10 @@ async fn the_streaming_path_stamps_the_event_too() {
 async fn the_warn_carries_only_a_hashed_session_key_lengths_and_the_epoch() {
     // Arrange
     let router = router_over(&["m1"], 1);
-    complete_once(&router, keyed_req(&["a", "b", "c"])).await;
+    Box::pin(complete_once(&router, keyed_req(&["a", "b", "c"]))).await;
 
     // Act
-    let (_, events) = complete_once(&router, keyed_req(&["A", "b", "c"])).await;
+    let (_, events) = Box::pin(complete_once(&router, keyed_req(&["A", "b", "c"]))).await;
 
     // Assert: the payload identifies the session only through the salted
     // hash, and no captured event renders the raw key anywhere.
@@ -350,11 +359,11 @@ async fn a_fresh_router_starts_from_a_first_seen_baseline() {
     // false NEGATIVE -- an unclassified turn -- never to a false positive.
     // Arrange
     let before = router_over(&["m1"], 1);
-    complete_once(&before, keyed_req(&["a", "b", "c"])).await;
+    Box::pin(complete_once(&before, keyed_req(&["a", "b", "c"]))).await;
 
     // Act
     let after = router_over(&["m1"], 1);
-    let (meta, events) = complete_once(&after, keyed_req(&["A", "b", "c"])).await;
+    let (meta, events) = Box::pin(complete_once(&after, keyed_req(&["A", "b", "c"]))).await;
 
     // Assert
     assert_eq!(meta.prefix_epoch_event, None);
@@ -365,15 +374,15 @@ async fn a_fresh_router_starts_from_a_first_seen_baseline() {
 async fn the_store_survives_a_hot_reload_via_the_carry_over_chain() {
     // Arrange: build a baseline (and an epoch) on the outgoing router.
     let before = router_over(&["m1"], 1);
-    complete_once(&before, keyed_req(&["a", "b", "c"])).await;
-    let (rewritten, _) = complete_once(&before, keyed_req(&["A", "b", "c"])).await;
+    Box::pin(complete_once(&before, keyed_req(&["a", "b", "c"]))).await;
+    let (rewritten, _) = Box::pin(complete_once(&before, keyed_req(&["A", "b", "c"]))).await;
     assert_eq!(rewritten.prefix_epoch_event, Some(1));
     let mut after = router_over(&["m1"], 1);
 
     // Act
     after.carry_over_prefix_epochs_from(&before);
-    let (stable, _) = complete_once(&after, keyed_req(&["A", "b", "c", "d"])).await;
-    let (again, _) = complete_once(&after, keyed_req(&["Z", "b", "c", "d"])).await;
+    let (stable, _) = Box::pin(complete_once(&after, keyed_req(&["A", "b", "c", "d"]))).await;
+    let (again, _) = Box::pin(complete_once(&after, keyed_req(&["Z", "b", "c", "d"]))).await;
 
     // Assert: the carried baseline classifies the very next turn (no
     // first-seen gap), and the carried epoch counter keeps counting.
@@ -389,17 +398,17 @@ async fn the_carry_over_shares_the_store_rather_than_snapshotting_it() {
     // outgoing Router. Sharing the Arc makes the window unobservable.
     // Arrange
     let before = router_over(&["m1"], 1);
-    complete_once(&before, keyed_req(&["a", "b"])).await;
+    Box::pin(complete_once(&before, keyed_req(&["a", "b"]))).await;
     let mut after = router_over(&["m1"], 1);
 
     // Act: carry over, THEN a late observation through the outgoing Router --
     // the order a request in flight across a reload takes.
     after.carry_over_prefix_epochs_from(&before);
-    complete_once(&before, keyed_req(&["a", "b", "c"])).await;
+    Box::pin(complete_once(&before, keyed_req(&["a", "b", "c"]))).await;
 
     // Assert: the incoming Router sees the late baseline, so the next turn
     // classifies against `["a", "b", "c"]` rather than the pre-swap snapshot.
-    let (stable, _) = complete_once(&after, keyed_req(&["a", "b", "c", "d"])).await;
+    let (stable, _) = Box::pin(complete_once(&after, keyed_req(&["a", "b", "c", "d"]))).await;
     assert_eq!(
         stable.prefix_epoch_event,
         Some(0),
@@ -415,15 +424,16 @@ async fn the_warn_stays_once_per_process_across_a_hot_reload() {
     // track reloads rather than rewrites.
     // Arrange: one rewrite on the outgoing Router burns the latch.
     let before = router_over(&["m1"], 1);
-    complete_once(&before, keyed_req(&["a", "b", "c"])).await;
-    let (rewritten, before_events) = complete_once(&before, keyed_req(&["A", "b", "c"])).await;
+    Box::pin(complete_once(&before, keyed_req(&["a", "b", "c"]))).await;
+    let (rewritten, before_events) =
+        Box::pin(complete_once(&before, keyed_req(&["A", "b", "c"]))).await;
     assert_eq!(rewritten.prefix_epoch_event, Some(1));
     assert_eq!(rewrite_warns(&before_events).len(), 1);
     let mut after = router_over(&["m1"], 1);
 
     // Act
     after.carry_over_prefix_epochs_from(&before);
-    let (again, after_events) = complete_once(&after, keyed_req(&["B", "b", "c"])).await;
+    let (again, after_events) = Box::pin(complete_once(&after, keyed_req(&["B", "b", "c"]))).await;
 
     // Assert: the event code still records the rewrite, the WARN does not
     // repeat.

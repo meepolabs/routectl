@@ -334,9 +334,9 @@ async fn cross_lane_fallback_strips_sampling_only_on_the_oauth_hop() {
     );
 
     let caller_req = sampling_req();
-    let (Dispatched { meta, result }, events) = capture_under_request_span(
+    let (Dispatched { meta, result }, events) = Box::pin(capture_under_request_span(
         router.complete_with_options(caller_req.clone(), RouterOptions::new()),
-    )
+    ))
     .await;
 
     // The OAuth hop halts at token resolution (the host-pinned seat is
@@ -490,9 +490,9 @@ async fn cross_lane_fallback_strips_top_p_when_temperature_is_absent() {
         stop: Some(vec![CALLER_STOP.into()]),
         ..Default::default()
     };
-    let (Dispatched { meta, result }, events) = capture_under_request_span(
+    let (Dispatched { meta, result }, events) = Box::pin(capture_under_request_span(
         router.complete_with_options(caller_req.clone(), RouterOptions::new()),
-    )
+    ))
     .await;
     result.expect_err("the OAuth hop cannot resolve a token in-tree");
     assert_eq!(meta.fallback_count, 1);

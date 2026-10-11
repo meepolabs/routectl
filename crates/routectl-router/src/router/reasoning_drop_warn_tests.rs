@@ -169,9 +169,9 @@ async fn same_provider_retries_and_fallback_hops_warn_exactly_once() {
     );
 
     // Act
-    let (Dispatched { meta, result }, events) = with_capture(
+    let (Dispatched { meta, result }, events) = Box::pin(with_capture(
         router.complete_with_options(req_carrying_reasoning_dialect(), RouterOptions::new()),
-    )
+    ))
     .await;
 
     // Assert: the whole chain was walked with a retry on each entry, and
@@ -218,8 +218,10 @@ async fn a_request_without_the_dialect_never_warns() {
         ..Default::default()
     };
 
-    let (dispatched, events) =
-        with_capture(router.complete_with_options(req, RouterOptions::new())).await;
+    let (dispatched, events) = Box::pin(with_capture(
+        router.complete_with_options(req, RouterOptions::new()),
+    ))
+    .await;
 
     dispatched.result.expect_err("the entry fails");
     assert!(drop_warns(&events).is_empty());
@@ -240,9 +242,9 @@ async fn responses_primary_falling_back_to_a_non_responses_target_warns_once() {
         2,
     );
 
-    let (Dispatched { meta, result }, events) = with_capture(
+    let (Dispatched { meta, result }, events) = Box::pin(with_capture(
         router.complete_with_options(req_carrying_reasoning_dialect(), RouterOptions::new()),
-    )
+    ))
     .await;
 
     result.expect_err("every entry fails");
@@ -271,9 +273,9 @@ async fn a_responses_only_chain_never_warns() {
         2,
     );
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_carrying_reasoning_dialect(), RouterOptions::new()),
-    )
+    ))
     .await;
 
     dispatched.result.expect_err("every entry fails");

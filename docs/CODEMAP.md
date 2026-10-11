@@ -46,6 +46,19 @@ license.
   closed `TranslationReason` (`HostedToolWithheld`, `TranslationRejected`)
   carrying only the date-stripped `TranslationKey`, never a label, URL or
   header; deduped, first-seen order; skipped for background probes
+- `src/wire_check/mod.rs` -- wire-check contract root: content-free types for
+  comparing a client's request body with the body routectl sent upstream on
+  the same attempt; module-scope deny of indexing/unwrap/expect/panic
+- `src/wire_check/path.rs` -- `WirePath`: sanitized RFC 6901 pointer
+  (non-token segment -> `*`, depth 8, 256 bytes, sealed on overflow)
+- `src/wire_check/edits.rs` -- `DeclaredEdit` (site, pointer pattern,
+  `EditKind`) with the blanket-container refusal and one-segment `*`
+  matching; closed `EditSite`, `PathClass`, `RejectionProvenance` label sets
+- `src/wire_check/lane.rs` -- `IngressDialect`, `EgressKind`, `Lane::of`
+  (FIDELITY iff same wire dialect), `LaneClass`, `Leg`; static labels
+- `src/wire_check/carriage.rs` -- `IngressWire`, clone-shared per-attempt
+  `WireTap` (deposit / declare / take; test-utils drop-on-deposit hook),
+  borrowed `AttemptRecord`; no Debug renders body bytes
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for
   unknown Anthropic SSE bytes (skip-serialized; preserves unknown
   content_block types verbatim through the canonical pipeline so Anthropic

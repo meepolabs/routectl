@@ -269,9 +269,9 @@ async fn advisor_strip_removes_tool_from_real_wire_body_and_succeeds() {
         .learned_capabilities
         .import_entries(vec![acting_negative("prov_a#upstream-model", "advisor")]);
 
-    let (d, events) = routectl_testkit::with_capture(
+    let (d, events) = Box::pin(routectl_testkit::with_capture(
         router.complete_with_options(advisor_req("solo"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(
@@ -322,9 +322,9 @@ async fn non_canonical_registry_token_does_not_strip_advisor_tool() {
             "advisor_helper",
         )]);
 
-    let (d, events) = routectl_testkit::with_capture(
+    let (d, events) = Box::pin(routectl_testkit::with_capture(
         router.complete_with_options(advisor_req("solo"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(d.result.is_ok());
@@ -367,9 +367,9 @@ async fn pinned_beta_capability_routes_away_instead_of_stripping() {
             "context_management",
         )]);
 
-    let (d, events) = routectl_testkit::with_capture(
+    let (d, events) = Box::pin(routectl_testkit::with_capture(
         router.complete_with_options(context_management_req("chain"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(d.result.is_ok());

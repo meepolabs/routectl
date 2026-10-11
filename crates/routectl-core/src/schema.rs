@@ -218,8 +218,10 @@ pub enum RequestProvenance {
     Library,
     /// Parsed by the Anthropic ingress.
     AnthropicIngress,
-    /// Parsed by the OpenAI ingress.
+    /// Parsed by the OpenAI Chat Completions ingress.
     OpenaiIngress,
+    /// Parsed by the OpenAI Responses ingress.
+    ResponsesIngress,
 }
 
 /// One preserved Responses `input[]` item plus the number of MODELED
@@ -266,8 +268,9 @@ pub struct ResponsesPassthroughItem {
 /// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`), which
 /// egresses read and re-emit deliberately rather than by serialization.
 /// The same holds for the per-request beta-repair fields the router sets
-/// (`withheld_betas`, `beta_repair_report`) and the per-attempt
-/// `translation_report` slot, which only providers write into.
+/// (`withheld_betas`, `beta_repair_report`), the per-attempt
+/// `translation_report` and `wire_tap` slots, which only providers write
+/// into, and the wire-check carriage (`ingress_wire`, `declared_edits`).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct RoutectlInternal {
@@ -551,6 +554,18 @@ pub struct RoutectlInternal {
     /// translate on this attempt; the router reads it after the call. `None`
     /// means nobody is listening and the egress records nothing.
     pub translation_report: Option<crate::translation_report::TranslationReport>,
+
+    /// The request body exactly as the client sent it, captured once by the
+    /// ingress after parsing. `None` for library consumers.
+    pub ingress_wire: Option<crate::wire_check::IngressWire>,
+
+    /// Body edits the ingress and router declared for this attempt.
+    pub declared_edits: Vec<crate::wire_check::DeclaredEdit>,
+
+    /// Slot where an egress deposits the body it sent and declares the
+    /// edits it made on this attempt; the router reads it after the call.
+    /// `None` means nobody is listening and the egress records nothing.
+    pub wire_tap: Option<crate::wire_check::WireTap>,
 }
 
 /// Fixed redaction placeholder shared by `ForwardedBearer`'s `Debug` and
@@ -1626,6 +1641,15 @@ mod tests {
         assert!(internal.withheld_betas.is_empty());
         assert!(internal.beta_repair_report.is_none());
         assert!(internal.translation_report.is_none());
+    }
+
+    #[test]
+    fn default_carrier_has_no_wire_check_carriage() {
+        let internal = RoutectlInternal::default();
+
+        assert!(internal.ingress_wire.is_none());
+        assert!(internal.declared_edits.is_empty());
+        assert!(internal.wire_tap.is_none());
     }
 
     /// The raw token is reachable only through the explicit accessor.

@@ -224,9 +224,9 @@ async fn eligible_self_identifying_records_warns_and_populates_meta() {
     let router = router_with(OPENAI_P1, self_identifying_provider());
 
     // Act
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     // Assert: the request still fails (learning never changes the
@@ -282,9 +282,9 @@ async fn oversized_upstream_param_is_dropped_from_the_learn_warn() {
     let router = router_with(OPENAI_P1, oversized_param_provider());
 
     // Act
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     // Assert: the capability is still learned (the resolver trims the raw
@@ -342,9 +342,9 @@ api_key_ref = "literal:k"
     let router = router_with(toml, provider.clone());
 
     // Act
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     // Assert: the same provider WAS retried (two dispatches), so the
@@ -377,9 +377,9 @@ api_key_ref = "literal:k"
 "#;
     let router = router_with(toml, self_identifying_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.meta.learned_capabilities.is_empty());
@@ -412,9 +412,9 @@ async fn masked_reject_emits_suppression_warn_and_counter_and_skips_learn() {
     );
     let router = router_with(&toml, self_identifying_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     // The request still fails; nothing was learned and the ordinary learn
@@ -467,9 +467,9 @@ async fn masked_cell_rejection_does_not_refresh_resident_entry() {
     let before = router.learned_capabilities.snapshot();
     assert_eq!(before.len(), 1);
 
-    let (dispatched, _events) = with_capture(
+    let (dispatched, _events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     // No learn event, and the resident entry is untouched: neither
@@ -502,9 +502,9 @@ async fn non_request_fault_status_is_never_learned() {
     });
     let router = router_with(OPENAI_P1, provider);
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.meta.learned_capabilities.is_empty());
@@ -519,9 +519,9 @@ async fn unresolvable_openai_rejection_is_not_learned() {
     // no-learn-on-unresolvable is the replacement guardrail.)
     let router = router_with(OPENAI_P1, paramless_unsupported_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.meta.learned_capabilities.is_empty());
@@ -539,9 +539,9 @@ async fn off_request_param_is_not_learned() {
     // entry is planted.
     let router = router_with(OPENAI_P1, poisoned_param_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("computer_use"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.result.is_err());
@@ -573,8 +573,10 @@ async fn inferred_prefill_is_dormant_and_not_learned() {
         ..Default::default()
     };
 
-    let (dispatched, events) =
-        with_capture(router.complete_with_options(req, RouterOptions::default())).await;
+    let (dispatched, events) = Box::pin(with_capture(
+        router.complete_with_options(req, RouterOptions::default()),
+    ))
+    .await;
 
     assert!(dispatched.result.is_err());
     assert!(
@@ -602,9 +604,9 @@ api_key_ref = "literal:k"
 "#;
     let router = router_with(toml, self_identifying_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.meta.learned_capabilities.is_empty());
@@ -906,9 +908,9 @@ async fn unmatched_bedrock_validation_warns_and_counts_once() {
         bedrock_400_provider(body, Some("ValidationException")),
     );
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.result.is_err());
@@ -941,9 +943,9 @@ async fn non_validation_bedrock_400_does_not_warn_or_count() {
     let body = r#"{"error":{"type":"invalid_request_error","message":"nested"}}"#;
     let router = router_with(BEDROCK_P1, bedrock_400_provider(body, None));
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.result.is_err());
@@ -959,9 +961,9 @@ async fn non_bedrock_match_leaves_bedrock_unmatched_counter_untouched() {
     // on the matcher's None branch.
     let router = router_with(OPENAI_P1, self_identifying_provider());
 
-    let (dispatched, _events) = with_capture(
+    let (dispatched, _events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
@@ -2021,9 +2023,9 @@ async fn unmatched_feature_naming_logs_at_debug_and_counts_once() {
     // fields, and nothing is learned.
     let router = router_with(ANTHROPIC_P1, generic_anthropic_400_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.result.is_err());
@@ -2112,8 +2114,10 @@ async fn unmatched_feature_naming_skips_non_feature_carrying_request() {
         ..Default::default()
     };
 
-    let (dispatched, events) =
-        with_capture(router.complete_with_options(req, RouterOptions::default())).await;
+    let (dispatched, events) = Box::pin(with_capture(
+        router.complete_with_options(req, RouterOptions::default()),
+    ))
+    .await;
 
     assert!(dispatched.result.is_err());
     assert!(feature_naming_unmatched_events(&events).is_empty());
@@ -2130,9 +2134,9 @@ async fn unmatched_feature_naming_ignores_a_request_that_only_grounds_a_field_ke
     // stay silent.
     let router = router_with(ANTHROPIC_P1, generic_anthropic_400_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_grounding_a_field_key_only(), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.result.is_err());
@@ -2154,9 +2158,9 @@ async fn unmatched_feature_naming_skips_provider_without_a_table() {
     // deterministic 400 there never bumps the feature-naming drift counter.
     let router = router_with(OPENAI_P1, paramless_unsupported_provider());
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.result.is_err());
@@ -2286,9 +2290,9 @@ async fn bedrock_advisor_400_learns_one_self_identifying_negative() {
     let router = router_with(BEDROCK_P1, advisor_gated_provider(&fx));
 
     // Act
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("advisor"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     // Assert: exactly one self-identifying negative, carrying the normalized
@@ -2384,9 +2388,9 @@ async fn bedrock_force_supported_masks_the_advisor_learn() {
     );
 
     // Act
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("advisor"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     // Assert: nothing learned, one suppression WARN + one counter, no negative.
@@ -2471,9 +2475,9 @@ async fn bedrock_negative_controls_do_not_learn_or_route() {
         });
         let router = router_with(BEDROCK_P1, provider.clone());
 
-        let (dispatched, events) = with_capture(
+        let (dispatched, events) = Box::pin(with_capture(
             router.complete_with_options(req_with_tool("advisor"), RouterOptions::default()),
-        )
+        ))
         .await;
 
         assert!(dispatched.result.is_err(), "control {control}");
@@ -2541,9 +2545,9 @@ async fn bedrock_drift_body_bumps_only_the_unmatched_counter() {
         bedrock_400_provider(&drift_body, Some(&lifted_type(&fx))),
     );
 
-    let (dispatched, events) = with_capture(
+    let (dispatched, events) = Box::pin(with_capture(
         router.complete_with_options(req_with_tool("advisor"), RouterOptions::default()),
-    )
+    ))
     .await;
 
     assert!(dispatched.result.is_err());
@@ -2703,9 +2707,9 @@ async fn an_input_file_rejection_on_the_responses_lane_learns_no_capability() {
         let router = router_with(RESPONSES_P1, provider.clone());
 
         // Act
-        let (dispatched, events) = with_capture(
+        let (dispatched, events) = Box::pin(with_capture(
             router.complete_with_options(req_with_tool_result_file(), RouterOptions::default()),
-        )
+        ))
         .await;
 
         // Assert: the rejection reached dispatch and nothing was learned.

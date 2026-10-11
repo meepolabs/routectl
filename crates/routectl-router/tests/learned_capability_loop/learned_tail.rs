@@ -38,7 +38,11 @@ async fn all_targets_learned_still_attempts_the_tail() {
     assert_eq!(hits(&a).await, 1);
     assert_eq!(hits(&b).await, 1);
 
-    let (d2, events) = routectl_testkit::with_capture(complete(&router, "learned_tail")).await;
+    let (d2, events) = Box::pin(routectl_testkit::with_capture(complete(
+        &router,
+        "learned_tail",
+    )))
+    .await;
     assert!(
         matches!(d2.result, Err(Error::Upstream { status: 400, .. })),
         "a learned-only chain must still attempt (not 501): {:?}",

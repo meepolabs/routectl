@@ -1,0 +1,350 @@
+//! The edit register: content-free declarations of the body changes routectl
+//! makes on purpose, plus the closed label sets a finding carries.
+
+use std::borrow::Cow;
+
+use super::path::{MAX_WIRE_PATH_DEPTH, MAX_WIRE_PATH_LEN, WILDCARD_SEGMENT, WirePath};
+
+/// Patterns that would exempt a whole container from detection. A transform
+/// that broke anything under one of these would otherwise go unseen.
+const BLANKET_PATTERNS: [&str; 9] = [
+    "",
+    "/",
+    "/*",
+    "/messages",
+    "/messages/*",
+    "/system",
+    "/system/*",
+    "/tools",
+    "/tools/*",
+];
+
+/// Kind of change a declared edit makes at its path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditKind {
+    /// The value at the path is removed.
+    Remove,
+    /// A value is added at the path.
+    Add,
+    /// The value at the path is replaced.
+    Rewrite,
+    /// The value at the path is moved to another location.
+    Relocate,
+}
+
+impl EditKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 4] = [Self::Remove, Self::Add, Self::Rewrite, Self::Relocate];
+
+    /// Static label for logs and counters.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Remove => "remove",
+            Self::Add => "add",
+            Self::Rewrite => "rewrite",
+            Self::Relocate => "relocate",
+        }
+    }
+}
+
+/// The site in routectl that made a declared edit. Closed: a new transform
+/// that changes a body gets its own member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditSite {
+    /// Router: the alias target's upstream model id replaces the client's.
+    ModelRename,
+    /// Router: operator `payload_extras` merged into the body.
+    OperatorPayloadExtras,
+    /// Router: lossless context reduction.
+    ContextReduction,
+    /// Router: prompt-cache breakpoint placement.
+    CachePlacement,
+    /// Router: repair of a field the upstream rejected on this request.
+    FieldRepair,
+    /// Router: a repair learned from an earlier rejection.
+    LearnedRepair,
+    /// Router: pre-flight removal or rewrite of a field known to be refused.
+    Preflight,
+    /// Router: canary probe of a previously refused field.
+    Canary,
+    /// Router: removal of replay artifacts the target cannot accept.
+    ReplayStrip,
+    /// Router: stable-prefix rewriting.
+    PrefixRewrite,
+    /// Provider: Claude Code cloak transforms.
+    Cloak,
+    /// Provider: Claude sampling-parameter normalization.
+    ClaudeSamplingNormalize,
+    /// Provider: reconciliation of mutually exclusive sampling parameters.
+    SamplingReconcile,
+    /// Provider: thinking removed because `tool_choice` forces tool use.
+    ThinkingStripForcedToolUse,
+    /// Provider: the body `stream` flag removed.
+    StreamStrip,
+    /// Provider: `anthropic_beta` removed from the body.
+    AnthropicBetaStrip,
+    /// Provider: reasoning effort injected.
+    EffortInjection,
+    /// Provider: tool-call ids rewritten to the upstream's id grammar.
+    ToolIdSanitize,
+    /// Provider: thinking signatures removed.
+    SignatureStrip,
+    /// Provider: top-level cache markers lowered onto blocks.
+    CacheMarkerLowering,
+    /// Provider: body fields moved into the request URL.
+    UrlFieldRelocate,
+    /// Provider: a hosted tool withheld from the upstream.
+    HostedToolWithhold,
+    /// Provider: `stream_options` injected.
+    StreamOptionsInjection,
+    /// Provider: a field gated off for the upstream's auth surface.
+    AuthSurfaceGate,
+    /// Provider: preserved Responses input items spliced back in.
+    ResponsesPassthroughSplice,
+    /// Response: a finish reason mapped to the client dialect's value.
+    FinishReasonRewrite,
+    /// Response: streaming envelope fields stamped onto each chunk.
+    StreamEnvelopeStamp,
+    /// Response: cached-token usage added.
+    CachedTokensAdd,
+}
+
+impl EditSite {
+    /// Every site, in declaration order.
+    pub const ALL: [Self; 28] = [
+        Self::ModelRename,
+        Self::OperatorPayloadExtras,
+        Self::ContextReduction,
+        Self::CachePlacement,
+        Self::FieldRepair,
+        Self::LearnedRepair,
+        Self::Preflight,
+        Self::Canary,
+        Self::ReplayStrip,
+        Self::PrefixRewrite,
+        Self::Cloak,
+        Self::ClaudeSamplingNormalize,
+        Self::SamplingReconcile,
+        Self::ThinkingStripForcedToolUse,
+        Self::StreamStrip,
+        Self::AnthropicBetaStrip,
+        Self::EffortInjection,
+        Self::ToolIdSanitize,
+        Self::SignatureStrip,
+        Self::CacheMarkerLowering,
+        Self::UrlFieldRelocate,
+        Self::HostedToolWithhold,
+        Self::StreamOptionsInjection,
+        Self::AuthSurfaceGate,
+        Self::ResponsesPassthroughSplice,
+        Self::FinishReasonRewrite,
+        Self::StreamEnvelopeStamp,
+        Self::CachedTokensAdd,
+    ];
+
+    /// Static label for logs and counters.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ModelRename => "model_rename",
+            Self::OperatorPayloadExtras => "operator_payload_extras",
+            Self::ContextReduction => "context_reduction",
+            Self::CachePlacement => "cache_placement",
+            Self::FieldRepair => "field_repair",
+            Self::LearnedRepair => "learned_repair",
+            Self::Preflight => "preflight",
+            Self::Canary => "canary",
+            Self::ReplayStrip => "replay_strip",
+            Self::PrefixRewrite => "prefix_rewrite",
+            Self::Cloak => "cloak",
+            Self::ClaudeSamplingNormalize => "claude_sampling_normalize",
+            Self::SamplingReconcile => "sampling_reconcile",
+            Self::ThinkingStripForcedToolUse => "thinking_strip_forced_tool_use",
+            Self::StreamStrip => "stream_strip",
+            Self::AnthropicBetaStrip => "anthropic_beta_strip",
+            Self::EffortInjection => "effort_injection",
+            Self::ToolIdSanitize => "tool_id_sanitize",
+            Self::SignatureStrip => "signature_strip",
+            Self::CacheMarkerLowering => "cache_marker_lowering",
+            Self::UrlFieldRelocate => "url_field_relocate",
+            Self::HostedToolWithhold => "hosted_tool_withhold",
+            Self::StreamOptionsInjection => "stream_options_injection",
+            Self::AuthSurfaceGate => "auth_surface_gate",
+            Self::ResponsesPassthroughSplice => "responses_passthrough_splice",
+            Self::FinishReasonRewrite => "finish_reason_rewrite",
+            Self::StreamEnvelopeStamp => "stream_envelope_stamp",
+            Self::CachedTokensAdd => "cached_tokens_add",
+        }
+    }
+}
+
+/// Why a pointer pattern was refused as a [`DeclaredEdit`] path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EditPatternError {
+    /// The pattern covers a whole container, which would hide every change
+    /// made anywhere inside it.
+    #[error("edit pattern exempts a whole container")]
+    Blanket,
+    /// The pattern is not an RFC 6901 pointer (it does not start with `/`).
+    #[error("edit pattern is not a JSON pointer")]
+    NotAPointer,
+    /// The pattern can never match a [`WirePath`]: an empty or non-token
+    /// segment, or more segments or bytes than a path carries.
+    #[error("edit pattern can never match a wire path")]
+    Unmatchable,
+}
+
+/// One body change routectl made on purpose, declared at the site that made
+/// it. Carries no body content: only the site, a pointer pattern and the
+/// kind of change.
+///
+/// The pattern is an RFC 6901 pointer whose segments are escaped the same
+/// way as a [`WirePath`]; a `*` segment matches exactly one segment.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeclaredEdit {
+    site: EditSite,
+    path: Cow<'static, str>,
+    kind: EditKind,
+}
+
+impl DeclaredEdit {
+    /// Declare an edit, refusing a pattern that blankets a whole container
+    /// or that could never match a [`WirePath`].
+    pub fn new(
+        site: EditSite,
+        path: impl Into<Cow<'static, str>>,
+        kind: EditKind,
+    ) -> Result<Self, EditPatternError> {
+        let path = path.into();
+        validate_pattern(&path)?;
+        Ok(Self { site, path, kind })
+    }
+
+    /// The site that made the edit.
+    pub const fn site(&self) -> EditSite {
+        self.site
+    }
+
+    /// The pointer pattern.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The kind of change.
+    pub const fn kind(&self) -> EditKind {
+        self.kind
+    }
+
+    /// True if the pattern matches `path`: the same number of segments, each
+    /// pattern segment either `*` or equal to the path's segment.
+    pub fn matches(&self, path: &WirePath) -> bool {
+        let mut pattern = self.path.split('/').skip(1);
+        let mut actual = path.segments();
+        loop {
+            match (pattern.next(), actual.next()) {
+                (None, None) => return true,
+                (Some(want), Some(got)) if want == WILDCARD_SEGMENT || want == got => {}
+                _ => return false,
+            }
+        }
+    }
+}
+
+fn validate_pattern(pattern: &str) -> Result<(), EditPatternError> {
+    if BLANKET_PATTERNS.contains(&pattern) {
+        return Err(EditPatternError::Blanket);
+    }
+    let Some(rest) = pattern.strip_prefix('/') else {
+        return Err(EditPatternError::NotAPointer);
+    };
+    let matchable = pattern.len() <= MAX_WIRE_PATH_LEN
+        && rest.split('/').count() <= MAX_WIRE_PATH_DEPTH
+        && rest
+            .split('/')
+            .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic()));
+    if matchable {
+        Ok(())
+    } else {
+        Err(EditPatternError::Unmatchable)
+    }
+}
+
+/// How a path differs between the two bodies a check compares. Closed; it is
+/// the `path_class` label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PathClass {
+    /// Present in the input, absent from the output.
+    Missing,
+    /// The same value at another index of the same array.
+    Moved,
+    /// Present in both with a different value.
+    Changed,
+    /// Absent from the input, present in the output.
+    Added,
+    /// A translation-lane input key the egress did not carry.
+    TranslationUnconsumed,
+}
+
+impl PathClass {
+    /// Every class, in declaration order.
+    pub const ALL: [Self; 5] = [
+        Self::Missing,
+        Self::Moved,
+        Self::Changed,
+        Self::Added,
+        Self::TranslationUnconsumed,
+    ];
+
+    /// Static label for logs and counters.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Moved => "moved",
+            Self::Changed => "changed",
+            Self::Added => "added",
+            Self::TranslationUnconsumed => "translation_unconsumed",
+        }
+    }
+}
+
+/// Where a path named by an upstream rejection came from. Closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RejectionProvenance {
+    /// The client sent it and routectl forwarded it unchanged.
+    ClientUnchanged,
+    /// The client sent it and routectl changed it.
+    ClientChanged,
+    /// The client did not send it; routectl added it.
+    RoutectlAdded,
+    /// The rejection named no path that could be located.
+    Unlocalized,
+    /// Not applicable: the lane translates, so client and egress paths do
+    /// not correspond.
+    NotApplicable,
+}
+
+impl RejectionProvenance {
+    /// Every provenance, in declaration order.
+    pub const ALL: [Self; 5] = [
+        Self::ClientUnchanged,
+        Self::ClientChanged,
+        Self::RoutectlAdded,
+        Self::Unlocalized,
+        Self::NotApplicable,
+    ];
+
+    /// Static label for logs and counters.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ClientUnchanged => "client_unchanged",
+            Self::ClientChanged => "client_changed",
+            Self::RoutectlAdded => "routectl_added",
+            Self::Unlocalized => "unlocalized",
+            Self::NotApplicable => "n_a",
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+#[path = "edits_tests.rs"]
+mod tests;

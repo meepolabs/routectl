@@ -715,18 +715,21 @@ pub routectl_core::error::Error::UnknownAlias(alloc::string::String)
 pub routectl_core::error::Error::UnknownProvider(alloc::string::String)
 pub routectl_core::error::Error::Upstream
 pub routectl_core::error::Error::Upstream::body: alloc::string::String
+pub routectl_core::error::Error::Upstream::extras: routectl_core::error::UpstreamExtras
 pub routectl_core::error::Error::Upstream::provider: alloc::string::String
 pub routectl_core::error::Error::Upstream::retry_after: core::option::Option<core::time::Duration>
 pub routectl_core::error::Error::Upstream::status: u16
 pub routectl_core::error::Error::Upstream::upstream_code: core::option::Option<alloc::boxed::Box<str>>
-pub routectl_core::error::Error::Upstream::upstream_request_id: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::error::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::error::Error::Validation(alloc::string::String)
 impl routectl_core::error::Error
 pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
 pub fn routectl_core::error::Error::upstream(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_full(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn routectl_core::error::Error::upstream_request_id(&self) -> core::option::Option<&str>
+pub fn routectl_core::error::Error::upstream_with_body(impl core::convert::Into<alloc::string::String>, u16, routectl_core::parsed_error_body::UpstreamBody, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_with_retry_after(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>) -> Self
 pub fn routectl_core::error::Error::with_upstream_request_id(self, core::option::Option<alloc::string::String>) -> Self
 impl core::convert::From<core::io::error::Error> for routectl_core::error::Error
@@ -766,6 +769,37 @@ impl<T> core::convert::From<T> for routectl_core::error::Error
 pub fn routectl_core::error::Error::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::error::Error
 impl<T> tracing::instrument::WithSubscriber for routectl_core::error::Error
+pub struct routectl_core::error::UpstreamExtras(_)
+impl routectl_core::error::UpstreamExtras
+pub fn routectl_core::error::UpstreamExtras::parsed(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
+pub fn routectl_core::error::UpstreamExtras::request_id(&self) -> core::option::Option<&str>
+impl core::fmt::Debug for routectl_core::error::UpstreamExtras
+pub fn routectl_core::error::UpstreamExtras::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::error::UpstreamExtras
+impl core::marker::Send for routectl_core::error::UpstreamExtras
+impl core::marker::Sync for routectl_core::error::UpstreamExtras
+impl core::marker::Unpin for routectl_core::error::UpstreamExtras
+impl core::marker::UnsafeUnpin for routectl_core::error::UpstreamExtras
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::error::UpstreamExtras
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::error::UpstreamExtras
+impl<T, U> core::convert::Into<U> for routectl_core::error::UpstreamExtras where U: core::convert::From<T>
+pub fn routectl_core::error::UpstreamExtras::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::error::UpstreamExtras where U: core::convert::Into<T>
+pub type routectl_core::error::UpstreamExtras::Error = core::convert::Infallible
+pub fn routectl_core::error::UpstreamExtras::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::error::UpstreamExtras where U: core::convert::TryFrom<T>
+pub type routectl_core::error::UpstreamExtras::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::error::UpstreamExtras::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_core::error::UpstreamExtras where T: 'static + ?core::marker::Sized
+pub fn routectl_core::error::UpstreamExtras::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::error::UpstreamExtras where T: ?core::marker::Sized
+pub fn routectl_core::error::UpstreamExtras::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::error::UpstreamExtras where T: ?core::marker::Sized
+pub fn routectl_core::error::UpstreamExtras::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_core::error::UpstreamExtras
+pub fn routectl_core::error::UpstreamExtras::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::error::UpstreamExtras
+impl<T> tracing::instrument::WithSubscriber for routectl_core::error::UpstreamExtras
 pub type routectl_core::error::Result<T, E> = core::result::Result<T, E>
 pub mod routectl_core::failure_class
 #[non_exhaustive] pub enum routectl_core::failure_class::FailureClass
@@ -1200,7 +1234,6 @@ pub fn routectl_core::log_safe::extract_upstream_message(&str) -> alloc::string:
 pub fn routectl_core::log_safe::header_trace_enabled() -> bool
 pub fn routectl_core::log_safe::headers_to_json<'a>(impl core::iter::traits::collect::IntoIterator<Item = (&'a str, &'a [u8])>) -> serde_json::value::Value
 pub fn routectl_core::log_safe::init_log_overrides(core::option::Option<bool>, core::option::Option<usize>, core::option::Option<bool>)
-pub fn routectl_core::log_safe::is_json_error_envelope(&str) -> bool
 pub fn routectl_core::log_safe::redact_error_body_text(&str) -> alloc::borrow::Cow<'_, str>
 pub fn routectl_core::log_safe::redact_prompts_enabled() -> bool
 pub fn routectl_core::log_safe::redact_prompts_in(&serde_json::value::Value) -> serde_json::value::Value
@@ -1222,6 +1255,83 @@ pub fn routectl_core::log_safe::trace_structural_summary(&str, &str, &str, &serd
 pub fn routectl_core::log_safe::trace_upstream_response_headers(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::log_safe::trace_upstream_success_body(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::log_safe::wrap_stream_with_summary<S>(S, &'static str, &'static str, alloc::string::String) -> futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>> where S: futures_core::stream::Stream<Item = routectl_core::error::Result<routectl_core::schema::ChatChunk>> + core::marker::Send + 'static
+pub mod routectl_core::parsed_error_body
+pub struct routectl_core::parsed_error_body::ParsedErrorBody(_)
+impl routectl_core::parsed_error_body::ParsedErrorBody
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::error_code(&self) -> core::option::Option<alloc::string::String>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::error_message(&self) -> core::option::Option<&str>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::error_param(&self) -> core::option::Option<&str>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::error_type(&self) -> core::option::Option<&str>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::is_error_envelope(&self) -> bool
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::value(&self) -> &serde_json::value::Value
+impl core::clone::Clone for routectl_core::parsed_error_body::ParsedErrorBody
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::clone(&self) -> routectl_core::parsed_error_body::ParsedErrorBody
+impl core::fmt::Debug for routectl_core::parsed_error_body::ParsedErrorBody
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::marker::Send for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::marker::Sync for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::marker::Unpin for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::marker::UnsafeUnpin for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::parsed_error_body::ParsedErrorBody
+impl<T, U> core::convert::Into<U> for routectl_core::parsed_error_body::ParsedErrorBody where U: core::convert::From<T>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::parsed_error_body::ParsedErrorBody where U: core::convert::Into<T>
+pub type routectl_core::parsed_error_body::ParsedErrorBody::Error = core::convert::Infallible
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::parsed_error_body::ParsedErrorBody where U: core::convert::TryFrom<T>
+pub type routectl_core::parsed_error_body::ParsedErrorBody::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::parsed_error_body::ParsedErrorBody where T: core::clone::Clone
+pub type routectl_core::parsed_error_body::ParsedErrorBody::Owned = T
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::clone_into(&self, &mut T)
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::parsed_error_body::ParsedErrorBody where T: 'static + ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::parsed_error_body::ParsedErrorBody where T: ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::parsed_error_body::ParsedErrorBody where T: ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::parsed_error_body::ParsedErrorBody where T: core::clone::Clone
+pub unsafe fn routectl_core::parsed_error_body::ParsedErrorBody::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::parsed_error_body::ParsedErrorBody
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::parsed_error_body::ParsedErrorBody
+impl<T> tracing::instrument::WithSubscriber for routectl_core::parsed_error_body::ParsedErrorBody
+pub struct routectl_core::parsed_error_body::UpstreamBody
+impl routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::UpstreamBody::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub const fn routectl_core::parsed_error_body::UpstreamBody::parsed(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
+pub fn routectl_core::parsed_error_body::UpstreamBody::text(&self) -> &str
+impl core::fmt::Debug for routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::UpstreamBody::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::parsed_error_body::UpstreamBody
+impl core::marker::Send for routectl_core::parsed_error_body::UpstreamBody
+impl core::marker::Sync for routectl_core::parsed_error_body::UpstreamBody
+impl core::marker::Unpin for routectl_core::parsed_error_body::UpstreamBody
+impl core::marker::UnsafeUnpin for routectl_core::parsed_error_body::UpstreamBody
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::parsed_error_body::UpstreamBody
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::parsed_error_body::UpstreamBody
+impl<T, U> core::convert::Into<U> for routectl_core::parsed_error_body::UpstreamBody where U: core::convert::From<T>
+pub fn routectl_core::parsed_error_body::UpstreamBody::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::parsed_error_body::UpstreamBody where U: core::convert::Into<T>
+pub type routectl_core::parsed_error_body::UpstreamBody::Error = core::convert::Infallible
+pub fn routectl_core::parsed_error_body::UpstreamBody::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::parsed_error_body::UpstreamBody where U: core::convert::TryFrom<T>
+pub type routectl_core::parsed_error_body::UpstreamBody::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::parsed_error_body::UpstreamBody::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_core::parsed_error_body::UpstreamBody where T: 'static + ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::UpstreamBody::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::parsed_error_body::UpstreamBody where T: ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::UpstreamBody::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::parsed_error_body::UpstreamBody where T: ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::UpstreamBody::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::UpstreamBody::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::parsed_error_body::UpstreamBody
+impl<T> tracing::instrument::WithSubscriber for routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::upstream_message_or_excerpt(&str, core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>) -> alloc::string::String
 pub mod routectl_core::reasoning_envelope
 pub fn routectl_core::reasoning_envelope::unwrap(&str) -> core::option::Option<(&str, core::option::Option<&str>, &str)>
 pub fn routectl_core::reasoning_envelope::wrap(&str, core::option::Option<&str>, &str) -> alloc::string::String
@@ -1424,6 +1534,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::Reasoning
 pub routectl_core::schema::RequestProvenance::AnthropicIngress
 pub routectl_core::schema::RequestProvenance::Library
 pub routectl_core::schema::RequestProvenance::OpenaiIngress
+pub routectl_core::schema::RequestProvenance::ResponsesIngress
 impl core::clone::Clone for routectl_core::schema::RequestProvenance
 pub fn routectl_core::schema::RequestProvenance::clone(&self) -> routectl_core::schema::RequestProvenance
 impl core::cmp::Eq for routectl_core::schema::RequestProvenance
@@ -1650,7 +1761,7 @@ impl serde_core::ser::Serialize for routectl_core::schema::ChatRequest
 pub fn routectl_core::schema::ChatRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for routectl_core::schema::ChatRequest
 pub fn routectl_core::schema::ChatRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for routectl_core::schema::ChatRequest
+impl !core::marker::Freeze for routectl_core::schema::ChatRequest
 impl core::marker::Send for routectl_core::schema::ChatRequest
 impl core::marker::Sync for routectl_core::schema::ChatRequest
 impl core::marker::Unpin for routectl_core::schema::ChatRequest
@@ -2145,11 +2256,13 @@ pub routectl_core::schema::RoutectlInternal::anthropic_thinking_display: core::o
 pub routectl_core::schema::RoutectlInternal::background_probe: bool
 pub routectl_core::schema::RoutectlInternal::beta_repair_report: core::option::Option<routectl_core::BetaRepairReport>
 pub routectl_core::schema::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub routectl_core::schema::RoutectlInternal::declared_edits: alloc::vec::Vec<routectl_core::wire_check::DeclaredEdit>
 pub routectl_core::schema::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
 pub routectl_core::schema::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
 pub routectl_core::schema::RoutectlInternal::header_extras: core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>
 pub routectl_core::schema::RoutectlInternal::history_reasoning: core::option::Option<routectl_core::CoreHistoryReasoning>
 pub routectl_core::schema::RoutectlInternal::inbound_session_key: core::option::Option<alloc::string::String>
+pub routectl_core::schema::RoutectlInternal::ingress_wire: core::option::Option<routectl_core::wire_check::IngressWire>
 pub routectl_core::schema::RoutectlInternal::max_output_tokens: u32
 pub routectl_core::schema::RoutectlInternal::max_thinking_budget: u32
 pub routectl_core::schema::RoutectlInternal::operator_betas: alloc::vec::Vec<alloc::string::String>
@@ -2160,6 +2273,8 @@ pub routectl_core::schema::RoutectlInternal::reasoning_dialect: core::option::Op
 pub routectl_core::schema::RoutectlInternal::responses_input_passthrough: alloc::vec::Vec<routectl_core::schema::ResponsesPassthroughItem>
 pub routectl_core::schema::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::supports_adaptive_thinking: bool
+pub routectl_core::schema::RoutectlInternal::translation_report: core::option::Option<routectl_core::TranslationReport>
+pub routectl_core::schema::RoutectlInternal::wire_tap: core::option::Option<routectl_core::wire_check::WireTap>
 pub routectl_core::schema::RoutectlInternal::withheld_betas: alloc::sync::Arc<[alloc::string::String]>
 impl core::clone::Clone for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::clone(&self) -> routectl_core::schema::RoutectlInternal
@@ -2167,7 +2282,7 @@ impl core::default::Default for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::default() -> routectl_core::schema::RoutectlInternal
 impl core::fmt::Debug for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_core::schema::RoutectlInternal
+impl !core::marker::Freeze for routectl_core::schema::RoutectlInternal
 impl core::marker::Send for routectl_core::schema::RoutectlInternal
 impl core::marker::Sync for routectl_core::schema::RoutectlInternal
 impl core::marker::Unpin for routectl_core::schema::RoutectlInternal
@@ -2830,6 +2945,807 @@ pub fn routectl_core::upstream_meta::UpstreamMeta::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::UpstreamMeta
 impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::UpstreamMeta
 pub const routectl_core::upstream_meta::OVERAGE_CLAIM: &str
+pub mod routectl_core::wire_check
+pub enum routectl_core::wire_check::EditKind
+pub routectl_core::wire_check::EditKind::Add
+pub routectl_core::wire_check::EditKind::Relocate
+pub routectl_core::wire_check::EditKind::Remove
+pub routectl_core::wire_check::EditKind::Rewrite
+impl routectl_core::wire_check::EditKind
+pub const routectl_core::wire_check::EditKind::ALL: [Self; 4]
+pub const fn routectl_core::wire_check::EditKind::label(self) -> &'static str
+impl core::clone::Clone for routectl_core::wire_check::EditKind
+pub fn routectl_core::wire_check::EditKind::clone(&self) -> routectl_core::wire_check::EditKind
+impl core::cmp::Eq for routectl_core::wire_check::EditKind
+impl core::cmp::PartialEq for routectl_core::wire_check::EditKind
+pub fn routectl_core::wire_check::EditKind::eq(&self, &routectl_core::wire_check::EditKind) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::EditKind
+pub fn routectl_core::wire_check::EditKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::EditKind
+pub fn routectl_core::wire_check::EditKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::EditKind
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::EditKind
+impl core::marker::Freeze for routectl_core::wire_check::EditKind
+impl core::marker::Send for routectl_core::wire_check::EditKind
+impl core::marker::Sync for routectl_core::wire_check::EditKind
+impl core::marker::Unpin for routectl_core::wire_check::EditKind
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::EditKind
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::EditKind
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::EditKind
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::EditKind where U: core::convert::From<T>
+pub fn routectl_core::wire_check::EditKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::EditKind where U: core::convert::Into<T>
+pub type routectl_core::wire_check::EditKind::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::EditKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::EditKind where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::EditKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::EditKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::EditKind where T: core::clone::Clone
+pub type routectl_core::wire_check::EditKind::Owned = T
+pub fn routectl_core::wire_check::EditKind::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::EditKind::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::EditKind where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::EditKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::EditKind where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::EditKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::EditKind where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::EditKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::EditKind where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::EditKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::EditKind
+pub fn routectl_core::wire_check::EditKind::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::EditKind
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::EditKind
+pub enum routectl_core::wire_check::EditPatternError
+pub routectl_core::wire_check::EditPatternError::Blanket
+pub routectl_core::wire_check::EditPatternError::NotAPointer
+pub routectl_core::wire_check::EditPatternError::Unmatchable
+impl core::clone::Clone for routectl_core::wire_check::EditPatternError
+pub fn routectl_core::wire_check::EditPatternError::clone(&self) -> routectl_core::wire_check::EditPatternError
+impl core::cmp::Eq for routectl_core::wire_check::EditPatternError
+impl core::cmp::PartialEq for routectl_core::wire_check::EditPatternError
+pub fn routectl_core::wire_check::EditPatternError::eq(&self, &routectl_core::wire_check::EditPatternError) -> bool
+impl core::error::Error for routectl_core::wire_check::EditPatternError
+impl core::fmt::Debug for routectl_core::wire_check::EditPatternError
+pub fn routectl_core::wire_check::EditPatternError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_core::wire_check::EditPatternError
+pub fn routectl_core::wire_check::EditPatternError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::wire_check::EditPatternError
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::EditPatternError
+impl core::marker::Freeze for routectl_core::wire_check::EditPatternError
+impl core::marker::Send for routectl_core::wire_check::EditPatternError
+impl core::marker::Sync for routectl_core::wire_check::EditPatternError
+impl core::marker::Unpin for routectl_core::wire_check::EditPatternError
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::EditPatternError
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::EditPatternError
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::EditPatternError
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::EditPatternError where U: core::convert::From<T>
+pub fn routectl_core::wire_check::EditPatternError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::EditPatternError where U: core::convert::Into<T>
+pub type routectl_core::wire_check::EditPatternError::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::EditPatternError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::EditPatternError where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::EditPatternError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::EditPatternError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::EditPatternError where T: core::clone::Clone
+pub type routectl_core::wire_check::EditPatternError::Owned = T
+pub fn routectl_core::wire_check::EditPatternError::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::EditPatternError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_core::wire_check::EditPatternError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_core::wire_check::EditPatternError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_core::wire_check::EditPatternError where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::EditPatternError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::EditPatternError where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::EditPatternError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::EditPatternError where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::EditPatternError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::EditPatternError where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::EditPatternError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::EditPatternError
+pub fn routectl_core::wire_check::EditPatternError::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::EditPatternError
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::EditPatternError
+pub enum routectl_core::wire_check::EditSite
+pub routectl_core::wire_check::EditSite::AnthropicBetaStrip
+pub routectl_core::wire_check::EditSite::AuthSurfaceGate
+pub routectl_core::wire_check::EditSite::CacheMarkerLowering
+pub routectl_core::wire_check::EditSite::CachePlacement
+pub routectl_core::wire_check::EditSite::CachedTokensAdd
+pub routectl_core::wire_check::EditSite::Canary
+pub routectl_core::wire_check::EditSite::ClaudeSamplingNormalize
+pub routectl_core::wire_check::EditSite::Cloak
+pub routectl_core::wire_check::EditSite::ContextReduction
+pub routectl_core::wire_check::EditSite::EffortInjection
+pub routectl_core::wire_check::EditSite::FieldRepair
+pub routectl_core::wire_check::EditSite::FinishReasonRewrite
+pub routectl_core::wire_check::EditSite::HostedToolWithhold
+pub routectl_core::wire_check::EditSite::LearnedRepair
+pub routectl_core::wire_check::EditSite::ModelRename
+pub routectl_core::wire_check::EditSite::OperatorPayloadExtras
+pub routectl_core::wire_check::EditSite::PrefixRewrite
+pub routectl_core::wire_check::EditSite::Preflight
+pub routectl_core::wire_check::EditSite::ReplayStrip
+pub routectl_core::wire_check::EditSite::ResponsesPassthroughSplice
+pub routectl_core::wire_check::EditSite::SamplingReconcile
+pub routectl_core::wire_check::EditSite::SignatureStrip
+pub routectl_core::wire_check::EditSite::StreamEnvelopeStamp
+pub routectl_core::wire_check::EditSite::StreamOptionsInjection
+pub routectl_core::wire_check::EditSite::StreamStrip
+pub routectl_core::wire_check::EditSite::ThinkingStripForcedToolUse
+pub routectl_core::wire_check::EditSite::ToolIdSanitize
+pub routectl_core::wire_check::EditSite::UrlFieldRelocate
+impl routectl_core::wire_check::EditSite
+pub const routectl_core::wire_check::EditSite::ALL: [Self; 28]
+pub const fn routectl_core::wire_check::EditSite::label(self) -> &'static str
+impl core::clone::Clone for routectl_core::wire_check::EditSite
+pub fn routectl_core::wire_check::EditSite::clone(&self) -> routectl_core::wire_check::EditSite
+impl core::cmp::Eq for routectl_core::wire_check::EditSite
+impl core::cmp::PartialEq for routectl_core::wire_check::EditSite
+pub fn routectl_core::wire_check::EditSite::eq(&self, &routectl_core::wire_check::EditSite) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::EditSite
+pub fn routectl_core::wire_check::EditSite::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::EditSite
+pub fn routectl_core::wire_check::EditSite::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::EditSite
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::EditSite
+impl core::marker::Freeze for routectl_core::wire_check::EditSite
+impl core::marker::Send for routectl_core::wire_check::EditSite
+impl core::marker::Sync for routectl_core::wire_check::EditSite
+impl core::marker::Unpin for routectl_core::wire_check::EditSite
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::EditSite
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::EditSite
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::EditSite
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::EditSite where U: core::convert::From<T>
+pub fn routectl_core::wire_check::EditSite::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::EditSite where U: core::convert::Into<T>
+pub type routectl_core::wire_check::EditSite::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::EditSite::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::EditSite where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::EditSite::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::EditSite::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::EditSite where T: core::clone::Clone
+pub type routectl_core::wire_check::EditSite::Owned = T
+pub fn routectl_core::wire_check::EditSite::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::EditSite::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::EditSite where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::EditSite::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::EditSite where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::EditSite::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::EditSite where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::EditSite::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::EditSite where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::EditSite::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::EditSite
+pub fn routectl_core::wire_check::EditSite::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::EditSite
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::EditSite
+pub enum routectl_core::wire_check::EgressKind
+pub routectl_core::wire_check::EgressKind::AnthropicApi
+pub routectl_core::wire_check::EgressKind::AnthropicApiMantle
+pub routectl_core::wire_check::EgressKind::BedrockConverse
+pub routectl_core::wire_check::EgressKind::BedrockInvoke
+pub routectl_core::wire_check::EgressKind::Gemini
+pub routectl_core::wire_check::EgressKind::Local
+pub routectl_core::wire_check::EgressKind::OpenaiCompat
+pub routectl_core::wire_check::EgressKind::OpenaiCompatMantle
+pub routectl_core::wire_check::EgressKind::OpenaiResponses
+pub routectl_core::wire_check::EgressKind::OpenaiResponsesMantle
+impl routectl_core::wire_check::EgressKind
+pub const routectl_core::wire_check::EgressKind::ALL: [Self; 10]
+pub const fn routectl_core::wire_check::EgressKind::label(self) -> &'static str
+pub const fn routectl_core::wire_check::EgressKind::wire_dialect(self) -> core::option::Option<routectl_core::wire_check::IngressDialect>
+impl core::clone::Clone for routectl_core::wire_check::EgressKind
+pub fn routectl_core::wire_check::EgressKind::clone(&self) -> routectl_core::wire_check::EgressKind
+impl core::cmp::Eq for routectl_core::wire_check::EgressKind
+impl core::cmp::PartialEq for routectl_core::wire_check::EgressKind
+pub fn routectl_core::wire_check::EgressKind::eq(&self, &routectl_core::wire_check::EgressKind) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::EgressKind
+pub fn routectl_core::wire_check::EgressKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::EgressKind
+pub fn routectl_core::wire_check::EgressKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::EgressKind
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::EgressKind
+impl core::marker::Freeze for routectl_core::wire_check::EgressKind
+impl core::marker::Send for routectl_core::wire_check::EgressKind
+impl core::marker::Sync for routectl_core::wire_check::EgressKind
+impl core::marker::Unpin for routectl_core::wire_check::EgressKind
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::EgressKind
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::EgressKind
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::EgressKind
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::EgressKind where U: core::convert::From<T>
+pub fn routectl_core::wire_check::EgressKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::EgressKind where U: core::convert::Into<T>
+pub type routectl_core::wire_check::EgressKind::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::EgressKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::EgressKind where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::EgressKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::EgressKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::EgressKind where T: core::clone::Clone
+pub type routectl_core::wire_check::EgressKind::Owned = T
+pub fn routectl_core::wire_check::EgressKind::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::EgressKind::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::EgressKind where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::EgressKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::EgressKind where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::EgressKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::EgressKind where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::EgressKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::EgressKind where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::EgressKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::EgressKind
+pub fn routectl_core::wire_check::EgressKind::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::EgressKind
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::EgressKind
+pub enum routectl_core::wire_check::IngressDialect
+pub routectl_core::wire_check::IngressDialect::Anthropic
+pub routectl_core::wire_check::IngressDialect::Chat
+pub routectl_core::wire_check::IngressDialect::Responses
+impl routectl_core::wire_check::IngressDialect
+pub const routectl_core::wire_check::IngressDialect::ALL: [Self; 3]
+pub const fn routectl_core::wire_check::IngressDialect::label(self) -> &'static str
+impl core::clone::Clone for routectl_core::wire_check::IngressDialect
+pub fn routectl_core::wire_check::IngressDialect::clone(&self) -> routectl_core::wire_check::IngressDialect
+impl core::cmp::Eq for routectl_core::wire_check::IngressDialect
+impl core::cmp::PartialEq for routectl_core::wire_check::IngressDialect
+pub fn routectl_core::wire_check::IngressDialect::eq(&self, &routectl_core::wire_check::IngressDialect) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::IngressDialect
+pub fn routectl_core::wire_check::IngressDialect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::IngressDialect
+pub fn routectl_core::wire_check::IngressDialect::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::IngressDialect
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::IngressDialect
+impl core::marker::Freeze for routectl_core::wire_check::IngressDialect
+impl core::marker::Send for routectl_core::wire_check::IngressDialect
+impl core::marker::Sync for routectl_core::wire_check::IngressDialect
+impl core::marker::Unpin for routectl_core::wire_check::IngressDialect
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::IngressDialect
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::IngressDialect
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::IngressDialect
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::IngressDialect where U: core::convert::From<T>
+pub fn routectl_core::wire_check::IngressDialect::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::IngressDialect where U: core::convert::Into<T>
+pub type routectl_core::wire_check::IngressDialect::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::IngressDialect::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::IngressDialect where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::IngressDialect::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::IngressDialect::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::IngressDialect where T: core::clone::Clone
+pub type routectl_core::wire_check::IngressDialect::Owned = T
+pub fn routectl_core::wire_check::IngressDialect::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::IngressDialect::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::IngressDialect where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::IngressDialect::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::IngressDialect where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::IngressDialect::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::IngressDialect where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::IngressDialect::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::IngressDialect where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::IngressDialect::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::IngressDialect
+pub fn routectl_core::wire_check::IngressDialect::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::IngressDialect
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::IngressDialect
+pub enum routectl_core::wire_check::LaneClass
+pub routectl_core::wire_check::LaneClass::Fidelity
+pub routectl_core::wire_check::LaneClass::Translation
+impl routectl_core::wire_check::LaneClass
+pub const fn routectl_core::wire_check::LaneClass::label(self) -> &'static str
+impl core::clone::Clone for routectl_core::wire_check::LaneClass
+pub fn routectl_core::wire_check::LaneClass::clone(&self) -> routectl_core::wire_check::LaneClass
+impl core::cmp::Eq for routectl_core::wire_check::LaneClass
+impl core::cmp::PartialEq for routectl_core::wire_check::LaneClass
+pub fn routectl_core::wire_check::LaneClass::eq(&self, &routectl_core::wire_check::LaneClass) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::LaneClass
+pub fn routectl_core::wire_check::LaneClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::LaneClass
+pub fn routectl_core::wire_check::LaneClass::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::LaneClass
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::LaneClass
+impl core::marker::Freeze for routectl_core::wire_check::LaneClass
+impl core::marker::Send for routectl_core::wire_check::LaneClass
+impl core::marker::Sync for routectl_core::wire_check::LaneClass
+impl core::marker::Unpin for routectl_core::wire_check::LaneClass
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::LaneClass
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::LaneClass
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::LaneClass
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::LaneClass where U: core::convert::From<T>
+pub fn routectl_core::wire_check::LaneClass::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::LaneClass where U: core::convert::Into<T>
+pub type routectl_core::wire_check::LaneClass::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::LaneClass::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::LaneClass where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::LaneClass::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::LaneClass::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::LaneClass where T: core::clone::Clone
+pub type routectl_core::wire_check::LaneClass::Owned = T
+pub fn routectl_core::wire_check::LaneClass::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::LaneClass::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::LaneClass where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::LaneClass::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::LaneClass where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::LaneClass::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::LaneClass where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::LaneClass::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::LaneClass where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::LaneClass::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::LaneClass
+pub fn routectl_core::wire_check::LaneClass::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::LaneClass
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::LaneClass
+pub enum routectl_core::wire_check::Leg
+pub routectl_core::wire_check::Leg::Request
+pub routectl_core::wire_check::Leg::Response
+impl routectl_core::wire_check::Leg
+pub const fn routectl_core::wire_check::Leg::label(self) -> &'static str
+impl core::clone::Clone for routectl_core::wire_check::Leg
+pub fn routectl_core::wire_check::Leg::clone(&self) -> routectl_core::wire_check::Leg
+impl core::cmp::Eq for routectl_core::wire_check::Leg
+impl core::cmp::PartialEq for routectl_core::wire_check::Leg
+pub fn routectl_core::wire_check::Leg::eq(&self, &routectl_core::wire_check::Leg) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::Leg
+pub fn routectl_core::wire_check::Leg::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::Leg
+pub fn routectl_core::wire_check::Leg::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::Leg
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::Leg
+impl core::marker::Freeze for routectl_core::wire_check::Leg
+impl core::marker::Send for routectl_core::wire_check::Leg
+impl core::marker::Sync for routectl_core::wire_check::Leg
+impl core::marker::Unpin for routectl_core::wire_check::Leg
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::Leg
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::Leg
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::Leg
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::Leg where U: core::convert::From<T>
+pub fn routectl_core::wire_check::Leg::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::Leg where U: core::convert::Into<T>
+pub type routectl_core::wire_check::Leg::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::Leg::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::Leg where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::Leg::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::Leg::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::Leg where T: core::clone::Clone
+pub type routectl_core::wire_check::Leg::Owned = T
+pub fn routectl_core::wire_check::Leg::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::Leg::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::Leg where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::Leg::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::Leg where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::Leg::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::Leg where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::Leg::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::Leg where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::Leg::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::Leg
+pub fn routectl_core::wire_check::Leg::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::Leg
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::Leg
+pub enum routectl_core::wire_check::PathClass
+pub routectl_core::wire_check::PathClass::Added
+pub routectl_core::wire_check::PathClass::Changed
+pub routectl_core::wire_check::PathClass::Missing
+pub routectl_core::wire_check::PathClass::Moved
+pub routectl_core::wire_check::PathClass::TranslationUnconsumed
+impl routectl_core::wire_check::PathClass
+pub const routectl_core::wire_check::PathClass::ALL: [Self; 5]
+pub const fn routectl_core::wire_check::PathClass::label(self) -> &'static str
+impl core::clone::Clone for routectl_core::wire_check::PathClass
+pub fn routectl_core::wire_check::PathClass::clone(&self) -> routectl_core::wire_check::PathClass
+impl core::cmp::Eq for routectl_core::wire_check::PathClass
+impl core::cmp::Ord for routectl_core::wire_check::PathClass
+pub fn routectl_core::wire_check::PathClass::cmp(&self, &routectl_core::wire_check::PathClass) -> core::cmp::Ordering
+impl core::cmp::PartialEq for routectl_core::wire_check::PathClass
+pub fn routectl_core::wire_check::PathClass::eq(&self, &routectl_core::wire_check::PathClass) -> bool
+impl core::cmp::PartialOrd for routectl_core::wire_check::PathClass
+pub fn routectl_core::wire_check::PathClass::partial_cmp(&self, &routectl_core::wire_check::PathClass) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for routectl_core::wire_check::PathClass
+pub fn routectl_core::wire_check::PathClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::PathClass
+pub fn routectl_core::wire_check::PathClass::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::PathClass
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::PathClass
+impl core::marker::Freeze for routectl_core::wire_check::PathClass
+impl core::marker::Send for routectl_core::wire_check::PathClass
+impl core::marker::Sync for routectl_core::wire_check::PathClass
+impl core::marker::Unpin for routectl_core::wire_check::PathClass
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::PathClass
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::PathClass
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::PathClass
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::PathClass where U: core::convert::From<T>
+pub fn routectl_core::wire_check::PathClass::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::PathClass where U: core::convert::Into<T>
+pub type routectl_core::wire_check::PathClass::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::PathClass::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::PathClass where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::PathClass::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::PathClass::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::PathClass where T: core::clone::Clone
+pub type routectl_core::wire_check::PathClass::Owned = T
+pub fn routectl_core::wire_check::PathClass::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::PathClass::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::PathClass where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::PathClass::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::PathClass where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::PathClass::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::PathClass where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::PathClass::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::PathClass where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::PathClass::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::PathClass
+pub fn routectl_core::wire_check::PathClass::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::PathClass
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::PathClass
+pub enum routectl_core::wire_check::RejectionProvenance
+pub routectl_core::wire_check::RejectionProvenance::ClientChanged
+pub routectl_core::wire_check::RejectionProvenance::ClientUnchanged
+pub routectl_core::wire_check::RejectionProvenance::NotApplicable
+pub routectl_core::wire_check::RejectionProvenance::RoutectlAdded
+pub routectl_core::wire_check::RejectionProvenance::Unlocalized
+impl routectl_core::wire_check::RejectionProvenance
+pub const routectl_core::wire_check::RejectionProvenance::ALL: [Self; 5]
+pub const fn routectl_core::wire_check::RejectionProvenance::label(self) -> &'static str
+impl core::clone::Clone for routectl_core::wire_check::RejectionProvenance
+pub fn routectl_core::wire_check::RejectionProvenance::clone(&self) -> routectl_core::wire_check::RejectionProvenance
+impl core::cmp::Eq for routectl_core::wire_check::RejectionProvenance
+impl core::cmp::PartialEq for routectl_core::wire_check::RejectionProvenance
+pub fn routectl_core::wire_check::RejectionProvenance::eq(&self, &routectl_core::wire_check::RejectionProvenance) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::RejectionProvenance
+pub fn routectl_core::wire_check::RejectionProvenance::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::RejectionProvenance
+pub fn routectl_core::wire_check::RejectionProvenance::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::RejectionProvenance
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::RejectionProvenance
+impl core::marker::Freeze for routectl_core::wire_check::RejectionProvenance
+impl core::marker::Send for routectl_core::wire_check::RejectionProvenance
+impl core::marker::Sync for routectl_core::wire_check::RejectionProvenance
+impl core::marker::Unpin for routectl_core::wire_check::RejectionProvenance
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::RejectionProvenance
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::RejectionProvenance
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::RejectionProvenance
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::RejectionProvenance where U: core::convert::From<T>
+pub fn routectl_core::wire_check::RejectionProvenance::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::RejectionProvenance where U: core::convert::Into<T>
+pub type routectl_core::wire_check::RejectionProvenance::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::RejectionProvenance::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::RejectionProvenance where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::RejectionProvenance::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::RejectionProvenance::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::RejectionProvenance where T: core::clone::Clone
+pub type routectl_core::wire_check::RejectionProvenance::Owned = T
+pub fn routectl_core::wire_check::RejectionProvenance::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::RejectionProvenance::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::RejectionProvenance where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::RejectionProvenance::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::RejectionProvenance where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::RejectionProvenance::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::RejectionProvenance where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::RejectionProvenance::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::RejectionProvenance where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::RejectionProvenance::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::RejectionProvenance
+pub fn routectl_core::wire_check::RejectionProvenance::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::RejectionProvenance
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::RejectionProvenance
+pub struct routectl_core::wire_check::AttemptRecord<'a>
+pub routectl_core::wire_check::AttemptRecord::canonical: &'a routectl_core::schema::ChatRequest
+pub routectl_core::wire_check::AttemptRecord::edits: &'a [routectl_core::wire_check::DeclaredEdit]
+pub routectl_core::wire_check::AttemptRecord::egress: core::option::Option<&'a bytes::bytes::Bytes>
+pub routectl_core::wire_check::AttemptRecord::ingress: &'a routectl_core::wire_check::IngressWire
+pub routectl_core::wire_check::AttemptRecord::rejection: core::option::Option<&'a routectl_core::error::Error>
+impl core::fmt::Debug for routectl_core::wire_check::AttemptRecord<'_>
+pub fn routectl_core::wire_check::AttemptRecord<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::clone::Clone for routectl_core::wire_check::AttemptRecord<'a>
+pub fn routectl_core::wire_check::AttemptRecord<'a>::clone(&self) -> routectl_core::wire_check::AttemptRecord<'a>
+impl<'a> core::marker::Copy for routectl_core::wire_check::AttemptRecord<'a>
+impl<'a> core::marker::Freeze for routectl_core::wire_check::AttemptRecord<'a>
+impl<'a> core::marker::Send for routectl_core::wire_check::AttemptRecord<'a>
+impl<'a> core::marker::Sync for routectl_core::wire_check::AttemptRecord<'a>
+impl<'a> core::marker::Unpin for routectl_core::wire_check::AttemptRecord<'a>
+impl<'a> core::marker::UnsafeUnpin for routectl_core::wire_check::AttemptRecord<'a>
+impl<'a> !core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::AttemptRecord<'a>
+impl<'a> !core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::AttemptRecord<'a>
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::AttemptRecord<'a> where U: core::convert::From<T>
+pub fn routectl_core::wire_check::AttemptRecord<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::AttemptRecord<'a> where U: core::convert::Into<T>
+pub type routectl_core::wire_check::AttemptRecord<'a>::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::AttemptRecord<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::AttemptRecord<'a> where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::AttemptRecord<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::AttemptRecord<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::AttemptRecord<'a> where T: core::clone::Clone
+pub type routectl_core::wire_check::AttemptRecord<'a>::Owned = T
+pub fn routectl_core::wire_check::AttemptRecord<'a>::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::AttemptRecord<'a>::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::AttemptRecord<'a> where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::AttemptRecord<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::AttemptRecord<'a> where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::AttemptRecord<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::AttemptRecord<'a> where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::AttemptRecord<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::AttemptRecord<'a> where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::AttemptRecord<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::AttemptRecord<'a>
+pub fn routectl_core::wire_check::AttemptRecord<'a>::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::AttemptRecord<'a>
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::AttemptRecord<'a>
+pub struct routectl_core::wire_check::DeclaredEdit
+impl routectl_core::wire_check::DeclaredEdit
+pub const fn routectl_core::wire_check::DeclaredEdit::kind(&self) -> routectl_core::wire_check::EditKind
+pub fn routectl_core::wire_check::DeclaredEdit::matches(&self, &routectl_core::wire_check::WirePath) -> bool
+pub fn routectl_core::wire_check::DeclaredEdit::new(routectl_core::wire_check::EditSite, impl core::convert::Into<alloc::borrow::Cow<'static, str>>, routectl_core::wire_check::EditKind) -> core::result::Result<Self, routectl_core::wire_check::EditPatternError>
+pub fn routectl_core::wire_check::DeclaredEdit::path(&self) -> &str
+pub const fn routectl_core::wire_check::DeclaredEdit::site(&self) -> routectl_core::wire_check::EditSite
+impl core::clone::Clone for routectl_core::wire_check::DeclaredEdit
+pub fn routectl_core::wire_check::DeclaredEdit::clone(&self) -> routectl_core::wire_check::DeclaredEdit
+impl core::cmp::Eq for routectl_core::wire_check::DeclaredEdit
+impl core::cmp::PartialEq for routectl_core::wire_check::DeclaredEdit
+pub fn routectl_core::wire_check::DeclaredEdit::eq(&self, &routectl_core::wire_check::DeclaredEdit) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::DeclaredEdit
+pub fn routectl_core::wire_check::DeclaredEdit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::DeclaredEdit
+pub fn routectl_core::wire_check::DeclaredEdit::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::DeclaredEdit
+impl core::marker::Freeze for routectl_core::wire_check::DeclaredEdit
+impl core::marker::Send for routectl_core::wire_check::DeclaredEdit
+impl core::marker::Sync for routectl_core::wire_check::DeclaredEdit
+impl core::marker::Unpin for routectl_core::wire_check::DeclaredEdit
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::DeclaredEdit
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::DeclaredEdit
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::DeclaredEdit
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::DeclaredEdit where U: core::convert::From<T>
+pub fn routectl_core::wire_check::DeclaredEdit::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::DeclaredEdit where U: core::convert::Into<T>
+pub type routectl_core::wire_check::DeclaredEdit::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::DeclaredEdit::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::DeclaredEdit where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::DeclaredEdit::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::DeclaredEdit::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::DeclaredEdit where T: core::clone::Clone
+pub type routectl_core::wire_check::DeclaredEdit::Owned = T
+pub fn routectl_core::wire_check::DeclaredEdit::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::DeclaredEdit::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::DeclaredEdit where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::DeclaredEdit::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::DeclaredEdit where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::DeclaredEdit::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::DeclaredEdit where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::DeclaredEdit::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::DeclaredEdit where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::DeclaredEdit::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::DeclaredEdit
+pub fn routectl_core::wire_check::DeclaredEdit::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::DeclaredEdit
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::DeclaredEdit
+pub struct routectl_core::wire_check::IngressWire
+pub routectl_core::wire_check::IngressWire::bytes: bytes::bytes::Bytes
+pub routectl_core::wire_check::IngressWire::client_version: core::option::Option<alloc::string::String>
+pub routectl_core::wire_check::IngressWire::dialect: routectl_core::wire_check::IngressDialect
+impl core::clone::Clone for routectl_core::wire_check::IngressWire
+pub fn routectl_core::wire_check::IngressWire::clone(&self) -> routectl_core::wire_check::IngressWire
+impl core::fmt::Debug for routectl_core::wire_check::IngressWire
+pub fn routectl_core::wire_check::IngressWire::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl !core::marker::Freeze for routectl_core::wire_check::IngressWire
+impl core::marker::Send for routectl_core::wire_check::IngressWire
+impl core::marker::Sync for routectl_core::wire_check::IngressWire
+impl core::marker::Unpin for routectl_core::wire_check::IngressWire
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::IngressWire
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::IngressWire
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::IngressWire
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::IngressWire where U: core::convert::From<T>
+pub fn routectl_core::wire_check::IngressWire::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::IngressWire where U: core::convert::Into<T>
+pub type routectl_core::wire_check::IngressWire::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::IngressWire::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::IngressWire where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::IngressWire::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::IngressWire::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::IngressWire where T: core::clone::Clone
+pub type routectl_core::wire_check::IngressWire::Owned = T
+pub fn routectl_core::wire_check::IngressWire::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::IngressWire::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::IngressWire where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::IngressWire::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::IngressWire where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::IngressWire::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::IngressWire where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::IngressWire::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::IngressWire where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::IngressWire::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::IngressWire
+pub fn routectl_core::wire_check::IngressWire::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::IngressWire
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::IngressWire
+pub struct routectl_core::wire_check::Lane
+impl routectl_core::wire_check::Lane
+pub const fn routectl_core::wire_check::Lane::class(self) -> routectl_core::wire_check::LaneClass
+pub const fn routectl_core::wire_check::Lane::egress(self) -> routectl_core::wire_check::EgressKind
+pub const fn routectl_core::wire_check::Lane::ingress(self) -> routectl_core::wire_check::IngressDialect
+pub const fn routectl_core::wire_check::Lane::label(self) -> &'static str
+pub fn routectl_core::wire_check::Lane::of(routectl_core::wire_check::IngressDialect, routectl_core::wire_check::EgressKind) -> Self
+impl core::clone::Clone for routectl_core::wire_check::Lane
+pub fn routectl_core::wire_check::Lane::clone(&self) -> routectl_core::wire_check::Lane
+impl core::cmp::Eq for routectl_core::wire_check::Lane
+impl core::cmp::PartialEq for routectl_core::wire_check::Lane
+pub fn routectl_core::wire_check::Lane::eq(&self, &routectl_core::wire_check::Lane) -> bool
+impl core::fmt::Debug for routectl_core::wire_check::Lane
+pub fn routectl_core::wire_check::Lane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::Lane
+pub fn routectl_core::wire_check::Lane::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::wire_check::Lane
+impl core::marker::StructuralPartialEq for routectl_core::wire_check::Lane
+impl core::marker::Freeze for routectl_core::wire_check::Lane
+impl core::marker::Send for routectl_core::wire_check::Lane
+impl core::marker::Sync for routectl_core::wire_check::Lane
+impl core::marker::Unpin for routectl_core::wire_check::Lane
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::Lane
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::Lane
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::Lane
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::Lane where U: core::convert::From<T>
+pub fn routectl_core::wire_check::Lane::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::Lane where U: core::convert::Into<T>
+pub type routectl_core::wire_check::Lane::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::Lane::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::Lane where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::Lane::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::Lane::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::Lane where T: core::clone::Clone
+pub type routectl_core::wire_check::Lane::Owned = T
+pub fn routectl_core::wire_check::Lane::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::Lane::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::Lane where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::Lane::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::Lane where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::Lane::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::Lane where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::Lane::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::Lane where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::Lane::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::Lane
+pub fn routectl_core::wire_check::Lane::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::Lane
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::Lane
+pub struct routectl_core::wire_check::TapContents
+pub routectl_core::wire_check::TapContents::edits: alloc::vec::Vec<routectl_core::wire_check::DeclaredEdit>
+pub routectl_core::wire_check::TapContents::egress: core::option::Option<bytes::bytes::Bytes>
+impl core::clone::Clone for routectl_core::wire_check::TapContents
+pub fn routectl_core::wire_check::TapContents::clone(&self) -> routectl_core::wire_check::TapContents
+impl core::default::Default for routectl_core::wire_check::TapContents
+pub fn routectl_core::wire_check::TapContents::default() -> routectl_core::wire_check::TapContents
+impl core::fmt::Debug for routectl_core::wire_check::TapContents
+pub fn routectl_core::wire_check::TapContents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl !core::marker::Freeze for routectl_core::wire_check::TapContents
+impl core::marker::Send for routectl_core::wire_check::TapContents
+impl core::marker::Sync for routectl_core::wire_check::TapContents
+impl core::marker::Unpin for routectl_core::wire_check::TapContents
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::TapContents
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::TapContents
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::TapContents
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::TapContents where U: core::convert::From<T>
+pub fn routectl_core::wire_check::TapContents::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::TapContents where U: core::convert::Into<T>
+pub type routectl_core::wire_check::TapContents::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::TapContents::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::TapContents where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::TapContents::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::TapContents::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::TapContents where T: core::clone::Clone
+pub type routectl_core::wire_check::TapContents::Owned = T
+pub fn routectl_core::wire_check::TapContents::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::TapContents::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::TapContents where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::TapContents::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::TapContents where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::TapContents::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::TapContents where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::TapContents::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::TapContents where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::TapContents::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::TapContents
+pub fn routectl_core::wire_check::TapContents::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::TapContents
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::TapContents
+pub struct routectl_core::wire_check::WirePath
+impl routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::as_str(&self) -> &str
+pub fn routectl_core::wire_check::WirePath::child(&self, &str) -> Self
+pub fn routectl_core::wire_check::WirePath::depth(&self) -> usize
+pub fn routectl_core::wire_check::WirePath::from_segments<'s, I>(I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = &'s str>
+pub const fn routectl_core::wire_check::WirePath::root() -> Self
+pub fn routectl_core::wire_check::WirePath::segments(&self) -> impl core::iter::traits::iterator::Iterator<Item = &str>
+impl core::clone::Clone for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::clone(&self) -> routectl_core::wire_check::WirePath
+impl core::cmp::Eq for routectl_core::wire_check::WirePath
+impl core::cmp::Ord for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::cmp(&self, &Self) -> core::cmp::Ordering
+impl core::cmp::PartialEq for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::eq(&self, &Self) -> bool
+impl core::cmp::PartialOrd for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::partial_cmp(&self, &Self) -> core::option::Option<core::cmp::Ordering>
+impl core::default::Default for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::default() -> routectl_core::wire_check::WirePath
+impl core::fmt::Debug for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::hash<H: core::hash::Hasher>(&self, &mut H)
+impl core::marker::Freeze for routectl_core::wire_check::WirePath
+impl core::marker::Send for routectl_core::wire_check::WirePath
+impl core::marker::Sync for routectl_core::wire_check::WirePath
+impl core::marker::Unpin for routectl_core::wire_check::WirePath
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::WirePath
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::WirePath
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::WirePath
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::WirePath where U: core::convert::From<T>
+pub fn routectl_core::wire_check::WirePath::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::WirePath where U: core::convert::Into<T>
+pub type routectl_core::wire_check::WirePath::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::WirePath::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::WirePath where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::WirePath::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::WirePath::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::WirePath where T: core::clone::Clone
+pub type routectl_core::wire_check::WirePath::Owned = T
+pub fn routectl_core::wire_check::WirePath::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::WirePath::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_core::wire_check::WirePath where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_core::wire_check::WirePath::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_core::wire_check::WirePath where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::WirePath::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::WirePath where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::WirePath::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::WirePath where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::WirePath::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::WirePath where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::WirePath::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::WirePath
+pub fn routectl_core::wire_check::WirePath::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::WirePath
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::WirePath
+pub struct routectl_core::wire_check::WireTap
+impl routectl_core::wire_check::WireTap
+pub fn routectl_core::wire_check::WireTap::declare(&self, routectl_core::wire_check::DeclaredEdit)
+pub fn routectl_core::wire_check::WireTap::deposit(&self, bytes::bytes::Bytes)
+pub fn routectl_core::wire_check::WireTap::take(&self) -> routectl_core::wire_check::TapContents
+impl core::clone::Clone for routectl_core::wire_check::WireTap
+pub fn routectl_core::wire_check::WireTap::clone(&self) -> routectl_core::wire_check::WireTap
+impl core::default::Default for routectl_core::wire_check::WireTap
+pub fn routectl_core::wire_check::WireTap::default() -> routectl_core::wire_check::WireTap
+impl core::fmt::Debug for routectl_core::wire_check::WireTap
+pub fn routectl_core::wire_check::WireTap::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::wire_check::WireTap
+impl core::marker::Send for routectl_core::wire_check::WireTap
+impl core::marker::Sync for routectl_core::wire_check::WireTap
+impl core::marker::Unpin for routectl_core::wire_check::WireTap
+impl core::marker::UnsafeUnpin for routectl_core::wire_check::WireTap
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::wire_check::WireTap
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::wire_check::WireTap
+impl<T, U> core::convert::Into<U> for routectl_core::wire_check::WireTap where U: core::convert::From<T>
+pub fn routectl_core::wire_check::WireTap::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::wire_check::WireTap where U: core::convert::Into<T>
+pub type routectl_core::wire_check::WireTap::Error = core::convert::Infallible
+pub fn routectl_core::wire_check::WireTap::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::wire_check::WireTap where U: core::convert::TryFrom<T>
+pub type routectl_core::wire_check::WireTap::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::wire_check::WireTap::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::wire_check::WireTap where T: core::clone::Clone
+pub type routectl_core::wire_check::WireTap::Owned = T
+pub fn routectl_core::wire_check::WireTap::clone_into(&self, &mut T)
+pub fn routectl_core::wire_check::WireTap::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::wire_check::WireTap where T: 'static + ?core::marker::Sized
+pub fn routectl_core::wire_check::WireTap::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::wire_check::WireTap where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::WireTap::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::wire_check::WireTap where T: ?core::marker::Sized
+pub fn routectl_core::wire_check::WireTap::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::wire_check::WireTap where T: core::clone::Clone
+pub unsafe fn routectl_core::wire_check::WireTap::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::wire_check::WireTap
+pub fn routectl_core::wire_check::WireTap::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::wire_check::WireTap
+impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::WireTap
+pub const routectl_core::wire_check::MAX_WIRE_PATH_DEPTH: usize
+pub const routectl_core::wire_check::MAX_WIRE_PATH_LEN: usize
+pub const routectl_core::wire_check::WILDCARD_SEGMENT: &str
 pub enum routectl_core::BreakpointPosition
 pub routectl_core::BreakpointPosition::Messages
 pub routectl_core::BreakpointPosition::System
@@ -3040,18 +3956,21 @@ pub routectl_core::Error::UnknownAlias(alloc::string::String)
 pub routectl_core::Error::UnknownProvider(alloc::string::String)
 pub routectl_core::Error::Upstream
 pub routectl_core::Error::Upstream::body: alloc::string::String
+pub routectl_core::Error::Upstream::extras: routectl_core::error::UpstreamExtras
 pub routectl_core::Error::Upstream::provider: alloc::string::String
 pub routectl_core::Error::Upstream::retry_after: core::option::Option<core::time::Duration>
 pub routectl_core::Error::Upstream::status: u16
 pub routectl_core::Error::Upstream::upstream_code: core::option::Option<alloc::boxed::Box<str>>
-pub routectl_core::Error::Upstream::upstream_request_id: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::Error::Validation(alloc::string::String)
 impl routectl_core::error::Error
 pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
 pub fn routectl_core::error::Error::upstream(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_full(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn routectl_core::error::Error::upstream_request_id(&self) -> core::option::Option<&str>
+pub fn routectl_core::error::Error::upstream_with_body(impl core::convert::Into<alloc::string::String>, u16, routectl_core::parsed_error_body::UpstreamBody, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_with_retry_after(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>) -> Self
 pub fn routectl_core::error::Error::with_upstream_request_id(self, core::option::Option<alloc::string::String>) -> Self
 impl core::convert::From<core::io::error::Error> for routectl_core::error::Error
@@ -3720,6 +4639,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_format:
 pub routectl_core::RequestProvenance::AnthropicIngress
 pub routectl_core::RequestProvenance::Library
 pub routectl_core::RequestProvenance::OpenaiIngress
+pub routectl_core::RequestProvenance::ResponsesIngress
 impl core::clone::Clone for routectl_core::schema::RequestProvenance
 pub fn routectl_core::schema::RequestProvenance::clone(&self) -> routectl_core::schema::RequestProvenance
 impl core::cmp::Eq for routectl_core::schema::RequestProvenance
@@ -4000,6 +4920,48 @@ impl<T> core::convert::From<T> for routectl_core::ToolPairingDefect
 pub fn routectl_core::ToolPairingDefect::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::ToolPairingDefect
 impl<T> tracing::instrument::WithSubscriber for routectl_core::ToolPairingDefect
+pub enum routectl_core::TranslationReason
+pub routectl_core::TranslationReason::HostedToolWithheld(routectl_core::TranslationKey)
+pub routectl_core::TranslationReason::TranslationRejected(routectl_core::TranslationKey)
+impl core::clone::Clone for routectl_core::TranslationReason
+pub fn routectl_core::TranslationReason::clone(&self) -> routectl_core::TranslationReason
+impl core::cmp::Eq for routectl_core::TranslationReason
+impl core::cmp::PartialEq for routectl_core::TranslationReason
+pub fn routectl_core::TranslationReason::eq(&self, &routectl_core::TranslationReason) -> bool
+impl core::fmt::Debug for routectl_core::TranslationReason
+pub fn routectl_core::TranslationReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::TranslationReason
+impl core::marker::Freeze for routectl_core::TranslationReason
+impl core::marker::Send for routectl_core::TranslationReason
+impl core::marker::Sync for routectl_core::TranslationReason
+impl core::marker::Unpin for routectl_core::TranslationReason
+impl core::marker::UnsafeUnpin for routectl_core::TranslationReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::TranslationReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::TranslationReason
+impl<T, U> core::convert::Into<U> for routectl_core::TranslationReason where U: core::convert::From<T>
+pub fn routectl_core::TranslationReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::TranslationReason where U: core::convert::Into<T>
+pub type routectl_core::TranslationReason::Error = core::convert::Infallible
+pub fn routectl_core::TranslationReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::TranslationReason where U: core::convert::TryFrom<T>
+pub type routectl_core::TranslationReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::TranslationReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::TranslationReason where T: core::clone::Clone
+pub type routectl_core::TranslationReason::Owned = T
+pub fn routectl_core::TranslationReason::clone_into(&self, &mut T)
+pub fn routectl_core::TranslationReason::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::TranslationReason where T: 'static + ?core::marker::Sized
+pub fn routectl_core::TranslationReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::TranslationReason where T: ?core::marker::Sized
+pub fn routectl_core::TranslationReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::TranslationReason where T: ?core::marker::Sized
+pub fn routectl_core::TranslationReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::TranslationReason where T: core::clone::Clone
+pub unsafe fn routectl_core::TranslationReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::TranslationReason
+pub fn routectl_core::TranslationReason::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::TranslationReason
+impl<T> tracing::instrument::WithSubscriber for routectl_core::TranslationReason
 #[non_exhaustive] pub enum routectl_core::UsageInputSource
 pub routectl_core::UsageInputSource::ExplicitFinal
 pub routectl_core::UsageInputSource::InterimCarry
@@ -4576,7 +5538,7 @@ impl serde_core::ser::Serialize for routectl_core::schema::ChatRequest
 pub fn routectl_core::schema::ChatRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for routectl_core::schema::ChatRequest
 pub fn routectl_core::schema::ChatRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for routectl_core::schema::ChatRequest
+impl !core::marker::Freeze for routectl_core::schema::ChatRequest
 impl core::marker::Send for routectl_core::schema::ChatRequest
 impl core::marker::Sync for routectl_core::schema::ChatRequest
 impl core::marker::Unpin for routectl_core::schema::ChatRequest
@@ -5143,6 +6105,49 @@ impl<T> core::convert::From<T> for routectl_core::cache_control::OwnedBreakpoint
 pub fn routectl_core::cache_control::OwnedBreakpoint::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::cache_control::OwnedBreakpoint
 impl<T> tracing::instrument::WithSubscriber for routectl_core::cache_control::OwnedBreakpoint
+pub struct routectl_core::ParsedErrorBody(_)
+impl routectl_core::parsed_error_body::ParsedErrorBody
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::error_code(&self) -> core::option::Option<alloc::string::String>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::error_message(&self) -> core::option::Option<&str>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::error_param(&self) -> core::option::Option<&str>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::error_type(&self) -> core::option::Option<&str>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::is_error_envelope(&self) -> bool
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::value(&self) -> &serde_json::value::Value
+impl core::clone::Clone for routectl_core::parsed_error_body::ParsedErrorBody
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::clone(&self) -> routectl_core::parsed_error_body::ParsedErrorBody
+impl core::fmt::Debug for routectl_core::parsed_error_body::ParsedErrorBody
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::marker::Send for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::marker::Sync for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::marker::Unpin for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::marker::UnsafeUnpin for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::parsed_error_body::ParsedErrorBody
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::parsed_error_body::ParsedErrorBody
+impl<T, U> core::convert::Into<U> for routectl_core::parsed_error_body::ParsedErrorBody where U: core::convert::From<T>
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::parsed_error_body::ParsedErrorBody where U: core::convert::Into<T>
+pub type routectl_core::parsed_error_body::ParsedErrorBody::Error = core::convert::Infallible
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::parsed_error_body::ParsedErrorBody where U: core::convert::TryFrom<T>
+pub type routectl_core::parsed_error_body::ParsedErrorBody::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::parsed_error_body::ParsedErrorBody where T: core::clone::Clone
+pub type routectl_core::parsed_error_body::ParsedErrorBody::Owned = T
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::clone_into(&self, &mut T)
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::parsed_error_body::ParsedErrorBody where T: 'static + ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::parsed_error_body::ParsedErrorBody where T: ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::parsed_error_body::ParsedErrorBody where T: ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::parsed_error_body::ParsedErrorBody where T: core::clone::Clone
+pub unsafe fn routectl_core::parsed_error_body::ParsedErrorBody::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::parsed_error_body::ParsedErrorBody
+pub fn routectl_core::parsed_error_body::ParsedErrorBody::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::parsed_error_body::ParsedErrorBody
+impl<T> tracing::instrument::WithSubscriber for routectl_core::parsed_error_body::ParsedErrorBody
 pub struct routectl_core::Reasoning
 pub routectl_core::Reasoning::details: alloc::vec::Vec<routectl_core::schema::ReasoningDetail>
 pub routectl_core::Reasoning::text: core::option::Option<alloc::string::String>
@@ -5416,11 +6421,13 @@ pub routectl_core::RoutectlInternal::anthropic_thinking_display: core::option::O
 pub routectl_core::RoutectlInternal::background_probe: bool
 pub routectl_core::RoutectlInternal::beta_repair_report: core::option::Option<routectl_core::BetaRepairReport>
 pub routectl_core::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub routectl_core::RoutectlInternal::declared_edits: alloc::vec::Vec<routectl_core::wire_check::DeclaredEdit>
 pub routectl_core::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
 pub routectl_core::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
 pub routectl_core::RoutectlInternal::header_extras: core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>
 pub routectl_core::RoutectlInternal::history_reasoning: core::option::Option<routectl_core::CoreHistoryReasoning>
 pub routectl_core::RoutectlInternal::inbound_session_key: core::option::Option<alloc::string::String>
+pub routectl_core::RoutectlInternal::ingress_wire: core::option::Option<routectl_core::wire_check::IngressWire>
 pub routectl_core::RoutectlInternal::max_output_tokens: u32
 pub routectl_core::RoutectlInternal::max_thinking_budget: u32
 pub routectl_core::RoutectlInternal::operator_betas: alloc::vec::Vec<alloc::string::String>
@@ -5431,6 +6438,8 @@ pub routectl_core::RoutectlInternal::reasoning_dialect: core::option::Option<rou
 pub routectl_core::RoutectlInternal::responses_input_passthrough: alloc::vec::Vec<routectl_core::schema::ResponsesPassthroughItem>
 pub routectl_core::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::supports_adaptive_thinking: bool
+pub routectl_core::RoutectlInternal::translation_report: core::option::Option<routectl_core::TranslationReport>
+pub routectl_core::RoutectlInternal::wire_tap: core::option::Option<routectl_core::wire_check::WireTap>
 pub routectl_core::RoutectlInternal::withheld_betas: alloc::sync::Arc<[alloc::string::String]>
 impl core::clone::Clone for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::clone(&self) -> routectl_core::schema::RoutectlInternal
@@ -5438,7 +6447,7 @@ impl core::default::Default for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::default() -> routectl_core::schema::RoutectlInternal
 impl core::fmt::Debug for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_core::schema::RoutectlInternal
+impl !core::marker::Freeze for routectl_core::schema::RoutectlInternal
 impl core::marker::Send for routectl_core::schema::RoutectlInternal
 impl core::marker::Sync for routectl_core::schema::RoutectlInternal
 impl core::marker::Unpin for routectl_core::schema::RoutectlInternal
@@ -5694,6 +6703,122 @@ impl<T> core::convert::From<T> for routectl_core::ToolPairingError
 pub fn routectl_core::ToolPairingError::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::ToolPairingError
 impl<T> tracing::instrument::WithSubscriber for routectl_core::ToolPairingError
+pub struct routectl_core::TranslationKey(_)
+impl routectl_core::TranslationKey
+pub fn routectl_core::TranslationKey::as_str(&self) -> &str
+pub fn routectl_core::TranslationKey::from_tool_type(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::TranslationKey
+pub fn routectl_core::TranslationKey::clone(&self) -> routectl_core::TranslationKey
+impl core::cmp::Eq for routectl_core::TranslationKey
+impl core::cmp::PartialEq for routectl_core::TranslationKey
+pub fn routectl_core::TranslationKey::eq(&self, &routectl_core::TranslationKey) -> bool
+impl core::fmt::Debug for routectl_core::TranslationKey
+pub fn routectl_core::TranslationKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::TranslationKey
+impl core::marker::Freeze for routectl_core::TranslationKey
+impl core::marker::Send for routectl_core::TranslationKey
+impl core::marker::Sync for routectl_core::TranslationKey
+impl core::marker::Unpin for routectl_core::TranslationKey
+impl core::marker::UnsafeUnpin for routectl_core::TranslationKey
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::TranslationKey
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::TranslationKey
+impl<T, U> core::convert::Into<U> for routectl_core::TranslationKey where U: core::convert::From<T>
+pub fn routectl_core::TranslationKey::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::TranslationKey where U: core::convert::Into<T>
+pub type routectl_core::TranslationKey::Error = core::convert::Infallible
+pub fn routectl_core::TranslationKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::TranslationKey where U: core::convert::TryFrom<T>
+pub type routectl_core::TranslationKey::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::TranslationKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::TranslationKey where T: core::clone::Clone
+pub type routectl_core::TranslationKey::Owned = T
+pub fn routectl_core::TranslationKey::clone_into(&self, &mut T)
+pub fn routectl_core::TranslationKey::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::TranslationKey where T: 'static + ?core::marker::Sized
+pub fn routectl_core::TranslationKey::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::TranslationKey where T: ?core::marker::Sized
+pub fn routectl_core::TranslationKey::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::TranslationKey where T: ?core::marker::Sized
+pub fn routectl_core::TranslationKey::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::TranslationKey where T: core::clone::Clone
+pub unsafe fn routectl_core::TranslationKey::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::TranslationKey
+pub fn routectl_core::TranslationKey::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::TranslationKey
+impl<T> tracing::instrument::WithSubscriber for routectl_core::TranslationKey
+pub struct routectl_core::TranslationReport
+impl routectl_core::TranslationReport
+pub fn routectl_core::TranslationReport::record(&self, routectl_core::TranslationReason)
+pub fn routectl_core::TranslationReport::take(&self) -> alloc::vec::Vec<routectl_core::TranslationReason>
+impl core::clone::Clone for routectl_core::TranslationReport
+pub fn routectl_core::TranslationReport::clone(&self) -> routectl_core::TranslationReport
+impl core::default::Default for routectl_core::TranslationReport
+pub fn routectl_core::TranslationReport::default() -> routectl_core::TranslationReport
+impl core::fmt::Debug for routectl_core::TranslationReport
+pub fn routectl_core::TranslationReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::TranslationReport
+impl core::marker::Send for routectl_core::TranslationReport
+impl core::marker::Sync for routectl_core::TranslationReport
+impl core::marker::Unpin for routectl_core::TranslationReport
+impl core::marker::UnsafeUnpin for routectl_core::TranslationReport
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::TranslationReport
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::TranslationReport
+impl<T, U> core::convert::Into<U> for routectl_core::TranslationReport where U: core::convert::From<T>
+pub fn routectl_core::TranslationReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::TranslationReport where U: core::convert::Into<T>
+pub type routectl_core::TranslationReport::Error = core::convert::Infallible
+pub fn routectl_core::TranslationReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::TranslationReport where U: core::convert::TryFrom<T>
+pub type routectl_core::TranslationReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::TranslationReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::TranslationReport where T: core::clone::Clone
+pub type routectl_core::TranslationReport::Owned = T
+pub fn routectl_core::TranslationReport::clone_into(&self, &mut T)
+pub fn routectl_core::TranslationReport::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::TranslationReport where T: 'static + ?core::marker::Sized
+pub fn routectl_core::TranslationReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::TranslationReport where T: ?core::marker::Sized
+pub fn routectl_core::TranslationReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::TranslationReport where T: ?core::marker::Sized
+pub fn routectl_core::TranslationReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::TranslationReport where T: core::clone::Clone
+pub unsafe fn routectl_core::TranslationReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::TranslationReport
+pub fn routectl_core::TranslationReport::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::TranslationReport
+impl<T> tracing::instrument::WithSubscriber for routectl_core::TranslationReport
+pub struct routectl_core::UpstreamBody
+impl routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::UpstreamBody::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub const fn routectl_core::parsed_error_body::UpstreamBody::parsed(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
+pub fn routectl_core::parsed_error_body::UpstreamBody::text(&self) -> &str
+impl core::fmt::Debug for routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::UpstreamBody::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::parsed_error_body::UpstreamBody
+impl core::marker::Send for routectl_core::parsed_error_body::UpstreamBody
+impl core::marker::Sync for routectl_core::parsed_error_body::UpstreamBody
+impl core::marker::Unpin for routectl_core::parsed_error_body::UpstreamBody
+impl core::marker::UnsafeUnpin for routectl_core::parsed_error_body::UpstreamBody
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::parsed_error_body::UpstreamBody
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::parsed_error_body::UpstreamBody
+impl<T, U> core::convert::Into<U> for routectl_core::parsed_error_body::UpstreamBody where U: core::convert::From<T>
+pub fn routectl_core::parsed_error_body::UpstreamBody::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::parsed_error_body::UpstreamBody where U: core::convert::Into<T>
+pub type routectl_core::parsed_error_body::UpstreamBody::Error = core::convert::Infallible
+pub fn routectl_core::parsed_error_body::UpstreamBody::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::parsed_error_body::UpstreamBody where U: core::convert::TryFrom<T>
+pub type routectl_core::parsed_error_body::UpstreamBody::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::parsed_error_body::UpstreamBody::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_core::parsed_error_body::UpstreamBody where T: 'static + ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::UpstreamBody::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::parsed_error_body::UpstreamBody where T: ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::UpstreamBody::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::parsed_error_body::UpstreamBody where T: ?core::marker::Sized
+pub fn routectl_core::parsed_error_body::UpstreamBody::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::UpstreamBody::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::parsed_error_body::UpstreamBody
+impl<T> tracing::instrument::WithSubscriber for routectl_core::parsed_error_body::UpstreamBody
 #[non_exhaustive] pub struct routectl_core::UpstreamMeta
 pub routectl_core::UpstreamMeta::anthropic_unified: core::option::Option<routectl_core::upstream_meta::AnthropicUnifiedQuota>
 pub routectl_core::UpstreamMeta::codex: core::option::Option<routectl_core::upstream_meta::CodexQuota>
@@ -5958,7 +7083,6 @@ pub fn routectl_core::header_trace_enabled() -> bool
 pub fn routectl_core::headers_to_json<'a>(impl core::iter::traits::collect::IntoIterator<Item = (&'a str, &'a [u8])>) -> serde_json::value::Value
 pub fn routectl_core::init_log_overrides(core::option::Option<bool>, core::option::Option<usize>, core::option::Option<bool>)
 pub fn routectl_core::is_canonical_request_key(&str) -> bool
-pub fn routectl_core::is_json_error_envelope(&str) -> bool
 pub fn routectl_core::is_known_evidence_class(&str) -> bool
 pub fn routectl_core::is_replayable(routectl_core::reasoning_format::ReplayScheme, routectl_core::reasoning_format::ReplayScheme) -> routectl_core::reasoning_format::Replayability
 pub fn routectl_core::is_responses_family(core::option::Option<&str>) -> bool
@@ -5992,6 +7116,7 @@ pub fn routectl_core::trace_stream_summary(&str, &str, &str, u64, core::option::
 pub fn routectl_core::trace_structural_summary(&str, &str, &str, &serde_json::value::Value)
 pub fn routectl_core::trace_upstream_response_headers(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::trace_upstream_success_body(&str, &str, &serde_json::value::Value)
+pub fn routectl_core::upstream_message_or_excerpt(&str, core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>) -> alloc::string::String
 pub fn routectl_core::validate_source<S: routectl_core::cache_control::CacheBreakpointSource>(&S) -> routectl_core::error::Result<()>
 pub fn routectl_core::validate_tool_pairing(&[routectl_core::schema::Message]) -> core::result::Result<(), routectl_core::ToolPairingError>
 pub fn routectl_core::wrap_stream_with_summary<S>(S, &'static str, &'static str, alloc::string::String) -> futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>> where S: futures_core::stream::Stream<Item = routectl_core::error::Result<routectl_core::schema::ChatChunk>> + core::marker::Send + 'static

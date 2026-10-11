@@ -134,7 +134,8 @@ async fn same_capability_probe_backs_off_on_repeat_rejection() {
     // emit an event. The reached same-capability settle also emits one
     // probe-settlement event tagged same_capability (reached_target=true).
     for req in 2..=3 {
-        let (d, events) = routectl_testkit::with_capture(complete(&router, "chain")).await;
+        let (d, events) =
+            Box::pin(routectl_testkit::with_capture(complete(&router, "chain"))).await;
         assert!(d.result.is_ok(), "re-probe {req} rejected, falls back to B");
         assert!(
             d.meta.learned_capabilities.is_empty(),

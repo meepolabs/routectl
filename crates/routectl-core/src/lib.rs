@@ -35,6 +35,7 @@ pub(crate) mod tool_pairing;
 mod translation_report;
 pub mod upstream_meta;
 pub(crate) mod volatile;
+pub mod wire_check;
 
 /// Shared canonical-request / canonical-response builders for the
 /// cross-crate contract tests. Compiled only under `cfg(test)` or the
