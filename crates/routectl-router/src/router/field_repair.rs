@@ -880,7 +880,9 @@ pub(super) struct AttributableLane<'a> {
 /// THE single attributability decision every field stage makes: the reactive
 /// `plan_field_carry`, the pre-flight planner, the fidelity status read,
 /// probe activation, and the probe's pre-dial recheck (the two probe stages
-/// further narrow the answer to `anthropic-api`).
+/// further narrow the answer to a kind and upstream with a free token count:
+/// `anthropic-api`, and `bedrock` on an Anthropic-family model -- see
+/// `count_tokens::seat_can_count_tokens`).
 ///
 /// Answers `Some` only when ALL of:
 ///
