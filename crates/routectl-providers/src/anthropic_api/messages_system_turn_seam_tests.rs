@@ -279,6 +279,8 @@ fn seam_block_kinds(msg: &AnthropicMessage) -> Vec<&'static str> {
             .iter()
             .map(|b| match b {
                 ContentBlock::Text { .. } => "text",
+                ContentBlock::Image { .. } => "image",
+                ContentBlock::Document { .. } => "document",
                 ContentBlock::Thinking { .. } => "thinking",
                 ContentBlock::RedactedThinking { .. } => "redacted_thinking",
                 ContentBlock::ToolResult { .. } => "tool_result",
@@ -421,6 +423,180 @@ fn dropped_turn_breakpoint_moves_when_the_merge_is_skipped() {
         matches!(
             &blocks[..],
             [ContentBlock::Text { text, cache_control: Some(_), .. }] if text == "prior text"
+        ),
+        "got {blocks:?}"
+    );
+    assert_eq!(seam_breakpoint_count(&out), 1);
+}
+
+fn seam_user_parts(parts: Vec<ContentPart>) -> Message {
+    Message {
+        content: MessageContent::Parts(parts),
+        ..st_user("")
+    }
+}
+
+fn seam_image_part() -> ContentPart {
+    ContentPart::Known(KnownContentPart::Image {
+        source: json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
+        cache_control: None,
+    })
+}
+
+fn seam_encrypted_reasoning_assistant(text: &str) -> Message {
+    Message {
+        reasoning_details: vec![ReasoningDetail {
+            kind: ReasoningDetailKind::Encrypted,
+            id: Some("r0".into()),
+            format: Some(ANTHROPIC_FORMAT.into()),
+            index: Some(0),
+            payload: serde_json::json!({"data": "opaque"}),
+        }],
+        ..st_assistant(text)
+    }
+}
+
+fn seam_skipped_count(events: &[CapturedEvent]) -> Option<&str> {
+    events
+        .iter()
+        .find_map(|e| e.field("system_turn_merges_skipped"))
+}
+
+/// A tool_result run after a dropped turn never merges into a preceding
+/// user message holding anything but tool_result blocks, whatever carrier
+/// that content arrived in: the string form, and a block list of text, an
+/// image, or a document. Translation succeeds (the ledger verify inside
+/// `translate_messages` accepts the skip), the pair stays two messages, and
+/// the tool_result leads the second.
+#[test]
+fn tool_result_after_a_dropped_turn_never_merges_behind_non_tool_result_content() {
+    let cases: [(&str, Message, &str); 4] = [
+        ("string carrier", st_user("prior text"), "text"),
+        (
+            "text block",
+            seam_user_parts(vec![st_text_part("prior text")]),
+            "text",
+        ),
+        (
+            "image block",
+            seam_user_parts(vec![seam_image_part()]),
+            "image",
+        ),
+        (
+            "document block",
+            seam_user_parts(vec![st_document_text_part("doc body")]),
+            "document",
+        ),
+    ];
+    for (name, before, before_kind) in cases {
+        // Arrange
+        let messages = vec![
+            before,
+            st_system(MessageContent::Parts(vec![])),
+            st_tool("call_1", "result"),
+        ];
+
+        // Act
+        let mut out = Vec::new();
+        let events = capture_events(|| out = st_forward(&messages));
+
+        // Assert
+        assert_eq!(st_roles(&out), vec!["user", "user"], "{name}");
+        assert_eq!(seam_block_kinds(&out[0]), vec![before_kind], "{name}");
+        assert_eq!(seam_block_kinds(&out[1]), vec!["tool_result"], "{name}");
+        assert_eq!(seam_skipped_count(&events), Some("1"), "{name}");
+    }
+}
+
+/// An assistant turn whose reasoning replays as `redacted_thinking` (an
+/// encrypted detail) counts as opening with thinking: the merge into a
+/// preceding assistant text turn is skipped, and the redacted block still
+/// leads its own message.
+#[test]
+fn redacted_thinking_after_a_dropped_turn_skips_the_merge() {
+    // Arrange
+    let messages = vec![
+        st_assistant("old text"),
+        st_system(MessageContent::Parts(vec![])),
+        seam_encrypted_reasoning_assistant("new text"),
+    ];
+
+    // Act
+    let mut out = Vec::new();
+    let events = capture_events(|| out = st_forward(&messages));
+
+    // Assert
+    assert_eq!(st_roles(&out), vec!["assistant", "assistant"]);
+    assert_eq!(seam_block_kinds(&out[0]), vec!["text"]);
+    assert_eq!(seam_block_kinds(&out[1]), vec!["redacted_thinking", "text"]);
+    assert_eq!(seam_skipped_count(&events), Some("1"));
+}
+
+/// Two dropped turns in one history are each accounted on their own: the
+/// first seam merges its user neighbors, the second is skipped because a
+/// tool_result cannot follow that merged text, and the ledger verify inside
+/// `translate_messages` balances both drops, the one merge and the one skip.
+#[test]
+fn two_dropped_turns_in_a_row_merge_then_skip_and_balance_the_ledger() {
+    // Arrange
+    let messages = vec![
+        st_user("a"),
+        st_system(MessageContent::Parts(vec![])),
+        st_user("b"),
+        st_system(MessageContent::Text(String::new())),
+        st_tool("call_1", "result"),
+    ];
+
+    // Act
+    let mut out = Vec::new();
+    let events = capture_events(|| out = st_forward(&messages));
+
+    // Assert
+    assert_eq!(st_roles(&out), vec!["user", "user"]);
+    assert_eq!(seam_texts(&out[0]), vec!["a", "b"]);
+    assert_eq!(seam_block_kinds(&out[1]), vec!["tool_result"]);
+    assert_eq!(seam_skipped_count(&events), Some("1"));
+    let line = events
+        .iter()
+        .find(|e| e.field("system_turns_dropped_empty").is_some())
+        .unwrap_or_else(|| panic!("no screen line: {events:?}"));
+    assert_eq!(line.field("system_turns_dropped_empty"), Some("2"));
+}
+
+/// A dropped turn's breakpoint re-anchors on a tool_result block when the
+/// preceding message holds nothing else.
+#[test]
+fn dropped_turn_breakpoint_moves_onto_a_preceding_tool_result() {
+    // Arrange
+    let caller = Message {
+        tool_calls: Some(vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "calc", "arguments": "{}"}
+        })]),
+        ..st_assistant("calling")
+    };
+    // Anthropic's prompt-caching docs list tool_result blocks as cacheable.
+    let messages = vec![
+        caller,
+        st_tool("call_1", "42"),
+        seam_blank_cached_turn(),
+        st_assistant("done"),
+    ];
+
+    // Act
+    let out = st_forward(&messages);
+
+    // Assert
+    assert_eq!(st_roles(&out), vec!["assistant", "user", "assistant"]);
+    let AnthropicContent::Blocks(blocks) = &out[1].content else {
+        panic!("expected block form: {:?}", out[1].content);
+    };
+    assert!(
+        matches!(
+            &blocks[..],
+            [ContentBlock::ToolResult { tool_use_id, cache_control: Some(cc), .. }]
+                if tool_use_id == "call_1" && *cc == CacheControl::ephemeral_5m()
         ),
         "got {blocks:?}"
     );
