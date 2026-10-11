@@ -21,6 +21,25 @@
 //! case is a batched one: the per-iteration clone is the untimed setup and
 //! only the render is measured.
 //!
+//! The live wire check is priced on the anthropic -> anthropic-api lane in
+//! three cases per profile. `hot_path` is the per-request work with no wire
+//! check at all: ingress parse, egress normalize and serialize, then the
+//! upstream response parsed, normalized and rendered back to the client.
+//! `wire_unadmitted` is that same path as an attempt the sampler declines
+//! pays it: the ingress capture, the sampler decision and tap install, and
+//! the provider's deposits and declarations into an unadmitted tap.
+//! `wire_unadmitted_setup` times that added work alone, so it is not lost
+//! in the hot path's run-to-run noise: capture, sampler decision and tap
+//! install, then the deposits and the request edits the provider declares
+//! on this profile.
+//! `wire_check` is the extra work one admitted attempt pays on top, both
+//! legs: capture, tap install, deposits and declarations, then each leg's
+//! drain, parse, diff and record. It drives the public pieces in the order
+//! the router's request check and response check run them; its inputs come
+//! from the real provider and renderer, built outside the timed closure.
+//! The fidelity diff never reads the canonical request, so both batched
+//! cases start from an empty one and time no request drop.
+//!
 //! Every fixture except `json_heavy_150k` is a `SpectrumProfile`; that one
 //! is bench-local and pinned in size by `assert_anchor_fixture`, and
 //! `scripts/bench.sh` records it on its separate local-fixtures line.
@@ -29,11 +48,20 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use axum::http::HeaderMap;
+use bytes::Bytes;
 use criterion::{BatchSize, Criterion};
+use routectl_core::identity::anthropic::parse_claude_cli_version;
+use routectl_core::wire_check::{
+    AttemptRecord, DeclaredEdit, EditKind, EditSite, EgressKind, IngressDialect, IngressWire, Lane,
+    LaneClass, Leg, WireTap, diff,
+};
 use routectl_core::{
     ChatRequest, ChatResponse, Choice, ContentPart, KnownContentPart, Message, MessageContent,
-    Role, Usage,
+    Provider, Role, Usage,
 };
+use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
+use routectl_router::wire_check_state::{CheckOutcome, WireCheckState};
+use routectl_router::{Config, WireCheckConfig};
 #[cfg(not(feature = "dhat"))]
 use routectl_testkit::bench_alloc::CountingAllocator;
 use routectl_testkit::bench_alloc::{self, BenchCase};
@@ -78,6 +106,16 @@ const ESTIMATE_PROFILES: [SpectrumProfile; 3] = [
 /// Profiles fed to the `response_render` stage (both dialects).
 const RENDER_PROFILES: [SpectrumProfile; 2] =
     [SpectrumProfile::PlainRoundTrip, SpectrumProfile::ToolHeavy];
+
+/// Profiles fed to the wire-check stages (`hot_path`, `wire_unadmitted`,
+/// `wire_check`).
+const WIRE_CHECK_PROFILES: [SpectrumProfile; 4] = PARSE_PROFILES;
+
+/// The user-agent the wire-check cases capture a client version from.
+const WIRE_CHECK_USER_AGENT: &str = "claude-cli/2.1.0 (external, cli)";
+
+/// The label the served response carries for its provider.
+const WIRE_CHECK_PROVIDER: &str = "bench-anthropic";
 
 const fn assistant_message(content: MessageContent, tool_calls: Option<Vec<Value>>) -> Message {
     Message {
@@ -236,6 +274,260 @@ fn build_response(profile: SpectrumProfile) -> ChatResponse {
     }
 }
 
+/// The lane every wire-check case travels.
+fn wire_check_lane() -> Lane {
+    Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi)
+}
+
+/// A `[wire_check]` block with the given sampling knobs.
+fn wire_check_config(first_n: u32, sample_one_in: u32) -> WireCheckConfig {
+    let config: Config = toml::from_str(&format!(
+        "version = 5\n[wire_check]\nfirst_n = {first_n}\nsample_one_in = {sample_one_in}\n"
+    ))
+    .expect("bench wire_check config parses");
+    config.wire_check
+}
+
+/// One profile's wire-check inputs, each produced by the real ingress,
+/// provider and renderer outside any timed closure.
+struct WireCheckFixture {
+    /// The client's request body.
+    ingress: Bytes,
+    /// The request body the provider sent.
+    egress: Bytes,
+    /// The request edits the provider declared while building `egress`.
+    request_edits: Vec<DeclaredEdit>,
+    /// The upstream's complete response body.
+    upstream: Bytes,
+    /// The response body the client received.
+    client: Bytes,
+}
+
+fn build_wire_check_fixture(
+    headers: &HeaderMap,
+    provider: &AnthropicApiProvider,
+    profile: SpectrumProfile,
+    fx: &BenchFixture,
+) -> WireCheckFixture {
+    let canonical = AnthropicIngress
+        .parse_request(headers, &fx.anthropic_wire)
+        .expect("anthropic fixture parses");
+    let tap = WireTap::admitted();
+    let mut tapped = canonical.clone();
+    tapped.routectl_internal.wire_tap = Some(tap.clone());
+    let egress = serialize_egress(provider, &tapped);
+    let request_edits = tap.take_request().edits(Leg::Request).to_vec();
+    let upstream = AnthropicIngress
+        .render_response(build_response(profile))
+        .expect("anthropic render");
+    let client = render_upstream(provider, &canonical, &upstream);
+    WireCheckFixture {
+        ingress: Bytes::from(fx.anthropic_wire.clone()),
+        egress,
+        request_edits,
+        upstream,
+        client,
+    }
+}
+
+/// The provider's request body for `req`, deposited into the request's tap
+/// when it carries one, as the provider does before sending.
+fn serialize_egress(provider: &AnthropicApiProvider, req: &ChatRequest) -> Bytes {
+    let body = provider
+        .normalize_request(req)
+        .expect("anthropic normalize_request");
+    let bytes = Bytes::from(serde_json::to_vec(&body).expect("egress body serializes"));
+    if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
+        tap.deposit(bytes.clone());
+    }
+    bytes
+}
+
+/// Parse and normalize the upstream body, relabel it for the client and
+/// render it back to the client's dialect.
+fn render_upstream(provider: &AnthropicApiProvider, req: &ChatRequest, upstream: &Bytes) -> Bytes {
+    if let Some(tap) = req
+        .routectl_internal
+        .wire_tap
+        .as_ref()
+        .filter(|tap| tap.checks_response())
+    {
+        tap.deposit_response(upstream.clone());
+    }
+    let raw: Value = serde_json::from_slice(upstream).expect("upstream body parses");
+    let mut resp = provider
+        .normalize_response(raw)
+        .expect("anthropic normalize_response");
+    resp.routectl_provider = Some(WIRE_CHECK_PROVIDER.into());
+    resp.model.clone_from(&req.model);
+    AnthropicIngress
+        .render_response(resp)
+        .expect("anthropic render")
+}
+
+/// One request through the hot path: ingress parse, then
+/// [`serve_parsed`].
+fn serve(
+    headers: &HeaderMap,
+    provider: &AnthropicApiProvider,
+    wire: &[u8],
+    upstream: &Bytes,
+) -> (Bytes, Bytes) {
+    let req = AnthropicIngress
+        .parse_request(headers, wire)
+        .expect("anthropic fixture parses");
+    serve_parsed(provider, &req, upstream)
+}
+
+fn serve_parsed(
+    provider: &AnthropicApiProvider,
+    req: &ChatRequest,
+    upstream: &Bytes,
+) -> (Bytes, Bytes) {
+    let egress = serialize_egress(provider, req);
+    let client = render_upstream(provider, req, upstream);
+    (egress, client)
+}
+
+/// Attach the client's body to `req` as its ingress wire, with the version
+/// the bench user-agent names.
+fn capture_ingress(req: &mut ChatRequest, ingress: &Bytes) {
+    req.routectl_internal.ingress_wire = Some(IngressWire {
+        dialect: IngressDialect::Anthropic,
+        client_version: parse_claude_cli_version(WIRE_CHECK_USER_AGENT).map(str::to_string),
+        bytes: ingress.clone(),
+    });
+}
+
+/// Ask the sampler about `req` and attach the tap its answer earns.
+fn install_tap(req: &mut ChatRequest, state: &WireCheckState, config: &WireCheckConfig) -> WireTap {
+    let lane = wire_check_lane();
+    let version = req
+        .routectl_internal
+        .ingress_wire
+        .as_ref()
+        .and_then(|wire| wire.client_version.as_deref());
+    let tap = if state.admit(lane, version, config) {
+        WireTap::checking_response(lane.ingress())
+    } else {
+        WireTap::default()
+    };
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    tap
+}
+
+/// Every response edit the router declares on a served complete body.
+fn declare_response_edits(tap: &WireTap) {
+    for (site, kind) in [
+        (EditSite::ProviderAttributionAdd, EditKind::Add),
+        (EditSite::ResponseModelRelabel, EditKind::Rewrite),
+        (EditSite::ResponseModelRelabel, EditKind::Add),
+    ] {
+        let path = if site == EditSite::ProviderAttributionAdd {
+            "/routectl_provider"
+        } else {
+            "/model"
+        };
+        tap.declare_response(DeclaredEdit::new(site, path, kind).expect("response edit pattern"));
+    }
+}
+
+/// The full check of one admitted attempt, both legs, on top of the work
+/// the hot path already did.
+fn run_full_check(
+    fx: &WireCheckFixture,
+    mut req: ChatRequest,
+    state: &WireCheckState,
+    config: &WireCheckConfig,
+) -> (CheckOutcome, CheckOutcome) {
+    capture_ingress(&mut req, &fx.ingress);
+    let tap = install_tap(&mut req, state, config);
+    assert!(tap.checks_response(), "wire_check case must be admitted");
+    for edit in &fx.request_edits {
+        tap.declare(edit.clone());
+    }
+    tap.deposit(fx.egress.clone());
+    tap.deposit_response(fx.upstream.clone());
+    declare_response_edits(&tap);
+    let request = check_request_leg(state, &req, &tap);
+    let response = check_response_leg(state, &tap, &fx.client);
+    (request, response)
+}
+
+fn check_request_leg(state: &WireCheckState, req: &ChatRequest, tap: &WireTap) -> CheckOutcome {
+    let lane = wire_check_lane();
+    let ingress = req
+        .routectl_internal
+        .ingress_wire
+        .as_ref()
+        .expect("captured ingress");
+    let contents = tap.take_request();
+    let edits: Vec<DeclaredEdit> = req
+        .routectl_internal
+        .declared_edits
+        .iter()
+        .chain(contents.edits(Leg::Request))
+        .cloned()
+        .collect();
+    let record = AttemptRecord::new(ingress, req, contents.request(), &edits);
+    let sent = record
+        .egress()
+        .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+    let received = serde_json::from_slice::<Value>(&record.ingress().bytes).ok();
+    let (Some(sent), Some(received)) = (sent, received) else {
+        state.record_incomplete(lane);
+        return CheckOutcome::Incomplete;
+    };
+    let outcome = diff(
+        &received,
+        &sent,
+        LaneClass::Fidelity,
+        record.edits(Leg::Request),
+    );
+    state.record_compared(
+        lane,
+        Leg::Request,
+        outcome.findings.iter().map(|f| (&f.path, f.class)),
+        outcome.truncated,
+    )
+}
+
+fn check_response_leg(state: &WireCheckState, tap: &WireTap, client: &Bytes) -> CheckOutcome {
+    let lane = wire_check_lane();
+    let declared = tap.take_response();
+    let upstream = declared
+        .response()
+        .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+    let client = serde_json::from_slice::<Value>(client).ok();
+    let (Some(upstream), Some(client)) = (upstream, client) else {
+        state.record_incomplete(lane);
+        return CheckOutcome::Incomplete;
+    };
+    let edits: Vec<DeclaredEdit> = declared.edits(Leg::Response).to_vec();
+    let outcome = diff(&upstream, &client, LaneClass::Fidelity, &edits);
+    state.record_compared(
+        lane,
+        Leg::Response,
+        outcome.findings.iter().map(|f| (&f.path, f.class)),
+        outcome.truncated,
+    )
+}
+
+/// Pin that a profile's check finishes clean on both legs, so the case
+/// prices the full diff of the common outcome and never the cheap
+/// incomplete exit or the loss path's ring and log work.
+fn assert_wire_check_compares(profile: SpectrumProfile, fx: &WireCheckFixture) {
+    let state = WireCheckState::default();
+    let (request, response) =
+        run_full_check(fx, ChatRequest::default(), &state, &wire_check_config(0, 1));
+    for (leg, outcome) in [("request", request), ("response", response)] {
+        assert!(
+            matches!(outcome, CheckOutcome::Clean),
+            "wire_check {profile:?} {leg} leg was not clean: {outcome:?}"
+        );
+    }
+}
+
 fn main() {
     let headers = HeaderMap::new();
     let headers = &headers;
@@ -252,6 +544,27 @@ fn main() {
         .collect();
 
     let anchor_fixture = anchor_fixture();
+
+    let wire_check_provider = AnthropicApiProvider::new(AnthropicApiConfig::new(
+        WIRE_CHECK_PROVIDER,
+        "sk-ant-bench-key",
+    ));
+    let wire_check_fixtures: Vec<(SpectrumProfile, BenchFixture, WireCheckFixture)> =
+        WIRE_CHECK_PROFILES
+            .iter()
+            .map(|p| {
+                let fx = p.generate();
+                let check = build_wire_check_fixture(headers, &wire_check_provider, *p, &fx);
+                assert_wire_check_compares(*p, &check);
+                (*p, fx, check)
+            })
+            .collect();
+    let checked_state = WireCheckState::default();
+    let checked_config = wire_check_config(0, 1);
+    let declined_state = WireCheckState::default();
+    // Past `first_n` the sampler admits the M-th attempt, so with M at
+    // u32::MAX no timed attempt is ever admitted.
+    let declined_config = wire_check_config(0, u32::MAX);
 
     let mut cases: Vec<BenchCase> = Vec::new();
 
@@ -324,6 +637,53 @@ fn main() {
             |resp: ChatResponse| {
                 let wire = OpenAiIngress.render_response(resp).expect("openai render");
                 black_box(wire);
+            },
+        ));
+    }
+
+    let wire_check_provider = &wire_check_provider;
+    let checked_state = &checked_state;
+    let checked_config = &checked_config;
+    let declined_state = &declined_state;
+    let declined_config = &declined_config;
+    for (profile, fx, check) in &wire_check_fixtures {
+        let wire = &fx.anthropic_wire;
+        cases.push(BenchCase::new(
+            format!("hot_path__{}__anthropic", profile.snake_name()),
+            move || {
+                black_box(serve(headers, wire_check_provider, wire, &check.upstream));
+            },
+        ));
+        cases.push(BenchCase::new(
+            format!("wire_unadmitted__{}__anthropic", profile.snake_name()),
+            move || {
+                let mut req = AnthropicIngress
+                    .parse_request(headers, wire)
+                    .expect("anthropic fixture parses");
+                capture_ingress(&mut req, &check.ingress);
+                let tap = install_tap(&mut req, declined_state, declined_config);
+                assert!(!tap.is_admitted(), "wire_unadmitted case must be declined");
+                black_box(serve_parsed(wire_check_provider, &req, &check.upstream));
+            },
+        ));
+        cases.push(BenchCase::new_batched(
+            format!("wire_unadmitted_setup__{}__anthropic", profile.snake_name()),
+            ChatRequest::default,
+            move |mut req: ChatRequest| {
+                capture_ingress(&mut req, &check.ingress);
+                let tap = install_tap(&mut req, declined_state, declined_config);
+                for edit in &check.request_edits {
+                    tap.declare(edit.clone());
+                }
+                tap.deposit(check.egress.clone());
+                black_box(req);
+            },
+        ));
+        cases.push(BenchCase::new_batched(
+            format!("wire_check__{}__anthropic", profile.snake_name()),
+            ChatRequest::default,
+            move |req: ChatRequest| {
+                black_box(run_full_check(check, req, checked_state, checked_config));
             },
         ));
     }
