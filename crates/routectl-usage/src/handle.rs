@@ -108,7 +108,7 @@ impl UsageCounters {
     }
 
     /// Capability-event rows successfully persisted by the consumer thread.
-    /// Capability events dropped as superseded by an operator purge of the same
+    /// Capability events dropped as superseded by a committed clear of the same
     /// key. See the field's own note on how to read a nonzero value.
     pub fn capability_events_superseded(&self) -> u64 {
         self.capability_events_superseded.load(Ordering::Relaxed)

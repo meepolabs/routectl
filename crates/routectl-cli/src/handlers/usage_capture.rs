@@ -663,7 +663,13 @@ pub(crate) fn drain_capability_events(
     }
     for ev in &meta.cleared_capabilities {
         usage.try_send_capability_event_at(
-            cleared_row_at(ev, ts, catalog_version, overlay_revision),
+            cleared_row_at(
+                ev,
+                ts,
+                catalog_version,
+                overlay_revision,
+                EvidenceSource::Live,
+            ),
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that
             // produced it: the writer compares it against the key's purge
@@ -674,12 +680,13 @@ pub(crate) fn drain_capability_events(
     }
 }
 
-/// The `cleared` ledger row for `ev`: `live` source, no phase / tier /
-/// evidence / value, stamped with the boundary revision pair.
+/// The `cleared` ledger row a routectl-issued probe settled for `ev`: `probe`
+/// source, no phase / tier / evidence / value, stamped with the given revision
+/// pair.
 ///
-/// The one mapping for a cleared row, shared by the dispatch drain and the
-/// acknowledged probe clear, so the replayer reads both identically.
-pub(crate) fn cleared_capability_row(
+/// The same mapping the dispatch drain uses for a client-traffic clear, which
+/// differs only in its `live` source, so the replayer reads both identically.
+pub(crate) fn probe_cleared_capability_row(
     ev: &CapabilityClearedEvent,
     ts: i64,
     catalog_version: u32,
@@ -690,6 +697,7 @@ pub(crate) fn cleared_capability_row(
         ts,
         i64::from(catalog_version),
         i64::try_from(overlay_revision).unwrap_or(i64::MAX),
+        EvidenceSource::Probe,
     )
 }
 
@@ -698,6 +706,7 @@ fn cleared_row_at(
     ts: i64,
     catalog_version: i64,
     overlay_revision: i64,
+    source: EvidenceSource,
 ) -> CapabilityEvent {
     CapabilityEvent {
         ts,
@@ -705,7 +714,7 @@ fn cleared_row_at(
         capability: ev.capability_key.clone(),
         verdict: Verdict::Cleared.as_str().to_string(),
         phase: String::new(),
-        source: EvidenceSource::Live.as_str().to_string(),
+        source: source.as_str().to_string(),
         tier: String::new(),
         evidence_class: None,
         upstream_token: None,

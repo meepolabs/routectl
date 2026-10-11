@@ -194,6 +194,95 @@ async fn an_event_superseded_by_a_purge_reports_so_and_writes_nothing() {
     writer.shutdown();
 }
 
+/// A `cleared` row for `capability` on `lane_key`.
+fn clear(lane_key: &str, capability: &str) -> CapabilityEvent {
+    CapabilityEvent {
+        verdict: "cleared".to_string(),
+        ..negative(lane_key, capability)
+    }
+}
+
+/// Every ledger verdict, in append order.
+fn ledger_verdicts(path: &PathBuf) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).expect("read open");
+    let mut stmt = conn
+        .prepare("SELECT verdict FROM capability_events ORDER BY rowid")
+        .expect("prepare");
+    stmt.query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<Result<Vec<String>, _>>()
+        .expect("rows")
+}
+
+/// A committed SINGLE clear raises its key's floor exactly as a batch clear
+/// does, so the next boot's rowid-ordered replay never sees a negative for the
+/// cleared version appended after the clear. Each row starts from one committed
+/// single clear at incarnation 4 and submits one follow-up for the same key.
+///
+/// Mutation check: skip the floor raise after a committed single event -> red on
+/// the delayed-negative row (it commits and lands after the clear). Refuse a
+/// clear at the floor -> red on the repeated-clear row.
+#[tokio::test]
+async fn a_committed_single_clear_raises_the_purge_floor() {
+    let key = wire_shape_key("thinking.enabled.display");
+    let rows = [
+        (
+            "delayed negative at the cleared incarnation",
+            negative("nick", &key),
+            4,
+            CapabilityEventWrite::SupersededByPurge,
+            vec!["cleared"],
+        ),
+        (
+            "repeated clear at the same incarnation",
+            clear("nick", &key),
+            4,
+            CapabilityEventWrite::Committed,
+            vec!["cleared", "cleared"],
+        ),
+        (
+            "older clear below the floor",
+            clear("nick", &key),
+            3,
+            CapabilityEventWrite::SupersededByPurge,
+            vec!["cleared"],
+        ),
+        (
+            "newer-incarnation negative after the clear",
+            negative("nick", &key),
+            5,
+            CapabilityEventWrite::Committed,
+            vec!["cleared", "broken"],
+        ),
+    ];
+
+    for (name, follow_up, incarnation, expected, verdicts) in rows {
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let first = handle
+            .admit_acknowledged_capability_event(clear("nick", &key), 1, 4)
+            .expect("admitted")
+            .await_outcome()
+            .await;
+        assert_eq!(
+            first,
+            CapabilityEventWrite::Committed,
+            "{name}: premise: the clear commits",
+        );
+
+        let outcome = handle
+            .admit_acknowledged_capability_event(follow_up, 1, incarnation)
+            .expect("admitted")
+            .await_outcome()
+            .await;
+
+        assert_eq!(outcome, expected, "{name}");
+        assert_eq!(ledger_verdicts(&path), verdicts, "{name}");
+        drop(handle);
+        writer.shutdown();
+    }
+}
+
 #[tokio::test]
 async fn a_failed_write_reports_write_failed() {
     // A writer with no usable connection: the insert cannot happen, and the caller

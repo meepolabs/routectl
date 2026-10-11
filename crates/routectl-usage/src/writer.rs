@@ -525,11 +525,12 @@ fn purge_floor_key(event: &CapabilityEvent) -> PurgeFloorKey {
 pub(crate) struct WriterState {
     conn: Option<Connection>,
     degraded: bool,
-    /// Per-key purge floors: the incarnation each purged key was cleared at.
+    /// Per-key purge floors: the newest incarnation each key was cleared at.
     ///
     /// NEVER evicted (see `fresh_purge_floors`) and updated ONLY after a
-    /// `cleared` purge row has committed -- a floor recorded for a clear that
-    /// failed would suppress events describing state that is still live.
+    /// `cleared` row has committed, from a batch or a single event alike -- a
+    /// floor recorded for a clear that failed would suppress events describing
+    /// state that is still live.
     purge_floors: std::collections::HashMap<PurgeFloorKey, u64>,
     /// The newest registry generation whose boundary batch has COMMITTED.
     ///
@@ -718,16 +719,23 @@ impl WriterState {
         // `<=` because the floor IS the cleared incarnation: an event describing
         // that same version is exactly what the purge superseded. A genuine
         // post-purge relearn allocated a strictly greater incarnation and passes.
+        //
+        // A `cleared` row AT the floor is the exception: it restates the clear
+        // that set the floor, so a caller retrying an acknowledged clear whose
+        // answer it never received is told durable rather than superseded. An
+        // OLDER clear stays refused -- appended after a relearn, it would make the
+        // next boot remove the newer negative.
         let key = purge_floor_key(event);
+        let is_clear = event.verdict == CLEARED_VERDICT;
         if let Some(&floor) = self.purge_floors.get(&key)
-            && stamp.incarnation <= floor
+            && (stamp.incarnation < floor || (stamp.incarnation == floor && !is_clear))
         {
             counters.incr_capability_events_superseded();
             tracing::debug!(
                 target: "routectl_usage::writer",
                 event_incarnation = stamp.incarnation,
                 purge_floor = floor,
-                "dropped a capability event superseded by an operator purge of the same key"
+                "dropped a capability event superseded by a committed clear of the same key"
             );
             return CapabilityEventWrite::SupersededByPurge;
         }
@@ -739,6 +747,13 @@ impl WriterState {
             Ok(_) => {
                 counters.incr_capability_events_persisted();
                 self.mark_healthy();
+                // Raised before the caller's acknowledgement is sent, on the same
+                // thread: a negative for the cleared version still queued behind
+                // this clear is refused, rather than appended after it for the
+                // next boot to replay.
+                if is_clear {
+                    self.raise_purge_floor(key, stamp.incarnation);
+                }
                 CapabilityEventWrite::Committed
             }
             Err(err) => {
@@ -797,15 +812,7 @@ impl WriterState {
                 // the very events the boundary exists to preserve.
                 for event in &batch.events {
                     if event.verdict == CLEARED_VERDICT {
-                        let key = purge_floor_key(event);
-                        // MAX, never overwrite: a later purge of the same key at
-                        // a lower incarnation must not lower the floor, or events
-                        // the earlier purge superseded would be admitted again.
-                        let raised = self
-                            .purge_floors
-                            .get(&key)
-                            .map_or(batch.incarnation, |&floor| floor.max(batch.incarnation));
-                        self.purge_floors.insert(key, raised);
+                        self.raise_purge_floor(purge_floor_key(event), batch.incarnation);
                     }
                 }
                 let _ = batch.ack.send(BatchCommit::Committed { rows: committed });
@@ -821,6 +828,16 @@ impl WriterState {
                 let _ = batch.ack.send(BatchCommit::WriteFailed);
             }
         }
+    }
+
+    /// Record that a `cleared` row for `key` at `incarnation` has COMMITTED.
+    ///
+    /// MAX, never overwrite: a later clear of the same key at a lower incarnation
+    /// must not lower the floor, or events the earlier clear superseded would be
+    /// admitted again.
+    fn raise_purge_floor(&mut self, key: PurgeFloorKey, incarnation: u64) {
+        let floor = self.purge_floors.entry(key).or_insert(incarnation);
+        *floor = (*floor).max(incarnation);
     }
 
     /// Count a write failure, emit a rate-limited ERROR, and log the

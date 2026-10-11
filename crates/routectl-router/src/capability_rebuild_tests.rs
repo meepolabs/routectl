@@ -1319,3 +1319,43 @@ fn a_non_live_exact_field_row_is_skipped_and_counted() {
     let resident: Vec<String> = reg.snapshot().into_iter().map(|e| e.feature_key).collect();
     assert_eq!(resident, vec![live_key]);
 }
+
+/// A routectl-issued re-check probe retracts a field verdict with a
+/// probe-sourced `cleared` row, so the replay admits that row and the negative
+/// stays retracted across a restart. A probe-sourced field NEGATIVE on the same
+/// replay is still skipped: a probe never mints a field verdict.
+///
+/// Mutation checks: skip every non-live field row again -> red on the resident
+/// set (the live negative comes back) and on both counters; admit probe-sourced
+/// field negatives -> red (the probe negative is resident and nothing is
+/// counted).
+#[test]
+fn a_probe_cleared_field_row_replays_while_a_probe_field_negative_is_skipped() {
+    let base = Instant::now();
+    let cleared_key =
+        crate::field_capability::field_capability_key("thinking.enabled.display").expect("path");
+    let probe_key =
+        crate::field_capability::field_capability_key("thinking.enabled.budget").expect("path");
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(1, CV, OV)),
+        rows: vec![
+            broken(2, base, &cleared_key),
+            probe_cleared(3, base, &cleared_key),
+            probe_broken(4, base, &probe_key),
+        ],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg, &providers());
+
+    assert_eq!(summary.replayed_cleared, 1, "the probe's clear replayed");
+    assert_eq!(
+        summary.skipped_namespace, 1,
+        "only the probe negative is skipped"
+    );
+    let resident: Vec<String> = reg.snapshot().into_iter().map(|e| e.feature_key).collect();
+    assert!(
+        resident.is_empty(),
+        "neither the retracted negative nor the probe negative is resident: {resident:?}",
+    );
+}

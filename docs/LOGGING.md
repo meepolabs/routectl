@@ -1541,8 +1541,9 @@ newer than the purge that superseded it. A restart resets the sequence.
 The refusal is also counted, so it is visible without a log level.
 
 One writer-side counter accompanies the per-key purge floor:
-`capability_events_superseded` counts events dropped because a purge of
-the same key had already superseded them. Zero on a daemon nobody purges.
+`capability_events_superseded` counts events dropped because a committed
+clear of the same key (an operator purge, or any other durable `cleared`
+row) had already superseded them. Zero on a daemon that never clears a key.
 A large value is a throughput signal (events queueing long enough to
 straddle purges), not a correctness one -- the drop is the protection
 working.

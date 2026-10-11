@@ -193,11 +193,11 @@ async fn a_closed_channel_reports_not_durable_and_the_job_stays_retryable() {
 }
 
 /// A healthy writer: the adapter answers durable, the router clears and
-/// resolves, and the ledger carries one LIVE-source `cleared` row.
+/// resolves, and the ledger carries one PROBE-source `cleared` row.
 ///
 /// The positive control for the closed-channel test above.
 #[tokio::test]
-async fn a_committed_clear_is_durable_and_lands_one_live_cleared_row() {
+async fn a_committed_clear_is_durable_and_lands_one_probe_cleared_row() {
     let (_dir, path, usage, writer) = live_usage_writer().await;
     let swap = published(lane_router(), &usage);
     queue_recheck(&swap).await;
@@ -224,8 +224,8 @@ async fn a_committed_clear_is_durable_and_lands_one_live_cleared_row() {
     );
     assert_eq!(rows[0].0, "cleared");
     assert_eq!(
-        rows[0].1, "live",
-        "live source: the warm rebuild skips a field row of any other source",
+        rows[0].1, "probe",
+        "probe source: routectl issued the request that settled the clear",
     );
 
     drop((live, swap, usage));
@@ -255,7 +255,7 @@ async fn the_clear_is_stamped_with_the_published_router_revision() {
         rows_for(&path, "cap-under-test"),
         vec![(
             "cleared".to_string(),
-            "live".to_string(),
+            "probe".to_string(),
             expected_catalog,
             9
         )],
@@ -266,7 +266,9 @@ async fn the_clear_is_stamped_with_the_published_router_revision() {
 }
 
 /// Only a COMMITTED write is durable: a row the writer drops as superseded by a
-/// purge of the same key answers not durable, though nothing failed.
+/// purge of the same key answers not durable, though nothing failed. The probe
+/// asked about an OLDER version than the purge cleared; a clear at the purge's
+/// own incarnation restates it and is durable.
 ///
 /// Mutation check: answer `outcome != WriteFailed` instead of `is_durable()` ->
 /// red.
@@ -276,7 +278,7 @@ async fn a_clear_superseded_by_a_purge_is_not_durable() {
     let swap = Arc::new(ArcSwap::from_pointee(lane_router()));
     let floor = usage
         .admit_capability_batch_at(
-            vec![cleared_capability_row(&cleared(1, 5), 1_000, 0, 0)],
+            vec![probe_cleared_capability_row(&cleared(1, 5), 1_000, 0, 0)],
             1,
             5,
         )
@@ -289,7 +291,7 @@ async fn a_clear_superseded_by_a_purge_is_not_durable() {
     );
     let ack = ack_over(&usage, &swap);
 
-    let durable = ack.acknowledge_clear(cleared(1, 5)).await;
+    let durable = ack.acknowledge_clear(cleared(1, 4)).await;
 
     assert!(!durable, "a superseded row is not on disk");
     assert_eq!(

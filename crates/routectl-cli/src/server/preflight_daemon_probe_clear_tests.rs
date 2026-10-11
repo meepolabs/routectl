@@ -105,6 +105,25 @@ fn recheck_ledger_verdicts(db_path: &std::path::Path) -> Vec<String> {
     .expect("rows")
 }
 
+/// The `source` of every `cleared` row recorded for the re-check key, in order.
+fn recheck_cleared_sources(db_path: &std::path::Path) -> Vec<String> {
+    let db = routectl_usage::open_readonly(db_path).expect("read-only open");
+    let mut stmt = db
+        .conn()
+        .prepare(
+            "SELECT source FROM capability_events \
+             WHERE lane_key = ?1 AND capability = ?2 AND verdict = 'cleared' \
+             ORDER BY rowid",
+        )
+        .expect("prepare");
+    stmt.query_map([STATE_KEY, recheck_key().as_str()], |r| {
+        r.get::<_, String>(0)
+    })
+    .expect("query")
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .expect("rows")
+}
+
 /// Whether the daemon's live router has the re-check negative acting.
 fn recheck_acting(router: &Router) -> bool {
     router
@@ -128,8 +147,8 @@ fn recheck_acting(router: &Router) -> bool {
 ///     is never resolved and no row lands;
 ///   - drop the acknowledgement from `Router::carry_over_learned_from` -> same,
 ///     on the rebuilt router;
-///   - write the clear with a `probe` source -> the warm rebuild skips the row
-///     and the negative is resident again.
+///   - make the warm rebuild skip probe-sourced field `cleared` rows -> the
+///     probe's clear is skipped and the negative is resident again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_resolved_recheck_writes_one_cleared_row_and_a_warm_rebuild_keeps_it_cleared() {
     let (config, dir) = daemon_config();
@@ -194,6 +213,11 @@ async fn a_resolved_recheck_writes_one_cleared_row_and_a_warm_rebuild_keeps_it_c
         recheck_ledger_verdicts(&db_path),
         vec!["broken".to_string(), "cleared".to_string()],
         "exactly one cleared row landed in the daemon's own ledger, after the seed",
+    );
+    assert_eq!(
+        recheck_cleared_sources(&db_path),
+        vec!["probe".to_string()],
+        "the clear is attributed to the routectl-issued probe that settled it",
     );
     assert!(
         !resident_after_warm_rebuild(&config, daemon.usage()).await,

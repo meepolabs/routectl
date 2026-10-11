@@ -15,13 +15,13 @@
 //! failed, and a row a boundary or purge superseded all answer `false`: the
 //! negative keeps acting and the probe job stays retryable.
 //!
-//! # The row is a live-source `cleared` row
+//! # The row is a probe-source `cleared` row
 //!
 //! The same shape the dispatch drain writes for a clear, built by the same
-//! function. Live rather than probe source is load-bearing: the warm rebuild
-//! refuses a field-namespace row whose source is not live, so a probe-sourced
-//! clear would be skipped at the next boot and the negative it retracted would
-//! come back.
+//! function, but stamped `probe`: routectl issued the request that settled it,
+//! not a client. The warm rebuild admits a probe-sourced field `cleared` row
+//! (while still refusing a probe-sourced field negative), so the negative this
+//! retracted stays retracted at the next boot.
 //!
 //! # Revision stamps come from the live router
 //!
@@ -44,7 +44,7 @@ use routectl_router::router::CapabilityClearedEvent;
 use routectl_router::{ProbeClearAcknowledgement, Router};
 use routectl_usage::UsageHandle;
 
-use crate::handlers::usage_capture::{cleared_capability_row, epoch_ms_now};
+use crate::handlers::usage_capture::{epoch_ms_now, probe_cleared_capability_row};
 
 /// Submits a probe-settled clear through the usage writer's acknowledged path.
 pub(super) struct UsageProbeClearAck {
@@ -66,8 +66,12 @@ impl ProbeClearAcknowledgement for UsageProbeClearAck {
             );
             return false;
         };
-        let row =
-            cleared_capability_row(&cleared, epoch_ms_now(), catalog_version, overlay_revision);
+        let row = probe_cleared_capability_row(
+            &cleared,
+            epoch_ms_now(),
+            catalog_version,
+            overlay_revision,
+        );
         let receipt = match self.usage.admit_acknowledged_capability_event(
             row,
             cleared.persistence_generation,

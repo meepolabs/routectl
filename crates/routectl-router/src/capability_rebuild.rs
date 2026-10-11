@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use routectl_core::capability::{
-    BETA_ACCEPTED, EvidenceSource, FailurePhase, SignalTier, is_known_evidence_class,
+    BETA_ACCEPTED, EvidenceSource, FailurePhase, SignalTier, Verdict, is_known_evidence_class,
     normalize_capability_key,
 };
 
@@ -279,8 +279,9 @@ pub struct CapabilityRebuildSummary {
     /// Events skipped because their capability key lands in the envelope-field
     /// namespace but no field-repair guard could have written them: the key
     /// reaches the namespace only once the lane's key normalization runs, or
-    /// the row's source is not live. Replaying one would make a resident field
-    /// verdict out of evidence the field-repair guard never produced.
+    /// the row's source is not live (a probe-sourced `cleared` row excepted).
+    /// Replaying one would make a resident field verdict out of evidence the
+    /// field-repair guard never produced.
     pub skipped_namespace: usize,
     /// Field rows whose persisted value token was refused by the strict
     /// decode: each still replayed, as a plain negative carrying no value, so
@@ -441,7 +442,10 @@ pub fn rebuild_capabilities_with_values(
 /// Why a row the registry would store under a field-namespace key is not a
 /// field verdict's own row, or `None` when it is (or is outside the
 /// namespace). A field-repair guard writes the exact key it minted, which
-/// normalization returns unchanged, and only ever from a live request.
+/// normalization returns unchanged, and mints a verdict only from a live
+/// request. A clear is the one exception to the source rule: a routectl-issued
+/// re-check probe retracts a field verdict with a `probe`-sourced `cleared`
+/// row, and skipping it would bring the retracted negative back at boot.
 fn field_namespace_skip(row: &CapabilityEventRow) -> Option<&'static str> {
     let normalized = normalize_capability_key(&row.capability, &row.provider_kind);
     if !crate::field_capability::capability_key_is_field_verdict(&normalized) {
@@ -450,8 +454,12 @@ fn field_namespace_skip(row: &CapabilityEventRow) -> Option<&'static str> {
     if normalized != row.capability {
         return Some("normalized_field_namespace");
     }
-    (EvidenceSource::parse(&row.source) != Some(EvidenceSource::Live))
-        .then_some("non_live_field_namespace")
+    let admitted = match EvidenceSource::parse(&row.source) {
+        Some(EvidenceSource::Live) => true,
+        Some(EvidenceSource::Probe) => row.verdict == Verdict::Cleared.as_str(),
+        None => false,
+    };
+    (!admitted).then_some("non_live_field_namespace")
 }
 
 /// Replay one surviving row through the matching admission call. The parsed
