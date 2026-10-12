@@ -3225,6 +3225,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   class, replay carried), `FieldRowProposer` (`rejected_field` on the native
   class), `CapabilityProposer` (`resolve_requested_capability` on the
   body-free error form)
+- `src/router/learn_revert.rs` -- a rejection naming a path a declared
+  routectl edit put on the wire: `MatchedEdit` (`None` / `One` / `Conflict`,
+  computed at settlement from the attempt's request edits, only for a
+  `routectl_added` / `client_changed` path the egress is not known to lack),
+  the closed `revert` (operator payload extras restored to the client's
+  value or removed; placed cache markers removed; every other site declined)
+  with its postcondition (the request slot equals what was sent and, undone,
+  equals the client's wire value), `TargetRevert` (once per target, draws the
+  request's `RepairBudget` last), the content-free `WireRevert` state on
+  `DispatchMeta` that `emit_wire_rejections` reads for the outcome, and the
+  deduped `routectl_edit_rejected` WARN (lane, masked + sanitized path, edit
+  site). Engages before the proposers; nothing learned or persisted
 - `src/router/learned_lanes.rs` -- the ONE projection of resolved learned
   lanes for operator surfaces: `LearnedLaneProjection` of
   `ResolvedLearnedLane { lane: StateKey, nicknames, provider_kind, routed }`,

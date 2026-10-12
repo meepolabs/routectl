@@ -47,6 +47,7 @@ mod field_repair;
 mod field_verdict_observability;
 mod learn_engine;
 mod learn_proposers;
+mod learn_revert;
 mod learned_lanes;
 mod local_refusal;
 mod opening_lookup;
@@ -463,6 +464,9 @@ pub struct Router {
     /// sampler's per-(lane, version) counts must not restart their first-N
     /// window on every config swap.
     wire_check: Arc<crate::wire_check_state::WireCheckState>,
+    /// Warn-once dedup for `routectl_edit_rejected`, keyed by lane, masked
+    /// path and attribution. Reset on a Router rebuild, which re-warns once.
+    edit_rejected_warned: learn_revert::EditRejectedWarned,
     /// Test-only: an RFC 6901 pointer every installed wire tap removes from
     /// the request body the egress deposits, simulating an egress that lost
     /// that member. `None` everywhere but the synthetic-loss tests.
@@ -1600,6 +1604,10 @@ pub struct DispatchMeta {
     /// that drew it and waiting for the field-repair outcome. Content-free;
     /// read once at request resolution.
     pub(crate) wire_rejections: Vec<wire_rejection::PendingWireRejection>,
+    /// The rejections among [`Self::wire_rejections`] a declared routectl
+    /// edit explains, each with what its revert came to. Content-free;
+    /// nothing in it outlives the request.
+    pub(crate) wire_reverts: Vec<learn_revert::WireRevert>,
     /// The response-direction wire check of the attempt that answered,
     /// when the sampler admitted it on a FIDELITY lane. The ingress
     /// renderer takes it and hands it the document the client received.
@@ -1795,6 +1803,7 @@ impl DispatchMeta {
             field_repairs: Vec::new(),
             field_preflight: Vec::new(),
             wire_rejections: Vec::new(),
+            wire_reverts: Vec::new(),
             response_check: None,
         }
     }
@@ -2194,6 +2203,7 @@ impl Router {
             catalog_overlay: Arc::default(),
             metrics: Arc::new(RouterMetrics::default()),
             wire_check: Arc::default(),
+            edit_rejected_warned: learn_revert::edit_rejected_warned(),
             #[cfg(any(test, feature = "test-utils"))]
             wire_tap_drop: None,
             has_forwarded_provider,

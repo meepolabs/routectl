@@ -44,7 +44,8 @@ use super::field_repair::{
     FieldRepairHandle, FieldRepairPlan, FieldRepairRow, FieldRepairTable, FieldSettlementMode,
 };
 use super::learn_proposers::{CapabilityProposer, FieldRowProposer, ReplayProposer};
-use super::rejection_parser::{NamedRejection, RejectionKind};
+use super::learn_revert::{MatchedEdit, SentSlot, TargetRevert, answer_declared_edit};
+use super::rejection_parser::{NamedRejection, RawPath, RejectionKind};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::{ReplayCarryPlan, strip_replay_artifacts_recalibrating};
 use super::runtime_gate::LearnedProbeGuard;
@@ -56,7 +57,7 @@ pub(super) type ResolvedCapability = (String, SignalTier, FailurePhase);
 
 /// Where on the attempt's wire a rejection points, as settled from the
 /// attempt's record before any repair touched the request.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct RejectionSite {
     /// Where the named path came from, as the wire check records it.
     pub(super) provenance: RejectionProvenance,
@@ -64,13 +65,24 @@ pub(super) struct RejectionSite {
     /// that cannot be told: no deposit, an unparseable body, a rejection
     /// naming no exact path, or a path whose shape the body does not share.
     pub(super) in_egress: Option<bool>,
+    /// The attempt's declared request edits that put the named path on the
+    /// wire. Only a path the body that went out carries, on a fidelity lane,
+    /// is matched.
+    pub(super) matched_edit: MatchedEdit,
+    /// The named location, unmasked, when the rejection named an exact one.
+    /// Read to undo an edit there; never rendered.
+    pub(super) locator: Option<RawPath>,
+    /// What the body that went out held at `locator`.
+    pub(super) sent: SentSlot,
+    /// The rejection's position among the request's pending rejections.
+    pub(super) pending: usize,
 }
 
 impl RejectionSite {
     /// Whether the rejection names a path the body that went out did not
     /// carry. Such a rejection cannot be about anything routectl sent there,
     /// so no path-keyed proposal may act on it.
-    fn names_absent_path(site: Option<Self>) -> bool {
+    fn names_absent_path(site: Option<&Self>) -> bool {
         site.and_then(|site| site.in_egress) == Some(false)
     }
 }
@@ -187,7 +199,7 @@ pub(super) enum Arbitration {
 /// generic capability slot still runs, behind its own request-membership
 /// gate, since a capability name is not a body path.
 pub(super) fn arbitrate(input: &RejectionInput<'_>, sink: &mut impl RepairSink) -> Arbitration {
-    let skip_path_keyed = RejectionSite::names_absent_path(input.site);
+    let skip_path_keyed = RejectionSite::names_absent_path(input.site.as_ref());
     for slot in ARBITRATION_ORDER {
         if skip_path_keyed && slot.is_path_keyed() {
             continue;
@@ -266,6 +278,8 @@ pub(super) struct AttemptLearning<'a> {
     /// The generic capability proposal of the last rejection that took no
     /// repair, held until [`Self::observe_generic`] applies it.
     pending_capability: Option<ResolvedCapability>,
+    /// The revert of a declared routectl edit a rejection named.
+    revert: TargetRevert,
 }
 
 impl<'a> AttemptLearning<'a> {
@@ -293,6 +307,7 @@ impl<'a> AttemptLearning<'a> {
             canary_lossy_repair: None,
             skip_replay_backoff: false,
             pending_capability: None,
+            revert: TargetRevert::default(),
         }
     }
 
@@ -339,6 +354,7 @@ impl<'a> AttemptLearning<'a> {
         provider_kind: Option<&str>,
     ) -> ClassifiedFailure {
         self.canary_lossy_repair = None;
+        self.revert.on_failure();
         match self.replay_plan.as_ref() {
             Some(plan) => classify_with_attempt(err, provider_kind, plan.attempt()),
             None => classify(err, provider_kind),
@@ -357,7 +373,10 @@ impl<'a> AttemptLearning<'a> {
     /// re-dispatches first.
     ///
     /// `site` is what the attempt's settlement read off the wire; `None`
-    /// arbitrates exactly as a rejection with no wire record.
+    /// arbitrates exactly as a rejection with no wire record. A site naming
+    /// a path one or more declared routectl edits put on the wire is
+    /// answered by undoing that edit, or not at all, and no proposer reads
+    /// it: such a rejection says nothing about what the upstream accepts.
     ///
     /// On `Retry` after the replay repair the running error is the
     /// rejection's body-free form, so a re-gate refusal cannot surface the
@@ -378,6 +397,22 @@ impl<'a> AttemptLearning<'a> {
         budget: &mut RepairBudget,
     ) -> FailureDecision {
         self.pending_capability = None;
+        if let Some(reverted) = answer_declared_edit(
+            &mut self.revert,
+            site.as_ref(),
+            client_req,
+            attempt_req,
+            meta,
+            budget,
+        ) {
+            if !reverted {
+                return FailureDecision::Proceed;
+            }
+            self.skip_replay_backoff = true;
+            return FailureDecision::Retry {
+                last_err_body_free: None,
+            };
+        }
         let input = RejectionInput {
             err,
             class: cf,
@@ -589,6 +624,7 @@ impl<'a> AttemptLearning<'a> {
             meta,
             &mut self.learned_probe_guard,
         );
+        self.revert.on_success(meta);
         self.settle_replay_success(req, meta);
         self.settle_field_success(req, meta);
         if self.canary_enabled {

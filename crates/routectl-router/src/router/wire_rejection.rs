@@ -25,6 +25,9 @@ use serde_json::Value;
 use super::class_observe::upstream_facts;
 use super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR;
 use super::learn_engine::RejectionSite;
+use super::learn_revert::{
+    EditAttribution, MatchedEdit, SentSlot, WireRevert, attributable, revert_outcome,
+};
 use super::rejection_parser::{
     CONVERSE_FIELD_BAG, REJECTION_STATUSES, RawPath, RejectedWirePath, rejected_wire_path,
 };
@@ -83,20 +86,11 @@ impl Router {
             status,
             err.parsed_body(),
         );
+        let pending = meta.wire_rejections.len();
         let site = lend_request_record(attempt_req, tap, |record| {
             let record = record?.with_rejection(err);
             compare_request(&self.wire_check, lane, &record);
-            let path = exact_locator(rejected.as_ref());
-            let sent = path
-                .and(record.egress())
-                .and_then(|body| serde_json::from_slice::<Value>(body).ok());
-            Some(RejectionSite {
-                provenance: provenance_of(lane, &record, path, sent.as_ref()),
-                in_egress: path
-                    .zip(sent.as_ref())
-                    .and_then(|(path, sent)| egress_location(lane.egress(), sent, path))
-                    .filter(|&carried| carried || absence_is_evidence(rejected.as_ref())),
-            })
+            Some(read_site(lane, &record, rejected.as_ref(), pending))
         });
         let Some(site) = site else {
             self.wire_check.record_incomplete(lane);
@@ -105,6 +99,12 @@ impl Router {
         let (path, field) = rejected.map_or((WirePath::root(), None), |named| {
             (named.wire, Some(named.field))
         });
+        if let Some(attribution) = EditAttribution::of(&site.matched_edit, site.provenance) {
+            self.warn_edit_rejected(lane, &path, attribution);
+        }
+        if site.matched_edit != MatchedEdit::None {
+            meta.wire_reverts.push(WireRevert::declined(pending));
+        }
         meta.wire_rejections.push(PendingWireRejection {
             lane,
             path,
@@ -119,16 +119,60 @@ impl Router {
     /// Record every rejection the request drew, each with what field repair
     /// made of it. Called once, when the dispatch has resolved and every
     /// repair record is final.
+    /// A rejection a declared routectl edit explains takes the outcome of
+    /// its revert; every other takes what field repair made of it.
     pub(super) fn emit_wire_rejections(&self, meta: &DispatchMeta) {
-        for pending in &meta.wire_rejections {
+        for (position, pending) in meta.wire_rejections.iter().enumerate() {
+            let outcome = revert_outcome(position, &meta.wire_reverts)
+                .unwrap_or_else(|| field_repair_outcome(pending, &meta.field_repairs));
             self.wire_check.record_rejection(
                 pending.lane,
                 Leg::Request,
                 &pending.path,
                 pending.provenance,
-                field_repair_outcome(pending, &meta.field_repairs),
+                outcome,
             );
         }
+    }
+}
+
+/// What the attempt's record says about the location `rejected` names:
+/// where it came from, whether the body that went out carries it, and the
+/// declared edits that put it there. `pending` is the rejection's position
+/// among the request's pending rejections.
+fn read_site(
+    lane: Lane,
+    record: &AttemptRecord<'_>,
+    rejected: Option<&RejectedWirePath>,
+    pending: usize,
+) -> RejectionSite {
+    let path = exact_locator(rejected);
+    let sent = path
+        .and(record.egress())
+        .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+    let provenance = provenance_of(lane, record, path, sent.as_ref());
+    let in_egress = path
+        .zip(sent.as_ref())
+        .and_then(|(path, sent)| egress_location(lane.egress(), sent, path))
+        .filter(|&carried| carried || absence_is_evidence(rejected));
+    let matched_edit = match rejected {
+        Some(named) if attributable(provenance, in_egress) => {
+            MatchedEdit::among(record.edits(Leg::Request), &named.wire)
+        }
+        _ => MatchedEdit::None,
+    };
+    RejectionSite {
+        provenance,
+        in_egress,
+        matched_edit,
+        locator: rejected
+            .filter(|named| !named.wire.is_coarsened())
+            .map(|named| named.locator.clone()),
+        sent: path
+            .zip(sent.as_ref())
+            .map(|(path, sent)| SentSlot::at(sent, path))
+            .unwrap_or_default(),
+        pending,
     }
 }
 
@@ -206,7 +250,7 @@ fn egress_location(egress: EgressKind, sent: &Value, path: &[String]) -> Option<
 }
 
 /// The value at `path` (raw keys and indices) in `body`.
-fn locate<'v>(body: &'v Value, path: &[String]) -> Option<&'v Value> {
+pub(super) fn locate<'v>(body: &'v Value, path: &[String]) -> Option<&'v Value> {
     match walk(body, path, TagOrKey::Key) {
         Walk::Found(value) => Some(value),
         Walk::Missing { .. } | Walk::Mismatch | Walk::Ambiguous => None,
