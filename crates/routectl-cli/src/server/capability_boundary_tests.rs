@@ -2209,6 +2209,7 @@ fn a_restatement_is_stamped_with_the_entrys_recorded_kind() {
             evidence_class: None,
             phase: routectl_core::capability::FailurePhase::F1,
             source: routectl_core::capability::EvidenceSource::Live,
+            recheck_owned: false,
         },
         provider_kind: "openai-compat".to_string(),
         incarnation: 0,

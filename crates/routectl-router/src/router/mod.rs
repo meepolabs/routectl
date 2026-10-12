@@ -3257,6 +3257,10 @@ mod probe_activation_boundary_tests;
 mod recheck_only_lapse_tests;
 
 #[cfg(test)]
+#[path = "recheck_backstop_tests.rs"]
+mod recheck_backstop_tests;
+
+#[cfg(test)]
 #[path = "probe_worker_tests.rs"]
 mod probe_worker_tests;
 

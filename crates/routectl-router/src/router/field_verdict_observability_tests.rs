@@ -43,6 +43,7 @@ fn entry(feature_key: &str, verdict: Verdict, source: EvidenceSource) -> Learned
             _ => FailurePhase::F2,
         },
         source,
+        recheck_owned: false,
     }
 }
 

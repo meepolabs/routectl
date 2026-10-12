@@ -111,6 +111,7 @@ pub(super) fn negative(
         evidence_class: None,
         phase,
         source: EvidenceSource::Live,
+        recheck_owned: false,
     }
 }
 

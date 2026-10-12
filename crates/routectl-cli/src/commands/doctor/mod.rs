@@ -30,6 +30,10 @@ mod lane_matrix_tests;
 #[path = "seed_matrix_tests.rs"]
 mod seed_matrix_tests;
 
+#[cfg(test)]
+#[path = "recheck_backstop_matrix_tests.rs"]
+mod recheck_backstop_matrix_tests;
+
 use std::path::Path;
 use std::time::Instant;
 

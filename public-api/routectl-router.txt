@@ -8071,6 +8071,66 @@ impl<T> typenum::type_operators::Same for routectl_router::MigrationError
 pub type routectl_router::MigrationError::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MigrationError where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::MigrationError::into_shared(self) -> Shared
+pub enum routectl_router::NegativeState
+pub routectl_router::NegativeState::Absent
+pub routectl_router::NegativeState::Acting
+pub routectl_router::NegativeState::Lapsed
+impl core::clone::Clone for routectl_router::NegativeState
+pub fn routectl_router::NegativeState::clone(&self) -> routectl_router::NegativeState
+impl core::cmp::Eq for routectl_router::NegativeState
+impl core::cmp::PartialEq for routectl_router::NegativeState
+pub fn routectl_router::NegativeState::eq(&self, &routectl_router::NegativeState) -> bool
+impl core::fmt::Debug for routectl_router::NegativeState
+pub fn routectl_router::NegativeState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::NegativeState
+impl core::marker::StructuralPartialEq for routectl_router::NegativeState
+impl core::marker::Freeze for routectl_router::NegativeState
+impl core::marker::Send for routectl_router::NegativeState
+impl core::marker::Sync for routectl_router::NegativeState
+impl core::marker::Unpin for routectl_router::NegativeState
+impl core::marker::UnsafeUnpin for routectl_router::NegativeState
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::NegativeState
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::NegativeState
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::NegativeState where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::NegativeState::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::NegativeState where U: core::convert::From<T>
+pub fn routectl_router::NegativeState::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::NegativeState where U: core::convert::Into<T>
+pub type routectl_router::NegativeState::Error = core::convert::Infallible
+pub fn routectl_router::NegativeState::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::NegativeState where U: core::convert::TryFrom<T>
+pub type routectl_router::NegativeState::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::NegativeState::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::NegativeState where T: core::clone::Clone
+pub type routectl_router::NegativeState::Owned = T
+pub fn routectl_router::NegativeState::clone_into(&self, &mut T)
+pub fn routectl_router::NegativeState::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::NegativeState where T: core::clone::Clone
+pub fn routectl_router::NegativeState::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::NegativeState where T: 'static + ?core::marker::Sized
+pub fn routectl_router::NegativeState::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::NegativeState where T: ?core::marker::Sized
+pub fn routectl_router::NegativeState::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::NegativeState where T: ?core::marker::Sized
+pub fn routectl_router::NegativeState::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::NegativeState where T: core::clone::Clone
+pub unsafe fn routectl_router::NegativeState::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::NegativeState
+pub fn routectl_router::NegativeState::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::NegativeState where T: core::clone::Clone
+pub fn routectl_router::NegativeState::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::NegativeState
+impl<T> outref::AsOut<T> for routectl_router::NegativeState where T: core::marker::Copy
+pub fn routectl_router::NegativeState::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::NegativeState where T: ?core::marker::Sized
+pub fn routectl_router::NegativeState::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::NegativeState::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::NegativeState
+impl<T> tracing::instrument::WithSubscriber for routectl_router::NegativeState
+impl<T> typenum::type_operators::Same for routectl_router::NegativeState
+pub type routectl_router::NegativeState::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::NegativeState where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::NegativeState::into_shared(self) -> Shared
 pub enum routectl_router::ObservationDirection
 pub routectl_router::ObservationDirection::SuspectAbsence
 pub routectl_router::ObservationDirection::Verified
@@ -13007,7 +13067,7 @@ pub fn routectl_router::LearnedCapabilityRegistry::inferred_window(&self) -> cor
 pub fn routectl_router::LearnedCapabilityRegistry::is_verified_working(&self, &str, &str, &str, std::time::Instant) -> bool
 pub fn routectl_router::LearnedCapabilityRegistry::is_verified_working_in_generation(&self, u64, &str, &str, &str, std::time::Instant) -> core::option::Option<bool>
 pub fn routectl_router::LearnedCapabilityRegistry::max_entries(&self) -> usize
-pub fn routectl_router::LearnedCapabilityRegistry::negative_state_in_generation(&self, u64, &str, &str, &str, std::time::Instant) -> core::option::Option<(routectl_router::learned_capability::NegativeState, u64)>
+pub fn routectl_router::LearnedCapabilityRegistry::negative_state_in_generation(&self, u64, &str, &str, &str, std::time::Instant) -> core::option::Option<(routectl_router::NegativeState, u64)>
 pub fn routectl_router::LearnedCapabilityRegistry::new(core::time::Duration, core::time::Duration, usize) -> Self
 pub fn routectl_router::LearnedCapabilityRegistry::observe(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, core::option::Option<&str>, std::time::Instant) -> core::option::Option<routectl_router::learned_capability::ObserveOutcome>
 pub fn routectl_router::LearnedCapabilityRegistry::observe_accepted_beta_in_generation(&self, u64, &str, &str, &str, std::time::Instant) -> routectl_router::GenerationOutcome<routectl_router::learned_capability::PositiveOutcome>
@@ -13139,6 +13199,7 @@ pub routectl_router::LearnedRegistryEntry::first_seen: std::time::Instant
 pub routectl_router::LearnedRegistryEntry::last_seen: std::time::Instant
 pub routectl_router::LearnedRegistryEntry::observations: u32
 pub routectl_router::LearnedRegistryEntry::phase: routectl_core::capability::FailurePhase
+pub routectl_router::LearnedRegistryEntry::recheck_owned: bool
 pub routectl_router::LearnedRegistryEntry::signal_tier: routectl_core::capability::SignalTier
 pub routectl_router::LearnedRegistryEntry::source: routectl_core::capability::EvidenceSource
 pub routectl_router::LearnedRegistryEntry::state_key: alloc::string::String
@@ -17509,6 +17570,7 @@ pub const routectl_router::CURRENT_CONFIG_VERSION: u32
 pub const routectl_router::CURRENT_VOCAB_VERSION: i64
 pub const routectl_router::K_SESSION_CAPACITY: usize
 pub const routectl_router::MAX_POOL_MEMBERS: usize
+pub const routectl_router::RECHECK_BACKSTOP: core::time::Duration
 pub const routectl_router::VERDICT_MIXED: &str
 pub trait routectl_router::CalibrationLedgerReader: core::marker::Send + core::marker::Sync
 pub fn routectl_router::CalibrationLedgerReader::read_calibration_samples(&self, std::time::SystemTime, usize) -> alloc::vec::Vec<routectl_router::CalibrationLedgerRow>

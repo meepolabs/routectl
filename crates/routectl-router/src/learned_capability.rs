@@ -91,6 +91,31 @@ const MAX_BACKOFF_MULTIPLE: u32 = 30;
 /// Backoff jitter is bounded to `+/- (decay / JITTER_DIVISOR)`.
 const JITTER_DIVISOR: u32 = 8;
 
+/// How long past its decay deadline a negative the free token-count re-check
+/// owns keeps acting before it falls back to the generic re-probe.
+///
+/// The re-check is the only recovery such a negative normally has, and it can
+/// end without an answer (its job exhausted or tombstoned for the
+/// incarnation). The backstop bounds how long a negative can stay stuck that
+/// way. A fixed span rather than a multiple of the decay window: a zero decay
+/// window must not hand a re-check-owned negative to an ordinary success.
+pub const RECHECK_BACKSTOP: Duration = Duration::from_hours(48);
+
+/// Whether a negative stamped with `expires_at` has lapsed into a
+/// re-verification at `now`: at its decay deadline for an ordinary negative,
+/// [`RECHECK_BACKSTOP`] later for one the free re-check owns.
+///
+/// The one lapse rule: the dispatch path and the display surfaces both read
+/// it, so the action the doctor reports is the one dispatch takes.
+pub fn negative_lapsed(expires_at: Instant, recheck_owned: bool, now: Instant) -> bool {
+    let deadline = if recheck_owned {
+        expires_at.checked_add(RECHECK_BACKSTOP)
+    } else {
+        Some(expires_at)
+    };
+    deadline.is_some_and(|deadline| now >= deadline)
+}
+
 /// Internal map key. `state_key` is used verbatim; `feature_key` is
 /// always the capability key normalized under `provider_kind`.
 ///
@@ -111,6 +136,19 @@ struct RegistryKey {
     state_key: String,
     provider_kind: String,
     feature_key: String,
+}
+
+impl RegistryKey {
+    /// Whether a negative under this key is recovered only by the free
+    /// token-count re-check under `table`.
+    fn recheck_owned(&self, table: crate::router::FieldRepairTable) -> bool {
+        crate::router::negative_recovers_only_by_recheck(
+            table,
+            &self.state_key,
+            &self.feature_key,
+            &self.provider_kind,
+        )
+    }
 }
 
 /// Which side of the capability-truth ledger a resident entry records: a
@@ -196,33 +234,28 @@ impl LearnedEntry {
         signal_acts(self.signal, self.observations)
     }
 
-    /// The decay window has lapsed and the negative is due for a re-probe.
-    /// A `Verified` positive never decays within a revision, so it is never
+    /// The negative is due for a re-probe under [`negative_lapsed`]. A
+    /// `Verified` positive never decays within a revision, so it is never
     /// expired -- it can never claim a re-probe slot.
-    fn is_expired(&self, now: Instant) -> bool {
-        matches!(self.verdict, EntryVerdict::Negative) && now >= self.expires_at
+    fn is_expired(&self, recheck_owned: bool, now: Instant) -> bool {
+        matches!(self.verdict, EntryVerdict::Negative)
+            && negative_lapsed(self.expires_at, recheck_owned, now)
     }
 
     /// Whether this entry, stored under `key`, has lapsed into a decay
-    /// re-verification: [`Self::is_expired`], except that a negative whose
-    /// only recovery is the free token-count re-check never lapses. That
-    /// re-check removes it only after its clear is acknowledged durable; a
-    /// lapse would instead admit it as a generic re-probe (or a reactive repair
-    /// slot) and let any ordinary success clear it with no durable
-    /// acknowledgement.
+    /// re-verification: [`Self::is_expired`], with a negative whose only
+    /// recovery is the free token-count re-check held for
+    /// [`RECHECK_BACKSTOP`] past its deadline. That re-check removes it only
+    /// after its clear is acknowledged durable; an ordinary lapse would instead
+    /// admit it as a generic re-probe (or a reactive repair slot) and let any
+    /// ordinary success clear it with no durable acknowledgement.
     fn has_lapsed(
         &self,
         table: crate::router::FieldRepairTable,
         key: &RegistryKey,
         now: Instant,
     ) -> bool {
-        self.is_expired(now)
-            && !crate::router::negative_recovers_only_by_recheck(
-                table,
-                &key.state_key,
-                &key.feature_key,
-                &key.provider_kind,
-            )
+        self.is_expired(key.recheck_owned(table), now)
     }
 
     /// The routing decision for this entry when it `is_acting`, keyed on
@@ -346,7 +379,7 @@ pub enum ProbeClaim {
 /// Non-claiming view of the resident negative for a key.
 ///
 /// The read-only counterpart to
-/// [`LearnedCapabilityRegistry::acting_negative_for`]: it never claims the
+/// `LearnedCapabilityRegistry::acting_negative_for`: it never claims the
 /// re-probe slot, so a caller that runs its own admission discipline (the
 /// reasoning-replay lifecycle's single-flight) reads the decay state
 /// without mutating it.
@@ -407,6 +440,10 @@ pub struct LearnedRegistryEntry {
     pub phase: FailurePhase,
     /// Whether the evidence came from live traffic or an out-of-band probe.
     pub source: EvidenceSource,
+    /// Whether the entry's key is one the free token-count re-check owns, so
+    /// a negative lapses [`RECHECK_BACKSTOP`] after `expires_at` rather than
+    /// at it.
+    pub recheck_owned: bool,
 }
 
 /// A snapshot row together with the provider kind of the write that created
@@ -859,6 +896,9 @@ pub struct PurgeLease {
     /// the entry did not change under the lease. Informational: the entry itself
     /// stays in the map, so nothing is reconstructed from this.
     captured: Option<LearnedEntry>,
+    /// The registry's closed field-repair table, which the captured entry's
+    /// snapshot shape reads its re-check ownership from.
+    field_repair_table: crate::router::FieldRepairTable,
     /// The generation selected under the same guard as the capture.
     generation: u64,
     /// Back-reference used only to release the lease.
@@ -893,9 +933,9 @@ impl PurgeLease {
     /// The captured entry, in the fixed snapshot shape, for assertions and for
     /// the audit record.
     pub fn captured_entry(&self) -> Option<LearnedRegistryEntry> {
-        self.captured
-            .as_ref()
-            .map(|entry| LearnedCapabilityRegistry::snapshot_row(&self.key, entry))
+        self.captured.as_ref().map(|entry| {
+            LearnedCapabilityRegistry::snapshot_row(self.field_repair_table, &self.key, entry)
+        })
     }
 }
 
@@ -1563,7 +1603,7 @@ impl LearnedCapabilityRegistry {
         self.entries
             .read()
             .iter()
-            .map(|(key, entry)| Self::snapshot_row(key, entry))
+            .map(|(key, entry)| Self::snapshot_row(self.field_repair_table(), key, entry))
             .collect()
     }
 
@@ -1590,7 +1630,7 @@ impl LearnedCapabilityRegistry {
             .filter(|(key, _)| {
                 !key.provider_kind.is_empty() && key.provider_kind == current_kind(&key.state_key)
             })
-            .map(|(key, entry)| Self::snapshot_row(key, entry))
+            .map(|(key, entry)| Self::snapshot_row(self.field_repair_table(), key, entry))
             .collect()
     }
 
@@ -1600,11 +1640,15 @@ impl LearnedCapabilityRegistry {
         self.entries
             .read()
             .iter()
-            .map(|(key, entry)| Self::recorded_row(key, entry))
+            .map(|(key, entry)| Self::recorded_row(self.field_repair_table(), key, entry))
             .collect()
     }
 
-    fn snapshot_row(key: &RegistryKey, entry: &LearnedEntry) -> LearnedRegistryEntry {
+    fn snapshot_row(
+        table: crate::router::FieldRepairTable,
+        key: &RegistryKey,
+        entry: &LearnedEntry,
+    ) -> LearnedRegistryEntry {
         LearnedRegistryEntry {
             state_key: key.state_key.clone(),
             feature_key: key.feature_key.clone(),
@@ -1617,12 +1661,17 @@ impl LearnedCapabilityRegistry {
             evidence_class: entry.evidence_class.clone(),
             phase: entry.phase,
             source: entry.source,
+            recheck_owned: key.recheck_owned(table),
         }
     }
 
-    fn recorded_row(key: &RegistryKey, entry: &LearnedEntry) -> RecordedLearnedEntry {
+    fn recorded_row(
+        table: crate::router::FieldRepairTable,
+        key: &RegistryKey,
+        entry: &LearnedEntry,
+    ) -> RecordedLearnedEntry {
         RecordedLearnedEntry {
-            entry: Self::snapshot_row(key, entry),
+            entry: Self::snapshot_row(table, key, entry),
             provider_kind: key.provider_kind.clone(),
             incarnation: entry.incarnation,
             value: None,
@@ -2858,6 +2907,7 @@ impl LearnedCapabilityRegistry {
             incarnation: captured.incarnation,
             key,
             captured: Some(captured),
+            field_repair_table: self.field_repair_table(),
             generation: effective,
             leases: Arc::clone(&self.purge_leases),
             settled: false,
@@ -2890,6 +2940,7 @@ impl LearnedCapabilityRegistry {
             incarnation: 0,
             key,
             captured: None,
+            field_repair_table: self.field_repair_table(),
             generation,
             leases: Arc::clone(&self.purge_leases),
             settled: false,
@@ -3295,7 +3346,7 @@ impl LearnedCapabilityRegistry {
             .filter(|(key, _)| {
                 !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
             })
-            .map(|(key, entry)| Self::recorded_row(key, entry))
+            .map(|(key, entry)| Self::recorded_row(self.field_repair_table(), key, entry))
             .collect();
 
         let outcome = submit(&survivors, pending_gen);

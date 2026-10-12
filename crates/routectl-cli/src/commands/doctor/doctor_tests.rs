@@ -3556,6 +3556,7 @@ mod matrix_panel {
             evidence_class: None,
             phase: FailurePhase::F1,
             source,
+            recheck_owned: false,
         }
     }
 

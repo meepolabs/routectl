@@ -212,7 +212,8 @@ pub struct LearnedActing {
     /// Whether the entry acts at all (a self-identifying signal, or a
     /// corroborated inferred one).
     pub acting: bool,
-    /// Whether a negative's decay window has lapsed.
+    /// Whether a negative has lapsed into a re-probe, by the same rule the
+    /// dispatch path applies.
     pub lapsed: bool,
     /// The detection phase of the entry.
     pub phase: FailurePhase,
@@ -227,7 +228,12 @@ impl LearnedActing {
         Self {
             verified,
             acting: crate::learned_capability::signal_acts(entry.signal_tier, entry.observations),
-            lapsed: !verified && now >= entry.expires_at,
+            lapsed: !verified
+                && crate::learned_capability::negative_lapsed(
+                    entry.expires_at,
+                    entry.recheck_owned,
+                    now,
+                ),
             phase: entry.phase,
             source: entry.source,
         }

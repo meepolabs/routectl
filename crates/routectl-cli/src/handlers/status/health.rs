@@ -512,6 +512,7 @@ mod tests {
             evidence_class: None,
             phase: FailurePhase::F2,
             source: EvidenceSource::Live,
+            recheck_owned: false,
         };
         let mapped = map_learned(entry, Instant::now(), 10_000);
         assert_eq!(mapped.state_key, "anthropic#claude-opus-wire");
@@ -540,6 +541,7 @@ mod tests {
             evidence_class: None,
             phase: FailurePhase::F3,
             source: EvidenceSource::Live,
+            recheck_owned: false,
         };
         let mapped = map_learned(entry, Instant::now(), 10_000);
         assert_eq!(mapped.verdict, "verified");
@@ -559,6 +561,7 @@ mod tests {
             evidence_class: None,
             phase: FailurePhase::F1,
             source: EvidenceSource::Live,
+            recheck_owned: false,
         }
     }
 
@@ -777,6 +780,7 @@ mod tests {
                     evidence_class: None,
                     phase: FailurePhase::F1,
                     source: EvidenceSource::Live,
+                    recheck_owned: false,
                 },
                 Instant::now(),
                 1_000,
