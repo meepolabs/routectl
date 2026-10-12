@@ -2765,12 +2765,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and retries once; `replay_rejection_body_free` rebuilds the rejection with
   no upstream body before generic logging, and `emit_replay_degradation`
   (`pub(super)`, also called by the token-count walk) fires the single
-  per-request degradation WARN. There is no shared repair abstraction: each of
-  `complete_inner`, `stream_inner` and `count_tokens_try_seat` owns its OWN
-  replay and field branches, and each branch owns its transform (the replay one
-  strips artifacts, the field one drops a mapped envelope field) -- three hot
-  paths were deliberately not unified, and the cross-walk tests are what catch
-  drift between them. Both chain loops declare the shared
+  per-request degradation WARN. Within `complete_inner` and `stream_inner`
+  the per-target learner state and the replay / field / canary / generic
+  arbitration live in `learn_engine::AttemptLearning` (one `on_rejection` /
+  `on_success` per walk); `count_tokens_try_seat` still owns its OWN replay
+  and field branches, and the cross-walk tests are what catch drift between
+  the token-count walk and the engine. Both chain loops declare the shared
   `repair_budget::RepairBudget` above themselves; every arm's own conditions
   gate first and the CHARGE happens inside the transform
   (`FieldRepairPlan::apply` for the field kind), so the repair count is bounded
@@ -2868,8 +2868,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   closed-table row the request carries, in table order.
   `negative_recovers_only_by_recheck` answers whether a negative on a key is
   owned by the free token-count re-check (a count-validated row, on a kind and
-  upstream with a free count): such a negative never lapses into a re-probe
-  and is never canaried.
+  upstream with a free count): such a negative is never canaried and lapses
+  into a re-probe only `RECHECK_BACKSTOP` past its decay deadline
+  (`learned_capability::negative_lapsed`).
   `Router::plan_field_carry` admits BEFORE dispatch and without
   touching the request, in this order: kill switch -> an admitted kind
   (`anthropic-api`, `bedrock`, `openai-compat`) -> NOT a forwarded-credential
@@ -2897,11 +2898,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   settlements reachable, since a request whose field is accepted clears a
   resident verdict while a rejected one commits. It is NOT a pre-flight
   rewrite: an acting verdict refuses the slot and the request dispatches
-  unchanged. `Router::rejection_names_field_surface` is the arm's repair
-  condition and reads the
+  unchanged. `rejected_field` (through the learning engine's
+  `FieldRowProposer`; `FieldRepairPlan::apply` on the token-count walk) is
+  the arm's repair condition and reads the
   NATIVE failure class, never the operator-remapped one -- a
   `[class_overrides]` entry states how a status is ROUTED, so reading it would
   let an override turn a 429 or 503 into a field repair.
+  `Router::rejection_names_field_surface` is its surface-filtered form, kept
+  for the probe re-check's `probe_failure_class`.
   `FieldRepairPlan::apply` owns the whole effect transactionally, ordered
   select-check-mutate-charge-release: SELECT the admitted candidate the
   rejection names (refusing outright when it names none, and refusing a second
@@ -3064,13 +3068,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   settlement and the durable write it authorizes are one operation (the
   confirmation needs the incarnation the write mints; the disproof must not clear
   a row on a claim a carry already superseded).
-  `Router::canary_repaired_retry(plan, attempt_req, meta, native_class, err,
-  provider_kind)` is the canary's same-field repair, all-or-nothing like the
-  reactive `FieldRepairPlan::apply`, and it draws NO `RepairBudget`: that ceiling
-  pays for the chance a fresh rejection is repairable, while this retry is the
-  second half of a re-verification routectl itself scheduled. It reads the NATIVE
-  failure class, never the operator-remapped one, and shares
-  `Router::rejection_names_field_surface` with the reactive admission so "did the
+  `Router::canary_repaired_retry(plan, attempt_req, meta, budget, named, err)`
+  is the canary's same-field repair, all-or-nothing like the
+  reactive `FieldRepairPlan::apply`, and it draws the request's shared
+  `RepairBudget` like every other repair (`can_draw` before the drop, `draw`
+  after it). Its `named` is
+  the field-row proposal the learning engine resolved from the NATIVE failure
+  class, never the operator-remapped one, through the same `rejected_field`
+  the reactive `FieldRepairPlan::apply_named` consumes, so "did the
   upstream name this mutation" has one implementation rather than two answers.
   It applies the transform through `field_repair`'s own `FieldSurface::drop_from`
   or, for a rewrite verdict, `FieldSurface::rewrite_in` with the verdict's
@@ -3211,15 +3216,26 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   settle guard and each repair branch's repaired-state flags; the learn dedupe
   set and `RepairBudget` stay request-scoped and are lent per call.
   `classify` (native, replay-attempt aware), `on_rejection` -> `FailureDecision`
-  (`Retry { last_err_body_free }` / `Proceed`) builds a read-only
+  (`Retry { last_err_body_free }` / `Proceed`) takes the `RejectionSite`
+  `settle_failed_attempt` returned (`provenance`, `in_egress: Option<bool>`,
+  `matched_edit`, the unmasked `locator`, the `sent` slot, the `pending`
+  rejection index). A site whose `matched_edit` is not `None` short-circuits
+  to `learn_revert::answer_declared_edit` (undo or `Proceed`; no proposer
+  reads it); otherwise it builds a read-only
   `RejectionInput` and runs `arbitrate`: the ONE precedence, the static
   `ARBITRATION_ORDER` of `Proposer`s (no trait objects) over the closed
   `Proposal` enum (`ReplayStrip` / `FieldRow` / `Capability`) -- replay strip
   -> field repair -> canary retry (on the field-row proposal) -> generic
   capability, repairs applied in place on `attempt_req` through the
-  `RepairSink` effects; on `Proceed` the capability proposal is held and
+  `RepairSink` effects. A site with `in_egress == Some(false)` skips every
+  path-keyed slot (the field-row slot, and with it the canary), so the
+  rejection proceeds unrepaired; the generic capability slot still runs. On
+  `Proceed` the capability proposal is held and
   `observe_generic` (still after the class observability) applies only it via
-  `observe_for_learning`; `on_success` settles betas, replay, field and canary
+  `observe_for_learning`; `on_success` settles betas, a pending revert,
+  replay, field and canary. Arbitration precedence is pinned in
+  `src/router/learn_engine_tests.rs`; per-dialect egress location and the
+  absent-path skip in `src/router/learn_engine_location_tests.rs`
 - `src/router/learn_proposers.rs` -- the three thin `Proposer`s the engine
   arbitrates: `ReplayProposer` (`is_replay_rejection_class` on the remapped
   class, replay carried), `FieldRowProposer` (`rejected_field` on the native
@@ -3235,8 +3251,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   equals the client's wire value), `TargetRevert` (once per target, draws the
   request's `RepairBudget` last), the content-free `WireRevert` state on
   `DispatchMeta` that `emit_wire_rejections` reads for the outcome, and the
-  deduped `routectl_edit_rejected` WARN (lane, masked + sanitized path, edit
-  site). Engages before the proposers; nothing learned or persisted
+  deduped `routectl_edit_rejected` WARN (lane, masked + sanitized path,
+  `edit_site`: the declared site label, `conflict`, or `undeclared` for a
+  `routectl_added` path no declaration explains, which then falls through to
+  the proposers; capped dedupe set reset on Router rebuild). Engages before
+  the proposers; nothing learned or persisted. Revert behavior on both
+  surfaces in `src/router/learn_revert_tests.rs`, its bounds (absent path,
+  translation lane, undeclared path, once per target / per request) in
+  `src/router/learn_revert_scope_tests.rs`, the warning and per-request
+  forgetting in `src/router/learn_revert_warning_tests.rs`
 - `src/router/learned_lanes.rs` -- the ONE projection of resolved learned
   lanes for operator surfaces: `LearnedLaneProjection` of
   `ResolvedLearnedLane { lane: StateKey, nicknames, provider_kind, routed }`,
@@ -3396,10 +3419,23 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a status in the parser's rejection set runs the full request check unsampled
   and classifies the named path (`rejected_wire_path`) against the ingress and
   deposited egress as `client_unchanged | client_changed | routectl_added |
-  unlocalized` (`n_a` on TRANSLATION lanes). Holds a content-free
-  `PendingWireRejection` on `DispatchMeta`; `emit_wire_rejections` joins the
-  field-repair outcome at dispatch end on the unmasked raw field path (never
-  rendered) and records the ring entry (WARN on `unrepaired`, deduped)
+  unlocalized` (`n_a` on TRANSLATION lanes), and returns it as a
+  `learn_engine::RejectionSite` (`None` when nothing was recorded).
+  `egress_location` sets `in_egress`: `Some(true)` when the sent body carries
+  the path (on Converse also inside `additionalModelRequestFields`),
+  `Some(false)` ONLY when every segment but the last resolved, the last key
+  is missing, and the parser's `presupposes_presence` says the reason refused
+  something sent there (a listed-value refusal, extra input, unsupported
+  parameter -- not a missing-field report or bare `error.param`); a shape
+  mismatch, a non-final miss (implied union tag, dotted client key) or a
+  segment that is both a key and the object's `type` tag is `None`.
+  Provenance labels keep `locate`'s key-first walk. `matched_edit` is
+  computed only when `learn_revert::attributable`. Holds a content-free
+  `PendingWireRejection` on `DispatchMeta`; `emit_wire_rejections` takes a
+  revert's outcome from `DispatchMeta.wire_reverts` when one exists, else
+  joins the field-repair outcome at dispatch end on the unmasked raw field
+  path (never rendered) and records the ring entry (WARN on `unrepaired`,
+  deduped)
 - `src/router/wire_response.rs` -- the response leg of the live wire check:
   `ResponseCheck` (public, opaque), carried on `DispatchMeta::response_check`
   from the serving attempt when the sampler admitted it on a FIDELITY lane;
@@ -3804,6 +3840,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/probe_half_open_tests.rs` -- carried half-open ownership
   (including at `Router::admit`, where a probe's drop must not free a client's
   claim) plus the deferral and what a declined probe does not consume
+- `src/router/recheck_backstop_tests.rs` -- a re-check-owned negative whose
+  re-check job is tombstoned keeps acting until `expires_at +
+  RECHECK_BACKSTOP`, then lapses into the generic re-probe (explicit
+  forward-derived `Instant`s)
 - `src/router/capability_health.rs` -- the CRATE-BOUNDARY contract for the
   capability-persistence gate: the `CapabilityPersistenceHealth` trait (one
   synchronous `capability_writes_durable()`, consulted per considered row on the
@@ -4213,10 +4253,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   merely timing out. `effective_persistence_generation` returns the pending
   generation when a boundary is in flight, otherwise the active one; it is what
   every event producer reads to stamp its row.
-  Also: `LearnedEntry::has_lapsed` is the decay rule every read applies -- a
-  key whose negative only the free re-check recovers
-  (`negative_recovers_only_by_recheck`, read against the registry's
-  `field_repair_table`) never lapses. Also: `retune` / `decay` /
+  Also: `negative_lapsed(expires_at, recheck_owned, now)` is THE lapse rule
+  (`pub` and re-exported at the crate root with `RECHECK_BACKSTOP`, a fixed
+  48h): an ordinary negative lapses at `expires_at`, one whose key only the
+  free re-check recovers (`negative_recovers_only_by_recheck`, read against
+  the registry's `field_repair_table`) only `RECHECK_BACKSTOP` later, so a
+  re-check that never answers cannot pin it forever.
+  `LearnedEntry::has_lapsed` applies it on every read, and every snapshot row
+  carries the key's ownership as `LearnedRegistryEntry.recheck_owned` so
+  display surfaces (`capability_display::LearnedActing`) apply the same rule.
+  Also: `retune` / `decay` /
   `inferred_window` / `max_entries` (hot-reloadable behind the same lock; applied
   in `carry_over_learned_from` for a config-only reload, and deferred to
   `Router::apply_capability_tuning` at publication for a revision-changing one,
@@ -4267,8 +4313,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   both the router build and the doctor's read-only one-shot ledger rebuild;
   `LearnedCapabilityRegistry` is a public export for that reuse. Also exposes
   `negative_state -> NegativeState{Absent,Acting,Lapsed}`, the read-only decay
-  view that never claims the probe slot -- crate-internal, consumed by the
-  sibling `learned_replay` lifecycle, which runs its own admission discipline
+  view that never claims the probe slot -- the method is crate-internal,
+  consumed by the sibling `learned_replay` lifecycle, which runs its own
+  admission discipline; the `NegativeState` type is re-exported at the crate
+  root for `negative_state_in_generation` callers
 - `src/learned_replay.rs` -- the reasoning-replay learned lifecycle layered
   over the registry. Crate-internal surface: nothing here is re-exported from
   the crate root, so the whole lifecycle is reachable only from the router's
@@ -4853,7 +4901,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   entry that does not act on routing (uncorroborated inferred, advisory live
   F3) falls through to the seed, then the prior;
   `LearnedActing::from_entry` reads a snapshot entry's acting facts through
-  the registry's own `signal_acts` predicate, and
+  the registry's own `signal_acts` predicate and its `lapsed` flag through
+  `learned_capability::negative_lapsed` over the row's `recheck_owned`, so a
+  `reprobe` action matches the dispatch path's lapse, and
   `lane_strips_capability(config, provider_entry, models, capability)`
   mirrors the filter's strip-vs-route policy (essential list + operator beta
   floor via `router::operator_betas`)
@@ -8114,7 +8164,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   of the seed's kind exists, and a covered cell resolves `seed` (withhold) or,
   under a replayed seed-clear marker, cleared (allow). Lane-keyed coverage
   lives in the `#[path]`-included `lane_matrix_tests.rs`, the seed layer's in
-  `seed_matrix_tests.rs`
+  `seed_matrix_tests.rs`, and the re-check backstop's (doctor action equals
+  the runtime decision on both sides of `RECHECK_BACKSTOP`) in
+  `recheck_backstop_matrix_tests.rs`
 - `src/commands/doctor/served.rs` -- the served gather's inputs.
   `GatherSources::{Disk, Served(Box<ServedInputs>)}` selects the layers;
   `ServedInputs` (built only by the status facade's `served_doctor_inputs`)
