@@ -52,6 +52,18 @@ fn constructor_accepts_narrow_patterns() {
         ("tool field", "/tools/*/name"),
         ("top-level key", "/stream"),
         ("system block marker", "/system/0/cache_control"),
+        (
+            "schema keyword below a property name",
+            "/tools/0/input_schema/properties/*/additionalProperties",
+        ),
+        (
+            "schema keyword below a wildcard tool",
+            "/tools/*/function/parameters/additionalProperties",
+        ),
+        (
+            "schema keyword below a pattern-property regex",
+            "/output_config/format/schema/patternProperties/*/type",
+        ),
     ];
 
     for (name, pattern) in rows {
@@ -64,7 +76,7 @@ fn constructor_accepts_narrow_patterns() {
 #[test]
 fn constructor_refuses_patterns_that_cannot_match() {
     let nine_deep = "/a/b/c/d/e/f/g/h/i";
-    let rows: [(&str, &'static str, EditPatternError); 10] = [
+    let rows: [(&str, &'static str, EditPatternError); 13] = [
         ("escaped key", "/a~0b~1c", EditPatternError::Unmatchable),
         (
             "33-byte key",
@@ -77,8 +89,23 @@ fn constructor_refuses_patterns_that_cannot_match() {
             EditPatternError::Unmatchable,
         ),
         (
-            "verbatim key under a tool schema",
-            "/tools/0/input_schema/properties",
+            "non-keyword key in a tool schema",
+            "/tools/0/input_schema/account_id",
+            EditPatternError::Unmatchable,
+        ),
+        (
+            "verbatim property name",
+            "/tools/0/input_schema/properties/account_id",
+            EditPatternError::Unmatchable,
+        ),
+        (
+            "keyword-named property name",
+            "/output_config/format/schema/properties/additionalProperties",
+            EditPatternError::Unmatchable,
+        ),
+        (
+            "verbatim key under an instance-valued keyword",
+            "/output_config/format/schema/default/type",
             EditPatternError::Unmatchable,
         ),
         (

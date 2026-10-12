@@ -777,3 +777,58 @@ fn many_forwarded_values_under_equal_prefix_names_stay_cheap_to_render() {
         assert!(path.chars().count() <= 256);
     }
 }
+
+/// `depth` nested `not` positions around one object-shaped schema, so the
+/// only object, and the only injection, sits `depth` segments below `schema`.
+fn object_under_nots(depth: usize) -> Value {
+    (0..depth).fold(json!({"type": "object"}), |inner, _| json!({"not": inner}))
+}
+
+#[test]
+fn an_injection_is_recorded_only_while_a_wire_check_path_can_name_it() {
+    let at = |below: &str| format!("/output_config/format/schema{below}/additionalProperties");
+    let rows: [(&str, usize, Vec<String>); 4] = [
+        ("object at the root", 0, vec![at("")]),
+        ("deepest nameable object", 4, vec![at("/not/not/not/not")]),
+        ("object one level past the path bound", 5, vec![]),
+        ("object fifteen levels below the root", 15, vec![]),
+    ];
+
+    for (name, depth, expected) in rows {
+        let mut schema = object_under_nots(depth);
+
+        let repair = repair_schema(PROVIDER, &mut schema).unwrap();
+
+        assert_eq!(
+            repair.injected_pointers().collect::<Vec<_>>(),
+            expected,
+            "row {name}"
+        );
+    }
+}
+
+#[test]
+fn an_injection_pointer_masks_names_and_keeps_keywords_and_indices() {
+    let mut schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "additionalProperties": {"type": "object", "properties": {}},
+            "choice": {"anyOf": [{"type": "string"}, {"type": "object"}]},
+            "list": {"type": "array", "items": {"type": "object"}}
+        },
+        "$defs": {"Account": {"type": "object"}}
+    });
+
+    let repair = repair_schema(PROVIDER, &mut schema).unwrap();
+
+    assert_eq!(
+        repair.injected_pointers().collect::<Vec<_>>(),
+        [
+            "/output_config/format/schema/$defs/*/additionalProperties",
+            "/output_config/format/schema/properties/*/additionalProperties",
+            "/output_config/format/schema/properties/*/anyOf/1/additionalProperties",
+            "/output_config/format/schema/properties/*/items/additionalProperties",
+        ]
+    );
+}

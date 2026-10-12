@@ -67,6 +67,8 @@
 //! `$ref` resolver and `visited` cycle guard are deliberately NOT mirrored
 //! here: with no dereferencing there is nothing to guard.
 
+use std::collections::BTreeSet;
+
 use serde_json::{Map, Value};
 
 use routectl_core::{Error, Result, sanitize_for_log};
@@ -109,6 +111,19 @@ const SCHEMA_ARRAY_POSITIONS: [&str; 3] = ["anyOf", "oneOf", "allOf"];
 /// Positions whose VALUE is a single schema.
 const SCHEMA_POSITIONS: [&str; 4] = ["not", "if", "then", "else"];
 
+/// Where the repaired schema sits in the request body, as wire-check
+/// pointer segments.
+const SCHEMA_POINTER: &str = "/output_config/format/schema";
+
+/// Segments a wire-check pointer spends on [`SCHEMA_POINTER`] and on the
+/// injected key itself; the rest of the path bound is left for the
+/// object's own location below `schema`.
+const SCHEMA_POINTER_OVERHEAD: usize = 4;
+
+/// Most distinct injection pointers one repair records. An injection past
+/// it is still made, and is left undeclared.
+const MAX_RECORDED_INJECTIONS: usize = 256;
+
 /// The `items` position: a single schema, or an array of positional schemas.
 const ITEMS: &str = "items";
 
@@ -124,11 +139,11 @@ pub struct AdditionalPropertiesRepair {
     /// Bounded at collection time: a schema can hold arbitrarily many, and
     /// an uncapped sample turns one WARN into an unbounded log record.
     forwarded: BoundedLogSample<String>,
-    /// Bit `n` is set when a key was injected `n` segments below `schema`.
-    /// Every key below `schema` is client-chosen, so a wire-check path names
-    /// an injection by its depth alone; deeper than the path bound, a path
-    /// names no location and is not recorded.
-    injected_depths: u16,
+    /// Wire-check pointer of each injected key, as a wire-check path
+    /// renders it: property names masked, keywords and indices verbatim.
+    /// An injection deeper than a wire-check path reaches names no location
+    /// and is not recorded.
+    injected: BTreeSet<String>,
 }
 
 impl AdditionalPropertiesRepair {
@@ -141,14 +156,22 @@ impl AdditionalPropertiesRepair {
     #[cfg(feature = "bedrock")]
     pub(super) fn merged(mut self, other: Self) -> Self {
         self.forwarded.absorb(other.forwarded);
-        self.injected_depths |= other.injected_depths;
+        for pointer in other.injected {
+            self.record_injection(pointer);
+        }
         self
     }
 
-    /// The depths below `schema`, shallowest first, at which the walk
-    /// injected `additionalProperties`. Depth 1 is the root object's own key.
-    pub fn injected_depths(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..u16::BITS as usize).filter(|depth| self.injected_depths & (1 << depth) != 0)
+    /// The wire-check pointer of each `additionalProperties` the walk
+    /// injected, in sorted order.
+    pub fn injected_pointers(&self) -> impl Iterator<Item = &str> + '_ {
+        self.injected.iter().map(String::as_str)
+    }
+
+    fn record_injection(&mut self, pointer: String) {
+        if self.injected.len() < MAX_RECORDED_INJECTIONS {
+            self.injected.insert(pointer);
+        }
     }
 
     /// Emit the aggregated WARN, if any non-`false` value was forwarded.
@@ -237,8 +260,8 @@ fn repair_schema(provider: &str, root: &mut Value) -> Result<AdditionalPropertie
             match map.get(ADDITIONAL_PROPERTIES) {
                 None => {
                     map.insert(ADDITIONAL_PROPERTIES.to_string(), Value::Bool(false));
-                    if let Some(depth) = pending.paths.depth_below_root(frame.path, 15) {
-                        repair.injected_depths |= 1 << (depth + 1);
+                    if let Some(pointer) = pending.paths.injection_pointer(frame.path) {
+                        repair.record_injection(pointer);
                     }
                 }
                 Some(Value::Bool(false)) => {}
@@ -288,7 +311,7 @@ fn push_children<'a>(
             let container = pending.paths.push(Some(path), key);
             if let Value::Object(entries) = value {
                 for (name, child) in entries {
-                    let child_path = pending.paths.push(Some(container), name);
+                    let child_path = pending.paths.push_name(container, name);
                     if !pending.push(child, child_path, depth + 1) {
                         return false;
                     }
@@ -458,29 +481,67 @@ impl<'a> Pending<'a> {
 /// what keeps rendering off the per-node path.
 #[derive(Default)]
 struct PathArena {
-    segments: Vec<(Option<usize>, String)>,
+    segments: Vec<Segment>,
+}
+
+/// One interned segment: its parent, its raw text, and whether it is a
+/// client-chosen name a wire-check path masks.
+struct Segment {
+    parent: Option<usize>,
+    text: String,
+    is_name: bool,
 }
 
 impl PathArena {
-    /// Segments between the root entry and `index`, or `None` past `cap`.
-    /// Bounded so a deep schema costs a constant per call.
-    fn depth_below_root(&self, index: usize, cap: usize) -> Option<usize> {
-        let mut depth = 0;
-        let mut cursor = self.segments.get(index).and_then(|(parent, _)| *parent);
-        while let Some(i) = cursor {
-            depth += 1;
-            if depth > cap {
+    /// The wire-check pointer of an `additionalProperties` injected into
+    /// the object at `index`, or `None` when the pointer would exceed the
+    /// wire-check path bound. Names render as the wildcard; keywords and
+    /// indices verbatim. Bounded so a deep schema costs a constant per call.
+    fn injection_pointer(&self, index: usize) -> Option<String> {
+        let cap = routectl_core::wire_check::MAX_WIRE_PATH_DEPTH - SCHEMA_POINTER_OVERHEAD;
+        let mut below_root: Vec<&Segment> = Vec::with_capacity(cap);
+        let mut cursor = self.segments.get(index);
+        while let Some(segment) = cursor {
+            let Some(parent) = segment.parent else {
+                break;
+            };
+            if below_root.len() == cap {
                 return None;
             }
-            cursor = self.segments.get(i).and_then(|(parent, _)| *parent);
+            below_root.push(segment);
+            cursor = self.segments.get(parent);
         }
-        Some(depth)
+        let mut pointer = String::from(SCHEMA_POINTER);
+        for segment in below_root.iter().rev() {
+            pointer.push('/');
+            pointer.push_str(if segment.is_name {
+                routectl_core::wire_check::WILDCARD_SEGMENT
+            } else {
+                &segment.text
+            });
+        }
+        pointer.push('/');
+        pointer.push_str(ADDITIONAL_PROPERTIES);
+        Some(pointer)
     }
 
     fn push(&mut self, parent: Option<usize>, segment: &str) -> usize {
+        self.intern(parent, segment, false)
+    }
+
+    /// Intern a client-chosen name under the name-map keyword at `parent`.
+    fn push_name(&mut self, parent: usize, name: &str) -> usize {
+        self.intern(Some(parent), name, true)
+    }
+
+    fn intern(&mut self, parent: Option<usize>, text: &str, is_name: bool) -> usize {
         #[cfg(test)]
         probe::record_segment();
-        self.segments.push((parent, segment.to_string()));
+        self.segments.push(Segment {
+            parent,
+            text: text.to_string(),
+            is_name,
+        });
         self.segments.len() - 1
     }
 
@@ -499,9 +560,9 @@ impl PathArena {
         let mut parts: Vec<&str> = Vec::new();
         let mut cursor = Some(index);
         while let Some(i) = cursor {
-            let (parent, segment) = &self.segments[i];
-            parts.push(segment);
-            cursor = *parent;
+            let segment = &self.segments[i];
+            parts.push(&segment.text);
+            cursor = segment.parent;
         }
         let mut out = String::with_capacity(RENDERED_PATH_CHARS);
         let mut remaining = RENDERED_PATH_CHARS;

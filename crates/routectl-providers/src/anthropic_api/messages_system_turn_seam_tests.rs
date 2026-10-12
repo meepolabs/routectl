@@ -601,3 +601,38 @@ fn dropped_turn_breakpoint_moves_onto_a_preceding_tool_result() {
     );
     assert_eq!(seam_breakpoint_count(&out), 1);
 }
+
+/// Push `user / dropped system / user` the way the walk does, returning the
+/// list for inspection alongside the ledger it charged.
+fn seam_join(wire: WireMessages) -> (WireMessages, MessageLedger) {
+    let mut wire = wire;
+    let mut ledger = MessageLedger::default();
+    let user = |text: &str| AnthropicMessage {
+        role: AnthropicRole::User,
+        content: AnthropicContent::Text(text.into()),
+    };
+    wire.push(0, user("a"), &mut ledger);
+    let _ = wire.drop_system_turn(None);
+    wire.push(2, user("b"), &mut ledger);
+    (wire, ledger)
+}
+
+#[test]
+fn only_an_admitted_tap_tracks_the_origins_a_join_is_declared_from() {
+    let unadmitted = routectl_core::wire_check::WireTap::default();
+    let admitted = routectl_core::wire_check::WireTap::admitted();
+    let rows = [
+        ("no tap", None, false, vec![]),
+        ("unadmitted tap", Some(&unadmitted), false, vec![]),
+        ("admitted tap", Some(&admitted), true, vec![(0, 2)]),
+    ];
+
+    for (name, tap, tracks, joins) in rows {
+        let (wire, ledger) = seam_join(WireMessages::for_tap(3, tap));
+
+        assert_eq!(wire.origins.is_some(), tracks, "row {name}");
+        assert_eq!(wire.merged, joins, "row {name}");
+        assert_eq!(wire.messages.len(), 1, "row {name}");
+        assert_eq!(ledger.merged_across_dropped_system_turn, 1, "row {name}");
+    }
+}

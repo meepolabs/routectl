@@ -182,9 +182,24 @@ impl WireTap {
         self.lock().contents.request_edits.push(edit);
     }
 
-    /// Append an edit made to the response body.
+    /// Append an edit made to the response body. An edit already declared
+    /// is not appended again, so a site that declares once per stream frame
+    /// keeps the list as long as the set of distinct edits. Nothing is
+    /// appended once the response assembly has failed: that check can no
+    /// longer complete, so no declaration can be consumed.
     pub fn declare_response(&self, edit: DeclaredEdit) {
-        self.lock().contents.response_edits.push(edit);
+        let mut slot = self.lock();
+        if slot
+            .upstream_stream
+            .as_ref()
+            .is_some_and(StreamAssembler::has_failed)
+        {
+            return;
+        }
+        let edits = &mut slot.contents.response_edits;
+        if !edits.contains(&edit) {
+            edits.push(edit);
+        }
     }
 
     /// Return the request body and request edits reported so far and empty

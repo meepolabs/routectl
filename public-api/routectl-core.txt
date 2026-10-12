@@ -3192,7 +3192,6 @@ pub routectl_core::wire_check::EditSite::ManagedExtrasStrip
 pub routectl_core::wire_check::EditSite::MaxTokensRename
 pub routectl_core::wire_check::EditSite::ModelRename
 pub routectl_core::wire_check::EditSite::OperatorPayloadExtras
-pub routectl_core::wire_check::EditSite::PrefixRewrite
 pub routectl_core::wire_check::EditSite::Preflight
 pub routectl_core::wire_check::EditSite::ProviderAttributionAdd
 pub routectl_core::wire_check::EditSite::ReasoningContentLift
@@ -3218,7 +3217,7 @@ pub routectl_core::wire_check::EditSite::ThinkingStripForcedToolUse
 pub routectl_core::wire_check::EditSite::ToolIdSanitize
 pub routectl_core::wire_check::EditSite::UrlFieldRelocate
 impl routectl_core::wire_check::EditSite
-pub const routectl_core::wire_check::EditSite::ALL: [Self; 51]
+pub const routectl_core::wire_check::EditSite::ALL: [Self; 50]
 pub const fn routectl_core::wire_check::EditSite::label(self) -> &'static str
 impl core::clone::Clone for routectl_core::wire_check::EditSite
 pub fn routectl_core::wire_check::EditSite::clone(&self) -> routectl_core::wire_check::EditSite

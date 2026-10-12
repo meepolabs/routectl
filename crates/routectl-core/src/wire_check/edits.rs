@@ -3,10 +3,7 @@
 
 use std::borrow::Cow;
 
-use super::path::{
-    MAX_WIRE_PATH_DEPTH, MAX_WIRE_PATH_LEN, WILDCARD_SEGMENT, WirePath, is_identifier_key,
-    opens_user_keyed,
-};
+use super::path::{KeyScope, MAX_WIRE_PATH_DEPTH, MAX_WIRE_PATH_LEN, WILDCARD_SEGMENT, WirePath};
 
 /// Patterns that would exempt a whole container from detection. A transform
 /// that broke anything under one of these would otherwise go unseen.
@@ -72,8 +69,6 @@ pub enum EditSite {
     Canary,
     /// Router: removal of replay artifacts the target cannot accept.
     ReplayStrip,
-    /// Router: stable-prefix rewriting.
-    PrefixRewrite,
     /// Ingress: a deprecated request field folded into its current
     /// location.
     LegacyFieldFold,
@@ -176,7 +171,7 @@ pub enum EditSite {
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 50] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -186,7 +181,6 @@ impl EditSite {
         Self::Preflight,
         Self::Canary,
         Self::ReplayStrip,
-        Self::PrefixRewrite,
         Self::LegacyFieldFold,
         Self::SystemMessageLift,
         Self::Cloak,
@@ -242,7 +236,6 @@ impl EditSite {
             Self::Preflight => "preflight",
             Self::Canary => "canary",
             Self::ReplayStrip => "replay_strip",
-            Self::PrefixRewrite => "prefix_rewrite",
             Self::LegacyFieldFold => "legacy_field_fold",
             Self::SystemMessageLift => "system_message_lift",
             Self::Cloak => "cloak",
@@ -400,19 +393,37 @@ fn validate_pattern(pattern: &str) -> Result<(), EditPatternError> {
     }
 }
 
-/// A [`WirePath`] segment is an index, the wildcard or a verbatim
-/// identifier key, and below a client-keyed object every key renders as the
-/// wildcard; a pattern segment that no path can render is unmatchable.
+/// A [`WirePath`] segment is an index, the wildcard or a verbatim key: an
+/// identifier key outside client-keyed objects and schemas, or a JSON Schema
+/// keyword inside a schema. A pattern segment that no path can render is
+/// unmatchable. A `*` may stand for an index or a masked key, which open
+/// different scopes, so every scope the pattern can be in is tracked.
 fn segments_can_match(rest: &str) -> bool {
     let mut ancestors: Vec<&str> = Vec::new();
-    let mut masked = false;
+    let mut scopes: Vec<KeyScope> = vec![KeyScope::Open];
     for segment in rest.split('/') {
         let is_index = !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit());
-        if segment != WILDCARD_SEGMENT && !is_index {
-            if masked || !is_identifier_key(segment) {
+        if segment == WILDCARD_SEGMENT {
+            scopes = KeyScope::ALL
+                .into_iter()
+                .filter(|next| {
+                    scopes
+                        .iter()
+                        .any(|scope| scope == next || scope.masked_key() == *next)
+                })
+                .collect();
+        } else if !is_index {
+            scopes = KeyScope::ALL
+                .into_iter()
+                .filter(|next| {
+                    scopes
+                        .iter()
+                        .any(|scope| scope.key(&ancestors, segment) == (true, *next))
+                })
+                .collect();
+            if scopes.is_empty() {
                 return false;
             }
-            masked = opens_user_keyed(&ancestors, segment);
         }
         ancestors.push(segment);
     }

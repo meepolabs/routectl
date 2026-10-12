@@ -271,6 +271,12 @@ impl StreamAssembler {
         self.budget.nodes = 0;
     }
 
+    /// True once a frame failed the assembly, so [`Self::finish`] can only
+    /// report it incomplete.
+    pub(super) const fn has_failed(&self) -> bool {
+        self.failure.is_some()
+    }
+
     #[cfg(test)]
     fn with_limits(dialect: IngressDialect, max_bytes: usize, max_nodes: usize) -> Self {
         let mut assembler = Self::new(dialect);

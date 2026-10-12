@@ -12,7 +12,7 @@ use super::super::cloak::{ClaudeCodeIdentity, CloakConfig, ToolRename, cloak_oau
 use super::super::request;
 
 fn tapped(mut req: ChatRequest) -> (ChatRequest, WireTap) {
-    let tap = WireTap::default();
+    let tap = WireTap::admitted();
     req.routectl_internal.wire_tap = Some(tap.clone());
     (req, tap)
 }
@@ -278,8 +278,14 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
                                          "additionalProperties": false}}}}}}}))
         },
         expected: &[
-            (EditKind::Add, "/output_config/format/schema/*"),
-            (EditKind::Add, "/output_config/format/schema/*/*/*"),
+            (
+                EditKind::Add,
+                "/output_config/format/schema/additionalProperties",
+            ),
+            (
+                EditKind::Add,
+                "/output_config/format/schema/properties/*/additionalProperties",
+            ),
         ],
     },
     AssemblyRow {
@@ -588,4 +594,69 @@ fn the_part_predicate_marks_only_unsigned_thinking() {
         ),
         owned(&[(EditKind::Remove, "/messages/3/content/0")])
     );
+}
+
+/// A key planted into the sent schema: the pointer of its parent object
+/// and the key.
+type Planted = Option<(&'static str, &'static str)>;
+
+/// The client's `output_config` beside the one the assembly sent, with the
+/// `extra` key planted in the sent copy, diffed under the assembly's
+/// declarations.
+fn schema_findings(extra: Planted) -> Vec<String> {
+    use routectl_core::wire_check::{LaneClass, diff};
+
+    let client = json!({"format": {"type": "json_schema", "schema": {
+        "type": "object",
+        "properties": {"inner": {"type": "object", "properties": {}}}}}});
+    let (body, edits) = assemble(base(json!({"provider_extras": {"output_config": client}})));
+    let mut sent = json!({"output_config": body["output_config"].clone()});
+    if let Some((parent, key)) = extra
+        && let Some(obj) = sent.pointer_mut(parent).and_then(Value::as_object_mut)
+    {
+        obj.insert(key.to_string(), json!(true));
+    }
+    let input = json!({"output_config": client});
+
+    diff(&input, &sent, LaneClass::Fidelity, &edits)
+        .findings
+        .iter()
+        .map(|finding| finding.path.as_str().to_string())
+        .collect()
+}
+
+#[test]
+fn only_the_injected_schema_keys_are_explained() {
+    let schema = "/output_config/format/schema";
+    let inner = "/output_config/format/schema/properties/inner";
+    let rows: [(&str, Planted, Vec<&str>); 5] = [
+        ("injections alone", None, vec![]),
+        (
+            "unknown key beside the root injection",
+            Some((schema, "x_vendor")),
+            vec!["/output_config/format/schema/*"],
+        ),
+        (
+            "keyword beside the root injection",
+            Some((schema, "minProperties")),
+            vec!["/output_config/format/schema/minProperties"],
+        ),
+        (
+            "keyword beside a nested injection",
+            Some((inner, "unevaluatedProperties")),
+            vec!["/output_config/format/schema/properties/*/unevaluatedProperties"],
+        ),
+        (
+            "property literally named additionalProperties",
+            Some((
+                "/output_config/format/schema/properties/inner/properties",
+                "additionalProperties",
+            )),
+            vec!["/output_config/format/schema/properties/*/properties/*"],
+        ),
+    ];
+
+    for (name, extra, expected) in rows {
+        assert_eq!(schema_findings(extra), expected, "row {name}");
+    }
 }

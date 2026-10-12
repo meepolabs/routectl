@@ -1194,6 +1194,7 @@ pub(super) fn translate_messages(
     let out = translate_messages_threaded(
         id,
         messages,
+        WireMessages::for_tap(messages.len(), tap),
         policy,
         envelopes,
         &mut skips,
@@ -1436,12 +1437,12 @@ impl MessageLedger {
 fn translate_messages_threaded(
     id: &str,
     messages: &[Message],
+    mut wire: WireMessages,
     policy: SystemTurnPolicy,
     envelopes: &mut EnvelopeUnwrapTally,
     skips: &mut ReasoningSkipTally<'_>,
     system_turns: &mut SystemTurnTally<'_>,
 ) -> Result<(Vec<AnthropicMessage>, MessageLedger)> {
-    let mut wire = WireMessages::with_capacity(messages.len());
     let mut ledger = MessageLedger {
         consumed: messages.len(),
         ..MessageLedger::default()
@@ -1544,7 +1545,9 @@ struct WireMessages {
     after_dropped_system_turn: bool,
     merges_skipped: usize,
     /// Canonical index of the message each wire message started from.
-    origins: Vec<usize>,
+    /// Tracked only for an admitted tap, the one consumer of the joins it
+    /// names.
+    origins: Option<Vec<usize>>,
     /// `(into, merged)` canonical indices of each same-role pair joined
     /// across a dropped system turn.
     merged: Vec<(usize, usize)>,
@@ -1561,13 +1564,22 @@ enum BreakpointFate {
 }
 
 impl WireMessages {
-    fn with_capacity(capacity: usize) -> Self {
+    /// An empty list for `capacity` messages, tracking origins only when
+    /// `tap` is admitted.
+    fn for_tap(capacity: usize, tap: Option<&routectl_core::wire_check::WireTap>) -> Self {
+        let tracks = tap.is_some_and(routectl_core::wire_check::WireTap::is_admitted);
         Self {
             messages: Vec::with_capacity(capacity),
             after_dropped_system_turn: false,
             merges_skipped: 0,
-            origins: Vec::with_capacity(capacity),
+            origins: tracks.then(|| Vec::with_capacity(capacity)),
             merged: Vec::new(),
+        }
+    }
+
+    fn record_origin(&mut self, origin: usize) {
+        if let Some(origins) = &mut self.origins {
+            origins.push(origin);
         }
     }
 
@@ -1580,7 +1592,7 @@ impl WireMessages {
             if !merge_keeps_block_order_legal(last, &msg) {
                 self.merges_skipped += 1;
                 self.messages.push(msg);
-                self.origins.push(origin);
+                self.record_origin(origin);
                 return;
             }
             let mut blocks = content_into_blocks(std::mem::replace(
@@ -1590,13 +1602,13 @@ impl WireMessages {
             blocks.extend(content_into_blocks(msg.content));
             last.content = AnthropicContent::Blocks(blocks);
             ledger.merged_across_dropped_system_turn += 1;
-            if let Some(&into) = self.origins.last() {
+            if let Some(&into) = self.origins.as_ref().and_then(|o| o.last()) {
                 self.merged.push((into, origin));
             }
             return;
         }
         self.messages.push(msg);
-        self.origins.push(origin);
+        self.record_origin(origin);
     }
 
     /// Record that a forwarded system turn was dropped here. A cache

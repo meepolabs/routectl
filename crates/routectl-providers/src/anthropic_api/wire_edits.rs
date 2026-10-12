@@ -141,10 +141,10 @@ pub fn declare_tool_id_sanitize(tap: Option<&WireTap>, messages: &[Message]) {
     }
 }
 
-/// Declare the `additionalProperties: false` the output-schema repair
-/// injected, one pattern per depth it injected at. Every key below `schema`
-/// renders masked, so `*` here matches exactly those client-chosen keys, and
-/// an Add explains only a key that appeared.
+/// Declare each `additionalProperties: false` the output-schema repair
+/// injected, at its exact pointer: property names masked, schema keywords
+/// and indices verbatim, so a key added anywhere else in the schema stays a
+/// finding.
 pub fn declare_schema_injections(
     tap: Option<&WireTap>,
     repair: &super::output_schema::AdditionalPropertiesRepair,
@@ -152,9 +152,13 @@ pub fn declare_schema_injections(
     if tap.is_none() {
         return;
     }
-    for depth in repair.injected_depths() {
-        let pattern = format!("/output_config/format/schema{}", "/*".repeat(depth));
-        declare(tap, EditSite::RequiredFieldDefault, pattern, EditKind::Add);
+    for pointer in repair.injected_pointers() {
+        declare(
+            tap,
+            EditSite::RequiredFieldDefault,
+            pointer.to_owned(),
+            EditKind::Add,
+        );
     }
 }
 

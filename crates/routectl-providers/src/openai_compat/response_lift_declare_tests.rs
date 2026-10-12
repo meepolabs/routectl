@@ -142,3 +142,33 @@ fn a_tap_that_does_not_check_the_response_records_no_lift() {
 
     assert_eq!(declared(&tap), []);
 }
+
+/// Mirrors the stream reader: every frame is folded into the tap and its
+/// lifts declared. 70k frames put three declarations per frame past the
+/// diff's node budget, so a register that grew per frame would truncate the
+/// check on its own.
+#[test]
+fn a_long_reasoning_stream_declares_each_lift_once() {
+    use routectl_core::wire_check::{Assembled, LaneClass, StreamExit, diff};
+
+    let tap = WireTap::checking_response(IngressDialect::Chat);
+    let frame = chunk(json!({"reasoning_content": "w"})).to_string();
+    let close = json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+
+    for _ in 0..70_000 {
+        crate::wire_declare::push_frame(Some(&tap), "", &frame);
+        let raw: Value = serde_json::from_str(&frame).unwrap();
+        declare_response_lifts(Some(&tap), &raw, ReasoningDialect::DeepSeek, true);
+    }
+    crate::wire_declare::push_frame(Some(&tap), "", &close.to_string());
+    crate::wire_declare::push_frame(Some(&tap), "", "[DONE]");
+
+    let Some(Assembled::Complete(document)) = tap.finish_response_stream(StreamExit::Ended) else {
+        panic!("the stream must assemble");
+    };
+    let contents = tap.take_response();
+    let edits = contents.edits(Leg::Response);
+    let outcome = diff(&document, &document, LaneClass::Fidelity, edits);
+    assert!(!outcome.truncated, "the check must not stop at its budget");
+    assert_eq!(edits.len(), 3);
+}

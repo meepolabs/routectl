@@ -392,3 +392,29 @@ fn an_unfinished_stream_reports_its_exit_and_frames_after_finish_are_ignored() {
     );
     assert_eq!(tap.finish_response_stream(StreamExit::Ended), None);
 }
+
+#[test]
+fn a_repeated_response_declaration_is_kept_once() {
+    let tap = WireTap::checking_response(IngressDialect::Chat);
+
+    for _ in 0..3 {
+        tap.declare_response(finish_reason_rewrite());
+        tap.declare_response(stream_strip());
+    }
+
+    assert_eq!(
+        tap.take_response().edits(Leg::Response),
+        [finish_reason_rewrite(), stream_strip()]
+    );
+}
+
+#[test]
+fn a_failed_response_assembly_takes_no_further_declarations() {
+    let tap = WireTap::checking_response(IngressDialect::Chat);
+    tap.declare_response(stream_strip());
+    tap.push_response_frame(SseFrame::new(None, "not json"));
+
+    tap.declare_response(finish_reason_rewrite());
+
+    assert_eq!(tap.take_response().edits(Leg::Response), [stream_strip()]);
+}
