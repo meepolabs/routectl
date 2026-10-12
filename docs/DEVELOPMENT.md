@@ -1072,6 +1072,9 @@ client-version read) lives in `scripts/drivers/lib/common.sh`.
 | `hermes-anthropic.sh` | the hermes CLI on the anthropic dialect, through `external-agent-cli.sh` | `hermes` from PATH |
 | `hermes-responses.sh` | the hermes CLI on the responses dialect | `hermes` from PATH |
 | `hermes-chat.sh` | the hermes CLI on the chat-completions dialect | `hermes` from PATH |
+| `pi-anthropic.sh` | the pi CLI on the anthropic dialect, through `external-agent-cli.sh` | `pi` from PATH |
+| `pi-responses.sh` | the pi CLI on the responses dialect | `pi` from PATH |
+| `pi-chat.sh` | the pi CLI on the chat-completions dialect | `pi` from PATH |
 
 The hermes drivers share `scripts/drivers/lib/hermes.sh`. The responses and
 chat dialects have no base-url environment carrier in hermes, so those two
@@ -1083,6 +1086,23 @@ three clear the inherited routing variables hermes reads, so a stray
 `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` cannot steer a turn past the
 daemon, and all three refuse front-proxy mode. The self-test injects a stub
 `hermes` through PATH; none of them names a binary override.
+
+The pi drivers share `scripts/drivers/lib/pi.sh`. pi has no base-url
+environment carrier on any dialect -- its anthropic provider ignores
+`ANTHROPIC_BASE_URL` -- so all three write `models.json` under
+`$PI_CODING_AGENT_DIR` inside the run's throwaway HOME: `pi-anthropic.sh`
+overrides `providers.anthropic.baseUrl` with the daemon's root, and the
+responses and chat drivers declare one custom provider (`baseUrl` = the
+daemon's `/v1`, `api` `openai-responses` or `openai-completions`). The file's
+`apiKey` is `$PI_ROUTECTL_LOCAL_API_KEY`, a variable name pi resolves at
+request time, so no key value is written. `settings.json` beside it carries
+the case knobs pi takes only from settings (`defaultTools`,
+`defaultThinkingLevel`, `cacheWarming`). pi's `-c` silently starts a fresh
+session when there is none to continue, so turn 2 of a multi-turn case runs
+only once turn 1 left a session file; `pi-anthropic.sh` gets the same check
+from `lib/pi-continue-guard.sh`, the binary it hands `external-agent-cli.sh`.
+All three refuse front-proxy mode, and the self-test injects a stub `pi`
+through PATH.
 
 ### Running a case
 
@@ -1137,7 +1157,7 @@ scripts/capture_driver.sh --lane anthropic-api --case thinking-01 \
   --expected-ingress anthropic -- scripts/drivers/external-agent-cli.sh
 ```
 
-Each hermes driver pins one dialect, so the expected ingress follows from
+Each hermes and pi driver pins one dialect, so the expected ingress follows from
 the file:
 
 ```
@@ -1145,6 +1165,12 @@ scripts/capture_driver.sh --lane openai-responses --case tools-multiturn-01 \
   --expected-ingress openai-responses -- scripts/drivers/hermes-responses.sh
 scripts/capture_driver.sh --lane openai-compat --case tools-multiturn-01 \
   --expected-ingress openai -- scripts/drivers/hermes-chat.sh
+scripts/capture_driver.sh --lane anthropic-api --case tools-multiturn-01 \
+  --expected-ingress anthropic -- scripts/drivers/pi-anthropic.sh
+scripts/capture_driver.sh --lane openai-responses --case tools-multiturn-01 \
+  --expected-ingress openai-responses -- scripts/drivers/pi-responses.sh
+scripts/capture_driver.sh --lane openai-compat --case tools-multiturn-01 \
+  --expected-ingress openai -- scripts/drivers/pi-chat.sh
 ```
 
 ### A driver corpus is a snapshot of a client VERSION

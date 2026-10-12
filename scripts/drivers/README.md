@@ -26,6 +26,9 @@ per-harness files small enough for the rule to stay affordable.
 | `hermes-anthropic.sh` | `hermes` from PATH | Expected ingress `anthropic`. Names the flags (`-z`, `-c`, `-m`, `--provider anthropic`) and execs `external-agent-cli.sh`, which owns the `ANTHROPIC_BASE_URL` carrier |
 | `hermes-responses.sh` | `hermes` from PATH | Expected ingress `openai-responses`. Owns its carrier: a custom provider with `api_mode: codex_responses` in a config written under the run's HOME |
 | `hermes-chat.sh` | `hermes` from PATH | Expected ingress `openai`. Same carrier as the responses driver, with `api_mode: chat_completions` |
+| `pi-anthropic.sh` | `pi` from PATH | Expected ingress `anthropic`. Writes `providers.anthropic.baseUrl` into `models.json` (pi ignores `ANTHROPIC_BASE_URL`), names the flags (`-p`, `-c`, `--model`, `--thinking`, `--provider anthropic`), and execs `external-agent-cli.sh` with `lib/pi-continue-guard.sh` as its client |
+| `pi-responses.sh` | `pi` from PATH | Expected ingress `openai-responses`. Owns its carrier: a `models.json` custom provider with `api: openai-responses` |
+| `pi-chat.sh` | `pi` from PATH | Expected ingress `openai`. Same carrier as the responses driver, with `api: openai-completions` |
 
 The three hermes files share [lib/hermes.sh](lib/hermes.sh): it points
 `HERMES_HOME` inside the run workspace, clears every inherited variable
@@ -36,13 +39,25 @@ local key's env var, never its value. All three are base-url only, and a
 multi-turn case through the responses/chat drivers refuses turn 2 unless
 turn 1 recorded a session for `-c` to resume.
 
+The three pi files share [lib/pi.sh](lib/pi.sh). pi has no base-url
+environment carrier on ANY dialect, so every pi driver writes
+`$PI_CODING_AGENT_DIR/models.json` inside the run workspace (an inherited
+`PI_CODING_AGENT_DIR` would otherwise hand pi the operator's profile).
+Its `apiKey` is the variable NAME `$PI_ROUTECTL_LOCAL_API_KEY`, which pi
+resolves at request time, never a value. `settings.json` beside it carries
+the tools, thinking, and cache-warming knobs. pi's `-c` silently starts
+fresh when there is nothing to continue, so all three refuse turn 2 unless
+turn 1 left a session file (`pi-anthropic.sh` through
+[lib/pi-continue-guard.sh](lib/pi-continue-guard.sh)), and all three are
+base-url only.
+
 A harness with no file here is not drivable on this box. Its missing
 piece is filed to the `wild-evidence` pen rather than stubbed.
 
 ## A turn loop never lends the client its stdin
 
 `claude-code-print.sh`, `external-agent-cli.sh`, `codex.sh` and the hermes
-turn loop in `lib/hermes.sh` all feed the case's
+and pi turn loops in `lib/hermes.sh` and `lib/pi.sh` all feed the case's
 turns through a `while read` loop, so the loop's stdin is a pipe holding
 the REMAINING prompts. Each redirects the client's stdin from `/dev/null`:
 a client that reads stdin otherwise drains that pipe, and a 2-turn case

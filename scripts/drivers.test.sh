@@ -56,10 +56,15 @@ DRIVER_FILES=(
     "$DRIVERS/hermes-anthropic.sh"
     "$DRIVERS/hermes-responses.sh"
     "$DRIVERS/hermes-chat.sh"
+    "$DRIVERS/pi-anthropic.sh"
+    "$DRIVERS/pi-responses.sh"
+    "$DRIVERS/pi-chat.sh"
 )
 DRIVER_LIBS=(
     "$DRIVERS/lib/common.sh"
     "$DRIVERS/lib/hermes.sh"
+    "$DRIVERS/lib/pi.sh"
+    "$DRIVERS/lib/pi-continue-guard.sh"
 )
 
 fails=0
@@ -1791,6 +1796,123 @@ SH
     chmod +x "$1"
 }
 
+# The stub PI, installed as `pi` in a directory the tests put first on
+# PATH -- the pi drivers name no binary override, so PATH is their
+# injection seam, and it also keeps any real pi on the box from ever being
+# reached by this suite.
+#
+# It models the parts of pi 1.1.0 the drivers depend on, verified against
+# its argument parser, its models.json schema, and its provider and
+# session resolution:
+#   * `-p PROMPT` runs one turn; `-c` continues the most recent session
+#     under `$PI_CODING_AGENT_DIR/sessions/<encoded cwd>/` and, with none,
+#     SILENTLY starts a fresh one -- the behavior the drivers must guard.
+#   * state lives under `$PI_CODING_AGENT_DIR`, default `$HOME/.pi/agent`.
+#   * `--provider anthropic` reaches `<baseUrl>/v1/messages`, where baseUrl
+#     is `providers.anthropic.baseUrl` from models.json or else pi's
+#     HARDCODED upstream; ANTHROPIC_BASE_URL is never read.
+#   * `--provider <name>` reaches the models.json custom provider of that
+#     name, on the route its `api` selects.
+#   * the key is models.json `apiKey` (a `$NAME` resolved from the env),
+#     else the provider's own env var.
+# A target that is not loopback is RECORDED and never contacted, so a
+# driver that left pi on its hardcoded upstream fails here, offline.
+#
+# Each turn REALLY posts to the endpoint it resolved, and the listener on
+# the other end logs the path. Like the generic stub it DRAINS stdin.
+# `STUB_PI_NO_SESSION` makes a turn record no session file.
+write_stub_pi() {
+    mkdir -p "$(dirname "$1")"
+    cat >"$1" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+    case "$arg" in
+        --version|-v)
+            printf '%s\n' "${STUB_CLIENT_VERSION-9.9.9}"
+            exit 0
+            ;;
+    esac
+done
+stdin_bytes="$(cat | wc -c | tr -d ' ')"
+provider="" resume=no prev=""
+for arg in "$@"; do
+    [ "$prev" = --provider ] && provider="$arg"
+    [ "$arg" = "-c" ] && resume=yes
+    prev="$arg"
+done
+agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+cwd_key="$(printf '%s' "$PWD" | sed 's|^/||; s|[/:]|-|g')"
+session_dir="$agent_dir/sessions/--$cwd_key--"
+resumed=no
+if [ "$resume" = yes ] && ls "$session_dir"/*.jsonl >/dev/null 2>&1; then
+    resumed=yes
+fi
+resolved="$(python3 - "$agent_dir/models.json" "$provider" <<'PY'
+import json
+import os
+import re
+import sys
+
+routes = {"openai-responses": "/responses", "openai-completions": "/chat/completions"}
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entry = json.load(fh)["providers"][sys.argv[2]]
+except (OSError, ValueError, KeyError, TypeError):
+    entry = {}
+if sys.argv[2] == "anthropic":
+    target = entry.get("baseUrl", "https://api.anthropic.com") + "/v1/messages"
+    fallback = os.environ.get("ANTHROPIC_API_KEY", "")
+elif entry.get("api") in routes and entry.get("baseUrl"):
+    target = entry["baseUrl"] + routes[entry["api"]]
+    fallback = ""
+else:
+    target = ""
+    fallback = ""
+key = entry.get("apiKey")
+if isinstance(key, str):
+    key = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: os.environ.get(m.group(1), ""), key)
+else:
+    key = fallback
+print(target)
+print(entry.get("baseUrl", ""))
+print(key)
+PY
+)"
+target="$(printf '%s\n' "$resolved" | sed -n 1p)"
+{
+    printf 'invocation argv=%s\n' "$*"
+    printf 'invocation stdin_bytes=%s\n' "$stdin_bytes"
+    printf 'invocation home=%s\n' "$HOME"
+    printf 'invocation agent_dir=%s\n' "$agent_dir"
+    printf 'invocation cwd=%s\n' "$PWD"
+    printf 'invocation resumed=%s\n' "$resumed"
+    printf 'invocation anthropic_base_url=%s\n' "${ANTHROPIC_BASE_URL-unset}"
+    printf 'invocation models_base_url=%s\n' "$(printf '%s\n' "$resolved" | sed -n 2p)"
+    printf 'invocation target=%s\n' "$target"
+    printf 'invocation key=%s\n' "$(printf '%s\n' "$resolved" | sed -n 3p)"
+} >>"$CLIENT_OUT"
+case "$target" in
+    http://127.0.0.1:*) ;;
+    *)
+        echo "stub pi: refusing to contact non-loopback target '$target'" >&2
+        exit 7
+        ;;
+esac
+if ! curl -fsS -m 5 -X POST -H 'content-type: application/json' \
+    -d '{}' "$target" >/dev/null 2>&1; then
+    echo "stub pi: no reachable endpoint at '$target'" >&2
+    exit 7
+fi
+if [ -z "${STUB_PI_NO_SESSION:-}" ]; then
+    mkdir -p "$session_dir"
+    printf '{"type":"message"}\n' >>"$session_dir/stub-session.jsonl"
+fi
+exit "${STUB_CLIENT_RC:-0}"
+SH
+    chmod +x "$1"
+}
+
 # A throwaway repo carrying the real runner, rig, scrub script, lane
 # configs, and the whole real drivers tree, plus the two stubs.
 make_work() {
@@ -1806,6 +1928,7 @@ make_work() {
     write_stub_routectl "$work/bin/routectl-stub"
     write_stub_client "$work/bin/client-stub"
     write_stub_hermes "$work/hermes-bin/hermes"
+    write_stub_pi "$work/pi-bin/pi"
     canned_trace >"$work/canned-trace.log"
     printf '%s\n' "$work"
 }
@@ -1872,7 +1995,7 @@ driver_run() {
         STUB_LISTENER="$work/bin/listener.py" \
         CLIENT_OUT="$work/client.txt" \
         STUB_REQUEST_LOG="$work/daemon-requests.log" \
-        PATH="$work/hermes-bin:$PATH" \
+        PATH="$work/hermes-bin:$work/pi-bin:$PATH" \
         STUB_CLIENT_RC="${STUB_CLIENT_RC:-0}" \
         ROUTECTL_DRIVER_CLAUDE_BIN="$work/bin/client-stub" \
         ROUTECTL_DRIVER_AGENT_BIN="$work/bin/client-stub" \
@@ -2320,6 +2443,245 @@ kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
 
+# ---------------------------------------------------------------------
+# Part 3d: the pi drivers, one per ingress dialect
+# ---------------------------------------------------------------------
+# Same shape as Part 3c, against the stub pi. pi has no base-url env
+# carrier, so the hostile inherited state here is an operator
+# PI_CODING_AGENT_DIR whose models.json points every provider at the
+# decoy: a driver that trusted it would send the turn there.
+
+operator_pi_models() {
+    mkdir -p "$1"
+    printf '{"providers":{"anthropic":{"baseUrl":"%s"},"routectl":{"baseUrl":"%s/v1","api":"openai-completions","apiKey":"x","models":[{"id":"m"}]}}}\n' \
+        "$DECOY_URL" "$DECOY_URL" >"$1/models.json"
+}
+
+# Paired positive controls. The stub pi DOES follow an inherited agent
+# dir, and with no models.json it DOES resolve pi's hardcoded upstream --
+# the host the missing-models.json mutation must surface. And `-c` with no
+# session DOES run silently as a fresh turn, which is what makes the
+# resume-guard assertions below non-vacuous.
+control_work="$(make_work)"
+operator_pi_models "$control_work/operator-pi"
+: >"$decoy_log"
+(
+    cd "$control_work" || exit 2
+    CLIENT_OUT="$control_work/client.txt" PI_CODING_AGENT_DIR="$control_work/operator-pi" \
+        "$control_work/pi-bin/pi" --provider anthropic --model m -p hi </dev/null
+) >/dev/null 2>&1
+check "control: an inherited PI_CODING_AGENT_DIR takes the stub pi to the decoy" \
+    "/v1/messages" "$(cat "$decoy_log")"
+: >"$control_work/client.txt"
+(
+    cd "$control_work" || exit 2
+    mkdir -p empty-agent
+    CLIENT_OUT="$control_work/client.txt" PI_CODING_AGENT_DIR="$control_work/empty-agent" \
+    ANTHROPIC_BASE_URL="$DECOY_URL" \
+        "$control_work/pi-bin/pi" --provider anthropic --model m -p hi </dev/null
+) >/dev/null 2>&1
+check "control: with no models.json the stub pi resolves the hardcoded upstream" \
+    "https://api.anthropic.com/v1/messages" "$(client_get "$control_work" target)"
+: >"$control_work/client.txt"
+rc=0
+(
+    cd "$control_work" || exit 2
+    operator_pi_models "$control_work/fresh-agent"
+    CLIENT_OUT="$control_work/client.txt" PI_CODING_AGENT_DIR="$control_work/fresh-agent" \
+        "$control_work/pi-bin/pi" --provider anthropic --model m -c -p hi </dev/null
+) >/dev/null 2>&1 || rc=$?
+check "control: the stub pi runs -c with no session as a fresh turn" \
+    "0:no" "$rc:$(client_get "$control_work" resumed)"
+rm -rf "$control_work"
+
+pi_json_get() {
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        node = json.load(fh)
+    for part in sys.argv[2].split("."):
+        node = node[int(part)] if isinstance(node, list) else node[part]
+except (OSError, ValueError, KeyError, TypeError, IndexError):
+    node = ""
+print(json.dumps(node) if isinstance(node, (list, dict)) else node)
+PY
+}
+
+# One row per pairing: driver | canned trace | lane | expected ingress |
+# the route the daemon must see | the models.json provider id | the path
+# under the daemon URL its baseUrl must carry | the custom provider's api
+# (`-` for the dialect that overrides the built-in anthropic provider).
+PI_ROWS='pi-anthropic.sh|canned_trace_tools|anthropic-api|anthropic|/v1/messages|anthropic||-
+pi-responses.sh|canned_trace_openai_responses_tools|openai-responses|openai-responses|/v1/responses|routectl|/v1|openai-responses
+pi-chat.sh|canned_trace_openai_chat_tools|openai-compat|openai|/v1/chat/completions|routectl|/v1|openai-completions'
+
+PI_LOCAL_KEY="pi-row-local-placeholder"
+
+while IFS='|' read -r driver trace lane ingress route provider suffix api; do
+    work="$(make_work)"
+    "$trace" >"$work/canned-trace.log"
+    operator_pi_models "$work/operator-pi"
+    operator_before="$(cat "$work/operator-pi/models.json")"
+    : >"$decoy_log"
+    rc=0
+    DRIVER_LANE="$lane" DRIVER_EXPECTED_INGRESS="$ingress" \
+    ROUTECTL_DRIVER_CLIENT_API_KEY="$PI_LOCAL_KEY" \
+    PI_CODING_AGENT_DIR="$work/operator-pi" \
+    PI_CODING_AGENT_SESSION_DIR="$work/operator-pi/sessions" \
+    ANTHROPIC_BASE_URL="$DECOY_URL" \
+    OPENAI_API_KEY="inherited-decoy-key" \
+        driver_run "$work" "$driver" tools-multiturn-01 || rc=$?
+    check "$driver: a run against the stub daemon exits 0" "0" "$rc"
+
+    check "$driver: the client is invoked once per turn" "2" \
+        "$(client_get "$work" argv | wc -l)"
+    check "$driver: the client sees no stdin on any turn" "0,0," \
+        "$(client_get "$work" stdin_bytes | tr '\n' ',')"
+    check "$driver: turn 1 opens a session rather than continuing one" "no" \
+        "$(client_get "$work" argv | sed -n 1p | grep -qE '(^| )-c( |$)' && echo yes || echo no)"
+    check "$driver: turn 2 continues the session with -c" "yes" \
+        "$(client_get "$work" argv | sed -n 2p | grep -qE '(^| )-c( |$)' && echo yes || echo no)"
+    check "$driver: turn 2 found turn 1's session to continue" "yes" \
+        "$(client_get "$work" resumed | sed -n 2p)"
+    check "$driver: each turn carries only its own prompt" "no" \
+        "$(client_get "$work" argv | sed -n 1p | grep -qF 'notes-beta.txt' && echo yes || echo no)"
+
+    daemon_url="http://127.0.0.1:$(sed -n 's/.* port=\([0-9]*\) .*/\1/p' "$work/runner.log" | tail -1)"
+    check "$driver: the client saw models.json baseUrl == the run's daemon" \
+        "$daemon_url$suffix,$daemon_url$suffix," \
+        "$(client_get "$work" models_base_url | tr '\n' ',')"
+    check "$driver: no turn resolved pi's hardcoded upstream" "no" \
+        "$(client_get "$work" target | grep -qv '^http://127\.0\.0\.1:' && echo yes || echo no)"
+    check "$driver: both turns reached the run's daemon on $route" \
+        "$route,$route," "$(tr '\n' ',' <"$work/daemon-requests.log" 2>/dev/null)"
+    check "$driver: no turn reached the inherited-agent-dir decoy" "" "$(cat "$decoy_log")"
+    check "$driver: the client reached the daemon with ANTHROPIC_BASE_URL unset" \
+        "unset,unset," "$(client_get "$work" anthropic_base_url | tr '\n' ',')"
+    check "$driver: the client authenticated with the local placeholder" \
+        "$PI_LOCAL_KEY" "$(client_get "$work" key | head -1)"
+
+    kept="$(kept_run "$work")"
+    case "$(client_get "$work" agent_dir | head -1)" in
+        "$kept"/*) echo "PASS: $driver: pi state lives inside the run workspace" ;;
+        *) fail "$driver: PI_CODING_AGENT_DIR was '$(client_get "$work" agent_dir | head -1)', not under the run" ;;
+    esac
+    check "$driver: the inherited operator agent dir was left untouched" \
+        "$operator_before|models.json" \
+        "$(cat "$work/operator-pi/models.json")|$(ls -A "$work/operator-pi")"
+
+    models="$kept/client-home/.pi/agent/models.json"
+    settings="$kept/client-home/.pi/agent/settings.json"
+    if [ -f "$models" ]; then
+        check "$driver: models.json names the key's env var, not a value" '$PI_ROUTECTL_LOCAL_API_KEY' \
+            "$(pi_json_get "$models" "providers.$provider.apiKey")"
+        if [ "$api" != - ]; then
+            check "$driver: models.json pins api to $api" "$api" \
+                "$(pi_json_get "$models" "providers.$provider.api")"
+            check "$driver: models.json declares the requested model" "claude-opus-4-8" \
+                "$(pi_json_get "$models" "providers.$provider.models.0.id")"
+        fi
+        check "$driver: models.json holds no credential value" "no" \
+            "$(grep -qF "$PI_LOCAL_KEY" "$models" && echo yes || echo no)"
+        rc=0
+        bash "$SCRUB" --check "$models" >/dev/null 2>&1 || rc=$?
+        check "$driver: models.json passes the scrub gate" "0" "$rc"
+        planted="$(mktemp -d)"
+        python3 - "$models" "$planted/models.json" "$provider" \
+            "$(printf '%s%s' 'sk-ant-api03-' 'QQQQQQQQQQQQQQQQQQQQQQQQ')" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    config = json.load(fh)
+config["providers"][sys.argv[3]]["apiKey"] = sys.argv[4]
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    json.dump(config, fh)
+PY
+        rc=0
+        out="$(bash "$SCRUB" --check "$planted/models.json" 2>&1)" || rc=$?
+        check "$driver: a key planted in models.json is caught" "1:yes" \
+            "$rc:$(printf '%s' "$out" | grep -qF 'provider-key' && echo yes || echo no)"
+        rm -rf "$planted"
+        check "$driver: a no-thinking case writes thinking off" "off" \
+            "$(pi_json_get "$settings" defaultThinkingLevel)"
+        check "$driver: cache warming is off" "off" "$(pi_json_get "$settings" cacheWarming)"
+        check "$driver: a tools case writes no tool restriction" "" \
+            "$(pi_json_get "$settings" defaultTools)"
+    else
+        fail "$driver: no models.json in the kept run at $models"
+        fails=$((fails + 9))
+    fi
+
+    meta="$work/repo/.routectl-driver-scratch/$lane/tools-multiturn-01/meta.json"
+    if [ -f "$meta" ]; then
+        check "$driver: meta.ingress_kind carries the traced $ingress dialect" \
+            "$ingress" "$(meta_get "$meta" ingress_kind)"
+        check "$driver: meta.client.binary_version carries the driver's read" \
+            "9.9.9" "$(meta_get "$meta" client.binary_version)"
+    else
+        fail "$driver: no fixture landed at $meta"
+        sed -n '1,30p' "$work/runner.log"
+        fails=$((fails + 1))
+    fi
+
+    [ -n "$kept" ] && rm -rf "$kept"
+    rm -rf "$work"
+done <<<"$PI_ROWS"
+
+# The knob controls the rows above cannot show: a no-tools case saves an
+# empty tool list, and a thinking case asks for a level and leaves the
+# default thinking level alone.
+work="$(make_work)"
+DRIVER_LANE=openai-responses DRIVER_EXPECTED_INGRESS=openai-responses \
+    driver_run "$work" pi-responses.sh plain-turn-01 || true
+kept="$(kept_run "$work")"
+check "a pi no-tools case saves an empty default tool list" "[]" \
+    "$(pi_json_get "$kept/client-home/.pi/agent/settings.json" defaultTools)"
+check "a pi no-thinking case passes no thinking level" "no" \
+    "$(client_get "$work" argv | grep -qF -- '--thinking' && echo yes || echo no)"
+check "a pi no-thinking case declares a non-reasoning model" "False" \
+    "$(pi_json_get "$kept/client-home/.pi/agent/models.json" providers.routectl.models.0.reasoning)"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+work="$(make_work)"
+canned_trace_thinking >"$work/canned-trace.log"
+driver_run "$work" pi-anthropic.sh thinking-01 || true
+kept="$(kept_run "$work")"
+check "a pi thinking case asks for a thinking level" "yes" \
+    "$(client_get "$work" argv | grep -qF -- '--thinking high' && echo yes || echo no)"
+check "a pi thinking case writes no thinking-off override" "" \
+    "$(pi_json_get "$kept/client-home/.pi/agent/settings.json" defaultThinkingLevel)"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# NO SESSION, NO MULTI-TURN CAPTURE. The stub records no session for turn
+# 1, and pi's own `-c` would then silently start fresh (the control above).
+# Every pi driver refuses before pi ever sees turn 2: the responses/chat
+# loop by its own check, the anthropic one in pi-continue-guard.sh.
+while IFS='|' read -r driver trace lane ingress route provider suffix api; do
+    work="$(make_work)"
+    "$trace" >"$work/canned-trace.log"
+    rc=0
+    STUB_PI_NO_SESSION=1 DRIVER_LANE="$lane" DRIVER_EXPECTED_INGRESS="$ingress" \
+        driver_run "$work" "$driver" tools-multiturn-01 || rc=$?
+    check_ne "$driver: a multi-turn case with no session to resume fails" "0" "$rc"
+    check "$driver: pi never ran turn 2" "1" "$(client_get "$work" argv | wc -l)"
+    if grep -rqF 'nothing to resume' "$work/runner.log" "$(kept_run "$work")" 2>/dev/null; then
+        echo "PASS: $driver: the refusal names the missing session"
+    else
+        fail "$driver: the no-resume refusal did not name the missing session"
+        sed -n '1,30p' "$work/runner.log"
+    fi
+    check_ne "$driver: the unresumable run landed no fixture" "yes" \
+        "$([ -f "$work/repo/.routectl-driver-scratch/$lane/tools-multiturn-01/meta.json" ] && echo yes || echo no)"
+    kept="$(kept_run "$work")"
+    [ -n "$kept" ] && rm -rf "$kept"
+    rm -rf "$work"
+done <<<"$PI_ROWS"
+
 kill "$decoy_pid" 2>/dev/null
 wait "$decoy_pid" 2>/dev/null
 rm -rf "$decoy_log" "$decoy_work"
@@ -2440,7 +2802,7 @@ direct_run() {
         cd "$work/repo" || exit 2
         HOME="$run/client-home" \
         CLIENT_OUT="$work/client.txt" \
-        PATH="$work/hermes-bin:$PATH" \
+        PATH="$work/hermes-bin:$work/pi-bin:$PATH" \
         ROUTECTL_DRIVER_CLAUDE_BIN="$work/bin/client-stub" \
         ROUTECTL_DRIVER_AGENT_BIN="$work/bin/client-stub" \
         ROUTECTL_DRIVER_CODEX_BIN="$work/bin/client-stub" \
@@ -2472,7 +2834,8 @@ done
 if curl -fsS -m 1 "http://127.0.0.1:$live_port/health" >/dev/null 2>&1; then
     echo "PASS: the paired reachable-daemon control has a live listener"
     for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh codex.sh \
-        hermes-anthropic.sh hermes-responses.sh hermes-chat.sh; do
+        hermes-anthropic.sh hermes-responses.sh hermes-chat.sh \
+        pi-anthropic.sh pi-responses.sh pi-chat.sh; do
         rc=0
         direct_run "$work" "$driver" "http://127.0.0.1:$live_port" || rc=$?
         check "$driver: exits 0 against a reachable daemon" "0" "$rc"
@@ -2602,6 +2965,27 @@ for driver in hermes-anthropic.sh hermes-responses.sh hermes-chat.sh; do
     fi
     check "$driver: a refused run wrote no hermes state" "" \
         "$(ls -A "$work/direct-run/client-home" 2>/dev/null)"
+    rm -rf "$work"
+done
+
+# The pi drivers refuse front-proxy the same way, before the daemon
+# precondition; Part 3d's base-url runs are the paired control.
+for driver in pi-anthropic.sh pi-responses.sh pi-chat.sh; do
+    work="$(make_work)"
+    rc=0
+    DIRECT_MODE=front-proxy DIRECT_CASE=tools-multiturn-01 \
+        direct_run "$work" "$driver" "http://127.0.0.1:1" || rc=$?
+    check "$driver: refuses front-proxy mode with exit 2" "2" "$rc"
+    if grep -qF 'no verified trust path' "$work/direct.log"; then
+        echo "PASS: $driver: the front-proxy refusal names the missing trust path"
+    else
+        fail "$driver: the front-proxy refusal did not name the missing trust path"
+        sed -n '1,10p' "$work/direct.log"
+    fi
+    check "$driver: a refused run wrote no pi state" "" \
+        "$(ls -A "$work/direct-run/client-home" 2>/dev/null)"
+    check "$driver: a refused run never invoked pi" "0" \
+        "$(client_get "$work" argv 2>/dev/null | wc -l)"
     rm -rf "$work"
 done
 
