@@ -19,6 +19,7 @@ use routectl_core::{
 use serde_json::{Value, json};
 
 use super::super::field_repair::{TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL};
+use super::RejectionSite;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{DispatchMeta, Router, RouterOptions};
@@ -253,9 +254,19 @@ fn fixture_rejection(text: &str) -> Error {
 
 /// An anthropic-api 400 whose message names `path` as a refused field.
 fn anthropic_rejection(path: &str) -> Error {
+    anthropic_reason(path, REFUSED_FIELD)
+}
+
+/// An anthropic-api 400 whose message names `path` with `reason`.
+fn anthropic_reason(path: &str, reason: &str) -> Error {
+    anthropic_message(&format!("{path}: {reason}"))
+}
+
+/// An anthropic-api 400 carrying `message`.
+fn anthropic_message(message: &str) -> Error {
     let body = json!({
         "type": "error",
-        "error": {"type": "invalid_request_error", "message": format!("{path}: {REFUSED_FIELD}")},
+        "error": {"type": "invalid_request_error", "message": message},
     });
     Error::upstream("scripted", 400, body.to_string())
 }
@@ -307,6 +318,10 @@ struct SiteRow {
 /// Settle `row`'s rejection the way a failed attempt is settled, and return
 /// what the settlement read off the wire.
 fn settle(row: &SiteRow) -> Option<bool> {
+    settle_site(row).in_egress
+}
+
+fn settle_site(row: &SiteRow) -> RejectionSite {
     let provider: Arc<dyn Provider> = ScriptedProvider::new(None, |_| Ok(()));
     let router = router(row.provider_block, Arc::clone(&provider));
     let model = ResolvedModel::new("m0", "p0", provider, "upstream");
@@ -323,7 +338,7 @@ fn settle(row: &SiteRow) -> Option<bool> {
         tap.deposit(serde_json::to_vec(&sent).expect("serialize").into());
     }
     let mut meta = DispatchMeta::for_alias(ALIAS);
-    let site = router
+    router
         .settle_failed_attempt(
             &target,
             &attempt_req,
@@ -332,8 +347,7 @@ fn settle(row: &SiteRow) -> Option<bool> {
             &(row.err)(),
             &mut meta,
         )
-        .unwrap_or_else(|| panic!("{}: premise, the rejection is recorded", row.name));
-    site.in_egress
+        .unwrap_or_else(|| panic!("{}: premise, the rejection is recorded", row.name))
 }
 
 fn site_rows() -> Vec<SiteRow> {
@@ -498,6 +512,185 @@ fn converse_site_rows() -> [SiteRow; 6] {
 #[test]
 fn the_settlement_reads_each_rejection_against_the_body_that_went_out() {
     for row in site_rows() {
+        assert_eq!(settle(&row), row.in_egress, "{}", row.name);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Absence counts only where the validator read a field the body lacks
+// ---------------------------------------------------------------------------
+
+/// A tool with no `type`, which the validator reads as the default member
+/// of the tool union and names by that member's tag.
+fn untagged_tool(_: &ChatRequest, mut client: Value) -> Value {
+    client["tools"] = json!([{"name": "x", "input_schema": {}}]);
+    client
+}
+
+fn metadata_with_dotted_key(_: &ChatRequest, mut client: Value) -> Value {
+    client["metadata"] = json!({"a.b": 1});
+    client
+}
+
+/// The thinking union on its `enabled` member, which also carries a key
+/// spelled like the tag, holding `budget`.
+fn thinking_with_key_named_like_its_tag(_: &ChatRequest, mut client: Value) -> Value {
+    client["thinking"] = json!({"type": "enabled", "enabled": {"budget": 1}});
+    client
+}
+
+/// An openai-shaped 400 naming `param` as missing, not refused.
+fn openai_missing(param: &str) -> Error {
+    let body = json!({"error": {
+        "message": format!("Missing required parameter: '{param}'."),
+        "type": "invalid_request_error",
+        "param": param,
+        "code": "missing_required_parameter",
+    }});
+    Error::upstream_full(
+        "scripted",
+        400,
+        body.to_string(),
+        None,
+        Some("invalid_request_error".into()),
+        Some("missing_required_parameter".into()),
+    )
+}
+
+#[test]
+fn only_a_miss_at_the_final_segment_is_absence() {
+    let rows = [
+        SiteRow {
+            name: "a default union member's implied tag, before the field it holds",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(untagged_tool),
+            err: || anthropic_rejection("tools.0.custom.name"),
+            in_egress: None,
+        },
+        SiteRow {
+            name: "a client key containing a dot, read as two segments",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(metadata_with_dotted_key),
+            err: || anthropic_rejection("metadata.a.b"),
+            in_egress: None,
+        },
+        SiteRow {
+            name: "every segment but the last resolved, the last missing",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(thinking_without_display),
+            err: || anthropic_rejection("thinking.enabled.display"),
+            in_egress: Some(false),
+        },
+    ];
+    for row in rows {
+        assert_eq!(settle(&row), row.in_egress, "{}", row.name);
+    }
+}
+
+#[test]
+fn a_segment_carried_both_as_a_key_and_as_the_tag_is_not_read_either_way() {
+    let rows = [
+        SiteRow {
+            name: "the key's child carries the field",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(thinking_with_key_named_like_its_tag),
+            err: || anthropic_rejection("thinking.enabled.budget"),
+            in_egress: None,
+        },
+        SiteRow {
+            name: "the key's child lacks the field",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(thinking_with_key_named_like_its_tag),
+            err: || anthropic_rejection("thinking.enabled.display"),
+            in_egress: None,
+        },
+    ];
+    for row in rows {
+        assert_eq!(settle(&row), row.in_egress, "{}", row.name);
+    }
+}
+
+/// The wire check's provenance still reads such a segment as the key: the
+/// field is found under it on the body that went out, and not on the
+/// client's, so routectl added it.
+#[test]
+fn the_wire_check_provenance_still_reads_a_tag_spelled_key_as_the_key() {
+    let row = SiteRow {
+        name: "the key's child carries the field",
+        provider_block: ANTHROPIC,
+        dialect: IngressDialect::Anthropic,
+        sent: Some(thinking_with_key_named_like_its_tag),
+        err: || anthropic_rejection("thinking.enabled.budget"),
+        in_egress: None,
+    };
+
+    let site = settle_site(&row);
+
+    assert_eq!(site.provenance.label(), "routectl_added", "{}", row.name);
+}
+
+#[test]
+fn absence_counts_only_for_a_reason_that_refuses_what_was_sent() {
+    let rows = [
+        SiteRow {
+            name: "a field reported missing",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(thinking_without_display),
+            err: || anthropic_reason("thinking.enabled.budget_tokens", "Field required"),
+            in_egress: None,
+        },
+        SiteRow {
+            name: "the same absent field refused as an extra input",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(thinking_without_display),
+            err: || anthropic_rejection("thinking.enabled.budget_tokens"),
+            in_egress: Some(false),
+        },
+        SiteRow {
+            name: "a quoted path not supported, with no grounded continuation",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(thinking_without_display),
+            err: || anthropic_message(r#""thinking.display" is not supported"#),
+            in_egress: None,
+        },
+        SiteRow {
+            name: "the same quoted path in the grounded template",
+            provider_block: ANTHROPIC,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(thinking_without_display),
+            err: || {
+                anthropic_message(
+                    r#""thinking.display" is not supported for this model. Use "thinking.type" instead."#,
+                )
+            },
+            in_egress: Some(false),
+        },
+        SiteRow {
+            name: "an openai parameter reported missing",
+            provider_block: OPENAI_COMPAT,
+            dialect: IngressDialect::Chat,
+            sent: Some(unchanged),
+            err: || openai_missing("temperature"),
+            in_egress: None,
+        },
+        SiteRow {
+            name: "the same absent openai parameter refused as unsupported",
+            provider_block: OPENAI_COMPAT,
+            dialect: IngressDialect::Chat,
+            sent: Some(unchanged),
+            err: || openai_rejection("temperature"),
+            in_egress: Some(false),
+        },
+    ];
+    for row in rows {
         assert_eq!(settle(&row), row.in_egress, "{}", row.name);
     }
 }

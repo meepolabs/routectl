@@ -94,7 +94,8 @@ impl Router {
                 provenance: provenance_of(lane, &record, path, sent.as_ref()),
                 in_egress: path
                     .zip(sent.as_ref())
-                    .and_then(|(path, sent)| egress_location(lane.egress(), sent, path)),
+                    .and_then(|(path, sent)| egress_location(lane.egress(), sent, path))
+                    .filter(|&carried| carried || absence_is_evidence(rejected.as_ref())),
             })
         });
         let Some(site) = site else {
@@ -139,6 +140,13 @@ fn exact_locator(rejected: Option<&RejectedWirePath>) -> Option<&[String]> {
         .map(|named| named.locator.as_slice())
 }
 
+/// Whether a walk that misses the named location says the body lacks the
+/// field the upstream read. Only a reason refusing something sent there
+/// does; any other reason may name the location because it is missing.
+fn absence_is_evidence(rejected: Option<&RejectedWirePath>) -> bool {
+    rejected.is_some_and(|named| named.presupposes_presence)
+}
+
 /// Where the path a rejection names came from: looked up in the client's
 /// body and in `sent`, the parsed body routectl sent. On a TRANSLATION lane
 /// the two bodies do not share paths, so a located path is not applicable.
@@ -167,9 +175,13 @@ fn provenance_of(
 }
 
 /// Whether `sent`, the body that went out on an `egress` lane, carries the
-/// location `path` a rejection names: `Some(false)` only when the walk ends
-/// on an object that lacks the key. `None` whenever the body and the path
-/// disagree about shape, since then the absence is not evidence.
+/// location `path` a rejection names: `Some(false)` only when every segment
+/// but the last resolved and the object reached lacks the last key. `None`
+/// whenever the body and the path disagree about shape or the walk could
+/// read a segment two ways, since then the absence is not evidence. A miss
+/// before the last segment is `None` too: the segment may be a tag the
+/// validator implied (an untagged union member's default) or one key of a
+/// client's that contains a dot.
 ///
 /// On Converse the model names its own fields relative to the field bag and
 /// the request validator names them from the root, bag included. A path the
@@ -182,50 +194,75 @@ fn egress_location(egress: EgressKind, sent: &Value, path: &[String]) -> Option<
     if bag_prefixed && egress != EgressKind::BedrockConverse {
         return None;
     }
-    match walk(sent, path) {
+    match walk(sent, path, TagOrKey::Unresolved) {
         Walk::Found(_) => Some(true),
-        Walk::Mismatch => None,
-        Walk::Missing if egress == EgressKind::BedrockConverse && !bag_prefixed => {
-            matches!(walk(sent.get(CONVERSE_FIELD_BAG)?, path), Walk::Found(_)).then_some(true)
+        Walk::Mismatch | Walk::Ambiguous => None,
+        Walk::Missing { .. } if egress == EgressKind::BedrockConverse && !bag_prefixed => {
+            let bag = sent.get(CONVERSE_FIELD_BAG)?;
+            matches!(walk(bag, path, TagOrKey::Unresolved), Walk::Found(_)).then_some(true)
         }
-        Walk::Missing => Some(false),
+        Walk::Missing { last } => last.then_some(false),
     }
 }
 
 /// The value at `path` (raw keys and indices) in `body`.
 fn locate<'v>(body: &'v Value, path: &[String]) -> Option<&'v Value> {
-    match walk(body, path) {
+    match walk(body, path, TagOrKey::Key) {
         Walk::Found(value) => Some(value),
-        Walk::Missing | Walk::Mismatch => None,
+        Walk::Missing { .. } | Walk::Mismatch | Walk::Ambiguous => None,
     }
 }
 
 /// How a walk of a raw path through a body ended.
 enum Walk<'v> {
     Found(&'v Value),
-    /// An object on the path lacks the next key.
-    Missing,
+    /// An object on the path lacks the next key; `last` when that key is
+    /// the path's final segment.
+    Missing {
+        last: bool,
+    },
     /// The path asks something the body's shape cannot answer: a key of a
     /// scalar, an index of an object, a non-index of an array, an index past
     /// an array's end.
     Mismatch,
+    /// An object carries the next segment both as its own key and as its
+    /// `type` tag, and the walk was told not to pick.
+    Ambiguous,
+}
+
+/// How a walk reads a segment an object carries both as a key and as its
+/// `type` tag.
+#[derive(Clone, Copy)]
+enum TagOrKey {
+    /// Descend into the key.
+    Key,
+    /// End the walk as [`Walk::Ambiguous`].
+    Unresolved,
 }
 
 /// Walk `path` (raw keys and indices) through `body`. A rejection names a
 /// tagged-union member by its tag (`thinking.enabled.display` for
 /// `{"thinking": {"type": "enabled", "display": ..}}`), so a segment an
 /// object lacks but carries as its own `type` tag is consumed without
-/// descending.
-fn walk<'v>(body: &'v Value, path: &[String]) -> Walk<'v> {
+/// descending. A segment the object carries both ways is read per `both`.
+fn walk<'v>(body: &'v Value, path: &[String], both: TagOrKey) -> Walk<'v> {
     let mut node = body;
-    for key in path {
+    for (at, key) in path.iter().enumerate() {
         node = match node {
-            Value::Object(map) => match map.get(key) {
-                Some(child) => child,
-                None if map.get(UNION_TAG).and_then(Value::as_str) == Some(key.as_str()) => node,
-                None if key.parse::<usize>().is_ok() => return Walk::Mismatch,
-                None => return Walk::Missing,
-            },
+            Value::Object(map) => {
+                let tagged = map.get(UNION_TAG).and_then(Value::as_str) == Some(key.as_str());
+                match (map.get(key), tagged, both) {
+                    (Some(_), true, TagOrKey::Unresolved) => return Walk::Ambiguous,
+                    (Some(child), _, _) => child,
+                    (None, true, _) => node,
+                    (None, false, _) if key.parse::<usize>().is_ok() => return Walk::Mismatch,
+                    (None, false, _) => {
+                        return Walk::Missing {
+                            last: at + 1 == path.len(),
+                        };
+                    }
+                }
+            }
             Value::Array(items) => match key.parse::<usize>().ok().and_then(|i| items.get(i)) {
                 Some(item) => item,
                 None => return Walk::Mismatch,

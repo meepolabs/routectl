@@ -128,6 +128,11 @@ pub(super) struct RejectedWirePath {
     /// the Converse field bag removed -- the shape a closed-table row path
     /// has, so a repair record can be matched against it.
     pub(super) field: RawPath,
+    /// Whether the reason refuses something the request carried at the
+    /// location: a value outside a listed set, an extra input, an unsupported
+    /// parameter. Only a grounded template earns it; any other reason may
+    /// name the location because it is missing.
+    pub(super) presupposes_presence: bool,
 }
 
 /// Path segments exactly as a rejection named them, for lookups and joins
@@ -172,6 +177,7 @@ pub(super) fn rejected_wire_path(
             .fold(WirePath::root(), |path, name| push_raw_name(path, name)),
         locator: RawPath::new(raw_segments.iter().copied()),
         field: RawPath::new(localized.segments.iter().copied()),
+        presupposes_presence: localized.presupposes_presence,
     })
 }
 
@@ -279,6 +285,7 @@ struct LocalizedPath<'a> {
     ends_in_index: bool,
     tier: SignalTier,
     kind: RejectionKind,
+    presupposes_presence: bool,
     /// The tokens the envelope's template names as replacements.
     replacements: Vec<&'a str>,
 }
@@ -289,6 +296,9 @@ struct Attribution<'a> {
     path: &'a str,
     tier: SignalTier,
     kind: RejectionKind,
+    /// The reason refuses something sent at `path`, so cannot be a report
+    /// that `path` is missing.
+    presupposes_presence: bool,
     replacements: Vec<&'a str>,
 }
 
@@ -314,6 +324,7 @@ fn localize<'a>(
         ends_in_index: ends_in_index(attribution.path),
         tier: attribution.tier,
         kind: attribution.kind,
+        presupposes_presence: attribution.presupposes_presence,
         replacements: attribution.replacements,
     })
 }
@@ -350,6 +361,7 @@ fn quoted_not_supported(message: &str) -> Option<Attribution<'_>> {
         path,
         tier,
         kind: RejectionKind::UnsupportedField,
+        presupposes_presence: replacement.is_some(),
         replacements: replacement.flatten().into_iter().collect(),
     })
 }
@@ -373,13 +385,15 @@ fn location_prefix(message: &str) -> Option<Attribution<'_>> {
         path,
         tier,
         kind,
+        presupposes_presence: grounded,
         replacements: listed.map(quoted_list).unwrap_or_default(),
     })
 }
 
 /// `error.param` alone names a field without saying the field was refused;
 /// only the `unsupported_parameter` code or the exact template naming the
-/// same parameter does.
+/// same parameter does. A bare `error.param` may also name a parameter the
+/// request is missing, so only a refusal presupposes it was sent.
 fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
     let message = parsed.error_message();
     let templated = message.and_then(unsupported_parameter);
@@ -400,6 +414,7 @@ fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
         path,
         tier: SignalTier::SelfIdentifying,
         kind,
+        presupposes_presence: unsupported,
         replacements: Vec::new(),
     })
 }
