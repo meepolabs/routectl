@@ -638,6 +638,12 @@ jobs:
       - name: lane config self-test
         run: bash scripts/drivers/config/lane_configs.test.sh
 
+      # The planted-drop proof needs a release binary this job does not
+      # build, so here it runs the weld to the known-undeclared list and its
+      # source hygiene checks, and SKIPS the end-to-end half by name.
+      - name: planted-drop proof (weld; end to end skips without a binary)
+        run: bash scripts/wire_watch/planted_drop.test.sh
+
   # Informational: public-API drift is reported, never enforced. The job
   # continues on error and is deliberately absent from `required.needs`, so
   # neither drift nor a broken toolchain bootstrap can block a merge. Its

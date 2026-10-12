@@ -856,6 +856,42 @@ A reader checks `schema` first, then takes an artifact's absence from
 `missing`: an empty trace file means the trace held no matching line, while
 a file named in `missing` was not produced at all.
 
+### Planted-drop proof and its recorded snapshots
+
+`scripts/wire_watch/planted_drop.test.sh` drives three cells through the
+real runner and the REAL routectl binary against a python mock upstream
+(`scripts/wire_watch/planted_drop.py`) on a probed free loopback port, in a
+copy of `scripts/` with two throwaway lane configs (`sample_one_in = 1`):
+
+| Cell | Lane | Plant | Expected finding |
+|---|---|---|---|
+| `request-leg-plant` | `responses->openai-responses` | the Responses request carries `temperature` | `request` leg, `/temperature` |
+| `response-leg-plant` | `chat->openai-compat` | the upstream chat stream frames carry `system_fingerprint` | `response` leg, `/system_fingerprint` |
+| `clean-control` | `chat->openai-compat` | none (plain completion) | `loss_findings: []`, nonzero `checks` |
+
+Both plants are known undeclared losses (`KNOWN_UNDECLARED` in
+`crates/routectl-cli/src/handlers/zero_detection_tests.rs`). The script
+checks on every run, with or without a binary, that each plant is still in
+that list; when a loss is fixed its entry goes, and the script fails asking
+for the plant to be swapped and the snapshots re-recorded.
+
+`scripts/wire_watch/testdata/<cell>.health.json` are the three cells'
+`/status/health` snapshots, recorded from a real run (never hand-edited) and
+read by the wire-watch report tests:
+
+```bash
+cargo build --release -p routectl-cli --bin routectl
+bash scripts/wire_watch/planted_drop.test.sh --record   # rewrite testdata/
+bash scripts/wire_watch/planted_drop.test.sh            # compare fresh vs recorded
+```
+
+Normal mode compares each fresh snapshot's (lane, leg, path, path_class)
+finding set with its recording. The binary is `ROUTECTL_BIN`, else
+`release/routectl` under `CARGO_TARGET_DIR` (default `target/`); with
+neither, the end-to-end half is a named SKIP and the weld and source
+hygiene checks still run. `--plants off` runs the cells with the plants
+removed and must fail the comparison.
+
 ### The (lane, variant) convention
 
 A lane needing a second DEPLOYMENT SHAPE of the same provider spells it

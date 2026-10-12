@@ -1,0 +1,39 @@
+{
+  "as_of": "2026-10-12T17:52:48Z",
+  "data": {
+    "learned_negatives": [],
+    "targets": [
+      {
+        "circuit": "closed",
+        "half_open_probe_in_flight": false,
+        "last_outcome": "ok",
+        "last_outcome_at_ms": 1791827568465,
+        "learned_lane": "mock#planted-upstream",
+        "nickname": "planted",
+        "open_since_ms": null,
+        "provider_name": "mock",
+        "rpm_available": null,
+        "seat_label": null,
+        "state_key": "planted",
+        "upstream": "planted-upstream"
+      }
+    ],
+    "wire_check": {
+      "checks": [
+        {
+          "count": 2,
+          "lane": "chat->openai-compat",
+          "last_seen_unix_secs": 1791827568,
+          "outcome": "clean"
+        }
+      ],
+      "local_refusals": [],
+      "loss": [],
+      "loss_findings": [],
+      "unrepaired_rejections": [],
+      "window_secs": 86400
+    }
+  },
+  "schema_version": 6,
+  "unavailable": null
+}
