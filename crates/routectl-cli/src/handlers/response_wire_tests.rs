@@ -1007,32 +1007,54 @@ const WARM_HOLD_UPSTREAM_DELAY: std::time::Duration = std::time::Duration::from_
 #[tokio::test]
 async fn a_complete_response_is_compared_only_after_its_body_is_taken() {
     for dialect in [Dialect::Anthropic, Dialect::Chat] {
-        for consume in [true, false] {
-            let server = upstream(dialect, false, None).await;
-            let router = router(dialect, &server.uri(), CHECK_EVERY).await;
-            let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+        let server = upstream(dialect, false, None).await;
+        let router = router(dialect, &server.uri(), CHECK_EVERY).await;
+        let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
 
-            let resp = respond(dialect, &swap, false, Render::AsShipped).await;
-            let before = outcomes(&swap.load().wire_check_snapshot());
-            if consume {
-                let body = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
-                assert!(!body.is_empty());
-            } else {
-                drop(resp);
-            }
-            let after = outcomes(&swap.load().wire_check_snapshot());
+        let resp = respond(dialect, &swap, false, Render::AsShipped).await;
+        let before = outcomes(&swap.load().wire_check_snapshot());
+        let body = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+        let after = outcomes(&swap.load().wire_check_snapshot());
 
-            assert_eq!(
-                before,
-                [(dialect.lane(), CheckOutcome::Clean, 1)],
-                "{dialect:?} consume={consume}: only the request leg before"
-            );
-            assert_eq!(
-                after,
-                [(dialect.lane(), CheckOutcome::Clean, 2)],
-                "{dialect:?} consume={consume}: the response leg after"
-            );
-        }
+        assert!(!body.is_empty());
+        assert_eq!(
+            before,
+            [(dialect.lane(), CheckOutcome::Clean, 1)],
+            "{dialect:?}: only the request leg before"
+        );
+        assert_eq!(
+            after,
+            [(dialect.lane(), CheckOutcome::Clean, 2)],
+            "{dialect:?}: the response leg after"
+        );
+    }
+}
+
+/// A complete body dropped before the client took it was never received,
+/// so its check records `incomplete`, never `clean`.
+#[tokio::test]
+async fn a_complete_response_dropped_unread_records_incomplete_never_clean() {
+    for dialect in [Dialect::Anthropic, Dialect::Chat] {
+        let server = upstream(dialect, false, None).await;
+        let router = router(dialect, &server.uri(), CHECK_EVERY).await;
+        let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+        let resp = respond(dialect, &swap, false, Render::AsShipped).await;
+
+        let ((), events) = routectl_testkit::with_capture(async { drop(resp) }).await;
+
+        assert_eq!(
+            outcomes(&swap.load().wire_check_snapshot()),
+            [
+                (dialect.lane(), CheckOutcome::Clean, 1),
+                (dialect.lane(), CheckOutcome::Incomplete, 1),
+            ],
+            "{dialect:?}: the request leg is clean; the unread response is not"
+        );
+        assert_eq!(
+            incomplete_reasons(&events),
+            [("client".to_string(), "cancelled".to_string())],
+            "{dialect:?}"
+        );
     }
 }
 

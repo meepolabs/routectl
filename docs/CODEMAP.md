@@ -5609,6 +5609,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`#[doc(hidden)]`), and `server` to the crate's own integration-test
   binaries; `config_classify` is crate-internal (`pub(crate)`, consumed only
   via `crate::config_classify::`)
+- `src/alloc_probe.rs` -- TEST-ONLY (`#[cfg(test)]`) thread-local allocation
+  counter installed as the lib-test `#[global_allocator]`; `count_allocs`
+  lets a test assert a path allocates nothing
 
 ### server
 

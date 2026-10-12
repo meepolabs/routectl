@@ -7,6 +7,11 @@
 //! and `main.rs`), and may change without notice. Do not depend on this crate
 //! as a library.
 
+#[cfg(test)]
+pub(crate) mod alloc_probe;
+#[cfg(test)]
+#[global_allocator]
+static ALLOC_PROBE: alloc_probe::ProbeAllocator = alloc_probe::ProbeAllocator;
 pub mod commands;
 pub(crate) mod config_classify;
 #[doc(hidden)]

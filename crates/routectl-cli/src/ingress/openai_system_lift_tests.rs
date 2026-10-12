@@ -6,8 +6,9 @@ use axum::http::HeaderMap;
 use routectl_core::wire_check::{EditKind, EditSite};
 use serde_json::{Value, json};
 
+use crate::alloc_probe::count_allocs;
 use crate::ingress::IngressAdapter;
-use crate::ingress::openai::OpenAiIngress;
+use crate::ingress::openai::{OpenAiIngress, system_lift_edits};
 
 fn lift_edits(body: Value) -> Vec<(String, EditKind)> {
     OpenAiIngress
@@ -85,4 +86,34 @@ fn a_body_with_a_top_level_system_declares_no_lift() {
                       "messages": [system("a"), user("hi")]});
 
     assert_eq!(lift_edits(body), []);
+}
+
+/// Declaring the lift runs on every Chat request before admission is known,
+/// so a request whose lift declares nothing allocates nothing for it. The
+/// mid-conversation row is the control: it declares an owned path, so the
+/// probe sees its allocations.
+#[test]
+fn a_lift_that_declares_nothing_allocates_nothing() {
+    let rows: [(&str, Vec<Value>, bool); 3] = [
+        ("no system", vec![user("hi"), user("again")], false),
+        (
+            "one leading text system",
+            vec![system("a"), user("hi")],
+            false,
+        ),
+        (
+            "one system mid-conversation",
+            vec![user("hi"), system("a"), user("again")],
+            true,
+        ),
+    ];
+    for (name, messages, allocates) in rows {
+        let body = json!({"model": "m", "messages": messages});
+        let req: routectl_core::ChatRequest = serde_json::from_value(body).expect("parses");
+
+        let (edits, allocs) = count_allocs(|| system_lift_edits(&req));
+
+        assert_eq!(edits.is_empty(), !allocates, "{name}");
+        assert_eq!(allocs > 0, allocates, "{name}: {allocs} allocations");
+    }
 }

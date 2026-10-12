@@ -40,8 +40,9 @@ pub(super) fn abandon_unrendered(check: Option<ResponseCheck>) {
 }
 
 /// A complete response body that compares itself with the upstream's
-/// answer once it is gone: after its one frame has been taken, or when it
-/// is dropped unread. The compare never runs ahead of the bytes.
+/// answer once its one frame has been taken. Dropped unread, it records
+/// `incomplete` instead: the client never received what would be compared.
+/// The compare never runs ahead of the bytes.
 pub(super) struct CheckedBody {
     body: Option<Bytes>,
     check: Option<(ResponseCheck, Bytes, ResponseEdits)>,
@@ -87,7 +88,16 @@ impl Body for CheckedBody {
 
 impl Drop for CheckedBody {
     fn drop(&mut self) {
-        if let Some((check, body, edits)) = self.check.take() {
+        let Some((check, body, edits)) = self.check.take() else {
+            return;
+        };
+        if self.body.is_some() {
+            check.compare_stream(
+                Assembled::Incomplete(IncompleteReason::Cancelled),
+                StreamExit::Cancelled,
+                &[],
+            );
+        } else {
             check.compare_body(&body, edits.as_slice());
         }
     }

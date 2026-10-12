@@ -569,45 +569,44 @@ fn merge_into_provider_extras(req: &mut ChatRequest, swept: Map<String, Value>) 
 /// the first moves to the front, later ones fold into it. A body that also
 /// sent a top-level `system` is not a Chat Completions shape and declares
 /// nothing, so any difference it makes stays visible.
-fn system_lift_edits(req: &ChatRequest) -> Vec<routectl_core::wire_check::DeclaredEdit> {
+pub(super) fn system_lift_edits(req: &ChatRequest) -> Vec<routectl_core::wire_check::DeclaredEdit> {
+    use std::borrow::Cow;
+
     use routectl_core::wire_check::DeclaredEdit;
 
     if req.system.is_some() {
         return Vec::new();
     }
-    let positions: Vec<usize> = req
+    let mut systems = req
         .messages
         .iter()
         .enumerate()
-        .filter(|(_, m)| matches!(m.role, Role::System))
-        .map(|(i, _)| i)
-        .collect();
-    let Some((&first, rest)) = positions.split_first() else {
+        .filter(|(_, m)| matches!(m.role, Role::System));
+    let Some((first, first_message)) = systems.next() else {
         return Vec::new();
     };
-    let reshaped = rest.is_empty()
-        && !matches!(
-            req.messages.get(first).map(|m| &m.content),
-            Some(MessageContent::Text(_))
-        );
-    let mut edits: Vec<(String, EditKind)> = match (first, rest.is_empty()) {
-        (0, true) if reshaped => vec![("/messages/0/content".into(), EditKind::Rewrite)],
-        (0, true) => Vec::new(),
-        (0, false) => vec![("/messages/0/content".into(), EditKind::Rewrite)],
-        (_, true) => vec![(format!("/messages/{first}"), EditKind::Relocate)],
-        (_, false) => vec![
-            ("/messages/0".into(), EditKind::Add),
-            (format!("/messages/{first}"), EditKind::Remove),
-        ],
+    let has_rest = systems.clone().next().is_some();
+    let reshaped = !has_rest && !matches!(first_message.content, MessageContent::Text(_));
+    let mut edits = Vec::new();
+    let mut declare = |path: Cow<'static, str>, kind: EditKind| {
+        if let Ok(edit) = DeclaredEdit::new(EditSite::SystemMessageLift, path, kind) {
+            edits.push(edit);
+        }
     };
-    edits.extend(
-        rest.iter()
-            .map(|j| (format!("/messages/{j}"), EditKind::Remove)),
-    );
+    match (first, has_rest) {
+        (0, false) if reshaped => declare("/messages/0/content".into(), EditKind::Rewrite),
+        (0, false) => {}
+        (0, true) => declare("/messages/0/content".into(), EditKind::Rewrite),
+        (_, false) => declare(format!("/messages/{first}").into(), EditKind::Relocate),
+        (_, true) => {
+            declare("/messages/0".into(), EditKind::Add);
+            declare(format!("/messages/{first}").into(), EditKind::Remove);
+        }
+    }
+    for (j, _) in systems {
+        declare(format!("/messages/{j}").into(), EditKind::Remove);
+    }
     edits
-        .into_iter()
-        .filter_map(|(path, kind)| DeclaredEdit::new(EditSite::SystemMessageLift, path, kind).ok())
-        .collect()
 }
 
 /// Prefer-non-null: keep non-null `reasoning`; else promote non-null

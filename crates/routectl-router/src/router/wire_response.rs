@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use routectl_core::ChatRequest;
 use routectl_core::wire_check::{
-    Assembled, DeclaredEdit, EditKind, EditSite, IncompleteReason, Lane, LaneClass, Leg,
-    StreamExit, WireTap, diff,
+    Assembled, DeclaredEdit, EditKind, EditSite, IncompleteReason, Lane, LaneClass, Leg, PathClass,
+    StreamExit, TapContents, WirePath, WireTap, diff,
 };
 use serde_json::Value;
 
@@ -26,6 +26,13 @@ use super::wire_check::attempt_lane;
 use super::{DispatchMeta, DispatchTarget, Router};
 
 const LOG_TARGET: &str = "routectl_router::wire_check";
+
+/// Largest complete body, client or upstream, compared inline; a larger one
+/// records `budget` unparsed. The compare runs on the thread dropping the
+/// response, and two parses plus the diff of a body near the stream
+/// assembler's 16 MiB cap took 18-144 ms (`test-release`, one JSON array of
+/// short text blocks vs one of short strings); at 2 MiB, 2-16 ms.
+const MAX_INLINE_COMPARE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The response-direction check of the attempt that answered the client.
 /// Opaque: it holds the attempt's tap, its lane and the router's wire-check
@@ -53,11 +60,18 @@ impl ResponseCheck {
 
     /// Compare a complete response body the client received with the
     /// upstream's answer. `client_edits` are the edits the renderer
-    /// declared while building `client_body`.
+    /// declared while building `client_body`. Either body larger than 2 MiB
+    /// records `budget` without being parsed.
     pub fn compare_body(self, client_body: &[u8], client_edits: &[DeclaredEdit]) {
+        let declared = self.tap.take_response();
+        let upstream_len = declared.response().map_or(0, |body| body.len());
+        if client_body.len().max(upstream_len) > MAX_INLINE_COMPARE_BYTES {
+            self.record_over_budget();
+            return;
+        }
         let client =
             serde_json::from_slice::<Value>(client_body).map_err(|_| IncompleteSide::Client(None));
-        self.record(StreamExit::Ended, client, client_edits);
+        self.record(&declared, StreamExit::Ended, client, client_edits);
     }
 
     /// Compare the stream the client received, folded into `client`, with
@@ -73,7 +87,23 @@ impl ResponseCheck {
             Assembled::Complete(document) => Ok(document),
             Assembled::Incomplete(reason) => Err(IncompleteSide::Client(Some(reason))),
         };
-        self.record(exit, client, client_edits);
+        let declared = self.tap.take_response();
+        self.record(&declared, exit, client, client_edits);
+    }
+
+    fn record_over_budget(self) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            lane = self.lane.label(),
+            leg = Leg::Response.label(),
+            "wire check skipped a response too large to compare inline"
+        );
+        self.state.record_compared(
+            self.lane,
+            Leg::Response,
+            std::iter::empty::<(&WirePath, PathClass)>(),
+            true,
+        );
     }
 
     /// The upstream's answer: the complete body the provider deposited, or
@@ -95,11 +125,11 @@ impl ResponseCheck {
 
     fn record(
         self,
+        declared: &TapContents,
         exit: StreamExit,
         client: Result<Value, IncompleteSide>,
         client_edits: &[DeclaredEdit],
     ) {
-        let declared = self.tap.take_response();
         let upstream = self.upstream_document(declared.response().map(|body| &body[..]), exit);
         let (upstream, client) = match (upstream, client) {
             (Ok(upstream), Ok(client)) => (upstream, client),

@@ -241,6 +241,45 @@ async fn the_router_declares_its_model_relabel_and_provider_attribution() {
     }
 }
 
+/// A complete body over the inline-compare limit on either side records
+/// `budget` and is never parsed: each oversize body here is not JSON, so a
+/// parse would record `incomplete` instead.
+#[tokio::test]
+async fn an_oversize_complete_body_records_budget_unparsed() {
+    let oversize = vec![b'x'; super::MAX_INLINE_COMPARE_BYTES + 1];
+    let rows: [(&str, bool, bool); 2] = [
+        ("client body over the limit", true, false),
+        ("upstream body over the limit", false, true),
+    ];
+    for (name, client_over, upstream_over) in rows {
+        let router = router("anthropic-api", CHECK_EVERY);
+        let dispatched = Box::pin(router.complete_with_options(
+            request(IngressDialect::Anthropic, false),
+            RouterOptions::default(),
+        ))
+        .await;
+        let check = dispatched.meta.response_check.expect("carried");
+        if upstream_over {
+            check.tap.deposit_response(oversize.clone().into());
+        }
+        let client = if client_over {
+            oversize.clone()
+        } else {
+            serde_json::to_vec(&client_body()).expect("json")
+        };
+
+        check.compare_body(&client, &[]);
+
+        let snapshot = router.wire_check_snapshot();
+        assert_eq!(
+            response_outcomes(&snapshot),
+            [(CheckOutcome::Budget, 1), (CheckOutcome::Clean, 1)],
+            "{name}"
+        );
+        assert!(snapshot.findings.is_empty(), "{name}");
+    }
+}
+
 #[tokio::test]
 async fn a_streamed_response_compares_assembled_documents_and_an_unfinished_side_is_incomplete() {
     // The request leg's own check records `clean` once on the same lane, so
