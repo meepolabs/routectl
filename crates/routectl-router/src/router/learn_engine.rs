@@ -101,10 +101,6 @@ pub(super) struct RejectionInput<'r> {
     /// would let a remapped 429 drop a field and mint a verdict.
     pub(super) native_class: &'r FailureClass,
     pub(super) target: &'r DispatchTarget,
-    #[expect(dead_code, reason = "no proposer reads the client request yet")]
-    pub(super) client_req: &'r ChatRequest,
-    #[expect(dead_code, reason = "no proposer reads the egress omissions yet")]
-    pub(super) untranslated: &'r UntranslatedCapabilities,
     /// Whether this target's attempt carried non-portable replay artifacts.
     pub(super) replay_carried: bool,
     pub(super) table: FieldRepairTable,
@@ -251,6 +247,21 @@ pub(super) enum FailureDecision {
     Proceed,
 }
 
+/// One rejection as the walk hands it to [`AttemptLearning::on_rejection`],
+/// borrowed read-only.
+pub(super) struct Rejection<'r> {
+    pub(super) err: &'r Error,
+    /// The effective class, after any operator `[class_overrides]` remap.
+    pub(super) class: &'r ClassifiedFailure,
+    /// What the upstream actually said.
+    pub(super) native_class: &'r FailureClass,
+    pub(super) target: &'r DispatchTarget,
+    /// The client's canonical request, which a revert restores values from.
+    pub(super) client_req: &'r ChatRequest,
+    /// What the attempt's settlement read off the wire.
+    pub(super) site: Option<RejectionSite>,
+}
+
 /// The learner state one chain target holds across its attempts.
 pub(super) struct AttemptLearning<'a> {
     router: &'a Router,
@@ -372,9 +383,9 @@ impl<'a> AttemptLearning<'a> {
     /// [`Self::observe_generic`]; a `Retry` never reaches it, because the walk
     /// re-dispatches first.
     ///
-    /// `site` is what the attempt's settlement read off the wire; `None`
-    /// arbitrates exactly as a rejection with no wire record. A site naming
-    /// a path one or more declared routectl edits put on the wire is
+    /// `rejection.site` is what the attempt's settlement read off the wire;
+    /// `None` arbitrates exactly as a rejection with no wire record. A site
+    /// naming a path one or more declared routectl edits put on the wire is
     /// answered by undoing that edit, or not at all, and no proposer reads
     /// it: such a rejection says nothing about what the upstream accepts.
     ///
@@ -382,47 +393,65 @@ impl<'a> AttemptLearning<'a> {
     /// rejection's body-free form, so a re-gate refusal cannot surface the
     /// reasoning blob a replay rejection may echo; the field and canary
     /// repairs keep the raw rejection.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn on_rejection(
         &mut self,
-        err: &Error,
-        cf: &ClassifiedFailure,
-        native_class: &FailureClass,
-        target: &DispatchTarget,
-        client_req: &ChatRequest,
-        untranslated: &UntranslatedCapabilities,
-        site: Option<RejectionSite>,
+        rejection: Rejection<'_>,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
         budget: &mut RepairBudget,
     ) -> FailureDecision {
         self.pending_capability = None;
-        if let Some(reverted) = answer_declared_edit(
+        if let Some(decision) = self.answer_declared(&rejection, attempt_req, meta, budget) {
+            return decision;
+        }
+        self.arbitrate_proposers(rejection, attempt_req, meta, budget)
+    }
+
+    /// The decision for a rejection laid to declared routectl edits: a retry
+    /// when the one edit was undone, otherwise `Proceed` with no proposer
+    /// consulted. `None` when no declared edit explains the rejection.
+    fn answer_declared(
+        &mut self,
+        rejection: &Rejection<'_>,
+        attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
+        budget: &mut RepairBudget,
+    ) -> Option<FailureDecision> {
+        let reverted = answer_declared_edit(
             &mut self.revert,
-            site.as_ref(),
-            client_req,
+            rejection.site.as_ref(),
+            rejection.client_req,
             attempt_req,
             meta,
             budget,
-        ) {
-            if !reverted {
-                return FailureDecision::Proceed;
-            }
-            self.skip_replay_backoff = true;
-            return FailureDecision::Retry {
-                last_err_body_free: None,
-            };
+        )?;
+        if !reverted {
+            return Some(FailureDecision::Proceed);
         }
+        self.skip_replay_backoff = true;
+        Some(FailureDecision::Retry {
+            last_err_body_free: None,
+        })
+    }
+
+    /// Run [`arbitrate`] over the proposers and turn its verdict into the
+    /// walk's decision, holding a `Proceed`'s capability proposal.
+    fn arbitrate_proposers(
+        &mut self,
+        rejection: Rejection<'_>,
+        attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
+        budget: &mut RepairBudget,
+    ) -> FailureDecision {
+        let (err, class, target) = (rejection.err, rejection.class, rejection.target);
         let input = RejectionInput {
             err,
-            class: cf,
-            native_class,
+            class,
+            native_class: rejection.native_class,
             target,
-            client_req,
-            untranslated,
             replay_carried: self.replay_plan.is_some(),
             table: self.router.field_repair_table(),
-            site,
+            site: rejection.site,
         };
         let mut sink = EngineSink {
             learning: self,
@@ -436,7 +465,7 @@ impl<'a> AttemptLearning<'a> {
             Arbitration::ReplayStrip => FailureDecision::Retry {
                 last_err_body_free: replay_rejection_body_free(
                     err,
-                    &cf.class,
+                    &class.class,
                     &target.provider_name,
                 ),
             },

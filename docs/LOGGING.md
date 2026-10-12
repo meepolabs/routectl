@@ -482,6 +482,29 @@ silence a loss WARN. Loss findings and unrepaired rejections inside the
 status window, with timestamps, are listed under `wire_check` in
 `/status/health` (`loss_findings`, `unrepaired_rejections`).
 
+### Rejected routectl edit WARN (`routectl_router::router::learn_revert`)
+
+When an upstream rejection names a path routectl itself put on the wire --
+a declared edit, or a `routectl_added` path no declaration explains -- the
+router WARNs. A single declared operator payload extra or placed cache
+marker is then undone and the attempt re-sent once; any other match is
+left unrepaired. Nothing is learned from such a rejection.
+
+| Message | Meaning | Fields |
+|---|---|---|
+| `routectl_edit_rejected` | An upstream rejection named a path a routectl edit put on the wire. Fires once per (lane, path, attribution) | `lane`, `path`, `edit_site` |
+| `routectl_edit_rejected dedup is full; new paths are no longer warned` | The dedup set reached its cap. Emitted once; later new paths stay silent | `cap` |
+
+`lane` is the same `<ingress>-><egress>` label as above. `path` is the
+masked, sanitized RFC 6901 pointer (client keys render as `*`, under the
+same rules as the wire-check `path`). `edit_site` is the declared edit's
+site label (for example `operator_payload_extras`, `cache_placement`,
+`model_rename`), `conflict` when several different declared edits match the
+path, or `undeclared` for a `routectl_added` path no declaration explains
+(that rejection then goes to the learners as usual). The dedup set holds at
+most 1024 (lane, path, attribution) entries per Router and starts empty
+again when a config reload rebuilds the Router.
+
 ### Envelope-field pre-flight decision DEBUG + WARN
 
 The PROACTIVE counterpart of the repair WARN above. When a resident learned

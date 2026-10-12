@@ -3500,8 +3500,10 @@ essential = []
   act path are skipped.
 - **`decay_hours`** (u64, default 48) -- how long a learned negative acts
   before it lapses into a single re-probe. A field negative a free token
-  count re-checks (on a lane that has such a count) never lapses: only that
-  re-check, once its clear is durable, retracts it.
+  count re-checks (on a lane that has such a count) does not lapse at that
+  deadline: only that re-check, once its clear is durable, retracts it. A
+  fixed 48h backstop past the decay deadline bounds this; a negative the
+  re-check has not retracted by then lapses into the ordinary re-probe.
 - **`inferred_window_hours`** (u64, default 1) -- how long a pending
   single-observation inferred signal waits for a confirming second
   observation before it resets.

@@ -7,10 +7,9 @@ use std::sync::atomic::AtomicUsize;
 
 use routectl_core::capability::{REASONING_REPLAY, SignalTier};
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy};
-use routectl_core::{ChatRequest, Error, Provider};
+use routectl_core::{Error, Provider};
 use serde_json::json;
 
-use super::super::capability_observe::UntranslatedCapabilities;
 use super::super::field_repair::FieldRepairTable;
 use super::super::probe_test_support::{GROUNDED_PATH, OkProvider};
 use super::super::rejection_parser::NamedRejection;
@@ -125,8 +124,6 @@ fn the_arbitration_order_decides_every_contested_rejection() {
     let target = anthropic_target();
     let err = field_rejection();
     let native = FailureClass::BadRequest;
-    let client_req = ChatRequest::default();
-    let untranslated = UntranslatedCapabilities::default();
     let rows = [
         Row {
             name: "replay strip beats the field row",
@@ -173,8 +170,6 @@ fn the_arbitration_order_decides_every_contested_rejection() {
             class: &cf,
             native_class: &native,
             target: &target,
-            client_req: &client_req,
-            untranslated: &untranslated,
             replay_carried: row.replay_carried,
             table: FieldRepairTable::default(),
             site: None,

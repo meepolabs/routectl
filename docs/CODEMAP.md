@@ -3216,8 +3216,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   settle guard and each repair branch's repaired-state flags; the learn dedupe
   set and `RepairBudget` stay request-scoped and are lent per call.
   `classify` (native, replay-attempt aware), `on_rejection` -> `FailureDecision`
-  (`Retry { last_err_body_free }` / `Proceed`) takes the `RejectionSite`
-  `settle_failed_attempt` returned (`provenance`, `in_egress: Option<bool>`,
+  (`Retry { last_err_body_free }` / `Proceed`) takes a read-only `Rejection`
+  (error, effective and native class, target, client request) carrying the
+  `RejectionSite` `settle_failed_attempt` returned (`provenance`, `in_egress: Option<bool>`,
   `matched_edit`, the unmasked `locator`, the `sent` slot, the `pending`
   rejection index). A site whose `matched_edit` is not `None` short-circuits
   to `learn_revert::answer_declared_edit` (undo or `Proceed`; no proposer
@@ -3234,8 +3235,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe_generic` (still after the class observability) applies only it via
   `observe_for_learning`; `on_success` settles betas, a pending revert,
   replay, field and canary. Arbitration precedence is pinned in
-  `src/router/learn_engine_tests.rs`; per-dialect egress location and the
-  absent-path skip in `src/router/learn_engine_location_tests.rs`
+  `src/router/learn_engine_tests.rs`; per-dialect egress location (the
+  settlement's `in_egress` reading) in
+  `src/router/learn_engine_location_tests.rs`, and the dispatch behavior on
+  both surfaces (absent-path skip, repair when carried) in its child module
+  `src/router/learn_engine_dispatch_tests.rs`
 - `src/router/learn_proposers.rs` -- the three thin `Proposer`s the engine
   arbitrates: `ReplayProposer` (`is_replay_rejection_class` on the remapped
   class, replay carried), `FieldRowProposer` (`rejected_field` on the native
@@ -3249,7 +3253,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   value or removed; placed cache markers removed; every other site declined)
   with its postcondition (the request slot equals what was sent and, undone,
   equals the client's wire value), `TargetRevert` (once per target, draws the
-  request's `RepairBudget` last), the content-free `WireRevert` state on
+  request's `RepairBudget` last, and un-declares exactly one occurrence of
+  the undone edit, since sibling leaves under a masked container share its
+  pattern), the content-free `WireRevert` state on
   `DispatchMeta` that `emit_wire_rejections` reads for the outcome, and the
   deduped `routectl_edit_rejected` WARN (lane, masked + sanitized path,
   `edit_site`: the declared site label, `conflict`, or `undeclared` for a
@@ -4254,9 +4260,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   generation when a boundary is in flight, otherwise the active one; it is what
   every event producer reads to stamp its row.
   Also: `negative_lapsed(expires_at, recheck_owned, now)` is THE lapse rule
-  (`pub` and re-exported at the crate root with `RECHECK_BACKSTOP`, a fixed
-  48h): an ordinary negative lapses at `expires_at`, one whose key only the
-  free re-check recovers (`negative_recovers_only_by_recheck`, read against
+  (crate-visible only: `learned_capability` is a `pub(crate)` module and the
+  crate root re-exports `RECHECK_BACKSTOP`, a fixed 48h, and `NegativeState`,
+  not the function): an ordinary negative lapses at `expires_at`, one whose
+  key only the free re-check recovers (`negative_recovers_only_by_recheck`, read against
   the registry's `field_repair_table`) only `RECHECK_BACKSTOP` later, so a
   re-check that never answers cannot pin it forever.
   `LearnedEntry::has_lapsed` applies it on every read, and every snapshot row

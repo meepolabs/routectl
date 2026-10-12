@@ -36,8 +36,6 @@ async fn the_warning_fires_once_per_lane_path_and_site() {
     }
 }
 
-/// Nothing about a revert is remembered: the next request sends the
-/// operator's edit again, draws the same rejection and reverts again.
 #[tokio::test]
 async fn a_revert_is_not_remembered_by_the_next_request() {
     for surface in SURFACES {

@@ -226,3 +226,47 @@ async fn a_spent_repair_budget_leaves_the_rejection_unrepaired() {
         assert_nothing_learned(&router, &outcome, &format!("{surface:?}"));
     }
 }
+
+/// Two operator leaves under a masked container, each declared at the same
+/// masked pattern.
+const TWO_MASKED_LEAVES: &str = "payload_extras = { metadata = { op_a = \"v\", op_b = \"v\" } }\n";
+
+fn carries_metadata_leaf(req: &ChatRequest, leaf: &str) -> bool {
+    req.provider_extras
+        .as_ref()
+        .and_then(|extras| extras.get("metadata"))
+        .and_then(|metadata| metadata.get(leaf))
+        .is_some()
+}
+
+/// Refuse `op_b` while carried, then `op_a` while carried, then serve.
+fn refuse_op_b_then_op_a(req: &ChatRequest) -> Result<()> {
+    for leaf in ["op_b", "op_a"] {
+        if carries_metadata_leaf(req, leaf) {
+            return Err(rejection(&format!("metadata.{leaf}")));
+        }
+    }
+    Ok(())
+}
+
+/// Reverting one operator leaf leaves the other leaf, still on the retry,
+/// declared: a second rejection naming it is laid to the operator's edit
+/// (and, the target's one revert spent, declined), never to an undeclared
+/// routectl addition the learners would read.
+#[tokio::test]
+async fn reverting_one_masked_leaf_keeps_its_sibling_declared() {
+    run_rows(&[Row {
+        name: "op_b reverted, then op_a rejected",
+        extras: TWO_MASKED_LEAVES,
+        cache: false,
+        request: anthropic_request,
+        shape: faithful,
+        answer: refuse_op_b_then_op_a,
+        calls: 2,
+        served: false,
+        field_repairs: 0,
+        findings: &[("routectl_added", FieldRepairOutcome::Unrepaired); 2],
+        warning: Some((ANTHROPIC_LANE, MASKED_OP_KEY, "operator_payload_extras")),
+    }])
+    .await;
+}

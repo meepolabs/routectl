@@ -44,7 +44,7 @@ use super::edit_declare::{
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::emit_field_repair;
-use super::learn_engine::{AttemptLearning, FailureDecision};
+use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
 use super::overlays::apply_layered_overlays;
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
@@ -841,19 +841,16 @@ impl Router {
                         // handling below, which a canary's provoked 400 would
                         // otherwise reach.
                         let untranslated = UntranslatedCapabilities::take_from(&translation_report);
+                        let rejection = Rejection {
+                            err: &e,
+                            class: &cf,
+                            native_class: &original_class,
+                            target,
+                            client_req: &req,
+                            site: rejection_site,
+                        };
                         if let FailureDecision::Retry { last_err_body_free } = learning
-                            .on_rejection(
-                                &e,
-                                &cf,
-                                &original_class,
-                                target,
-                                &req,
-                                &untranslated,
-                                rejection_site,
-                                &mut attempt_req,
-                                meta,
-                                &mut repair_budget,
-                            )
+                            .on_rejection(rejection, &mut attempt_req, meta, &mut repair_budget)
                         {
                             probe_guard.release();
                             // Preserve the genuine rejection as last_err before
@@ -1611,19 +1608,16 @@ impl Router {
                         // exactly ONCE. Streams take no in-loop backoff, so the
                         // retry is immediate; a stream holds no canary.
                         let untranslated = UntranslatedCapabilities::take_from(&translation_report);
+                        let rejection = Rejection {
+                            err: &e,
+                            class: &cf,
+                            native_class: &original_class,
+                            target,
+                            client_req: &req,
+                            site: rejection_site,
+                        };
                         if let FailureDecision::Retry { last_err_body_free } = learning
-                            .on_rejection(
-                                &e,
-                                &cf,
-                                &original_class,
-                                target,
-                                &req,
-                                &untranslated,
-                                rejection_site,
-                                &mut attempt_req,
-                                meta,
-                                &mut repair_budget,
-                            )
+                            .on_rejection(rejection, &mut attempt_req, meta, &mut repair_budget)
                         {
                             probe_guard.release();
                             // Preserve the genuine rejection as last_err before

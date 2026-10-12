@@ -959,9 +959,11 @@ pub(super) fn transform_class_of_capability_key(
 /// `provider_kind` is recovered ONLY by the free token-count re-check.
 ///
 /// True for a closed-table row a free count validates, on a kind and upstream
-/// that has such a count. Such a negative never decays into the generic
-/// re-probe: an ordinary successful completion that carried the field cannot
-/// clear it, and only the queued re-check, acknowledged durable, retracts it.
+/// that has such a count. Such a negative does not decay into the generic
+/// re-probe at its deadline: an ordinary successful completion that carried the
+/// field cannot clear it, and only the queued re-check, acknowledged durable,
+/// retracts it -- until [`crate::RECHECK_BACKSTOP`] past the deadline, when
+/// `negative_lapsed` lets it lapse like any other.
 /// Every other key -- a non-validated row, a lane with no free count to ask, a
 /// catalog capability, a beta flag -- keeps its decay.
 pub fn negative_recovers_only_by_recheck(

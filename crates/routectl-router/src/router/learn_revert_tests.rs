@@ -16,7 +16,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use routectl_core::wire_check::{DeclaredEdit, IngressDialect, IngressWire};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result,
-    SystemContent,
+    SystemContent, ToolDef,
 };
 use routectl_testkit::CapturedEvent;
 use serde_json::{Value, json};
@@ -37,6 +37,10 @@ const OPERATOR_EXTRA: &str = "payload_extras = { metadata = { op_key = \"v\" } }
 /// Two operator extras under `metadata`: `op_key` added, `b` rewritten
 /// over the client's own value. Both declarations render `/metadata/*`.
 const TWO_OPERATOR_EXTRAS: &str = "payload_extras = { metadata = { op_key = \"v\", b = 2 } }\n";
+/// An operator extra at the closed-table test field's path. The faithful
+/// egress then sends the field's own value there, not the operator's, so the
+/// request's slot is never the wire's and no revert holds.
+const OPERATOR_TEST_ROW: &str = "payload_extras = { routectl_test_unsupported_field = \"op\" }\n";
 const OP_KEY: &str = "op_key";
 const OP_KEY_PATH: &str = "metadata.op_key";
 const MASKED_OP_KEY: &str = "/metadata/*";
@@ -202,7 +206,8 @@ fn anthropic_request() -> ChatRequest {
 // ---------------------------------------------------------------------------
 
 /// The client's body as a fidelity egress sends it: the model the request
-/// names, its extras merged at the top level, and its top-level cache marker.
+/// names, its extras merged at the top level, its system blocks and tools,
+/// and its top-level cache marker.
 fn faithful(req: &ChatRequest) -> Value {
     let ingress = req
         .routectl_internal
@@ -218,6 +223,9 @@ fn faithful(req: &ChatRequest) -> Value {
     }
     if let Some(system) = req.system.as_ref() {
         body["system"] = serde_json::to_value(system).expect("serialize");
+    }
+    if let Some(tools) = req.tools.as_ref() {
+        body["tools"] = serde_json::to_value(tools).expect("serialize");
     }
     if let Some(marker) = req.cache_control.as_ref() {
         body["cache_control"] = serde_json::to_value(marker).expect("serialize");
@@ -311,25 +319,53 @@ fn refuse_system_marker_while_carried(req: &ChatRequest) -> Result<()> {
     Ok(())
 }
 
-/// A request whose client sent one system block with no cache marker.
-fn system_block_request() -> ChatRequest {
-    let block = json!([{"type": "text", "text": "be brief"}]);
-    let mut req = request_with(IngressDialect::Anthropic, &json!({"metadata": {}}), true);
-    let mut client: Value = serde_json::from_slice(
-        &req.routectl_internal
-            .ingress_wire
-            .as_ref()
-            .expect("ingress")
-            .bytes,
-    )
-    .expect("ingress json");
-    client["system"] = block.clone();
+/// `req` with `value` also at `key` of its client body.
+fn with_client_member(mut req: ChatRequest, key: &str, value: Value) -> ChatRequest {
+    let ingress = req
+        .routectl_internal
+        .ingress_wire
+        .as_ref()
+        .expect("ingress");
+    let mut client: Value = serde_json::from_slice(&ingress.bytes).expect("ingress json");
+    client[key] = value;
     req.routectl_internal.ingress_wire = Some(IngressWire {
         dialect: IngressDialect::Anthropic,
         client_version: None,
         bytes: serde_json::to_vec(&client).expect("serialize").into(),
     });
+    req
+}
+
+/// A request whose client sent one system block with no cache marker.
+fn system_block_request() -> ChatRequest {
+    let block = json!([{"type": "text", "text": "be brief"}]);
+    let req = request_with(IngressDialect::Anthropic, &json!({"metadata": {}}), true);
+    let mut req = with_client_member(req, "system", block.clone());
     req.system = Some(serde_json::from_value(block).expect("system blocks"));
+    req
+}
+
+fn tool_marker(req: &ChatRequest) -> bool {
+    matches!(
+        req.tools.as_deref(),
+        Some([ToolDef::Custom(tool)]) if tool.cache_control.is_some()
+    )
+}
+
+fn refuse_tool_marker_while_carried(req: &ChatRequest) -> Result<()> {
+    if tool_marker(req) {
+        return Err(rejection("tools.0.cache_control"));
+    }
+    Ok(())
+}
+
+/// A request whose client sent one custom tool with no cache marker and no
+/// system prompt, so the front marker is placed on that tool.
+fn custom_tool_request() -> ChatRequest {
+    let tools = json!([{"name": "lookup", "input_schema": {"type": "object"}}]);
+    let req = request_with(IngressDialect::Anthropic, &json!({"metadata": {}}), true);
+    let mut req = with_client_member(req, "tools", tools.clone());
+    req.tools = Some(serde_json::from_value(tools).expect("custom tools"));
     req
 }
 
@@ -529,6 +565,19 @@ async fn a_declared_revertible_edit_is_reverted_and_the_retry_repairs_the_reject
             findings: &[("routectl_added", FieldRepairOutcome::Repaired)],
             warning: Some((ANTHROPIC_LANE, "/system/0/cache_control", "cache_placement")),
         },
+        Row {
+            name: "custom tool cache marker placed",
+            extras: "",
+            cache: true,
+            request: custom_tool_request,
+            shape: faithful,
+            answer: refuse_tool_marker_while_carried,
+            calls: 2,
+            served: true,
+            field_repairs: 0,
+            findings: &[("routectl_added", FieldRepairOutcome::Repaired)],
+            warning: Some((ANTHROPIC_LANE, "/tools/0/cache_control", "cache_placement")),
+        },
     ])
     .await;
 }
@@ -643,6 +692,29 @@ async fn a_rejection_the_revert_cannot_answer_is_unrepaired_and_learns_nothing()
             field_repairs: 0,
             findings: &[("client_changed", FieldRepairOutcome::Unrepaired)],
             warning: Some((ANTHROPIC_LANE, MASKED_OP_KEY, "operator_payload_extras")),
+        },
+        Row {
+            // The rejected path is also a closed-table field the request
+            // carries, so a field repair would take if a proposer were asked.
+            name: "postcondition fails on a path the field table also names",
+            extras: OPERATOR_TEST_ROW,
+            cache: false,
+            request: || {
+                let mut req = anthropic_request();
+                req.user = Some(TEST_UNSUPPORTED_SENTINEL.to_string());
+                req
+            },
+            shape: faithful,
+            answer: refuse_test_row_while_carried,
+            calls: 1,
+            served: false,
+            field_repairs: 0,
+            findings: &[("routectl_added", FieldRepairOutcome::Unrepaired)],
+            warning: Some((
+                ANTHROPIC_LANE,
+                "/routectl_test_unsupported_field",
+                "operator_payload_extras",
+            )),
         },
         Row {
             name: "the reverted retry fails",

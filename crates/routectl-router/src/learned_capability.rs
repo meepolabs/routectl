@@ -255,6 +255,12 @@ impl LearnedEntry {
         key: &RegistryKey,
         now: Instant,
     ) -> bool {
+        // Re-check ownership costs a table lookup and a state-key parse, so
+        // it is read only for a negative already past its decay deadline:
+        // before that, neither lapse rule fires.
+        if !self.is_expired(false, now) {
+            return false;
+        }
         self.is_expired(key.recheck_owned(table), now)
     }
 

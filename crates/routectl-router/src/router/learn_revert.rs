@@ -409,10 +409,12 @@ impl TargetRevert {
         if !budget.draw() {
             return false;
         }
-        reverted
-            .routectl_internal
-            .declared_edits
-            .retain(|declared| declared != edit);
+        // Remove one occurrence only: operator extras declare the same masked
+        // pattern once per leaf, and the other leaves are still on the retry.
+        let declared = &mut reverted.routectl_internal.declared_edits;
+        if let Some(position) = declared.iter().position(|declared| declared == edit) {
+            declared.remove(position);
+        }
         *attempt_req = reverted;
         self.attempted = true;
         self.awaiting = Some(rejection);
