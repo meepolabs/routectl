@@ -477,6 +477,13 @@ impl<A: IngressAdapter> IngressAdapter for DroppingAdapter<A> {
     fn early_frame(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
         self.drop_from_events(self.inner.early_frame(state))
     }
+    fn declare_early_frame_edits(
+        &self,
+        state: &mut dyn IngressStreamState,
+        edits: &mut ResponseEdits,
+    ) {
+        self.inner.declare_early_frame_edits(state, edits);
+    }
     fn render_chunk(
         &self,
         chunk: ChatChunk,
@@ -944,31 +951,51 @@ async fn the_chat_stream_render_loses_an_upstream_system_fingerprint() {
 }
 
 /// Past the early-flush grace the client gets a synthetic `message_start`
-/// before the check exists; the client's document still starts with it.
+/// before the check exists, built from the request-seeded usage estimate;
+/// the client's document still starts with it. Single-sourced: the row
+/// whose upstream sends no usage records clean only because the early
+/// frame's estimate-backed `/usage` is declared, and the row with real
+/// upstream usage stays clean because the closing usage restates it.
 #[tokio::test]
 async fn a_warm_held_anthropic_stream_records_a_clean_response_leg() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path(Dialect::Anthropic.upstream_path()))
-        .respond_with(sse(Dialect::Anthropic.stream_body(None)).set_delay(WARM_HOLD_UPSTREAM_DELAY))
-        .mount(&server)
-        .await;
-    let router = router(Dialect::Anthropic, &server.uri(), CHECK_EVERY).await;
-    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+    let rows: [(&str, ResponseTemplate); 2] = [
+        (
+            "upstream opening and closing frames carry usage",
+            sse(Dialect::Anthropic.stream_body(None)),
+        ),
+        (
+            "upstream opening and closing frames carry no usage",
+            anthropic_stream_with(
+                anthropic_start("msg_1", None),
+                vec![anthropic_delta("end_turn", None)],
+            ),
+        ),
+    ];
+    for (name, template) in rows {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(Dialect::Anthropic.upstream_path()))
+            .respond_with(template.set_delay(WARM_HOLD_UPSTREAM_DELAY))
+            .mount(&server)
+            .await;
+        let router = router(Dialect::Anthropic, &server.uri(), CHECK_EVERY).await;
+        let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
 
-    let client = send(Dialect::Anthropic, &swap, true, Render::AsShipped).await;
+        let client = send(Dialect::Anthropic, &swap, true, Render::AsShipped).await;
 
-    let snapshot = swap.load().wire_check_snapshot();
-    assert_eq!(
-        response_findings(&snapshot),
-        Vec::<(String, &str)>::new(),
-        "{}",
-        String::from_utf8_lossy(&client)
-    );
-    assert_eq!(
-        outcomes(&snapshot),
-        [(Dialect::Anthropic.lane(), CheckOutcome::Clean, 2)]
-    );
+        let snapshot = swap.load().wire_check_snapshot();
+        assert_eq!(
+            response_findings(&snapshot),
+            Vec::<(String, &str)>::new(),
+            "{name}: {}",
+            String::from_utf8_lossy(&client)
+        );
+        assert_eq!(
+            outcomes(&snapshot),
+            [(Dialect::Anthropic.lane(), CheckOutcome::Clean, 2)],
+            "{name}"
+        );
+    }
 }
 
 /// Longer than the handler's early-flush grace, so the stream goes

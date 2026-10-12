@@ -895,6 +895,7 @@ async fn warm_render_task<A: IngressAdapter>(
             for ev in &early_sent {
                 client.check.observe(ev);
             }
+            adapter.declare_early_frame_edits(state.as_mut(), client.check.edits());
             drive_stream(upstream, adapter, capture, client, router, turn, state).await;
         }
         Err(e) => {

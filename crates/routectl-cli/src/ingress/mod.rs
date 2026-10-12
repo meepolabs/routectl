@@ -744,6 +744,16 @@ pub trait IngressAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// Declare into `edits` the response edits the frames [`Self::early_frame`]
+    /// already sent made, for a response check installed after they went
+    /// out. Default: nothing, matching the default empty early frame.
+    fn declare_early_frame_edits(
+        &self,
+        _state: &mut dyn IngressStreamState,
+        _edits: &mut ResponseEdits,
+    ) {
+    }
+
     /// Whether this dialect's first stream event reports the turn's input
     /// usage to the client, so the handler selects an opening count (and
     /// measures the request against the session anchor) for its streams.

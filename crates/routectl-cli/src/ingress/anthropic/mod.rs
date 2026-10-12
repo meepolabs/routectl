@@ -80,6 +80,10 @@ pub struct AnthropicStreamState {
     /// True when the `message_start` already sent carried a minted id
     /// because no upstream id had arrived yet.
     minted_start_id: bool,
+    /// True when the `message_start` already sent carried the
+    /// request-seeded usage estimate because no upstream first-event usage
+    /// had arrived yet.
+    estimated_start_usage: bool,
     /// Buffered tool-use deltas keyed by tool call index. We flush them
     /// sequentially at the end of the stream so OpenAI-style interleaved
     /// tool call chunks still produce valid Anthropic block ordering.
@@ -174,9 +178,9 @@ mod stream_opaque;
 use parse::translate_request;
 use render::render_messages_response;
 use stream::{
-    anthropic_state_mut, close_lingering_opaque_blocks, close_open_block, emit_message_delta,
-    emit_message_start, emit_message_stop, flush_tool_blocks, new_state, render_chunk_declared,
-    render_error_eos_internal,
+    anthropic_state_mut, close_lingering_opaque_blocks, close_open_block, declare_sent_start_edits,
+    emit_message_delta, emit_message_start, emit_message_stop, flush_tool_blocks, new_state,
+    render_chunk_declared, render_error_eos_internal,
 };
 
 /// Reverse of `routectl_providers::anthropic_api::response::map_stop_reason`.
@@ -364,6 +368,14 @@ impl IngressAdapter for AnthropicIngress {
             s.started = true;
         }
         events
+    }
+
+    fn declare_early_frame_edits(
+        &self,
+        state: &mut dyn IngressStreamState,
+        edits: &mut ResponseEdits,
+    ) {
+        declare_sent_start_edits(anthropic_state_mut(state), edits);
     }
 
     fn reports_opening_usage(&self) -> bool {

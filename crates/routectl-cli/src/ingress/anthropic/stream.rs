@@ -59,6 +59,16 @@ pub(super) fn render_chunk_declared(
     Ok(events)
 }
 
+/// Declare the edits the `message_start` already sent made: a minted id,
+/// and the estimate standing in for an upstream first-event usage.
+pub(super) fn declare_sent_start_edits(state: &AnthropicStreamState, edits: &mut ResponseEdits) {
+    if !state.started {
+        return;
+    }
+    declare_minted_start_id(state.minted_start_id, edits);
+    declare_estimated_start_usage(state.estimated_start_usage, edits);
+}
+
 fn render_chunk_events(
     chunk: ChatChunk,
     state: &mut AnthropicStreamState,
@@ -204,6 +214,7 @@ pub(super) fn emit_message_start(
     events: &mut Vec<SseEvent>,
 ) {
     state.minted_start_id = state.msg_id.is_none();
+    state.estimated_start_usage = opening.is_none();
     let usage = opening.map_or_else(
         || json!({"input_tokens": state.input_tokens_estimate, "output_tokens": 0}),
         opening_usage_json,
