@@ -638,3 +638,65 @@ fn camelcase_input_schema_tool_keeps_its_schema() {
         .collect();
     assert_eq!(schemas, vec![&schema, &schema]);
 }
+
+fn legacy_fold_edits(
+    body: serde_json::Value,
+) -> Vec<(String, routectl_core::wire_check::EditKind)> {
+    use routectl_core::wire_check::EditSite;
+
+    AnthropicIngress
+        .parse_request_value(&HeaderMap::new(), body)
+        .expect("parses")
+        .routectl_internal
+        .declared_edits
+        .iter()
+        .filter(|e| e.site() == EditSite::LegacyFieldFold)
+        .map(|e| (e.path().to_string(), e.kind()))
+        .collect()
+}
+
+#[test]
+fn the_legacy_output_format_fold_declares_exactly_the_edit_it_makes() {
+    use routectl_core::wire_check::EditKind::{Add, Relocate, Remove};
+
+    let format = json!({"type": "json_schema", "schema": {"type": "object"}});
+    let base = |extra: serde_json::Value| {
+        let mut body = json!({"model": "m", "max_tokens": 1,
+                              "messages": [{"role": "user", "content": "hi"}]});
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        body
+    };
+    let rows: [(&str, serde_json::Value, Vec<(&str, _)>); 5] = [
+        (
+            "moved into a new output_config",
+            base(json!({"output_format": format})),
+            vec![("/output_format", Remove), ("/output_config", Add)],
+        ),
+        (
+            "moved into an existing output_config",
+            base(json!({"output_format": format, "output_config": {"effort": "high"}})),
+            vec![
+                ("/output_format", Relocate),
+                ("/output_config/format", Relocate),
+            ],
+        ),
+        (
+            "dropped beside a nested format",
+            base(json!({"output_format": format, "output_config": {"format": format}})),
+            vec![("/output_format", Remove)],
+        ),
+        (
+            "a null legacy field is no fold",
+            base(json!({"output_format": null})),
+            vec![],
+        ),
+        ("no legacy field", base(json!({})), vec![]),
+    ];
+
+    for (name, body, want) in rows {
+        let want: Vec<(String, _)> = want.into_iter().map(|(p, k)| (p.to_string(), k)).collect();
+        assert_eq!(legacy_fold_edits(body), want, "{name}");
+    }
+}

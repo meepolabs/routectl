@@ -124,6 +124,11 @@ pub struct AdditionalPropertiesRepair {
     /// Bounded at collection time: a schema can hold arbitrarily many, and
     /// an uncapped sample turns one WARN into an unbounded log record.
     forwarded: BoundedLogSample<String>,
+    /// Bit `n` is set when a key was injected `n` segments below `schema`.
+    /// Every key below `schema` is client-chosen, so a wire-check path names
+    /// an injection by its depth alone; deeper than the path bound, a path
+    /// names no location and is not recorded.
+    injected_depths: u16,
 }
 
 impl AdditionalPropertiesRepair {
@@ -136,7 +141,14 @@ impl AdditionalPropertiesRepair {
     #[cfg(feature = "bedrock")]
     pub(super) fn merged(mut self, other: Self) -> Self {
         self.forwarded.absorb(other.forwarded);
+        self.injected_depths |= other.injected_depths;
         self
+    }
+
+    /// The depths below `schema`, shallowest first, at which the walk
+    /// injected `additionalProperties`. Depth 1 is the root object's own key.
+    pub fn injected_depths(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..u16::BITS as usize).filter(|depth| self.injected_depths & (1 << depth) != 0)
     }
 
     /// Emit the aggregated WARN, if any non-`false` value was forwarded.
@@ -225,6 +237,9 @@ fn repair_schema(provider: &str, root: &mut Value) -> Result<AdditionalPropertie
             match map.get(ADDITIONAL_PROPERTIES) {
                 None => {
                     map.insert(ADDITIONAL_PROPERTIES.to_string(), Value::Bool(false));
+                    if let Some(depth) = pending.paths.depth_below_root(frame.path, 15) {
+                        repair.injected_depths |= 1 << (depth + 1);
+                    }
                 }
                 Some(Value::Bool(false)) => {}
                 // Rendered LAZILY: a path costs O(depth x segment length) and
@@ -447,6 +462,21 @@ struct PathArena {
 }
 
 impl PathArena {
+    /// Segments between the root entry and `index`, or `None` past `cap`.
+    /// Bounded so a deep schema costs a constant per call.
+    fn depth_below_root(&self, index: usize, cap: usize) -> Option<usize> {
+        let mut depth = 0;
+        let mut cursor = self.segments.get(index).and_then(|(parent, _)| *parent);
+        while let Some(i) = cursor {
+            depth += 1;
+            if depth > cap {
+                return None;
+            }
+            cursor = self.segments.get(i).and_then(|(parent, _)| *parent);
+        }
+        Some(depth)
+    }
+
     fn push(&mut self, parent: Option<usize>, segment: &str) -> usize {
         #[cfg(test)]
         probe::record_segment();

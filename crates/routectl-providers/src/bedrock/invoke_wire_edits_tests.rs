@@ -1,6 +1,7 @@
 //! The Bedrock Invoke seam declares its own body edits on the attempt's wire
-//! tap: the `stream` strip, the `model` field moving into the URL, and the
-//! top-level cache marker lowered onto a content block.
+//! tap: the `stream` strip, the `model` field moving into the URL, the
+//! top-level cache marker lowered onto a content block, and the body
+//! `anthropic_version` Bedrock requires.
 
 use routectl_core::ChatRequest;
 use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
@@ -99,6 +100,13 @@ const ROWS: &[Row] = &[
             (EditKind::Rewrite, "/messages/0/content"),
         ],
     },
+    Row {
+        name: "client anthropic_version replaced with the Bedrock value",
+        site: EditSite::RequiredFieldDefault,
+        firing: || request(json!({"provider_extras": {"anthropic_version": "2023-06-01"}})),
+        idle: || request(json!({"provider_extras": {"anthropic_version": "bedrock-2023-05-31"}})),
+        expected: &[(EditKind::Rewrite, "/anthropic_version")],
+    },
 ];
 
 #[test]
@@ -117,6 +125,13 @@ fn the_model_field_is_declared_moved_into_the_url() {
     let edits = site_edits(request(json!({})), EditSite::UrlFieldRelocate);
 
     assert_eq!(edits, owned(&[(EditKind::Remove, "/model")]));
+}
+
+#[test]
+fn an_absent_anthropic_version_is_declared_added() {
+    let edits = site_edits(request(json!({})), EditSite::RequiredFieldDefault);
+
+    assert_eq!(edits, owned(&[(EditKind::Add, "/anthropic_version")]));
 }
 
 #[test]

@@ -106,6 +106,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         "anthropic_version".into(),
         Value::String(BEDROCK_ANTHROPIC_VERSION.into()),
     );
+    declare_anthropic_version(req);
 
     // Merge the configured beta flags ahead of the client's, keeping only
     // the first occurrence of each flag. Runs even with no configured
@@ -241,6 +242,26 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     }
 
     Ok(body)
+}
+
+/// Declare the body `anthropic_version` this seam writes: an Add when the
+/// client sent none, a Rewrite when it sent another value.
+fn declare_anthropic_version(req: &ChatRequest) {
+    let client = req
+        .provider_extras
+        .as_ref()
+        .and_then(|extras| extras.get("anthropic_version"));
+    let kind = match client {
+        None => EditKind::Add,
+        Some(v) if v.as_str() == Some(BEDROCK_ANTHROPIC_VERSION) => return,
+        Some(_) => EditKind::Rewrite,
+    };
+    wire_edits::declare(
+        wire_edits::tap_of(req),
+        EditSite::RequiredFieldDefault,
+        "/anthropic_version",
+        kind,
+    );
 }
 
 /// Count this request's unrecognized `response_format` on the Invoke lane.

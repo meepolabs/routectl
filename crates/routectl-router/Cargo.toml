@@ -30,8 +30,9 @@ gen-catalog = []
 # dev-dependency feature there so the constructor is available to test builds and
 # NEVER compiled into a release build: a hand-built status row in production
 # would be a fabricated status report, and the type is `#[non_exhaustive]`
-# precisely so no foreign crate can assemble one.
-"test-utils" = []
+# precisely so no foreign crate can assemble one. Also turns on the core
+# wire-tap drop hook the router's synthetic-loss seam installs.
+"test-utils" = ["routectl-core/test-utils"]
 # Compiles the live learned-capability smoke, which calls the real
 # openai-compat provider named by ROUTECTL_LIVE_BASE_URL /
 # ROUTECTL_LIVE_API_KEY. The feature alone runs nothing: the target is

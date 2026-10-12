@@ -89,6 +89,23 @@ pub fn declare(tap: &WireTap, site: EditSite, path: impl Into<Cow<'static, str>>
     }
 }
 
+/// Declare one response-body edit on a tap that checks the response; see
+/// [`declare`] for how a refused pattern is handled.
+#[cfg(feature = "openai-compat")]
+pub fn declare_response(tap: Option<&WireTap>, site: EditSite, path: &'static str, kind: EditKind) {
+    let Some(tap) = tap.filter(|tap| tap.checks_response()) else {
+        return;
+    };
+    match DeclaredEdit::new(site, path, kind) {
+        Ok(edit) => tap.declare_response(edit),
+        Err(e) => tracing::debug!(
+            site = site.label(),
+            error = %e,
+            "wire-check response edit declaration refused"
+        ),
+    }
+}
+
 /// RFC 6901 pointer for member `key` under `parent` (`""` for the top
 /// level), or `None` when the key is not token-shaped: such a key renders
 /// as a wildcard in a finding, and a top-level wildcard pattern is refused

@@ -1187,6 +1187,7 @@ pub(super) fn translate_messages(
     policy: SystemTurnPolicy,
     envelopes: &mut EnvelopeUnwrapTally,
     fingerprint: &mut super::request::ClientFingerprintStripTally,
+    tap: Option<&routectl_core::wire_check::WireTap>,
 ) -> Result<Vec<AnthropicMessage>> {
     let mut skips = ReasoningSkipTally::new(id);
     let mut system_turns = SystemTurnTally::new(id);
@@ -1210,7 +1211,34 @@ pub(super) fn translate_messages(
     system_turns.flush();
     let (out, ledger) = out?;
     ledger.verify(id, out.len())?;
+    declare_dropped_system_turns(tap, &system_turns);
     Ok(out)
+}
+
+/// Declare each forwarded system turn the screen dropped, and each same-role
+/// pair a drop then left adjacent and joined, at canonical indices -- the
+/// client's own indices on the Anthropic ingress, the one lane whose diff
+/// reads them. A join rewrites the earlier turn's content and removes the
+/// later turn.
+fn declare_dropped_system_turns(
+    tap: Option<&routectl_core::wire_check::WireTap>,
+    system_turns: &SystemTurnTally<'_>,
+) {
+    use routectl_core::wire_check::{EditKind, EditSite};
+
+    for (index, site) in &system_turns.dropped_turns {
+        super::wire_edits::declare(tap, *site, format!("/messages/{index}"), EditKind::Remove);
+    }
+    let site = EditSite::DialectFieldStrip;
+    for (into, merged) in &system_turns.merged_turns {
+        super::wire_edits::declare(
+            tap,
+            site,
+            format!("/messages/{into}/content"),
+            EditKind::Rewrite,
+        );
+        super::wire_edits::declare(tap, site, format!("/messages/{merged}"), EditKind::Remove);
+    }
 }
 
 /// Test-only shim: drive `translate_messages` without threading a
@@ -1226,7 +1254,7 @@ pub(super) fn translate_messages_untallied(
     envelopes: &mut EnvelopeUnwrapTally,
 ) -> Result<Vec<AnthropicMessage>> {
     let mut fingerprint = super::request::ClientFingerprintStripTally::default();
-    translate_messages(id, messages, policy, envelopes, &mut fingerprint)
+    translate_messages(id, messages, policy, envelopes, &mut fingerprint, None)
 }
 
 /// Whether a canonical `Role::System` turn reaches the wire as a
@@ -1262,6 +1290,12 @@ struct SystemTurnTally<'a> {
     breakpoints_moved: usize,
     breakpoints_dropped: usize,
     merges_skipped: usize,
+    /// Canonical index of each forwarded system turn the screen dropped,
+    /// with the site that dropped it.
+    dropped_turns: Vec<(usize, routectl_core::wire_check::EditSite)>,
+    /// `(into, merged)` canonical indices of the same-role pairs joined
+    /// across a dropped turn.
+    merged_turns: Vec<(usize, usize)>,
 }
 
 impl<'a> SystemTurnTally<'a> {
@@ -1275,6 +1309,8 @@ impl<'a> SystemTurnTally<'a> {
             breakpoints_moved: 0,
             breakpoints_dropped: 0,
             merges_skipped: 0,
+            dropped_turns: Vec::new(),
+            merged_turns: Vec::new(),
         }
     }
 
@@ -1421,6 +1457,7 @@ fn translate_messages_threaded(
                     }
                     SystemTurnPolicy::Forward => {
                         emit_forwarded_system_turn(
+                            i,
                             &msg.content,
                             &mut wire,
                             &mut ledger,
@@ -1433,6 +1470,7 @@ fn translate_messages_threaded(
             }
             Role::User => {
                 wire.push(
+                    i,
                     AnthropicMessage {
                         role: AnthropicRole::User,
                         content: translate_simple_content(&msg.content, envelopes),
@@ -1443,6 +1481,7 @@ fn translate_messages_threaded(
             }
             Role::Assistant => {
                 wire.push(
+                    i,
                     AnthropicMessage {
                         role: AnthropicRole::Assistant,
                         content: build_assistant_content(id, i, msg, envelopes, skips)?,
@@ -1455,7 +1494,7 @@ fn translate_messages_threaded(
                 let (run, run_end) = collect_tool_run(messages, i);
                 ledger.tool_turns_consumed += run.len();
                 ledger.tool_runs_emitted += 1;
-                wire.push(build_tool_message(&run, envelopes), &mut ledger);
+                wire.push(i, build_tool_message(&run, envelopes), &mut ledger);
                 i = run_end;
             }
             // This function serves callers whose ingress dialect is
@@ -1473,6 +1512,7 @@ fn translate_messages_threaded(
                     "anthropic egress: unrecognized message role forwarded as user"
                 );
                 wire.push(
+                    i,
                     AnthropicMessage {
                         role: AnthropicRole::User,
                         content: translate_simple_content(&msg.content, envelopes),
@@ -1484,6 +1524,7 @@ fn translate_messages_threaded(
         }
     }
     system_turns.record_merges_skipped(wire.merges_skipped);
+    system_turns.merged_turns = wire.merged;
     Ok((wire.messages, ledger))
 }
 
@@ -1502,6 +1543,11 @@ struct WireMessages {
     messages: Vec<AnthropicMessage>,
     after_dropped_system_turn: bool,
     merges_skipped: usize,
+    /// Canonical index of the message each wire message started from.
+    origins: Vec<usize>,
+    /// `(into, merged)` canonical indices of each same-role pair joined
+    /// across a dropped system turn.
+    merged: Vec<(usize, usize)>,
 }
 
 /// Where a cache breakpoint carried by a dropped system turn ended up.
@@ -1520,10 +1566,12 @@ impl WireMessages {
             messages: Vec::with_capacity(capacity),
             after_dropped_system_turn: false,
             merges_skipped: 0,
+            origins: Vec::with_capacity(capacity),
+            merged: Vec::new(),
         }
     }
 
-    fn push(&mut self, msg: AnthropicMessage, ledger: &mut MessageLedger) {
+    fn push(&mut self, origin: usize, msg: AnthropicMessage, ledger: &mut MessageLedger) {
         let across_seam = std::mem::take(&mut self.after_dropped_system_turn);
         if across_seam
             && let Some(last) = self.messages.last_mut()
@@ -1532,6 +1580,7 @@ impl WireMessages {
             if !merge_keeps_block_order_legal(last, &msg) {
                 self.merges_skipped += 1;
                 self.messages.push(msg);
+                self.origins.push(origin);
                 return;
             }
             let mut blocks = content_into_blocks(std::mem::replace(
@@ -1541,9 +1590,13 @@ impl WireMessages {
             blocks.extend(content_into_blocks(msg.content));
             last.content = AnthropicContent::Blocks(blocks);
             ledger.merged_across_dropped_system_turn += 1;
+            if let Some(&into) = self.origins.last() {
+                self.merged.push((into, origin));
+            }
             return;
         }
         self.messages.push(msg);
+        self.origins.push(origin);
     }
 
     /// Record that a forwarded system turn was dropped here. A cache
@@ -1680,6 +1733,7 @@ fn breakpoint_slot(block: &mut ContentBlock) -> Option<&mut Option<CacheControl>
 /// charging the drop to its ledger term and carrying its breakpoint over the
 /// seam.
 fn emit_forwarded_system_turn(
+    index: usize,
     content: &MessageContent,
     wire: &mut WireMessages,
     ledger: &mut MessageLedger,
@@ -1691,6 +1745,7 @@ fn emit_forwarded_system_turn(
     match screened.verdict {
         SystemTurnVerdict::Forward(kept) => {
             wire.push(
+                index,
                 AnthropicMessage {
                     role: AnthropicRole::System,
                     content: translate_simple_content(&kept, envelopes),
@@ -1703,10 +1758,18 @@ fn emit_forwarded_system_turn(
         SystemTurnVerdict::DroppedBilling => {
             system_turns.record_billing_dropped_turn();
             ledger.system_turns_dropped_by_billing_strip += 1;
+            system_turns.dropped_turns.push((
+                index,
+                routectl_core::wire_check::EditSite::ClientFingerprintStrip,
+            ));
         }
         SystemTurnVerdict::DroppedEmpty => {
             system_turns.record_empty_dropped_turn();
             ledger.system_turns_dropped_as_empty += 1;
+            system_turns.dropped_turns.push((
+                index,
+                routectl_core::wire_check::EditSite::DialectFieldStrip,
+            ));
         }
     }
     if let Some(fate) = wire.drop_system_turn(last_breakpoint(content)) {

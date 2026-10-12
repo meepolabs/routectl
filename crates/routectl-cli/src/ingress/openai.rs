@@ -20,7 +20,7 @@ use axum::http::HeaderMap;
 use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
-    Result, is_canonical_request_key,
+    Result, Role, is_canonical_request_key,
 };
 use serde_json::{Map, Value};
 
@@ -183,7 +183,9 @@ impl IngressAdapter for OpenAiIngress {
         // `req.system` here at ingress so every egress reads the same
         // shape. Concat with newlines when multiple system messages
         // are present (matching the legacy lift-from-egress behavior).
+        let lift_edits = system_lift_edits(&req);
         super::lift_system_messages(&mut req);
+        req.routectl_internal.declared_edits.extend(lift_edits);
         // tool_choice and OpenAI function tools are NOT translated at
         // the ingress: different egresses want different shapes
         // (openai-compat passes through verbatim, Anthropic egress
@@ -562,6 +564,52 @@ fn merge_into_provider_extras(req: &mut ChatRequest, swept: Map<String, Value>) 
 /// under `reasoning_content`, but canonical `Message.reasoning` is
 /// the only string slot.
 ///
+/// The edits lifting the system-role messages makes to a Chat body, once
+/// the egress sends the lifted prompt back as the leading system message:
+/// the first moves to the front, later ones fold into it. A body that also
+/// sent a top-level `system` is not a Chat Completions shape and declares
+/// nothing, so any difference it makes stays visible.
+fn system_lift_edits(req: &ChatRequest) -> Vec<routectl_core::wire_check::DeclaredEdit> {
+    use routectl_core::wire_check::DeclaredEdit;
+
+    if req.system.is_some() {
+        return Vec::new();
+    }
+    let positions: Vec<usize> = req
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| matches!(m.role, Role::System))
+        .map(|(i, _)| i)
+        .collect();
+    let Some((&first, rest)) = positions.split_first() else {
+        return Vec::new();
+    };
+    let reshaped = rest.is_empty()
+        && !matches!(
+            req.messages.get(first).map(|m| &m.content),
+            Some(MessageContent::Text(_))
+        );
+    let mut edits: Vec<(String, EditKind)> = match (first, rest.is_empty()) {
+        (0, true) if reshaped => vec![("/messages/0/content".into(), EditKind::Rewrite)],
+        (0, true) => Vec::new(),
+        (0, false) => vec![("/messages/0/content".into(), EditKind::Rewrite)],
+        (_, true) => vec![(format!("/messages/{first}"), EditKind::Relocate)],
+        (_, false) => vec![
+            ("/messages/0".into(), EditKind::Add),
+            (format!("/messages/{first}"), EditKind::Remove),
+        ],
+    };
+    edits.extend(
+        rest.iter()
+            .map(|j| (format!("/messages/{j}"), EditKind::Remove)),
+    );
+    edits
+        .into_iter()
+        .filter_map(|(path, kind)| DeclaredEdit::new(EditSite::SystemMessageLift, path, kind).ok())
+        .collect()
+}
+
 /// Prefer-non-null: keep non-null `reasoning`; else promote non-null
 /// `reasoning_content`; else drop both. Coalescing here (vs. a serde
 /// alias) handles NIM's both-keys-one-null shape that would

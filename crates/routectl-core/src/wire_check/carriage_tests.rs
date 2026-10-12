@@ -249,6 +249,20 @@ fn drop_hook_removes_one_member_from_the_deposit() {
 }
 
 #[test]
+fn a_drop_hook_added_to_an_admitted_tap_keeps_its_admission_and_response_check() {
+    let tap = WireTap::checking_response(IngressDialect::Chat).with_drop_on_deposit("/model");
+
+    tap.deposit(Bytes::from_static(br#"{"model":"m","max_tokens":1}"#));
+
+    assert!(tap.is_admitted());
+    assert!(tap.checks_response());
+    assert_eq!(
+        tap.take_request().request().map(Bytes::as_ref),
+        Some(&br#"{"max_tokens":1}"#[..])
+    );
+}
+
+#[test]
 fn drop_hook_leaves_the_response_deposit_untouched() {
     let tap = WireTap::dropping_on_deposit("/model");
     let upstream = Bytes::from_static(br#"{"model":"m","id":"x"}"#);

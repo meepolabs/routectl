@@ -455,6 +455,7 @@ impl Provider for OpenAiCompatProvider {
         // the trait-level `normalize_response` only sees the
         // config-side default.
         let dialect = self.dialect_for(&req);
+        response::declare_response_lifts(crate::wire_declare::tap(&req), &raw, dialect, false);
         let mut chat_resp = response::normalize(&self.cfg.id, raw, dialect)?;
         response::apply_stop_sequence_heuristic(&mut chat_resp, req.stop.as_deref());
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
@@ -589,6 +590,11 @@ impl Provider for OpenAiCompatProvider {
                 };
 
                 crate::wire_declare::push_frame(response_tap.as_ref(), &event.event, &event.data);
+                if let Some(tap) = response_tap.as_ref()
+                    && let Ok(chunk) = serde_json::from_str::<Value>(&event.data)
+                {
+                    response::declare_response_lifts(Some(tap), &chunk, dialect, true);
+                }
                 let data = event.data;
                 let trimmed = data.trim();
                 if trimmed == "[DONE]" {

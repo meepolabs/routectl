@@ -295,6 +295,64 @@ pub(crate) fn coalesce_reasoning_content_in_response(mut raw: Value) -> Value {
     raw
 }
 
+/// Declare, on a tap that checks the response, the response edits
+/// normalizing `raw` makes: a `reasoning_content` renamed to `reasoning`
+/// (and, for a dialect that lifts it, moved on into `reasoning_details`),
+/// and `cache_read_input_tokens` lifted from the usage sub-bags. `raw` is a
+/// complete body or one stream chunk, whose choices carry `delta` in place
+/// of `message`; a lifting dialect keeps `reasoning` on a stream only.
+pub(crate) fn declare_response_lifts(
+    tap: Option<&routectl_core::wire_check::WireTap>,
+    raw: &Value,
+    dialect: ReasoningDialect,
+    streamed: bool,
+) {
+    use routectl_core::wire_check::{EditKind, EditSite};
+
+    if !tap.is_some_and(routectl_core::wire_check::WireTap::checks_response) {
+        return;
+    }
+    let carrier = if streamed { "delta" } else { "message" };
+    let renames_reasoning = raw
+        .get("choices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|choice| choice.get(carrier))
+        .any(|msg| {
+            msg.get("reasoning_content").is_some_and(|v| !v.is_null())
+                && msg.get("reasoning").is_none_or(Value::is_null)
+        });
+    if renames_reasoning {
+        let site = EditSite::ReasoningContentLift;
+        let declare = |path, kind| crate::wire_declare::declare_response(tap, site, path, kind);
+        declare("/choices/*/message/reasoning_content", EditKind::Remove);
+        if dialect.lifts_reasoning_content() {
+            declare("/choices/*/message/reasoning_details", EditKind::Add);
+        }
+        if streamed || !dialect.lifts_reasoning_content() {
+            declare("/choices/*/message/reasoning", EditKind::Add);
+        }
+    }
+    let usage = raw.get("usage");
+    let lifts_cache_read = usage
+        .and_then(|u| u.get("cache_read_input_tokens"))
+        .is_none_or(Value::is_null)
+        && usage.is_some_and(|u| {
+            u.get("prompt_cache_hit_tokens").is_some_and(Value::is_u64)
+                || u.pointer("/prompt_tokens_details/cached_tokens")
+                    .is_some_and(Value::is_u64)
+        });
+    if lifts_cache_read {
+        crate::wire_declare::declare_response(
+            tap,
+            EditSite::CachedTokensAdd,
+            "/usage/cache_read_input_tokens",
+            EditKind::Add,
+        );
+    }
+}
+
 /// Merge `reasoning_content` into `reasoning`, preferring whichever is a
 /// non-null string. Always strips `reasoning_content` after.
 pub(crate) fn merge_reasoning_keys(obj: &mut serde_json::Map<String, Value>) {
@@ -316,6 +374,10 @@ pub(crate) fn merge_reasoning_keys(obj: &mut serde_json::Map<String, Value>) {
 fn apply_dialect_to_message(id: &str, msg: &mut Message, dialect: ReasoningDialect) -> Result<()> {
     dialect.as_dyn().apply_response(id, msg)
 }
+
+#[cfg(test)]
+#[path = "response_lift_declare_tests.rs"]
+mod lift_declare_tests;
 
 #[cfg(test)]
 mod tests {

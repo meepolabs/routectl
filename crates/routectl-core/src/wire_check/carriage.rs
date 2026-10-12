@@ -231,10 +231,16 @@ impl WireTap {
     /// an egress that silently lost that key. A body that is not JSON, or has
     /// no such member, is stored unchanged.
     pub fn dropping_on_deposit(pointer: &'static str) -> Self {
-        Self {
-            drop_on_deposit: Some(pointer),
-            ..Self::default()
-        }
+        Self::default().with_drop_on_deposit(pointer)
+    }
+
+    /// This tap, also removing the member at `pointer` from every request
+    /// body deposited into it, as [`Self::dropping_on_deposit`] does. The
+    /// admission and response-check decisions are kept.
+    #[must_use]
+    pub const fn with_drop_on_deposit(mut self, pointer: &'static str) -> Self {
+        self.drop_on_deposit = Some(pointer);
+        self
     }
 }
 

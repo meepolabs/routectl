@@ -461,6 +461,11 @@ pub struct Router {
     /// sampler's per-(lane, version) counts must not restart their first-N
     /// window on every config swap.
     wire_check: Arc<crate::wire_check_state::WireCheckState>,
+    /// Test-only: an RFC 6901 pointer every installed wire tap removes from
+    /// the request body the egress deposits, simulating an egress that lost
+    /// that member. `None` everywhere but the synthetic-loss tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    wire_tap_drop: Option<&'static str>,
     /// `true` iff `config.providers` contains a `ProviderEntry::AnthropicApi`
     /// with `credential_source == Forwarded`. Computed ONCE here at
     /// construction (a full `config.providers` scan) rather than re-scanned
@@ -2187,6 +2192,8 @@ impl Router {
             catalog_overlay: Arc::default(),
             metrics: Arc::new(RouterMetrics::default()),
             wire_check: Arc::default(),
+            #[cfg(any(test, feature = "test-utils"))]
+            wire_tap_drop: None,
             has_forwarded_provider,
             volatile_prefix_warned: Mutex::new(HashSet::new()),
             prefix_rewrite_warned: Arc::new(AtomicBool::new(false)),
@@ -3161,6 +3168,17 @@ impl Router {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn wire_check_state_for_tests(&self) -> &crate::wire_check_state::WireCheckState {
         &self.wire_check
+    }
+
+    /// This router, with every wire tap it installs removing the member at
+    /// `pointer` from the request body the egress deposits: an egress that
+    /// silently lost that member, as the live wire check sees it. The bytes
+    /// sent upstream are untouched.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub const fn with_wire_tap_drop_for_tests(mut self, pointer: &'static str) -> Self {
+        self.wire_tap_drop = Some(pointer);
+        self
     }
 
     /// Retain the build's sanitized per-pool reports and count their

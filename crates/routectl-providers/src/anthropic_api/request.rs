@@ -744,6 +744,14 @@ pub(crate) fn normalize_deferring_format_key_warn(
     let messages = normalize_replay_invariants(id, req, hr, system_turns)?;
 
     let max_tokens = resolve_max_tokens(req);
+    if req.max_tokens.is_none() {
+        super::wire_edits::declare(
+            tap,
+            routectl_core::wire_check::EditSite::RequiredFieldDefault,
+            "/max_tokens",
+            routectl_core::wire_check::EditKind::Add,
+        );
+    }
     let thinking = build_thinking(req, adaptive);
     let output_config = build_output_config(req, &thinking);
 
@@ -777,8 +785,14 @@ pub(crate) fn normalize_deferring_format_key_warn(
         id,
         terminal_anthropic_host,
     );
-    let mut anthropic_messages =
-        translate_messages(id, &messages, system_turns, &mut envelopes, fingerprint)?;
+    let mut anthropic_messages = translate_messages(
+        id,
+        &messages,
+        system_turns,
+        &mut envelopes,
+        fingerprint,
+        tap,
+    )?;
     super::wire_edits::declare_tool_id_sanitize(tap, &req.messages);
 
     // When context_management emulation is active, re-inject cached
@@ -925,6 +939,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         Some(obj) => super::output_schema::inject_additional_properties_false(id, obj)?,
         None => super::output_schema::AdditionalPropertiesRepair::default(),
     };
+    super::wire_edits::declare_schema_injections(super::wire_edits::tap_of(req), &repair);
 
     // When context_management emulation is active we have already applied
     // the edits above. Strip the `context_management` body key so it is

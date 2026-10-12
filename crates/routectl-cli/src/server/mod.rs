@@ -211,3 +211,7 @@ mod capability_positive_window_tests;
 #[cfg(test)]
 #[path = "beta_capability_restart_tests.rs"]
 mod beta_capability_restart_tests;
+
+#[cfg(test)]
+#[path = "wire_loss_daemon_tests.rs"]
+mod wire_loss_daemon_tests;

@@ -46,6 +46,7 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // `output_format` (deprecated), nested `output_config.format`
     // (current), or both (claude-code itself logs a warning when both
     // are present and prefers the nested form -- mirror that here).
+    let fold = legacy_format_fold(extras.get("output_config"), output_format.as_ref());
     let output_config = merge_output_format(extras.remove("output_config"), output_format);
     if let Some(oc) = output_config {
         extras.insert("output_config".into(), oc);
@@ -150,7 +151,68 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // returns 400 before it touches the egress.
     validate_request_cache_control(&req)?;
 
+    declare_legacy_format_fold(&mut req, fold);
+
     Ok(req)
+}
+
+/// What folding a legacy top-level `output_format` did to the body, as the
+/// wire check sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyFormatFold {
+    /// No non-null `output_format` arrived; nothing changed.
+    None,
+    /// The nested `output_config.format` won and the legacy field was
+    /// dropped.
+    Dropped,
+    /// The legacy field moved into `output_config.format`; `config_added`
+    /// when no `output_config` object was there to receive it.
+    Moved { config_added: bool },
+}
+
+fn legacy_format_fold(
+    output_config: Option<&Value>,
+    output_format: Option<&Value>,
+) -> LegacyFormatFold {
+    let Some(legacy) = output_format else {
+        return LegacyFormatFold::None;
+    };
+    if legacy.is_null() {
+        return LegacyFormatFold::None;
+    }
+    match output_config {
+        Some(Value::Object(config)) if config.contains_key("format") => LegacyFormatFold::Dropped,
+        Some(Value::Object(_)) => LegacyFormatFold::Moved {
+            config_added: false,
+        },
+        _ => LegacyFormatFold::Moved { config_added: true },
+    }
+}
+
+/// Declare the legacy `output_format` fold on the request, so the wire
+/// check reads it as an edit rather than a loss.
+fn declare_legacy_format_fold(req: &mut ChatRequest, fold: LegacyFormatFold) {
+    use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite};
+
+    let edits: &[(&'static str, EditKind)] = match fold {
+        LegacyFormatFold::None => &[],
+        LegacyFormatFold::Dropped => &[("/output_format", EditKind::Remove)],
+        LegacyFormatFold::Moved { config_added: true } => &[
+            ("/output_format", EditKind::Remove),
+            ("/output_config", EditKind::Add),
+        ],
+        LegacyFormatFold::Moved {
+            config_added: false,
+        } => &[
+            ("/output_format", EditKind::Relocate),
+            ("/output_config/format", EditKind::Relocate),
+        ],
+    };
+    for (path, kind) in edits {
+        if let Ok(edit) = DeclaredEdit::new(EditSite::LegacyFieldFold, *path, *kind) {
+            req.routectl_internal.declared_edits.push(edit);
+        }
+    }
 }
 
 /// The Anthropic dialect's HEADER vocabulary for inbound session identity:

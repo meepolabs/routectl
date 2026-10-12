@@ -18,6 +18,9 @@ pub(super) struct WireCheckRows {
     window_secs: u64,
     /// One row per (lane, path class) with a loss seen inside the window.
     loss: Vec<LossRow>,
+    /// The unexplained differences the findings ring holds from inside the
+    /// window, by path, oldest first.
+    loss_findings: Vec<LossFindingRow>,
     /// One row per (lane, outcome) of checks run inside the window.
     checks: Vec<CheckRow>,
     /// Upstream rejections field repair did not repair, inside the window,
@@ -33,6 +36,15 @@ struct LossRow {
     path_class: &'static str,
     count: u64,
     last_seen_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LossFindingRow {
+    lane: &'static str,
+    leg: &'static str,
+    path: String,
+    path_class: &'static str,
+    ts_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +74,17 @@ struct LocalRefusalRow {
 
 const fn current(reading: &CounterReading, window_secs: u64, now_unix_secs: u64) -> bool {
     reading.count > 0 && reading.seen_within(window_secs, now_unix_secs)
+}
+
+fn loss_finding_row(finding: &WireFinding) -> Option<LossFindingRow> {
+    let class = finding.class?;
+    Some(LossFindingRow {
+        lane: finding.lane.label(),
+        leg: finding.leg.label(),
+        path: finding.path.as_str().to_string(),
+        path_class: class.label(),
+        ts_unix_secs: finding.ts_unix_secs,
+    })
 }
 
 fn unrepaired_row(finding: &WireFinding) -> Option<UnrepairedRejectionRow> {
@@ -102,12 +125,14 @@ pub(super) fn project(snapshot: &WireCheckSnapshot, now_unix_secs: u64) -> WireC
             last_seen_unix_secs: c.reading.last_seen_unix_secs,
         })
         .collect();
-    let unrepaired_rejections = snapshot
-        .findings
-        .iter()
-        .filter(|f| now_unix_secs.saturating_sub(f.ts_unix_secs) <= window)
-        .filter_map(unrepaired_row)
-        .collect();
+    let in_window = || {
+        snapshot
+            .findings
+            .iter()
+            .filter(move |f| now_unix_secs.saturating_sub(f.ts_unix_secs) <= window)
+    };
+    let loss_findings = in_window().filter_map(loss_finding_row).collect();
+    let unrepaired_rejections = in_window().filter_map(unrepaired_row).collect();
     let local_refusals = snapshot
         .local_refusals
         .iter()
@@ -121,6 +146,7 @@ pub(super) fn project(snapshot: &WireCheckSnapshot, now_unix_secs: u64) -> WireC
     WireCheckRows {
         window_secs: window,
         loss,
+        loss_findings,
         checks,
         unrepaired_rejections,
         local_refusals,

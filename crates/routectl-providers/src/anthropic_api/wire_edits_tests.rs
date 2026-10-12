@@ -207,6 +207,88 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
         idle: || base(json!({"system": [{"type": "text", "text": "rules"}]})),
         expected: &[(EditKind::Remove, "/system/0")],
     },
+    AssemblyRow {
+        name: "empty forwarded system turn dropped",
+        site: EditSite::DialectFieldStrip,
+        firing: || {
+            request_from(json!({"model": "claude-x", "max_tokens": 16,
+                "system": "rules",
+                "messages": [user_turn(), {"role": "system", "content": ""},
+                             {"role": "assistant", "content": "ok"}, user_turn()]}))
+        },
+        idle: || {
+            request_from(json!({"model": "claude-x", "max_tokens": 16,
+                "system": "rules",
+                "messages": [user_turn(), {"role": "assistant", "content": "ok"}, user_turn()]}))
+        },
+        expected: &[(EditKind::Remove, "/messages/1")],
+    },
+    AssemblyRow {
+        name: "same-role turns joined across a dropped system turn",
+        site: EditSite::DialectFieldStrip,
+        firing: || {
+            request_from(json!({"model": "claude-x", "max_tokens": 16,
+                "system": "rules",
+                "messages": [user_turn(), {"role": "system", "content": ""}, user_turn()]}))
+        },
+        idle: || {
+            request_from(json!({"model": "claude-x", "max_tokens": 16,
+                "system": "rules",
+                "messages": [user_turn(), {"role": "system", "content": "keep"}, user_turn()]}))
+        },
+        expected: &[
+            (EditKind::Remove, "/messages/1"),
+            (EditKind::Rewrite, "/messages/0/content"),
+            (EditKind::Remove, "/messages/2"),
+        ],
+    },
+    AssemblyRow {
+        name: "billing-only forwarded system turn dropped",
+        site: EditSite::ClientFingerprintStrip,
+        firing: || {
+            request_from(json!({"model": "claude-x", "max_tokens": 16,
+                "system": "rules",
+                "messages": [user_turn(),
+                    {"role": "system",
+                     "content": "x-anthropic-billing-header: cc_version=1; cch=abcde;"},
+                    {"role": "assistant", "content": "ok"}, user_turn()]}))
+        },
+        idle: || {
+            request_from(json!({"model": "claude-x", "max_tokens": 16,
+                "system": "rules",
+                "messages": [user_turn(), {"role": "system", "content": "keep"},
+                             {"role": "assistant", "content": "ok"}, user_turn()]}))
+        },
+        expected: &[(EditKind::Remove, "/messages/1")],
+    },
+    AssemblyRow {
+        name: "output schema additionalProperties injected at each object's depth",
+        site: EditSite::RequiredFieldDefault,
+        firing: || {
+            base(json!({"provider_extras": {"output_config": {"format": {
+                "type": "json_schema", "schema": {
+                "type": "object",
+                "properties": {"inner": {"type": "object", "properties": {}}}}}}}}))
+        },
+        idle: || {
+            base(json!({"provider_extras": {"output_config": {"format": {
+                "type": "json_schema", "schema": {
+                "type": "object", "additionalProperties": false,
+                "properties": {"inner": {"type": "object", "properties": {},
+                                         "additionalProperties": false}}}}}}}))
+        },
+        expected: &[
+            (EditKind::Add, "/output_config/format/schema/*"),
+            (EditKind::Add, "/output_config/format/schema/*/*/*"),
+        ],
+    },
+    AssemblyRow {
+        name: "omitted max_tokens filled with the default ceiling",
+        site: EditSite::RequiredFieldDefault,
+        firing: || request_from(json!({"model": "claude-x", "messages": [user_turn()]})),
+        idle: || base(json!({})),
+        expected: &[(EditKind::Add, "/max_tokens")],
+    },
 ];
 
 #[test]

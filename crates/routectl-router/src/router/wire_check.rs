@@ -105,6 +105,11 @@ impl Router {
             Some(_) => WireTap::admitted(),
             None => WireTap::default(),
         };
+        #[cfg(any(test, feature = "test-utils"))]
+        let tap = match self.wire_tap_drop {
+            Some(pointer) => tap.with_drop_on_deposit(pointer),
+            None => tap,
+        };
         attempt_req.routectl_internal.wire_tap = Some(tap.clone());
         (Some(tap), SampleCharge(charge))
     }

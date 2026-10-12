@@ -74,6 +74,12 @@ pub enum EditSite {
     ReplayStrip,
     /// Router: stable-prefix rewriting.
     PrefixRewrite,
+    /// Ingress: a deprecated request field folded into its current
+    /// location.
+    LegacyFieldFold,
+    /// Ingress: system-role messages lifted into the system prompt, which
+    /// the egress sends back as one leading system message.
+    SystemMessageLift,
     /// Provider: Claude Code cloak transforms.
     Cloak,
     /// Provider: Claude sampling-parameter normalization.
@@ -142,6 +148,9 @@ pub enum EditSite {
     StreamEnvelopeStamp,
     /// Response: cached-token usage added.
     CachedTokensAdd,
+    /// Response: an upstream `reasoning_content` moved into the canonical
+    /// reasoning fields.
+    ReasoningContentLift,
     /// Response: Chat Completions envelope fields stamped onto a complete
     /// body.
     ResponseEnvelopeStamp,
@@ -165,7 +174,7 @@ pub enum EditSite {
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 51] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -176,6 +185,8 @@ impl EditSite {
         Self::Canary,
         Self::ReplayStrip,
         Self::PrefixRewrite,
+        Self::LegacyFieldFold,
+        Self::SystemMessageLift,
         Self::Cloak,
         Self::ClaudeSamplingNormalize,
         Self::SamplingReconcile,
@@ -207,6 +218,7 @@ impl EditSite {
         Self::FinishReasonRewrite,
         Self::StreamEnvelopeStamp,
         Self::CachedTokensAdd,
+        Self::ReasoningContentLift,
         Self::ResponseEnvelopeStamp,
         Self::ResponseModelRelabel,
         Self::ProviderAttributionAdd,
@@ -229,6 +241,8 @@ impl EditSite {
             Self::Canary => "canary",
             Self::ReplayStrip => "replay_strip",
             Self::PrefixRewrite => "prefix_rewrite",
+            Self::LegacyFieldFold => "legacy_field_fold",
+            Self::SystemMessageLift => "system_message_lift",
             Self::Cloak => "cloak",
             Self::ClaudeSamplingNormalize => "claude_sampling_normalize",
             Self::SamplingReconcile => "sampling_reconcile",
@@ -260,6 +274,7 @@ impl EditSite {
             Self::FinishReasonRewrite => "finish_reason_rewrite",
             Self::StreamEnvelopeStamp => "stream_envelope_stamp",
             Self::CachedTokensAdd => "cached_tokens_add",
+            Self::ReasoningContentLift => "reasoning_content_lift",
             Self::ResponseEnvelopeStamp => "response_envelope_stamp",
             Self::ResponseModelRelabel => "response_model_relabel",
             Self::ProviderAttributionAdd => "provider_attribution_add",

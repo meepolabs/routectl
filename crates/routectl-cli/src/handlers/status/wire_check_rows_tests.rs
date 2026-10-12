@@ -54,12 +54,22 @@ fn a_loss_key_shows_inside_the_window_and_drops_once_last_seen_is_outside_it() {
             "last_seen_unix_secs": seen,
         }])
     );
+    assert_eq!(
+        inside["loss_findings"],
+        json!([{
+            "lane": "anthropic->anthropic-api",
+            "leg": "request",
+            "path": LOST_PATH,
+            "path_class": "missing",
+            "ts_unix_secs": seen,
+        }])
+    );
     assert_eq!(inside["checks"][0]["outcome"], json!("loss"));
     assert_eq!(
         inside["local_refusals"][0]["lane"],
         json!("anthropic->anthropic-api")
     );
-    for key in ["loss", "checks", "local_refusals"] {
+    for key in ["loss", "loss_findings", "checks", "local_refusals"] {
         assert_eq!(outside[key], json!([]), "{key} past the window");
     }
 }
@@ -90,6 +100,11 @@ fn an_unrepaired_rejection_renders_all_five_fields_and_a_repaired_one_does_not_r
         .as_array()
         .expect("an array of rows");
     assert_eq!(unrepaired.len(), 1, "{rows}");
+    assert_eq!(
+        rows["loss_findings"],
+        json!([]),
+        "a rejection is not a loss"
+    );
     let row = &unrepaired[0];
     assert_eq!(row["lane"], json!("anthropic->anthropic-api"));
     assert_eq!(row["leg"], json!("request"));
