@@ -644,6 +644,13 @@ jobs:
       - name: planted-drop proof (weld; end to end skips without a binary)
         run: bash scripts/wire_watch/planted_drop.test.sh
 
+      # The wire-watch denominator, run ledger and evidence reader: every
+      # committed cells.tsv row validates, the expansion count and bytes
+      # are pinned, and evidence is read from directories the real writer
+      # produced. Stdlib python only -- no binary, no credential.
+      - name: wire watch self-test
+        run: bash scripts/wire_watch/wire_watch.test.sh
+
   # Informational: public-API drift is reported, never enforced. The job
   # continues on error and is deliberately absent from `required.needs`, so
   # neither drift nor a broken toolchain bootstrap can block a merge. Its
