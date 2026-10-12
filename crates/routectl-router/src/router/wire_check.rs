@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use routectl_core::ChatRequest;
 use routectl_core::wire_check::{
-    AttemptRecord, DeclaredEdit, DiffOutcome, EgressKind, Lane, LaneClass, Leg, WireTap, diff,
+    AttemptRecord, DeclaredEdit, DiffOutcome, EgressKind, IngressDialect, Lane, LaneClass, Leg,
+    WireTap, diff,
 };
 use serde_json::Value;
 
@@ -71,6 +72,10 @@ impl Router {
     /// no charge. The charge is given back when the returned [`SampleCharge`]
     /// drops, unless the attempt succeeded and called [`SampleCharge::keep`].
     ///
+    /// A TRANSLATION-lane stream also folds the upstream's stream while the
+    /// body trace is on, whether or not it was admitted, so its finished
+    /// document can be traced; it is never compared.
+    ///
     /// Called once per provider call: clones share one slot, so a tap reused
     /// across calls would let an earlier attempt's deposit stand in for a later
     /// attempt that deposited nothing.
@@ -105,6 +110,13 @@ impl Router {
             Some(_) => WireTap::admitted(),
             None => WireTap::default(),
         };
+        let traced_fold = target.egress_kind.and_then(|egress| {
+            traced_translation_fold(Lane::of(ingress.dialect, egress), attempt_req)
+        });
+        let tap = match traced_fold {
+            Some(dialect) => tap.folding_response(dialect),
+            None => tap,
+        };
         #[cfg(any(test, feature = "test-utils"))]
         let tap = match self.wire_tap_drop {
             Some(pointer) => tap.with_drop_on_deposit(pointer),
@@ -130,6 +142,18 @@ impl Router {
         };
         compare_request_leg(&self.wire_check, lane, attempt_req, tap);
     }
+}
+
+/// The dialect an attempt's upstream stream arrives in, when that stream is
+/// to be folded for the body trace alone: a TRACE-only fold of a streamed
+/// TRANSLATION-lane attempt whose egress speaks an assemblable dialect.
+/// The trace gate is read last, so every other attempt never consults it.
+fn traced_translation_fold(lane: Lane, attempt_req: &ChatRequest) -> Option<IngressDialect> {
+    if lane.class() != LaneClass::Translation || attempt_req.stream != Some(true) {
+        return None;
+    }
+    let dialect = lane.egress().wire_dialect()?;
+    routectl_core::body_trace_enabled().then_some(dialect)
 }
 
 /// One attempt's charge against the success sampler. Only successful

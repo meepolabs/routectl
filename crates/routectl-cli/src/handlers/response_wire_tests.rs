@@ -729,6 +729,12 @@ pub(super) struct HangingUpstream {
 
 impl HangingUpstream {
     pub(super) async fn start() -> Self {
+        Self::start_with(anthropic_unfinished_stream()).await
+    }
+
+    /// An upstream that sends `body` as the first frames of a stream and
+    /// then holds the connection open.
+    pub(super) async fn start_with(body: String) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -736,10 +742,10 @@ impl HangingUpstream {
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
+                let body = body.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0_u8; 64 * 1024];
                     let _ = socket.read(&mut buf).await;
-                    let body = anthropic_unfinished_stream();
                     let head = format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
                          transfer-encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n",

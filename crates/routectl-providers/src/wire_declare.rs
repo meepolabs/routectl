@@ -52,10 +52,10 @@ pub fn deposit_response(req: &ChatRequest, body: Vec<u8>) -> Bytes {
 }
 
 /// A handle on the tap for a stream reader to fold upstream frames into,
-/// present only when the attempt checks its response. A stream nobody
-/// checks gets `None` and pays one `Option` test per frame.
+/// present only when the attempt folds its response. A stream nobody
+/// folds gets `None` and pays one `Option` test per frame.
 pub fn response_tap(req: &ChatRequest) -> Option<WireTap> {
-    tap(req).filter(|tap| tap.checks_response()).cloned()
+    tap(req).filter(|tap| tap.folds_response()).cloned()
 }
 
 /// Fold one upstream server-sent event into `tap`'s response assembler.

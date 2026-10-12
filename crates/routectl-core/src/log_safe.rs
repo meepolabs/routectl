@@ -1146,6 +1146,14 @@ pub fn trace_outgoing_body(provider_kind: &str, provider_id: &str, body: &serde_
     );
 }
 
+/// Whether the TRACE body lines are on: the gate every `trace_*_body`
+/// emitter here checks first. A caller that must build a body only to
+/// trace it asks this before building, so the work is skipped wherever
+/// the line would be.
+pub fn body_trace_enabled() -> bool {
+    tracing::event_enabled!(tracing::Level::TRACE)
+}
+
 /// Emit a `tracing::trace!` line carrying the upstream's deserialized
 /// 2xx success body (direction 3 success path). Fires AFTER the body
 /// parses but BEFORE routectl normalizes it, so operators see the wire
@@ -1157,7 +1165,7 @@ pub fn trace_upstream_success_body(
     provider_id: &str,
     body: &serde_json::Value,
 ) {
-    if !tracing::event_enabled!(tracing::Level::TRACE) {
+    if !body_trace_enabled() {
         return;
     }
     let safe = redact_prompts_in(body);
@@ -1175,7 +1183,7 @@ pub fn trace_upstream_success_body(
 /// `ChatResponse` is serialized to wire JSON, so the trace shows what
 /// the client actually receives. Honors `ROUTECTL_LOG_REDACT_PROMPTS=1`.
 pub fn trace_egress_body(ingress: &str, body: &serde_json::Value) {
-    if !tracing::event_enabled!(tracing::Level::TRACE) {
+    if !body_trace_enabled() {
         return;
     }
     let safe = redact_prompts_in(body);

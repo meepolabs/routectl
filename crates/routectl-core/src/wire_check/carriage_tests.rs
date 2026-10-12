@@ -362,6 +362,47 @@ fn only_a_response_checking_tap_folds_stream_frames() {
     }
 }
 
+/// A folding-only tap assembles the upstream's stream without checking
+/// the response; folding a checking tap keeps its check and its dialect.
+#[test]
+fn a_folding_tap_assembles_without_checking_the_response() {
+    let rows = [
+        (
+            "folding unadmitted tap",
+            WireTap::default().folding_response(IngressDialect::Chat),
+            false,
+            false,
+        ),
+        (
+            "folding admitted tap",
+            WireTap::admitted().folding_response(IngressDialect::Chat),
+            true,
+            false,
+        ),
+        (
+            "folding a checking tap",
+            WireTap::checking_response(IngressDialect::Chat)
+                .folding_response(IngressDialect::Anthropic),
+            true,
+            true,
+        ),
+    ];
+
+    for (name, tap, admitted, checks) in rows {
+        push_chat_frames(&tap.clone());
+
+        let assembled = tap.finish_response_stream(StreamExit::Ended);
+
+        assert!(
+            matches!(assembled, Some(Assembled::Complete(_))),
+            "row {name}: {assembled:?}"
+        );
+        assert!(tap.folds_response(), "row {name}");
+        assert_eq!(tap.is_admitted(), admitted, "row {name}");
+        assert_eq!(tap.checks_response(), checks, "row {name}");
+    }
+}
+
 #[test]
 fn a_finished_stream_assembles_the_frames_every_clone_pushed() {
     let tap = WireTap::checking_response(IngressDialect::Chat);

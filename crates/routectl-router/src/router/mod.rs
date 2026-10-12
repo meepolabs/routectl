@@ -1609,8 +1609,10 @@ pub struct DispatchMeta {
     /// nothing in it outlives the request.
     pub(crate) wire_reverts: Vec<learn_revert::WireRevert>,
     /// The response-direction wire check of the attempt that answered,
-    /// when the sampler admitted it on a FIDELITY lane. The ingress
-    /// renderer takes it and hands it the document the client received.
+    /// when the sampler admitted it on a FIDELITY lane, or a trace-only
+    /// one for a TRANSLATION-lane stream folded while the body trace was
+    /// on. The ingress renderer takes it and hands it the document the
+    /// client received.
     pub response_check: Option<ResponseCheck>,
 }
 

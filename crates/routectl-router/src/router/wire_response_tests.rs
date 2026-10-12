@@ -533,3 +533,115 @@ fn each_egress_traces_under_its_providers_own_token() {
         );
     }
 }
+
+/// Dispatch one streamed or complete request on `dialect` and return
+/// whether a response check rode out, with TRACE on or off for the
+/// dispatch.
+async fn carries_a_check(
+    router: &Router,
+    dialect: IngressDialect,
+    stream: bool,
+    trace: bool,
+) -> bool {
+    let dispatch = async {
+        if stream {
+            Box::pin(router.stream_with_options(request(dialect, true), RouterOptions::default()))
+                .await
+                .meta
+        } else {
+            Box::pin(
+                router.complete_with_options(request(dialect, false), RouterOptions::default()),
+            )
+            .await
+            .meta
+        }
+    };
+    let meta = if trace {
+        routectl_testkit::with_capture(dispatch).await.0
+    } else {
+        dispatch.await
+    };
+    meta.response_check.is_some()
+}
+
+/// A TRANSLATION-lane stream folds the upstream's stream for the body
+/// trace only while TRACE is on, admitted or not; with TRACE off, and on a
+/// complete answer, no check rides out, so no assembler is built on either
+/// side.
+#[tokio::test]
+async fn a_translation_stream_is_folded_only_while_the_body_trace_is_on() {
+    let rows: [(&str, &str, bool, bool, bool); 5] = [
+        ("traced admitted stream", CHECK_EVERY, true, true, true),
+        ("traced unadmitted stream", CHECK_NONE, true, true, true),
+        ("untraced admitted stream", CHECK_EVERY, true, false, false),
+        ("untraced unadmitted stream", CHECK_NONE, true, false, false),
+        ("traced complete answer", CHECK_EVERY, false, true, false),
+    ];
+    for (name, wire_check, stream, trace, carried) in rows {
+        let router = router("anthropic-api", wire_check);
+
+        let got = carries_a_check(&router, IngressDialect::Chat, stream, trace).await;
+
+        assert_eq!(got, carried, "{name}");
+    }
+}
+
+/// A trace-only check traces both whole documents, the upstream's in its
+/// own dialect, and records no response-leg outcome: a translation lane's
+/// two sides are never compared. An unfinished side traces nothing.
+#[tokio::test]
+async fn a_trace_only_check_traces_whole_documents_and_records_nothing() {
+    let both = vec![
+        (
+            "upstream success body".to_string(),
+            "anthropic".to_string(),
+            "answering".to_string(),
+        ),
+        (
+            "egress response body".to_string(),
+            "openai".to_string(),
+            String::new(),
+        ),
+    ];
+    let rows: [(&str, StreamExit, Option<IncompleteReason>, Vec<_>); 3] = [
+        ("whole stream", StreamExit::Ended, None, both),
+        (
+            "client went away",
+            StreamExit::Disconnect,
+            Some(IncompleteReason::Disconnect),
+            vec![],
+        ),
+        (
+            "upstream failed mid-stream",
+            StreamExit::UpstreamError,
+            Some(IncompleteReason::UpstreamError),
+            vec![],
+        ),
+    ];
+    for (name, exit, client_reason, expected) in rows {
+        let router = router("anthropic-api", CHECK_EVERY);
+        let (dispatched, _) = routectl_testkit::with_capture(Box::pin(router.stream_with_options(
+            request(IngressDialect::Chat, true),
+            RouterOptions::default(),
+        )))
+        .await;
+        let _chunks: Vec<_> = dispatched.result.expect("stream opens").collect().await;
+        let client = client_reason.map_or(
+            Assembled::Complete(json!({"object": "chat.completion", "choices": []})),
+            Assembled::Incomplete,
+        );
+        let check = dispatched.meta.response_check.expect("a trace-only check");
+
+        let events = routectl_testkit::capture_events(|| {
+            check.compare_traced_stream(client, exit, &[], "openai");
+        });
+
+        assert_eq!(body_traces(&events), expected, "{name}");
+        let snapshot = router.wire_check_snapshot();
+        assert_eq!(
+            response_outcomes(&snapshot),
+            [(CheckOutcome::Clean, 1)],
+            "{name}: only the request leg recorded"
+        );
+    }
+}

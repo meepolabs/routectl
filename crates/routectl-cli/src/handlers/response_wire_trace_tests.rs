@@ -32,9 +32,9 @@ use crate::server::AppState;
 use crate::server::request_id;
 
 const REQUEST_ID: &str = "019eab77-0000-4000-8000-0000000000aa";
-const UPSTREAM_MSG: &str = "upstream success body";
-const EGRESS_MSG: &str = "egress response body";
-const OUTGOING_MSG: &str = "outgoing request body";
+pub(super) const UPSTREAM_MSG: &str = "upstream success body";
+pub(super) const EGRESS_MSG: &str = "egress response body";
+pub(super) const OUTGOING_MSG: &str = "outgoing request body";
 const INGRESS_MSG: &str = "ingress request body";
 const LOG_SAFE_TARGET: &str = "routectl_core::log_safe: ";
 
@@ -55,7 +55,7 @@ impl std::io::Write for Sink {
 /// Run `body` on a current-thread runtime under the production subscriber
 /// at TRACE for the body-trace emitter, and return what the sink wrote. The
 /// render task is spawned onto the same thread, so its events land here.
-fn traced<F, Fut, T>(body: F) -> (T, String)
+pub(super) fn traced<F, Fut, T>(body: F) -> (T, String)
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = T>,
@@ -90,11 +90,11 @@ const fn route(dialect: Dialect) -> &'static str {
     }
 }
 
-type RouterSwap = Arc<arc_swap::ArcSwap<Router>>;
+pub(super) type RouterSwap = Arc<arc_swap::ArcSwap<Router>>;
 
 /// The daemon's three ingress routes under the request-id middleware, as
 /// production stacks them.
-fn app(swap: &RouterSwap) -> axum::Router {
+pub(super) fn app(swap: &RouterSwap) -> axum::Router {
     axum::Router::new()
         .route("/v1/messages", post(crate::handlers::messages::messages))
         .route(
@@ -106,7 +106,7 @@ fn app(swap: &RouterSwap) -> axum::Router {
         .layer(axum::middleware::from_fn(request_id::middleware))
 }
 
-fn post_request(dialect: Dialect, stream: bool) -> Request<Body> {
+pub(super) fn post_request(dialect: Dialect, stream: bool) -> Request<Body> {
     let body = serde_json::to_vec(&dialect.request_body(stream)).expect("json");
     Request::builder()
         .method("POST")
@@ -120,7 +120,7 @@ fn post_request(dialect: Dialect, stream: bool) -> Request<Body> {
 
 /// Send one request through `swap`'s router and read the whole response
 /// before returning, so the stream's check has run.
-async fn send(swap: &RouterSwap, dialect: Dialect, stream: bool) -> String {
+pub(super) async fn send(swap: &RouterSwap, dialect: Dialect, stream: bool) -> String {
     let resp = app(swap)
         .oneshot(post_request(dialect, stream))
         .await
@@ -133,7 +133,7 @@ async fn send(swap: &RouterSwap, dialect: Dialect, stream: bool) -> String {
 /// One body-trace line: its message, the field region before `body=`, and
 /// whether it sits in the request span.
 #[derive(Debug)]
-struct BodyLine {
+pub(super) struct BodyLine {
     message: &'static str,
     fields: String,
     in_request_span: bool,
@@ -141,7 +141,7 @@ struct BodyLine {
 
 /// Every body-trace line the log_safe emitter wrote, anchored on the
 /// emitter target and the message right after it.
-fn body_lines(log: &str) -> Vec<BodyLine> {
+pub(super) fn body_lines(log: &str) -> Vec<BodyLine> {
     let request_span = format!("request_id={REQUEST_ID}");
     log.lines()
         .filter_map(|line| {
@@ -165,7 +165,7 @@ fn body_lines(log: &str) -> Vec<BodyLine> {
         .collect()
 }
 
-fn count(lines: &[BodyLine], message: &str) -> usize {
+pub(super) fn count(lines: &[BodyLine], message: &str) -> usize {
     lines.iter().filter(|l| l.message == message).count()
 }
 
@@ -179,14 +179,14 @@ fn fields_of<'a>(lines: &'a [BodyLine], message: &str) -> Vec<&'a str> {
 
 /// The upstream's and the client's lines for one request: what each body
 /// line says about its emitter, in order.
-struct StreamTrace {
-    upstream: Vec<String>,
-    egress: Vec<String>,
-    outgoing: Vec<String>,
-    outside_request_span: usize,
+pub(super) struct StreamTrace {
+    pub(super) upstream: Vec<String>,
+    pub(super) egress: Vec<String>,
+    pub(super) outgoing: Vec<String>,
+    pub(super) outside_request_span: usize,
 }
 
-fn stream_trace(log: &str) -> StreamTrace {
+pub(super) fn stream_trace(log: &str) -> StreamTrace {
     let lines = body_lines(log);
     let owned = |message| {
         fields_of(&lines, message)
@@ -202,7 +202,7 @@ fn stream_trace(log: &str) -> StreamTrace {
     }
 }
 
-fn ingress_id(dialect: Dialect) -> &'static str {
+pub(super) fn ingress_id(dialect: Dialect) -> &'static str {
     use crate::ingress::IngressAdapter;
     match dialect {
         Dialect::Anthropic => crate::ingress::anthropic::AnthropicIngress.id(),

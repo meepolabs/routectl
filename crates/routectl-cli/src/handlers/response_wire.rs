@@ -199,3 +199,7 @@ mod tests;
 #[cfg(test)]
 #[path = "response_wire_trace_tests.rs"]
 mod trace_tests;
+
+#[cfg(test)]
+#[path = "response_wire_translation_trace_tests.rs"]
+mod translation_trace_tests;

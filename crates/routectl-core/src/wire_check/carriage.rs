@@ -88,13 +88,15 @@ impl fmt::Debug for TapContents {
 /// observes what the provider records on the copy that rode the request.
 ///
 /// A tap also carries whether its attempt was admitted for a full check,
-/// and whether that check covers the response, so a provider can skip work
-/// only a checked attempt reads. Both are fixed when the tap is created and
-/// shared by every clone.
+/// whether that check covers the response, and whether the upstream's
+/// stream is folded at all, so a provider can skip work only a reader of
+/// the tap needs. All three are fixed when the tap is created and shared by
+/// every clone.
 #[derive(Clone, Default)]
 pub struct WireTap {
     slot: Arc<Mutex<Slot>>,
     admitted: bool,
+    checks_response: bool,
     response_dialect: Option<IngressDialect>,
     #[cfg(any(test, feature = "test-utils"))]
     drop_on_deposit: Option<&'static str>,
@@ -114,9 +116,22 @@ impl WireTap {
     pub fn checking_response(dialect: IngressDialect) -> Self {
         Self {
             admitted: true,
+            checks_response: true,
             response_dialect: Some(dialect),
             ..Self::default()
         }
+    }
+
+    /// This tap, also folding the upstream's stream in `dialect` so it can
+    /// be finished into a document, without checking the response. A tap
+    /// that already folds keeps its dialect; admission and the response
+    /// check are kept.
+    #[must_use]
+    pub const fn folding_response(mut self, dialect: IngressDialect) -> Self {
+        if self.response_dialect.is_none() {
+            self.response_dialect = Some(dialect);
+        }
+        self
     }
 
     /// Whether this tap's attempt is admitted for a full check.
@@ -127,6 +142,12 @@ impl WireTap {
     /// Whether this tap's attempt checks the response direction, so the
     /// provider should report what the upstream answered.
     pub const fn checks_response(&self) -> bool {
+        self.checks_response
+    }
+
+    /// Whether this tap folds the upstream's stream, so a stream reader
+    /// should push its frames.
+    pub const fn folds_response(&self) -> bool {
         self.response_dialect.is_some()
     }
 
@@ -149,8 +170,7 @@ impl WireTap {
 
     /// Fold one upstream stream frame into the tap's response assembler,
     /// creating it on the first frame. Does nothing on a tap that does not
-    /// check the response, so an unchecked stream never builds an
-    /// assembler.
+    /// fold the response, so such a stream never builds an assembler.
     pub fn push_response_frame(&self, frame: SseFrame<'_>) {
         let Some(dialect) = self.response_dialect else {
             return;
@@ -273,6 +293,7 @@ impl fmt::Debug for WireTap {
         let slot = self.lock();
         f.debug_struct("WireTap")
             .field("admitted", &self.admitted)
+            .field("checks_response", &self.checks_response)
             .field("response_dialect", &self.response_dialect)
             .field("contents", &slot.contents)
             .field("upstream_stream", &slot.upstream_stream)

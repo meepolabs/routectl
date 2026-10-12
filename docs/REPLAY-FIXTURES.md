@@ -275,14 +275,17 @@ vector for whichever file is absent:
 | absent | absent | that direction was not observed |
 
 Whether the run STREAMED is `meta.stream`, never file presence. A stream
-whose response check ran on a FIDELITY lane (the sampler admitted the
-attempt, and the ingress speaks the egress's own dialect) and whose two
-assembled documents both completed has its documents traced on the same
-`upstream success body` / `egress response body` lines a complete response
-emits, so its fixture carries both body files: each is the assembled JSON
-document, not the SSE frames. Any other stream -- unsampled, on a
-TRANSLATION lane, or with either side cut short -- has neither body line
-and lands headers only. The upstream line carries the providers-crate
+whose two assembled documents both completed has its documents traced on
+the same `upstream success body` / `egress response body` lines a complete
+response emits, so its fixture carries both body files: each is the
+assembled JSON document, not the SSE frames. That holds for a stream whose
+response check ran on a FIDELITY lane (the sampler admitted the attempt,
+and the ingress speaks the egress's own dialect) and, while the body trace
+is on, for every stream on a TRANSLATION lane, sampled or not: there the
+upstream file is in the egress's dialect and the egress file in the
+client's. Any other stream -- an unsampled FIDELITY stream, an egress whose
+stream no assembler reads (Bedrock Converse, Gemini), or either side cut
+short -- has neither body line and lands headers only. The upstream line carries the providers-crate
 `provider_kind` token, the same one the outgoing line carries, so the lane
 a fixture keys on does not change with it.
 

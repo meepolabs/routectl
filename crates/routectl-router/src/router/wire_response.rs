@@ -12,7 +12,10 @@
 //!
 //! A stream has no complete body for the providers and the renderer to
 //! trace, so a stream whose two documents both assemble emits them here,
-//! through the same TRACE body lines a complete response emits.
+//! through the same TRACE body lines a complete response emits. A
+//! TRANSLATION-lane stream folded while the body trace was on carries a
+//! trace-only check: it traces its two documents the same way and compares
+//! nothing, since the two sides speak different dialects.
 
 use std::fmt;
 use std::sync::Arc;
@@ -47,12 +50,14 @@ pub struct ResponseCheck {
     tap: WireTap,
     state: Arc<WireCheckState>,
     provider_id: Option<Arc<str>>,
+    compares: bool,
 }
 
 impl fmt::Debug for ResponseCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ResponseCheck")
             .field("lane", &self.lane.label())
+            .field("compares", &self.compares)
             .finish_non_exhaustive()
     }
 }
@@ -68,6 +73,9 @@ impl ResponseCheck {
     /// declared while building `client_body`. Either body larger than 2 MiB
     /// records `budget` without being parsed.
     pub fn compare_body(self, client_body: &[u8], client_edits: &[DeclaredEdit]) {
+        if !self.compares {
+            return;
+        }
         let declared = self.tap.take_response();
         let upstream_len = declared.response().map_or(0, |body| body.len());
         if client_body.len().max(upstream_len) > MAX_INLINE_COMPARE_BYTES {
@@ -113,12 +121,32 @@ impl ResponseCheck {
         client_edits: &[DeclaredEdit],
         traced_ingress: Option<&str>,
     ) {
+        if !self.compares {
+            self.trace_uncompared_stream(client, exit, traced_ingress);
+            return;
+        }
         let client = match client {
             Assembled::Complete(document) => Ok(document),
             Assembled::Incomplete(reason) => Err(IncompleteSide::Client(Some(reason))),
         };
         let declared = self.tap.take_response();
         self.record(&declared, exit, client, client_edits, traced_ingress);
+    }
+
+    /// Finish a trace-only check: trace both documents when both
+    /// assembled, record nothing either way.
+    fn trace_uncompared_stream(
+        &self,
+        client: Assembled,
+        exit: StreamExit,
+        traced_ingress: Option<&str>,
+    ) {
+        let upstream = self.tap.finish_response_stream(exit);
+        if let (Some(ingress), Assembled::Complete(client), Some(Assembled::Complete(upstream))) =
+            (traced_ingress, client, upstream)
+        {
+            self.trace_stream_documents(&upstream, &client, ingress);
+        }
     }
 
     fn record_over_budget(self) {
@@ -268,7 +296,8 @@ impl IncompleteSide {
 
 impl Router {
     /// Hand the serving attempt's response check to `meta` when its tap
-    /// checks the response; clear it otherwise, so a carrier left by an
+    /// checks the response, or a trace-only one when its tap only folds the
+    /// upstream's stream; clear it otherwise, so a carrier left by an
     /// earlier attempt never describes this one.
     pub(super) fn carry_response_check(
         &self,
@@ -278,13 +307,14 @@ impl Router {
         meta: &mut DispatchMeta,
     ) {
         meta.response_check = tap
-            .filter(|tap| tap.checks_response())
+            .filter(|tap| tap.folds_response())
             .zip(attempt_lane(target, attempt_req))
             .map(|(tap, lane)| ResponseCheck {
                 lane,
                 tap: tap.clone(),
                 state: Arc::clone(&self.wire_check),
                 provider_id: target.provider.as_ref().map(|p| Arc::from(p.id())),
+                compares: tap.checks_response(),
             });
     }
 }

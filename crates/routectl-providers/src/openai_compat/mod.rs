@@ -590,7 +590,7 @@ impl Provider for OpenAiCompatProvider {
                 };
 
                 crate::wire_declare::push_frame(response_tap.as_ref(), &event.event, &event.data);
-                if let Some(tap) = response_tap.as_ref()
+                if let Some(tap) = response_tap.as_ref().filter(|tap| tap.checks_response())
                     && let Ok(chunk) = serde_json::from_str::<Value>(&event.data)
                 {
                     response::declare_response_lifts(Some(tap), &chunk, dialect, true);

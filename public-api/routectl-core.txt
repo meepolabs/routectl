@@ -1229,6 +1229,7 @@ pub const routectl_core::log_safe::HDR_MSG_INGRESS: &str
 pub const routectl_core::log_safe::HDR_MSG_OUTGOING: &str
 pub const routectl_core::log_safe::HDR_MSG_UPSTREAM: &str
 pub const routectl_core::log_safe::MAX_TRACE_BODY_BYTES: usize
+pub fn routectl_core::log_safe::body_trace_enabled() -> bool
 pub fn routectl_core::log_safe::debug_upstream_error_body(&str, &str, u16, &str)
 pub fn routectl_core::log_safe::extract_upstream_message(&str) -> alloc::string::String
 pub fn routectl_core::log_safe::header_trace_enabled() -> bool
@@ -4128,6 +4129,8 @@ pub fn routectl_core::wire_check::WireTap::declare_response(&self, routectl_core
 pub fn routectl_core::wire_check::WireTap::deposit(&self, bytes::bytes::Bytes)
 pub fn routectl_core::wire_check::WireTap::deposit_response(&self, bytes::bytes::Bytes)
 pub fn routectl_core::wire_check::WireTap::finish_response_stream(&self, routectl_core::wire_check::StreamExit) -> core::option::Option<routectl_core::wire_check::Assembled>
+pub const fn routectl_core::wire_check::WireTap::folding_response(self, routectl_core::wire_check::IngressDialect) -> Self
+pub const fn routectl_core::wire_check::WireTap::folds_response(&self) -> bool
 pub const fn routectl_core::wire_check::WireTap::is_admitted(&self) -> bool
 pub fn routectl_core::wire_check::WireTap::push_response_frame(&self, routectl_core::wire_check::SseFrame<'_>)
 pub fn routectl_core::wire_check::WireTap::take_request(&self) -> routectl_core::wire_check::TapContents
@@ -7580,6 +7583,7 @@ impl routectl_core::TokenSource for routectl_core::StaticToken
 pub fn routectl_core::StaticToken::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_core::StaticToken::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_core::apply_json_minify(&mut routectl_core::schema::ChatRequest) -> routectl_core::context_reduction::ReductionOutcome
+pub fn routectl_core::body_trace_enabled() -> bool
 pub fn routectl_core::compute_frozen_floor(&routectl_core::schema::ChatRequest) -> routectl_core::cache_control::FrozenFloor
 pub fn routectl_core::debug_upstream_error_body(&str, &str, u16, &str)
 pub fn routectl_core::eligible_system_block_index(&routectl_core::system_content::SystemContent) -> core::option::Option<usize>
