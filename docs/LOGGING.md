@@ -487,8 +487,10 @@ status window, with timestamps, are listed under `wire_check` in
 When an upstream rejection names a path routectl itself put on the wire --
 a declared edit, or a `routectl_added` path no declaration explains -- the
 router WARNs. A single declared operator payload extra or placed cache
-marker is then undone and the attempt re-sent once; any other match is
-left unrepaired. Nothing is learned from such a rejection.
+marker is then undone and the attempt re-sent once, when the undo restores
+exactly what the client sent and the repair budget allows; any other
+declared match is left unrepaired. Nothing is learned from a rejection that
+matches a declared edit.
 
 | Message | Meaning | Fields |
 |---|---|---|
