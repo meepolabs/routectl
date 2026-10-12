@@ -53,3 +53,10 @@ upstream = "claude-opus-4-8"
 [aliases]
 "claude-*" = "fixture-sonnet"
 default    = "fixture-sonnet"
+
+# Every attempt is checked, not the 1-in-100 sample a production daemon
+# uses: a driven run is a few dozen attempts per cell, so the default rate
+# would leave most of them unchecked and a wire loss would surface only by
+# luck. `first_n` stays at its default; past it, this rate governs.
+[wire_check]
+sample_one_in = 1

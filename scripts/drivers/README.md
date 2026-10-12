@@ -77,6 +77,15 @@ DEPLOYMENT SHAPE of the same provider is a `<lane>.<variant>` filename
 more -- no path segment, no `meta.json` field, no flag. A wire-affecting
 per-deployment value lives INSIDE the file, where `config_sha` covers it.
 
+Every lane config sets `[wire_check] sample_one_in = 1`, so the daemon a
+driven run boots checks every attempt rather than a production sample.
+On the Bedrock lanes (`bedrock-invoke`, `bedrock-converse`,
+`bedrock-mantle`) the model is a matrix dimension: each candidate is a
+`[models.<nick>]` entry, listed with its tier and source doc in
+[../wire_watch/models.tsv](../wire_watch/models.tsv).
+[config/lane_configs.test.sh](config/lane_configs.test.sh) welds those
+together and pins each Bedrock lane to its key's region.
+
 ## Connection mode is a capture axis
 
 A MITM front proxy carries `role:"system"` turns inside `messages[]`;

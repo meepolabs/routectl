@@ -1,0 +1,279 @@
+# Candidate models for the Bedrock driver lanes, one row per (lane, model).
+#
+# Columns (tab-separated, header row below this comment block):
+#   lane       the lane config: scripts/drivers/config/<lane>.toml
+#   nickname   that config's [models.<nickname>] key; a driver passes it as
+#              the model name
+#   upstream   the provider-side model or inference-profile id
+#   tier       primary = the one model per lane that runs every case;
+#              sweep = runs the small sweep case set
+#   thinking   yes = the model's AWS doc page lists reasoning support, so
+#              the sweep includes a streaming thinking case
+#
+# Lines starting with `#` are comments. Every upstream id below appears on
+# a `# doc` line naming the AWS model card it was taken from; the regions
+# and inference options were taken from the per-model tables on
+# https://docs.aws.amazon.com/bedrock/latest/userguide/models-region-compatibility.html
+# and the endpoint/API support from
+# https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html
+# and https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html
+# (all read 2026-10-12). Invoke/Converse rows are bedrock-runtime ids
+# callable from us-west-2 (in-Region, `us.` geo, or `global.` profile);
+# mantle rows are bare ids served in-Region on bedrock-mantle in us-east-1.
+#
+# Lane configs and this file are welded by
+# scripts/drivers/config/lane_configs.test.sh: nicknames match per lane in
+# both directions, exactly one primary per lane, and every upstream id is
+# cited here.
+#
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-lite.html us.amazon.nova-2-lite-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-lite.html amazon.nova-lite-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-micro.html us.amazon.nova-micro-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-pro.html us.amazon.nova-pro-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-fable-5.html us.anthropic.claude-fable-5 global.anthropic.claude-fable-5 anthropic.claude-fable-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-fable-5-1.html us.anthropic.claude-fable-5-1
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html us.anthropic.claude-haiku-4-5-20251001-v1:0 global.anthropic.claude-haiku-4-5-20251001-v1:0 anthropic.claude-haiku-4-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-5-5.html us.anthropic.claude-haiku-5-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-mythos-5.html anthropic.claude-mythos-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-mythos-5-1.html us.anthropic.claude-mythos-5-1
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-1.html us.anthropic.claude-opus-4-1-20250805-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-5.html us.anthropic.claude-opus-4-5-20251101-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-6.html us.anthropic.claude-opus-4-6-v1
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-7.html us.anthropic.claude-opus-4-7 anthropic.claude-opus-4-7
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-8.html us.anthropic.claude-opus-4-8 global.anthropic.claude-opus-4-8 anthropic.claude-opus-4-8
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5.html us.anthropic.claude-opus-5 anthropic.claude-opus-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5-5.html us.anthropic.claude-opus-5-5 global.anthropic.claude-opus-5-5 anthropic.claude-opus-5-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-4-5.html us.anthropic.claude-sonnet-4-5-20250929-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-4-6.html us.anthropic.claude-sonnet-4-6
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5.html us.anthropic.claude-sonnet-5 anthropic.claude-sonnet-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html us.anthropic.claude-sonnet-5-5 global.anthropic.claude-sonnet-5-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-deepseek-deepseek-r1.html us.deepseek.r1-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-deepseek-deepseek-v3-1.html deepseek.v3-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-deepseek-deepseek-v3-2.html deepseek.v3.2
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-google-gemma-3-12b-it.html google.gemma-3-12b-it
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-google-gemma-3-27b-pt.html google.gemma-3-27b-it
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-google-gemma-3-4b-it.html google.gemma-3-4b-it
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-google-gemma-4-26b-a4b.html google.gemma-4-26b-a4b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-google-gemma-4-31b.html google.gemma-4-31b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-google-gemma-4-e2b.html google.gemma-4-e2b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-3-1-70b-instruct.html meta.llama3-1-70b-instruct-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-3-1-8b-instruct.html meta.llama3-1-8b-instruct-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-3-3-70b-instruct.html us.meta.llama3-3-70b-instruct-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-3-70b-instruct.html meta.llama3-70b-instruct-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-3-8b-instruct.html meta.llama3-8b-instruct-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-4-maverick-17b-instruct.html us.meta.llama4-maverick-17b-instruct-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-4-scout-17b-instruct.html us.meta.llama4-scout-17b-instruct-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-minimax-minimax-m2.html minimax.minimax-m2
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-minimax-minimax-m2-1.html minimax.minimax-m2.1
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-minimax-minimax-m2-5.html minimax.minimax-m2.5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-devstral-2-123b.html mistral.devstral-2-123b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-magistral-small-2509.html mistral.magistral-small-2509
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-ministral-14b-3-0.html mistral.ministral-3-14b-instruct
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-ministral-3-8b.html mistral.ministral-3-8b-instruct
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-ministral-3b.html mistral.ministral-3-3b-instruct
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-mistral-7b-instruct.html mistral.mistral-7b-instruct-v0:2
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-mistral-large.html mistral.mistral-large-2402-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-mistral-large-3.html mistral.mistral-large-3-675b-instruct
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-mixtral-8x7b-instruct.html mistral.mixtral-8x7b-instruct-v0:1
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-pixtral-large.html us.mistral.pixtral-large-2502-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-voxtral-mini-3b-2507.html mistral.voxtral-mini-3b-2507
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-mistral-ai-voxtral-small-24b-2507.html mistral.voxtral-small-24b-2507
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-moonshot-ai-kimi-k2-5.html moonshotai.kimi-k2.5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-moonshot-ai-kimi-k3.html us.moonshotai.kimi-k3
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-nvidia-nemotron-nano-3-30b.html nvidia.nemotron-nano-3-30b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-nvidia-nemotron-super-3-120b.html nvidia.nemotron-super-3-120b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-nvidia-nvidia-nemotron-nano-12b-v2-vl-bf16.html nvidia.nemotron-nano-12b-v2
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-nvidia-nvidia-nemotron-nano-9b-v2.html nvidia.nemotron-nano-9b-v2
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-54.html openai.gpt-5.4
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-55.html openai.gpt-5.5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-luna.html us.openai.gpt-5.6-luna openai.gpt-5.6-luna
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-sol.html us.openai.gpt-5.6-sol openai.gpt-5.6-sol
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-terra.html us.openai.gpt-5.6-terra openai.gpt-5.6-terra
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-sol.html us.openai.gpt-6.1-sol openai.gpt-6.1-sol
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html us.openai.gpt-6-astra openai.gpt-6-astra
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-luna.html us.openai.gpt-6-luna openai.gpt-6-luna
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-sol.html us.openai.gpt-6-sol openai.gpt-6-sol
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html openai.gpt-oss-120b-1:0 openai.gpt-oss-120b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-20b.html openai.gpt-oss-20b-1:0 openai.gpt-oss-20b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-safeguard-120b.html openai.gpt-oss-safeguard-120b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-safeguard-20b.html openai.gpt-oss-safeguard-20b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-235b-a22b-2507.html qwen.qwen3-235b-a22b-2507-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-32b.html qwen.qwen3-32b-v1:0 qwen.qwen3-32b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-coder-30b-a3b-instruct.html qwen.qwen3-coder-30b-a3b-v1:0 qwen.qwen3-coder-30b-a3b-instruct
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-coder-480b-a35b-instruct.html qwen.qwen3-coder-480b-a35b-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-coder-next.html qwen.qwen3-coder-next
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-next-80b-a3b.html qwen.qwen3-next-80b-a3b qwen.qwen3-next-80b-a3b-instruct
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-qwen-qwen3-vl-235b-a22b.html qwen.qwen3-vl-235b-a22b qwen.qwen3-vl-235b-a22b-instruct
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-writer-palmyra-vision-7b.html writer.palmyra-vision-7b
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-writer-palmyra-x4.html us.writer.palmyra-x4-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-writer-palmyra-x5.html us.writer.palmyra-x5-v1:0
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-xai-grok-4-3.html xai.grok-4.3
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-xai-grok-4-6.html us.xai.grok-4.6
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-xai-grok-4-7.html us.xai.grok-4.7
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-4-7.html zai.glm-4.7
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-4-7-flash.html zai.glm-4.7-flash
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5.html zai.glm-5
+# doc https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-zai-glm-5-3.html us.zai.glm-5.3
+#
+lane	nickname	upstream	tier	thinking
+bedrock-invoke	invoke-claude-haiku-5-5	us.anthropic.claude-haiku-5-5	sweep	yes
+bedrock-invoke	invoke-claude-sonnet-5-5	us.anthropic.claude-sonnet-5-5	primary	yes
+bedrock-invoke	invoke-claude-opus-5-5	us.anthropic.claude-opus-5-5	sweep	yes
+bedrock-invoke	invoke-claude-fable-5-1	us.anthropic.claude-fable-5-1	sweep	yes
+bedrock-invoke	invoke-claude-mythos-5-1	us.anthropic.claude-mythos-5-1	sweep	yes
+bedrock-invoke	invoke-claude-opus-5	us.anthropic.claude-opus-5	sweep	yes
+bedrock-invoke	invoke-claude-sonnet-5	us.anthropic.claude-sonnet-5	sweep	yes
+bedrock-invoke	invoke-claude-fable-5	us.anthropic.claude-fable-5	sweep	yes
+bedrock-invoke	invoke-claude-opus-4-8	us.anthropic.claude-opus-4-8	sweep	yes
+bedrock-invoke	invoke-claude-opus-4-7	us.anthropic.claude-opus-4-7	sweep	yes
+bedrock-invoke	invoke-claude-opus-4-6	us.anthropic.claude-opus-4-6-v1	sweep	yes
+bedrock-invoke	invoke-claude-sonnet-4-6	us.anthropic.claude-sonnet-4-6	sweep	yes
+bedrock-invoke	invoke-claude-opus-4-5	us.anthropic.claude-opus-4-5-20251101-v1:0	sweep	yes
+bedrock-invoke	invoke-claude-haiku-4-5	us.anthropic.claude-haiku-4-5-20251001-v1:0	sweep	yes
+bedrock-invoke	invoke-claude-sonnet-4-5	us.anthropic.claude-sonnet-4-5-20250929-v1:0	sweep	yes
+bedrock-invoke	invoke-claude-opus-4-1	us.anthropic.claude-opus-4-1-20250805-v1:0	sweep	yes
+bedrock-invoke	invoke-claude-fable-5-global	global.anthropic.claude-fable-5	sweep	yes
+bedrock-invoke	invoke-claude-opus-5-5-global	global.anthropic.claude-opus-5-5	sweep	yes
+bedrock-invoke	invoke-claude-opus-4-8-global	global.anthropic.claude-opus-4-8	sweep	yes
+bedrock-invoke	invoke-claude-sonnet-5-5-global	global.anthropic.claude-sonnet-5-5	sweep	yes
+bedrock-invoke	invoke-claude-haiku-4-5-global	global.anthropic.claude-haiku-4-5-20251001-v1:0	sweep	yes
+bedrock-converse	converse-claude-haiku-5-5	us.anthropic.claude-haiku-5-5	sweep	yes
+bedrock-converse	converse-claude-sonnet-5-5	us.anthropic.claude-sonnet-5-5	primary	yes
+bedrock-converse	converse-claude-opus-5-5	us.anthropic.claude-opus-5-5	sweep	yes
+bedrock-converse	converse-claude-fable-5-1	us.anthropic.claude-fable-5-1	sweep	yes
+bedrock-converse	converse-claude-mythos-5-1	us.anthropic.claude-mythos-5-1	sweep	yes
+bedrock-converse	converse-claude-opus-5	us.anthropic.claude-opus-5	sweep	yes
+bedrock-converse	converse-claude-sonnet-5	us.anthropic.claude-sonnet-5	sweep	yes
+bedrock-converse	converse-claude-fable-5	us.anthropic.claude-fable-5	sweep	yes
+bedrock-converse	converse-claude-opus-4-8	us.anthropic.claude-opus-4-8	sweep	yes
+bedrock-converse	converse-claude-opus-4-7	us.anthropic.claude-opus-4-7	sweep	yes
+bedrock-converse	converse-claude-opus-4-6	us.anthropic.claude-opus-4-6-v1	sweep	yes
+bedrock-converse	converse-claude-sonnet-4-6	us.anthropic.claude-sonnet-4-6	sweep	yes
+bedrock-converse	converse-claude-opus-4-5	us.anthropic.claude-opus-4-5-20251101-v1:0	sweep	yes
+bedrock-converse	converse-claude-haiku-4-5	us.anthropic.claude-haiku-4-5-20251001-v1:0	sweep	yes
+bedrock-converse	converse-claude-sonnet-4-5	us.anthropic.claude-sonnet-4-5-20250929-v1:0	sweep	yes
+bedrock-converse	converse-claude-opus-4-1	us.anthropic.claude-opus-4-1-20250805-v1:0	sweep	yes
+bedrock-converse	converse-claude-fable-5-global	global.anthropic.claude-fable-5	sweep	yes
+bedrock-converse	converse-claude-opus-5-5-global	global.anthropic.claude-opus-5-5	sweep	yes
+bedrock-converse	converse-claude-opus-4-8-global	global.anthropic.claude-opus-4-8	sweep	yes
+bedrock-converse	converse-claude-sonnet-5-5-global	global.anthropic.claude-sonnet-5-5	sweep	yes
+bedrock-converse	converse-claude-haiku-4-5-global	global.anthropic.claude-haiku-4-5-20251001-v1:0	sweep	yes
+bedrock-converse	converse-gpt-6-1-sol	us.openai.gpt-6.1-sol	sweep	yes
+bedrock-converse	converse-gpt-6-astra	us.openai.gpt-6-astra	sweep	yes
+bedrock-converse	converse-gpt-6-sol	us.openai.gpt-6-sol	sweep	yes
+bedrock-converse	converse-gpt-6-luna	us.openai.gpt-6-luna	sweep	yes
+bedrock-converse	converse-gpt-5-6-sol	us.openai.gpt-5.6-sol	sweep	yes
+bedrock-converse	converse-gpt-5-6-terra	us.openai.gpt-5.6-terra	sweep	yes
+bedrock-converse	converse-gpt-5-6-luna	us.openai.gpt-5.6-luna	sweep	yes
+bedrock-converse	converse-gpt-oss-120b	openai.gpt-oss-120b-1:0	sweep	no
+bedrock-converse	converse-gpt-oss-20b	openai.gpt-oss-20b-1:0	sweep	no
+bedrock-converse	converse-gpt-oss-safeguard-120b	openai.gpt-oss-safeguard-120b	sweep	no
+bedrock-converse	converse-gpt-oss-safeguard-20b	openai.gpt-oss-safeguard-20b	sweep	no
+bedrock-converse	converse-deepseek-v3-2	deepseek.v3.2	sweep	no
+bedrock-converse	converse-deepseek-v3-1	deepseek.v3-v1:0	sweep	no
+bedrock-converse	converse-deepseek-r1	us.deepseek.r1-v1:0	sweep	yes
+bedrock-converse	converse-gemma-3-27b	google.gemma-3-27b-it	sweep	no
+bedrock-converse	converse-gemma-3-12b	google.gemma-3-12b-it	sweep	no
+bedrock-converse	converse-gemma-3-4b	google.gemma-3-4b-it	sweep	no
+bedrock-converse	converse-llama-4-maverick	us.meta.llama4-maverick-17b-instruct-v1:0	sweep	no
+bedrock-converse	converse-llama-4-scout	us.meta.llama4-scout-17b-instruct-v1:0	sweep	no
+bedrock-converse	converse-llama-3-3-70b	us.meta.llama3-3-70b-instruct-v1:0	sweep	no
+bedrock-converse	converse-llama-3-1-70b	meta.llama3-1-70b-instruct-v1:0	sweep	no
+bedrock-converse	converse-llama-3-1-8b	meta.llama3-1-8b-instruct-v1:0	sweep	no
+bedrock-converse	converse-llama-3-70b	meta.llama3-70b-instruct-v1:0	sweep	no
+bedrock-converse	converse-llama-3-8b	meta.llama3-8b-instruct-v1:0	sweep	no
+bedrock-converse	converse-minimax-m2-5	minimax.minimax-m2.5	sweep	no
+bedrock-converse	converse-minimax-m2-1	minimax.minimax-m2.1	sweep	no
+bedrock-converse	converse-minimax-m2	minimax.minimax-m2	sweep	no
+bedrock-converse	converse-devstral-2-123b	mistral.devstral-2-123b	sweep	no
+bedrock-converse	converse-magistral-small-2509	mistral.magistral-small-2509	sweep	yes
+bedrock-converse	converse-ministral-3-14b	mistral.ministral-3-14b-instruct	sweep	no
+bedrock-converse	converse-ministral-3-8b	mistral.ministral-3-8b-instruct	sweep	no
+bedrock-converse	converse-ministral-3-3b	mistral.ministral-3-3b-instruct	sweep	no
+bedrock-converse	converse-mistral-large-3	mistral.mistral-large-3-675b-instruct	sweep	no
+bedrock-converse	converse-mistral-large-2402	mistral.mistral-large-2402-v1:0	sweep	no
+bedrock-converse	converse-mistral-7b	mistral.mistral-7b-instruct-v0:2	sweep	no
+bedrock-converse	converse-mixtral-8x7b	mistral.mixtral-8x7b-instruct-v0:1	sweep	no
+bedrock-converse	converse-pixtral-large	us.mistral.pixtral-large-2502-v1:0	sweep	no
+bedrock-converse	converse-voxtral-small-24b	mistral.voxtral-small-24b-2507	sweep	no
+bedrock-converse	converse-voxtral-mini-3b	mistral.voxtral-mini-3b-2507	sweep	no
+bedrock-converse	converse-kimi-k3	us.moonshotai.kimi-k3	sweep	yes
+bedrock-converse	converse-kimi-k2-5	moonshotai.kimi-k2.5	sweep	no
+bedrock-converse	converse-nemotron-super-3-120b	nvidia.nemotron-super-3-120b	sweep	no
+bedrock-converse	converse-nemotron-nano-3-30b	nvidia.nemotron-nano-3-30b	sweep	no
+bedrock-converse	converse-nemotron-nano-12b-v2	nvidia.nemotron-nano-12b-v2	sweep	no
+bedrock-converse	converse-nemotron-nano-9b-v2	nvidia.nemotron-nano-9b-v2	sweep	no
+bedrock-converse	converse-qwen3-235b	qwen.qwen3-235b-a22b-2507-v1:0	sweep	yes
+bedrock-converse	converse-qwen3-32b	qwen.qwen3-32b-v1:0	sweep	yes
+bedrock-converse	converse-qwen3-next-80b	qwen.qwen3-next-80b-a3b	sweep	yes
+bedrock-converse	converse-qwen3-vl-235b	qwen.qwen3-vl-235b-a22b	sweep	no
+bedrock-converse	converse-qwen3-coder-480b	qwen.qwen3-coder-480b-a35b-v1:0	sweep	no
+bedrock-converse	converse-qwen3-coder-30b	qwen.qwen3-coder-30b-a3b-v1:0	sweep	no
+bedrock-converse	converse-palmyra-x5	us.writer.palmyra-x5-v1:0	sweep	no
+bedrock-converse	converse-palmyra-x4	us.writer.palmyra-x4-v1:0	sweep	no
+bedrock-converse	converse-palmyra-vision-7b	writer.palmyra-vision-7b	sweep	no
+bedrock-converse	converse-grok-4-7	us.xai.grok-4.7	sweep	yes
+bedrock-converse	converse-grok-4-6	us.xai.grok-4.6	sweep	yes
+bedrock-converse	converse-glm-5-3	us.zai.glm-5.3	sweep	yes
+bedrock-converse	converse-glm-5	zai.glm-5	sweep	no
+bedrock-converse	converse-glm-4-7	zai.glm-4.7	sweep	no
+bedrock-converse	converse-glm-4-7-flash	zai.glm-4.7-flash	sweep	no
+bedrock-converse	converse-nova-2-lite	us.amazon.nova-2-lite-v1:0	sweep	no
+bedrock-converse	converse-nova-pro	us.amazon.nova-pro-v1:0	sweep	no
+bedrock-converse	converse-nova-lite	amazon.nova-lite-v1:0	sweep	no
+bedrock-converse	converse-nova-micro	us.amazon.nova-micro-v1:0	sweep	no
+bedrock-mantle	mantle-claude-opus-5-5	anthropic.claude-opus-5-5	sweep	yes
+bedrock-mantle	mantle-claude-opus-5	anthropic.claude-opus-5	sweep	yes
+bedrock-mantle	mantle-claude-sonnet-5	anthropic.claude-sonnet-5	sweep	yes
+bedrock-mantle	mantle-claude-mythos-5	anthropic.claude-mythos-5	sweep	yes
+bedrock-mantle	mantle-claude-fable-5	anthropic.claude-fable-5	sweep	yes
+bedrock-mantle	mantle-claude-opus-4-8	anthropic.claude-opus-4-8	sweep	yes
+bedrock-mantle	mantle-claude-opus-4-7	anthropic.claude-opus-4-7	sweep	yes
+bedrock-mantle	mantle-claude-haiku-4-5	anthropic.claude-haiku-4-5	sweep	yes
+bedrock-mantle	mantle-gpt-6-sol	openai.gpt-6-sol	primary	yes
+bedrock-mantle	mantle-gpt-6-1-sol	openai.gpt-6.1-sol	sweep	yes
+bedrock-mantle	mantle-gpt-6-astra	openai.gpt-6-astra	sweep	yes
+bedrock-mantle	mantle-gpt-6-luna	openai.gpt-6-luna	sweep	yes
+bedrock-mantle	mantle-gpt-5-6-sol	openai.gpt-5.6-sol	sweep	yes
+bedrock-mantle	mantle-gpt-5-6-terra	openai.gpt-5.6-terra	sweep	yes
+bedrock-mantle	mantle-gpt-5-6-luna	openai.gpt-5.6-luna	sweep	yes
+bedrock-mantle	mantle-gpt-5-5	openai.gpt-5.5	sweep	yes
+bedrock-mantle	mantle-gpt-5-4	openai.gpt-5.4	sweep	yes
+bedrock-mantle	mantle-chat-gpt-6-sol	openai.gpt-6-sol	sweep	yes
+bedrock-mantle	mantle-gpt-oss-120b	openai.gpt-oss-120b	sweep	no
+bedrock-mantle	mantle-gpt-oss-20b	openai.gpt-oss-20b	sweep	no
+bedrock-mantle	mantle-gpt-oss-safeguard-120b	openai.gpt-oss-safeguard-120b	sweep	no
+bedrock-mantle	mantle-gpt-oss-safeguard-20b	openai.gpt-oss-safeguard-20b	sweep	no
+bedrock-mantle	mantle-deepseek-v3-2	deepseek.v3.2	sweep	no
+bedrock-mantle	mantle-gemma-4-31b	google.gemma-4-31b	sweep	yes
+bedrock-mantle	mantle-gemma-4-26b-a4b	google.gemma-4-26b-a4b	sweep	yes
+bedrock-mantle	mantle-gemma-4-e2b	google.gemma-4-e2b	sweep	yes
+bedrock-mantle	mantle-gemma-3-27b	google.gemma-3-27b-it	sweep	no
+bedrock-mantle	mantle-gemma-3-12b	google.gemma-3-12b-it	sweep	no
+bedrock-mantle	mantle-gemma-3-4b	google.gemma-3-4b-it	sweep	no
+bedrock-mantle	mantle-minimax-m2-5	minimax.minimax-m2.5	sweep	no
+bedrock-mantle	mantle-minimax-m2-1	minimax.minimax-m2.1	sweep	no
+bedrock-mantle	mantle-minimax-m2	minimax.minimax-m2	sweep	no
+bedrock-mantle	mantle-devstral-2-123b	mistral.devstral-2-123b	sweep	no
+bedrock-mantle	mantle-magistral-small-2509	mistral.magistral-small-2509	sweep	yes
+bedrock-mantle	mantle-ministral-3-14b	mistral.ministral-3-14b-instruct	sweep	no
+bedrock-mantle	mantle-ministral-3-8b	mistral.ministral-3-8b-instruct	sweep	no
+bedrock-mantle	mantle-ministral-3-3b	mistral.ministral-3-3b-instruct	sweep	no
+bedrock-mantle	mantle-mistral-large-3	mistral.mistral-large-3-675b-instruct	sweep	no
+bedrock-mantle	mantle-voxtral-small-24b	mistral.voxtral-small-24b-2507	sweep	no
+bedrock-mantle	mantle-voxtral-mini-3b	mistral.voxtral-mini-3b-2507	sweep	no
+bedrock-mantle	mantle-kimi-k2-5	moonshotai.kimi-k2.5	sweep	no
+bedrock-mantle	mantle-nemotron-super-3-120b	nvidia.nemotron-super-3-120b	sweep	no
+bedrock-mantle	mantle-nemotron-nano-3-30b	nvidia.nemotron-nano-3-30b	sweep	no
+bedrock-mantle	mantle-nemotron-nano-12b-v2	nvidia.nemotron-nano-12b-v2	sweep	no
+bedrock-mantle	mantle-nemotron-nano-9b-v2	nvidia.nemotron-nano-9b-v2	sweep	no
+bedrock-mantle	mantle-qwen3-32b	qwen.qwen3-32b	sweep	yes
+bedrock-mantle	mantle-qwen3-next-80b	qwen.qwen3-next-80b-a3b-instruct	sweep	yes
+bedrock-mantle	mantle-qwen3-vl-235b	qwen.qwen3-vl-235b-a22b-instruct	sweep	no
+bedrock-mantle	mantle-qwen3-coder-next	qwen.qwen3-coder-next	sweep	no
+bedrock-mantle	mantle-qwen3-coder-30b	qwen.qwen3-coder-30b-a3b-instruct	sweep	no
+bedrock-mantle	mantle-palmyra-vision-7b	writer.palmyra-vision-7b	sweep	no
+bedrock-mantle	mantle-grok-4-3	xai.grok-4.3	sweep	yes
+bedrock-mantle	mantle-glm-5	zai.glm-5	sweep	no
+bedrock-mantle	mantle-glm-4-7	zai.glm-4.7	sweep	no
+bedrock-mantle	mantle-glm-4-7-flash	zai.glm-4.7-flash	sweep	no

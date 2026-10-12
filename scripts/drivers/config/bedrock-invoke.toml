@@ -1,0 +1,167 @@
+# Hermetic driver config for the `bedrock-invoke` lane: Bedrock
+# InvokeModel (the Anthropic Messages body) on bedrock-runtime.
+#
+# Invoke shapes only the Anthropic body, so the candidates are the Claude
+# models the AWS docs list for bedrock-runtime from us-west-2.
+#
+# COMMITTED ON PURPOSE. `scripts/capture_driver.sh` hashes THIS FILE and
+# records the digest as `meta.config_sha` on every fixture the lane
+# produces, so a rerun of a case under a drifted config reads as a config
+# change rather than as client drift. Editing this file therefore
+# invalidates every prior fixture's comparability -- that is the intent,
+# not a hazard, but it means an edit is a deliberate act.
+#
+# Nothing here is environment-derived: no real path, no account, no
+# credential. The only credential is a REFERENCE to an env var the runner
+# forwards from its caller (the `ROUTECTL_DRIVER_*` passthrough
+# namespace); an unset one keeps the daemon from starting rather than
+# silently routing somewhere else.
+#
+# The daemon's state (usage database, catalog state) lands under
+# `$XDG_CONFIG_HOME/routectl/`, which the runner points at a throwaway
+# directory. That default resolution is what keeps a driven run off the
+# operator's own state -- no path in this file names it.
+#
+# Model is a matrix dimension on this lane: every `[models.<nick>]` entry
+# below is one candidate, and `scripts/wire_watch/models.tsv` lists the
+# same nicknames with their tier and the doc each upstream id came from.
+# The two are welded by `scripts/drivers/config/lane_configs.test.sh`, so a
+# model is added or removed in BOTH files or neither. A candidate this
+# account cannot use is expected: the upstream's access-denied answer is
+# recorded as not-run, never as a wire finding.
+
+version = 5
+
+# Placeholder only. The runner ALWAYS overrides the bind port on the
+# command line (`serve --port`), because it selects a free port at boot
+# time. Overriding rather than rewriting this file keeps the hashed bytes
+# identical across runs: a port-patched copy would hash differently every
+# run and `meta.config_sha` would stop distinguishing config drift from
+# noise.
+[server]
+host = "127.0.0.1"
+port = 8787
+
+# A Bedrock API key (bearer), not SigV4. The key is service-scoped: one
+# minted for bedrock-runtime in us-west-2 serves Invoke and Converse there
+# and nothing else, which is why this lane and its sibling name only that
+# region. The env var is keyed on the provider name (`bedrock`), per the
+# `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` convention.
+[providers.bedrock]
+kind      = "bedrock"
+region    = "us-west-2"
+api_shape = "invoke"
+creds     = { kind = "bearer-key", key_ref = "env://ROUTECTL_DRIVER_BEDROCK_API_KEY" }
+
+[models.invoke-claude-haiku-5-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-haiku-5-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-sonnet-5-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-5-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-opus-5-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-5-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-fable-5-1]
+provider = "bedrock"
+upstream = "us.anthropic.claude-fable-5-1"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-mythos-5-1]
+provider = "bedrock"
+upstream = "us.anthropic.claude-mythos-5-1"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-opus-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-sonnet-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-fable-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-fable-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-opus-4-8]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-8"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-opus-4-7]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-7"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-opus-4-6]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-6-v1"
+
+[models.invoke-claude-sonnet-4-6]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-4-6"
+
+[models.invoke-claude-opus-4-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-5-20251101-v1:0"
+
+[models.invoke-claude-haiku-4-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+[models.invoke-claude-sonnet-4-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+[models.invoke-claude-opus-4-1]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-1-20250805-v1:0"
+
+[models.invoke-claude-fable-5-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-fable-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-opus-5-5-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-opus-5-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-opus-4-8-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-opus-4-8"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-sonnet-5-5-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-sonnet-5-5"
+supports_adaptive_thinking = true
+
+[models.invoke-claude-haiku-4-5-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+# A driver selects a candidate by passing its nickname as the model, so no
+# glob below may prefix a nickname: a glob outranks a direct nickname and
+# would silently route the cell to a different model. `default` is the
+# lane's full-case-set model.
+[aliases]
+"claude-*" = "invoke-claude-sonnet-5-5"
+default = "invoke-claude-sonnet-5-5"
+
+# Every attempt is checked, not the 1-in-100 sample a production daemon
+# uses: a driven run is a few dozen attempts per cell, so the default rate
+# would leave most of them unchecked and a wire loss would surface only by
+# luck. `first_n` stays at its default; past it, this rate governs.
+[wire_check]
+sample_one_in = 1

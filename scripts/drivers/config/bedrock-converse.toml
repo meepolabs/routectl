@@ -1,0 +1,423 @@
+# Hermetic driver config for the `bedrock-converse` lane: the AWS Converse
+# API on bedrock-runtime.
+#
+# Converse is vendor-neutral, so the candidates are every chat model the
+# AWS docs list for bedrock-runtime from us-west-2, Claude and otherwise.
+#
+# COMMITTED ON PURPOSE. `scripts/capture_driver.sh` hashes THIS FILE and
+# records the digest as `meta.config_sha` on every fixture the lane
+# produces, so a rerun of a case under a drifted config reads as a config
+# change rather than as client drift. Editing this file therefore
+# invalidates every prior fixture's comparability -- that is the intent,
+# not a hazard, but it means an edit is a deliberate act.
+#
+# Nothing here is environment-derived: no real path, no account, no
+# credential. The only credential is a REFERENCE to an env var the runner
+# forwards from its caller (the `ROUTECTL_DRIVER_*` passthrough
+# namespace); an unset one keeps the daemon from starting rather than
+# silently routing somewhere else.
+#
+# The daemon's state (usage database, catalog state) lands under
+# `$XDG_CONFIG_HOME/routectl/`, which the runner points at a throwaway
+# directory. That default resolution is what keeps a driven run off the
+# operator's own state -- no path in this file names it.
+#
+# Model is a matrix dimension on this lane: every `[models.<nick>]` entry
+# below is one candidate, and `scripts/wire_watch/models.tsv` lists the
+# same nicknames with their tier and the doc each upstream id came from.
+# The two are welded by `scripts/drivers/config/lane_configs.test.sh`, so a
+# model is added or removed in BOTH files or neither. A candidate this
+# account cannot use is expected: the upstream's access-denied answer is
+# recorded as not-run, never as a wire finding.
+
+version = 5
+
+# Placeholder only. The runner ALWAYS overrides the bind port on the
+# command line (`serve --port`), because it selects a free port at boot
+# time. Overriding rather than rewriting this file keeps the hashed bytes
+# identical across runs: a port-patched copy would hash differently every
+# run and `meta.config_sha` would stop distinguishing config drift from
+# noise.
+[server]
+host = "127.0.0.1"
+port = 8787
+
+# A Bedrock API key (bearer), not SigV4. The key is service-scoped: one
+# minted for bedrock-runtime in us-west-2 serves Invoke and Converse there
+# and nothing else, which is why this lane and its sibling name only that
+# region. The env var is keyed on the provider name (`bedrock`), per the
+# `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` convention.
+[providers.bedrock]
+kind      = "bedrock"
+region    = "us-west-2"
+api_shape = "converse"
+creds     = { kind = "bearer-key", key_ref = "env://ROUTECTL_DRIVER_BEDROCK_API_KEY" }
+
+[models.converse-claude-haiku-5-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-haiku-5-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-sonnet-5-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-5-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-opus-5-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-5-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-fable-5-1]
+provider = "bedrock"
+upstream = "us.anthropic.claude-fable-5-1"
+supports_adaptive_thinking = true
+
+[models.converse-claude-mythos-5-1]
+provider = "bedrock"
+upstream = "us.anthropic.claude-mythos-5-1"
+supports_adaptive_thinking = true
+
+[models.converse-claude-opus-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-sonnet-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-fable-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-fable-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-opus-4-8]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-8"
+supports_adaptive_thinking = true
+
+[models.converse-claude-opus-4-7]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-7"
+supports_adaptive_thinking = true
+
+[models.converse-claude-opus-4-6]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-6-v1"
+
+[models.converse-claude-sonnet-4-6]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-4-6"
+
+[models.converse-claude-opus-4-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-5-20251101-v1:0"
+
+[models.converse-claude-haiku-4-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+[models.converse-claude-sonnet-4-5]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+[models.converse-claude-opus-4-1]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-1-20250805-v1:0"
+
+[models.converse-claude-fable-5-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-fable-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-opus-5-5-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-opus-5-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-opus-4-8-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-opus-4-8"
+supports_adaptive_thinking = true
+
+[models.converse-claude-sonnet-5-5-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-sonnet-5-5"
+supports_adaptive_thinking = true
+
+[models.converse-claude-haiku-4-5-global]
+provider = "bedrock"
+upstream = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+[models.converse-gpt-6-1-sol]
+provider = "bedrock"
+upstream = "us.openai.gpt-6.1-sol"
+
+[models.converse-gpt-6-astra]
+provider = "bedrock"
+upstream = "us.openai.gpt-6-astra"
+
+[models.converse-gpt-6-sol]
+provider = "bedrock"
+upstream = "us.openai.gpt-6-sol"
+
+[models.converse-gpt-6-luna]
+provider = "bedrock"
+upstream = "us.openai.gpt-6-luna"
+
+[models.converse-gpt-5-6-sol]
+provider = "bedrock"
+upstream = "us.openai.gpt-5.6-sol"
+
+[models.converse-gpt-5-6-terra]
+provider = "bedrock"
+upstream = "us.openai.gpt-5.6-terra"
+
+[models.converse-gpt-5-6-luna]
+provider = "bedrock"
+upstream = "us.openai.gpt-5.6-luna"
+
+[models.converse-gpt-oss-120b]
+provider = "bedrock"
+upstream = "openai.gpt-oss-120b-1:0"
+
+[models.converse-gpt-oss-20b]
+provider = "bedrock"
+upstream = "openai.gpt-oss-20b-1:0"
+
+[models.converse-gpt-oss-safeguard-120b]
+provider = "bedrock"
+upstream = "openai.gpt-oss-safeguard-120b"
+
+[models.converse-gpt-oss-safeguard-20b]
+provider = "bedrock"
+upstream = "openai.gpt-oss-safeguard-20b"
+
+[models.converse-deepseek-v3-2]
+provider = "bedrock"
+upstream = "deepseek.v3.2"
+
+[models.converse-deepseek-v3-1]
+provider = "bedrock"
+upstream = "deepseek.v3-v1:0"
+
+[models.converse-deepseek-r1]
+provider = "bedrock"
+upstream = "us.deepseek.r1-v1:0"
+
+[models.converse-gemma-3-27b]
+provider = "bedrock"
+upstream = "google.gemma-3-27b-it"
+
+[models.converse-gemma-3-12b]
+provider = "bedrock"
+upstream = "google.gemma-3-12b-it"
+
+[models.converse-gemma-3-4b]
+provider = "bedrock"
+upstream = "google.gemma-3-4b-it"
+
+[models.converse-llama-4-maverick]
+provider = "bedrock"
+upstream = "us.meta.llama4-maverick-17b-instruct-v1:0"
+
+[models.converse-llama-4-scout]
+provider = "bedrock"
+upstream = "us.meta.llama4-scout-17b-instruct-v1:0"
+
+[models.converse-llama-3-3-70b]
+provider = "bedrock"
+upstream = "us.meta.llama3-3-70b-instruct-v1:0"
+
+[models.converse-llama-3-1-70b]
+provider = "bedrock"
+upstream = "meta.llama3-1-70b-instruct-v1:0"
+
+[models.converse-llama-3-1-8b]
+provider = "bedrock"
+upstream = "meta.llama3-1-8b-instruct-v1:0"
+
+[models.converse-llama-3-70b]
+provider = "bedrock"
+upstream = "meta.llama3-70b-instruct-v1:0"
+
+[models.converse-llama-3-8b]
+provider = "bedrock"
+upstream = "meta.llama3-8b-instruct-v1:0"
+
+[models.converse-minimax-m2-5]
+provider = "bedrock"
+upstream = "minimax.minimax-m2.5"
+
+[models.converse-minimax-m2-1]
+provider = "bedrock"
+upstream = "minimax.minimax-m2.1"
+
+[models.converse-minimax-m2]
+provider = "bedrock"
+upstream = "minimax.minimax-m2"
+
+[models.converse-devstral-2-123b]
+provider = "bedrock"
+upstream = "mistral.devstral-2-123b"
+
+[models.converse-magistral-small-2509]
+provider = "bedrock"
+upstream = "mistral.magistral-small-2509"
+
+[models.converse-ministral-3-14b]
+provider = "bedrock"
+upstream = "mistral.ministral-3-14b-instruct"
+
+[models.converse-ministral-3-8b]
+provider = "bedrock"
+upstream = "mistral.ministral-3-8b-instruct"
+
+[models.converse-ministral-3-3b]
+provider = "bedrock"
+upstream = "mistral.ministral-3-3b-instruct"
+
+[models.converse-mistral-large-3]
+provider = "bedrock"
+upstream = "mistral.mistral-large-3-675b-instruct"
+
+[models.converse-mistral-large-2402]
+provider = "bedrock"
+upstream = "mistral.mistral-large-2402-v1:0"
+
+[models.converse-mistral-7b]
+provider = "bedrock"
+upstream = "mistral.mistral-7b-instruct-v0:2"
+
+[models.converse-mixtral-8x7b]
+provider = "bedrock"
+upstream = "mistral.mixtral-8x7b-instruct-v0:1"
+
+[models.converse-pixtral-large]
+provider = "bedrock"
+upstream = "us.mistral.pixtral-large-2502-v1:0"
+
+[models.converse-voxtral-small-24b]
+provider = "bedrock"
+upstream = "mistral.voxtral-small-24b-2507"
+
+[models.converse-voxtral-mini-3b]
+provider = "bedrock"
+upstream = "mistral.voxtral-mini-3b-2507"
+
+[models.converse-kimi-k3]
+provider = "bedrock"
+upstream = "us.moonshotai.kimi-k3"
+
+[models.converse-kimi-k2-5]
+provider = "bedrock"
+upstream = "moonshotai.kimi-k2.5"
+
+[models.converse-nemotron-super-3-120b]
+provider = "bedrock"
+upstream = "nvidia.nemotron-super-3-120b"
+
+[models.converse-nemotron-nano-3-30b]
+provider = "bedrock"
+upstream = "nvidia.nemotron-nano-3-30b"
+
+[models.converse-nemotron-nano-12b-v2]
+provider = "bedrock"
+upstream = "nvidia.nemotron-nano-12b-v2"
+
+[models.converse-nemotron-nano-9b-v2]
+provider = "bedrock"
+upstream = "nvidia.nemotron-nano-9b-v2"
+
+[models.converse-qwen3-235b]
+provider = "bedrock"
+upstream = "qwen.qwen3-235b-a22b-2507-v1:0"
+
+[models.converse-qwen3-32b]
+provider = "bedrock"
+upstream = "qwen.qwen3-32b-v1:0"
+
+[models.converse-qwen3-next-80b]
+provider = "bedrock"
+upstream = "qwen.qwen3-next-80b-a3b"
+
+[models.converse-qwen3-vl-235b]
+provider = "bedrock"
+upstream = "qwen.qwen3-vl-235b-a22b"
+
+[models.converse-qwen3-coder-480b]
+provider = "bedrock"
+upstream = "qwen.qwen3-coder-480b-a35b-v1:0"
+
+[models.converse-qwen3-coder-30b]
+provider = "bedrock"
+upstream = "qwen.qwen3-coder-30b-a3b-v1:0"
+
+[models.converse-palmyra-x5]
+provider = "bedrock"
+upstream = "us.writer.palmyra-x5-v1:0"
+
+[models.converse-palmyra-x4]
+provider = "bedrock"
+upstream = "us.writer.palmyra-x4-v1:0"
+
+[models.converse-palmyra-vision-7b]
+provider = "bedrock"
+upstream = "writer.palmyra-vision-7b"
+
+[models.converse-grok-4-7]
+provider = "bedrock"
+upstream = "us.xai.grok-4.7"
+
+[models.converse-grok-4-6]
+provider = "bedrock"
+upstream = "us.xai.grok-4.6"
+
+[models.converse-glm-5-3]
+provider = "bedrock"
+upstream = "us.zai.glm-5.3"
+
+[models.converse-glm-5]
+provider = "bedrock"
+upstream = "zai.glm-5"
+
+[models.converse-glm-4-7]
+provider = "bedrock"
+upstream = "zai.glm-4.7"
+
+[models.converse-glm-4-7-flash]
+provider = "bedrock"
+upstream = "zai.glm-4.7-flash"
+
+[models.converse-nova-2-lite]
+provider = "bedrock"
+upstream = "us.amazon.nova-2-lite-v1:0"
+
+[models.converse-nova-pro]
+provider = "bedrock"
+upstream = "us.amazon.nova-pro-v1:0"
+
+[models.converse-nova-lite]
+provider = "bedrock"
+upstream = "amazon.nova-lite-v1:0"
+
+[models.converse-nova-micro]
+provider = "bedrock"
+upstream = "us.amazon.nova-micro-v1:0"
+
+# A driver selects a candidate by passing its nickname as the model, so no
+# glob below may prefix a nickname: a glob outranks a direct nickname and
+# would silently route the cell to a different model. `default` is the
+# lane's full-case-set model.
+[aliases]
+"claude-*" = "converse-claude-sonnet-5-5"
+default = "converse-claude-sonnet-5-5"
+
+# Every attempt is checked, not the 1-in-100 sample a production daemon
+# uses: a driven run is a few dozen attempts per cell, so the default rate
+# would leave most of them unchecked and a wire loss would surface only by
+# luck. `first_n` stays at its default; past it, this rate governs.
+[wire_check]
+sample_one_in = 1

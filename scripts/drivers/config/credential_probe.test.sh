@@ -10,11 +10,10 @@
 # credential -- `config check` resolves an `env://` ref by reading the
 # named env var, nothing more, so every value used here is synthetic.
 #
-# This is also where the credential-resolution probe required for the
-# `openai-responses` and `openai-compat` lane configs is RECORDED: this
-# file running clean is the evidence, re-verified on every run rather
-# than captured as a point-in-time note that would drift the moment
-# either config changed.
+# This is also where the credential-resolution probe required for every
+# credential-bearing lane config is RECORDED: this file running clean is
+# the evidence, re-verified on every run rather than captured as a
+# point-in-time note that would drift the moment a config changed.
 #
 # Requires a built `routectl` binary. Set ROUTECTL_BIN to point at one,
 # or have it on PATH, or have already built it under the repo's target
@@ -87,6 +86,22 @@ check_exit0 "openai-responses.toml resolves ROUTECTL_DRIVER_OPENAI_API_KEY and R
 
 check_exit0 "openai-compat.toml resolves ROUTECTL_DRIVER_OPENAI_API_KEY (with the unset control)" \
     bash "$PROBE" "$HERE/openai-compat.toml" ROUTECTL_DRIVER_OPENAI_API_KEY
+
+check_exit0 "openai-compat.ollama.toml resolves ROUTECTL_DRIVER_OLLAMA_API_KEY (with the unset control)" \
+    bash "$PROBE" "$HERE/openai-compat.ollama.toml" ROUTECTL_DRIVER_OLLAMA_API_KEY
+
+# The Bedrock lanes carry the key in a `bearer-key` creds descriptor, not
+# an `api_key_ref`; the probe still sees it because `config check` walks
+# the descriptor. On the Mantle lane all three providers share the one
+# ref, so the unset control must warn for it.
+check_exit0 "bedrock-invoke.toml resolves ROUTECTL_DRIVER_BEDROCK_API_KEY (with the unset control)" \
+    bash "$PROBE" "$HERE/bedrock-invoke.toml" ROUTECTL_DRIVER_BEDROCK_API_KEY
+
+check_exit0 "bedrock-converse.toml resolves ROUTECTL_DRIVER_BEDROCK_API_KEY (with the unset control)" \
+    bash "$PROBE" "$HERE/bedrock-converse.toml" ROUTECTL_DRIVER_BEDROCK_API_KEY
+
+check_exit0 "bedrock-mantle.toml resolves ROUTECTL_DRIVER_BEDROCK_API_KEY (with the unset control)" \
+    bash "$PROBE" "$HERE/bedrock-mantle.toml" ROUTECTL_DRIVER_BEDROCK_API_KEY
 
 # The probe's own failure mode: a var name that never appears in the
 # config's secret_uris() cannot possibly warn when unset, so the control

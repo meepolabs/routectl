@@ -630,6 +630,14 @@ jobs:
       - name: interaction set and driver self-test
         run: bash scripts/drivers.test.sh
 
+      # Structural checks over the committed lane configs and the Bedrock
+      # model candidate list: every lane checks every attempt, the
+      # anthropic-api twins stay twins, models.tsv and the lane configs name
+      # the same models, and each Bedrock lane names only its key's region.
+      # Stdlib python only -- no binary, no credential.
+      - name: lane config self-test
+        run: bash scripts/drivers/config/lane_configs.test.sh
+
   # Informational: public-API drift is reported, never enforced. The job
   # continues on error and is deliberately absent from `required.needs`, so
   # neither drift nor a broken toolchain bootstrap can block a merge. Its
