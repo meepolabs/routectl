@@ -92,6 +92,7 @@
 #                      scheme word matched case-insensitively
 #   provider-key       a raw vendor credential carrying no scheme word at
 #                      all (`sk-ant-api03-...`, `ghp_...`, `AKIA...`)
+#   bedrock-long-term-key  an `ABSK`-prefixed Bedrock long-term API key
 #   google-oauth-token a `ya29.`-prefixed Google OAuth access token
 #   google-api-key     an `AIza`-prefixed Google API key
 #   jwt                a three-segment `eyJ`-prefixed JSON Web Token
@@ -757,10 +758,14 @@ has_bearer_token() {
 # false-positive risk is near zero -- but each prefix still requires >=16
 # opaque chars AFTER it, so documentation prose naming a bare prefix does
 # not trip the rule. That accept direction is asserted.
-PROVIDER_KEY_RE='(sk-ant-api03-|sk-ant-oat01-|sk-ant-ort01-|sk-proj-|sk-or-v1-|ghp_|AKIA)[A-Za-z0-9_-]{16,}'
+PROVIDER_KEY_RE='(sk-ant-api03-|sk-ant-oat01-|sk-ant-ort01-|sk-ant-admin01-|sk-proj-|sk-svcacct-|sk-or-v1-|ghp_|AKIA)[A-Za-z0-9_-]{16,}'
 
+# OpenAI's admin-key prefix also occurs INSIDE ordinary hyphenated names
+# (`flask-admin-...` is a real package family), so unlike the prefixes above
+# it must begin a token: it carries ANCHOR_LEFT (defined below) and its own
+# regex, under the same finding class. The accept direction is asserted.
 has_provider_key() {
-  grep_has -qE "$PROVIDER_KEY_RE" "$1"
+  grep_has -qE -e "$PROVIDER_KEY_RE" -e "$OPENAI_ADMIN_KEY_RE" "$1"
 }
 
 # Vendor shapes the prefix set above does not carry, each its OWN named
@@ -818,6 +823,18 @@ NVIDIA_API_KEY_RE="$ANCHOR_LEFT"'nvapi-[A-Za-z0-9_-]{20,}'
 # Bedrock's short-term API key. Prefix-keyed like its siblings.
 BEDROCK_API_KEY_RE="$ANCHOR_LEFT"'bedrock-api-key-[A-Za-z0-9_=&-]{20,}'
 
+# Bedrock's long-term API key: `ABSK` plus the base64 of
+# `<IAM user>-at-<12-digit account>:<base64 of a 44-byte secret>`. The user
+# name is whatever the key was minted for -- `BedrockAPIKey-...` only for the
+# console default -- so nothing after `ABSK` is fixed and the rule keys on
+# length instead. The shortest real key (a 1-char user) carries
+# 1+4+12+1+60 = 78 bytes, 104 base64 chars; the floor is 100, a margin under
+# that, and well above the short ABSK-led words and identifiers ordinary text
+# carries. Both sides of the floor are asserted.
+BEDROCK_LONG_TERM_KEY_RE="$ANCHOR_LEFT"'ABSK[A-Za-z0-9+/]{100,}={0,2}'
+
+OPENAI_ADMIN_KEY_RE="$ANCHOR_LEFT"'sk-admin-[A-Za-z0-9_-]{16,}'
+
 # The two AWS credentials that have NO prefix of their own: the secret access
 # key is 40 opaque base64 characters and the session token is a long opaque
 # run, so neither can be keyed on its value the way every rule above is.
@@ -873,6 +890,10 @@ has_nvidia_api_key() {
 
 has_bedrock_api_key() {
   grep_has -qE "$BEDROCK_API_KEY_RE" "$1"
+}
+
+has_bedrock_long_term_key() {
+  grep_has -qE "$BEDROCK_LONG_TERM_KEY_RE" "$1"
 }
 
 has_aws_cred_assignment() {
@@ -964,7 +985,7 @@ PROVIDER_SHAPE_KINDS=(
   "openai-compat=sk-proj,sk-or-v1,nvapi"
   "openai-responses=sk-proj"
   "gemini=ya29,AIza"
-  "bedrock=bedrock-api-key,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN"
+  "bedrock=bedrock-api-key,ABSK,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN"
 )
 # Kinds with NO prefix-detectable credential shape, reason recorded per entry.
 PROVIDER_SHAPE_EXCLUDED=(
@@ -1154,6 +1175,7 @@ run_check() {
     has_aws_temp_key_id "$f" && findings+="  $f  aws-temp-key-id"$'\n'
     has_nvidia_api_key "$f" && findings+="  $f  nvidia-api-key"$'\n'
     has_bedrock_api_key "$f" && findings+="  $f  bedrock-api-key"$'\n'
+    has_bedrock_long_term_key "$f" && findings+="  $f  bedrock-long-term-key"$'\n'
     has_aws_cred_assignment "$f" && findings+="  $f  aws-credential-assignment"$'\n'
     has_scratch_task_id "$f" && findings+="  $f  scratch-task-id"$'\n'
     has_scratch_worktree "$f" && findings+="  $f  scratch-worktree-path"$'\n'

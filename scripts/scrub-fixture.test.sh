@@ -912,6 +912,90 @@ assert_clean "prose naming the bedrock api key prefix is accepted" \
     ingress_request.json \
     "$(body_with "the bedrock-api-key- prefix names a short-term key")"
 
+# --- bedrock long-term keys and the newer sk- prefixes -------------------
+# A Bedrock long-term API key is `ABSK` + the base64 of
+# `<IAM user>-at-<12-digit account>:<base64 of a 44-byte secret>`. The user
+# name is whatever the key was minted for (the console default
+# `BedrockAPIKey-...` is only one case), so that payload has no fixed head.
+# `bedrock_payload` builds it from the layout; its shortest form, a 1-char
+# user, is 1+4+12+1+60 = 78 bytes, 104 base64 chars. OpenAI
+# service-account and admin keys and Anthropic admin keys carry their own
+# sk- prefixes. Every one of these passed --check at exit 0 before its rule
+# existed.
+bedrock_payload() {
+    python3 -I -c 'import base64, sys
+user = sys.argv[1]
+secret = base64.b64encode(bytes(range(44))).decode()
+raw = (user + "-at-123456789012:" + secret).encode()
+print(base64.b64encode(raw).decode())' "$1"
+}
+assert_caught "a bedrock long-term api key in a captured body" \
+    ingress_request.json \
+    "$(body_with "AWS_BEARER_TOKEN_BEDROCK=$(fake_key 'ABSK' "$(bedrock_payload BedrockAPIKey-abcd)")")" \
+    bedrock-long-term-key
+
+assert_caught "a bedrock long-term key for another IAM user is caught" \
+    ingress_request.json \
+    "$(body_with "AWS_BEARER_TOKEN_BEDROCK=$(fake_key 'ABSK' "$(bedrock_payload githubRevokedKeysUser)")")" \
+    bedrock-long-term-key
+
+assert_caught "the shortest bedrock long-term key (1-char user) is caught" \
+    ingress_request.json \
+    "$(body_with "key=$(fake_key 'ABSK' "$(bedrock_payload u)")")" \
+    bedrock-long-term-key
+
+assert_caught "a bedrock long-term key beginning an escaped line is caught" \
+    ingress_request.json \
+    "$(body_with "here:\\n$(fake_key 'ABSK' "$(bedrock_payload BedrockAPIKey-abcd)")\\nend")" \
+    bedrock-long-term-key
+
+assert_caught "an openai service-account key in a captured body" \
+    ingress_request.json \
+    "$(body_with "OPENAI_API_KEY=$(fake_key 'sk-svcacct-')")" \
+    provider-key
+
+assert_caught "an openai admin key in a captured body" \
+    ingress_request.json \
+    "$(body_with "OPENAI_ADMIN_KEY=$(fake_key 'sk-admin-')")" \
+    provider-key
+
+assert_caught "an anthropic admin key in a captured body" \
+    ingress_request.json \
+    "$(body_with "ANTHROPIC_ADMIN_KEY=$(fake_key 'sk-ant-admin01-')")" \
+    provider-key
+
+# The accept side. `ABSK` alone is an ordinary token (a ticker, an
+# abbreviation), the bare prefix is what documentation names, and
+# `sk-admin-` occurs inside ordinary hyphenated names: Flask-Admin is a
+# real package family, so its repo and package names carry `sk-admin-`
+# mid-word followed by a long run.
+assert_clean "a bare ABSK word is accepted" \
+    ingress_request.json \
+    "$(body_with "ABSK closed higher; see the ABSK filing")"
+
+assert_clean "prose naming the bedrock long-term key prefix is accepted" \
+    ingress_request.json \
+    "$(body_with "long-term keys start with ABSKQmVkcm9ja0FQSUtleS and then the id")"
+
+# The rule's floor is 100 payload chars, below the 104 of the shortest real
+# key. A 99-char run is the accept side of that boundary: a base64 run that
+# merely happens to start with ABSK (an identifier, a short token).
+assert_clean "an ABSK base64 run one char under the floor is accepted" \
+    ingress_request.json \
+    "$(body_with "id=$(fake_key 'ABSK' "$(bedrock_payload u | cut -c1-99)")")"
+
+assert_clean "a short ABSK-prefixed identifier is accepted" \
+    ingress_request.json \
+    "$(body_with "ref ABSKZ2l0aHViUmV2b2tlZEtleXNVc2Vy in the revocation list")"
+
+assert_clean "prose naming the newer sk- prefixes is accepted" \
+    ingress_request.json \
+    "$(body_with "openai keys may start sk-svcacct- or sk-admin-, anthropic admin keys sk-ant-admin01-")"
+
+assert_clean "a flask-admin package name is not an admin key" \
+    ingress_request.json \
+    "$(body_with "pip install flask-admin-dashboard-starter-kit")"
+
 # --- escaped-newline boundary, both directions -------------------------
 # A captured body is single-line JSON, so an embedded newline is the two
 # BYTES `\` + `n`. `n` is a token character, so a credential that BEGINS an
@@ -967,7 +1051,7 @@ assert_shape_table_rule_ids_exist() {
     # LS_MODE_RE, `bearer` in BEARER_RE, so a bogus row like `some-kind=rwx`
     # would read as covered by a gate that has no such rule -- the exact
     # silent under-read this guard exists to prevent, arriving through it.
-    regexes="$(grep -E '^(PROVIDER_KEY|GOOGLE_OAUTH_TOKEN|GOOGLE_API_KEY|JWT|AWS_TEMP_KEY_ID|NVIDIA_API_KEY|BEDROCK_API_KEY|AWS_CRED_ASSIGN)_RE=' "$SCRUB")"
+    regexes="$(grep -E '^(PROVIDER_KEY|OPENAI_ADMIN_KEY|GOOGLE_OAUTH_TOKEN|GOOGLE_API_KEY|JWT|AWS_TEMP_KEY_ID|NVIDIA_API_KEY|BEDROCK_API_KEY|BEDROCK_LONG_TERM_KEY|AWS_CRED_ASSIGN)_RE=' "$SCRUB")"
 
     while IFS= read -r row; do
         [ -n "$row" ] || continue
@@ -1548,6 +1632,7 @@ assert_grep_error_refuses "the jwt scan" ingress_request.json "eyJ"
 assert_grep_error_refuses "the aws temp key id scan" ingress_request.json "ASIA"
 assert_grep_error_refuses "the nvidia key scan" ingress_request.json "nvapi-"
 assert_grep_error_refuses "the bedrock key scan" ingress_request.json "bedrock-api-key-"
+assert_grep_error_refuses "the bedrock long-term key scan" ingress_request.json "ABSK[A-Za-z0-9+/]"
 assert_grep_error_refuses "the aws credential assignment scan" ingress_request.json "AWS_SECRET_ACCESS_KEY"
 
 # An error AFTER grep has streamed output must still refuse: the consumer

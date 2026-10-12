@@ -38,6 +38,7 @@ SCRUB="$HERE/scrub-fixture.sh"
 LANE_CONFIG="$HERE/drivers/config/anthropic-api.toml"
 INGRESS_KINDS="$HERE/drivers/lib/ingress_kinds.sh"
 VERIFY_PATTERN="$HERE/drivers/lib/verify_pattern.py"
+CELL_EVIDENCE="$HERE/drivers/lib/cell_evidence.py"
 
 # shellcheck source=scripts/drivers/lib/structural_shape.sh
 . "$HERE/drivers/lib/structural_shape.sh"
@@ -205,25 +206,63 @@ fails=$((fails + replica_fails))
 unset replica_fails
 
 # The python listener, shared by the stub daemon and by the case that
-# OCCUPIES a port. Answers only `/health`; anything else 404s, because a
-# stub that answered everything would hide a runner that polled the wrong
-# path.
+# OCCUPIES a port. Answers `/health`, plus the two status snapshots when the
+# stub is given their bodies; anything else 404s, because a stub that
+# answered everything would hide a runner that polled the wrong path. The
+# usage path matches only with `?window=all`, the window the runner must ask
+# for.
+#
+# Serving `/status/health` writes the fidelity snapshot line to stderr (the
+# trace), ANSI-styled as the real formatter writes it, because the real
+# daemon emits that line from the same handler. The line therefore exists
+# in the trace only if the runner fetched health while the daemon was up.
+# `STUB_STATUS_MODE=health-500` answers health with a 500 and emits nothing.
 write_listener() {
     cat >"$1" <<'PY'
 import http.server
+import os
+import signal
 import socketserver
 import sys
 
+FIDELITY_LINE = (
+    "\x1b[2m2026-08-25T10:00:01.000000Z\x1b[0m \x1b[32m INFO\x1b[0m "
+    "\x1b[2mroutectl_cli::handlers::status::field_verdict_log\x1b[0m\x1b[2m:\x1b[0m "
+    "envelope field verdict snapshot rc_field_repair_attempted_total=0 "
+    "rc_parser_unlocalized_total=3 rc_field_verdict_rows_total=0 rc_field_verdict_rows=[]\n"
+)
+
+
+def body_of(var):
+    path = os.environ.get(var, "")
+    if not path:
+        return None
+    with open(path, "rb") as fh:
+        return fh.read()
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def reply(self, code, body):
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
+        health = body_of("STUB_HEALTH_BODY")
+        usage = body_of("STUB_USAGE_BODY")
         if self.path == "/health":
-            body = b'{"status":"ok","version":"stub"}'
-            self.send_response(200)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.reply(200, b'{"status":"ok","version":"stub"}')
+        elif self.path == "/status/health" and health is not None:
+            if os.environ.get("STUB_STATUS_MODE") == "health-500":
+                self.reply(500, b'{"error":"stub"}')
+                return
+            sys.stderr.write(FIDELITY_LINE)
+            sys.stderr.flush()
+            self.reply(200, health)
+        elif self.path == "/status/usage?window=all" and usage is not None:
+            self.reply(200, usage)
         else:
             self.send_response(404)
             self.send_header("content-length", "0")
@@ -232,6 +271,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+
+if os.environ.get("STUB_MODE") == "ignores-term":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 socketserver.TCPServer.allow_reuse_address = True
 with socketserver.TCPServer(("127.0.0.1", int(sys.argv[1])), Handler) as srv:
@@ -278,6 +320,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 printf '%s\n' "$$" >"$STUB_PID_FILE"
+printf '%s\n' "${NO_COLOR-unset}" >"$STUB_PID_FILE.no-color"
 printf '%s\n' "$port" >"$STUB_PORT_FILE"
 if [ -r "${STUB_TRACE_FILE:-}" ]; then
     cat "$STUB_TRACE_FILE" >&2
@@ -354,6 +397,15 @@ if [ -n "${PROBE_CLIENT_VERSION:-}" ]; then
     printf 'name=probe\nversion=%s\n' "$PROBE_CLIENT_VERSION" \
         >"$ROUTECTL_DRIVER_RUN/client.txt"
 fi
+# The driver runs as a direct child of the runner, so its parent pid is the
+# runner's. Signalling it from here interrupts a FOREGROUND runner, the
+# shape a terminal Ctrl-C has; a runner started with `&` from a
+# non-interactive shell would have SIGINT ignored and could not trap it.
+if [ -n "${PROBE_SIGNAL_RUNNER:-}" ]; then
+    kill -s "$PROBE_SIGNAL_RUNNER" "$PPID"
+    sleep 0.5
+fi
+exit "${PROBE_EXIT:-0}"
 SH
     chmod +x "$1"
 }
@@ -411,6 +463,7 @@ make_work() {
     cp "$HERE/drivers/lib/verify_pattern.py" "$work/repo/scripts/drivers/lib/verify_pattern.py"
     cp "$INGRESS_KINDS" "$work/repo/scripts/drivers/lib/ingress_kinds.sh"
     cp "$HERE/drivers/lib/client_version.py" "$work/repo/scripts/drivers/lib/client_version.py"
+    cp "$CELL_EVIDENCE" "$work/repo/scripts/drivers/lib/cell_evidence.py"
     cp "$LANE_CONFIG" "$work/repo/scripts/drivers/config/anthropic-api.toml"
     cp "$HERE/drivers/config/anthropic-api.front-proxy.toml" \
         "$work/repo/scripts/drivers/config/anthropic-api.front-proxy.toml"
@@ -423,7 +476,9 @@ make_work() {
         driver-selftest-09c \
         driver-selftest-13b driver-selftest-15 driver-selftest-15b \
         driver-selftest-15c driver-selftest-15d driver-selftest-16 \
-        driver-selftest-16b; do
+        driver-selftest-16b driver-selftest-17 driver-selftest-17b \
+        driver-selftest-17c driver-selftest-17d driver-selftest-17e \
+        driver-selftest-17f; do
         write_case "$work/repo/scripts/drivers/cases" "$case_id" baseline
     done
     # The rig reads the workspace version from the repo-root Cargo.toml.
@@ -474,10 +529,16 @@ runner_run() {
         STUB_LISTENER="$work/bin/listener.py" \
         STUB_MODE="${STUB_MODE:-healthy}" \
         STUB_MITM_MODE="${STUB_MITM_MODE:-ready}" \
+        STUB_HEALTH_BODY="${STUB_HEALTH_BODY-}" \
+        STUB_USAGE_BODY="${STUB_USAGE_BODY-}" \
+        STUB_STATUS_MODE="${STUB_STATUS_MODE-}" \
         PROBE_OUT="$work/probe.txt" \
         PROBE_CLIENT_VERSION="${PROBE_CLIENT_VERSION-}" \
+        PROBE_EXIT="${PROBE_EXIT-}" \
+        PROBE_SIGNAL_RUNNER="${PROBE_SIGNAL_RUNNER-}" \
         ROUTECTL_DRIVER_OUT_ROOT="${ROUTECTL_DRIVER_OUT_ROOT-$work
 $work/scratch}" \
+            timeout -s KILL "${RUNNER_BOUND:-300}" \
             bash scripts/capture_driver.sh --work "$work/runs" \
             "${pin[@]+"${pin[@]}"}" "$@" \
             -- "$work/bin/probe-driver"
@@ -2179,6 +2240,684 @@ check "the first root's marker does not suppress a capture into the second" "0" 
 check "the second root's capture landed despite the first root's marker" "yes" \
     "$([ -f "$root_b/anthropic-api/driver-selftest-16b/meta.json" ] && echo yes || echo no)"
 rm -rf "$work"
+
+# --- Case 17: per-cell evidence lands beside the fixture ---------------
+# The evidence is what a matrix aggregator reads after the run workspace
+# (trace included) is gone, so every file is asserted from OUTSIDE the run.
+
+# Status bodies the stub serves. Distinct, non-trivial bytes, so a
+# byte-identity check cannot pass against a runner that wrote something of
+# its own.
+write_status_bodies() {
+    printf '{"schema_version":6,"data":{"wire_check":{"rows":[{"lane":"anthropic-api","path_class":"stub"}]}}}\n' \
+        >"$1/status-health.json"
+    printf '{"schema_version":3,"data":{"window":"all","totals":{"requests":2,"input_tokens":17}}}\n' \
+        >"$1/status-usage.json"
+}
+
+# Trace lines for a SECOND request that never completes (so the rig never
+# selects it): an ingress line whose BODY quotes another dialect's field, and
+# an upstream error whose body is longer than the excerpt cap. Spellings are
+# welded to the emitters in the extractor rows below.
+EVIDENCE_ID="019eab77-0000-4000-8000-0000000000f1"
+# The event target as the production formatter draws it with styling on:
+# dimmed target, dimmed separator. Only this spelling marks an event.
+styled_target() {
+    printf '\033[2m%s\033[0m\033[2m:\033[0m' "$1"
+}
+evidence_trace_lines() {
+    local span="request{method=POST path=/v1/messages request_id=$EVIDENCE_ID}"
+    local target
+    target="$(styled_target routectl_core::log_safe)"
+    local long
+    long="$(printf 'x%.0s' $(seq 1 700))"
+    cat <<TRACE
+2026-08-25T10:00:00.600000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"messages":[{"content":"say ingress=\\"openai\\""}]} redact_prompts_enabled=false
+2026-08-25T10:00:00.700000Z DEBUG $span:complete_with_options{alias=my-alias}:complete{provider=anthropic:p model=m}: $target upstream error body provider_kind="anthropic" provider="anthropic:p" status=429 body={"error":{"message":"$long"}}
+TRACE
+}
+
+evidence_dir_of() {
+    printf '%s\n' "$(default_landing_root "$1")/.cell-evidence"
+}
+
+result_get() {
+    python3 -c 'import json,sys
+v=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("/"):
+    v=v[k]
+print(json.dumps(v))' "$1" "$2"
+}
+
+# 17: success. All five artifacts plus the result; health is byte-identical
+# to what the daemon served; the fidelity line is in fidelity.log, which
+# holds only if the snapshot was fetched while the daemon was up.
+work="$(make_work)"
+{ canned_trace; evidence_trace_lines; } >"$work/canned-trace.log"
+write_status_bodies "$work"
+port_ev="$(free_port)"
+rc=0
+NO_COLOR=1 STUB_HEALTH_BODY="$work/status-health.json" STUB_USAGE_BODY="$work/status-usage.json" \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17 || rc=$?
+ev="$(evidence_dir_of "$work")"
+check "an evidence run exits 0" "0" "$rc"
+check "the daemon boots with styling on even under a caller's NO_COLOR" "unset" \
+    "$(cat "$work/stub.pid.no-color" 2>/dev/null)"
+for f in health.json usage.json fidelity.log ingress_kinds.txt upstream_errors.jsonl client_result.json; do
+    check "a successful run lands .cell-evidence/$f" "yes" "$([ -f "$ev/$f" ] && echo yes || echo no)"
+done
+check "health.json is byte-identical to what the daemon served" "yes" \
+    "$(cmp -s "$work/status-health.json" "$ev/health.json" && echo yes || echo no)"
+check "usage.json is byte-identical to the window=all body" "yes" \
+    "$(cmp -s "$work/status-usage.json" "$ev/usage.json" && echo yes || echo no)"
+check "fidelity.log holds the verdict snapshot line" "1" \
+    "$(grep -c 'envelope field verdict snapshot .*rc_parser_unlocalized_total=3' "$ev/fidelity.log" 2>/dev/null)"
+check "fidelity.log is ANSI-stripped" "0" "$(grep -c $'\x1b' "$ev/fidelity.log" 2>/dev/null)"
+check "ingress_kinds.txt holds only the traced dialect" "anthropic" "$(cat "$ev/ingress_kinds.txt" 2>/dev/null)"
+check "upstream_errors.jsonl has one row per error line" "1" "$(wc -l <"$ev/upstream_errors.jsonl" 2>/dev/null | tr -d ' ')"
+row="$(head -1 "$ev/upstream_errors.jsonl" 2>/dev/null)"
+check "an error row carries provider_kind and status" "anthropic 429" \
+    "$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); print(r["provider_kind"], r["status"])' "$row" 2>/dev/null)"
+check "an error excerpt is capped at 512 bytes" "512" \
+    "$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["excerpt"].encode()))' "$row" 2>/dev/null)"
+res="$ev/client_result.json"
+check "client_result schema marker" '"routectl-cell-evidence/1"' "$(result_get "$res" schema 2>/dev/null)"
+check "client_result records driver_rc" "0" "$(result_get "$res" driver_rc 2>/dev/null)"
+check "client_result records rig_rc" "0" "$(result_get "$res" rig_rc 2>/dev/null)"
+check "client_result records the final exit" "0" "$(result_get "$res" exit 2>/dev/null)"
+check "client_result records the lane" '"anthropic-api"' "$(result_get "$res" lane 2>/dev/null)"
+check "client_result records the case" '"driver-selftest-17"' "$(result_get "$res" case 2>/dev/null)"
+check "client_result records expected_ingress" '"anthropic"' "$(result_get "$res" expected_ingress 2>/dev/null)"
+check "client_result records connection_mode" '"base-url"' "$(result_get "$res" connection_mode 2>/dev/null)"
+check "client_result records the case's turn count" "1" "$(result_get "$res" turns 2>/dev/null)"
+check "a complete cell names nothing missing" "{}" "$(result_get "$res" missing 2>/dev/null)"
+check "the fixture still lands beside the evidence" "yes" \
+    "$([ -f "$(default_landing_root "$work")/anthropic-api/driver-selftest-17/meta.json" ] && echo yes || echo no)"
+check "no temp snapshot is left behind" "" "$(find "$ev" -name '.*.tmp' 2>/dev/null)"
+rm -rf "$work"
+
+# 17b: a failing driver (exit 4) still lands both snapshots and the result.
+work="$(make_work)"
+write_status_bodies "$work"
+port_ev="$(free_port)"
+rc=0
+PROBE_EXIT=9 STUB_HEALTH_BODY="$work/status-health.json" STUB_USAGE_BODY="$work/status-usage.json" \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17b || rc=$?
+ev="$(evidence_dir_of "$work")"
+check "a failing driver still exits 4" "4" "$rc"
+for f in health.json usage.json client_result.json; do
+    check "a failing driver still lands .cell-evidence/$f" "yes" "$([ -f "$ev/$f" ] && echo yes || echo no)"
+done
+check "the failed run's result records the driver's own code" "9" "$(result_get "$ev/client_result.json" driver_rc 2>/dev/null)"
+check "the failed run's result records that the rig never ran" "null" "$(result_get "$ev/client_result.json" rig_rc 2>/dev/null)"
+check "the failed run's result records exit 4" "4" "$(result_get "$ev/client_result.json" exit 2>/dev/null)"
+rm -rf "$work"
+
+# 17c: a rig refusal (exit 5) still lands both snapshots and the result.
+work="$(make_work)"
+canned_trace_half_structural >"$work/canned-trace.log"
+write_status_bodies "$work"
+port_ev="$(free_port)"
+rc=0
+STUB_HEALTH_BODY="$work/status-health.json" STUB_USAGE_BODY="$work/status-usage.json" \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17c || rc=$?
+ev="$(evidence_dir_of "$work")"
+check "a rig refusal still exits 5" "5" "$rc"
+for f in health.json usage.json client_result.json; do
+    check "a rig refusal still lands .cell-evidence/$f" "yes" "$([ -f "$ev/$f" ] && echo yes || echo no)"
+done
+check "the refused run's result records driver_rc 0" "0" "$(result_get "$ev/client_result.json" driver_rc 2>/dev/null)"
+check "the refused run's result records the rig's code" "1" "$(result_get "$ev/client_result.json" rig_rc 2>/dev/null)"
+check "the refused run's result records exit 5" "5" "$(result_get "$ev/client_result.json" exit 2>/dev/null)"
+rm -rf "$work"
+
+# 17d: a daemon that never became healthy (exit 3) lands no evidence, and a
+# previous run's evidence in the same landing root does not survive to be
+# read as this run's.
+work="$(make_work)"
+write_status_bodies "$work"
+ev="$(evidence_dir_of "$work")"
+mkdir -p "$ev"
+cp "$work/status-health.json" "$ev/health.json"
+port_ev="$(free_port)"
+rc=0
+STUB_MODE=deaf STUB_HEALTH_BODY="$work/status-health.json" \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17d --timeout 2 || rc=$?
+check "a never-healthy daemon still exits 3" "3" "$rc"
+check "a never-healthy run lands no evidence dir" "no" "$([ -e "$ev" ] && echo yes || echo no)"
+rm -rf "$work"
+
+# 17e: a /status/health that 500s lands no health.json, and the result names
+# the missing snapshot. The exit code is the run's, not the fetch's.
+work="$(make_work)"
+write_status_bodies "$work"
+port_ev="$(free_port)"
+rc=0
+STUB_STATUS_MODE=health-500 STUB_HEALTH_BODY="$work/status-health.json" \
+STUB_USAGE_BODY="$work/status-usage.json" \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17e || rc=$?
+ev="$(evidence_dir_of "$work")"
+check "a failed health fetch does not change the exit code" "0" "$rc"
+check "a failed health fetch lands no health.json" "no" "$([ -e "$ev/health.json" ] && echo yes || echo no)"
+check "a failed health fetch still lands client_result.json" "yes" "$([ -f "$ev/client_result.json" ] && echo yes || echo no)"
+check "client_result names the missing health snapshot and why" '"http 500"' \
+    "$(result_get "$ev/client_result.json" missing/health.json 2>/dev/null)"
+check "the usage snapshot is unaffected by the health failure" "yes" "$([ -f "$ev/usage.json" ] && echo yes || echo no)"
+rm -rf "$work"
+
+# 17f: the evidence dir is confined like --out: a symlink in its place is
+# refused before any boot, and its target receives nothing.
+work="$(make_work)"
+mkdir -p "$work/scratch/cell" "$work/elsewhere"
+ln -s "$work/elsewhere" "$work/scratch/cell/.cell-evidence"
+port_ev="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17f \
+    --out "$work/scratch/cell" --out-root "$work/scratch" || rc=$?
+check "a symlinked evidence dir is refused as a usage error" "2" "$rc"
+check_log "the refusal names the symlink" "symlink component" "$work/runner.log"
+check "the refused run booted no daemon" "no" "$([ -f "$work/stub.pid" ] && echo yes || echo no)"
+check "the symlink target received nothing" "" "$(ls -A "$work/elsewhere")"
+rm -rf "$work"
+
+# 17i: a daemon that ignores SIGTERM is still stopped, within the grace
+# period, on the normal path: the rig runs and the run exits 0 rather than
+# waiting on the daemon forever. The outer bound turns a hang into exit 124.
+work="$(make_work)"
+port_ev="$(free_port)"
+rc=0
+started="$(date +%s)"
+STUB_MODE=ignores-term RUNNER_BOUND=60 \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17f || rc=$?
+elapsed=$(( $(date +%s) - started ))
+check "a daemon ignoring SIGTERM does not hang the normal stop path" "0" "$rc"
+check "the stop is bounded by the grace period" "yes" "$([ "$elapsed" -lt 30 ] && echo yes || echo no)"
+stub_pid="$(cat "$work/stub.pid" 2>/dev/null)"
+check "the daemon ignoring SIGTERM is dead after the run" "no" \
+    "$([ -n "$stub_pid" ] && kill -0 "$stub_pid" 2>/dev/null && echo yes || echo no)"
+[ -n "$stub_pid" ] && kill -9 "$stub_pid" 2>/dev/null
+rm -rf "$work"
+
+# 17j: a signal to the runner while the driver is still running. The driver
+# itself exits 0, so a runner that reported the interrupted command's own
+# status would call the cell a success. INT must read as 130, TERM as 143
+# and HUP (a closed terminal) as 129, both in the process status and in
+# client_result.json, and none may leave the daemon running.
+for sig_pair in INT:130 TERM:143 HUP:129; do
+    sig="${sig_pair%%:*}"
+    want="${sig_pair#*:}"
+    work="$(make_work)"
+    port_ev="$(free_port)"
+    rc=0
+    PROBE_SIGNAL_RUNNER="$sig" \
+    ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+        runner_run "$work" --lane anthropic-api --case driver-selftest-17f || rc=$?
+    ev="$(evidence_dir_of "$work")"
+    check "SIG$sig mid-drive exits $want" "$want" "$rc"
+    check "SIG$sig mid-drive records exit $want in client_result.json" "$want" \
+        "$(result_get "$ev/client_result.json" exit 2>/dev/null)"
+    stub_pid="$(cat "$work/stub.pid" 2>/dev/null)"
+    check "SIG$sig mid-drive leaves no daemon behind" "no" \
+        "$([ -n "$stub_pid" ] && kill -0 "$stub_pid" 2>/dev/null && echo yes || echo no)"
+    rm -rf "$work"
+done
+
+# 17k: a second, DIFFERENT signal landing inside cleanup must not replace
+# the first one's status. Traps nest in bash, so a TERM handled while the
+# INT cleanup is still running would re-enter it and exit 143. The second
+# signal is sent once, right after cleanup reads its incoming status (the
+# earliest point it can arrive), located by content in this case's own copy
+# of the runner, so the window is hit every run rather than by timing.
+inject_second_signal() {
+    python3 -I - "$1" <<'INJECT'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+anchor = re.compile(r"^(cleanup\(\) \{\n  local rc=\$\?\n)", re.M)
+if len(anchor.findall(text)) != 1:
+    sys.exit("cleanup anchor not found exactly once")
+second = '  [ -n "${SECOND_SENT:-}" ] || [ $# -eq 0 ] || { SECOND_SENT=1; kill -TERM $$; }\n'
+text = anchor.sub(lambda m: m.group(1) + second, text)
+open(path, "w").write(text)
+INJECT
+}
+work="$(make_work)"
+rc=0
+inject_second_signal "$work/repo/scripts/capture_driver.sh" || rc=$?
+check "the second-signal injection found its anchor" "0" "$rc"
+port_ev="$(free_port)"
+rc=0
+PROBE_SIGNAL_RUNNER=INT \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17f || rc=$?
+ev="$(evidence_dir_of "$work")"
+check "a TERM inside the INT cleanup keeps exit 130" "130" "$rc"
+check "a TERM inside the INT cleanup keeps 130 in client_result.json" "130" \
+    "$(result_get "$ev/client_result.json" exit 2>/dev/null)"
+rm -rf "$work"
+
+# 17l: the evidence writer runs inside cleanup, where INT and TERM are
+# ignored and that disposition is inherited, so a writer stuck past its
+# bound shrugs off timeout's SIGTERM. The bound must still hold: the run
+# finishes, keeps its own exit code, and says the evidence was not written.
+# The case's repo copy carries a writer that ignores SIGTERM and never ends,
+# and a runner whose writer bound is lowered (located by content) so the
+# case does not wait out the full minute.
+work="$(make_work)"
+rc=0
+python3 -I - "$work/repo/scripts/capture_driver.sh" <<'BOUND' || rc=$?
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+pattern = re.compile(r"^EVIDENCE_WRITE_SECONDS=60$", re.M)
+if len(pattern.findall(text)) != 1:
+    sys.exit("writer bound not found exactly once")
+open(path, "w").write(pattern.sub("EVIDENCE_WRITE_SECONDS=2", text))
+BOUND
+check "the writer bound was found in the runner copy" "0" "$rc"
+cat >"$work/repo/scripts/drivers/lib/cell_evidence.py" <<'WRITER'
+import signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(600)
+WRITER
+port_ev="$(free_port)"
+rc=0
+started="$(date +%s)"
+RUNNER_BOUND=90 \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17f || rc=$?
+elapsed=$(( $(date +%s) - started ))
+check "a writer ignoring SIGTERM does not hold the run" "0" "$rc"
+check "the writer bound holds inside cleanup" "yes" "$([ "$elapsed" -lt 45 ] && echo yes || echo no)"
+check_log "a killed writer is still reported" "could not write the cell evidence" "$work/runner.log"
+rm -rf "$work"
+
+# 17m: a daemon that survives SIGKILL (stuck in uninterruptible sleep, with
+# the kill pending) cannot be produced without privileges, so the case
+# reproduces its observable state: this case's runner copy has its SIGKILL
+# line (located by content) removed, and the stub ignores SIGTERM. The
+# runner must not wait on the pid forever, must not run the rig or parse a
+# trace the daemon may still be writing, and must report the failure as its
+# own exit code, in the process status and in client_result.json. Two
+# paths reach the stop: the normal one after a clean driver, and cleanup
+# entered with a nonzero status (a failing driver, exit 4) -- survival
+# overrides that status too, since an unkillable daemon is the worse fault.
+remove_sigkill() {
+    python3 -I - "$1" <<'NOKILL'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+pattern = re.compile(r'^(\s*)kill -9 "\$DAEMON_PID" 2>/dev/null \|\| true$', re.M)
+if len(pattern.findall(text)) != 1:
+    sys.exit("SIGKILL line not found exactly once")
+open(path, "w").write(pattern.sub(r"\1:", text))
+NOKILL
+}
+for unkillable_path in normal:0 failing-driver:9; do
+    path_name="${unkillable_path%%:*}"
+    probe_exit="${unkillable_path#*:}"
+    work="$(make_work)"
+    rc=0
+    remove_sigkill "$work/repo/scripts/capture_driver.sh" || rc=$?
+    check "[$path_name] the SIGKILL line was found in the runner copy" "0" "$rc"
+    port_ev="$(free_port)"
+    rc=0
+    started="$(date +%s)"
+    PROBE_EXIT="$probe_exit" STUB_MODE=ignores-term RUNNER_BOUND=60 \
+    ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+        runner_run "$work" --lane anthropic-api --case driver-selftest-17f || rc=$?
+    elapsed=$(( $(date +%s) - started ))
+    ev="$(evidence_dir_of "$work")"
+    check "[$path_name] a daemon that outlives SIGKILL exits 9" "9" "$rc"
+    check "[$path_name] the unkillable-daemon stop is bounded" "yes" \
+        "$([ "$elapsed" -lt 30 ] && echo yes || echo no)"
+    check "[$path_name] the unkillable-daemon run records exit 9" "9" \
+        "$(result_get "$ev/client_result.json" exit 2>/dev/null)"
+    check "[$path_name] the unkillable-daemon run records the driver's code" "$probe_exit" \
+        "$(result_get "$ev/client_result.json" driver_rc 2>/dev/null)"
+    check "[$path_name] the unkillable-daemon run never ran the rig" "null" \
+        "$(result_get "$ev/client_result.json" rig_rc 2>/dev/null)"
+    check "[$path_name] the unkillable-daemon run lands no fixture" "no" \
+        "$([ -e "$(default_landing_root "$work")/anthropic-api/driver-selftest-17f" ] && echo yes || echo no)"
+    check "[$path_name] the unkillable-daemon run parses no live trace" '"daemon still running"' \
+        "$(result_get "$ev/client_result.json" missing/fidelity.log 2>/dev/null)"
+    check "[$path_name] the unkillable-daemon run writes no trace artifact" "no" \
+        "$([ -e "$ev/fidelity.log" ] && echo yes || echo no)"
+    check_log "[$path_name] the unkillable daemon is named in the log" "survived SIGKILL" "$work/runner.log"
+    stub_pid="$(cat "$work/stub.pid" 2>/dev/null)"
+    [ -n "$stub_pid" ] && kill -9 "$stub_pid" 2>/dev/null
+    rm -rf "$work"
+done
+
+# 17n: the outer bound on the evidence writer must take the scrub checker
+# down with it. The checker runs in its own session (so the writer's own
+# bound can kill its whole group), which means killing the writer alone
+# would orphan it. This case's repo copy carries a stand-in checker that
+# forks a child and then blocks, and a runner with its writer bound lowered
+# (both located by content); the driver fails so the rig, which also runs
+# the scrubber, never starts. After the run neither process may survive.
+work="$(make_work)"
+{ canned_trace; evidence_trace_lines; } >"$work/canned-trace.log"
+rc=0
+python3 -I - "$work/repo/scripts/capture_driver.sh" <<'BOUND' || rc=$?
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+for name, value in (("EVIDENCE_WRITE_SECONDS", "60"), ("EVIDENCE_KILL_AFTER_SECONDS", "5")):
+    pattern = re.compile(rf"^{name}={value}$", re.M)
+    if len(pattern.findall(text)) != 1:
+        sys.exit(name + " not found exactly once")
+    text = pattern.sub(f"{name}=1", text)
+open(path, "w").write(text)
+BOUND
+check "the writer bounds were found in the runner copy" "0" "$rc"
+cat >"$work/repo/scripts/scrub-fixture.sh" <<CHECKER
+sleep 300 &
+printf '%s %s\n' "\$\$" "\$!" >"$work/checker.pids"
+exec sleep 300
+CHECKER
+port_ev="$(free_port)"
+rc=0
+PROBE_EXIT=9 RUNNER_BOUND=60 \
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17f || rc=$?
+check "a bounded-out writer keeps the run's own exit code" "4" "$rc"
+read -r checker_pid checker_child <"$work/checker.pids" 2>/dev/null
+check "the stand-in checker was reached" "yes" "$([ -n "${checker_child:-}" ] && echo yes || echo no)"
+check "no scrub checker outlives the writer bound" "no" \
+    "$({ [ -n "${checker_pid:-}" ] && kill -0 "$checker_pid" 2>/dev/null; } ||
+        { [ -n "${checker_child:-}" ] && kill -0 "$checker_child" 2>/dev/null; } && echo yes || echo no)"
+[ -n "${checker_pid:-}" ] && kill -9 "$checker_pid" 2>/dev/null
+[ -n "${checker_child:-}" ] && kill -9 "$checker_child" 2>/dev/null
+rm -rf "$work"
+
+# 17h: a previous run's evidence that cannot be removed is a usage error
+# before any boot, never an older snapshot left to be read as this run's.
+work="$(make_work)"
+stale="$work/scratch/cell/.cell-evidence"
+mkdir -p "$stale"
+printf 'stale\n' >"$stale/health.json"
+chmod 555 "$stale"
+port_ev="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_ev" ROUTECTL_DRIVER_PORT_MAX="$port_ev" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-17f \
+    --out "$work/scratch/cell" --out-root "$work/scratch" || rc=$?
+check "an unremovable stale evidence dir is refused as a usage error" "2" "$rc"
+check_log "the refusal names the evidence dir" "could not remove the previous evidence" "$work/runner.log"
+check "the refused run booted no daemon" "no" "$([ -f "$work/stub.pid" ] && echo yes || echo no)"
+chmod 755 "$stale"
+rm -rf "$work"
+
+# 17g: extractor rows. Each row is one trace line and the ingress tokens
+# (or error rows) the extractor must read off it. A body that quotes a
+# trace line or a field sits AFTER the first emitter target, and a span
+# field sits BEFORE it, so neither may contribute.
+xwork="$(mktemp -d)"
+ingress_row() {
+    local label="$1" expected="$2" line="$3"
+    printf '%s\n' "$line" >"$xwork/trace.log"
+    check "ingress row: $label" "$expected" \
+        "$(python3 -I "$CELL_EVIDENCE" extract-lines ingress "$xwork/trace.log" | tr '\n' ' ')"
+}
+error_row_count() {
+    local label="$1" expected="$2" line="$3"
+    printf '%s\n' "$line" >"$xwork/trace.log"
+    check "error row: $label" "$expected" \
+        "$(python3 -I "$CELL_EVIDENCE" extract-lines errors "$xwork/trace.log" | wc -l | tr -d ' ')"
+}
+X_SPAN='request{method=POST path=/v1/chat/completions request_id=019eab77-0000-4000-8000-0000000000f2}:chat_completions{ingress="openai_compat"}'
+# X_T is the target as plain text, the form a quoted or planted copy takes;
+# X_S is the target as the formatter draws an event's own.
+X_T='routectl_core::log_safe:'
+X_S="$(styled_target routectl_core::log_safe)"
+ingress_row "the anchored line yields its token" "openai " \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S ingress request body ingress=\"openai\" body={} redact_prompts_enabled=false"
+ingress_row "a body quoting ingress=\"openai\" adds no token" "anthropic " \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S ingress request body ingress=\"anthropic\" body={\"content\":\"ingress=\\\"openai\\\"\"} redact_prompts_enabled=false"
+# A truncated or non-JSON body can carry the field with RAW quotes, which
+# an extractor that took the last (or any) `ingress="..."` on the line
+# would read.
+ingress_row "a raw-quoted ingress=\"openai\" in the body adds no token" "anthropic " \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S ingress request body ingress=\"anthropic\" body=say ingress=\"openai\" ... [truncated at 64 bytes] redact_prompts_enabled=false"
+ingress_row "a span-only ingress field is not an event token" "" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S outgoing request body provider_kind=\"openai-compat\" provider=p body={} redact_prompts_enabled=false"
+ingress_row "a body quoting a whole ingress line adds no token" "" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S outgoing request body provider_kind=\"openai-compat\" provider=p body={\"c\":\"$X_T ingress request body ingress=\\\"openai-responses\\\"\"} redact_prompts_enabled=false"
+# Raw (unescaped) quotes: a truncated or non-JSON body can carry a whole
+# trace line verbatim, so only the FIRST emitter target on the line counts.
+ingress_row "a raw-quoted ingress line in a body adds no token" "" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S outgoing request body provider_kind=\"openai-compat\" provider=p body=say $X_T ingress request body ingress=\"openai\" body={} ... [truncated at 64 bytes] redact_prompts_enabled=false"
+ingress_row "an ANSI-styled line is stripped before the anchor" "openai-responses " \
+    $'\x1b[2m2026-08-25T10:00:00.000000Z\x1b[0m \x1b[35mTRACE\x1b[0m request\x1b[1m{\x1b[0mrequest_id=x\x1b[1m}\x1b[0m: \x1b[2mroutectl_core::log_safe\x1b[0m\x1b[2m:\x1b[0m ingress request body ingress="openai-responses" body={}'
+error_row_count "the anchored error line yields a row" "1" \
+    "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"openai-compat\" provider=\"openai-compat:up\" status=404 body={}"
+error_row_count "a body quoting an error line yields no row" "0" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S ingress request body ingress=\"openai\" body={\"c\":\"$X_T upstream error body provider_kind=\\\"x\\\" provider=p status=500 body={}\"}"
+error_row_count "a raw-quoted error line in a body yields no row" "0" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S ingress request body ingress=\"openai\" body=say $X_T upstream error body provider_kind=\"x\" provider=p status=500 body={} ... [truncated at 64 bytes] redact_prompts_enabled=false"
+# The client-chosen model name is rendered raw (printable ASCII, braces
+# included) as the `alias` span field, BEFORE the event's own target. A
+# model name that spells a whole event must not be read as one: neither
+# when the real event is another log_safe line, nor when the real target
+# is a different module, nor when the planted text carries no brace.
+X_ALIAS_SPAN='request{method=POST path=/v1/messages request_id=019eab77-0000-4000-8000-0000000000f3}:complete_with_options'
+X_REAL_TAIL="complete{provider=anthropic:p model=m}: $X_S outgoing request body provider_kind=\"anthropic\" provider=p body={} redact_prompts_enabled=false"
+error_row_count "an error event planted in the alias span yields no row" "0" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_ALIAS_SPAN{alias=x}: $X_T upstream error body provider_kind=\"anthropic\" provider=p status=500 body=forged}:$X_REAL_TAIL"
+ingress_row "an ingress event planted in the alias span adds no token" "" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_ALIAS_SPAN{alias=x}: $X_T ingress request body ingress=\"openai\" body={}}:$X_REAL_TAIL"
+ingress_row "a brace-free planted ingress event adds no token" "" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_ALIAS_SPAN{alias=x: $X_T ingress request body ingress=\"openai\" y}:$X_REAL_TAIL"
+ingress_row "a planted ingress event over another module's event adds no token" "" \
+    "2026-08-25T10:00:00.000000Z  INFO $X_ALIAS_SPAN{alias=x}: $X_T ingress request body ingress=\"openai\" }:complete{provider=anthropic:p model=m}: $(styled_target routectl_router::router::dispatch) dispatching attempt=1"
+ingress_row "a benign alias span does not hide the real ingress event" "openai " \
+    "2026-08-25T10:00:00.000000Z TRACE $X_ALIAS_SPAN{alias=my-alias}: $X_S ingress request body ingress=\"openai\" body={} redact_prompts_enabled=false"
+# The sink writes an ESC inside field text as the visible four characters
+# `\x1b`, so a span value spelling the STYLED target is still plain text.
+ingress_row "a planted escaped-styled target in the alias span adds no token" "" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_ALIAS_SPAN{alias=\\x1b[2mroutectl_core::log_safe\\x1b[0m\\x1b[2m:\\x1b[0m ingress request body ingress=\"openai\" }:$X_REAL_TAIL"
+# Fail closed: an unstyled trace has no boundary a field cannot forge.
+ingress_row "an unstyled event line contributes nothing" "" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_T ingress request body ingress=\"openai\" body={} redact_prompts_enabled=false"
+
+# Upstream error excerpts are written to disk beside the fixture, so a
+# credential an upstream echoed into its error text (in a JSON message or
+# in plain text, where no name-keyed redaction sees it) must never land
+# there. Keys are assembled at runtime so no literal sits in this file.
+error_excerpt() {
+    local label="$1" expected="$2" body="$3"
+    printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=401 body=$body" \
+        >"$xwork/trace.log"
+    check "error excerpt: $label" "$expected" \
+        "$(python3 -I "$CELL_EVIDENCE" extract-lines errors "$xwork/trace.log" |
+            python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["excerpt"])' 2>/dev/null)"
+}
+X_KEY="sk-ant-api03-$(printf 'Q%.0s' $(seq 1 24))"
+X_BEARER="Bearer $(printf 'z%.0s' $(seq 1 24))"
+X_OMITTED='[omitted: credential-shaped content]'
+error_excerpt "a key inside a JSON error message is omitted" "$X_OMITTED" \
+    "{\"error\":{\"message\":\"invalid key $X_KEY\"}}"
+error_excerpt "a key in a plain-text error body is omitted" "$X_OMITTED" \
+    "invalid x-api-key $X_KEY supplied"
+error_excerpt "a bearer token in a plain-text error body is omitted" "$X_OMITTED" \
+    "rejected Authorization: $X_BEARER"
+error_excerpt "a key straddling the excerpt cap is omitted" "$X_OMITTED" \
+    "$(printf 'p%.0s' $(seq 1 500)) $X_KEY"
+error_excerpt "a clean error body keeps its excerpt" '{"error":{"message":"rate limited"}}' \
+    '{"error":{"message":"rate limited"}}'
+# One dirty row must not cost its clean neighbours their excerpts.
+{
+    printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=429 body=clean one"
+    printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=401 body=bad $X_KEY"
+    printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=500 body=clean two"
+} >"$xwork/trace.log"
+check "error excerpt: only the dirty row of a mixed batch is omitted" \
+    "clean one|$X_OMITTED|clean two" \
+    "$(python3 -I "$CELL_EVIDENCE" extract-lines errors "$xwork/trace.log" |
+        python3 -c 'import json,sys; print("|".join(json.loads(l)["excerpt"] for l in sys.stdin))' 2>/dev/null)"
+# Fail closed: with no checker beside the writer, nothing can be verified.
+mkdir -p "$xwork/lone/scripts/drivers/lib"
+cp "$CELL_EVIDENCE" "$xwork/lone/scripts/drivers/lib/cell_evidence.py"
+printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=429 body=rate limited" \
+    >"$xwork/trace.log"
+check "error excerpt: a body that cannot be checked is omitted" "$X_OMITTED" \
+    "$(python3 -I "$xwork/lone/scripts/drivers/lib/cell_evidence.py" extract-lines errors "$xwork/trace.log" |
+        python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["excerpt"])' 2>/dev/null)"
+
+# Defense in depth for a credential no shape rule knows: an excerpt whose
+# body carries the literal value of a credential the run holds is omitted.
+# The key is random and prefix-less, so only this rule can see it; the same
+# body with the variable unset is the control that attributes the omission.
+X_ENV_KEY="$(head -c 400 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 40)"
+X_ENV_LINE="2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"bedrock\" provider=p status=403 body={\"message\":\"key $X_ENV_KEY is not authorized\"}"
+env_excerpt() {
+    printf '%s\n' "$X_ENV_LINE" >"$xwork/trace.log"
+    env "$@" python3 -I "$CELL_EVIDENCE" extract-lines errors "$xwork/trace.log" |
+        python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["excerpt"])' 2>/dev/null
+}
+check "the run's random key is 40 chars" "40" "${#X_ENV_KEY}"
+check "error excerpt: a held credential's value in a body is omitted" "$X_OMITTED" \
+    "$(env_excerpt ROUTECTL_DRIVER_BEDROCK_API_KEY="$X_ENV_KEY")"
+check "error excerpt: a held account id's value in a body is omitted" "$X_OMITTED" \
+    "$(env_excerpt ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID="$X_ENV_KEY")"
+check "error excerpt: the same body is kept when no credential holds it" \
+    "{\"message\":\"key $X_ENV_KEY is not authorized\"}" \
+    "$(env_excerpt -u ROUTECTL_DRIVER_BEDROCK_API_KEY ROUTECTL_DRIVER_OPENAI_API_KEY="other-$X_ENV_KEY-other")"
+check "error excerpt: a held value under the length floor is ignored" \
+    "{\"message\":\"key $X_ENV_KEY is not authorized\"}" \
+    "$(env_excerpt ROUTECTL_DRIVER_BEDROCK_API_KEY="${X_ENV_KEY:0:15}")"
+check "error excerpt: a non-credential driver variable is ignored" \
+    "{\"message\":\"key $X_ENV_KEY is not authorized\"}" \
+    "$(env_excerpt ROUTECTL_DRIVER_REQUEST_MODEL="$X_ENV_KEY")"
+
+# The held-credential name pattern is a vocabulary the lane configs must
+# fit: every secret a lane resolves through an `env://` ref is a credential
+# the run holds, and a name the pattern missed would be one whose echo the
+# writer could not omit. Welded here against every committed lane config,
+# so a lane added with a new suffix is red rather than silently uncovered.
+# The positive control: the configs must yield refs, or the loop is vacuous.
+held_pattern="$(sed -n 's/^HELD_CREDENTIAL_NAME = re.compile(r"\(.*\)")$/\1/p' "$CELL_EVIDENCE")"
+check_ne "the writer declares a held-credential name pattern" "" "$held_pattern"
+lane_refs="$(cat "$HERE"/drivers/config/*.toml |
+    grep -v '^[[:space:]]*#' | grep -oE '"env://[A-Za-z0-9_]+"' | tr -d '"' | sed 's|^env://||' | sort -u)"
+check_ne "the lane configs carry env:// credential refs" "" "$lane_refs"
+unmatched="$(printf '%s\n' "$lane_refs" | python3 -I -c 'import re, sys
+pattern = re.compile(sys.argv[1])
+print(" ".join(name for name in sys.stdin.read().split() if not pattern.match(name)))' "$held_pattern")"
+check "every lane config env:// ref is a held credential name" "" "$unmatched"
+
+# The scratch copy of the error bodies the checker scans must live beside
+# the trace (inside the run workspace the runner removes), never in the
+# shared temp root, where a writer killed mid-check would leave full error
+# bodies behind. A stand-in checker records the directory it was handed and
+# its pid, then blocks so the writer can be SIGKILLed mid-check.
+mkdir -p "$xwork/scratchcase/scripts/drivers/lib" "$xwork/scratchcase/run" "$xwork/tmp"
+cp "$CELL_EVIDENCE" "$xwork/scratchcase/scripts/drivers/lib/cell_evidence.py"
+cat >"$xwork/scratchcase/scripts/scrub-fixture.sh" <<'CHECKER'
+printf '%s %s\n' "$$" "$2" >>"$SCRUB_SEEN"
+exec sleep 30
+CHECKER
+printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=429 body=rate limited" \
+    >"$xwork/scratchcase/run/trace.log"
+SCRUB_SEEN="$xwork/scrub-seen" TMPDIR="$xwork/tmp" \
+    python3 -I "$xwork/scratchcase/scripts/drivers/lib/cell_evidence.py" \
+    extract-lines errors "$xwork/scratchcase/run/trace.log" >/dev/null 2>&1 &
+writer_pid=$!
+i=0
+while [ ! -s "$xwork/scrub-seen" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+kill -9 "$writer_pid" 2>/dev/null
+wait "$writer_pid" 2>/dev/null
+read -r checker_pid scratch_seen <"$xwork/scrub-seen" 2>/dev/null
+[ -n "${checker_pid:-}" ] && kill -9 "$checker_pid" 2>/dev/null
+check "the checker was reached" "yes" "$([ -n "${scratch_seen:-}" ] && echo yes || echo no)"
+check "the scrub scratch lives beside the trace" "yes" \
+    "$(case "${scratch_seen:-}" in "$xwork/scratchcase/run/"*) echo yes ;; *) echo no ;; esac)"
+check "a writer killed mid-check leaves nothing in the temp root" "" "$(ls -A "$xwork/tmp")"
+
+# The checker can exit, and be reaped, between its timeout firing and the
+# group kill, so the kill finds no group. A controlled seam makes that race
+# certain: the first bounded wait reaps the stand-in checker, then reports a
+# timeout. Finalization must still fail closed (the excerpt omitted), still
+# write client_result.json, and still take the checker's verdict path to
+# the end (its streams drained) rather than abandon it at the failed kill.
+mkdir -p "$xwork/racecase/scripts/drivers/lib" "$xwork/racecase/run" "$xwork/racecase/out"
+cp "$CELL_EVIDENCE" "$xwork/racecase/scripts/drivers/lib/cell_evidence.py"
+printf 'exit 0\n' >"$xwork/racecase/scripts/scrub-fixture.sh"
+printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=429 body=rate limited" \
+    >"$xwork/racecase/run/trace.log"
+python3 -I - "$xwork/racecase" <<'RACE' >"$xwork/race.log" 2>&1
+import importlib.util, subprocess, sys
+root = sys.argv[1]
+spec = importlib.util.spec_from_file_location("cell_evidence", root + "/scripts/drivers/lib/cell_evidence.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = subprocess.Popen.communicate
+drained = []
+def late(self, input=None, timeout=None):
+    if timeout is not None:
+        self.wait()
+        raise subprocess.TimeoutExpired(self.args, timeout)
+    drained.append(self.pid)
+    return real(self, input, timeout)
+subprocess.Popen.communicate = late
+mod.finalize(["--dir", root + "/out", "--trace", root + "/run/trace.log", "--exit", "0"])
+print("drained=%d" % len(drained))
+RACE
+check "a checker gone before its group kill does not crash finalization" "0" "$?"
+check "a checker gone before its group kill still lands client_result.json" "yes" \
+    "$([ -f "$xwork/racecase/out/client_result.json" ] && echo yes || echo no)"
+check "a checker gone before its group kill is still drained" "drained=1" \
+    "$(grep -o 'drained=[0-9]*' "$xwork/race.log")"
+check "a checker gone before its group kill fails closed" "$X_OMITTED" \
+    "$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["excerpt"])' \
+        "$xwork/racecase/out/upstream_errors.jsonl" 2>/dev/null)"
+
+fidelity_row_count() {
+    local label="$1" expected="$2" line="$3"
+    printf '%s\n' "$line" >"$xwork/trace.log"
+    check "fidelity row: $label" "$expected" \
+        "$(python3 -I "$CELL_EVIDENCE" extract-lines fidelity "$xwork/trace.log" | wc -l | tr -d ' ')"
+}
+X_F='routectl_cli::handlers::status::field_verdict_log:'
+fidelity_row_count "the anchored snapshot line is kept" "1" \
+    "2026-08-25T10:00:01.000000Z  INFO request{method=GET path=/status/health}: $(styled_target routectl_cli::handlers::status::field_verdict_log) envelope field verdict snapshot rc_parser_unlocalized_total=0"
+fidelity_row_count "a body quoting the snapshot line raw is not kept" "0" \
+    "2026-08-25T10:00:00.000000Z TRACE $X_SPAN: $X_S ingress request body ingress=\"openai\" body=say $X_F envelope field verdict snapshot rc_parser_unlocalized_total=0 ... [truncated at 64 bytes] redact_prompts_enabled=false"
+rm -rf "$xwork"
+
+# The extractor's spellings are replicas of the emitters'; weld them where
+# the crates tree exists. A positive control first: each needle must be
+# readable out of the extractor, or the weld compares nothing.
+LOG_SAFE_SRC="$HERE/../crates/routectl-core/src/log_safe.rs"
+FIDELITY_SRC="$HERE/../crates/routectl-cli/src/handlers/status/field_verdict_log.rs"
+if [ -f "$LOG_SAFE_SRC" ] && [ -f "$FIDELITY_SRC" ]; then
+    for pair in 'INGRESS_MESSAGE:"ingress request body"' 'ERROR_MESSAGE:"upstream error body"'; do
+        name="${pair%%:*}"
+        spelled="$(sed -n "s/^$name = \"\(.*\) \"$/\"\1\"/p" "$CELL_EVIDENCE")"
+        check "the extractor's $name is the emitter's message" "${pair#*:}" "$spelled"
+        check "log_safe.rs emits $spelled" "yes" "$(grep -qF -- "$spelled" "$LOG_SAFE_SRC" && echo yes || echo no)"
+    done
+    fid="$(sed -n 's/^FIDELITY_MESSAGE = \(".*"\)$/\1/p' "$CELL_EVIDENCE")"
+    check "the extractor's fidelity message is the emitter's constant" "yes" \
+        "$([ -n "$fid" ] && grep -qF "FIDELITY_SNAPSHOT_MESSAGE: &str = $fid;" "$FIDELITY_SRC" && echo yes || echo no)"
+    check "the fidelity target names the emitting module" "yes" \
+        "$(grep -qF 'FIDELITY_TARGET = "routectl_cli::handlers::status::field_verdict_log"' "$CELL_EVIDENCE" && echo yes || echo no)"
+    check "the ingress body trace records its dialect as the first field" "yes" \
+        "$(grep -A3 'tracing::trace!(' "$LOG_SAFE_SRC" | grep -B1 -A1 '^        ingress,$' | grep -qF 'body = %truncated' && echo yes || echo no)"
+else
+    echo "PASS: no crates tree in this checkout; the extractor weld is not asserted"
+fi
 
 if [ "$fails" -gt 0 ]; then
     echo "capture_driver self-test: $fails failure(s)"

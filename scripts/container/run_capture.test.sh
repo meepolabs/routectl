@@ -914,6 +914,36 @@ else
     skip "  environment."
 fi
 
+# A runner exit the container fixture cannot produce (9 needs a daemon that
+# survives SIGKILL, and the in-cell runner is the real one, read-only) is
+# still the wrapper's to pass through untouched. A stand-in `docker` that
+# answers `image inspect` and exits 9 from `run` pins that: 9 is the
+# runner's, not one of the wrapper's own refusal codes.
+FAKE_DOCKER_BIN="$WORK/fake-docker-bin"
+mkdir -p "$FAKE_DOCKER_BIN"
+cat >"$FAKE_DOCKER_BIN/docker" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+    image) exit 0 ;;
+    run) exit "${FAKE_DOCKER_RUN_EXIT:-0}" ;;
+    *) exit 0 ;;
+esac
+SH
+chmod +x "$FAKE_DOCKER_BIN/docker"
+FAKE_DOCKER_ROOT="$(new_scratch)"
+rc=0
+(
+    cd "$REPO_ROOT" || exit 2
+    PATH="$FAKE_DOCKER_BIN:$PATH" \
+    FAKE_DOCKER_RUN_EXIT=9 \
+    ROUTECTL_BIN="$FAKE_DOCKER_ROOT/stub-routectl" \
+    ROUTECTL_CAPTURE_CELL_SEAT="$SEAT" \
+        bash "$WRAPPER" --scratch "$FAKE_DOCKER_ROOT/land" -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        -- "/scratch/$ASSETS_REL/driver.sh"
+) >"$FAKE_DOCKER_ROOT.log" 2>&1 || rc=$?
+check "a runner exit 9 comes out of the wrapper as 9" "9" "$rc"
+
 # ---------------------------------------------------------------------
 # Part 6: the container legs
 # ---------------------------------------------------------------------
@@ -1064,8 +1094,8 @@ run_container_legs() {
     fi
 
     # --- exit codes propagate VERBATIM -------------------------------
-    # The runner distinguishes seven outcomes and callers act on the
-    # number. A wrapper that collapsed them to 1 would make the whole
+    # The runner distinguishes nine outcomes (0 and 2-9) and callers act on
+    # the number. A wrapper that collapsed them to 1 would make the whole
     # contract unobservable through the container.
     root="$(new_scratch nolanding)"
     rc=0

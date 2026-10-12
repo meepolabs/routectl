@@ -735,7 +735,10 @@ What each run then does, in order:
    URL plus all four fixture pins exported. `--help` lists the exact
    variable names -- that block is the contract a driver script codes
    against.
-5. Stops the daemon by the pid it captured from its own `$!` (never by
+5. After the driver exits, whatever its status, saves the daemon's
+   `/status/health` and `/status/usage` snapshots (see "Per-cell evidence"
+   below).
+6. Stops the daemon by the pid it captured from its own `$!` (never by
    name, and never under `setsid`, which would capture the wrapper), then
    runs the rig in `--driver-mode` against the trace, landing under
    `<out>/<lane>/<case-id>/`. With no `--out`, that is
@@ -745,7 +748,11 @@ A cleanup trap runs on every exit path, so an interrupted or failed run
 never leaves a daemon holding its port. Exit codes: 2 usage, 3 unhealthy
 daemon, 4 driver failure, 5 rig refusal, 6 no free port, 7 the rig ran
 clean but landed no fixture, 8 (front-proxy only) the daemon is healthy
-but its MITM listener never became ready. 5 and 7 are separate because a
+but its MITM listener never became ready, 9 the daemon was still alive
+after SIGTERM, a grace period, SIGKILL and a second bounded wait (a
+process in uninterruptible sleep keeps SIGKILL pending), so the rig never
+ran on a trace that may still be growing; 9 replaces any other code the run
+was already exiting with. 5 and 7 are separate because a
 refusal means routectl produced a fixture the gate rejected (a defect,
 never retry) while a zero landing means the case produced no completed
 request (retryable). 8 is separate from 3 because MITM startup failure
@@ -764,6 +771,90 @@ question the field exists to answer.
 `scripts/capture_driver.test.sh` covers the runner against a STUB daemon
 (`ROUTECTL_BIN` selects the binary) -- a real boot needs a credential and
 CI has none.
+
+### Per-cell evidence
+
+Every run whose daemon became healthy leaves `<out>/.cell-evidence/` beside
+the fixture, on EVERY exit path after that point (0, 4, 5, 7, 8, a signal).
+It is what a matrix aggregator reads after the run workspace, trace
+included, has been removed. A run that never became healthy (exit 3, or a
+usage error) leaves none, and any `.cell-evidence/` from an earlier run into
+the same `--out` is removed before boot, so an absent file is never an older
+run's file. One `--out` per cell: a second run into the same landing root
+replaces the first run's evidence. The directory is confined under
+`--out-root` by the same check as `--out` (a symlink in its place is a usage
+error). None of it changes the exit codes above. Writer:
+`scripts/drivers/lib/cell_evidence.py` (the snapshots are fetched by the
+runner itself).
+
+| File | Written | Content |
+|---|---|---|
+| `health.json` | after the driver exits, before the daemon stops | `GET /status/health` body, byte for byte |
+| `usage.json` | same | `GET /status/usage?window=all` body, byte for byte |
+| `fidelity.log` | after the daemon stops, before workspace removal | every `envelope field verdict snapshot` INFO line in the trace, ANSI-stripped, one per line (the `rc_parser_unlocalized_total` and `rc_field_verdict_rows` fields live only here, not in the health JSON) |
+| `ingress_kinds.txt` | same | the distinct traced ingress dialect tokens (`anthropic`, `openai`, `openai-responses`), sorted, one per line |
+| `upstream_errors.jsonl` | same | one JSON object per `upstream error body` line: `{"excerpt": str, "provider_kind": str, "status": int}`, excerpt capped at 512 bytes; when `scripts/scrub-fixture.sh --check` flags the error body (a key or token echoed into its text), the body contains the value (16+ chars) of any `ROUTECTL_DRIVER_*_API_KEY`, `*_TOKEN` or `*_ACCOUNT_ID` the run holds, or the check cannot give a verdict, the excerpt is the fixed `[omitted: credential-shaped content]` instead |
+| `client_result.json` | last, from the cleanup trap | see below |
+
+Each snapshot fetch is bounded (10 s, 8 MiB) and lands through a temp file,
+so a snapshot is either the whole 200 body or absent. Serving
+`/status/health` is also what makes the daemon emit the fidelity line, so
+`fidelity.log` is non-empty only when that fetch happened while the daemon
+was up. The three trace files are empty, not absent, when the trace held no
+matching line.
+
+`client_result.json`:
+
+```json
+{
+  "case": "tools-multiturn-01",
+  "connection_mode": "base-url",
+  "driver_rc": 0,
+  "exit": 0,
+  "expected_ingress": "anthropic",
+  "lane": "anthropic-api",
+  "missing": {},
+  "rig_rc": 0,
+  "schema": "routectl-cell-evidence/1",
+  "truncated": [],
+  "turns": 3
+}
+```
+
+- `schema` -- the layout marker, `routectl-cell-evidence/1`. A reader treats
+  any other value as an unknown layout (cell incomplete), never as empty.
+- `driver_rc` / `rig_rc` -- the driver command's and the capture rig's own
+  exit codes; `null` when that step never ran (a driver failure has
+  `rig_rc: null`). `exit` is this runner's exit code.
+- `turns` -- the number of turns in the case file.
+- `missing` -- artifact name -> reason, for each of the five files above
+  that could not be produced: a snapshot's reason is `http <code>`,
+  `curl exit <n>` (time or size cap, refused connection), or `write failed`;
+  a trace file's is `trace unreadable: <error class>`, or
+  `daemon still running` on an exit 9 run, whose trace is never read. `{}` means every file
+  is present.
+- `truncated` -- names of trace files that hit their cap (1 MiB of
+  fidelity lines, 1000 error rows, 16 ingress tokens) and so are not the
+  whole trace's record.
+
+Matching anchors on the event boundary the daemon's formatter draws. The
+runner boots the daemon with styling on (it unsets `NO_COLOR`), and with
+styling the event's own target is the first dimmed target followed by a
+dimmed `:` on the line; the log sink writes any ESC inside span or event
+field text as the visible text `\x1b`, so no field value can spell that
+boundary. The target found there must be the one sought
+(`routectl_core::log_safe` for the ingress and error lines,
+`routectl_cli::handlers::status::field_verdict_log` for the fidelity line)
+and, ANSI-stripped, be followed directly by the event message; the ingress
+token is the event's own first field (`ingress="<token>"` right after the
+message). So neither a span value written before the target -- the
+client-chosen model name is logged raw as the `alias` span field and can
+spell a whole trace line -- nor a request body written after it, escaped or
+raw, contributes. A line with no styled target contributes nothing.
+
+A reader checks `schema` first, then takes an artifact's absence from
+`missing`: an empty trace file means the trace held no matching line, while
+a file named in `missing` was not produced at all.
 
 ### The (lane, variant) convention
 
@@ -1350,7 +1441,7 @@ provider:
 - `--user` carries the host uid/gid, so the fixture lands owned by you. A
   root-owned fixture could not be promoted or scrubbed without sudo.
 
-**The wrapper's exit code is the runner's, verbatim.** 0 and 2 through 8
+**The wrapper's exit code is the runner's, verbatim.** 0 and 2 through 9
 mean exactly what they mean on the host path, so a caller reads one contract
 either way. The wrapper's own refusals occupy a disjoint range, one code
 each, and every one of them fires before docker is consulted at all -- so a

@@ -188,6 +188,23 @@
 #      failure is non-fatal to the daemon, so /health stays green while
 #      the proxied CONNECT has nothing to hit, and an operator sent to
 #      the health layer would debug the wrong thing
+#   9  the daemon was still alive after SIGTERM, the grace period, SIGKILL
+#      and a second bounded wait (a process stuck in uninterruptible
+#      sleep keeps SIGKILL pending). Takes precedence over any other code,
+#      a signal's included. The rig never runs on a trace the daemon may
+#      still be writing, and the trace evidence is reported missing rather
+#      than parsed
+#
+# PER-CELL EVIDENCE. Once the daemon is healthy, every exit path leaves
+# `<out>/.cell-evidence/` beside the fixture: the daemon's /status/health and
+# /status/usage snapshots (read after the driver exits, before the daemon
+# stops), what the trace says about fidelity, ingress dialects and upstream
+# errors (read after it stops, before the workspace goes), and
+# client_result.json naming the step codes, the exit code, and any artifact
+# that could not be produced. A run that never became healthy leaves none.
+# The exit codes above are unaffected by it. Layout: docs/DEVELOPMENT.md
+# "Per-cell evidence". Give each cell its own `--out`: a second run into the
+# same landing root replaces the first run's evidence.
 #
 # `ROUTECTL_BIN` overrides the daemon binary (default `routectl`). It sits
 # outside the driver namespace below on purpose: it names the DAEMON, not
@@ -523,6 +540,20 @@ OUT_ROOT="$(abspath_lexical "$OUT_ROOT")"
 confine_out_root "$OUT_ROOT"
 confine_out_under "$DRIVER_OUT" "$OUT_ROOT"
 
+# Per-cell evidence lands beside the fixture, under the same confined root,
+# and is checked by the same walk so a symlinked evidence dir is refused
+# rather than followed. A previous run's evidence is removed BEFORE boot:
+# a run that dies early must not leave an older run's snapshot looking like
+# its own. The directory itself is created only once the daemon is healthy,
+# so a run that never got that far lands no evidence at all.
+EVIDENCE_DIR="$DRIVER_OUT/.cell-evidence"
+confine_out_under "$EVIDENCE_DIR" "$OUT_ROOT"
+{ rm -rf "$EVIDENCE_DIR" 2>/dev/null && [ ! -e "$EVIDENCE_DIR" ] && [ ! -L "$EVIDENCE_DIR" ]; } ||
+  die "could not remove the previous evidence at $EVIDENCE_DIR" 2
+CELL_EVIDENCE="$ROOT/scripts/drivers/lib/cell_evidence.py"
+[ -r "$CELL_EVIDENCE" ] || die "cell evidence writer not found at $CELL_EVIDENCE" 2
+CASE_TURNS="$(python3 "$VALIDATE_CASE" --turns "$CASE_FILE" | wc -l | tr -d ' ')"
+
 
 # ---------------------------------------------------------------------
 # Run workspace
@@ -561,26 +592,99 @@ CLIENT_RECORD="$RUN/client.txt"
 
 DAEMON_PID=""
 
-# Kill ONLY the pid this run captured, then take the workspace down.
-# Registered before the daemon starts so every exit path -- a failed
-# health poll, a driver crash, a SIGINT from the terminal -- runs it; an
-# aborted run that leaked a daemon would hold its port and its hermetic
-# state directory for the rest of the session.
-cleanup() {
-  local rc=$?
-  trap - EXIT
-  if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-    kill "$DAEMON_PID" 2>/dev/null || true
-    local i=0
-    while [ "$i" -lt 40 ] && kill -0 "$DAEMON_PID" 2>/dev/null; do
-      sleep 0.1
-      i=$((i + 1))
-    done
-    if kill -0 "$DAEMON_PID" 2>/dev/null; then
-      kill -9 "$DAEMON_PID" 2>/dev/null || true
-      wait "$DAEMON_PID" 2>/dev/null || true
+# Evidence state the cleanup trap reports. Empty rc = that step never ran.
+EVIDENCE_ACTIVE=0
+DRIVER_RC=""
+RIG_RC=""
+HEALTH_SNAPSHOT="not fetched"
+USAGE_SNAPSHOT="not fetched"
+
+# Write the trace-derived evidence and the client result. Runs from the
+# cleanup trap, after the daemon is stopped (so the trace is complete) and
+# before the workspace removal (which takes the trace with it). A failure
+# here is reported and never changes the run's exit code: evidence is a
+# record of the run, not a gate on it.
+#
+# The writer inherits cleanup's ignored INT/TERM, so timeout's own SIGTERM
+# cannot end it; --kill-after escalates to SIGKILL, which can.
+EVIDENCE_WRITE_SECONDS=60
+EVIDENCE_KILL_AFTER_SECONDS=5
+finalize_evidence() {
+  local rc="$1"
+  [ "$EVIDENCE_ACTIVE" = 1 ] || return 0
+  local -a live=()
+  [ "$DAEMON_UNSTOPPABLE" = 0 ] || live=(--trace-live)
+  timeout --kill-after="${EVIDENCE_KILL_AFTER_SECONDS}s" "${EVIDENCE_WRITE_SECONDS}s" \
+    python3 "$CELL_EVIDENCE" finalize "${live[@]+"${live[@]}"}" \
+    --dir "$EVIDENCE_DIR" --trace "$TRACE" \
+    --snapshot "health=$HEALTH_SNAPSHOT" --snapshot "usage=$USAGE_SNAPSHOT" \
+    --exit "$rc" --driver-rc "$DRIVER_RC" --rig-rc "$RIG_RC" \
+    --lane "$LANE" --case "$CASE_ID" --expected-ingress "$EXPECTED_INGRESS" \
+    --connection-mode "$CONNECTION_MODE" --turns "$CASE_TURNS" ||
+    echo "capture_driver: could not write the cell evidence under $EVIDENCE_DIR" >&2
+}
+
+# Stop ONLY the pid this run captured: SIGTERM, then SIGKILL once the
+# grace period runs out, then a second bounded wait for the SIGKILL to
+# land. Bounded on every path, because a daemon stuck in shutdown would
+# otherwise hold the run (and its port) indefinitely. `wait` runs only
+# once the pid is observed gone: on a process in uninterruptible sleep the
+# SIGKILL stays pending and `wait` would block forever. Returns non-zero,
+# with DAEMON_UNSTOPPABLE set, when the daemon is still alive at the end.
+DAEMON_STOP_GRACE_POLLS=40
+DAEMON_KILL_GRACE_POLLS=40
+DAEMON_UNSTOPPABLE=0
+daemon_gone_within() {
+  local i=0
+  while [ "$i" -lt "$1" ] && kill -0 "$DAEMON_PID" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! kill -0 "$DAEMON_PID" 2>/dev/null
+}
+stop_daemon() {
+  [ -n "$DAEMON_PID" ] || return 0
+  kill "$DAEMON_PID" 2>/dev/null || true
+  if ! daemon_gone_within "$DAEMON_STOP_GRACE_POLLS"; then
+    echo "capture_driver: daemon pid $DAEMON_PID ignored SIGTERM; sending SIGKILL" >&2
+    kill -9 "$DAEMON_PID" 2>/dev/null || true
+    if ! daemon_gone_within "$DAEMON_KILL_GRACE_POLLS"; then
+      echo "capture_driver: daemon pid $DAEMON_PID survived SIGKILL; its trace is not read" >&2
+      DAEMON_UNSTOPPABLE=1
+      DAEMON_PID=""
+      return 1
     fi
   fi
+  wait "$DAEMON_PID" 2>/dev/null || true
+  DAEMON_PID=""
+}
+
+# Stop the daemon, then take the workspace down. Registered before the
+# daemon starts so every exit path -- a failed health poll, a driver
+# crash, a SIGINT from the terminal -- runs it; an aborted run that leaked
+# a daemon would hold its port and its hermetic state directory for the
+# rest of the session.
+#
+# A signal arrives with $? holding the interrupted command's status, which
+# can be 0, so a signal entry passes its own conventional code (128 + the
+# signal number) instead. Bash runs a trap handler inside a running one, so
+# a second signal would re-enter cleanup and replace the first status: the
+# signal traps ignore INT, TERM and HUP before calling it, cleanup does the
+# same as its first trap change on the EXIT path, and a re-entry that still
+# got through returns at once. Every step it runs is time-bounded, so ignoring
+# signals cannot wedge the runner.
+CLEANUP_STARTED=0
+cleanup() {
+  local rc=$?
+  trap '' INT TERM HUP
+  [ "$CLEANUP_STARTED" = 0 ] || return 0
+  CLEANUP_STARTED=1
+  [ $# -eq 0 ] || rc="$1"
+  trap - EXIT
+  # Survival overrides whatever status brought the run here: a daemon still
+  # holding its port and writing its trace is the fault the caller must see.
+  stop_daemon || rc=9
+  finalize_evidence "$rc"
   if [ "$KEEP" = 1 ]; then
     echo "capture_driver: run workspace kept at $RUN" >&2
   else
@@ -588,7 +692,10 @@ cleanup() {
   fi
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap "trap '' INT TERM HUP; cleanup 130" INT
+trap "trap '' INT TERM HUP; cleanup 143" TERM
+trap "trap '' INT TERM HUP; cleanup 129" HUP
 
 mkdir -p "$RUN_HOME" "$RUN_WORK" "$RUN_XDG/routectl"
 
@@ -700,8 +807,12 @@ serve_args=(serve --host 127.0.0.1 --port "$PORT")
 if [ -n "$MITM_PORT" ]; then
   serve_args+=(--mitm-port "$MITM_PORT")
 fi
+# NO_COLOR is unset because the evidence extractors anchor on the styled
+# event target: styling is the only boundary a span value (the client's
+# model name) cannot forge, since the sink escapes ESC inside field text.
 (
   cd "$RUN_WORK"
+  unset NO_COLOR
   HOME="$RUN_HOME" \
   XDG_CONFIG_HOME="$RUN_XDG" \
   ROUTECTL_LOG="routectl=info,routectl_core::log_safe=trace" \
@@ -738,6 +849,9 @@ if [ "$healthy" = 0 ]; then
   tail -n 20 "$TRACE" >&2 || true
   exit 3
 fi
+
+mkdir -p "$EVIDENCE_DIR"
+EVIDENCE_ACTIVE=1
 
 # ---------------------------------------------------------------------
 # MITM readiness (front-proxy only)
@@ -827,6 +941,44 @@ driver_rc=0
   ROUTECTL_FIXTURE_EXPECTED_INGRESS="$EXPECTED_INGRESS" \
     exec "$@"
 ) >"$RUN/driver.log" 2>&1 || driver_rc=$?
+DRIVER_RC="$driver_rc"
+
+# ---------------------------------------------------------------------
+# Snapshots
+# ---------------------------------------------------------------------
+
+# The daemon's own view of the cell, read while it is still up and before
+# any exit -- a failed driver is exactly the cell whose health rows matter.
+# Each fetch is bounded in time and size and lands through a temp file, so a
+# hung or oversized endpoint costs at most the cap and never leaves a
+# partial snapshot. A failure is recorded (client_result.json names the
+# missing file) and never fatal. Serving /status/health is also what makes
+# the daemon emit the fidelity line the cleanup trap extracts.
+SNAPSHOT_MAX_BYTES=8388608
+fetch_snapshot() {
+  local path="$1" dest="$EVIDENCE_DIR/$2" tmp code curl_rc=0
+  tmp="$EVIDENCE_DIR/.$2.tmp"
+  code="$(curl -sS -m 10 --max-filesize "$SNAPSHOT_MAX_BYTES" -o "$tmp" \
+    -w '%{http_code}' "$BASE_URL$path" 2>/dev/null)" || curl_rc=$?
+  # A transfer curl aborted (time or size cap) can still report 200 and
+  # leave a partial body, so its own status gates before the HTTP code.
+  if [ "$curl_rc" != 0 ]; then
+    rm -f "$tmp"
+    printf 'curl exit %s\n' "$curl_rc"
+  elif [ "$code" != 200 ] || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    printf 'http %s\n' "$code"
+  elif mv "$tmp" "$dest"; then
+    printf 'ok\n'
+  else
+    rm -f "$tmp"
+    printf 'write failed\n'
+  fi
+}
+HEALTH_SNAPSHOT="$(fetch_snapshot /status/health health.json)" ||
+  HEALTH_SNAPSHOT="fetch failed"
+USAGE_SNAPSHOT="$(fetch_snapshot '/status/usage?window=all' usage.json)" ||
+  USAGE_SNAPSHOT="fetch failed"
 
 if [ "$driver_rc" != 0 ]; then
   echo "capture_driver: driver command exited $driver_rc" >&2
@@ -855,11 +1007,7 @@ fi
 # Stop the daemon BEFORE the rig reads the trace: a still-running daemon
 # can append mid-read, and the shutdown path is also where the last
 # response's trace lines are flushed.
-if kill -0 "$DAEMON_PID" 2>/dev/null; then
-  kill "$DAEMON_PID" 2>/dev/null || true
-  wait "$DAEMON_PID" 2>/dev/null || true
-fi
-DAEMON_PID=""
+stop_daemon || exit 9
 
 # `--force`: the run's trace is a fresh file, so the rig's resume marker
 # (which lives in the landing root, across runs) would otherwise skip a
@@ -884,6 +1032,7 @@ ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION="$CLIENT_BINARY_VERSION" \
     --log "$TRACE" \
     --out "$DRIVER_OUT" \
     --allow-unsafe-out || rig_rc=$?
+RIG_RC="$rig_rc"
 
 # The mapping is explicit rather than a blanket non-zero -> 5, because the
 # rig distinguishes a REFUSAL (exit 1: it produced a fixture and rejected
