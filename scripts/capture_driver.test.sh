@@ -2883,6 +2883,102 @@ check "a checker gone before its group kill fails closed" "$X_OMITTED" \
     "$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["excerpt"])' \
         "$xwork/racecase/out/upstream_errors.jsonl" 2>/dev/null)"
 
+# A terminating signal can arrive after the checker is started but before
+# the writer has recorded its group. The writer must still take the group
+# down on its way out, and the checker must not start with those signals
+# blocked. A seam delivers SIGTERM to the writer inside that window, once
+# the stand-in checker has exec'd into sleep and the seam has read that
+# process's blocked-signal mask (bash's own mask is not a fair reading: it
+# blocks signals transiently around the commands it runs).
+mkdir -p "$xwork/sigcase/scripts/drivers/lib" "$xwork/sigcase/run" "$xwork/sigcase/out"
+cp "$CELL_EVIDENCE" "$xwork/sigcase/scripts/drivers/lib/cell_evidence.py"
+cat >"$xwork/sigcase/scripts/scrub-fixture.sh" <<'CHECKER'
+exec sleep 30
+CHECKER
+printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=429 body=rate limited" \
+    >"$xwork/sigcase/run/trace.log"
+rc=0
+SCRUB_SEEN="$xwork/sig-seen" python3 -I - "$xwork/sigcase" <<'SIGWINDOW' >/dev/null 2>&1 || rc=$?
+import importlib.util, os, signal, subprocess, sys, time
+root = sys.argv[1]
+spec = importlib.util.spec_from_file_location("cell_evidence", root + "/scripts/drivers/lib/cell_evidence.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = subprocess.Popen
+class SignalledPopen(real):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        blocked = "unknown"
+        for _ in range(100):
+            try:
+                with open("/proc/%d/comm" % self.pid) as fh:
+                    if fh.read().strip() == "sleep":
+                        with open("/proc/%d/status" % self.pid) as st:
+                            blocked = next(l.split()[1] for l in st if l.startswith("SigBlk:"))
+                        break
+            except OSError:
+                pass
+            time.sleep(0.1)
+        with open(os.environ["SCRUB_SEEN"], "w") as out:
+            out.write("%d %s\n" % (self.pid, blocked))
+        os.kill(os.getpid(), signal.SIGTERM)
+subprocess.Popen = SignalledPopen
+for signum in mod.TERMINATING:
+    signal.signal(signum, mod._on_terminate)
+mod.finalize(["--dir", root + "/out", "--trace", root + "/run/trace.log", "--exit", "0"])
+SIGWINDOW
+read -r sig_checker sig_blocked <"$xwork/sig-seen" 2>/dev/null
+i=0
+while [ -n "${sig_checker:-}" ] && kill -0 "$sig_checker" 2>/dev/null && [ "$i" -lt 20 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+check "a writer signalled before it records the checker exits on the signal" "143" "$rc"
+check "the signalled checker was reached" "yes" "$([ -n "${sig_checker:-}" ] && echo yes || echo no)"
+check "a writer signalled before it records the checker leaves no checker group" "no" \
+    "$([ -n "${sig_checker:-}" ] && kill -0 "$sig_checker" 2>/dev/null && echo yes || echo no)"
+if [ -r /proc/self/status ]; then
+    check "the checker starts with no signals blocked" "0000000000000000" "${sig_blocked:-}"
+else
+    echo "PASS: no /proc on this host; the checker's blocked-signal mask is not asserted"
+fi
+[ -n "${sig_checker:-}" ] && kill -9 "$sig_checker" 2>/dev/null
+
+# The other side of that window: the checker has exited and been reaped,
+# but the writer has not yet cleared the group when the signal lands. Its
+# pid is free for reuse then, so the handler must not kill by it. The seam
+# records group kills instead of sending them.
+mkdir -p "$xwork/reapcase/scripts/drivers/lib" "$xwork/reapcase/run" "$xwork/reapcase/out"
+cp "$CELL_EVIDENCE" "$xwork/reapcase/scripts/drivers/lib/cell_evidence.py"
+printf 'exit 0\n' >"$xwork/reapcase/scripts/scrub-fixture.sh"
+printf '%s\n' "2026-08-25T10:00:00.000000Z DEBUG $X_SPAN: $X_S upstream error body provider_kind=\"anthropic\" provider=p status=429 body=rate limited" \
+    >"$xwork/reapcase/run/trace.log"
+rc=0
+python3 -I - "$xwork/reapcase" "$xwork/reap-kills" <<'REAPWINDOW' >/dev/null 2>&1 || rc=$?
+import importlib.util, os, signal, subprocess, sys
+root, kills = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("cell_evidence", root + "/scripts/drivers/lib/cell_evidence.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+open(kills, "w").close()
+def record_killpg(pgid, signum):
+    with open(kills, "a") as fh:
+        fh.write("%d\n" % pgid)
+os.killpg = record_killpg
+real = subprocess.Popen.communicate
+def reaped_then_signalled(self, input=None, timeout=None):
+    result = real(self, input, timeout)
+    os.kill(os.getpid(), signal.SIGTERM)
+    return result
+subprocess.Popen.communicate = reaped_then_signalled
+for signum in mod.TERMINATING:
+    signal.signal(signum, mod._on_terminate)
+mod.finalize(["--dir", root + "/out", "--trace", root + "/run/trace.log", "--exit", "0"])
+REAPWINDOW
+check "a writer signalled after the checker is reaped exits on the signal" "143" "$rc"
+check "a writer signalled after the checker is reaped kills no group by its pid" "0" \
+    "$(wc -l <"$xwork/reap-kills" 2>/dev/null | tr -d ' ')"
+
 fidelity_row_count() {
     local label="$1" expected="$2" line="$3"
     printf '%s\n' "$line" >"$xwork/trace.log"

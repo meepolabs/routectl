@@ -157,10 +157,25 @@ def error_row(line: str) -> tuple[dict, str] | None:
 # that also means it does not die with this process, so whatever ends this
 # process -- its own timeout, or the runner's outer bound -- kills it first.
 _checker_group: int | None = None
+# Signals that end this process. They are blocked while the checker is
+# started and recorded, so the handler never misses a group that exists.
+TERMINATING = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+def _checker_unreaped(pid: int) -> bool:
+    """True while the checker leader has not been reaped: its pid -- and so
+    its group id -- cannot be reused by an unrelated process until then.
+    The leader is reaped inside communicate() or wait(), before the group
+    is cleared, so a kill landing after the reap must not use the pid."""
+    try:
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return False
+    return True
 
 
 def _kill_checker_group() -> None:
-    if _checker_group is None:
+    if _checker_group is None or not _checker_unreaped(_checker_group):
         return
     try:
         os.killpg(_checker_group, signal.SIGKILL)
@@ -177,15 +192,21 @@ def _scrub_check(directory: str) -> set[str] | None:
     """Names of the files under `directory` the scrubber flags, or None when
     the check could not give a verdict."""
     global _checker_group
+    prior_mask = signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATING)
     try:
         proc = subprocess.Popen(
             ["bash", SCRUB_CHECKER, "--check", directory],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
             start_new_session=True,
+            # A child inherits the blocked mask; this process is
+            # single-threaded, so restoring it between fork and exec is safe.
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask),
         )
-    except OSError:
+        _checker_group = proc.pid
+    except (OSError, subprocess.SubprocessError):
         return None
-    _checker_group = proc.pid
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
     try:
         _, stderr = proc.communicate(timeout=SCRUB_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
@@ -413,7 +434,7 @@ def main(argv: list[str]) -> int:
     # disposition is inherited, so without a handler the outer bound's
     # SIGTERM would be lost and only its SIGKILL would land -- which cannot
     # take the checker group with it.
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for signum in TERMINATING:
         signal.signal(signum, _on_terminate)
     try:
         if len(argv) == 3 and argv[0] == "extract-lines":
