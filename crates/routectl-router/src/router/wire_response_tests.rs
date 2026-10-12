@@ -280,6 +280,43 @@ async fn an_oversize_complete_body_records_budget_unparsed() {
     }
 }
 
+/// A body dropped unread is cut on the client side, so the check records
+/// `incomplete` naming the client without parsing the upstream deposit:
+/// the deposit here is oversize and not JSON, so a parse would name the
+/// upstream side as unreadable instead.
+#[tokio::test]
+async fn an_unread_drop_records_incomplete_without_parsing_the_upstream_body() {
+    let router = router("anthropic-api", CHECK_EVERY);
+    let dispatched = Box::pin(router.complete_with_options(
+        request(IngressDialect::Anthropic, false),
+        RouterOptions::default(),
+    ))
+    .await;
+    let check = dispatched.meta.response_check.expect("carried");
+    check
+        .tap
+        .deposit_response(vec![b'x'; super::MAX_INLINE_COMPARE_BYTES + 1].into());
+
+    let events = routectl_testkit::capture_events(|| {
+        check.compare_stream(
+            Assembled::Incomplete(IncompleteReason::Cancelled),
+            StreamExit::Cancelled,
+            &[],
+        );
+    });
+
+    assert_eq!(
+        response_outcomes(&router.wire_check_snapshot()),
+        [(CheckOutcome::Clean, 1), (CheckOutcome::Incomplete, 1)]
+    );
+    let sides: Vec<(Option<&str>, Option<&str>)> = events
+        .iter()
+        .filter(|e| e.message == "wire check had no complete response to compare")
+        .map(|e| (e.field("side"), e.field("reason")))
+        .collect();
+    assert_eq!(sides, [(Some("client"), Some("cancelled"))]);
+}
+
 #[tokio::test]
 async fn a_streamed_response_compares_assembled_documents_and_an_unfinished_side_is_incomplete() {
     // The request leg's own check records `clean` once on the same lane, so

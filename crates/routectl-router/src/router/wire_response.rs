@@ -123,6 +123,23 @@ impl ResponseCheck {
         }
     }
 
+    fn record_unfinished(self, side: IncompleteSide) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            lane = self.lane.label(),
+            leg = Leg::Response.label(),
+            side = side.label(),
+            reason = side.reason_label(),
+            "wire check had no complete response to compare"
+        );
+        self.state.record_incomplete(self.lane);
+    }
+
+    /// Compare `client` with the upstream's answer. A cut client side next
+    /// to a deposited upstream body records `incomplete` without parsing
+    /// that body: an unread drop lands here, and the deposit can reach the
+    /// assembler's cap, past the inline limit. Otherwise an unfinished
+    /// upstream side is named first.
     fn record(
         self,
         declared: &TapContents,
@@ -130,21 +147,16 @@ impl ResponseCheck {
         client: Result<Value, IncompleteSide>,
         client_edits: &[DeclaredEdit],
     ) {
-        let upstream = self.upstream_document(declared.response().map(|body| &body[..]), exit);
-        let (upstream, client) = match (upstream, client) {
-            (Ok(upstream), Ok(client)) => (upstream, client),
-            (Err(side), _) | (_, Err(side)) => {
-                tracing::debug!(
-                    target: LOG_TARGET,
-                    lane = self.lane.label(),
-                    leg = Leg::Response.label(),
-                    side = side.label(),
-                    reason = side.reason_label(),
-                    "wire check had no complete response to compare"
-                );
-                self.state.record_incomplete(self.lane);
-                return;
-            }
+        let deposited = declared.response().map(|body| &body[..]);
+        let documents = match (deposited, client) {
+            (Some(_), Err(side)) => Err(side),
+            (deposited, client) => self
+                .upstream_document(deposited, exit)
+                .and_then(|upstream| client.map(|client| (upstream, client))),
+        };
+        let (upstream, client) = match documents {
+            Ok(documents) => documents,
+            Err(side) => return self.record_unfinished(side),
         };
         let edits: Vec<DeclaredEdit> = declared
             .edits(Leg::Response)
