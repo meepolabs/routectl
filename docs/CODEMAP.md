@@ -69,10 +69,13 @@ license.
   suppression and Relocate pairing, TRANSLATION top-level unconsumed
   extras; depth 64 / 200k-node budget sets `DiffOutcome.truncated`
 - `src/wire_check/carriage.rs` -- `IngressWire`, clone-shared per-attempt
-  `WireTap` with per-direction slots (request deposit / declare, response
-  deposit / declare, take; test-utils drop-on-deposit hook on the request
-  leg), opaque `TapContents` and borrowed `AttemptRecord` read per `Leg`;
-  no Debug renders body bytes
+  `WireTap` with per-direction slots (request `deposit` / `declare` drained by
+  `take_request`; response `deposit_response` / `push_response_frame` /
+  `finish_response_stream` / `declare_response` drained by `take_response`;
+  test-utils drop-on-deposit hook on the request leg); admission fixed at
+  creation rides the tap (`admitted` / `checking_response` constructors,
+  `is_admitted`, `checks_response`); opaque `TapContents` and borrowed
+  `AttemptRecord` read per `Leg`; no Debug renders body bytes
 - `src/wire_check/assemble.rs` -- `StreamAssembler`: folds one streamed
   response, per `SseFrame` (SSE `event:` name + `data:` text), into the
   dialect's non-streamed body; `finish(StreamExit)` returns `Complete` only
@@ -472,11 +475,13 @@ license.
   their only caller. The per-request tally types stay per translator
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/wire_declare.rs` -- egress-side wire-tap reporting for openai-compat,
-  openai-responses and gemini: `serialize_and_deposit` (serialize the body
-  once, deposit those bytes into the request's `WireTap`, return them for
-  `.body()`), `declare` (a refused pattern is dropped at DEBUG, never sent),
-  `member_pointer` and `declare_stream_flag`; every entry point is a no-op
-  when the request carries no tap
+  openai-responses, gemini and the anthropic-api / Bedrock egresses:
+  `serialize_and_deposit` (serialize the body once, deposit those bytes into
+  the request's `WireTap`, return them for `.body()`), `declare` (a refused
+  pattern is dropped at DEBUG, never sent), `member_pointer` and
+  `declare_stream_flag`; response side `deposit_response`, `response_tap`,
+  `push_frame` and `declare_response`; every entry point is a no-op when the
+  request carries no tap
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin,
   User-Agent override, and the host-keyed proxy policy (every builder takes
   the client's base URL; a loopback host gets `no_proxy()`); tests in
@@ -1626,7 +1631,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   grammar) is fully defaulted (empty list), so a missing block changes
   nothing. `prefix_impact_opt_in` is an ACTIVE dispatch gate: the pre-flight
   planner refuses a prefix-impacting transform for any target it does not name,
-  so an entry can change what goes upstream. The re-verification
+  so an entry can change what goes upstream. `WireCheckConfig` (global
+  `[wire_check]`: `first_n` 8, `sample_one_in` 100, `window_secs` 86400; the
+  latter two non-zero by type) is the live wire check's sampler and status
+  window. The re-verification
   cadence and the confirmation quorums are the code constants
   `CANARY_INTERVAL` (100), `ENVELOPE_QUORUM` (1) and `PREFIX_QUORUM` (2), never
   read from the environment. The whole
@@ -3341,21 +3349,24 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   attempt: `egress_kind_of` (provider entry -> `EgressKind`, Bedrock shape and
   Mantle sub-lanes distinct; set once on each `DispatchTarget` at chain
   expansion), `install_wire_tap` (a fresh `WireTap` per provider call on both
-  surfaces, only when the request carries an ingress body), and
-  `Router::check_request_wire` (after the sampler admits, FIDELITY lanes diff
+  surfaces, only when the request carries an ingress body; the sampler decides
+  admission here and returns `(Option<WireTap>, SampleCharge)` -- a FIDELITY
+  admission also checks the response; the charge is given back on drop unless
+  a successful attempt calls `SampleCharge::keep`), and
+  `Router::check_request_wire` (when the tap `is_admitted`, FIDELITY lanes diff
   the ingress JSON against the deposit, TRANSLATION lanes diff canonical
   `provider_extras`; no deposit records `incomplete`). Reads only; never
   changes the response or fails the attempt
-- `src/router/wire_rejection.rs` -- the wire side of a failed attempt, called
-  at the top of both `Err` arms before any repair: releases the attempt's
-  sampler charge (`WireCheckState::release`; only successes count), and on a
-  status in the parser's rejection set runs the full request check unsampled
+- `src/router/wire_rejection.rs` -- the wire side of a failed attempt,
+  `Router::settle_failed_attempt`, called at the top of both `Err` arms before
+  any repair: drops the attempt's `SampleCharge` (only successes count), and on
+  a status in the parser's rejection set runs the full request check unsampled
   and classifies the named path (`rejected_wire_path`) against the ingress and
   deposited egress as `client_unchanged | client_changed | routectl_added |
   unlocalized` (`n_a` on TRANSLATION lanes). Holds a content-free
   `PendingWireRejection` on `DispatchMeta`; `emit_wire_rejections` joins the
-  field-repair outcome at dispatch end and records the ring entry (WARN on
-  `unrepaired`, deduped)
+  field-repair outcome at dispatch end on the unmasked raw field path (never
+  rendered) and records the ring entry (WARN on `unrepaired`, deduped)
 - `src/router/wire_response.rs` -- the response leg of the live wire check:
   `ResponseCheck` (public, opaque), carried on `DispatchMeta::response_check`
   from the serving attempt when the sampler admitted it on a FIDELITY lane;
@@ -6467,12 +6478,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
   loads a snapshot into `StatusRouterView` (also private inner `Arc<Router>`)
-  which exposes ONLY six read methods -- `route_targets(now)`,
+  which exposes ONLY seven read methods -- `route_targets(now)`,
   `learned_capabilities()`, `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
   see `field_verdict_log.rs`), `field_verdict_status()` (the per-verdict
   fidelity rows, a PURE router-side read -- see
-  `routectl-router/src/router/fidelity_status.rs`), `effective_view()` (runs
+  `routectl-router/src/router/fidelity_status.rs`), `wire_check_snapshot()`
+  (the live wire check's counters and findings ring, read-only),
+  `effective_view()` (runs
   `derive_effective_view` against the live config AND the overlay retained on
   the pinned Router, INTERNALLY, so panels never touch raw `Config` and one
   derivation can never pair mismatched config / overlay generations), and
@@ -6545,7 +6558,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   monotonic elapsed ages (`None` == closed/never-seen, never a 0/epoch
   sentinel); `last_outcome` renders the derived `circuit_open` when the phase
   is open, else the stored outcome token; `feature_key` is renamed to the
-  contract token `capability_key`. No dial, no mutation. Also calls the
+  contract token `capability_key`. Adds the `wire_check` section (see
+  `wire_check_rows.rs`) from the same view. No dial, no mutation. Also calls the
   `log_field_verdict_snapshot` once per build -- the response data and the INFO
   snapshot are separate reads from one pinned Router/config generation, not an
   atomic live-state snapshot: each may observe a different canary or counter
@@ -6623,8 +6637,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   presenting a subset as complete
 - `src/handlers/status/wire_check_rows.rs` -- the health panel's additive
   `wire_check` section, projected from `Router::wire_check_snapshot` through
-  the facade: `window_secs`, loss rows per (lane, path_class) and check rows
-  per (lane, outcome) last seen inside the window, unrepaired-rejection rows
+  the facade: `window_secs`, loss rows per (lane, path_class), loss findings
+  by path (lane, leg, path, path_class, ts) from the findings ring, and check
+  rows per (lane, outcome) last seen inside the window, unrepaired-rejection rows
   (lane, leg, path, f1_outcome, provenance, ts) from the findings ring, and
   local-refusal rows per lane. Closed labels, sanitized paths and counts only
 - `src/handlers/status/usage_health.rs` -- `UsageHealthView`, a counters-only
@@ -7003,8 +7018,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   capture/admission read sites so the two cannot drift on the literal
 - `src/ingress/response_edits.rs` -- `ResponseEdits`: collector a renderer
   declares its intended response edits into (`render_response_declared` /
-  `render_chunk_declared` on `IngressAdapter`); records only when the
-  attempt's response is checked
+  `render_chunk_declared` / `declare_early_frame_edits` on `IngressAdapter`,
+  which also names its wire `dialect()`); records only when the attempt's
+  response is checked
 - `src/ingress/session_key.rs` -- shared inbound per-conversation
   session-key resolution: `OPENAI_SESSION_HEADERS` (the ordered, grounded
   allowlist of session headers the OpenAI-shaped ingresses accept, and the
