@@ -321,6 +321,9 @@ while [ $# -gt 0 ]; do
 done
 printf '%s\n' "$$" >"$STUB_PID_FILE"
 printf '%s\n' "${NO_COLOR-unset}" >"$STUB_PID_FILE.no-color"
+if [ -n "${STUB_ENV_DUMP:-}" ]; then
+    env -0 >"$STUB_ENV_DUMP"
+fi
 printf '%s\n' "$port" >"$STUB_PORT_FILE"
 if [ -r "${STUB_TRACE_FILE:-}" ]; then
     cat "$STUB_TRACE_FILE" >&2
@@ -388,6 +391,9 @@ set -u
         "$([ -n "${ROUTECTL_DRIVER_PROXY_CA:-}" ] && [ -r "$ROUTECTL_DRIVER_PROXY_CA" ] && echo yes || echo no)"
     printf 'health=%s\n' "$(curl -fsS -m 2 "$ROUTECTL_BASE_URL/health" || echo unreachable)"
 } >"$PROBE_OUT"
+if [ -n "${PROBE_ENV_DUMP:-}" ]; then
+    env -0 >"$PROBE_ENV_DUMP"
+fi
 
 # The run record a real driver writes through `driver_record_client`. The
 # probe does not source the driver library -- it is the RUNNER under test
@@ -478,7 +484,7 @@ make_work() {
         driver-selftest-15c driver-selftest-15d driver-selftest-16 \
         driver-selftest-16b driver-selftest-17 driver-selftest-17b \
         driver-selftest-17c driver-selftest-17d driver-selftest-17e \
-        driver-selftest-17f; do
+        driver-selftest-17f driver-selftest-18; do
         write_case "$work/repo/scripts/drivers/cases" "$case_id" baseline
     done
     # The rig reads the workspace version from the repo-root Cargo.toml.
@@ -3014,6 +3020,77 @@ if [ -f "$LOG_SAFE_SRC" ] && [ -f "$FIDELITY_SRC" ]; then
 else
     echo "PASS: no crates tree in this checkout; the extractor weld is not asserted"
 fi
+
+# --- Case 18: the driven client holds no upstream credential -----------
+# The daemon resolves the lane's real credential from its own environment;
+# the driven client must not inherit it, nor any provider key the clients
+# read natively. Every name below is exported into the runner's
+# environment, so the daemon's dump is the positive control (each arrived)
+# and the driver's dump must hold none of them. The names are the
+# runner's own convention plus what claude, codex, pi and hermes read
+# from the environment, and one name bash cannot represent as a variable
+# (a `-` in it), which only an exec-time `env -u` can remove.
+STRIPPED_NAMES=(
+    ROUTECTL_DRIVER_ANTHROPIC_API_KEY ROUTECTL_DRIVER_OPENAI_API_KEY
+    ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID ROUTECTL_DRIVER_GEMINI_API_KEY
+    ROUTECTL_DRIVER_BEDROCK_API_KEY ROUTECTL_DRIVER_OLLAMA_API_KEY
+    AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+    AWS_SESSION_TOKEN AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
+    AWS_WEB_IDENTITY_TOKEN_FILE AWS_CONTAINER_CREDENTIALS_FULL_URI
+    OPENAI_API_KEY OLLAMA_API_KEY GEMINI_API_KEY GOOGLE_APPLICATION_CREDENTIALS
+    ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN ANTHROPIC_TOKEN
+    ANTHROPIC_PROFILE ANTHROPIC_FOUNDRY_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+    CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_CLIENT_KEY CODEX_API_KEY
+    CODEX_ACCESS_TOKEN OPENROUTER_API_KEY AZURE_CLIENT_SECRET HF_TOKEN
+    ROUTECTL-SELFTEST_API_KEY
+)
+# Names that must SURVIVE: the local placeholders a driver presents to the
+# daemon, and two knobs whose names merely resemble a credential. Without
+# these rows a runner that cleared the whole environment would pass.
+KEPT_NAMES=(
+    ROUTECTL_DRIVER_CLIENT_API_KEY ROUTECTL_DRIVER_CLIENT_BEARER
+    ROUTECTL_DRIVER_THINKING_TOKENS MAX_THINKING_TOKENS
+)
+work="$(make_work)"
+port_s="$(free_port)"
+strip_env=()
+for name in "${STRIPPED_NAMES[@]}" "${KEPT_NAMES[@]}"; do
+    strip_env+=("$name=selftest-value-$name")
+done
+rc=0
+env "${strip_env[@]}" \
+    STUB_ENV_DUMP="$work/daemon.env" PROBE_ENV_DUMP="$work/driver.env" \
+    ROUTECTL_DRIVER_PORT_MIN="$port_s" ROUTECTL_DRIVER_PORT_MAX="$port_s" \
+    bash -c "$(declare -f runner_run); runner_run \"\$1\" --lane anthropic-api --case driver-selftest-18" \
+    _ "$work" || rc=$?
+check "a run with upstream credentials in its environment exits 0" "0" "$rc"
+env_names() {
+    tr '\0' '\n' <"$1" | sed -n 's/^\([^=]*\)=.*/\1/p' | sort -u
+}
+if [ -s "$work/daemon.env" ] && [ -s "$work/driver.env" ]; then
+    daemon_names="$(env_names "$work/daemon.env")"
+    driver_names="$(env_names "$work/driver.env")"
+    for name in "${STRIPPED_NAMES[@]}"; do
+        check "the daemon env still holds $name" "yes" \
+            "$(printf '%s\n' "$daemon_names" | grep -qxF -- "$name" && echo yes || echo no)"
+        check "the driven client env does not hold $name" "no" \
+            "$(printf '%s\n' "$driver_names" | grep -qxF -- "$name" && echo yes || echo no)"
+    done
+    for name in "${KEPT_NAMES[@]}"; do
+        check "the driven client env keeps $name" "yes" \
+            "$(printf '%s\n' "$driver_names" | grep -qxF -- "$name" && echo yes || echo no)"
+    done
+    # Counted over VALUES, not names: a stripped value copied under some
+    # other name would survive every per-name row above.
+    check "the only planted values left in the driven client env are the kept ones" \
+        "${#KEPT_NAMES[@]}" \
+        "$(tr '\0' '\n' <"$work/driver.env" | grep -c 'selftest-value-')"
+else
+    echo "FAIL: the daemon or the driver env dump is missing (runner log: $work/runner.log)"
+    sed -n '1,20p' "$work/runner.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
 
 if [ "$fails" -gt 0 ]; then
     echo "capture_driver self-test: $fails failure(s)"

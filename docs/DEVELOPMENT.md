@@ -967,7 +967,11 @@ them: `ROUTECTL_DRIVER_CLIENT_API_KEY` is the PLACEHOLDER the client holds
 locally, which never leaves the daemon, while
 `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` is the REAL upstream credential
 routectl injects on egress. The provider convention is keyed on the
-PROVIDER (`anthropic`, `openai`, `gemini`), never on the lane.
+PROVIDER (`anthropic`, `openai`, `gemini`, `bedrock`, `ollama`), never on
+the lane. The daemon reads the real credentials; the runner removes them,
+and every other credential-shaped variable (`*_API_KEY`, `*_TOKEN`,
+`*_SECRET`, `*CREDENTIALS*`, `AWS_PROFILE`, ...), from the driven client's
+environment before it starts, keeping only the two placeholders.
 
 The header is not prose a rename can silently outdate:
 `scripts/capture_driver.test.sh` derives all three lists from it, derives
@@ -1378,7 +1382,12 @@ PATH lookup.
 Two `--` separators, and that is deliberate: the wrapper's own flags stop at
 the first one, everything after it is the runner's argv verbatim, and the
 runner's own `--` still introduces the driver command. `--image <tag>`
-selects a non-default image.
+selects a non-default image. `--name <name>` names the container so an
+orchestrator can `docker kill` exactly that cell; it must be
+`routectl-cell-` followed by 1-63 of `[a-z0-9_.-]` (first `[a-z0-9]`),
+anything else is exit 2. The fixed prefix keeps a name from reading as a
+hex container-id prefix, which `docker kill` would otherwise resolve to
+another container.
 
 What crosses the boundary, and nothing else:
 
@@ -1399,7 +1408,7 @@ ROUTECTL_DRIVER_<PROVIDER>_API_KEY
 ```
 
 with `<PROVIDER>` the upper-cased form of a name in routectl's own provider
-vocabulary -- `anthropic`, `openai`, `gemini`. Both openai kinds
+vocabulary -- `anthropic`, `openai`, `gemini`, `bedrock`, `ollama`. Both openai kinds
 (`openai-responses` and `openai-compat`) share the ONE `openai` name,
 because routectl's own conventional-env-var table gives them one variable:
 an `openai-responses.toml` lane and an `openai-compat.toml` lane both
@@ -1436,9 +1445,10 @@ provider:
   `openai` credential lives under `codex`.
 - **neither** -- REFUSED BY NAME, exit 20. An empty credential would 401 at
   the upstream and surface as the runner's retryable exit 7, which is
-  indistinguishable from a case that produced no request. `gemini` is not
-  an OAuth provider, so its credential can only arrive as an env
-  passthrough.
+  indistinguishable from a case that produced no request. `gemini`,
+  `bedrock` and `ollama` are not OAuth providers, so their credentials
+  (`ROUTECTL_DRIVER_GEMINI_API_KEY`, `ROUTECTL_DRIVER_BEDROCK_API_KEY`,
+  `ROUTECTL_DRIVER_OLLAMA_API_KEY`) can only arrive as an env passthrough.
 
 - **The read-only repo is load-bearing**, not tidiness. A driven agent runs
   with file tools and permission prompts disabled; a writable repo mount

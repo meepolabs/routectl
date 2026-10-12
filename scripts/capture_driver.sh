@@ -106,6 +106,12 @@
 #   ROUTECTL_DRIVER_PROXY_URL         http://127.0.0.1:<mitm-port>
 #   ROUTECTL_DRIVER_PROXY_CA          the CA pem the client must trust
 #
+# And REMOVED: every upstream credential in the caller's environment
+# (any name shaped like a key, token, secret or credentials file, plus
+# AWS_PROFILE / AWS_CONFIG_FILE / ANTHROPIC_PROFILE). The daemon already
+# holds the lane's credential; a driver presents only the local-client
+# placeholders, which are the one exemption.
+#
 # The MITM port is a SECOND probed port, distinct from the HTTP one
 # (`validate_mitm_config` refuses a collision at startup), passed as
 # `serve --mitm-port` so the committed config bytes -- and their sha --
@@ -253,6 +259,8 @@
 #   ROUTECTL_DRIVER_ANTHROPIC_API_KEY     the REAL upstream credentials,
 #   ROUTECTL_DRIVER_OPENAI_API_KEY        under the per-provider
 #   ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID     convention
+#   ROUTECTL_DRIVER_BEDROCK_API_KEY
+#   ROUTECTL_DRIVER_OLLAMA_API_KEY
 #                                         ROUTECTL_DRIVER_<PROVIDER>_API_KEY
 #                                         (plus _ACCOUNT_ID where the
 #                                         provider's auth surface needs
@@ -260,7 +268,10 @@
 #                                         never on the lane, and already
 #                                         committed in the lane configs
 #                                         and the capture-cell wrapper,
-#                                         which is their one resolver
+#                                         which is their one resolver.
+#                                         The daemon reads them; the
+#                                         driver never sees them (see
+#                                         Drive below)
 #   ROUTECTL_DRIVER_REQUEST_MODEL         both change the captured wire
 #   ROUTECTL_DRIVER_THINKING_TOKENS       (the `model` field, the thinking
 #                                         shape), so they are stable by
@@ -913,9 +924,66 @@ fi
 # Drive
 # ---------------------------------------------------------------------
 
+# UPSTREAM CREDENTIALS NEVER REACH THE DRIVEN CLIENT. The daemon resolved
+# its lane's credential at boot from its own environment; the client talks
+# only to that daemon and holds a placeholder. A real key left in the
+# driver's environment is readable by the driven agent's shell tools and,
+# worse, read natively by the clients themselves (claude, codex, pi and
+# hermes each pick up provider keys such as ANTHROPIC_API_KEY,
+# OPENAI_API_KEY, CODEX_API_KEY, GEMINI_API_KEY, OLLAMA_API_KEY and the
+# AWS_* Bedrock family), which would put a real upstream credential on the
+# hermetic daemon's wire and into a fixture.
+#
+# Matched by NAME SHAPE rather than listed, because the clients' own lists
+# are long and grow every release: any environment name ending in a
+# credential suffix, or carrying a token/secret/credentials component, is
+# removed. The two local-client placeholders are the only
+# exemption -- they are what a driver presents to the local daemon.
+# AWS_PROFILE, AWS_CONFIG_FILE and ANTHROPIC_PROFILE select a stored
+# credential without matching any suffix, so they are named outright.
+is_upstream_credential_name() {
+  case "$1" in
+    ROUTECTL_DRIVER_CLIENT_API_KEY|ROUTECTL_DRIVER_CLIENT_BEARER) return 1 ;;
+    AWS_PROFILE|AWS_CONFIG_FILE|ANTHROPIC_PROFILE) return 0 ;;
+    API_KEY|TOKEN|*_API_KEY|*_ACCOUNT_ID|*_ACCESS_KEY|*_ACCESS_KEY_ID|*_CLIENT_KEY) return 0 ;;
+    *_TOKEN|*_TOKEN_*|*_SECRET|*_SECRET_*|*_BEARER|*_PASSWORD|*_PASSPHRASE) return 0 ;;
+    *CREDENTIALS*) return 0 ;;
+  esac
+  return 1
+}
+
+# Enumerated from `env -0`, not `compgen -e`: bash hides an inherited name
+# it cannot represent as a variable (one carrying `-` or `.`) yet still
+# passes it to every child, so a shell-side `unset` cannot reach it. The
+# removal is therefore `env -u` at exec time, which works on any name. A
+# failed enumeration stops the driver rather than running it unstripped.
+upstream_credential_unset_args() {
+  local entry name dump
+  dump="$(mktemp)" || return 1
+  if ! env -0 >"$dump"; then
+    rm -f "$dump"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    name="${entry%%=*}"
+    if is_upstream_credential_name "$name"; then
+      printf '%s\0' "$name"
+    fi
+  done <"$dump"
+  rm -f "$dump"
+}
+
 driver_rc=0
 (
   cd "$RUN_WORK"
+  credential_unsets=()
+  unset_list="$(mktemp)" || die "could not enumerate the driver environment; refusing to drive with upstream credentials in reach" 4
+  upstream_credential_unset_args >"$unset_list" ||
+    { rm -f "$unset_list"; die "could not enumerate the driver environment; refusing to drive with upstream credentials in reach" 4; }
+  while IFS= read -r -d '' name; do
+    credential_unsets+=(-u "$name")
+  done <"$unset_list"
+  rm -f "$unset_list"
   # The proxy carriers exist only in front-proxy mode: a base-url driver
   # that saw them could route through a listener this run never started,
   # and the drivers' own mode check treats their presence as intent. The
@@ -939,7 +1007,7 @@ driver_rc=0
   ROUTECTL_FIXTURE_CONNECTION_MODE="$CONNECTION_MODE" \
   ROUTECTL_FIXTURE_WIRE_PATTERN="$WIRE_PATTERN" \
   ROUTECTL_FIXTURE_EXPECTED_INGRESS="$EXPECTED_INGRESS" \
-    exec "$@"
+    exec env ${credential_unsets[@]+"${credential_unsets[@]}"} -- "$@"
 ) >"$RUN/driver.log" 2>&1 || driver_rc=$?
 DRIVER_RC="$driver_rc"
 

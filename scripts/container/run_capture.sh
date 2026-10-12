@@ -14,7 +14,7 @@
 #
 # Usage:
 #   run_capture.sh --scratch <host-dir> [--image <tag>] \
-#                  [--provider <name>]... \
+#                  [--name <container-name>] [--provider <name>]... \
 #                  -- <capture_driver.sh args...>
 #
 #   e.g.
@@ -38,9 +38,19 @@
 #   --image     Image tag to run. Default `routectl-capture:default`,
 #               which is what scripts/container/build.sh writes with no
 #               --version. Never a bare `:latest`.
+#   --name      Name for the container, so the caller can `docker kill`
+#               exactly this cell (an orphan left by a timeout). Must be
+#               `routectl-cell-` followed by 1-63 characters from
+#               [a-z0-9_.-], the first of them [a-z0-9]; anything else is
+#               a usage error (exit 2). The fixed prefix is what makes the
+#               name non-hex: `docker kill X` tries X as a container id
+#               PREFIX after the exact id and name lookups, so a hex-only
+#               name could resolve to some other container. Omitted, docker
+#               picks a name and nothing else changes.
 #   --provider  A provider whose upstream credential this run needs.
 #               Repeatable; default `anthropic`. Named from routectl's own
-#               provider vocabulary (`anthropic`, `openai`, `gemini`) and
+#               provider vocabulary (`anthropic`, `openai`, `gemini`,
+#               `bedrock`, `ollama`) and
 #               NEVER from a lane name -- see THE CREDENTIAL CONVENTION
 #               below. The lane config decides which variables it actually
 #               resolves; this flag decides which ones cross the boundary,
@@ -74,7 +84,8 @@
 #   ROUTECTL_DRIVER_<PROVIDER>_API_KEY
 #
 # with <PROVIDER> the upper-cased form of a name in routectl's own
-# provider vocabulary (`anthropic`, `openai`, `gemini`). Both openai kinds
+# provider vocabulary (`anthropic`, `openai`, `gemini`, `bedrock`,
+# `ollama`). Both openai kinds
 # -- `openai-responses` and `openai-compat` -- share the ONE `openai`
 # name, because routectl's own conventional-env-var table gives them one
 # variable; a lane is not a provider, so `openai-responses.toml` and
@@ -118,7 +129,10 @@
 #   no seat entry, env var set-> passed straight through from the host
 #                                environment (the gemini shape: gemini is
 #                                not an OAuth provider, so its credential
-#                                is an API key the operator exports)
+#                                is an API key the operator exports; bedrock
+#                                and ollama take the same path, as
+#                                ROUTECTL_DRIVER_BEDROCK_API_KEY and
+#                                ROUTECTL_DRIVER_OLLAMA_API_KEY)
 #   neither                   -> REFUSED BY NAME, exit 20. Never
 #                                forwarded empty: an empty credential
 #                                resolves to an upstream 401, which the
@@ -232,7 +246,7 @@ DEFAULT_IMAGE="routectl-capture:default"
 #   ACCOUNT_ID_PROVIDERS  which providers additionally need an account id.
 #
 DEFAULT_PROVIDERS="anthropic"
-KNOWN_PROVIDERS="anthropic openai gemini"
+KNOWN_PROVIDERS="anthropic openai gemini bedrock ollama"
 ACCOUNT_ID_PROVIDERS="openai"
 
 # `case` rather than an associative array: this script runs under `set -eu`
@@ -267,6 +281,31 @@ needs_account_id() {
     esac
 }
 
+# The container name grammar, spelled as explicit character lists rather
+# than ranges: a bracket range is collated per locale, and a name this
+# accepts must be one docker accepts ([a-zA-Z0-9][a-zA-Z0-9_.-]+) and can
+# never read as a hex id prefix.
+CELL_NAME_PREFIX="routectl-cell-"
+CELL_NAME_SUFFIX_MAX=63
+CELL_NAME_FIRST_CHARS="abcdefghijklmnopqrstuvwxyz0123456789"
+CELL_NAME_CHARS="${CELL_NAME_FIRST_CHARS}_.-"
+
+valid_cell_name() {
+    local suffix
+    case "$1" in
+        "$CELL_NAME_PREFIX"?*) suffix="${1#"$CELL_NAME_PREFIX"}" ;;
+        *) return 1 ;;
+    esac
+    [ "${#suffix}" -le "$CELL_NAME_SUFFIX_MAX" ] || return 1
+    case "${suffix:0:1}" in
+        [$CELL_NAME_FIRST_CHARS]) ;;
+        *) return 1 ;;
+    esac
+    case "$suffix" in
+        *[!$CELL_NAME_CHARS]*) return 1 ;;
+    esac
+}
+
 usage() {
     sed -n '2,/^# --- END USAGE ---$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
 }
@@ -279,6 +318,7 @@ die() {
 SCRATCH=""
 IMAGE="$DEFAULT_IMAGE"
 PROVIDERS=""
+CELL_NAME=""
 
 # This script's own flags stop at the FIRST `--`; everything after it is
 # the runner's argv, which carries its own `--` for the driver command.
@@ -295,6 +335,13 @@ while [ $# -gt 0 ]; do
         --image)
             [ $# -ge 2 ] && [ -n "$2" ] || die "--image needs a non-empty value" 2
             IMAGE="$2"
+            shift 2
+            ;;
+        --name)
+            [ $# -ge 2 ] && [ -n "$2" ] || die "--name needs a non-empty value" 2
+            valid_cell_name "$2" ||
+                die "refusing --name '$2': a cell name is ${CELL_NAME_PREFIX} followed by 1-${CELL_NAME_SUFFIX_MAX} of [a-z0-9_.-], starting with [a-z0-9]. the fixed prefix keeps it from reading as a container id prefix, which docker kill would resolve to another container." 2
+            CELL_NAME="$2"
             shift 2
             ;;
         --provider)
@@ -610,8 +657,12 @@ for var in $FORWARD_VARS; do
     CREDENTIAL_ENV_FLAGS+=(-e "$var")
 done
 
+NAME_FLAGS=()
+[ -z "$CELL_NAME" ] || NAME_FLAGS=(--name "$CELL_NAME")
+
 docker run \
     --rm \
+    ${NAME_FLAGS[@]+"${NAME_FLAGS[@]}"} \
     --user "$(id -u):$(id -g)" \
     --network bridge \
     --workdir "$CELL_REPO" \

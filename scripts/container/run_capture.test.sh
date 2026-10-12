@@ -248,6 +248,24 @@ while [ $# -gt 0 ]; do
     esac
 done
 assets=/scratch/assets
+# The DAEMON side of the credential boundary: the lane config resolves its
+# key from this process's environment, so this is where a forwarded
+# credential must arrive. Digests only, absence as an empty sha.
+daemon_credential() {
+    if [ -n "${2:-}" ]; then
+        printf '%s_present=yes\n%s_sha=%s\n' "$1" "$1" \
+            "$(printf '%s' "$2" | sha256sum | cut -d' ' -f1)"
+    else
+        printf '%s_present=no\n%s_sha=\n' "$1" "$1"
+    fi
+}
+{
+    daemon_credential anthropic_key "${ROUTECTL_DRIVER_ANTHROPIC_API_KEY:-}"
+    daemon_credential openai_key "${ROUTECTL_DRIVER_OPENAI_API_KEY:-}"
+    daemon_credential openai_account "${ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID:-}"
+    daemon_credential gemini_key "${ROUTECTL_DRIVER_GEMINI_API_KEY:-}"
+    daemon_credential bedrock_key "${ROUTECTL_DRIVER_BEDROCK_API_KEY:-}"
+} >"$assets/daemon.txt"
 mode="$(cat "$assets/mode" 2>/dev/null || echo healthy)"
 trace="$assets/trace-$mode.log"
 [ -r "$trace" ] || trace="$assets/trace-healthy.log"
@@ -336,6 +354,7 @@ report_credential() {
     report_credential openai_key "${ROUTECTL_DRIVER_OPENAI_API_KEY:-}"
     report_credential openai_account "${ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID:-}"
     report_credential gemini_key "${ROUTECTL_DRIVER_GEMINI_API_KEY:-}"
+    report_credential bedrock_key "${ROUTECTL_DRIVER_BEDROCK_API_KEY:-}"
     printf 'seat_at_xdg=%s\n' "$([ -e "$seat_xdg" ] && echo yes || echo no)"
     printf 'seat_at_home=%s\n' "$([ -e "$seat_home" ] && echo yes || echo no)"
     printf 'seat_anywhere=%s\n' \
@@ -480,6 +499,8 @@ provider_run() {
             -u ROUTECTL_DRIVER_OPENAI_API_KEY \
             -u ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID \
             -u ROUTECTL_DRIVER_GEMINI_API_KEY \
+            -u ROUTECTL_DRIVER_BEDROCK_API_KEY \
+            -u ROUTECTL_DRIVER_OLLAMA_API_KEY \
             "ROUTECTL_BIN=$root/stub-routectl" \
             "ROUTECTL_CAPTURE_CELL_SEAT=${LEG_SEAT:-$SEAT}" \
             "${env_pairs[@]}" \
@@ -488,9 +509,17 @@ provider_run() {
     return "$rc"
 }
 
-# Read one field out of a landed probe report.
+# Read one field out of a landed probe report (what the DRIVEN client saw).
 probe_get() {
     sed -n "s/^$2=//p" "$1/$ASSETS_REL/probe.txt" | head -1
+}
+
+# Read one field out of the stub daemon's report (what the DAEMON saw). A
+# forwarded credential is asserted here: the runner strips every upstream
+# credential from the driven client's environment, so the driver probe
+# must report each one absent.
+daemon_get() {
+    sed -n "s/^$2=//p" "$1/$ASSETS_REL/daemon.txt" | head -1
 }
 
 # Whether the container legs can run at all. Both the accept control and
@@ -725,13 +754,15 @@ provider_run "$GEMINI_OK_ROOT" \
     -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
 if container_available; then
     check "the SAME provider with its env var set is not refused" "0" "$rc"
-    check "the env-passthrough credential reached the container intact" \
-        "$FAKE_GEMINI_KEY_SHA" "$(probe_get "$GEMINI_OK_ROOT/land" gemini_key_sha)"
+    check "the env-passthrough credential reached the daemon intact" \
+        "$FAKE_GEMINI_KEY_SHA" "$(daemon_get "$GEMINI_OK_ROOT/land" gemini_key_sha)"
+    check "the env-passthrough credential did not reach the driven client" "no" \
+        "$(probe_get "$GEMINI_OK_ROOT/land" gemini_key_present)"
     # A run asked for gemini alone must forward NOTHING else. A wrapper
     # that exported the whole convention regardless of --provider would
     # pass every assertion above.
     check "a gemini-only run forwards no anthropic credential" "no" \
-        "$(probe_get "$GEMINI_OK_ROOT/land" anthropic_key_present)"
+        "$(daemon_get "$GEMINI_OK_ROOT/land" anthropic_key_present)"
 else
     # The refusal ran without docker; its control cannot. Named, because a
     # silent skip here leaves the refusal above uncontrolled.
@@ -925,7 +956,12 @@ cat >"$FAKE_DOCKER_BIN/docker" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
     image) exit 0 ;;
-    run) exit "${FAKE_DOCKER_RUN_EXIT:-0}" ;;
+    run)
+        if [ -n "${FAKE_DOCKER_ARGV:-}" ]; then
+            printf '%s\n' "$@" >"$FAKE_DOCKER_ARGV"
+        fi
+        exit "${FAKE_DOCKER_RUN_EXIT:-0}"
+        ;;
     *) exit 0 ;;
 esac
 SH
@@ -943,6 +979,136 @@ rc=0
         -- "/scratch/$ASSETS_REL/driver.sh"
 ) >"$FAKE_DOCKER_ROOT.log" 2>&1 || rc=$?
 check "a runner exit 9 comes out of the wrapper as 9" "9" "$rc"
+
+# ---------------------------------------------------------------------
+# Part 5b: --name, against the recorded docker argv
+# ---------------------------------------------------------------------
+#
+# `docker kill X` resolves X as an exact id, then an exact name, then an
+# id PREFIX -- so a name that reads as hex could kill some other
+# container. The wrapper accepts exactly one layout: `routectl-cell-`
+# plus 1-63 of [a-z0-9_.-], the first [a-z0-9]. Every refusal is a usage
+# error (2) from the wrapper itself, decided before docker is consulted.
+
+# Run the wrapper against the argv-recording docker stand-in. The argv
+# lands one word per line in <root>.argv.
+#
+# Usage: fake_docker_run <scratch-root> <VAR=value>... -- [wrapper args...]
+fake_docker_run() {
+    local root="$1"
+    shift
+    local env_pairs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+        env_pairs+=("$1")
+        shift
+    done
+    shift
+    rm -f "$root.argv"
+    provider_run "$root" "PATH=$FAKE_DOCKER_BIN:$PATH" \
+        "FAKE_DOCKER_ARGV=$root.argv" \
+        ${env_pairs[@]+"${env_pairs[@]}"} -- "$@"
+}
+
+# Whether <root>.argv holds <word> immediately followed by <next>.
+argv_has_pair() {
+    awk -v a="$2" -v b="$3" 'prev == a && $0 == b { hit = 1 } { prev = $0 } END { exit !hit }' \
+        "$1.argv" 2>/dev/null && echo yes || echo no
+}
+
+name_refusal() {
+    local label="$1" name="$2" root rc=0
+    root="$(new_scratch)"
+    fake_docker_run "$root" -- --scratch "$root/land" --name "$name" -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "--name refuses $label with exit 2" "2" "$rc"
+    check "--name refusal of $label reached no docker run" "no" \
+        "$([ -e "$root.argv" ] && echo yes || echo no)"
+}
+
+CELL_NAME_63="$(printf 'a%.0s' $(seq 1 63))"
+name_refusal "a hex-only name" "deadbeef0123"
+name_refusal "a name missing the routectl-cell- prefix" "cell-run-01"
+name_refusal "an uppercase suffix" "routectl-cell-Run01"
+name_refusal "a slash" "routectl-cell-a/b"
+name_refusal "a dot-dot suffix" "routectl-cell-.."
+name_refusal "an empty suffix" "routectl-cell-"
+name_refusal "a 64-character suffix" "routectl-cell-${CELL_NAME_63}a"
+name_refusal "a hex-only suffix with an uppercase prefix" "ROUTECTL-CELL-abc"
+
+EMPTY_NAME_ROOT="$(new_scratch)"
+rc=0
+fake_docker_run "$EMPTY_NAME_ROOT" -- --scratch "$EMPTY_NAME_ROOT/land" --name "" -- \
+    --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+    -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "--name refuses an empty value with exit 2" "2" "$rc"
+
+# The paired ACCEPT rows: without them every refusal above is satisfiable
+# by a wrapper that refuses --name outright. The longest legal suffix is
+# one of them, so the length bound is pinned from both sides.
+name_accepted() {
+    local label="$1" name="$2" root rc=0
+    root="$(new_scratch)"
+    fake_docker_run "$root" -- --scratch "$root/land" --name "$name" -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "--name accepts $label" "0" "$rc"
+    check "--name passes $label to docker run as --name <name>" "yes" \
+        "$(argv_has_pair "$root" --name "$name")"
+}
+name_accepted "a canonical cell name" "routectl-cell-r1.c2_bedrock-invoke"
+name_accepted "a 63-character suffix" "routectl-cell-${CELL_NAME_63}"
+
+NO_NAME_ROOT="$(new_scratch)"
+rc=0
+fake_docker_run "$NO_NAME_ROOT" -- --scratch "$NO_NAME_ROOT/land" -- \
+    --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+    -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "a run without --name still reaches docker run" "0" "$rc"
+check "a run without --name passes no --name to docker" "0" \
+    "$(grep -cx -- '--name' "$NO_NAME_ROOT.argv" || true)"
+
+# ---------------------------------------------------------------------
+# Part 5c: bedrock and ollama are env-passthrough providers
+# ---------------------------------------------------------------------
+#
+# Neither has a seat entry, so each key arrives only from the operator's
+# environment and crosses BY NAME. The value must appear in no argv word
+# and in nothing the wrapper prints.
+FAKE_BEDROCK_KEY="$(fake_key 'stub-bedrock-' "${FAKE_RUN}BDRK6789")"
+FAKE_OLLAMA_KEY="$(fake_key 'stub-ollama-' "${FAKE_RUN}OLMA6789")"
+
+passthrough_provider() {
+    local provider="$1" var="$2" value="$3" root rc=0
+    root="$(new_scratch)"
+    fake_docker_run "$root" "$var=$value" -- \
+        --scratch "$root/land" --provider "$provider" -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "--provider $provider with \$$var set reaches docker run" "0" "$rc"
+    check "--provider $provider forwards $var by name" "yes" \
+        "$(argv_has_pair "$root" -e "$var")"
+    check "--provider $provider puts no $var=value word in the docker argv" "0" \
+        "$(grep -c -- "^$var=" "$root.argv" || true)"
+    check "--provider $provider value is absent from the docker argv" "0" \
+        "$(grep -cF -- "$value" "$root.argv" || true)"
+    check "--provider $provider value is absent from the wrapper's output" "0" \
+        "$(grep -cF -- "$value" "$root.log" || true)"
+    check "--provider $provider forwards no seat credential" "0" \
+        "$(grep -cx -- 'ROUTECTL_DRIVER_ANTHROPIC_API_KEY' "$root.argv" || true)"
+
+    root="$(new_scratch)"
+    rc=0
+    fake_docker_run "$root" -- \
+        --scratch "$root/land" --provider "$provider" -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "--provider $provider with no env value is refused with exit 20" "20" "$rc"
+    check_refusal "the $provider no-credential refusal names the variable" \
+        "\$$var is unset or empty" "$root.log"
+}
+passthrough_provider bedrock ROUTECTL_DRIVER_BEDROCK_API_KEY "$FAKE_BEDROCK_KEY"
+passthrough_provider ollama ROUTECTL_DRIVER_OLLAMA_API_KEY "$FAKE_OLLAMA_KEY"
 
 # ---------------------------------------------------------------------
 # Part 6: the container legs
@@ -991,18 +1157,22 @@ run_container_legs() {
     # The DEFAULT provider set is `anthropic` alone, so this leg is also
     # the behavioural-unchanged assertion for the pre-existing path: no
     # `--provider` flag, one credential, the same variable name.
-    check "the token reached the container as ROUTECTL_DRIVER_ANTHROPIC_API_KEY" \
-        "yes" "$(probe_get "$land" anthropic_key_present)"
+    check "the token reached the daemon as ROUTECTL_DRIVER_ANTHROPIC_API_KEY" \
+        "yes" "$(daemon_get "$land" anthropic_key_present)"
     check "the token arrived intact, compared by digest" \
-        "$FAKE_TOKEN_SHA" "$(probe_get "$land" anthropic_key_sha)"
+        "$FAKE_TOKEN_SHA" "$(daemon_get "$land" anthropic_key_sha)"
+    # The other half of the boundary: the daemon holds the key, the driven
+    # client running beside it in the same container does not.
+    check "the token did not reach the driven client" "no" \
+        "$(probe_get "$land" anthropic_key_present)"
     # A default run must forward NOTHING beyond the default provider. The
     # seat this suite writes HOLDS a codex entry, so a wrapper that
     # extracted every seat it found would leak a credential the run never
     # asked for -- into a container running a driven agent.
     check "a default run forwards no openai credential" "no" \
-        "$(probe_get "$land" openai_key_present)"
+        "$(daemon_get "$land" openai_key_present)"
     check "a default run forwards no openai account id" "no" \
-        "$(probe_get "$land" openai_account_present)"
+        "$(daemon_get "$land" openai_account_present)"
     check "no seat file exists at the path routectl resolves" "no" \
         "$(probe_get "$land" seat_at_xdg)"
     check "no seat file exists under the container's HOME either" "no" \
@@ -1053,15 +1223,17 @@ run_container_legs() {
     if [ -f "$root/land/$ASSETS_REL/probe.txt" ]; then
         local codex_land="$root/land"
         check "the codex seat token crossed as ROUTECTL_DRIVER_OPENAI_API_KEY" \
-            "$FAKE_CODEX_TOKEN_SHA" "$(probe_get "$codex_land" openai_key_sha)"
+            "$FAKE_CODEX_TOKEN_SHA" "$(daemon_get "$codex_land" openai_key_sha)"
         check "the codex account id crossed as ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID" \
-            "$FAKE_CODEX_ACCOUNT_SHA" "$(probe_get "$codex_land" openai_account_sha)"
+            "$FAKE_CODEX_ACCOUNT_SHA" "$(daemon_get "$codex_land" openai_account_sha)"
         # Keyed on the PROVIDER, and the openai variable must hold the
         # CODEX seat's token -- not the anthropic one that shares the file.
         check "the openai variable does not carry the anthropic seat's token" "no" \
-            "$([ "$(probe_get "$codex_land" openai_key_sha)" = "$FAKE_TOKEN_SHA" ] && echo yes || echo no)"
+            "$([ "$(daemon_get "$codex_land" openai_key_sha)" = "$FAKE_TOKEN_SHA" ] && echo yes || echo no)"
         check "an openai-only run forwards no anthropic credential" "no" \
-            "$(probe_get "$codex_land" anthropic_key_present)"
+            "$(daemon_get "$codex_land" anthropic_key_present)"
+        check "neither codex value reached the driven client" "no/no" \
+            "$(probe_get "$codex_land" openai_key_present)/$(probe_get "$codex_land" openai_account_present)"
     else
         fail "the openai leg's driver never ran inside the container (log: $root.log)"
     fi
@@ -1086,11 +1258,30 @@ run_container_legs() {
     if [ -f "$root/land/$ASSETS_REL/probe.txt" ]; then
         local env_land="$root/land"
         check "the env-sourced token crossed, not the seat's" \
-            "$FAKE_GEMINI_KEY_SHA" "$(probe_get "$env_land" openai_key_sha)"
+            "$FAKE_GEMINI_KEY_SHA" "$(daemon_get "$env_land" openai_key_sha)"
         check "no account id rides an env-sourced token" "no" \
-            "$(probe_get "$env_land" openai_account_present)"
+            "$(daemon_get "$env_land" openai_account_present)"
     else
         fail "the env-sourced openai leg's driver never ran (log: $root.log)"
+    fi
+
+    # --- bedrock: env passthrough to the daemon, never the client ------
+    root="$(new_scratch healthy)"
+    rc=0
+    provider_run "$root" \
+        "ROUTECTL_DRIVER_BEDROCK_API_KEY=$FAKE_BEDROCK_KEY" -- \
+        --scratch "$root/land" --provider bedrock -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        --timeout 20 \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "a run asking for bedrock alone exits 0" "0" "$rc"
+    if [ -f "$root/land/$ASSETS_REL/probe.txt" ]; then
+        check "the bedrock key reached the daemon intact" \
+            "$(sha_of "$FAKE_BEDROCK_KEY")" "$(daemon_get "$root/land" bedrock_key_sha)"
+        check "the bedrock key did not reach the driven client" "no" \
+            "$(probe_get "$root/land" bedrock_key_present)"
+    else
+        fail "the bedrock leg's driver never ran inside the container (log: $root.log)"
     fi
 
     # --- exit codes propagate VERBATIM -------------------------------
