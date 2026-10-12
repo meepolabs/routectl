@@ -3211,9 +3211,20 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   settle guard and each repair branch's repaired-state flags; the learn dedupe
   set and `RepairBudget` stay request-scoped and are lent per call.
   `classify` (native, replay-attempt aware), `on_rejection` -> `FailureDecision`
-  (`Retry { last_err_body_free }` / `Proceed`) runs replay strip -> field
-  repair -> canary retry in place on `attempt_req`, `observe_generic` wraps
-  `observe_for_learning`, `on_success` settles betas, replay, field and canary
+  (`Retry { last_err_body_free }` / `Proceed`) builds a read-only
+  `RejectionInput` and runs `arbitrate`: the ONE precedence, the static
+  `ARBITRATION_ORDER` of `Proposer`s (no trait objects) over the closed
+  `Proposal` enum (`ReplayStrip` / `FieldRow` / `Capability`) -- replay strip
+  -> field repair -> canary retry (on the field-row proposal) -> generic
+  capability, repairs applied in place on `attempt_req` through the
+  `RepairSink` effects; on `Proceed` the capability proposal is held and
+  `observe_generic` (still after the class observability) applies only it via
+  `observe_for_learning`; `on_success` settles betas, replay, field and canary
+- `src/router/learn_proposers.rs` -- the three thin `Proposer`s the engine
+  arbitrates: `ReplayProposer` (`is_replay_rejection_class` on the remapped
+  class, replay carried), `FieldRowProposer` (`rejected_field` on the native
+  class), `CapabilityProposer` (`resolve_requested_capability` on the
+  body-free error form)
 - `src/router/learned_lanes.rs` -- the ONE projection of resolved learned
   lanes for operator surfaces: `LearnedLaneProjection` of
   `ResolvedLearnedLane { lane: StateKey, nicknames, provider_kind, routed }`,

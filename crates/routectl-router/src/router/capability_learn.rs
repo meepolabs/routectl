@@ -9,7 +9,6 @@ use routectl_core::{ChatRequest, Error};
 
 use super::capability_observe::UntranslatedCapabilities;
 use super::{DispatchMeta, DispatchTarget, LearnedProbeGuard, Router};
-use crate::capability_matcher::resolve_requested_capability;
 use crate::field_verdict_value::VerdictValue;
 
 /// The native AWS Bedrock provider `kind` string; the only kind whose flat
@@ -753,6 +752,9 @@ impl Router {
     ///
     /// A capability in `untranslated` never learns: the attempt's egress kept
     /// it off the wire, so the rejection cannot be about it.
+    ///
+    /// `resolved` is the resolver's attribution of `err`, made once by the
+    /// learning engine's arbitration; `None` routes to the drift observers.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_for_learning(
         &self,
@@ -762,6 +764,7 @@ impl Router {
         target: &DispatchTarget,
         req: &ChatRequest,
         untranslated: &UntranslatedCapabilities,
+        resolved: Option<(String, SignalTier, FailurePhase)>,
         dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
         probe_guard: &mut LearnedProbeGuard,
@@ -791,7 +794,7 @@ impl Router {
         // sit) would under-count exactly the traffic where the parser is blind
         // while the matcher is not.
         self.observe_unlocalized_field_rejection(err, cf, remapped, target, dedupe);
-        let Some(resolved) = resolve_requested_capability(provider_kind, err, cf) else {
+        let Some(resolved) = resolved else {
             self.observe_bedrock_validation_drift(provider_kind, err, target, dedupe);
             self.observe_feature_naming_drift(provider_kind, cf, target, req, dedupe);
             return;

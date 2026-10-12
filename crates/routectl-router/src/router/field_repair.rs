@@ -1069,7 +1069,7 @@ pub(super) fn request_feature_keys(table: FieldRepairTable, req: &ChatRequest) -
 ///
 /// The class is read FIRST, so the parser is never consulted for a class
 /// that cannot carry a field rejection.
-fn rejected_field(
+pub(super) fn rejected_field(
     table: FieldRepairTable,
     class: &FailureClass,
     err: &Error,
@@ -1307,6 +1307,20 @@ impl FieldRepairPlan<'_> {
         rejection: &Error,
         provider_kind: &str,
     ) -> Option<u16> {
+        let named = rejected_field(self.table, native_class, rejection, provider_kind)?;
+        self.apply_named(named, attempt_req, meta, budget, rejection)
+    }
+
+    /// [`Self::apply`] for a rejection already resolved to its closed-table
+    /// row: repair the admitted candidate whose SURFACE that row names.
+    pub(super) fn apply_named(
+        &mut self,
+        named: NamedRejection,
+        attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
+        budget: &mut RepairBudget,
+        rejection: &Error,
+    ) -> Option<u16> {
         // A plan that has already repaired must not repair again: the ceiling
         // is one drop per attempt, and a second would mutate a body the arm
         // already re-dispatched.
@@ -1316,20 +1330,10 @@ impl FieldRepairPlan<'_> {
         // WHICH row: the one the upstream named. Refusing here is
         // pre-mutation, so an unnamed rejection leaves the request and every
         // guard exactly as the caller handed them over.
-        let (idx, named) = self
+        let idx = self
             .candidates
             .iter()
-            .enumerate()
-            .find_map(|(idx, candidate)| {
-                Router::rejection_names_field_surface(
-                    self.table,
-                    candidate.surface,
-                    native_class,
-                    rejection,
-                    provider_kind,
-                )
-                .map(|named| (idx, named))
-            })?;
+            .position(|candidate| candidate.surface == named.row.surface)?;
         let edit = FieldEdit::for_rejection(self.candidates[idx].transform, &named)?;
         let status = self.apply_candidate(idx, edit, attempt_req, meta, budget, rejection)?;
         self.repaired_kind = Some(named.kind);

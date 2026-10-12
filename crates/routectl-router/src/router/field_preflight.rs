@@ -98,7 +98,7 @@ use super::field_repair::{
     FieldRepairRow, FieldSurface, FieldTransform, TransformClass, field_repair_admits_kind,
     present_rows,
 };
-use super::rejection_parser::RejectionKind;
+use super::rejection_parser::{NamedRejection, RejectionKind};
 use super::repair_budget::RepairBudget;
 use super::{
     CapabilityClearedEvent, CapabilityLearnEvent, DispatchTarget, FieldPreflight,
@@ -959,29 +959,24 @@ impl Router {
     /// payload, one repair was charged, and the caller must re-dispatch this
     /// same target. `None` means nothing was mutated or charged.
     ///
-    /// The NATIVE class is the input, never the operator-remapped one, for the
-    /// same reason the reactive arm reads it: a `[class_overrides]` entry states
-    /// how a status should be ROUTED, not what the upstream said, so reading it
-    /// would let an override turn a 429 into a canary confirmation.
-    #[allow(clippy::too_many_arguments)]
+    /// `named` must be resolved from the NATIVE class, never the
+    /// operator-remapped one, for the same reason the reactive arm reads it: a
+    /// `[class_overrides]` entry states how a status should be ROUTED, not what
+    /// the upstream said, so reading it would let an override turn a 429 into a
+    /// canary confirmation.
     pub(super) fn canary_repaired_retry(
         &self,
         plan: &mut FieldPreflightPlan<'_>,
         attempt_req: &mut ChatRequest,
         meta: &mut super::DispatchMeta,
         budget: &mut RepairBudget,
-        native_class: &routectl_core::failure_class::FailureClass,
+        named: NamedRejection,
         err: &routectl_core::Error,
-        provider_kind: &str,
     ) -> Option<CanaryRepair> {
         let surface = plan.canary_surface()?;
-        let named = Self::rejection_names_field_surface(
-            self.field_repair_table(),
-            surface,
-            native_class,
-            err,
-            provider_kind,
-        )?;
+        if named.row.surface != surface {
+            return None;
+        }
         let lossy_path = (named.kind == RejectionKind::InvalidValue).then_some(named.row.path);
         if lossy_path.is_some()
             && let Some(canary) = plan.canary.take()

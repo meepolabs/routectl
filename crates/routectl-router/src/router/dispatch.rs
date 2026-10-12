@@ -840,12 +840,15 @@ impl Router {
                         // recovery and BEFORE the terminal and fallback
                         // handling below, which a canary's provoked 400 would
                         // otherwise reach.
+                        let untranslated = UntranslatedCapabilities::take_from(&translation_report);
                         if let FailureDecision::Retry { last_err_body_free } = learning
                             .on_rejection(
                                 &e,
                                 &cf,
                                 &original_class,
                                 target,
+                                &req,
+                                &untranslated,
                                 &mut attempt_req,
                                 meta,
                                 &mut repair_budget,
@@ -983,7 +986,7 @@ impl Router {
                             remapped,
                             target,
                             &req,
-                            &UntranslatedCapabilities::take_from(&translation_report),
+                            &untranslated,
                             &mut learn_dedupe,
                             meta,
                         );
@@ -1606,12 +1609,15 @@ impl Router {
                         // correctness branch that re-dispatches this target
                         // exactly ONCE. Streams take no in-loop backoff, so the
                         // retry is immediate; a stream holds no canary.
+                        let untranslated = UntranslatedCapabilities::take_from(&translation_report);
                         if let FailureDecision::Retry { last_err_body_free } = learning
                             .on_rejection(
                                 &e,
                                 &cf,
                                 &original_class,
                                 target,
+                                &req,
+                                &untranslated,
                                 &mut attempt_req,
                                 meta,
                                 &mut repair_budget,
@@ -1717,7 +1723,7 @@ impl Router {
                             remapped,
                             target,
                             &req,
-                            &UntranslatedCapabilities::take_from(&translation_report),
+                            &untranslated,
                             &mut learn_dedupe,
                             meta,
                         );

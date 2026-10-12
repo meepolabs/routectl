@@ -12,14 +12,19 @@
 //! budget) is NOT owned here: it outlives every target, so the walk keeps it
 //! above its chain loop and lends it to each call.
 //!
-//! The engine never re-dispatches. [`AttemptLearning::on_rejection`] runs the
-//! fixed repair branches against the walk's `attempt_req` in place and
-//! returns a [`FailureDecision`]; the walk re-gates on `Retry` and continues
-//! its ordinary error path on `Proceed`.
+//! The engine never re-dispatches. [`AttemptLearning::on_rejection`] asks
+//! every proposer what the rejection supports, arbitrates in the one fixed
+//! order ([`ARBITRATION_ORDER`]), applies the first repair that takes against
+//! the walk's `attempt_req` in place, and returns a [`FailureDecision`]; the
+//! walk re-gates on `Retry` and continues its ordinary error path on
+//! `Proceed`. A `Proceed` keeps the generic capability proposal for
+//! [`AttemptLearning::observe_generic`], which applies it later in the error
+//! path, after the class observability.
 
 use std::collections::HashSet;
 use std::time::Instant;
 
+use routectl_core::capability::{FailurePhase, SignalTier};
 use routectl_core::failure_class::{
     ClassifiedFailure, FailureClass, classify, classify_with_attempt,
 };
@@ -34,11 +39,160 @@ use super::dispatch::{
     REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, replay_rejection_body_free,
 };
 use super::field_preflight::FieldPreflightPlan;
-use super::field_repair::{FieldRepairHandle, FieldRepairPlan, FieldSettlementMode};
+use super::field_repair::{
+    FieldRepairHandle, FieldRepairPlan, FieldRepairRow, FieldRepairTable, FieldSettlementMode,
+};
+use super::learn_proposers::{CapabilityProposer, FieldRowProposer, ReplayProposer};
+use super::rejection_parser::{NamedRejection, RejectionKind};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::{ReplayCarryPlan, strip_replay_artifacts_recalibrating};
 use super::runtime_gate::LearnedProbeGuard;
 use super::{DispatchMeta, DispatchTarget, ReplayDegradation, Router};
+
+/// A generic capability attribution: the canonical capability key, the
+/// signal tier, and the phase the resolver read it at.
+pub(super) type ResolvedCapability = (String, SignalTier, FailurePhase);
+
+/// Where on the attempt's wire a rejection points. Carries no facts yet: the
+/// slot exists so a proposer can read them once settlement extracts them.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RejectionSite;
+
+/// Everything a proposer may read about one rejection, borrowed read-only.
+///
+/// Holds no `&mut` state, no repair budget and no registry handle: a
+/// proposer only says what the rejection supports, and the arbitration alone
+/// decides which proposal acts.
+pub(super) struct RejectionInput<'r> {
+    pub(super) err: &'r Error,
+    /// The effective class, after any operator `[class_overrides]` remap.
+    pub(super) class: &'r ClassifiedFailure,
+    /// What the upstream actually said. The path-keyed proposers read this,
+    /// never `class`: an override says how a status is ROUTED, and reading it
+    /// would let a remapped 429 drop a field and mint a verdict.
+    pub(super) native_class: &'r FailureClass,
+    pub(super) target: &'r DispatchTarget,
+    #[expect(dead_code, reason = "no proposer reads the client request yet")]
+    pub(super) client_req: &'r ChatRequest,
+    #[expect(dead_code, reason = "no proposer reads the egress omissions yet")]
+    pub(super) untranslated: &'r UntranslatedCapabilities,
+    /// Whether this target's attempt carried non-portable replay artifacts.
+    pub(super) replay_carried: bool,
+    pub(super) table: FieldRepairTable,
+    #[expect(dead_code, reason = "no proposer reads the rejection site yet")]
+    pub(super) site: Option<RejectionSite>,
+}
+
+/// What one proposer says a rejection supports. Closed: a new learner is a
+/// new variant here and a new arm in [`arbitrate`], never an open registry.
+#[derive(Clone, Debug)]
+pub(super) enum Proposal {
+    /// Re-send the attempt with its reasoning-replay artifacts stripped.
+    ReplayStrip,
+    /// Edit the closed-table row the rejection named; the canary's repaired
+    /// retry answers the same proposal when the reactive repair does not.
+    FieldRow {
+        row: &'static FieldRepairRow,
+        kind: RejectionKind,
+        tier: SignalTier,
+        accepted: Option<&'static str>,
+    },
+    /// Learn a generic capability negative for the attributed capability.
+    Capability(ResolvedCapability),
+}
+
+/// One learner's reading of a rejection.
+pub(super) trait Proposer {
+    fn propose(&self, input: &RejectionInput<'_>) -> Option<Proposal>;
+}
+
+/// One slot of the arbitration order. An enum rather than a trait object so
+/// the order is a plain static array dispatched by `match`.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ProposerSlot {
+    Replay(ReplayProposer),
+    FieldRow(FieldRowProposer),
+    Capability(CapabilityProposer),
+}
+
+impl Proposer for ProposerSlot {
+    fn propose(&self, input: &RejectionInput<'_>) -> Option<Proposal> {
+        match self {
+            Self::Replay(proposer) => proposer.propose(input),
+            Self::FieldRow(proposer) => proposer.propose(input),
+            Self::Capability(proposer) => proposer.propose(input),
+        }
+    }
+}
+
+/// THE precedence among the learners: the first slot whose proposal takes
+/// decides the rejection.
+pub(super) const ARBITRATION_ORDER: [ProposerSlot; 3] = [
+    ProposerSlot::Replay(ReplayProposer),
+    ProposerSlot::FieldRow(FieldRowProposer),
+    ProposerSlot::Capability(CapabilityProposer),
+];
+
+/// The effects a winning repair proposal has on the attempt. Each returns
+/// whether the repair took; `false` means nothing was mutated or charged.
+pub(super) trait RepairSink {
+    fn strip_replay(&mut self) -> bool;
+    fn repair_field(&mut self, named: NamedRejection) -> bool;
+    fn canary_retry(&mut self, named: NamedRejection) -> bool;
+}
+
+/// What the arbitration decided for one rejection.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Arbitration {
+    ReplayStrip,
+    FieldRepair,
+    CanaryRetry,
+    /// No repair took. Carries the generic capability proposal, if any, for
+    /// the generic learner to apply.
+    Proceed(Option<ResolvedCapability>),
+}
+
+/// Walk [`ARBITRATION_ORDER`] and settle the rejection on the first proposal
+/// that takes. A repair proposal whose effect does not take (already spent,
+/// no plan, budget exhausted) falls through to the next slot; a capability
+/// proposal always takes, as the generic learner's claim.
+pub(super) fn arbitrate(input: &RejectionInput<'_>, sink: &mut impl RepairSink) -> Arbitration {
+    for slot in ARBITRATION_ORDER {
+        if let Some(proposal) = slot.propose(input)
+            && let Some(decided) = take_proposal(proposal, sink)
+        {
+            return decided;
+        }
+    }
+    Arbitration::Proceed(None)
+}
+
+/// The decision `proposal` settles the rejection on, or `None` when its
+/// repair effect did not take.
+fn take_proposal(proposal: Proposal, sink: &mut impl RepairSink) -> Option<Arbitration> {
+    match proposal {
+        Proposal::ReplayStrip => sink.strip_replay().then_some(Arbitration::ReplayStrip),
+        Proposal::FieldRow {
+            row,
+            kind,
+            tier,
+            accepted,
+        } => {
+            let named = NamedRejection {
+                row,
+                tier,
+                kind,
+                accepted,
+            };
+            if sink.repair_field(named) {
+                Some(Arbitration::FieldRepair)
+            } else {
+                sink.canary_retry(named).then_some(Arbitration::CanaryRetry)
+            }
+        }
+        Proposal::Capability(resolved) => Some(Arbitration::Proceed(Some(resolved))),
+    }
+}
 
 /// What the walk does with a rejection after the repair branches ran.
 pub(super) enum FailureDecision {
@@ -75,6 +229,9 @@ pub(super) struct AttemptLearning<'a> {
     canary_reject_status: u16,
     canary_lossy_repair: Option<FieldRepairHandle>,
     skip_replay_backoff: bool,
+    /// The generic capability proposal of the last rejection that took no
+    /// repair, held until [`Self::observe_generic`] applies it.
+    pending_capability: Option<ResolvedCapability>,
 }
 
 impl<'a> AttemptLearning<'a> {
@@ -101,6 +258,7 @@ impl<'a> AttemptLearning<'a> {
             canary_reject_status: 0,
             canary_lossy_repair: None,
             skip_replay_backoff: false,
+            pending_capability: None,
         }
     }
 
@@ -153,17 +311,16 @@ impl<'a> AttemptLearning<'a> {
         }
     }
 
-    /// Run the fixed repair branches -- replay strip, envelope field, then
-    /// the canary's repaired retry -- for a rejection that already passed
-    /// auth recovery. Each fires at most once per target and never nests
-    /// inside the per-target retry or the fallback walk, so the call count
-    /// stays additive.
+    /// Arbitrate a rejection that already passed auth recovery: every
+    /// proposer reads it, and the first proposal in [`ARBITRATION_ORDER`] that
+    /// takes decides it -- replay strip, envelope field, the canary's repaired
+    /// retry, then the generic capability learner. Each repair fires at most
+    /// once per target and never nests inside the per-target retry or the
+    /// fallback walk, so the call count stays additive.
     ///
-    /// The replay branch reads the effective (remapped) class; the field and
-    /// canary branches read the NATIVE class, because an operator
-    /// `[class_overrides]` entry says how a status should be ROUTED, not what
-    /// the upstream said -- reading it would let an override turn a 429 into a
-    /// field repair and a permanent verdict.
+    /// On `Proceed` the generic capability proposal is held for
+    /// [`Self::observe_generic`]; a `Retry` never reaches it, because the walk
+    /// re-dispatches first.
     ///
     /// On `Retry` after the replay repair the running error is the
     /// rejection's body-free form, so a re-gate refusal cannot surface the
@@ -176,27 +333,48 @@ impl<'a> AttemptLearning<'a> {
         cf: &ClassifiedFailure,
         native_class: &FailureClass,
         target: &DispatchTarget,
+        client_req: &ChatRequest,
+        untranslated: &UntranslatedCapabilities,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
         budget: &mut RepairBudget,
     ) -> FailureDecision {
-        if self.try_replay_repair(err, &cf.class, target, attempt_req, meta, budget) {
-            return FailureDecision::Retry {
+        self.pending_capability = None;
+        let input = RejectionInput {
+            err,
+            class: cf,
+            native_class,
+            target,
+            client_req,
+            untranslated,
+            replay_carried: self.replay_plan.is_some(),
+            table: self.router.field_repair_table(),
+            site: None,
+        };
+        let mut sink = EngineSink {
+            learning: self,
+            err,
+            target,
+            attempt_req,
+            meta,
+            budget,
+        };
+        match arbitrate(&input, &mut sink) {
+            Arbitration::ReplayStrip => FailureDecision::Retry {
                 last_err_body_free: replay_rejection_body_free(
                     err,
                     &cf.class,
                     &target.provider_name,
                 ),
-            };
-        }
-        if self.try_field_repair(err, native_class, target, attempt_req, meta, budget)
-            || self.try_canary_repair(err, native_class, target, attempt_req, meta, budget)
-        {
-            return FailureDecision::Retry {
+            },
+            Arbitration::FieldRepair | Arbitration::CanaryRetry => FailureDecision::Retry {
                 last_err_body_free: None,
-            };
+            },
+            Arbitration::Proceed(resolved) => {
+                self.pending_capability = resolved;
+                FailureDecision::Proceed
+            }
         }
-        FailureDecision::Proceed
     }
 
     /// Reasoning-replay strip repair: when the optimistically carried variant
@@ -206,12 +384,11 @@ impl<'a> AttemptLearning<'a> {
     /// nothing).
     ///
     /// `budget.draw()` is the LAST condition: it mutates, so drawing before
-    /// the class check would charge requests that never repair. An exhausted
-    /// budget leaves the rejection on the ordinary error path.
+    /// the proposer's class check would charge requests that never repair. An
+    /// exhausted budget leaves the rejection on the ordinary error path.
     fn try_replay_repair(
         &mut self,
         err: &Error,
-        class: &FailureClass,
         target: &DispatchTarget,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
@@ -223,7 +400,7 @@ impl<'a> AttemptLearning<'a> {
         let Some(plan) = self.replay_plan.as_ref() else {
             return false;
         };
-        if !Router::is_replay_rejection_class(class) || !budget.draw() {
+        if !budget.draw() {
             return false;
         }
         self.replay_repair_attempted = true;
@@ -255,8 +432,8 @@ impl<'a> AttemptLearning<'a> {
     /// guard.
     fn try_field_repair(
         &mut self,
+        named: NamedRejection,
         err: &Error,
-        native_class: &FailureClass,
         target: &DispatchTarget,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
@@ -268,14 +445,7 @@ impl<'a> AttemptLearning<'a> {
         let Some(plan) = self.field_plan.as_mut() else {
             return false;
         };
-        let Some(status) = plan.apply(
-            attempt_req,
-            meta,
-            budget,
-            native_class,
-            err,
-            target.provider_kind.unwrap_or(""),
-        ) else {
+        let Some(status) = plan.apply_named(named, attempt_req, meta, budget, err) else {
             return false;
         };
         self.field_reject_status = status;
@@ -295,8 +465,8 @@ impl<'a> AttemptLearning<'a> {
     /// retry draws the shared request allowance.
     fn try_canary_repair(
         &mut self,
+        named: NamedRejection,
         err: &Error,
-        native_class: &FailureClass,
         target: &DispatchTarget,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
@@ -310,9 +480,8 @@ impl<'a> AttemptLearning<'a> {
             attempt_req,
             meta,
             budget,
-            native_class,
+            named,
             err,
-            target.provider_kind.unwrap_or(""),
         ) else {
             return false;
         };
@@ -330,7 +499,9 @@ impl<'a> AttemptLearning<'a> {
     }
 
     /// The generic learned-capability observation for a rejection that took
-    /// no repair, settling this target's re-probes against it.
+    /// no repair, settling this target's re-probes against it. Applies only
+    /// the capability proposal [`Self::on_rejection`] held; it resolves
+    /// nothing itself.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_generic(
         &mut self,
@@ -350,6 +521,7 @@ impl<'a> AttemptLearning<'a> {
             target,
             req,
             untranslated,
+            self.pending_capability.take(),
             dedupe,
             meta,
             &mut self.learned_probe_guard,
@@ -465,3 +637,52 @@ impl<'a> AttemptLearning<'a> {
         }
     }
 }
+
+/// The repair effects against one live attempt: the target's learner state
+/// plus the request-scoped budget and the attempt body it may edit.
+struct EngineSink<'s, 'a> {
+    learning: &'s mut AttemptLearning<'a>,
+    err: &'s Error,
+    target: &'s DispatchTarget,
+    attempt_req: &'s mut ChatRequest,
+    meta: &'s mut DispatchMeta,
+    budget: &'s mut RepairBudget,
+}
+
+impl RepairSink for EngineSink<'_, '_> {
+    fn strip_replay(&mut self) -> bool {
+        self.learning.try_replay_repair(
+            self.err,
+            self.target,
+            self.attempt_req,
+            self.meta,
+            self.budget,
+        )
+    }
+
+    fn repair_field(&mut self, named: NamedRejection) -> bool {
+        self.learning.try_field_repair(
+            named,
+            self.err,
+            self.target,
+            self.attempt_req,
+            self.meta,
+            self.budget,
+        )
+    }
+
+    fn canary_retry(&mut self, named: NamedRejection) -> bool {
+        self.learning.try_canary_repair(
+            named,
+            self.err,
+            self.target,
+            self.attempt_req,
+            self.meta,
+            self.budget,
+        )
+    }
+}
+
+#[cfg(test)]
+#[path = "learn_engine_tests.rs"]
+mod learn_engine_tests;

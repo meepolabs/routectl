@@ -46,6 +46,7 @@ mod field_preflight;
 mod field_repair;
 mod field_verdict_observability;
 mod learn_engine;
+mod learn_proposers;
 mod learned_lanes;
 mod local_refusal;
 mod opening_lookup;
