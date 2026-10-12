@@ -215,11 +215,19 @@ for path in layers:
 PY
 }
 
-# The class names in a gate verdict, one per line. Reads the gate's OWN
-# output; carries no pattern of its own. A finding line is
-# `  <path>  <class>`.
-finding_classes() {
-    awk '/^  \// { print $NF }' <<<"$1" | sort -u
+# The findings in a gate verdict as `<in-image path> <class>`, one per line.
+# Reads the gate's OWN output; carries no pattern of its own. A finding
+# line is `  <path>  <class>`, and the path is under the scanned farm,
+# which is stripped so the row names the file as the image holds it.
+finding_rows() {
+    local verdict="$1" farm="$2" line path cls
+    while IFS= read -r line; do
+        case "$line" in "  /"*) ;; *) continue ;; esac
+        line="${line#  }"
+        cls="${line##*  }"
+        path="${line%  *}"
+        printf '%s %s\n' "${path#"$farm"}" "$cls"
+    done <<<"$verdict" | sort -u
 }
 
 # Classes that are NOT a credential and that fire on the distro content
@@ -249,8 +257,57 @@ class_is_accounted() {
     return 1
 }
 
+# Individual files of VENDORED upstream content that match a gate rule,
+# each accounted by its exact in-image path AND the one class it fires.
+# Every entry was opened and read before it was listed; none is a file
+# the build wrote, which is where a credential enters an image. They are
+# shipped bytes of a pinned client, interpreter, or dependency:
+#
+#   base64-embedded binary (wasm modules, a bitmap font) where a random
+#   run happens to start with a vendor key prefix;
+#   the cloud vendor's own documented example access key id, quoted in
+#   its SDK's API docs;
+#   placeholder keys made of a prefix and `x` filler, in an env template
+#   and a skill reference;
+#   fixed fixture bearer values in upstream eval scripts;
+#   the example token in a JWT library's README;
+#   a CSS class name, and a doc's example worktree path.
+#
+# The narrowing is per FILE and per CLASS, never per tree or per class: a
+# second class in a listed file, or the same class in any other file,
+# still fails. A listed entry the scan no longer reports also fails, so a
+# client re-pin that moves or drops a file forces this list to be re-read
+# instead of leaving an exemption behind for whatever lands at that path
+# next. The list follows the Dockerfile's committed default pins, which
+# are what `routectl-capture:default` is built from.
+VENDORED_FINDINGS="$(cat <<'LIST'
+/opt/node/lib/node_modules/npm/node_modules/undici/lib/llhttp/llhttp-wasm.js provider-key
+/opt/node/lib/node_modules/npm/node_modules/undici/lib/llhttp/llhttp_simd-wasm.js provider-key
+/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/llhttp/llhttp_simd-wasm.js provider-key
+/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OIM2DMFI.js provider-key
+/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleCommand.d.ts provider-key
+/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleWithWebIdentityCommand.d.ts provider-key
+/opt/hermes/venv/lib/python3.14/site-packages/PIL/ImageFont.py provider-key
+/opt/hermes/src/.env.example provider-key
+/opt/hermes/src/skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md provider-key
+/opt/hermes/src/skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md bearer-token
+/opt/hermes/src/evals/desktop_mcp_oauth/backend_http_fixture.py bearer-token
+/opt/hermes/src/evals/provider_fallback/probe_104360.py bearer-token
+/opt/hermes/src/evals/mcp_device_flow.py bearer-token
+/opt/hermes/venv/lib/python3.14/site-packages/pyjwt-2.13.0.dist-info/METADATA jwt
+/opt/hermes/src/plugins/kanban/dashboard/dist/style.css home-prefix-encoded
+/opt/hermes/src/plugins/kanban/dashboard/dist/index.js home-prefix-encoded
+/opt/hermes/src/skills/autonomous-ai-agents/claude-code/SKILL.md scratch-worktree-path
+LIST
+)"
+
+finding_is_vendored() {
+    grep -qxF -- "$1" <<<"$VENDORED_FINDINGS"
+}
+
 # Walk every layer of an image and echo one `<index> <class>` line per
-# unaccounted finding, plus a `layers <n>` line and a `text <n>` line.
+# unaccounted finding, one `vendored <path> <class>` line per finding the
+# list above accounts for, plus a `layers <n>` line and a `text <n>` line.
 # The layer count is echoed rather than asserted here so the caller can
 # compare it against the image's own count.
 walk_image() {
@@ -260,7 +317,7 @@ walk_image() {
     # line above reads an unset `dir` under `set -u`.
     local tarball="$dir/image.tar"
     local -a paths=()
-    local path idx=0 lroot farm textcount verdict rc cls
+    local path idx=0 lroot farm textcount verdict rc cls row
 
     if ! docker save "$image" -o "$tarball" 2>"$dir/save.err"; then
         printf 'error docker-save-failed\n'
@@ -310,11 +367,17 @@ walk_image() {
             printf 'error gate-exit-%s\n' "$rc"
             continue
         fi
-        while IFS= read -r cls; do
-            [ -n "$cls" ] || continue
+        while IFS= read -r row; do
+            [ -n "$row" ] || continue
+            cls="${row##* }"
             class_is_accounted "$cls" && continue
+            if finding_is_vendored "$row"; then
+                printf 'vendored %s\n' "$row"
+                continue
+            fi
             printf '%s %s\n' "$idx" "$cls"
-        done < <(finding_classes "$verdict")
+            printf 'finding %s %s\n' "$idx" "$row" >&2
+        done < <(finding_rows "$verdict" "$farm")
     done
     printf 'layers %s\n' "$idx"
 }
@@ -323,7 +386,7 @@ walk_image() {
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     IMAGE_LAYERS="$(docker image inspect "$IMAGE" --format '{{len .RootFS.Layers}}' 2>/dev/null)"
     mkdir -p "$WORK/committed"
-    COMMITTED_OUT="$(walk_image "$IMAGE" "$WORK/committed")"
+    COMMITTED_OUT="$(walk_image "$IMAGE" "$WORK/committed" 2>"$WORK/committed.err")"
 
     COMMITTED_WALKED="$(awk '$1 == "layers" { print $2 }' <<<"$COMMITTED_OUT")"
     COMMITTED_ERRORS="$(awk '$1 == "error" { print $2 }' <<<"$COMMITTED_OUT")"
@@ -355,6 +418,16 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 
     check "no credential class in any layer of the committed image" \
         "" "$COMMITTED_FINDINGS"
+    if [ -n "$COMMITTED_FINDINGS" ]; then
+        sed -n 's/^finding /  unaccounted: layer /p' "$WORK/committed.err"
+    fi
+
+    COMMITTED_VENDORED="$(awk '$1 == "vendored" { print $2, $3 }' <<<"$COMMITTED_OUT")"
+    STALE_VENDORED="$(LC_ALL=C comm -23 \
+        <(LC_ALL=C sort -u <<<"$VENDORED_FINDINGS") \
+        <(LC_ALL=C sort -u <<<"$COMMITTED_VENDORED"))"
+    check "every vendored-content exemption still matches a finding in the image" \
+        "" "$STALE_VENDORED"
 else
     skip "committed image scan -- NO IMAGE WAS SCANNED: $IMAGE is not present on"
     skip "  this host, so no layer of it was checked for a credential. A green run"
@@ -413,7 +486,7 @@ DOCKERFILE
     if docker build -q -t "$CONTROL_IMAGE" "$CONTROL_CTX" >/dev/null 2>"$WORK/control-build.err"; then
         CONTROL_LAYERS="$(docker image inspect "$CONTROL_IMAGE" --format '{{len .RootFS.Layers}}' 2>/dev/null)"
         mkdir -p "$WORK/control"
-        CONTROL_OUT="$(walk_image "$CONTROL_IMAGE" "$WORK/control")"
+        CONTROL_OUT="$(walk_image "$CONTROL_IMAGE" "$WORK/control" 2>/dev/null)"
 
         CONTROL_WALKED="$(awk '$1 == "layers" { print $2 }' <<<"$CONTROL_OUT")"
         CONTROL_ERRORS="$(awk '$1 == "error" { print $2 }' <<<"$CONTROL_OUT")"

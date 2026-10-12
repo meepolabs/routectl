@@ -132,3 +132,120 @@ RUN mkdir -p /opt/codex \
     && ln -s /opt/codex/codex-x86_64-unknown-linux-musl /usr/local/bin/codex \
     && chmod -R a+rX /opt/codex \
     && su -s /bin/sh -c 'codex --version' nobody
+
+# Node is the runtime pi needs (its package declares node >= 22.19). The
+# official linux-x64 tarball, not the distro package: the archive's node
+# moves with the archive, which is the unpinned-apt-layer drift the comment
+# on the apt layer accepts for runtime utilities but not for an interpreter a
+# client runs on. The checksum is the one nodejs.org publishes in the signed
+# SHASUMS256.txt for this exact version; a download that does not match it
+# fails the build here rather than landing an unverified interpreter.
+#
+# .tar.gz rather than .tar.xz: the base image has gzip and no xz, and adding
+# an apt dependency to save a few MB of download is the wrong trade.
+# --no-same-owner because the tarball records its builder's uid.
+ARG NODE_VERSION=24.21.0
+ARG NODE_SHA256=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
+
+RUN mkdir -p /opt/node \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" \
+        -o /tmp/node.tar.gz \
+    && printf '%s  %s\n' "$NODE_SHA256" /tmp/node.tar.gz >/tmp/node.sha256 \
+    && sha256sum -c /tmp/node.sha256 \
+    && rm -f /tmp/node.sha256 \
+    && tar -xzf /tmp/node.tar.gz -C /opt/node --strip-components=1 --no-same-owner \
+    && rm -f /tmp/node.tar.gz \
+    && ln -s /opt/node/bin/node /usr/local/bin/node \
+    && ln -s /opt/node/bin/npm /usr/local/bin/npm \
+    && ln -s /opt/node/bin/npx /usr/local/bin/npx \
+    && chmod -R a+rX /opt/node \
+    && su -s /bin/sh -c 'node --version' nobody
+
+# pi is installed from its published npm package at a pinned version; no
+# source build. Same ARG convention as the clients above: the fixture
+# record is `meta.client.version` off the running binary.
+#
+# The npm cache and HOME are pointed at throwaway paths for this layer only
+# and removed in it: npm writes its cache, debug logs, and update-notifier
+# state under them, which is per-build state that would otherwise ride the
+# layer. --ignore-scripts because no install script is needed for the CLI to
+# run (the smoke test below proves it), and the transitive set resolves at
+# build time, so a lifecycle script there would run as root unreviewed.
+#
+# The smoke test runs as the unprivileged uid and requires the pinned version
+# in the output, so a registry that served a different build fails here.
+# node writes a compile cache under /tmp on that first run; it is per-build
+# state like the npm cache and goes with it.
+ARG PI_VERSION=1.1.0
+
+RUN HOME=/tmp/pi-build-home npm_config_cache=/tmp/pi-npm-cache \
+        npm install -g --prefix /opt/pi --ignore-scripts \
+        --no-audit --no-fund --no-update-notifier \
+        "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && rm -rf /tmp/pi-build-home /tmp/pi-npm-cache \
+    && ln -s /opt/pi/bin/pi /usr/local/bin/pi \
+    && chmod -R a+rX /opt/pi \
+    && su -s /bin/sh -c 'pi --version' nobody >/tmp/pi-version \
+    && cat /tmp/pi-version \
+    && grep -qF "$PI_VERSION" /tmp/pi-version \
+    && rm -rf /tmp/pi-version /tmp/node-compile-cache
+
+# hermes is installed from the UPSTREAM repository at a release tag, and the
+# tag is checked against a pinned commit: a tag can be moved, a commit
+# cannot, so a re-pointed tag fails the build instead of changing what the
+# image carries under the same pin. Both are build ARGs; overriding one
+# without the other fails the check below by design.
+#
+# Dependencies come from the project's own uv.lock (hash-verified, --frozen
+# so nothing is re-resolved at build time), installed with the uv release
+# that same commit pins in pm/lock.json and verified against the sha256 it
+# records there. The venv uses the base image's python3, which satisfies the
+# project's requires-python; uv is told never to download an interpreter.
+# The `anthropic` extra is the SDK hermes needs for its anthropic_messages
+# mode; the openai SDK for the other two modes is a core dependency.
+#
+# The .git directory is removed after the check, which turns off upstream's
+# self-update probe (it needs a checkout) and keeps clone metadata out of the
+# layer. The other trees removed with it are the ones upstream's own image
+# leaves out of its build context (its .dockerignore at the pinned commit):
+# test suites, the docs site, the desktop app, and packaging metadata. None is
+# on the CLI's runtime path, and their fixtures are credential-shaped by
+# design, which is noise for the layer scan rather than coverage. With no checkout, `hermes --version` reads its identity from an
+# install stamp, so one is written here from the pins -- without the
+# timestamp upstream's own stamp writer adds, which would make two builds of
+# one pin byte-different. `external` names this image, not hermes, as the
+# thing that replaces the tree on an update.
+#
+# The uv binary, its cache, and the lock files uv leaves in /tmp and in the
+# venv are removed in the same layer; the smoke test runs as the unprivileged
+# uid and requires the pinned version in the output.
+ARG HERMES_VERSION=v0.21.7
+ARG HERMES_COMMIT=71d34bad1045610252eda02ee79549436896e784
+
+RUN set -eu \
+    && git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$HERMES_VERSION" \
+        https://github.com/NousResearch/hermes-agent.git /opt/hermes/src \
+    && test "$(git -C /opt/hermes/src rev-parse HEAD)" = "$HERMES_COMMIT" \
+    && rm -rf /opt/hermes/src/.git /opt/hermes/src/.github /opt/hermes/src/tests \
+        /opt/hermes/src/website /opt/hermes/src/nix /opt/hermes/src/flake.nix /opt/hermes/src/flake.lock \
+    && find /opt/hermes/src/apps -mindepth 1 -maxdepth 1 ! -name shared -exec rm -rf {} + \
+    && python3 -I -c 'import json, sys; a = json.load(open(sys.argv[1]))["packages"]["uv"]["artifacts"]["linux-x64"]; print(a["url"], file=open(sys.argv[2], "w")); print(a["sha256"] + "  /tmp/hermes-uv.tar.gz", file=open(sys.argv[3], "w"))' \
+        /opt/hermes/src/pm/lock.json /tmp/hermes-uv.url /tmp/hermes-uv.sha256 \
+    && mkdir -p /tmp/hermes-uv \
+    && curl -fsSL "$(cat /tmp/hermes-uv.url)" -o /tmp/hermes-uv.tar.gz \
+    && sha256sum -c /tmp/hermes-uv.sha256 \
+    && tar -xzf /tmp/hermes-uv.tar.gz -C /tmp/hermes-uv --strip-components=1 --no-same-owner \
+    && UV_CACHE_DIR=/tmp/hermes-uv-cache UV_PYTHON_DOWNLOADS=never UV_NO_CONFIG=1 \
+        UV_PROJECT_ENVIRONMENT=/opt/hermes/venv \
+        /tmp/hermes-uv/uv sync --project /opt/hermes/src --frozen --no-dev \
+        --extra anthropic --python /usr/bin/python3 --quiet \
+    && rm -rf /tmp/hermes-uv /tmp/hermes-uv.tar.gz /tmp/hermes-uv-cache /tmp/hermes-uv.url /tmp/hermes-uv.sha256 \
+        /tmp/uv-*.lock /opt/hermes/venv/.lock \
+    && python3 -I -c 'import json, sys; v = sys.argv[1].removeprefix("v"); json.dump({"schemaVersion": 2, "commit": sys.argv[2], "baseVersion": v, "displayVersion": v, "distance": 0, "dirty": False, "updateMechanism": "external"}, open(sys.argv[3], "w")); print(file=open(sys.argv[3], "a"))' \
+        "$HERMES_VERSION" "$HERMES_COMMIT" /opt/hermes/src/install-stamp.json \
+    && ln -s /opt/hermes/venv/bin/hermes /usr/local/bin/hermes \
+    && chmod -R a+rX /opt/hermes \
+    && su -s /bin/sh -c 'hermes --version' nobody >/tmp/hermes-version \
+    && cat /tmp/hermes-version \
+    && grep -qF "v${HERMES_VERSION#v}" /tmp/hermes-version \
+    && rm -f /tmp/hermes-version

@@ -1153,13 +1153,27 @@ is pinned by digest so two contributors cannot silently differ on glibc:
 bash scripts/container/build.sh
 ```
 
-That writes `routectl-capture:default`. `--version <client-version>` bakes a
-different client version in as a build ARG and tags
-`routectl-capture:<version>`; `--tag <tag>` names the tag outright. Never a
-bare `:latest`, which would let a rebuild replace the image a fixture was
-captured under. Exit codes: 0 built, 1 build failed, 2 usage, 3 docker
-missing. The script reports the version it observes by running the client in
-the finished image, because that observed value -- not the requested ARG --
+The image carries four clients -- claude, codex, pi (npm package
+`@earendil-works/pi-coding-agent`, on an official Node tarball verified
+against its pinned sha256), and hermes (the upstream release tag, checked
+against a pinned commit, dependencies from its own `uv.lock`). Each client
+pin is a build ARG whose committed default lives in the Dockerfile; override
+one with `--claude-version`, `--codex-version`, `--pi-version`, or
+`--hermes-version <tag> --hermes-commit <sha>` (the two hermes flags go
+together, because the build refuses a tag that does not resolve to the
+commit).
+
+The tag is derived from all four pins
+(`routectl-capture:claude<v>_codex<v>_pi<v>_hermes<v>`), so changing any one
+pin builds a different tag; a build at the committed defaults also tags
+`routectl-capture:default`, which is what the run wrapper and the self-tests
+use when given no `--image`. `--tag <repo>:<tag>` names the tag outright.
+Never a bare `:latest`, which would let a rebuild replace the image a fixture
+was captured under. `--dry-run` prints the resolved pins, the tags, and the
+build command without touching docker. Exit codes: 0 built (or dry run
+printed), 1 build failed, 2 usage, 3 docker missing. After a build the
+script reports the version every client prints in the finished image, run as
+an unprivileged uid, because that observed value -- not the requested ARG --
 is what a fixture records.
 
 The image carries the client and its runtime dependencies. It carries NO
@@ -1314,13 +1328,18 @@ argv, including after the driver separator. The image is never pulled from a
 registry (18 rather than a pull), because a run against a registry image
 would capture under a layer set nobody in this repo committed.
 
-Both scripts have shell self-tests in the same directory, which skip BY NAME
+The scripts have shell self-tests in the same directory, which skip BY NAME
 when docker is absent rather than silently:
 
 ```
+bash scripts/container/build.test.sh
 bash scripts/container/run_capture.test.sh
 bash scripts/container/image_scan.test.sh
 ```
+
+`build.test.sh` needs no docker at all: it drives `build.sh --dry-run` with a
+failing `docker` stub on PATH and asserts the argument refusals and that
+changing any one client pin changes the derived tag.
 
 The wrapper's refusal legs need no docker at all -- the wrapper decides every
 one of them from its argv and the host filesystem -- so they run everywhere;
@@ -1330,7 +1349,11 @@ that attempts the write and reports what happened, which is the only honest
 place to assert it. The layer scan runs this repo's own
 `scripts/scrub-fixture.sh` over the extracted content of every image layer,
 so credential vocabulary keeps exactly one owner, and it carries a positive
-control proving the scan can fail.
+control proving the scan can fail. Vendored client content that matches a
+gate rule (base64-embedded binaries, an SDK's documented example key,
+placeholder keys in templates) is accounted file by file and class by class
+in the scan's own list; an entry the scan no longer finds fails the run, so a
+client re-pin forces that list to be re-read.
 
 ## Capturing an upstream rejection fixture
 
