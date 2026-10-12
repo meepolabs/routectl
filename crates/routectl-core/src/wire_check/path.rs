@@ -42,7 +42,7 @@ fn is_element_segment(segment: &str) -> bool {
 
 /// Keys that open a client-keyed object or a schema in at least one
 /// position.
-const CONTAINER_KEYS: [&str; 10] = [
+const CONTAINER_KEYS: [&str; 11] = [
     "metadata",
     "client_metadata",
     "input_schema",
@@ -53,6 +53,7 @@ const CONTAINER_KEYS: [&str; 10] = [
     "schema",
     "input",
     "variables",
+    "input_examples",
 ];
 
 /// The JSON Schema keywords that render verbatim inside a schema. A fixed
@@ -194,8 +195,9 @@ fn keyword_scope(keyword: &str) -> KeyScope {
 /// Client-keyed objects are request `metadata` and Responses
 /// `client_metadata`; the arguments a tool call carries (a `tool_use`
 /// block's `input`, a function call's `arguments`); header maps (`headers`,
-/// `extra_headers`); and Responses prompt `variables`. Schemas are a tool's
-/// argument schema (`input_schema`, function `parameters`) and a
+/// `extra_headers`); Responses prompt `variables`; and a tool's
+/// `input_examples`. Schemas are a tool's argument schema (`input_schema`,
+/// function `parameters` under `tools` or legacy `functions`) and a
 /// structured-output `schema`.
 fn container_scope(ancestors: &[&str], key: &str) -> KeyScope {
     if !CONTAINER_KEYS.contains(&key) {
@@ -214,9 +216,19 @@ fn container_scope(ancestors: &[&str], key: &str) -> KeyScope {
             false,
         ),
         "variables" => (ancestors == ["prompt"], false),
+        "input_examples" => (
+            parent.is_some_and(is_element_segment) && grandparent == Some(&"tools"),
+            false,
+        ),
         "input_schema" => (false, true),
-        "parameters" => (false, ancestors.first() == Some(&"tools")),
-        "schema" => (false, matches!(parent, Some("json_schema" | "format"))),
+        "parameters" => (
+            false,
+            matches!(ancestors.first(), Some(&("tools" | "functions"))),
+        ),
+        "schema" => (
+            false,
+            matches!(parent, Some("json_schema" | "format" | "output_format")),
+        ),
         _ => (false, false),
     };
     if masked {
@@ -414,7 +426,7 @@ mod tests {
         let at_cap = "k".repeat(MAX_WIRE_KEY_LEN);
         let over_cap = "k".repeat(MAX_WIRE_KEY_LEN + 1);
         let at_cap_expected = format!("/{at_cap}");
-        let rows: [(&str, Vec<&str>, &str); 31] = [
+        let rows: [(&str, Vec<&str>, &str); 43] = [
             ("root", vec![], ""),
             ("schema key", vec!["max_tokens"], "/max_tokens"),
             (
@@ -533,6 +545,66 @@ mod tests {
                 "key under a header map",
                 vec!["headers", "x-team"],
                 "/headers/*",
+            ),
+            (
+                "parameters under legacy functions is a schema",
+                vec!["functions", "0", "parameters", "properties", "account_id"],
+                "/functions/0/parameters/properties/*",
+            ),
+            (
+                "property name under a legacy output_format schema",
+                vec!["output_format", "schema", "properties", "account_id"],
+                "/output_format/schema/properties/*",
+            ),
+            (
+                "property under a tool's input example",
+                vec!["tools", "0", "input_examples", "1", "account_id"],
+                "/tools/0/input_examples/1/*",
+            ),
+            (
+                "non ascii key in a schema",
+                vec!["tools", "0", "input_schema", "caf\u{e9}"],
+                "/tools/0/input_schema/*",
+            ),
+            (
+                "non ascii property name",
+                vec!["tools", "0", "input_schema", "properties", "caf\u{e9}"],
+                "/tools/0/input_schema/properties/*",
+            ),
+            (
+                "empty key in a schema",
+                vec!["tools", "0", "input_schema", ""],
+                "/tools/0/input_schema/*",
+            ),
+            (
+                "empty property name",
+                vec!["tools", "0", "input_schema", "properties", ""],
+                "/tools/0/input_schema/properties/*",
+            ),
+            (
+                "keyword-cased key that is not a keyword",
+                vec!["tools", "0", "input_schema", "Type"],
+                "/tools/0/input_schema/*",
+            ),
+            (
+                "required entry",
+                vec!["tools", "0", "input_schema", "required", "0"],
+                "/tools/0/input_schema/required/0",
+            ),
+            (
+                "key inside an enum entry",
+                vec!["tools", "0", "input_schema", "enum", "1", "account_id"],
+                "/tools/0/input_schema/enum/1/*",
+            ),
+            (
+                "$defs child name",
+                vec!["tools", "0", "input_schema", "$defs", "Account"],
+                "/tools/0/input_schema/$defs/*",
+            ),
+            (
+                "keyword inside a $defs child",
+                vec!["tools", "0", "input_schema", "$defs", "Account", "type"],
+                "/tools/0/input_schema/$defs/*/type",
             ),
             (
                 "Responses input items are not client-keyed",

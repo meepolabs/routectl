@@ -787,15 +787,28 @@ fn object_under_nots(depth: usize) -> Value {
 #[test]
 fn an_injection_is_recorded_only_while_a_wire_check_path_can_name_it() {
     let at = |below: &str| format!("/output_config/format/schema{below}/additionalProperties");
-    let rows: [(&str, usize, Vec<String>); 4] = [
-        ("object at the root", 0, vec![at("")]),
-        ("deepest nameable object", 4, vec![at("/not/not/not/not")]),
-        ("object one level past the path bound", 5, vec![]),
-        ("object fifteen levels below the root", 15, vec![]),
+    let rows: [(&str, Value, Vec<String>); 5] = [
+        ("empty schema", json!({}), vec![]),
+        ("object at the root", object_under_nots(0), vec![at("")]),
+        (
+            "deepest nameable object",
+            object_under_nots(4),
+            vec![at("/not/not/not/not")],
+        ),
+        (
+            "object one level past the path bound",
+            object_under_nots(5),
+            vec![],
+        ),
+        (
+            "object fifteen levels below the root",
+            object_under_nots(15),
+            vec![],
+        ),
     ];
 
-    for (name, depth, expected) in rows {
-        let mut schema = object_under_nots(depth);
+    for (name, schema, expected) in rows {
+        let mut schema = schema;
 
         let repair = repair_schema(PROVIDER, &mut schema).unwrap();
 
