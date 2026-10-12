@@ -17,12 +17,16 @@
 //!   `rc_request_refused_local_total{lane}`, each key holding a count and the
 //!   unix second it was last bumped. Every label is a closed enum, so the key
 //!   space is bounded by the product of the enums;
-//! - a ring of the newest [`FINDINGS_RING_CAPACITY`] findings, each naming a
-//!   lane, leg, sanitized path and closed labels -- never a body value.
+//! - the newest [`FINDINGS_RING_CAPACITY`] findings of each kind (loss and
+//!   rejection), each naming a lane, leg, sanitized path and closed labels --
+//!   never a body value.
 //!
-//! A loss or an unrepaired rejection WARNs once per (lane, path, kind)
-//! through a [`CappedWarnSet`]; the counters increment on every call
-//! regardless. Locks are held only for the map or ring update and never
+//! A loss WARNs once per (lane, path, class) and an unrepaired rejection once
+//! per (lane, path), each kind through its own [`CappedWarnSet`]; the
+//! counters increment on every call regardless. Rejection paths are chosen by
+//! whatever the client sends, so the two kinds never share a ring or a dedup
+//! set: no volume of rejections can evict a loss finding or silence a loss
+//! WARN. Locks are held only for the map or ring update and never
 //! across a `tracing` call or an await.
 
 use std::collections::{HashMap, VecDeque};
@@ -38,11 +42,12 @@ use crate::config::WireCheckConfig;
 /// Most client versions the sampler tracks per lane for first-N checking.
 pub const MAX_TRACKED_VERSIONS_PER_LANE: usize = 8;
 
-/// Most findings the ring retains; the oldest is dropped first.
+/// Most findings of each kind retained; the oldest of that kind is dropped
+/// first.
 pub const FINDINGS_RING_CAPACITY: usize = 128;
 
-/// Distinct (lane, path, kind) WARN keys remembered before the dedup set
-/// stops recording. Paths are client-influenced, so the set needs a bound;
+/// Distinct WARN keys each kind's dedup set remembers before it stops
+/// recording. Paths are client-influenced, so the set needs a bound;
 /// past it a new key stays silent while its counters still increment.
 const WARN_DEDUP_CAP: usize = 1024;
 
@@ -80,7 +85,7 @@ impl CheckOutcome {
 
 /// What field repair made of an upstream rejection. Closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum F1Outcome {
+pub enum FieldRepairOutcome {
     /// Repaired, and the repair kept the client's intent.
     Repaired,
     /// Repaired by dropping or replacing what the client asked for.
@@ -89,7 +94,7 @@ pub enum F1Outcome {
     Unrepaired,
 }
 
-impl F1Outcome {
+impl FieldRepairOutcome {
     /// Every outcome, in declaration order.
     pub const ALL: [Self; 3] = [Self::Repaired, Self::RepairedLossy, Self::Unrepaired];
 
@@ -126,7 +131,7 @@ impl CounterReading {
 
 /// One content-free finding: a path a check flagged as lost, or a path an
 /// upstream rejection named. A loss carries `class`; a rejection carries
-/// `provenance` and `f1_outcome`.
+/// `provenance` and `field_repair_outcome`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WireFinding {
@@ -143,7 +148,7 @@ pub struct WireFinding {
     /// Where the rejected path came from, for a rejection.
     pub provenance: Option<RejectionProvenance>,
     /// What field repair made of the rejection, for a rejection.
-    pub f1_outcome: Option<F1Outcome>,
+    pub field_repair_outcome: Option<FieldRepairOutcome>,
 }
 
 /// One `rc_wire_loss_total{lane,path_class}` key.
@@ -203,7 +208,8 @@ pub struct WireCheckSnapshot {
 pub struct WireCheckState {
     sampler: [Mutex<LaneSampler>; Lane::COUNT],
     registry: Mutex<Registry>,
-    warned: CappedWarnSet<(Lane, WirePath, WarnKind)>,
+    loss_warned: CappedWarnSet<(Lane, WirePath, PathClass)>,
+    rejection_warned: CappedWarnSet<(Lane, WirePath)>,
 }
 
 impl Default for WireCheckState {
@@ -211,7 +217,8 @@ impl Default for WireCheckState {
         Self {
             sampler: std::array::from_fn(|_| Mutex::default()),
             registry: Mutex::default(),
-            warned: CappedWarnSet::new(WARN_DEDUP_CAP),
+            loss_warned: CappedWarnSet::new(WARN_DEDUP_CAP),
+            rejection_warned: CappedWarnSet::new(WARN_DEDUP_CAP),
         }
     }
 }
@@ -227,22 +234,65 @@ struct Registry {
     loss: HashMap<(Lane, PathClass), CounterReading>,
     checks: HashMap<(Lane, CheckOutcome), CounterReading>,
     local_refusals: HashMap<Lane, CounterReading>,
-    findings: VecDeque<WireFinding>,
+    loss_findings: FindingRing,
+    rejection_findings: FindingRing,
+    next_seq: u64,
 }
 
+/// Findings of one kind, each tagged with a registry-wide sequence number so
+/// the two kinds merge back into recording order.
+type FindingRing = VecDeque<(u64, WireFinding)>;
+
 impl Registry {
-    fn push_finding(&mut self, finding: WireFinding) {
-        while self.findings.len() >= FINDINGS_RING_CAPACITY {
-            self.findings.pop_front();
-        }
-        self.findings.push_back(finding);
+    fn push_loss(&mut self, finding: WireFinding) {
+        let seq = self.take_seq();
+        push_bounded(&mut self.loss_findings, seq, finding);
+    }
+
+    fn push_rejection(&mut self, finding: WireFinding) {
+        let seq = self.take_seq();
+        push_bounded(&mut self.rejection_findings, seq, finding);
+    }
+
+    const fn take_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq = seq.wrapping_add(1);
+        seq
+    }
+
+    /// Both rings, oldest first.
+    fn findings(&self) -> Vec<WireFinding> {
+        let mut merged: Vec<&(u64, WireFinding)> = self
+            .loss_findings
+            .iter()
+            .chain(self.rejection_findings.iter())
+            .collect();
+        merged.sort_by_key(|(seq, _)| *seq);
+        merged.into_iter().map(|(_, f)| f.clone()).collect()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum WarnKind {
-    Loss(PathClass),
-    UnrepairedRejection,
+fn push_bounded(ring: &mut FindingRing, seq: u64, finding: WireFinding) {
+    while ring.len() >= FINDINGS_RING_CAPACITY {
+        ring.pop_front();
+    }
+    ring.push_back((seq, finding));
+}
+
+/// Define a method `pub` in test and `test-utils` builds, where the cli's
+/// tests and bench drive the state directly, and `pub(crate)` otherwise, so
+/// production code outside this crate reads the state only through
+/// [`WireCheckState::snapshot`].
+macro_rules! test_utils_pub {
+    ($(#[$meta:meta])* fn $($rest:tt)*) => {
+        #[cfg(any(test, feature = "test-utils"))]
+        $(#[$meta])*
+        pub fn $($rest)*
+
+        #[cfg(not(any(test, feature = "test-utils")))]
+        $(#[$meta])*
+        pub(crate) fn $($rest)*
+    };
 }
 
 /// Recover a poisoned lock rather than propagate it: nothing here panics
@@ -271,40 +321,42 @@ const fn admit_nth(seen_before: u64, first_n: u64, sample_one_in: u64) -> bool {
 }
 
 impl WireCheckState {
-    /// Whether a successful attempt on `lane` from `client_version` gets a
-    /// full check. A version that is not a safe token counts as no version,
-    /// so a hostile or oversized string is never stored. Allocates only the
-    /// first time a (lane, version) is tracked, and only attempts on the
-    /// same lane contend for a lock.
-    pub fn admit(
-        &self,
-        lane: Lane,
-        client_version: Option<&str>,
-        config: &WireCheckConfig,
-    ) -> bool {
-        let first_n = u64::from(config.first_n);
-        let sample_one_in = u64::from(config.sample_one_in.get());
-        let client_version = client_version.filter(|v| is_safe_token(v));
-        let Some(shard) = self.sampler.get(lane.index()) else {
-            return false;
-        };
-        let mut entry = lock(shard);
-        if let Some((_, seen)) = entry
-            .versions
-            .iter_mut()
-            .find(|(version, _)| version.as_deref() == client_version)
-        {
-            let admitted = admit_nth(*seen, first_n, sample_one_in);
-            *seen = seen.saturating_add(1);
-            return admitted;
+    test_utils_pub! {
+        /// Whether a successful attempt on `lane` from `client_version` gets a
+        /// full check. A version that is not a safe token counts as no version,
+        /// so a hostile or oversized string is never stored. Allocates only the
+        /// first time a (lane, version) is tracked, and only attempts on the
+        /// same lane contend for a lock.
+        fn admit(
+            &self,
+            lane: Lane,
+            client_version: Option<&str>,
+            config: &WireCheckConfig,
+        ) -> bool {
+            let first_n = u64::from(config.first_n);
+            let sample_one_in = u64::from(config.sample_one_in.get());
+            let client_version = client_version.filter(|v| is_safe_token(v));
+            let Some(shard) = self.sampler.get(lane.index()) else {
+                return false;
+            };
+            let mut entry = lock(shard);
+            if let Some((_, seen)) = entry
+                .versions
+                .iter_mut()
+                .find(|(version, _)| version.as_deref() == client_version)
+            {
+                let admitted = admit_nth(*seen, first_n, sample_one_in);
+                *seen = seen.saturating_add(1);
+                return admitted;
+            }
+            if entry.versions.len() < MAX_TRACKED_VERSIONS_PER_LANE {
+                entry.versions.push((client_version.map(Box::from), 1));
+                return admit_nth(0, first_n, sample_one_in);
+            }
+            let seen = entry.overflow_seen;
+            entry.overflow_seen = seen.saturating_add(1);
+            admit_nth(seen, 0, sample_one_in)
         }
-        if entry.versions.len() < MAX_TRACKED_VERSIONS_PER_LANE {
-            entry.versions.push((client_version.map(Box::from), 1));
-            return admit_nth(0, first_n, sample_one_in);
-        }
-        let seen = entry.overflow_seen;
-        entry.overflow_seen = seen.saturating_add(1);
-        admit_nth(seen, 0, sample_one_in)
     }
 
     /// Give back the charge one [`Self::admit`] call for `lane` and
@@ -314,7 +366,7 @@ impl WireCheckState {
     /// is never untracked and the tracked list only fills, so a version
     /// absent from a full list was charged to the overflow counter; one
     /// absent from a list with room was never charged, and nothing changes.
-    pub fn release(&self, lane: Lane, client_version: Option<&str>) {
+    pub(crate) fn release(&self, lane: Lane, client_version: Option<&str>) {
         let client_version = client_version.filter(|v| is_safe_token(v));
         let Some(shard) = self.sampler.get(lane.index()) else {
             return;
@@ -333,9 +385,11 @@ impl WireCheckState {
         }
     }
 
-    /// Record a check that had nothing complete to compare.
-    pub fn record_incomplete(&self, lane: Lane) {
-        self.record_incomplete_at(lane, unix_now_secs());
+    test_utils_pub! {
+        /// Record a check that had nothing complete to compare.
+        fn record_incomplete(&self, lane: Lane) {
+            self.record_incomplete_at(lane, unix_now_secs());
+        }
     }
 
     fn record_incomplete_at(&self, lane: Lane, now: u64) {
@@ -346,21 +400,23 @@ impl WireCheckState {
             .bump(now);
     }
 
-    /// Record a finished comparison on `leg`: every finding bumps its loss
-    /// counter and enters the ring, and the check counts once under the
-    /// outcome it earned. A `truncated` comparison is `budget` whatever it
-    /// found, so it is never counted `clean`. Returns that outcome.
-    pub fn record_compared<'p, I>(
-        &self,
-        lane: Lane,
-        leg: Leg,
-        findings: I,
-        truncated: bool,
-    ) -> CheckOutcome
-    where
-        I: IntoIterator<Item = (&'p WirePath, PathClass)>,
-    {
-        self.record_compared_at(lane, leg, findings, truncated, unix_now_secs())
+    test_utils_pub! {
+        /// Record a finished comparison on `leg`: every finding bumps its loss
+        /// counter and enters the ring, and the check counts once under the
+        /// outcome it earned. A `truncated` comparison is `budget` whatever it
+        /// found, so it is never counted `clean`. Returns that outcome.
+        fn record_compared<'p, I>(
+            &self,
+            lane: Lane,
+            leg: Leg,
+            findings: I,
+            truncated: bool,
+        ) -> CheckOutcome
+        where
+            I: IntoIterator<Item = (&'p WirePath, PathClass)>,
+        {
+            self.record_compared_at(lane, leg, findings, truncated, unix_now_secs())
+        }
     }
 
     fn record_compared_at<'p, I>(
@@ -396,17 +452,17 @@ impl WireCheckState {
         {
             let mut registry = lock(&self.registry);
             registry.loss.entry((lane, class)).or_default().bump(now);
-            registry.push_finding(WireFinding {
+            registry.push_loss(WireFinding {
                 ts_unix_secs: now,
                 lane,
                 leg,
                 path: path.clone(),
                 class: Some(class),
                 provenance: None,
-                f1_outcome: None,
+                field_repair_outcome: None,
             });
         }
-        if self.should_warn(lane, path, WarnKind::Loss(class)) {
+        if should_warn(&self.loss_warned, (lane, path.clone(), class), "loss") {
             tracing::warn!(
                 target: LOG_TARGET,
                 lane = lane.label(),
@@ -418,18 +474,27 @@ impl WireCheckState {
         }
     }
 
-    /// Record a path an upstream rejection named, with its provenance and
-    /// what field repair made of it. An unrepaired rejection WARNs once per
-    /// (lane, path).
-    pub fn record_rejection(
-        &self,
-        lane: Lane,
-        leg: Leg,
-        path: &WirePath,
-        provenance: RejectionProvenance,
-        f1_outcome: F1Outcome,
-    ) {
-        self.record_rejection_at(lane, leg, path, provenance, f1_outcome, unix_now_secs());
+    test_utils_pub! {
+        /// Record a path an upstream rejection named, with its provenance and
+        /// what field repair made of it. An unrepaired rejection WARNs once per
+        /// (lane, path).
+        fn record_rejection(
+            &self,
+            lane: Lane,
+            leg: Leg,
+            path: &WirePath,
+            provenance: RejectionProvenance,
+            field_repair_outcome: FieldRepairOutcome,
+        ) {
+            self.record_rejection_at(
+                lane,
+                leg,
+                path,
+                provenance,
+                field_repair_outcome,
+                unix_now_secs(),
+            );
+        }
     }
 
     fn record_rejection_at(
@@ -438,20 +503,20 @@ impl WireCheckState {
         leg: Leg,
         path: &WirePath,
         provenance: RejectionProvenance,
-        f1_outcome: F1Outcome,
+        field_repair_outcome: FieldRepairOutcome,
         now: u64,
     ) {
-        lock(&self.registry).push_finding(WireFinding {
+        lock(&self.registry).push_rejection(WireFinding {
             ts_unix_secs: now,
             lane,
             leg,
             path: path.clone(),
             class: None,
             provenance: Some(provenance),
-            f1_outcome: Some(f1_outcome),
+            field_repair_outcome: Some(field_repair_outcome),
         });
-        if f1_outcome == F1Outcome::Unrepaired
-            && self.should_warn(lane, path, WarnKind::UnrepairedRejection)
+        if field_repair_outcome == FieldRepairOutcome::Unrepaired
+            && should_warn(&self.rejection_warned, (lane, path.clone()), "rejection")
         {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -459,15 +524,17 @@ impl WireCheckState {
                 leg = leg.label(),
                 path = path.as_str(),
                 provenance = provenance.label(),
-                f1_outcome = f1_outcome.label(),
+                field_repair_outcome = field_repair_outcome.label(),
                 "upstream rejected a request field and it was not repaired"
             );
         }
     }
 
-    /// Count one request routectl refused locally on `lane`.
-    pub fn record_local_refusal(&self, lane: Lane) {
-        self.record_local_refusal_at(lane, unix_now_secs());
+    test_utils_pub! {
+        /// Count one request routectl refused locally on `lane`.
+        fn record_local_refusal(&self, lane: Lane) {
+            self.record_local_refusal_at(lane, unix_now_secs());
+        }
     }
 
     fn record_local_refusal_at(&self, lane: Lane, now: u64) {
@@ -476,22 +543,6 @@ impl WireCheckState {
             .entry(lane)
             .or_default()
             .bump(now);
-    }
-
-    fn should_warn(&self, lane: Lane, path: &WirePath, kind: WarnKind) -> bool {
-        match self.warned.admit((lane, path.clone(), kind)) {
-            WarnDecision::Emit => true,
-            WarnDecision::AlreadyWarned | WarnDecision::CapReached { notice: false } => false,
-            WarnDecision::CapReached { notice: true } => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    cap = self.warned.cap(),
-                    "wire check warning dedup is full; new paths are counted but no longer \
-                     warned"
-                );
-                false
-            }
-        }
     }
 
     /// Copy every counter and the ring. Reads only: the sampler is not
@@ -521,7 +572,7 @@ impl WireCheckState {
             .iter()
             .map(|(&lane, &reading)| LocalRefusalCounter { lane, reading })
             .collect();
-        let findings = registry.findings.iter().cloned().collect();
+        let findings = registry.findings();
         drop(registry);
         loss.sort_by_key(|c| (c.lane.label(), c.path_class.label()));
         checks.sort_by_key(|c| (c.lane.label(), c.outcome.label()));
@@ -532,6 +583,29 @@ impl WireCheckState {
             checks,
             local_refusals,
             findings,
+        }
+    }
+}
+
+/// Whether a WARN for `key` should be emitted: once per key, and never once
+/// `set` is full. The first key past the cap emits one notice naming `kind`.
+fn should_warn<K: Eq + std::hash::Hash>(
+    set: &CappedWarnSet<K>,
+    key: K,
+    kind: &'static str,
+) -> bool {
+    match set.admit(key) {
+        WarnDecision::Emit => true,
+        WarnDecision::AlreadyWarned | WarnDecision::CapReached { notice: false } => false,
+        WarnDecision::CapReached { notice: true } => {
+            tracing::warn!(
+                target: LOG_TARGET,
+                kind,
+                cap = set.cap(),
+                "wire check warning dedup is full; new paths are counted but no longer \
+                 warned"
+            );
+            false
         }
     }
 }

@@ -5,7 +5,7 @@ use routectl_core::wire_check::{
     EgressKind, IngressDialect, Lane, Leg, PathClass, RejectionProvenance, WirePath,
 };
 use routectl_router::Config;
-use routectl_router::wire_check_state::{F1Outcome, WireCheckState};
+use routectl_router::wire_check_state::{FieldRepairOutcome, WireCheckState};
 use serde_json::{Value, json};
 
 use super::project;
@@ -83,14 +83,14 @@ fn an_unrepaired_rejection_renders_all_five_fields_and_a_repaired_one_does_not_r
         Leg::Request,
         &path,
         RejectionProvenance::ClientUnchanged,
-        F1Outcome::Unrepaired,
+        FieldRepairOutcome::Unrepaired,
     );
     state.record_rejection(
         lane(),
         Leg::Request,
         &WirePath::root().child("metadata"),
         RejectionProvenance::RoutectlAdded,
-        F1Outcome::Repaired,
+        FieldRepairOutcome::Repaired,
     );
     let snapshot = snapshot_of(&state);
 
@@ -109,7 +109,7 @@ fn an_unrepaired_rejection_renders_all_five_fields_and_a_repaired_one_does_not_r
     assert_eq!(row["lane"], json!("anthropic->anthropic-api"));
     assert_eq!(row["leg"], json!("request"));
     assert_eq!(row["path"], json!("/tools/0"));
-    assert_eq!(row["f1_outcome"], json!("unrepaired"));
+    assert_eq!(row["field_repair_outcome"], json!("unrepaired"));
     assert_eq!(row["provenance"], json!("client_unchanged"));
 }
 
@@ -121,7 +121,7 @@ fn an_unrepaired_rejection_older_than_the_window_does_not_render() {
         Leg::Request,
         &WirePath::root().child("metadata"),
         RejectionProvenance::ClientChanged,
-        F1Outcome::Unrepaired,
+        FieldRepairOutcome::Unrepaired,
     );
     let snapshot = snapshot_of(&state);
     let ts = snapshot.findings[0].ts_unix_secs;

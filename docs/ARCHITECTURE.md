@@ -88,9 +88,15 @@ contract for extending it:
 - **New ingress dialect**: add a file under
   `routectl-cli/src/ingress/`, implement `IngressAdapter`, add a
   one-line route in `src/server/mod.rs`. Zero changes to providers or
-  canonical types.
+  canonical types. Register the dialect in
+  `routectl-core/src/wire_check/lane.rs` (`IngressDialect`) so the live
+  wire check has a lane for it, and, if it streams, add its stream
+  assembler in `routectl-core/src/wire_check/assemble.rs` so streamed
+  responses fold into a comparable document.
 - **New egress provider**: implement `Provider` in
-  `routectl-providers`. Zero changes to ingress adapters.
+  `routectl-providers`. Zero changes to ingress adapters. Register its
+  wire surface in `routectl-core/src/wire_check/lane.rs` (`EgressKind`)
+  so the live wire check has a lane for it.
 - **New canonical-shape feature**: extend the `routectl-core` schema
   first, then teach the relevant ingress and egress to read/write it.
   Forward-compat catchalls (`ContentPart::Other`, `ToolDef::Other`,

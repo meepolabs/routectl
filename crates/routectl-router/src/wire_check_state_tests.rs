@@ -3,7 +3,8 @@ use routectl_core::wire_check::{
 };
 
 use super::{
-    CheckOutcome, F1Outcome, FINDINGS_RING_CAPACITY, MAX_TRACKED_VERSIONS_PER_LANE, WireCheckState,
+    CheckOutcome, FINDINGS_RING_CAPACITY, FieldRepairOutcome, MAX_TRACKED_VERSIONS_PER_LANE,
+    WireCheckState,
 };
 use crate::config::{Config, WireCheckConfig};
 
@@ -244,7 +245,7 @@ fn a_loss_bumps_its_lane_and_class_counter_and_enters_the_ring_with_its_leg() {
     assert_eq!(finding.leg, Leg::Response);
     assert_eq!(finding.path, lost);
     assert_eq!(finding.class, Some(PathClass::Changed));
-    assert_eq!(finding.f1_outcome, None);
+    assert_eq!(finding.field_repair_outcome, None);
 }
 
 #[test]
@@ -258,7 +259,7 @@ fn the_ring_holds_at_most_its_capacity_keeping_the_newest() {
             Leg::Request,
             &path(&["tools", &n.to_string()]),
             RejectionProvenance::ClientUnchanged,
-            F1Outcome::Repaired,
+            FieldRepairOutcome::Repaired,
         );
     }
 
@@ -270,6 +271,65 @@ fn the_ring_holds_at_most_its_capacity_keeping_the_newest() {
         path(&["tools", &(total - 1).to_string()]),
         "newest kept last"
     );
+}
+
+fn record_unrepaired_rejections(state: &WireCheckState, count: usize) {
+    for n in 0..count {
+        state.record_rejection(
+            anthropic_lane(),
+            Leg::Request,
+            &path(&["tools", &n.to_string()]),
+            RejectionProvenance::ClientUnchanged,
+            FieldRepairOutcome::Unrepaired,
+        );
+    }
+}
+
+#[test]
+fn a_flood_of_rejections_never_evicts_a_loss_finding() {
+    let state = WireCheckState::default();
+    let lost = path(&["stop_sequences"]);
+    state.record_compared(
+        chat_lane(),
+        Leg::Request,
+        [(&lost, PathClass::Missing)],
+        false,
+    );
+
+    record_unrepaired_rejections(&state, FINDINGS_RING_CAPACITY + 72);
+
+    let findings = state.snapshot(&WireCheckConfig::default()).findings;
+    let losses: Vec<&WirePath> = findings
+        .iter()
+        .filter(|f| f.class.is_some())
+        .map(|f| &f.path)
+        .collect();
+    assert_eq!(losses, [&lost]);
+    assert_eq!(findings.len(), FINDINGS_RING_CAPACITY + 1);
+    assert_eq!(findings[0].path, lost, "findings stay in recording order");
+}
+
+#[test]
+fn a_flood_of_rejection_warn_keys_never_silences_a_new_loss() {
+    let state = WireCheckState::default();
+    let lost = path(&["stop_sequences"]);
+
+    let events = routectl_testkit::capture_events(|| {
+        record_unrepaired_rejections(&state, 1100);
+        state.record_compared(
+            chat_lane(),
+            Leg::Request,
+            [(&lost, PathClass::Missing)],
+            false,
+        );
+    });
+
+    let loss_warns: Vec<_> = wire_check_warns(&events)
+        .into_iter()
+        .filter(|e| e.field("path_class").is_some())
+        .collect();
+    assert_eq!(loss_warns.len(), 1);
+    assert_eq!(loss_warns[0].field("path"), Some("/stop_sequences"));
 }
 
 #[test]
@@ -372,25 +432,25 @@ fn only_an_unrepaired_rejection_warns_and_only_once_per_path() {
     let rejected = path(&["thinking"]);
 
     let events = routectl_testkit::capture_events(|| {
-        for f1 in [
-            F1Outcome::Repaired,
-            F1Outcome::RepairedLossy,
-            F1Outcome::Unrepaired,
-            F1Outcome::Unrepaired,
+        for outcome in [
+            FieldRepairOutcome::Repaired,
+            FieldRepairOutcome::RepairedLossy,
+            FieldRepairOutcome::Unrepaired,
+            FieldRepairOutcome::Unrepaired,
         ] {
             state.record_rejection(
                 anthropic_lane(),
                 Leg::Request,
                 &rejected,
                 RejectionProvenance::RoutectlAdded,
-                f1,
+                outcome,
             );
         }
     });
 
     let warns = wire_check_warns(&events);
     assert_eq!(warns.len(), 1);
-    assert_eq!(warns[0].field("f1_outcome"), Some("unrepaired"));
+    assert_eq!(warns[0].field("field_repair_outcome"), Some("unrepaired"));
     assert_eq!(warns[0].field("provenance"), Some("routectl_added"));
     assert_eq!(warns[0].field("path"), Some("/thinking"));
     assert_eq!(
@@ -423,8 +483,11 @@ fn snapshot_reads_do_not_advance_the_sampler_or_change_the_registry() {
 fn closed_label_sets_are_complete_and_distinct() {
     let outcomes: Vec<&str> = CheckOutcome::ALL.iter().map(|o| o.label()).collect();
     assert_eq!(outcomes, ["clean", "loss", "budget", "incomplete"]);
-    let f1: Vec<&str> = F1Outcome::ALL.iter().map(|o| o.label()).collect();
-    assert_eq!(f1, ["repaired", "repaired_lossy", "unrepaired"]);
+    let repair_outcomes: Vec<&str> = FieldRepairOutcome::ALL.iter().map(|o| o.label()).collect();
+    assert_eq!(
+        repair_outcomes,
+        ["repaired", "repaired_lossy", "unrepaired"]
+    );
 }
 
 /// Each row is a client version that is not a safe token. It must share

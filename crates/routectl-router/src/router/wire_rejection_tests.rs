@@ -26,7 +26,7 @@ use super::PendingWireRejection;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{DispatchMeta, FieldRepair, Router, RouterOptions};
-use crate::wire_check_state::{CheckOutcome, F1Outcome, WireCheckSnapshot};
+use crate::wire_check_state::{CheckOutcome, FieldRepairOutcome, WireCheckSnapshot};
 
 const ALIAS: &str = "a";
 const NEVER_SAMPLED: &str = "first_n = 0\nsample_one_in = 1000";
@@ -219,8 +219,8 @@ async fn dispatch(router: &Router, surface: Surface, req: ChatRequest) -> bool {
     }
 }
 
-/// `(path, provenance, f1 outcome)` of every rejection finding, oldest first.
-fn rejections(snapshot: &WireCheckSnapshot) -> Vec<(String, &'static str, F1Outcome)> {
+/// `(path, provenance, field-repair outcome)` of every rejection finding, oldest first.
+fn rejections(snapshot: &WireCheckSnapshot) -> Vec<(String, &'static str, FieldRepairOutcome)> {
     snapshot
         .findings
         .iter()
@@ -228,7 +228,7 @@ fn rejections(snapshot: &WireCheckSnapshot) -> Vec<(String, &'static str, F1Outc
             Some((
                 f.path.as_str().to_string(),
                 f.provenance?.label(),
-                f.f1_outcome?,
+                f.field_repair_outcome?,
             ))
         })
         .collect()
@@ -312,7 +312,7 @@ async fn a_rejected_path_is_classified_by_where_it_came_from() {
             let snapshot = router.wire_check_snapshot();
             assert_eq!(
                 rejections(&snapshot),
-                [(path.to_string(), provenance, F1Outcome::Unrepaired)],
+                [(path.to_string(), provenance, FieldRepairOutcome::Unrepaired)],
                 "{surface:?} {name}"
             );
         }
@@ -400,7 +400,7 @@ fn carries_test_row(req: &ChatRequest) -> bool {
 
 #[tokio::test]
 async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns() {
-    let rows: [(&str, Answer, F1Outcome, usize); 3] = [
+    let rows: [(&str, Answer, FieldRepairOutcome, usize); 3] = [
         (
             "repaired",
             |req| {
@@ -409,7 +409,7 @@ async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns(
                 }
                 Ok(())
             },
-            F1Outcome::Repaired,
+            FieldRepairOutcome::Repaired,
             0,
         ),
         (
@@ -420,13 +420,13 @@ async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns(
                 }
                 Ok(())
             },
-            F1Outcome::RepairedLossy,
+            FieldRepairOutcome::RepairedLossy,
             0,
         ),
         (
             "unrepaired",
             |_| Err(rejection(TEST_UNSUPPORTED_PATH, REFUSED_FIELD)),
-            F1Outcome::Unrepaired,
+            FieldRepairOutcome::Unrepaired,
             1,
         ),
     ];
@@ -495,17 +495,17 @@ fn repair_of(field_path: &'static str, succeeded: bool) -> FieldRepair {
 
 #[test]
 fn a_rejected_container_key_joins_its_repair_by_the_unmasked_field() {
-    let rows: [(&str, Vec<FieldRepair>, F1Outcome); 3] = [
+    let rows: [(&str, Vec<FieldRepair>, FieldRepairOutcome); 3] = [
         (
             "a successful repair of the same key",
             vec![repair_of(CONTAINER_KEY_PATH, true)],
-            F1Outcome::Repaired,
+            FieldRepairOutcome::Repaired,
         ),
-        ("no repair", vec![], F1Outcome::Unrepaired),
+        ("no repair", vec![], FieldRepairOutcome::Unrepaired),
         (
             "a successful repair of a sibling key",
             vec![repair_of("metadata.other_id", true)],
-            F1Outcome::Unrepaired,
+            FieldRepairOutcome::Unrepaired,
         ),
     ];
     for (name, repairs, expected) in rows {

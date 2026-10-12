@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 use routectl_router::wire_check_state::{
-    CounterReading, F1Outcome, WireCheckSnapshot, WireFinding,
+    CounterReading, FieldRepairOutcome, WireCheckSnapshot, WireFinding,
 };
 
 /// The wire-check section of the health panel.
@@ -60,7 +60,7 @@ struct UnrepairedRejectionRow {
     lane: &'static str,
     leg: &'static str,
     path: String,
-    f1_outcome: &'static str,
+    field_repair_outcome: &'static str,
     provenance: &'static str,
     ts_unix_secs: u64,
 }
@@ -88,13 +88,15 @@ fn loss_finding_row(finding: &WireFinding) -> Option<LossFindingRow> {
 }
 
 fn unrepaired_row(finding: &WireFinding) -> Option<UnrepairedRejectionRow> {
-    let f1_outcome = finding.f1_outcome.filter(|o| *o == F1Outcome::Unrepaired)?;
+    let field_repair_outcome = finding
+        .field_repair_outcome
+        .filter(|o| *o == FieldRepairOutcome::Unrepaired)?;
     let provenance = finding.provenance?;
     Some(UnrepairedRejectionRow {
         lane: finding.lane.label(),
         leg: finding.leg.label(),
         path: finding.path.as_str().to_string(),
-        f1_outcome: f1_outcome.label(),
+        field_repair_outcome: field_repair_outcome.label(),
         provenance: provenance.label(),
         ts_unix_secs: finding.ts_unix_secs,
     })

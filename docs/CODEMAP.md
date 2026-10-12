@@ -4062,8 +4062,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   per lane, then 1 in `sample_one_in`), the closed-label counters
   `rc_wire_loss_total{lane,path_class}` / `rc_wire_check_total{lane,outcome}`
   / `rc_request_refused_local_total{lane}` with last-seen seconds, a
-  128-entry content-free findings ring (`WireFinding`, `F1Outcome`), and the
-  path-only WARN deduped per (lane, path, kind); `Router::wire_check_snapshot`
+  content-free findings ring of 128 entries per kind (loss, rejection;
+  `WireFinding`, `FieldRepairOutcome`), and the path-only WARN deduped per
+  (lane, path) in a separate set per kind; `Router::wire_check_snapshot`
   reads it without mutating
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain
   pre-filter; walks `ToolDef::Other(v)["type"]` strings through
@@ -6640,7 +6641,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the facade: `window_secs`, loss rows per (lane, path_class), loss findings
   by path (lane, leg, path, path_class, ts) from the findings ring, and check
   rows per (lane, outcome) last seen inside the window, unrepaired-rejection rows
-  (lane, leg, path, f1_outcome, provenance, ts) from the findings ring, and
+  (lane, leg, path, field_repair_outcome, provenance, ts) from the findings ring, and
   local-refusal rows per lane. Closed labels, sanitized paths and counts only
 - `src/handlers/status/usage_health.rs` -- `UsageHealthView`, a counters-only
   facade over the usage writer's shared `Arc<UsageCounters>`, with two reads:

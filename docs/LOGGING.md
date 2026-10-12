@@ -452,6 +452,36 @@ non-settling result-only token count: a target this stage cannot
 attribute a rejection to is one it must not act on, not just one it must
 not learn from.
 
+### Live wire-check WARNs (`routectl_router::wire_check`)
+
+The live wire check compares a sample of successful attempts' bodies
+across each hop and records what an upstream rejection named. Three
+WARNs share the target `routectl_router::wire_check`:
+
+| Message | Meaning | Fields |
+|---|---|---|
+| `wire check found an unexplained difference` | A checked attempt's body lost, moved, changed or gained a member that no routectl transform declared. Fires once per (lane, path, path class) | `lane`, `leg`, `path`, `path_class` |
+| `upstream rejected a request field and it was not repaired` | An upstream rejection named a request path and field repair did not fix it, so the client received the rejection. Fires once per (lane, path); repaired rejections never WARN | `lane`, `leg`, `path`, `provenance`, `field_repair_outcome` |
+| `wire check warning dedup is full; new paths are counted but no longer warned` | One kind's dedup set reached its cap. Emitted once per kind; later new paths of that kind stay silent while their counters and findings still record | `kind` (`loss` / `rejection`), `cap` |
+
+Field values are closed labels: `lane` is `<ingress>-><egress>` (for
+example `anthropic->bedrock-invoke`), `leg` is `request` / `response`,
+`path_class` is `missing` / `moved` / `changed` / `added` /
+`translation_unconsumed`, `provenance` is `client_unchanged` /
+`client_changed` / `routectl_added` / `unlocalized` / `n_a`, and
+`field_repair_outcome` is `unrepaired` on this line.
+
+`path` is a sanitized RFC 6901 pointer, never a body value. An object
+key renders verbatim only when it is a short ASCII identifier outside a
+client-keyed object; any other key, and every key below `metadata`, a
+tool or output schema, tool-call arguments, header maps or prompt
+variables, renders as `*`. Pointers are capped in depth and length, so a
+long one names an ancestor of the location. Losses and rejections keep
+separate dedup sets, so a stream of distinct rejection paths cannot
+silence a loss WARN. Loss findings and unrepaired rejections inside the
+status window, with timestamps, are listed under `wire_check` in
+`/status/health` (`loss_findings`, `unrepaired_rejections`).
+
 ### Envelope-field pre-flight decision DEBUG + WARN
 
 The PROACTIVE counterpart of the repair WARN above. When a resident learned

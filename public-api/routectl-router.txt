@@ -5833,71 +5833,71 @@ impl<T> typenum::type_operators::Same for routectl_router::wire_check_state::Che
 pub type routectl_router::wire_check_state::CheckOutcome::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::wire_check_state::CheckOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::wire_check_state::CheckOutcome::into_shared(self) -> Shared
-pub enum routectl_router::wire_check_state::F1Outcome
-pub routectl_router::wire_check_state::F1Outcome::Repaired
-pub routectl_router::wire_check_state::F1Outcome::RepairedLossy
-pub routectl_router::wire_check_state::F1Outcome::Unrepaired
-impl routectl_router::wire_check_state::F1Outcome
-pub const routectl_router::wire_check_state::F1Outcome::ALL: [Self; 3]
-pub const fn routectl_router::wire_check_state::F1Outcome::label(self) -> &'static str
-impl core::clone::Clone for routectl_router::wire_check_state::F1Outcome
-pub fn routectl_router::wire_check_state::F1Outcome::clone(&self) -> routectl_router::wire_check_state::F1Outcome
-impl core::cmp::Eq for routectl_router::wire_check_state::F1Outcome
-impl core::cmp::PartialEq for routectl_router::wire_check_state::F1Outcome
-pub fn routectl_router::wire_check_state::F1Outcome::eq(&self, &routectl_router::wire_check_state::F1Outcome) -> bool
-impl core::fmt::Debug for routectl_router::wire_check_state::F1Outcome
-pub fn routectl_router::wire_check_state::F1Outcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for routectl_router::wire_check_state::F1Outcome
-pub fn routectl_router::wire_check_state::F1Outcome::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for routectl_router::wire_check_state::F1Outcome
-impl core::marker::StructuralPartialEq for routectl_router::wire_check_state::F1Outcome
-impl core::marker::Freeze for routectl_router::wire_check_state::F1Outcome
-impl core::marker::Send for routectl_router::wire_check_state::F1Outcome
-impl core::marker::Sync for routectl_router::wire_check_state::F1Outcome
-impl core::marker::Unpin for routectl_router::wire_check_state::F1Outcome
-impl core::marker::UnsafeUnpin for routectl_router::wire_check_state::F1Outcome
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::wire_check_state::F1Outcome
-impl core::panic::unwind_safe::UnwindSafe for routectl_router::wire_check_state::F1Outcome
-impl<Q, K> equivalent::Equivalent<K> for routectl_router::wire_check_state::F1Outcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn routectl_router::wire_check_state::F1Outcome::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for routectl_router::wire_check_state::F1Outcome where U: core::convert::From<T>
-pub fn routectl_router::wire_check_state::F1Outcome::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_router::wire_check_state::F1Outcome where U: core::convert::Into<T>
-pub type routectl_router::wire_check_state::F1Outcome::Error = core::convert::Infallible
-pub fn routectl_router::wire_check_state::F1Outcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_router::wire_check_state::F1Outcome where U: core::convert::TryFrom<T>
-pub type routectl_router::wire_check_state::F1Outcome::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_router::wire_check_state::F1Outcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_router::wire_check_state::F1Outcome where T: core::clone::Clone
-pub type routectl_router::wire_check_state::F1Outcome::Owned = T
-pub fn routectl_router::wire_check_state::F1Outcome::clone_into(&self, &mut T)
-pub fn routectl_router::wire_check_state::F1Outcome::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::wire_check_state::F1Outcome where T: core::clone::Clone
-pub fn routectl_router::wire_check_state::F1Outcome::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_router::wire_check_state::F1Outcome where T: 'static + ?core::marker::Sized
-pub fn routectl_router::wire_check_state::F1Outcome::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_router::wire_check_state::F1Outcome where T: ?core::marker::Sized
-pub fn routectl_router::wire_check_state::F1Outcome::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_router::wire_check_state::F1Outcome where T: ?core::marker::Sized
-pub fn routectl_router::wire_check_state::F1Outcome::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_router::wire_check_state::F1Outcome where T: core::clone::Clone
-pub unsafe fn routectl_router::wire_check_state::F1Outcome::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_router::wire_check_state::F1Outcome
-pub fn routectl_router::wire_check_state::F1Outcome::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_router::wire_check_state::F1Outcome where T: core::clone::Clone
-pub fn routectl_router::wire_check_state::F1Outcome::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
-impl<T> either::into_either::IntoEither for routectl_router::wire_check_state::F1Outcome
-impl<T> outref::AsOut<T> for routectl_router::wire_check_state::F1Outcome where T: core::marker::Copy
-pub fn routectl_router::wire_check_state::F1Outcome::as_out(&mut self) -> outref::Out<'_, T>
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::wire_check_state::F1Outcome where T: ?core::marker::Sized
-pub fn routectl_router::wire_check_state::F1Outcome::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_router::wire_check_state::F1Outcome::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_router::wire_check_state::F1Outcome
-impl<T> tracing::instrument::WithSubscriber for routectl_router::wire_check_state::F1Outcome
-impl<T> typenum::type_operators::Same for routectl_router::wire_check_state::F1Outcome
-pub type routectl_router::wire_check_state::F1Outcome::Output = T
-impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::wire_check_state::F1Outcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
-pub fn routectl_router::wire_check_state::F1Outcome::into_shared(self) -> Shared
+pub enum routectl_router::wire_check_state::FieldRepairOutcome
+pub routectl_router::wire_check_state::FieldRepairOutcome::Repaired
+pub routectl_router::wire_check_state::FieldRepairOutcome::RepairedLossy
+pub routectl_router::wire_check_state::FieldRepairOutcome::Unrepaired
+impl routectl_router::wire_check_state::FieldRepairOutcome
+pub const routectl_router::wire_check_state::FieldRepairOutcome::ALL: [Self; 3]
+pub const fn routectl_router::wire_check_state::FieldRepairOutcome::label(self) -> &'static str
+impl core::clone::Clone for routectl_router::wire_check_state::FieldRepairOutcome
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::clone(&self) -> routectl_router::wire_check_state::FieldRepairOutcome
+impl core::cmp::Eq for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::cmp::PartialEq for routectl_router::wire_check_state::FieldRepairOutcome
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::eq(&self, &routectl_router::wire_check_state::FieldRepairOutcome) -> bool
+impl core::fmt::Debug for routectl_router::wire_check_state::FieldRepairOutcome
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_router::wire_check_state::FieldRepairOutcome
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::marker::StructuralPartialEq for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::marker::Freeze for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::marker::Send for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::marker::Sync for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::marker::Unpin for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::marker::UnsafeUnpin for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::wire_check_state::FieldRepairOutcome
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::wire_check_state::FieldRepairOutcome
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::wire_check_state::FieldRepairOutcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::wire_check_state::FieldRepairOutcome where U: core::convert::From<T>
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::wire_check_state::FieldRepairOutcome where U: core::convert::Into<T>
+pub type routectl_router::wire_check_state::FieldRepairOutcome::Error = core::convert::Infallible
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::wire_check_state::FieldRepairOutcome where U: core::convert::TryFrom<T>
+pub type routectl_router::wire_check_state::FieldRepairOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::wire_check_state::FieldRepairOutcome where T: core::clone::Clone
+pub type routectl_router::wire_check_state::FieldRepairOutcome::Owned = T
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::clone_into(&self, &mut T)
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::wire_check_state::FieldRepairOutcome where T: core::clone::Clone
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::wire_check_state::FieldRepairOutcome where T: 'static + ?core::marker::Sized
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::wire_check_state::FieldRepairOutcome where T: ?core::marker::Sized
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::wire_check_state::FieldRepairOutcome where T: ?core::marker::Sized
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::wire_check_state::FieldRepairOutcome where T: core::clone::Clone
+pub unsafe fn routectl_router::wire_check_state::FieldRepairOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::wire_check_state::FieldRepairOutcome
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::wire_check_state::FieldRepairOutcome where T: core::clone::Clone
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::wire_check_state::FieldRepairOutcome
+impl<T> outref::AsOut<T> for routectl_router::wire_check_state::FieldRepairOutcome where T: core::marker::Copy
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::wire_check_state::FieldRepairOutcome where T: ?core::marker::Sized
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::wire_check_state::FieldRepairOutcome
+impl<T> tracing::instrument::WithSubscriber for routectl_router::wire_check_state::FieldRepairOutcome
+impl<T> typenum::type_operators::Same for routectl_router::wire_check_state::FieldRepairOutcome
+pub type routectl_router::wire_check_state::FieldRepairOutcome::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::wire_check_state::FieldRepairOutcome where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::wire_check_state::FieldRepairOutcome::into_shared(self) -> Shared
 pub struct routectl_router::wire_check_state::CounterReading
 pub routectl_router::wire_check_state::CounterReading::count: u64
 pub routectl_router::wire_check_state::CounterReading::last_seen_unix_secs: u64
@@ -6141,12 +6141,6 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::wire_check_state::WireCheckSnapshot::into_shared(self) -> Shared
 pub struct routectl_router::wire_check_state::WireCheckState
 impl routectl_router::wire_check_state::WireCheckState
-pub fn routectl_router::wire_check_state::WireCheckState::admit(&self, routectl_core::wire_check::lane::Lane, core::option::Option<&str>, &routectl_router::WireCheckConfig) -> bool
-pub fn routectl_router::wire_check_state::WireCheckState::record_compared<'p, I>(&self, routectl_core::wire_check::lane::Lane, routectl_core::wire_check::lane::Leg, I, bool) -> routectl_router::wire_check_state::CheckOutcome where I: core::iter::traits::collect::IntoIterator<Item = (&'p routectl_core::wire_check::path::WirePath, routectl_core::wire_check::edits::PathClass)>
-pub fn routectl_router::wire_check_state::WireCheckState::record_incomplete(&self, routectl_core::wire_check::lane::Lane)
-pub fn routectl_router::wire_check_state::WireCheckState::record_local_refusal(&self, routectl_core::wire_check::lane::Lane)
-pub fn routectl_router::wire_check_state::WireCheckState::record_rejection(&self, routectl_core::wire_check::lane::Lane, routectl_core::wire_check::lane::Leg, &routectl_core::wire_check::path::WirePath, routectl_core::wire_check::edits::RejectionProvenance, routectl_router::wire_check_state::F1Outcome)
-pub fn routectl_router::wire_check_state::WireCheckState::release(&self, routectl_core::wire_check::lane::Lane, core::option::Option<&str>)
 pub fn routectl_router::wire_check_state::WireCheckState::snapshot(&self, &routectl_router::WireCheckConfig) -> routectl_router::wire_check_state::WireCheckSnapshot
 impl core::default::Default for routectl_router::wire_check_state::WireCheckState
 pub fn routectl_router::wire_check_state::WireCheckState::default() -> Self
@@ -6187,7 +6181,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::wire_check_state::WireCheckState::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::wire_check_state::WireFinding
 pub routectl_router::wire_check_state::WireFinding::class: core::option::Option<routectl_core::wire_check::edits::PathClass>
-pub routectl_router::wire_check_state::WireFinding::f1_outcome: core::option::Option<routectl_router::wire_check_state::F1Outcome>
+pub routectl_router::wire_check_state::WireFinding::field_repair_outcome: core::option::Option<routectl_router::wire_check_state::FieldRepairOutcome>
 pub routectl_router::wire_check_state::WireFinding::lane: routectl_core::wire_check::lane::Lane
 pub routectl_router::wire_check_state::WireFinding::leg: routectl_core::wire_check::lane::Leg
 pub routectl_router::wire_check_state::WireFinding::path: routectl_core::wire_check::path::WirePath

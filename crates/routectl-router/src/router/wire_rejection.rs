@@ -23,7 +23,7 @@ use super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR;
 use super::rejection_parser::{REJECTION_STATUSES, RawPath, RejectedWirePath, rejected_wire_path};
 use super::wire_check::{SampleCharge, attempt_lane, compare_request, lend_request_record};
 use super::{DispatchMeta, DispatchTarget, FieldRepair, Router};
-use crate::wire_check_state::F1Outcome;
+use crate::wire_check_state::FieldRepairOutcome;
 
 /// One rejected attempt, classified before any repair touched its request
 /// and waiting for the field-repair outcome. Holds no body content: a
@@ -110,7 +110,7 @@ impl Router {
                 Leg::Request,
                 &pending.path,
                 pending.provenance,
-                f1_outcome(pending, &meta.field_repairs),
+                field_repair_outcome(pending, &meta.field_repairs),
             );
         }
     }
@@ -169,9 +169,12 @@ const UNION_TAG: &str = "type";
 /// What field repair made of `pending`: the first repair on the same target
 /// for the same field recorded at or after the rejection. A repair whose
 /// retry did not succeed left the rejection unrepaired.
-fn f1_outcome(pending: &PendingWireRejection, repairs: &[FieldRepair]) -> F1Outcome {
+fn field_repair_outcome(
+    pending: &PendingWireRejection,
+    repairs: &[FieldRepair],
+) -> FieldRepairOutcome {
     let Some(field) = pending.field.as_ref() else {
-        return F1Outcome::Unrepaired;
+        return FieldRepairOutcome::Unrepaired;
     };
     let repair = repairs
         .get(pending.repairs_before..)
@@ -184,12 +187,12 @@ fn f1_outcome(pending: &PendingWireRejection, repairs: &[FieldRepair]) -> F1Outc
     match repair {
         Some(repair) if repair.repair_succeeded => {
             if repair.action == FIELD_ACTION_LOSSY_DROP_REPAIR {
-                F1Outcome::RepairedLossy
+                FieldRepairOutcome::RepairedLossy
             } else {
-                F1Outcome::Repaired
+                FieldRepairOutcome::Repaired
             }
         }
-        _ => F1Outcome::Unrepaired,
+        _ => FieldRepairOutcome::Unrepaired,
     }
 }
 
