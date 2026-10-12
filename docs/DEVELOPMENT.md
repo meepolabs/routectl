@@ -1069,6 +1069,20 @@ client-version read) lives in `scripts/drivers/lib/common.sh`.
 | `claude-code-print.sh` | `claude -p` / Agent SDK print mode | same variable; the same binary, a different wire shape |
 | `external-agent-cli.sh` | any third-party Anthropic-dialect CLI | `ROUTECTL_DRIVER_AGENT_BIN`, REQUIRED, no default |
 | `codex.sh` | the codex CLI, which speaks the responses dialect | `ROUTECTL_DRIVER_CODEX_BIN`, default `codex` |
+| `hermes-anthropic.sh` | the hermes CLI on the anthropic dialect, through `external-agent-cli.sh` | `hermes` from PATH |
+| `hermes-responses.sh` | the hermes CLI on the responses dialect | `hermes` from PATH |
+| `hermes-chat.sh` | the hermes CLI on the chat-completions dialect | `hermes` from PATH |
+
+The hermes drivers share `scripts/drivers/lib/hermes.sh`. The responses and
+chat dialects have no base-url environment carrier in hermes, so those two
+drivers write a hermes config under the run's throwaway HOME declaring one
+custom provider (`base_url` = the daemon's `/v1`, `api_mode`
+`codex_responses` or `chat_completions`, `key_env` naming the local
+placeholder's variable) and select it with `--provider` on every turn. All
+three clear the inherited routing variables hermes reads, so a stray
+`OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` cannot steer a turn past the
+daemon, and all three refuse front-proxy mode. The self-test injects a stub
+`hermes` through PATH; none of them names a binary override.
 
 ### Running a case
 
@@ -1121,6 +1135,16 @@ ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG=--continue \
 ROUTECTL_DRIVER_AGENT_MODEL_FLAG=-m \
 scripts/capture_driver.sh --lane anthropic-api --case thinking-01 \
   --expected-ingress anthropic -- scripts/drivers/external-agent-cli.sh
+```
+
+Each hermes driver pins one dialect, so the expected ingress follows from
+the file:
+
+```
+scripts/capture_driver.sh --lane openai-responses --case tools-multiturn-01 \
+  --expected-ingress openai-responses -- scripts/drivers/hermes-responses.sh
+scripts/capture_driver.sh --lane openai-compat --case tools-multiturn-01 \
+  --expected-ingress openai -- scripts/drivers/hermes-chat.sh
 ```
 
 ### A driver corpus is a snapshot of a client VERSION

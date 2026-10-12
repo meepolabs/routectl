@@ -22,15 +22,29 @@ per-harness files small enough for the rule to stay affordable.
 | `claude-code.sh` | `claude`, interactive | Types the case's turns into a pty; supports both connection modes |
 | `claude-code-print.sh` | `claude -p` | Same binary, different wire shape: non-interactive turn structure and tool loop. Multi-turn resumes by session id |
 | `external-agent-cli.sh` | named by `ROUTECTL_DRIVER_AGENT_BIN` | Any third-party Anthropic-dialect CLI with a one-shot flag; the driver never names its client |
+| `codex.sh` | `codex exec` | Expected ingress `openai-responses`; points codex at the daemon through its own `-c model_providers.*` overrides |
+| `hermes-anthropic.sh` | `hermes` from PATH | Expected ingress `anthropic`. Names the flags (`-z`, `-c`, `-m`, `--provider anthropic`) and execs `external-agent-cli.sh`, which owns the `ANTHROPIC_BASE_URL` carrier |
+| `hermes-responses.sh` | `hermes` from PATH | Expected ingress `openai-responses`. Owns its carrier: a custom provider with `api_mode: codex_responses` in a config written under the run's HOME |
+| `hermes-chat.sh` | `hermes` from PATH | Expected ingress `openai`. Same carrier as the responses driver, with `api_mode: chat_completions` |
+
+The three hermes files share [lib/hermes.sh](lib/hermes.sh): it points
+`HERMES_HOME` inside the run workspace, clears every inherited variable
+hermes would route or authenticate by (an operator's `OPENAI_BASE_URL`
+would otherwise win over the written config), and writes the config that
+carries the case knobs hermes takes only from config. The config names the
+local key's env var, never its value. All three are base-url only, and a
+multi-turn case through the responses/chat drivers refuses turn 2 unless
+turn 1 recorded a session for `-c` to resume.
 
 A harness with no file here is not drivable on this box. Its missing
 piece is filed to the `wild-evidence` pen rather than stubbed.
 
 ## A turn loop never lends the client its stdin
 
-`claude-code-print.sh` and `external-agent-cli.sh` both feed the case's
+`claude-code-print.sh`, `external-agent-cli.sh`, `codex.sh` and the hermes
+turn loop in `lib/hermes.sh` all feed the case's
 turns through a `while read` loop, so the loop's stdin is a pipe holding
-the REMAINING prompts. Both redirect the client's stdin from `/dev/null`:
+the REMAINING prompts. Each redirects the client's stdin from `/dev/null`:
 a client that reads stdin otherwise drains that pipe, and a 2-turn case
 runs ONE turn with every prompt concatenated into a single user text block
 -- a fixture claiming a multi-turn shape it never carried.
@@ -40,7 +54,7 @@ script into a pty, with no client sitting in the loop).
 The self-test's stub client DRAINS stdin for exactly this reason. A stub
 that ignored it cannot exhibit the bug, so the "once per turn" assertion
 passed against a stub incapable of failing it -- and it does pass, measured,
-with either driver's redirect removed.
+with a driver's redirect removed.
 
 ## The dialect a driver's client speaks is the CALLER's pin
 
