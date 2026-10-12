@@ -56,6 +56,13 @@ pub(super) fn render_messages_response(resp: ChatResponse, edits: &mut ResponseE
         "stop_reason".into(),
         stop_reason.map_or(Value::Null, Value::String),
     );
+    if stop_sequence_value.is_null() {
+        edits.declare(
+            EditSite::ResponseEnvelopeStamp,
+            "/stop_sequence",
+            EditKind::Add,
+        );
+    }
     body.insert("stop_sequence".into(), stop_sequence_value);
 
     let usage = resp.usage.as_ref().map(|u| {

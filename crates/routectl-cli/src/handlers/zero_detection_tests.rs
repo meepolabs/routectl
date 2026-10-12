@@ -50,12 +50,6 @@ const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
     KnownUndeclared {
         lane: ANTHROPIC,
         leg: Leg::Response,
-        path: "/stop_sequence",
-        reason: "pending renderer declarations: the render writes a null stop_sequence",
-    },
-    KnownUndeclared {
-        lane: ANTHROPIC,
-        leg: Leg::Response,
         path: "/usage/server_tool_use",
         reason: "real loss: the closing message_delta render drops server_tool_use",
     },
@@ -99,13 +93,7 @@ const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
         lane: RESPONSES,
         leg: Leg::Response,
         path: "/output/0/id",
-        reason: "pending renderer declarations: the render does not echo the output item id",
-    },
-    KnownUndeclared {
-        lane: RESPONSES,
-        leg: Leg::Response,
-        path: "/output/0/status",
-        reason: "pending renderer declarations: the render rebuilds the output item status",
+        reason: "real loss: the egress drops the upstream message item id, so no render can echo it",
     },
 ];
 

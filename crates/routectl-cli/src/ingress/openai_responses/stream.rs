@@ -57,8 +57,8 @@ use routectl_core::{
 use crate::ingress::{IngressStreamState, ResponseEdits, SseEvent, StreamErrorClass};
 
 use super::render::{
-    declare_status_rebuild, function_call_item, output_text_block, render_responses_response,
-    status_from_finish_reason,
+    declare_message_item_status, declare_status_rebuild, function_call_item, output_text_block,
+    render_responses_response, status_from_finish_reason,
 };
 use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 
@@ -123,7 +123,7 @@ pub(super) fn render_chunk_declared(
     ensure_created(state, &mut events);
 
     if let Some(choice) = chunk.choices.first() {
-        emit_delta_events(&choice.delta, state, &mut events);
+        emit_delta_events(&choice.delta, state, &mut events, edits);
         if let Some(fr) = choice.finish_reason.as_deref() {
             if state.pending_finish_reason.is_none() {
                 declare_status_rebuild(Some(fr), edits);
@@ -172,11 +172,12 @@ fn emit_delta_events(
     delta: &ChunkDelta,
     state: &mut ResponsesStreamState,
     events: &mut Vec<SseEvent>,
+    edits: &mut ResponseEdits,
 ) {
     if let Some(text) = delta.content.as_deref()
         && !text.is_empty()
     {
-        emit_text_delta(text, state, events);
+        emit_text_delta(text, state, events, edits);
     }
 
     for d in &delta.reasoning_details {
@@ -194,8 +195,13 @@ fn emit_delta_events(
 // Text item lifecycle
 // ---------------------------------------------------------------------------
 
-fn emit_text_delta(text: &str, state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) {
-    let output_index = ensure_text_item(state, events);
+fn emit_text_delta(
+    text: &str,
+    state: &mut ResponsesStreamState,
+    events: &mut Vec<SseEvent>,
+    edits: &mut ResponseEdits,
+) {
+    let output_index = ensure_text_item(state, events, edits);
     state.text_accumulator.push_str(text);
     state.current_text.push_str(text);
     push_event(
@@ -213,12 +219,19 @@ fn emit_text_delta(text: &str, state: &mut ResponsesStreamState, events: &mut Ve
 /// Open a `message` item (+ its `output_text` content part) if one is
 /// not already open, closing any superseded item first. Returns the
 /// message item's `output_index`.
-fn ensure_text_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) -> u64 {
+fn ensure_text_item(
+    state: &mut ResponsesStreamState,
+    events: &mut Vec<SseEvent>,
+    edits: &mut ResponseEdits,
+) -> u64 {
     if let Some(OpenOutputItem::Text { output_index }) = state.open {
         return output_index;
     }
     close_open_item(state, events);
     let output_index = alloc_output_index(state);
+    if let Ok(index) = usize::try_from(output_index) {
+        declare_message_item_status(index, edits);
+    }
     state.open = Some(OpenOutputItem::Text { output_index });
     state.current_text.clear();
     push_event(

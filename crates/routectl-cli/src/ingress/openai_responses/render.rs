@@ -49,7 +49,7 @@
 
 use serde_json::{Map, Value, json};
 
-use routectl_core::wire_check::{EditKind, EditSite};
+use routectl_core::wire_check::{EditKind, EditSite, WirePath};
 use routectl_core::{
     ChatResponse, ContentPart, KnownContentPart, Message, MessageContent, ReasoningDetail,
     ReasoningDetailKind, Result, is_responses_family,
@@ -84,7 +84,9 @@ pub(super) fn render_responses_response_declared(
         body.insert("incomplete_details".into(), details);
     }
 
-    let output = first.map(|c| build_output(&c.message)).unwrap_or_default();
+    let output = first
+        .map(|c| build_output(&c.message, edits))
+        .unwrap_or_default();
     body.insert("output".into(), Value::Array(output));
 
     if let Some(usage) = resp.usage.as_ref().map(render_usage) {
@@ -158,18 +160,34 @@ pub(super) fn declare_status_rebuild(finish_reason: Option<&str>, edits: &mut Re
 /// Arrival order mirrors the egress walk: reasoning items first, then a
 /// message item (text + refusal + forward-compat blocks), then one
 /// function_call item per tool_call.
-fn build_output(msg: &Message) -> Vec<Value> {
+fn build_output(msg: &Message, edits: &mut ResponseEdits) -> Vec<Value> {
     let mut output: Vec<Value> = Vec::new();
 
     output.extend(build_reasoning_items(&msg.reasoning_details));
 
     if let Some(message_item) = build_message_item(&msg.content, msg.refusal.as_deref()) {
+        declare_message_item_status(output.len(), edits);
         output.push(message_item);
     }
 
     output.extend(build_function_call_items(msg));
 
     output
+}
+
+/// A `message` output item's `status` comes from the render's own item
+/// lifecycle, not from the upstream item, which canonical does not carry.
+pub(super) fn declare_message_item_status(output_index: usize, edits: &mut ResponseEdits) {
+    edits.declare_at(
+        EditSite::ResponsesStatusRewrite,
+        || {
+            WirePath::root()
+                .child("output")
+                .index(output_index)
+                .child("status")
+        },
+        EditKind::Rewrite,
+    );
 }
 
 /// Build a single `message` output item from the canonical message

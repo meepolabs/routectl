@@ -1178,6 +1178,15 @@ fn anthropic_stream_with(
     anthropic_sse(&frames)
 }
 
+/// The shared complete Anthropic body without its `key` member.
+fn anthropic_complete_without(key: &str) -> Value {
+    let mut body = Dialect::Anthropic.complete_body(None);
+    if let Some(object) = body.as_object_mut() {
+        object.remove(key);
+    }
+    body
+}
+
 async fn anthropic_run(template: ResponseTemplate, stream: bool) -> WireCheckSnapshot {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1217,6 +1226,11 @@ async fn each_declared_anthropic_exception_explains_only_its_own_change() {
             ResponseTemplate::new(200).set_body_json(
                 Dialect::Anthropic.complete_body(Some(("upstream_meta", json!({"k": 1})))),
             ),
+            false,
+        ),
+        (
+            "null stop_sequence stamped where the upstream sent none",
+            ResponseTemplate::new(200).set_body_json(anthropic_complete_without("stop_sequence")),
             false,
         ),
         (
@@ -1322,24 +1336,31 @@ async fn each_declared_anthropic_exception_explains_only_its_own_change() {
     }
 }
 
-/// The Responses `status` / `incomplete_details` rebuild, single-sourced
-/// per path and per transport: each row differs from the upstream at one
-/// path, and records clean only because the rebuild declared it.
+/// The Responses `status` / `incomplete_details` rebuild and the message
+/// item `status` the render writes, single-sourced per path and per
+/// transport: each row differs from the upstream at one path, and records
+/// clean only because the rebuild declared it.
 #[tokio::test]
 async fn the_declared_responses_status_rebuild_explains_only_its_own_change() {
-    let rows: [(&str, (&str, Value)); 2] = [
+    let rows = [
         (
             "status the finish reason cannot name",
-            ("status", json!("incomplete")),
+            Some(("status", json!("incomplete"))),
+            "completed",
         ),
         (
             "incomplete_details null withheld",
-            ("incomplete_details", Value::Null),
+            Some(("incomplete_details", Value::Null)),
+            "completed",
         ),
+        ("message item status rewritten", None, "in_progress"),
     ];
-    for (name, extra) in rows {
+    for (name, extra, item_status) in rows {
         for stream in [false, true] {
-            let mut body = Dialect::Responses.stream_body(Some(extra.clone()));
+            let mut body = Dialect::Responses.stream_body(extra.clone()).replace(
+                "\"status\":\"completed\",\"type\":\"message\"",
+                &format!("\"status\":\"{item_status}\",\"type\":\"message\""),
+            );
             if !stream {
                 // The complete render echoes the upstream's timestamp, as in
                 // the shared faithful fixture.

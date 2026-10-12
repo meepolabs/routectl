@@ -151,8 +151,9 @@ pub enum EditSite {
     /// Response: an upstream `reasoning_content` moved into the canonical
     /// reasoning fields.
     ReasoningContentLift,
-    /// Response: Chat Completions envelope fields stamped onto a complete
-    /// body.
+    /// Response: envelope fields the client dialect requires stamped onto a
+    /// complete body (the Chat Completions envelope, the Anthropic nullable
+    /// `stop_sequence`).
     ResponseEnvelopeStamp,
     /// Response: the upstream model id replaced by the client-visible label.
     ResponseModelRelabel,
@@ -165,7 +166,8 @@ pub enum EditSite {
     /// `message_delta` usage.
     AnthropicStreamUsageFill,
     /// Response: the Responses `status` and `incomplete_details` rebuilt
-    /// from the canonical finish reason.
+    /// from the canonical finish reason, and a message output item's
+    /// `status` written by the render's own item lifecycle.
     ResponsesStatusRewrite,
     /// Response: stream frames arriving after the terminal frame, or a
     /// repeated stop reason, withheld from the client.
