@@ -36,10 +36,11 @@
 # WHY THIS IS A SCRIPT AND NOT A DOCUMENTED `mv`. A `mv` of one fixture
 # directory over an existing one MERGES: files the previous capture wrote
 # survive next to the new ones. File presence IS part of the fixture
-# schema -- an `upstream_response.json` present means the run was
-# non-stream, absent means it streamed -- so a merged directory is a
-# fixture no single capture ever produced, and every drift signal read
-# off it is read off evidence that does not exist. Promotion therefore
+# schema -- an `upstream_response.json` present means the capture traced
+# the upstream document, absent means it did not (whether the run
+# streamed is `meta.stream`, never file presence) -- so a merged directory
+# is a fixture no single capture ever produced, and every drift signal
+# read off it is read off evidence that does not exist. Promotion therefore
 # copies into a staging directory beside the destination and lands it by
 # RENAME-ASIDE-THEN-DELETE, the same idiom the rig uses for a case rerun:
 # the old fixture is renamed out of the way, the new one is renamed into

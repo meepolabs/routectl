@@ -25,20 +25,20 @@ use crate::server::AppState;
 use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse};
 
-const CHECK_EVERY: (u32, u32) = (8, 1);
+pub(super) const CHECK_EVERY: (u32, u32) = (8, 1);
 const CHECK_NONE: (u32, u32) = (0, 1000);
 
 #[derive(Clone, Copy, Debug)]
-enum Dialect {
+pub(super) enum Dialect {
     Anthropic,
     Chat,
     Responses,
 }
 
-const DIALECTS: [Dialect; 3] = [Dialect::Anthropic, Dialect::Chat, Dialect::Responses];
+pub(super) const DIALECTS: [Dialect; 3] = [Dialect::Anthropic, Dialect::Chat, Dialect::Responses];
 
 impl Dialect {
-    const fn lane(self) -> &'static str {
+    pub(super) const fn lane(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic->anthropic-api",
             Self::Chat => "chat->openai-compat",
@@ -67,7 +67,7 @@ impl Dialect {
         }
     }
 
-    fn request_body(self, stream: bool) -> Value {
+    pub(super) fn request_body(self, stream: bool) -> Value {
         match self {
             Self::Anthropic => json!({
                 "model": "a", "max_tokens": 16, "stream": stream,
@@ -111,7 +111,7 @@ impl Dialect {
     }
 
     /// The upstream's stream for the same answer.
-    fn stream_body(self, extra: Option<(&str, Value)>) -> String {
+    pub(super) fn stream_body(self, extra: Option<(&str, Value)>) -> String {
         let frames: Vec<(Option<&str>, Value)> = match self {
             Self::Anthropic => {
                 let mut start = json!({
@@ -231,7 +231,11 @@ fn responses_body() -> Value {
     })
 }
 
-async fn upstream(dialect: Dialect, stream: bool, extra: Option<(&str, Value)>) -> MockServer {
+pub(super) async fn upstream(
+    dialect: Dialect,
+    stream: bool,
+    extra: Option<(&str, Value)>,
+) -> MockServer {
     let server = MockServer::start().await;
     let template = if stream {
         ResponseTemplate::new(200)
@@ -256,7 +260,11 @@ async fn upstream(dialect: Dialect, stream: bool, extra: Option<(&str, Value)>) 
     server
 }
 
-async fn router(dialect: Dialect, base: &str, (first_n, sample_one_in): (u32, u32)) -> Router {
+pub(super) async fn router(
+    dialect: Dialect,
+    base: &str,
+    (first_n, sample_one_in): (u32, u32),
+) -> Router {
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
     let mut config = Config {
@@ -514,7 +522,7 @@ impl<A: IngressAdapter> IngressAdapter for DroppingAdapter<A> {
     }
 }
 
-fn outcomes(snapshot: &WireCheckSnapshot) -> Vec<(&'static str, CheckOutcome, u64)> {
+pub(super) fn outcomes(snapshot: &WireCheckSnapshot) -> Vec<(&'static str, CheckOutcome, u64)> {
     snapshot
         .checks
         .iter()
@@ -643,7 +651,7 @@ async fn the_responses_stream_render_loses_the_upstream_created_at() {
 
 /// One `message_start` and a text block, then nothing: a stream the
 /// upstream never finished.
-fn anthropic_unfinished_stream() -> String {
+pub(super) fn anthropic_unfinished_stream() -> String {
     let frames = [
         (
             "message_start",
@@ -715,12 +723,12 @@ async fn an_upstream_stream_cut_mid_response_records_incomplete_never_clean() {
 
 /// An upstream that sends the first frames of a stream and then holds the
 /// connection open, so the client can leave mid-response.
-struct HangingUpstream {
-    base: String,
+pub(super) struct HangingUpstream {
+    pub(super) base: String,
 }
 
 impl HangingUpstream {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

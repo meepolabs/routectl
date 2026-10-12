@@ -889,7 +889,7 @@ async fn warm_render_task<A: IngressAdapter>(
                 meter.bind_served(&dispatched.meta);
             }
             stamp_opening(&mut capture, turn.meter.as_ref());
-            let mut client = ClientSink::new(tx, response_check);
+            let mut client = ClientSink::new(tx, response_check, adapter.id());
             // The early frame went out before the check existed; the
             // client's document starts with it.
             for ev in &early_sent {
@@ -948,7 +948,7 @@ async fn render_checked_stream_task<A: IngressAdapter>(
     response_check: Option<ResponseCheck>,
 ) {
     let state: Box<dyn IngressStreamState> = adapter.new_stream_state(&turn.ctx);
-    let client = ClientSink::new(tx, response_check);
+    let client = ClientSink::new(tx, response_check, adapter.id());
     drive_stream(upstream, adapter, capture, client, router, turn, state).await;
 }
 

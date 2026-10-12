@@ -164,6 +164,11 @@ criterion = { workspace = true }
 # a test can gate run_at's config-phase re-read on an out-of-band write.
 # Test-only; the release binary reaches the lock via routectl-router.
 fd-lock = "4"
+# Bedrock event-stream frame encoding, so a handler test can serve a real
+# Bedrock provider a streamed answer from a mock origin. Both already build
+# through routectl-providers' `bedrock` feature, pinned to the same minors.
+aws-smithy-eventstream = "0.61"
+aws-smithy-types = "1.2"
 # Used by the file-watch / SIGHUP integration tests
 # (`tests/hot_reload.rs`) to deliver SIGHUP into the running test
 # process. Confined to `cfg(unix)` test paths.

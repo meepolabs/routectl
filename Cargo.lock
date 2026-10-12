@@ -2809,6 +2809,8 @@ version = "0.9.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "aws-smithy-eventstream",
+ "aws-smithy-types",
  "axum",
  "base64",
  "bytes",

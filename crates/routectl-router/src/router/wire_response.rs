@@ -9,14 +9,18 @@
 //! other attempt leaves the carrier empty and pays nothing on the response.
 //! Reads only: nothing here changes what the client receives, and every
 //! failure to build a document is `incomplete`, never `clean`.
+//!
+//! A stream has no complete body for the providers and the renderer to
+//! trace, so a stream whose two documents both assemble emits them here,
+//! through the same TRACE body lines a complete response emits.
 
 use std::fmt;
 use std::sync::Arc;
 
 use routectl_core::ChatRequest;
 use routectl_core::wire_check::{
-    Assembled, DeclaredEdit, EditKind, EditSite, IncompleteReason, Lane, LaneClass, Leg, PathClass,
-    StreamExit, TapContents, WirePath, WireTap, diff,
+    Assembled, DeclaredEdit, EditKind, EditSite, EgressKind, IncompleteReason, Lane, LaneClass,
+    Leg, PathClass, StreamExit, TapContents, WirePath, WireTap, diff,
 };
 use serde_json::Value;
 
@@ -42,6 +46,7 @@ pub struct ResponseCheck {
     lane: Lane,
     tap: WireTap,
     state: Arc<WireCheckState>,
+    provider_id: Option<Arc<str>>,
 }
 
 impl fmt::Debug for ResponseCheck {
@@ -71,24 +76,49 @@ impl ResponseCheck {
         }
         let client =
             serde_json::from_slice::<Value>(client_body).map_err(|_| IncompleteSide::Client(None));
-        self.record(&declared, StreamExit::Ended, client, client_edits);
+        self.record(&declared, StreamExit::Ended, client, client_edits, None);
     }
 
     /// Compare the stream the client received, folded into `client`, with
     /// the upstream's stream; `exit` is how the stream ended. Either side
-    /// unfinished records `incomplete` with its reason.
+    /// unfinished records `incomplete` with its reason. Traces nothing; see
+    /// [`Self::compare_traced_stream`].
     pub fn compare_stream(
         self,
         client: Assembled,
         exit: StreamExit,
         client_edits: &[DeclaredEdit],
     ) {
+        self.compare_stream_as(client, exit, client_edits, None);
+    }
+
+    /// [`Self::compare_stream`] that also traces both documents when both
+    /// assemble: the upstream's as the upstream success body, the client's
+    /// as the egress response body under `ingress`, the id of the ingress
+    /// adapter that rendered it.
+    pub fn compare_traced_stream(
+        self,
+        client: Assembled,
+        exit: StreamExit,
+        client_edits: &[DeclaredEdit],
+        ingress: &str,
+    ) {
+        self.compare_stream_as(client, exit, client_edits, Some(ingress));
+    }
+
+    fn compare_stream_as(
+        self,
+        client: Assembled,
+        exit: StreamExit,
+        client_edits: &[DeclaredEdit],
+        traced_ingress: Option<&str>,
+    ) {
         let client = match client {
             Assembled::Complete(document) => Ok(document),
             Assembled::Incomplete(reason) => Err(IncompleteSide::Client(Some(reason))),
         };
         let declared = self.tap.take_response();
-        self.record(&declared, exit, client, client_edits);
+        self.record(&declared, exit, client, client_edits, traced_ingress);
     }
 
     fn record_over_budget(self) {
@@ -139,13 +169,16 @@ impl ResponseCheck {
     /// to a deposited upstream body records `incomplete` without parsing
     /// that body: an unread drop lands here, and the deposit can reach the
     /// assembler's cap, past the inline limit. Otherwise an unfinished
-    /// upstream side is named first.
+    /// upstream side is named first. `traced_ingress`, when set, traces the
+    /// two documents; a complete body never sets it, because its provider
+    /// and its renderer already traced it.
     fn record(
         self,
         declared: &TapContents,
         exit: StreamExit,
         client: Result<Value, IncompleteSide>,
         client_edits: &[DeclaredEdit],
+        traced_ingress: Option<&str>,
     ) {
         let deposited = declared.response().map(|body| &body[..]);
         let documents = match (deposited, client) {
@@ -158,6 +191,9 @@ impl ResponseCheck {
             Ok(documents) => documents,
             Err(side) => return self.record_unfinished(side),
         };
+        if let Some(ingress) = traced_ingress {
+            self.trace_stream_documents(&upstream, &client, ingress);
+        }
         let edits: Vec<DeclaredEdit> = declared
             .edits(Leg::Response)
             .iter()
@@ -171,6 +207,38 @@ impl ResponseCheck {
             outcome.findings.iter().map(|f| (&f.path, f.class)),
             outcome.truncated,
         );
+    }
+
+    /// Emit a finished stream's documents as the upstream success body and
+    /// the egress response body. The upstream line carries the provider's
+    /// own `provider_kind` token, the one its outgoing request line carries,
+    /// because a fixture capture keys the request's lane on the last such
+    /// token it reads.
+    fn trace_stream_documents(&self, upstream: &Value, client: &Value, ingress: &str) {
+        let (Some(kind), Some(provider_id)) = (
+            provider_trace_kind(self.lane.egress()),
+            self.provider_id.as_deref(),
+        ) else {
+            return;
+        };
+        routectl_core::trace_upstream_success_body(kind, provider_id, upstream);
+        routectl_core::trace_egress_body(ingress, client);
+    }
+}
+
+/// The `provider_kind` token the provider serving `egress` traces its
+/// outgoing request under: the providers' own vocabulary, not the config
+/// kind (`anthropic`, never `anthropic-api`; each Bedrock shape apart). A
+/// Mantle sub-lane is served by its standard sibling's provider.
+const fn provider_trace_kind(egress: EgressKind) -> Option<&'static str> {
+    match egress {
+        EgressKind::AnthropicApi | EgressKind::AnthropicApiMantle => Some("anthropic"),
+        EgressKind::BedrockInvoke => Some("bedrock-invoke"),
+        EgressKind::BedrockConverse => Some("bedrock-converse"),
+        EgressKind::OpenaiCompat | EgressKind::OpenaiCompatMantle => Some("openai-compat"),
+        EgressKind::OpenaiResponses | EgressKind::OpenaiResponsesMantle => Some("openai-responses"),
+        EgressKind::Gemini => Some("gemini"),
+        EgressKind::Local => None,
     }
 }
 
@@ -216,6 +284,7 @@ impl Router {
                 lane,
                 tap: tap.clone(),
                 state: Arc::clone(&self.wire_check),
+                provider_id: target.provider.as_ref().map(|p| Arc::from(p.id())),
             });
     }
 }

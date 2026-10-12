@@ -111,35 +111,46 @@ pub(super) struct ClientSink {
 }
 
 impl ClientSink {
-    /// A sink over `tx`, folding for `check` when present.
+    /// A sink over `tx`, folding for `check` when present; `ingress` is the
+    /// id of the adapter rendering the stream.
     pub(super) fn new(
         tx: tokio::sync::mpsc::Sender<SseEvent>,
         check: Option<ResponseCheck>,
+        ingress: &str,
     ) -> Self {
         Self {
             tx,
-            check: ClientStreamCheck::new(check),
+            check: ClientStreamCheck::new(check, ingress),
         }
     }
 }
 
 /// Folds the frames a streamed response sends the client and, when it is
-/// dropped, compares them with the upstream's stream through the check. The
-/// exit defaults to a cancelled task; each `drive_stream` exit names its
-/// own with [`Self::end`].
+/// dropped, compares them with the upstream's stream through the check,
+/// tracing both documents when both are whole. The exit defaults to a
+/// cancelled task; each `drive_stream` exit names its own with
+/// [`Self::end`].
 pub(super) struct ClientStreamCheck {
-    armed: Option<(ResponseCheck, StreamAssembler)>,
+    armed: Option<ArmedCheck>,
     edits: ResponseEdits,
     exit: StreamExit,
 }
 
+struct ArmedCheck {
+    check: ResponseCheck,
+    assembler: StreamAssembler,
+    ingress: Box<str>,
+}
+
 impl ClientStreamCheck {
-    /// A fold for `check`'s stream; inert when `check` is `None`.
-    pub(super) fn new(check: Option<ResponseCheck>) -> Self {
+    /// A fold for `check`'s stream, rendered by the `ingress` adapter; inert
+    /// when `check` is `None`.
+    pub(super) fn new(check: Option<ResponseCheck>, ingress: &str) -> Self {
         let edits = response_edits_for(check.as_ref());
-        let armed = check.map(|check| {
-            let assembler = StreamAssembler::new(check.lane().ingress());
-            (check, assembler)
+        let armed = check.map(|check| ArmedCheck {
+            assembler: StreamAssembler::new(check.lane().ingress()),
+            check,
+            ingress: ingress.into(),
         });
         Self {
             armed,
@@ -155,8 +166,10 @@ impl ClientStreamCheck {
 
     /// Fold one frame the client is about to receive.
     pub(super) fn observe(&mut self, event: &SseEvent) {
-        if let Some((_, assembler)) = self.armed.as_mut() {
-            assembler.push(SseFrame::new(event.event.as_deref(), &event.data));
+        if let Some(armed) = self.armed.as_mut() {
+            armed
+                .assembler
+                .push(SseFrame::new(event.event.as_deref(), &event.data));
         }
     }
 
@@ -168,11 +181,12 @@ impl ClientStreamCheck {
 
 impl Drop for ClientStreamCheck {
     fn drop(&mut self) {
-        if let Some((check, assembler)) = self.armed.take() {
-            check.compare_stream(
-                assembler.finish(self.exit),
+        if let Some(armed) = self.armed.take() {
+            armed.check.compare_traced_stream(
+                armed.assembler.finish(self.exit),
                 self.exit,
                 self.edits.as_slice(),
+                &armed.ingress,
             );
         }
     }
@@ -181,3 +195,7 @@ impl Drop for ClientStreamCheck {
 #[cfg(test)]
 #[path = "response_wire_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "response_wire_trace_tests.rs"]
+mod trace_tests;

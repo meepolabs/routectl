@@ -80,10 +80,11 @@ trace_non_stream() {
 TRACE
 }
 
-# A STREAM request: the completion marker is a `stream summary` line and
-# there is NO `upstream success body`, so the fixture lands with upstream
-# response HEADERS and no upstream response BODY -- the combination the
-# deleted `has_*` flags rejected.
+# A STREAM request with no body lines: the completion marker is a `stream
+# summary` line and there is NO `upstream success body`, so the fixture
+# lands with upstream response HEADERS and no upstream response BODY -- the
+# combination the deleted `has_*` flags rejected. A stream the daemon did
+# not check, or whose documents did not both assemble, leaves this shape.
 #
 # Same `provider_kind` placement as trace_non_stream, for the same reason:
 # the field rides the two egress-direction header lines because that is
@@ -144,6 +145,22 @@ trace_driver() {
     trace_non_stream "$id" "$kind" "$ingress"
     structural_line "$id" ingress 400000
     structural_line "$id" outgoing 500000
+}
+
+# A CHECKED stream: the same request plus the two body lines the daemon
+# emits once both assembled documents are whole -- the upstream's under the
+# provider's own `provider_kind`, the client's under the ingress id, both
+# AFTER the stream summary, inside the request span, as the stream check
+# runs when the client's stream ends.
+trace_stream_traced() {
+    local id="$1" kind="$2"
+    local span="request{method=POST path=/v1/messages request_id=$id}"
+    local target="routectl_core::log_safe:"
+    trace_stream "$id" "$kind"
+    cat <<TRACE
+2026-08-25T11:00:00.300000Z TRACE $span:messages{ingress="anthropic"}: $target upstream success body provider_kind="$kind" provider="anthropic-api:p" body={"id":"msg_s","type":"message","content":[{"type":"text","text":"ok"}]} redact_prompts_enabled=false
+2026-08-25T11:00:00.300100Z TRACE $span:messages{ingress="anthropic"}: $target egress response body ingress="anthropic" body={"id":"msg_s","type":"message","model":"my-alias","content":[{"type":"text","text":"ok"}]} redact_prompts_enabled=false
+TRACE
 }
 
 # A stream trace carrying both structural summaries. Used as the RERUN of
@@ -990,24 +1007,28 @@ fi
 unset pk_msgs_rig pk_target_rig log_safe_src
 
 
-# --- Case 3: a stream capture lands headers without a body -----------
-# The 96%-of-corpus shape. The rig must write the upstream response
-# HEADERS file, must NOT write the upstream response BODY file, and must
-# say nothing about either in meta.json. Case 1's paired positive control
-# (a non-stream trace DOES produce upstream_response.json) is what stops
-# the absence assertion below from passing vacuously against a rig that
-# writes no body files at all.
+# --- Case 3: a stream capture with no body lines lands no body --------
+# A stream the daemon traced no documents for. The rig must write the
+# upstream response HEADERS file, must write NEITHER response BODY file,
+# must mark the fixture a stream in meta.json, and must say nothing about
+# file presence there. Case 3b's paired positive control (a checked stream
+# trace DOES produce both body files) is what stops the absence assertions
+# below from passing vacuously against a rig that writes no body files.
 work="$(run_rig "$(trace_stream 019eab77-0000-4000-8000-000000000003 anthropic)")"
 dir="$work/repo/crates/routectl-cli/tests/fixtures/captured/019eab77-0000-4000-8000-000000000003"
 if [ -d "$dir" ]; then
     assert_files_present "$dir" "a stream capture" \
         "${REQUIRED_FILES[@]}" upstream_response.headers.json
-    if [ -f "$dir/upstream_response.json" ]; then
-        echo "FAIL: stream capture wrote an upstream response body it never saw"
-        fails=$((fails + 1))
-    else
-        echo "PASS: stream capture writes no upstream response body"
-    fi
+    for body in upstream_response.json egress_response.json; do
+        if [ -f "$dir/$body" ]; then
+            echo "FAIL: stream capture wrote $body from no body line"
+            fails=$((fails + 1))
+        else
+            echo "PASS: stream capture with no body line writes no $body"
+        fi
+    done
+    check "a stream capture is marked by meta.stream" \
+        "True" "$(meta_get "$dir/meta.json" stream)"
     if grep -q '"has_' "$dir/meta.json"; then
         echo "FAIL: stream meta.json still carries a has_* presence flag"
         fails=$((fails + 1))
@@ -1016,6 +1037,34 @@ if [ -d "$dir" ]; then
     fi
 else
     echo "FAIL: stream capture produced no fixture directory (rig log: $work/rig.log)"
+    cat "$work/rig.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# --- Case 3b: a checked stream lands both response bodies -------------
+# The positive control for case 3: the same stream plus the two body lines
+# a checked stream emits. Both body files land with the traced documents,
+# meta.stream still says stream (file presence no longer does), and the
+# lane is unchanged by the extra provider_kind line, which carries the
+# providers-crate token like the outgoing line before it.
+id3b=019eab77-0000-4000-8000-00000000003b
+work="$(run_rig "$(trace_stream_traced "$id3b" anthropic)")"
+dir="$work/repo/crates/routectl-cli/tests/fixtures/captured/$id3b"
+if [ -d "$dir" ]; then
+    assert_files_present "$dir" "a checked stream capture" \
+        "${REQUIRED_FILES[@]}" upstream_response.headers.json \
+        upstream_response.json egress_response.json
+    check "a checked stream is still marked by meta.stream" \
+        "True" "$(meta_get "$dir/meta.json" stream)"
+    check "the extra provider_kind line keeps the lane" \
+        "anthropic-api" "$(meta_get "$dir/meta.json" lane)"
+    check "upstream_response.json holds the upstream document" \
+        "msg_s" "$(meta_get "$dir/upstream_response.json" id)"
+    check "egress_response.json holds the client document" \
+        "my-alias" "$(meta_get "$dir/egress_response.json" model)"
+else
+    echo "FAIL: checked stream capture produced no fixture directory (rig log: $work/rig.log)"
     cat "$work/rig.log"
     fails=$((fails + 1))
 fi

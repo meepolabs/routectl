@@ -4876,6 +4876,7 @@ pub struct routectl_router::router::ResponseCheck
 impl routectl_router::ResponseCheck
 pub fn routectl_router::ResponseCheck::compare_body(self, &[u8], &[routectl_core::wire_check::edits::DeclaredEdit])
 pub fn routectl_router::ResponseCheck::compare_stream(self, routectl_core::wire_check::assemble::Assembled, routectl_core::wire_check::assemble::StreamExit, &[routectl_core::wire_check::edits::DeclaredEdit])
+pub fn routectl_router::ResponseCheck::compare_traced_stream(self, routectl_core::wire_check::assemble::Assembled, routectl_core::wire_check::assemble::StreamExit, &[routectl_core::wire_check::edits::DeclaredEdit], &str)
 pub const fn routectl_router::ResponseCheck::lane(&self) -> routectl_core::wire_check::lane::Lane
 impl core::clone::Clone for routectl_router::ResponseCheck
 pub fn routectl_router::ResponseCheck::clone(&self) -> routectl_router::ResponseCheck
@@ -15771,6 +15772,7 @@ pub struct routectl_router::ResponseCheck
 impl routectl_router::ResponseCheck
 pub fn routectl_router::ResponseCheck::compare_body(self, &[u8], &[routectl_core::wire_check::edits::DeclaredEdit])
 pub fn routectl_router::ResponseCheck::compare_stream(self, routectl_core::wire_check::assemble::Assembled, routectl_core::wire_check::assemble::StreamExit, &[routectl_core::wire_check::edits::DeclaredEdit])
+pub fn routectl_router::ResponseCheck::compare_traced_stream(self, routectl_core::wire_check::assemble::Assembled, routectl_core::wire_check::assemble::StreamExit, &[routectl_core::wire_check::edits::DeclaredEdit], &str)
 pub const fn routectl_router::ResponseCheck::lane(&self) -> routectl_core::wire_check::lane::Lane
 impl core::clone::Clone for routectl_router::ResponseCheck
 pub fn routectl_router::ResponseCheck::clone(&self) -> routectl_router::ResponseCheck

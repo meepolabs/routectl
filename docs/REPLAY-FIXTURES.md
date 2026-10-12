@@ -192,9 +192,10 @@ A rerun REPLACES the previous directory rather than merging into it: the
 old directory is renamed aside, the new one moves into place, and only
 then is the old one removed, so a reader sees one whole fixture or the
 other. Merging would leave files the new capture never observed -- a
-non-stream run's `upstream_response.json` surviving into a stream rerun --
-and since file presence IS the schema (below), the drift signal would be
-read off a directory no single capture ever produced. `request_id` stays
+`upstream_response.json` from a run whose trace carried a body line
+surviving into a rerun whose trace carried none -- and since file presence
+IS the schema (below), the drift signal would be read off a directory no
+single capture ever produced. `request_id` stays
 in `meta.json` for traceability; it just no longer names the directory.
 
 A `case_id` therefore has to be a single path-safe SCENARIO name
@@ -269,9 +270,21 @@ vector for whichever file is absent:
 | body | headers | what it means |
 |---|---|---|
 | present | present | that direction was fully observed |
-| absent | present | STREAM capture -- the body arrived as SSE frames and was never logged as one JSON value |
+| absent | present | the body was never logged as one JSON value -- a stream the daemon traced no documents for |
 | present | absent | that direction's response headers were not logged |
 | absent | absent | that direction was not observed |
+
+Whether the run STREAMED is `meta.stream`, never file presence. A stream
+whose response check ran on a FIDELITY lane (the sampler admitted the
+attempt, and the ingress speaks the egress's own dialect) and whose two
+assembled documents both completed has its documents traced on the same
+`upstream success body` / `egress response body` lines a complete response
+emits, so its fixture carries both body files: each is the assembled JSON
+document, not the SSE frames. Any other stream -- unsampled, on a
+TRANSLATION lane, or with either side cut short -- has neither body line
+and lands headers only. The upstream line carries the providers-crate
+`provider_kind` token, the same one the outgoing line carries, so the lane
+a fixture keys on does not change with it.
 
 The rig's tmp-then-rename promotion (see the atomicity contract in
 `scripts/capture_fixtures.sh`) means a fixture directory is never
@@ -593,9 +606,11 @@ Fields:
   already on disk as the traced `ingress_kind`, so a second copy could
   only ever disagree with the fact it was checked against.
 - `stream` -- `true` for SSE-bytes responses, `false` for JSON
-  bodies. Stream fixtures are currently skipped by the replay
-  drivers (stream-body replay is deferred -- the capture rig does
-  not yet write stream bodies). `assert_sse_equal` exists as harness
+  bodies. The ONLY record of whether the run streamed: a checked
+  stream carries both response body files (its assembled documents,
+  see the presence table above), so their presence does not say
+  non-stream. Stream fixtures are currently skipped by the replay
+  drivers (stream-body replay is deferred). `assert_sse_equal` exists as harness
   scaffolding for future stream replay and has no driver caller today;
   the exercised non-stream path uses `assert_json_equal_structural_verbose`.
 - `model` -- post-alias provider model id from the trace. Used by the

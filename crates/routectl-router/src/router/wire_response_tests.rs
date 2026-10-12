@@ -413,3 +413,123 @@ async fn no_response_check_rides_out_of_an_unchecked_attempt() {
         }
     }
 }
+
+/// The body-trace lines one finished stream compare emitted, as
+/// (message, provider_kind or ingress, provider).
+fn body_traces(events: &[routectl_testkit::CapturedEvent]) -> Vec<(String, String, String)> {
+    events
+        .iter()
+        .filter(|e| e.message.ends_with(" body"))
+        .map(|e| {
+            (
+                e.message.clone(),
+                e.field("provider_kind")
+                    .or_else(|| e.field("ingress"))
+                    .unwrap_or_default()
+                    .to_string(),
+                e.field("provider").unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// A traced stream compare emits each whole document once, the upstream's
+/// under the serving provider's own id and its trace token; the untraced
+/// compare and an unfinished side emit nothing.
+#[tokio::test]
+async fn a_traced_stream_compare_emits_both_documents_only_when_both_are_whole() {
+    let both = vec![
+        (
+            "upstream success body".to_string(),
+            "anthropic".to_string(),
+            "answering".to_string(),
+        ),
+        (
+            "egress response body".to_string(),
+            "anthropic".to_string(),
+            String::new(),
+        ),
+    ];
+    let rows: [(&str, bool, StreamExit, Option<IncompleteReason>, Vec<_>); 4] = [
+        ("whole stream, traced", true, StreamExit::Ended, None, both),
+        (
+            "whole stream, untraced",
+            false,
+            StreamExit::Ended,
+            None,
+            vec![],
+        ),
+        (
+            "client went away",
+            true,
+            StreamExit::Disconnect,
+            Some(IncompleteReason::Disconnect),
+            vec![],
+        ),
+        (
+            "upstream failed mid-stream",
+            true,
+            StreamExit::UpstreamError,
+            Some(IncompleteReason::UpstreamError),
+            vec![],
+        ),
+    ];
+    for (name, traced, exit, client_reason, expected) in rows {
+        let router = router("anthropic-api", CHECK_EVERY);
+        let dispatched = Box::pin(router.stream_with_options(
+            request(IngressDialect::Anthropic, true),
+            RouterOptions::default(),
+        ))
+        .await;
+        let _chunks: Vec<_> = dispatched.result.expect("stream opens").collect().await;
+        let client =
+            client_reason.map_or(Assembled::Complete(client_body()), Assembled::Incomplete);
+        let check = dispatched.meta.response_check.expect("carried");
+
+        let events = routectl_testkit::capture_events(|| {
+            if traced {
+                check.compare_traced_stream(client, exit, &[], "anthropic");
+            } else {
+                check.compare_stream(client, exit, &[]);
+            }
+        });
+
+        assert_eq!(body_traces(&events), expected, "{name}");
+    }
+}
+
+/// Each egress kind traces under the token its provider spells its own
+/// request lines with; the config kind and the Mantle suffix never appear.
+#[cfg(feature = "bedrock")]
+#[test]
+fn each_egress_traces_under_its_providers_own_token() {
+    use routectl_core::wire_check::EgressKind;
+    use routectl_providers::bedrock::BedrockApiShape;
+    let rows = [
+        (EgressKind::AnthropicApi, Some("anthropic")),
+        (EgressKind::AnthropicApiMantle, Some("anthropic")),
+        (
+            EgressKind::BedrockInvoke,
+            Some(BedrockApiShape::Invoke.provider_kind_str()),
+        ),
+        (
+            EgressKind::BedrockConverse,
+            Some(BedrockApiShape::Converse.provider_kind_str()),
+        ),
+        (EgressKind::OpenaiCompat, Some("openai-compat")),
+        (EgressKind::OpenaiCompatMantle, Some("openai-compat")),
+        (EgressKind::OpenaiResponses, Some("openai-responses")),
+        (EgressKind::OpenaiResponsesMantle, Some("openai-responses")),
+        (EgressKind::Gemini, Some("gemini")),
+        (EgressKind::Local, None),
+    ];
+    assert_eq!(rows.len(), EgressKind::ALL.len());
+    for (egress, token) in rows {
+        assert_eq!(
+            super::provider_trace_kind(egress),
+            token,
+            "{}",
+            egress.label()
+        );
+    }
+}
