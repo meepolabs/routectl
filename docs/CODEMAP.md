@@ -3204,6 +3204,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `dispatch_chain` (no metrics or rotation perturbation) -- and its sibling
   `first_target_oauth_id`, backing the discovery-time credential check in
   `handlers/models.rs`
+- `src/router/learn_engine.rs` -- per-target learner state for one chain
+  iteration of `complete_inner` / `stream_inner`: `AttemptLearning` owns the
+  replay and envelope-field carry plans, the held `FieldPreflightPlan` (canary
+  repair + settlement only on the `Complete` surface), the learned re-probe
+  settle guard and each repair branch's repaired-state flags; the learn dedupe
+  set and `RepairBudget` stay request-scoped and are lent per call.
+  `classify` (native, replay-attempt aware), `on_rejection` -> `FailureDecision`
+  (`Retry { last_err_body_free }` / `Proceed`) runs replay strip -> field
+  repair -> canary retry in place on `attempt_req`, `observe_generic` wraps
+  `observe_for_learning`, `on_success` settles betas, replay, field and canary
 - `src/router/learned_lanes.rs` -- the ONE projection of resolved learned
   lanes for operator surfaces: `LearnedLaneProjection` of
   `ResolvedLearnedLane { lane: StateKey, nicknames, provider_kind, routed }`,
