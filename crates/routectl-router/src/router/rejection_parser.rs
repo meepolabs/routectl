@@ -46,7 +46,7 @@ const ANTHROPIC_INVALID_REQUEST: &str = "invalid_request_error";
 
 /// The Converse wrapper object that carries model-specific request fields;
 /// a Converse rejection may name a field relative to the request root.
-const CONVERSE_FIELD_BAG: &str = "additionalModelRequestFields";
+pub(super) const CONVERSE_FIELD_BAG: &str = "additionalModelRequestFields";
 
 /// The location-prefix reasons grounded on captured envelopes are this list
 /// lead-in and [`LOCATION_UNSUPPORTED_FIELD_REASON`]. A prefix followed by

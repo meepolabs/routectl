@@ -9,18 +9,25 @@
 //! end with what field repair made of the same path, because the repair
 //! that answers a rejection runs after it and may never run at all.
 //!
+//! The same settlement says whether the body that went out carries the path
+//! at all, which the learning engine reads to leave alone a rejection naming
+//! a path routectl never sent.
+//!
 //! Reads only. Nothing here changes the request, the error, or the learned
 //! state the repair settles.
 
 use routectl_core::wire_check::{
-    AttemptRecord, Lane, LaneClass, Leg, RejectionProvenance, WirePath, WireTap,
+    AttemptRecord, EgressKind, Lane, LaneClass, Leg, RejectionProvenance, WirePath, WireTap,
 };
 use routectl_core::{ChatRequest, Error, sanitize_for_log};
 use serde_json::Value;
 
 use super::class_observe::upstream_facts;
 use super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR;
-use super::rejection_parser::{REJECTION_STATUSES, RawPath, RejectedWirePath, rejected_wire_path};
+use super::learn_engine::RejectionSite;
+use super::rejection_parser::{
+    CONVERSE_FIELD_BAG, REJECTION_STATUSES, RawPath, RejectedWirePath, rejected_wire_path,
+};
 use super::wire_check::{SampleCharge, attempt_lane, compare_request, lend_request_record};
 use super::{DispatchMeta, DispatchTarget, FieldRepair, Router};
 use crate::wire_check_state::FieldRepairOutcome;
@@ -49,8 +56,9 @@ pub struct PendingWireRejection {
 impl Router {
     /// Settle the wire check for an attempt that did not succeed. Gives back
     /// the attempt's sampler charge whether or not it was admitted, then,
-    /// for a status in the rejection set, compares the request leg and
-    /// records the rejection's provenance on `meta`.
+    /// for a status in the rejection set, compares the request leg, records
+    /// the rejection's provenance on `meta`, and returns where on the wire
+    /// the rejection points. `None` when no rejection was recorded.
     ///
     /// Must run before anything mutates `attempt_req` or drains `tap`, so
     /// both still describe the body the upstream refused.
@@ -62,30 +70,36 @@ impl Router {
         charge: SampleCharge,
         err: &Error,
         meta: &mut DispatchMeta,
-    ) {
+    ) -> Option<RejectionSite> {
         drop(charge);
         let (Some(tap), Some(lane)) = (tap, attempt_lane(target, attempt_req)) else {
-            return;
+            return None;
         };
-        let Some(status) = upstream_facts(err)
+        let status = upstream_facts(err)
             .status
-            .filter(|status| REJECTION_STATUSES.contains(status))
-        else {
-            return;
-        };
+            .filter(|status| REJECTION_STATUSES.contains(status))?;
         let rejected = rejected_wire_path(
             target.provider_kind.unwrap_or_default(),
             status,
             err.parsed_body(),
         );
-        let provenance = lend_request_record(attempt_req, tap, |record| {
+        let site = lend_request_record(attempt_req, tap, |record| {
             let record = record?.with_rejection(err);
             compare_request(&self.wire_check, lane, &record);
-            Some(provenance_of(lane, &record, rejected.as_ref()))
+            let path = exact_locator(rejected.as_ref());
+            let sent = path
+                .and(record.egress())
+                .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+            Some(RejectionSite {
+                provenance: provenance_of(lane, &record, path, sent.as_ref()),
+                in_egress: path
+                    .zip(sent.as_ref())
+                    .and_then(|(path, sent)| egress_location(lane.egress(), sent, path)),
+            })
         });
-        let Some(provenance) = provenance else {
+        let Some(site) = site else {
             self.wire_check.record_incomplete(lane);
-            return;
+            return None;
         };
         let (path, field) = rejected.map_or((WirePath::root(), None), |named| {
             (named.wire, Some(named.field))
@@ -94,10 +108,11 @@ impl Router {
             lane,
             path,
             field,
-            provenance,
+            provenance: site.provenance,
             state_key: sanitize_for_log(&target.state_key),
             repairs_before: meta.field_repairs.len(),
         });
+        Some(site)
     }
 
     /// Record every rejection the request drew, each with what field repair
@@ -116,31 +131,34 @@ impl Router {
     }
 }
 
+/// The unmasked location a rejection names, unless the parser could not
+/// localize it or its pointer was coarsened to an ancestor of it.
+fn exact_locator(rejected: Option<&RejectedWirePath>) -> Option<&[String]> {
+    rejected
+        .filter(|named| !named.wire.is_coarsened())
+        .map(|named| named.locator.as_slice())
+}
+
 /// Where the path a rejection names came from: looked up in the client's
-/// body and in the body routectl sent. On a TRANSLATION lane the two bodies
-/// do not share paths, so a located path is not applicable.
+/// body and in `sent`, the parsed body routectl sent. On a TRANSLATION lane
+/// the two bodies do not share paths, so a located path is not applicable.
 fn provenance_of(
     lane: Lane,
     record: &AttemptRecord<'_>,
-    rejected: Option<&RejectedWirePath>,
+    path: Option<&[String]>,
+    sent: Option<&Value>,
 ) -> RejectionProvenance {
-    let Some(path) = rejected
-        .filter(|named| !named.wire.is_coarsened())
-        .map(|named| named.locator.as_slice())
-    else {
+    let Some(path) = path else {
         return RejectionProvenance::Unlocalized;
     };
     if lane.class() == LaneClass::Translation {
         return RejectionProvenance::NotApplicable;
     }
-    let sent = record
-        .egress()
-        .and_then(|body| serde_json::from_slice::<Value>(body).ok());
     let received = serde_json::from_slice::<Value>(&record.ingress().bytes).ok();
     let (Some(sent), Some(received)) = (sent, received) else {
         return RejectionProvenance::Unlocalized;
     };
-    match (locate(&received, path), locate(&sent, path)) {
+    match (locate(&received, path), locate(sent, path)) {
         (Some(client), Some(wire)) if client == wire => RejectionProvenance::ClientUnchanged,
         (Some(_), _) => RejectionProvenance::ClientChanged,
         (None, Some(_)) => RejectionProvenance::RoutectlAdded,
@@ -148,19 +166,74 @@ fn provenance_of(
     }
 }
 
-/// The value at `path` (raw keys and indices) in `body`. A rejection names a
+/// Whether `sent`, the body that went out on an `egress` lane, carries the
+/// location `path` a rejection names: `Some(false)` only when the walk ends
+/// on an object that lacks the key. `None` whenever the body and the path
+/// disagree about shape, since then the absence is not evidence.
+///
+/// On Converse the model names its own fields relative to the field bag and
+/// the request validator names them from the root, bag included. A path the
+/// root lacks is looked for in the bag; one neither carries is `None`, not
+/// absent, because the model also reads fields the Converse body spells
+/// elsewhere. A bag-prefixed path on any other egress names a shape that
+/// body does not have.
+fn egress_location(egress: EgressKind, sent: &Value, path: &[String]) -> Option<bool> {
+    let bag_prefixed = path.first().map(String::as_str) == Some(CONVERSE_FIELD_BAG);
+    if bag_prefixed && egress != EgressKind::BedrockConverse {
+        return None;
+    }
+    match walk(sent, path) {
+        Walk::Found(_) => Some(true),
+        Walk::Mismatch => None,
+        Walk::Missing if egress == EgressKind::BedrockConverse && !bag_prefixed => {
+            matches!(walk(sent.get(CONVERSE_FIELD_BAG)?, path), Walk::Found(_)).then_some(true)
+        }
+        Walk::Missing => Some(false),
+    }
+}
+
+/// The value at `path` (raw keys and indices) in `body`.
+fn locate<'v>(body: &'v Value, path: &[String]) -> Option<&'v Value> {
+    match walk(body, path) {
+        Walk::Found(value) => Some(value),
+        Walk::Missing | Walk::Mismatch => None,
+    }
+}
+
+/// How a walk of a raw path through a body ended.
+enum Walk<'v> {
+    Found(&'v Value),
+    /// An object on the path lacks the next key.
+    Missing,
+    /// The path asks something the body's shape cannot answer: a key of a
+    /// scalar, an index of an object, a non-index of an array, an index past
+    /// an array's end.
+    Mismatch,
+}
+
+/// Walk `path` (raw keys and indices) through `body`. A rejection names a
 /// tagged-union member by its tag (`thinking.enabled.display` for
 /// `{"thinking": {"type": "enabled", "display": ..}}`), so a segment an
 /// object lacks but carries as its own `type` tag is consumed without
 /// descending.
-fn locate<'v>(body: &'v Value, path: &[String]) -> Option<&'v Value> {
-    path.iter().try_fold(body, |node, key| match node {
-        Value::Object(map) => map.get(key).or_else(|| {
-            (map.get(UNION_TAG).and_then(Value::as_str) == Some(key.as_str())).then_some(node)
-        }),
-        Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
-        _ => None,
-    })
+fn walk<'v>(body: &'v Value, path: &[String]) -> Walk<'v> {
+    let mut node = body;
+    for key in path {
+        node = match node {
+            Value::Object(map) => match map.get(key) {
+                Some(child) => child,
+                None if map.get(UNION_TAG).and_then(Value::as_str) == Some(key.as_str()) => node,
+                None if key.parse::<usize>().is_ok() => return Walk::Mismatch,
+                None => return Walk::Missing,
+            },
+            Value::Array(items) => match key.parse::<usize>().ok().and_then(|i| items.get(i)) {
+                Some(item) => item,
+                None => return Walk::Mismatch,
+            },
+            _ => return Walk::Mismatch,
+        };
+    }
+    Walk::Found(node)
 }
 
 /// The member a tagged union names its variant by.

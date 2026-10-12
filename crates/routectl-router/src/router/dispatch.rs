@@ -732,7 +732,7 @@ impl Router {
                         return Ok(resp);
                     }
                     Err(mut e) => {
-                        self.settle_failed_attempt(
+                        let rejection_site = self.settle_failed_attempt(
                             target,
                             &attempt_req,
                             wire_tap.as_ref(),
@@ -849,6 +849,7 @@ impl Router {
                                 target,
                                 &req,
                                 &untranslated,
+                                rejection_site,
                                 &mut attempt_req,
                                 meta,
                                 &mut repair_budget,
@@ -1529,7 +1530,7 @@ impl Router {
                         ));
                     }
                     Err(mut e) => {
-                        self.settle_failed_attempt(
+                        let rejection_site = self.settle_failed_attempt(
                             target,
                             &attempt_req,
                             wire_tap.as_ref(),
@@ -1618,6 +1619,7 @@ impl Router {
                                 target,
                                 &req,
                                 &untranslated,
+                                rejection_site,
                                 &mut attempt_req,
                                 meta,
                                 &mut repair_budget,

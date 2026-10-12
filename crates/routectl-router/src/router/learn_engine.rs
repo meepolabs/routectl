@@ -28,6 +28,7 @@ use routectl_core::capability::{FailurePhase, SignalTier};
 use routectl_core::failure_class::{
     ClassifiedFailure, FailureClass, classify, classify_with_attempt,
 };
+use routectl_core::wire_check::RejectionProvenance;
 use routectl_core::{BetaRepairReport, ChatRequest, Error, sanitize_for_log};
 
 use crate::feature_keys::derive_feature_keys;
@@ -53,10 +54,26 @@ use super::{DispatchMeta, DispatchTarget, ReplayDegradation, Router};
 /// signal tier, and the phase the resolver read it at.
 pub(super) type ResolvedCapability = (String, SignalTier, FailurePhase);
 
-/// Where on the attempt's wire a rejection points. Carries no facts yet: the
-/// slot exists so a proposer can read them once settlement extracts them.
+/// Where on the attempt's wire a rejection points, as settled from the
+/// attempt's record before any repair touched the request.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct RejectionSite;
+pub(super) struct RejectionSite {
+    /// Where the named path came from, as the wire check records it.
+    pub(super) provenance: RejectionProvenance,
+    /// Whether the body that went out carries the named path. `None` when
+    /// that cannot be told: no deposit, an unparseable body, a rejection
+    /// naming no exact path, or a path whose shape the body does not share.
+    pub(super) in_egress: Option<bool>,
+}
+
+impl RejectionSite {
+    /// Whether the rejection names a path the body that went out did not
+    /// carry. Such a rejection cannot be about anything routectl sent there,
+    /// so no path-keyed proposal may act on it.
+    fn names_absent_path(site: Option<Self>) -> bool {
+        site.and_then(|site| site.in_egress) == Some(false)
+    }
+}
 
 /// Everything a proposer may read about one rejection, borrowed read-only.
 ///
@@ -79,7 +96,6 @@ pub(super) struct RejectionInput<'r> {
     /// Whether this target's attempt carried non-portable replay artifacts.
     pub(super) replay_carried: bool,
     pub(super) table: FieldRepairTable,
-    #[expect(dead_code, reason = "no proposer reads the rejection site yet")]
     pub(super) site: Option<RejectionSite>,
 }
 
@@ -113,6 +129,15 @@ pub(super) enum ProposerSlot {
     Replay(ReplayProposer),
     FieldRow(FieldRowProposer),
     Capability(CapabilityProposer),
+}
+
+impl ProposerSlot {
+    /// Whether this slot's proposal is keyed on the path the rejection
+    /// names. The canary answers the field-row proposal, so it is keyed on
+    /// the same path.
+    const fn is_path_keyed(self) -> bool {
+        matches!(self, Self::FieldRow(_))
+    }
 }
 
 impl Proposer for ProposerSlot {
@@ -156,8 +181,17 @@ pub(super) enum Arbitration {
 /// that takes. A repair proposal whose effect does not take (already spent,
 /// no plan, budget exhausted) falls through to the next slot; a capability
 /// proposal always takes, as the generic learner's claim.
+///
+/// A rejection naming a path the sent body did not carry skips every
+/// path-keyed slot: nothing is repaired or learned for that path. The
+/// generic capability slot still runs, behind its own request-membership
+/// gate, since a capability name is not a body path.
 pub(super) fn arbitrate(input: &RejectionInput<'_>, sink: &mut impl RepairSink) -> Arbitration {
+    let skip_path_keyed = RejectionSite::names_absent_path(input.site);
     for slot in ARBITRATION_ORDER {
+        if skip_path_keyed && slot.is_path_keyed() {
+            continue;
+        }
         if let Some(proposal) = slot.propose(input)
             && let Some(decided) = take_proposal(proposal, sink)
         {
@@ -322,6 +356,9 @@ impl<'a> AttemptLearning<'a> {
     /// [`Self::observe_generic`]; a `Retry` never reaches it, because the walk
     /// re-dispatches first.
     ///
+    /// `site` is what the attempt's settlement read off the wire; `None`
+    /// arbitrates exactly as a rejection with no wire record.
+    ///
     /// On `Retry` after the replay repair the running error is the
     /// rejection's body-free form, so a re-gate refusal cannot surface the
     /// reasoning blob a replay rejection may echo; the field and canary
@@ -335,6 +372,7 @@ impl<'a> AttemptLearning<'a> {
         target: &DispatchTarget,
         client_req: &ChatRequest,
         untranslated: &UntranslatedCapabilities,
+        site: Option<RejectionSite>,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
         budget: &mut RepairBudget,
@@ -349,7 +387,7 @@ impl<'a> AttemptLearning<'a> {
             untranslated,
             replay_carried: self.replay_plan.is_some(),
             table: self.router.field_repair_table(),
-            site: None,
+            site,
         };
         let mut sink = EngineSink {
             learning: self,
@@ -686,3 +724,7 @@ impl RepairSink for EngineSink<'_, '_> {
 #[cfg(test)]
 #[path = "learn_engine_tests.rs"]
 mod learn_engine_tests;
+
+#[cfg(test)]
+#[path = "learn_engine_location_tests.rs"]
+mod learn_engine_location_tests;
