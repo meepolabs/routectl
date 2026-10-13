@@ -31,7 +31,10 @@ nothing: unstyled text has no boundary a field value cannot forge, which is
 why the runner forces styling on for its daemon. The text after the
 boundary is ANSI-stripped and must begin with the event message.
 
-Exit codes: 0 written, 2 usage error.
+Exit codes: 0 written, 2 usage error -- including a finalize value over
+its cap (stderr names it `field-too-long`), refused before anything is
+written so the reader sees the cell as missing its result, never as a
+result it must refuse for size.
 """
 
 import json
@@ -61,7 +64,9 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 STYLED_TARGET = re.compile(
     r"\x1b\[2m([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)\x1b\[0m\x1b\[2m:\x1b\[0m "
 )
-INGRESS_FIELD = re.compile(r'ingress="([a-z0-9_-]{1,64})"(?: |$)')
+# One ingress_kinds.txt line; the reader validates each line against it.
+INGRESS_TOKEN = r"[a-z0-9_-]{1,64}"
+INGRESS_FIELD = re.compile(r'ingress="(' + INGRESS_TOKEN + r')"(?: |$)')
 ERROR_FIELDS = re.compile(
     r'provider_kind="([^"\\]{1,64})" provider=(?:"(?:[^"\\]|\\.)*"|\S+) status=(\d{3}) body=(.*)$'
 )
@@ -109,6 +114,18 @@ def _held_credentials() -> list[str]:
 
 TRACE_ARTIFACTS = ("fidelity.log", "ingress_kinds.txt", "upstream_errors.jsonl")
 SNAPSHOT_ARTIFACTS = ("health.json", "usage.json")
+
+# Bounds on every finalize value that reaches client_result.json, so the
+# file has a size the reader can cap at (RESULT_MAX_BYTES, derived below).
+# String caps are on the value's JSON encoding, quotes and escapes included,
+# so a non-ASCII value counts what it costs on disk. The runner passes lane
+# and case names, ingress tokens, short fetch statuses and exit codes, all
+# far inside these.
+FIELD_MAX_JSON_BYTES = 256
+STATUS_MAX_JSON_BYTES = 128
+INT_MAX_CHARS = 20
+RESULT_STR_FIELDS = ("lane", "case", "expected_ingress", "connection_mode")
+RESULT_INT_FIELDS = ("turns", "driver_rc", "rig_rc", "exit")
 
 
 def _after_target(line: str, target: str, message: str) -> str | None:
@@ -355,6 +372,24 @@ def _int_or_none(value: str | None) -> int | None:
         return None
 
 
+def _json_bytes(value: str) -> int:
+    return len(json.dumps(value))
+
+
+def _check_caps(opts: dict[str, str], snapshots: dict[str, str]) -> None:
+    """Refuse any value over its cap. An int field's encoding is never
+    longer than its argument text, so capping the text caps the output."""
+    for key in RESULT_STR_FIELDS:
+        if _json_bytes(opts.get(key, "")) > FIELD_MAX_JSON_BYTES:
+            raise ValueError("field-too-long: --" + key.replace("_", "-"))
+    for key in RESULT_INT_FIELDS:
+        if len(opts.get(key, "")) > INT_MAX_CHARS:
+            raise ValueError("field-too-long: --" + key.replace("_", "-"))
+    for name, status in snapshots.items():
+        if _json_bytes(status) > STATUS_MAX_JSON_BYTES:
+            raise ValueError("field-too-long: --snapshot " + name)
+
+
 def _parse_finalize(argv: list[str]) -> tuple[dict[str, str], dict[str, str]]:
     """Return (single-valued options, snapshot name -> fetch status)."""
     opts: dict[str, str] = {}
@@ -386,7 +421,34 @@ def _parse_finalize(argv: list[str]) -> tuple[dict[str, str], dict[str, str]]:
     for required in ("dir", "trace", "exit"):
         if required not in opts:
             raise ValueError("--" + required + " is required")
+    _check_caps(opts, snapshots)
     return opts, snapshots
+
+
+def _result_text(opts: dict[str, str], missing: dict[str, str], truncated: list[str]) -> str:
+    result = {
+        "schema": SCHEMA,
+        **{key: opts.get(key, "") for key in RESULT_STR_FIELDS},
+        **{key: _int_or_none(opts.get(key)) for key in RESULT_INT_FIELDS},
+        "missing": dict(sorted(missing.items())),
+        "truncated": truncated,
+    }
+    return json.dumps(result, indent=2, sort_keys=True) + "\n"
+
+
+def _max_result_bytes() -> int:
+    """The size of the largest client_result.json finalize can write: every
+    field at its cap, every artifact named missing with a reason at the
+    status cap, every trace artifact truncated."""
+    longest_int = "-" + "9" * (INT_MAX_CHARS - 1)
+    opts = {key: "x" * (FIELD_MAX_JSON_BYTES - 2) for key in RESULT_STR_FIELDS}
+    opts.update({key: longest_int for key in RESULT_INT_FIELDS})
+    reason = "x" * (STATUS_MAX_JSON_BYTES - 2)
+    missing = {name: reason for name in TRACE_ARTIFACTS + SNAPSHOT_ARTIFACTS}
+    return len(_result_text(opts, missing, list(TRACE_ARTIFACTS)).encode("ascii"))
+
+
+RESULT_MAX_BYTES = _max_result_bytes()
 
 
 def finalize(argv: list[str]) -> None:
@@ -400,20 +462,7 @@ def finalize(argv: list[str]) -> None:
         status = statuses.get(name, "not fetched")
         if status != "ok" or not os.path.isfile(os.path.join(directory, name + ".json")):
             missing[name + ".json"] = status if status != "ok" else "absent after fetch"
-    result = {
-        "schema": SCHEMA,
-        "lane": opts.get("lane", ""),
-        "case": opts.get("case", ""),
-        "expected_ingress": opts.get("expected_ingress", ""),
-        "connection_mode": opts.get("connection_mode", ""),
-        "turns": _int_or_none(opts.get("turns")),
-        "driver_rc": _int_or_none(opts.get("driver_rc")),
-        "rig_rc": _int_or_none(opts.get("rig_rc")),
-        "exit": _int_or_none(opts["exit"]),
-        "missing": dict(sorted(missing.items())),
-        "truncated": truncated,
-    }
-    _write_atomic(directory, "client_result.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
+    _write_atomic(directory, "client_result.json", _result_text(opts, missing, truncated))
 
 
 def extract_lines(kind: str, trace: str) -> None:

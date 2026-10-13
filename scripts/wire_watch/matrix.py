@@ -30,11 +30,29 @@ swept by exactly one row, so the candidate list is covered once and never
 multiplied by the harness count.
 
 Preflight, per cell, in this order: the driver file is missing or not
-executable -> NOT_RUN(driver); the key file is missing, unreadable, empty,
-not a regular file, or carries any group/other permission bit ->
-NOT_RUN(credential) with a detail token. The key file is only stat()ed and
-opened; its bytes are never read, so no key value can reach the ledger or
-a message.
+executable -> NOT_RUN(driver); the key file fails `open_key_file` ->
+NOT_RUN(credential) with that function's detail token. Preflight opens and
+fstat()s the key file and closes it unread, so no key value can reach the
+ledger or a message.
+
+Key files. `open_key_file(key_dir, name)` opens the key directory and then
+the key relative to that directory's descriptor, and judges both open
+descriptors, never a path, so what is checked is what is read. Neither the
+key directory nor the key may be a symlink (O_NOFOLLOW on each): following
+a link would let whoever can write it choose which file is exported. The
+directory must be owned by the current user and writable by no one else,
+so no other user can swap a key in after the check; the key must be a
+regular, nonempty file owned by the current user with no group/other
+permission bit. Path components above key_dir are trusted. key_dir is
+first made absolute with os.path.abspath, which resolves `.` and `..`
+lexically against the physical working directory, so `link/../keys` names
+`<cwd>/keys`; whatever directory that names still has to pass the owner,
+mode and no-symlink checks.
+
+Preflight's verdict is only a forecast. The runner MUST call
+open_key_file again at launch, unchanged, and read the key from the
+descriptor it returns immediately before export, since the files can
+change between preflight and launch.
 
 Public API
   Paths.from_root(root)          the committed input locations
@@ -42,7 +60,11 @@ Public API
   MatrixError                    refusal; .failures names each bad row
   load_rows(paths)               validated rows, or MatrixError
   expand(paths, rows)            ordered ledger.CellSpec tuple
-  key_file_problem(key_dir, name)  None, or the NOT_RUN(credential) detail
+  open_key_file(key_dir, name)   (fd, None) for a usable key -- caller reads
+                                 then closes fd -- or (None, detail token);
+                                 checks key_dir and key by descriptor
+  key_file_problem(key_dir, name)  None, or the NOT_RUN(credential) detail;
+                                 open_key_file with the descriptor closed
   preflight(ledger, paths, key_dir)  ledger with unrunnable cells NOT_RUN
   build_ledger(paths, key_dir)   load_rows + expand + preflight
   run_inputs(paths)              ledger.RunInputs digests
@@ -54,6 +76,7 @@ CLI
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
@@ -68,8 +91,21 @@ sys.path.insert(0, os.path.join(HERE, "..", "drivers", "config"))
 sys.path.insert(0, os.path.join(HERE, "..", "drivers", "lib"))
 
 import lane_configs  # noqa: E402
+import nofollow  # noqa: E402
 import validate_case  # noqa: E402
-from ledger import CellSpec, CellState, ModelTier, NotRunReason, RunInputs, RunLedger  # noqa: E402
+from ledger import (  # noqa: E402
+    CONNECTION_MODES,
+    DRIVER_RE,
+    KEY_FILE_RE,
+    LANE_RE,
+    TOKEN_RE,
+    CellSpec,
+    CellState,
+    ModelTier,
+    NotRunReason,
+    RunInputs,
+    RunLedger,
+)
 
 CELLS_COLUMNS = [
     "driver",
@@ -80,13 +116,8 @@ CELLS_COLUMNS = [
     "key_file",
     "sweep",
 ]
-CONNECTION_MODES = ("base-url", "front-proxy")
 NONE = "-"
 
-DRIVER_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.sh$")
-LANE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)?$")
-KEY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 PROVIDER_REF_RE = re.compile(r"env://ROUTECTL_DRIVER_([A-Z0-9]+)_(?:API_KEY|ACCOUNT_ID|TOKEN)\b")
 MITM_RE = re.compile(r"^\[mitm\]$", re.MULTILINE)
 INGRESS_BLOCK_RE = re.compile(
@@ -217,7 +248,7 @@ def bedrock_lanes(paths: Paths) -> Set[str]:
 
 def _row_failures(paths: Paths, raw: Dict[str, str], kinds: Tuple[str, ...], bedrock: Set[str]) -> List[str]:
     failures: List[str] = []
-    if not DRIVER_RE.match(raw["driver"]):
+    if not DRIVER_RE.fullmatch(raw["driver"]):
         failures.append(f"driver {raw['driver']!r} must match {DRIVER_RE.pattern}")
     if raw["expected_ingress"] not in kinds:
         failures.append(f"unknown expected_ingress {raw['expected_ingress']!r} (known: {', '.join(kinds)})")
@@ -226,11 +257,11 @@ def _row_failures(paths: Paths, raw: Dict[str, str], kinds: Tuple[str, ...], bed
         failures.append(f"unknown connection_mode {mode!r} (known: {', '.join(CONNECTION_MODES)})")
     key_file = raw["key_file"]
     providers = _split_list(raw["providers"])
-    if key_file != NONE and not KEY_FILE_RE.match(key_file):
+    if key_file != NONE and not KEY_FILE_RE.fullmatch(key_file):
         failures.append(f"key_file {key_file!r} must be '-' or a plain file name")
     if key_file != NONE and len(providers) != 1:
         failures.append("a key_file serves exactly one provider")
-    if not LANE_RE.match(raw["lane"]):
+    if not LANE_RE.fullmatch(raw["lane"]):
         failures.append(f"lane {raw['lane']!r} must match {LANE_RE.pattern}")
         return failures
     config = os.path.join(paths.config_dir, raw["lane"] + ".toml")
@@ -368,7 +399,7 @@ def sweep_cases(cases: Sequence[Case], thinking: bool) -> Tuple[str, ...]:
 def _lane_default(paths: Paths, lane: str) -> str:
     tables = lane_configs.read_config(os.path.join(paths.config_dir, lane + ".toml"))
     default = lane_configs.string_value(tables.get("aliases", {}).get("default", ""))
-    if not default or not TOKEN_RE.match(default):
+    if not default or not TOKEN_RE.fullmatch(default):
         raise MatrixError([f"lane {lane}: [aliases] default is missing or not a plain nickname"])
     return default
 
@@ -399,7 +430,7 @@ def expand(paths: Paths, rows: Sequence[CellRow]) -> Tuple[CellSpec, ...]:
     specs: List[CellSpec] = []
     for row in rows:
         for model, tier, thinking in _models_for(paths, row, by_lane.get(row.lane)):
-            if not TOKEN_RE.match(model):
+            if not TOKEN_RE.fullmatch(model):
                 raise MatrixError([f"model nickname {model!r} is not a safe token"])
             chosen = every_case if thinking is None else sweep_cases(cases, thinking)
             specs.extend(
@@ -420,27 +451,108 @@ def expand(paths: Paths, rows: Sequence[CellRow]) -> Tuple[CellSpec, ...]:
     return tuple(specs)
 
 
-def key_file_problem(key_dir: str, name: str) -> Optional[str]:
-    """None when the key file is usable; else the NOT_RUN(credential) detail.
-    Never reads the file's content."""
-    path = os.path.join(key_dir, name)
-    try:
-        info = os.stat(path)
-    except FileNotFoundError:
-        return "missing"
-    except OSError:
-        return "unreadable"
+def _descriptor_problem(fd: int) -> Optional[str]:
+    info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode):
         return "not-a-file"
+    if info.st_uid != os.geteuid():
+        return "wrong-owner"
     if info.st_mode & INSECURE_MODE_BITS:
         return "insecure-mode"
     if info.st_size == 0:
         return "empty"
-    try:
-        os.close(os.open(path, os.O_RDONLY))
-    except OSError:
-        return "unreadable"
     return None
+
+
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# O_NONBLOCK: opening a FIFO planted under the key's name would otherwise
+# block until a writer appears; it is then refused as not-a-file. Reads
+# from a regular file ignore the flag.
+_KEY_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | _CLOEXEC
+# Group/other write on the key directory would let another user replace a
+# key between the check and the read.
+KEY_DIR_WRITE_BITS = 0o022
+
+
+_KEY_DIR_REFUSALS = {
+    nofollow.BAD_PATH: "bad-dir-path",
+    nofollow.MISSING: "missing",
+    nofollow.SYMLINK: "symlink",
+    nofollow.NOT_A_DIRECTORY: "unreadable",
+    nofollow.UNREADABLE: "unreadable",
+}
+
+
+def _key_dir_problem(dir_fd: int) -> Optional[str]:
+    info = os.fstat(dir_fd)
+    if info.st_uid != os.geteuid():
+        return "wrong-owner"
+    if info.st_mode & KEY_DIR_WRITE_BITS:
+        return "bad-dir-mode"
+    return None
+
+
+def _open_key_in(dir_fd: int, name: str) -> Tuple[Optional[int], Optional[str]]:
+    try:
+        fd = os.open(name, _KEY_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError as exc:
+        return None, "symlink" if exc.errno == errno.ELOOP else "unreadable"
+    try:
+        problem = _descriptor_problem(fd)
+    except OSError:
+        problem = "unreadable"
+    if problem is not None:
+        os.close(fd)
+        return None, problem
+    return fd, None
+
+
+def open_key_file(key_dir: str, name: str) -> Tuple[Optional[int], Optional[str]]:
+    """(fd, None) when the key file is usable, else (None, detail token).
+
+    The caller owns the returned descriptor and must close it; on every
+    other path nothing is left open. Details: bad-name, bad-dir-path,
+    missing, symlink, unreadable, not-a-file, wrong-owner, bad-dir-mode,
+    insecure-mode, empty. The key directory is judged first, so a detail other than
+    insecure-mode, empty or not-a-file may concern it rather than the key.
+    Never reads the file's content."""
+    if not KEY_FILE_RE.fullmatch(name):
+        return None, "bad-name"
+    if not key_dir:
+        return None, "bad-dir-path"
+    try:
+        # nofollow.open_dir refuses a final `.` or `..`. abspath resolves
+        # them lexically against the physical working directory (getcwd
+        # never returns a symlink), so `.` is the real working directory and
+        # `link/.` ends in `link`, which open_dir then refuses as a symlink.
+        absolute = os.path.abspath(key_dir)
+    except OSError:
+        return None, "unreadable"
+    try:
+        dir_fd = nofollow.open_dir(absolute)
+    except nofollow.DirRefused as refused:
+        return None, _KEY_DIR_REFUSALS[refused.detail]
+    try:
+        try:
+            problem = _key_dir_problem(dir_fd)
+        except OSError:
+            problem = "unreadable"
+        if problem is not None:
+            return None, problem
+        return _open_key_in(dir_fd, name)
+    finally:
+        os.close(dir_fd)
+
+
+def key_file_problem(key_dir: str, name: str) -> Optional[str]:
+    """None when the key file is usable; else the NOT_RUN(credential) detail.
+    Never reads the file's content."""
+    fd, problem = open_key_file(key_dir, name)
+    if fd is not None:
+        os.close(fd)
+    return problem
 
 
 def _driver_missing(drivers_dir: str, driver: str) -> bool:

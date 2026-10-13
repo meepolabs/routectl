@@ -25,9 +25,14 @@ Exit codes: 0 ok, 1 a check failed, 2 usage error.
 """
 
 import json
+import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import strict_json  # noqa: E402
 
 UPSTREAM_MODEL = "planted-upstream"
 CHAT_LANE = "chat->openai-compat"
@@ -252,8 +257,17 @@ def weld(source_path: str) -> int:
 
 def wire_check(health_path: str) -> dict:
     with open(health_path, encoding="utf-8") as f:
-        doc = json.load(f)
-    rows = (doc.get("data") or {}).get("wire_check")
+        text = f.read()
+    try:
+        doc = strict_json.loads(text)
+    except strict_json.StrictJsonError as e:
+        raise ValueError(f"{health_path}: {e.detail}") from None
+    if not isinstance(doc, dict):
+        raise ValueError(f"{health_path}: not a JSON object")
+    data = doc.get("data")
+    if not isinstance(data, dict):
+        raise ValueError(f"{health_path}: data is not an object")
+    rows = data.get("wire_check")
     if not isinstance(rows, dict):
         raise ValueError(f"{health_path}: no data.wire_check object")
     return rows

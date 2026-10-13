@@ -11,10 +11,12 @@ import io
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WIRE_WATCH = os.path.dirname(HERE)
@@ -68,6 +70,7 @@ class MatrixTestCase(unittest.TestCase):
         self.key_dir = os.path.join(self._tmp.name, "keys")
         self.key_names = {r["key_file"] for r in data_rows(self.paths.cells_tsv) if r["key_file"] != "-"}
         write_keys(self.key_dir, self.key_names)
+        os.chmod(self.key_dir, 0o700)
 
     def tearDown(self) -> None:
         for dirpath, _, files in os.walk(self.key_dir):
@@ -292,18 +295,253 @@ class PreflightTests(MatrixTestCase):
             ("insecure-mode", lambda: os.chmod(path, 0o640)),
             ("not-a-file", lambda: (os.remove(path), os.mkdir(path, 0o700))),
             ("empty", lambda: open(path, "w").close()),
+            ("symlink", lambda: self.replace_with_symlink(path)),
+            ("not-a-file", lambda: (os.remove(path), os.mkfifo(path, 0o600))),
         ]
         if os.geteuid() != 0:
             rows.append(("unreadable", lambda: os.chmod(path, 0o200)))
         for detail, plant in rows:
             with self.subTest(detail):
-                if os.path.isdir(path):
+                if os.path.isdir(path) and not os.path.islink(path):
                     os.rmdir(path)
+                elif os.path.lexists(path):
+                    os.remove(path)
                 write_keys(self.key_dir, {name})
                 plant()
 
                 self.assertEqual(self.states_for(self.key_cells(name)), {(CellState.NOT_RUN, "credential", detail)})
                 self.assertEqual(self.states_for(lambda s: s.key_file is None), {(CellState.PENDING, None, None)})
+
+    def replace_with_symlink(self, path: str) -> None:
+        target = os.path.join(self._tmp.name, "real-key")
+        write_keys(self._tmp.name, {"real-key"})
+        os.remove(path)
+        os.symlink(target, path)
+
+    def test_a_key_owned_by_another_user(self) -> None:
+        name = "ollama-api-key"
+        other = os.geteuid() + 1
+        with mock.patch.object(matrix.os, "geteuid", return_value=other):
+            states = self.states_for(self.key_cells(name))
+        self.assertEqual(states, {(CellState.NOT_RUN, "credential", "wrong-owner")})
+
+    def test_preflight_judges_the_opened_descriptor_not_the_path(self) -> None:
+        real_stat, real_lstat = os.stat, os.lstat
+        by_path = []
+
+        def guard(real):
+            def spy(path, *args, **kwargs):
+                if str(path).startswith(self.key_dir):
+                    by_path.append(path)
+                return real(path, *args, **kwargs)
+            return spy
+
+        with mock.patch.object(matrix.os, "stat", guard(real_stat)), mock.patch.object(matrix.os, "lstat", guard(real_lstat)):
+            states = self.states_for(lambda s: s.key_file is not None)
+        self.assertEqual(states, {(CellState.PENDING, None, None)})
+        self.assertEqual(by_path, [], "key file judged by path, not by its open descriptor")
+
+
+class OpenKeyFileTests(MatrixTestCase):
+    NAME = "ollama-api-key"
+
+    def test_a_usable_key_yields_a_readable_descriptor(self) -> None:
+        fd, problem = matrix.open_key_file(self.key_dir, self.NAME)
+        self.assertIsNone(problem)
+        assert fd is not None
+        try:
+            self.assertEqual(os.read(fd, 4096).decode().strip(), PLANTED_KEY)
+        finally:
+            os.close(fd)
+
+    def test_a_problem_yields_no_descriptor(self) -> None:
+        os.chmod(os.path.join(self.key_dir, self.NAME), 0o640)
+        self.assertEqual(matrix.open_key_file(self.key_dir, self.NAME), (None, "insecure-mode"))
+
+    def test_a_name_that_is_not_a_plain_file_name_is_refused(self) -> None:
+        for name in ("../keys/" + self.NAME, "a/b", ".hidden", "", self.NAME + "\n"):
+            with self.subTest(name):
+                self.assertEqual(matrix.open_key_file(self.key_dir, name), (None, "bad-name"))
+
+    def test_a_symlinked_key_dir_is_refused(self) -> None:
+        link = os.path.join(self._tmp.name, "keys-link")
+        os.symlink(self.key_dir, link)
+
+        self.assertEqual(matrix.open_key_file(link, self.NAME), (None, "symlink"))
+
+    def test_a_key_dir_that_is_a_file_is_not_reported_as_the_key(self) -> None:
+        plain = os.path.join(self._tmp.name, "plain-file")
+        open(plain, "w").close()
+        self.assertEqual(matrix.open_key_file(plain, self.NAME), (None, "unreadable"))
+
+    def test_a_symlinked_key_dir_is_refused_through_any_spelling(self) -> None:
+        link = os.path.join(self._tmp.name, "keys-link")
+        os.symlink(self.key_dir, link)
+        for spelled, detail in ((link + "/", "symlink"), (link + "//", "symlink"), (link + "/.", "symlink")):
+            with self.subTest(spelled):
+                self.assertEqual(matrix.open_key_file(spelled, self.NAME), (None, detail))
+
+    def test_dot_and_dotdot_key_dirs_resolve_from_the_working_directory(self) -> None:
+        sub = os.path.join(self.key_dir, "sub")
+        os.mkdir(sub, 0o700)
+        cwd = os.getcwd()
+        try:
+            for start, spelled in ((self.key_dir, "."), (sub, ".."), (sub, "../")):
+                with self.subTest(spelled):
+                    os.chdir(start)
+                    fd, problem = matrix.open_key_file(spelled, self.NAME)
+                    self.assertIsNone(problem)
+                    assert fd is not None
+                    os.close(fd)
+        finally:
+            os.chdir(cwd)
+
+    def test_an_empty_key_dir_is_refused(self) -> None:
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.key_dir)
+            self.assertEqual(matrix.open_key_file("", self.NAME), (None, "bad-dir-path"))
+        finally:
+            os.chdir(cwd)
+
+    def test_a_relative_key_dir_from_a_deleted_working_directory_is_unreadable(self) -> None:
+        gone = os.path.join(self._tmp.name, "gone")
+        os.mkdir(gone)
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(gone)
+        os.rmdir(gone)
+
+        self.assertEqual(matrix.open_key_file("keys", self.NAME), (None, "unreadable"))
+
+    def test_the_root_directory_is_not_a_key_dir(self) -> None:
+        self.assertEqual(matrix.open_key_file("/", self.NAME), (None, "bad-dir-path"))
+
+    def test_dot_from_inside_a_symlinked_key_dir_is_its_real_directory(self) -> None:
+        link = os.path.join(self._tmp.name, "keys-link")
+        os.symlink(self.key_dir, link)
+        cwd = os.getcwd()
+        try:
+            os.chdir(link)
+            fd, problem = matrix.open_key_file(".", self.NAME)
+        finally:
+            os.chdir(cwd)
+        self.assertIsNone(problem)
+        assert fd is not None
+        os.close(fd)
+
+    def test_a_trailing_slash_on_a_real_key_dir_still_opens(self) -> None:
+        fd, problem = matrix.open_key_file(self.key_dir + "/", self.NAME)
+        self.assertIsNone(problem)
+        assert fd is not None
+        os.close(fd)
+
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses directory permissions")
+    def test_a_key_dir_under_a_search_only_parent_is_usable(self) -> None:
+        parent = os.path.dirname(self.key_dir)
+        os.chmod(parent, 0o100)
+        try:
+            fd, problem = matrix.open_key_file(self.key_dir, self.NAME)
+        finally:
+            os.chmod(parent, 0o700)
+        self.assertIsNone(problem)
+        assert fd is not None
+        os.close(fd)
+
+    def test_a_missing_key_dir(self) -> None:
+        self.assertEqual(matrix.open_key_file(os.path.join(self._tmp.name, "nope"), self.NAME), (None, "missing"))
+
+    def test_a_group_or_other_writable_key_dir_is_refused(self) -> None:
+        for mode in (0o770, 0o702):
+            with self.subTest(oct(mode)):
+                os.chmod(self.key_dir, mode)
+                try:
+                    result = matrix.open_key_file(self.key_dir, self.NAME)
+                finally:
+                    os.chmod(self.key_dir, 0o700)
+                self.assertEqual(result, (None, "bad-dir-mode"))
+
+    def test_a_readable_but_not_writable_key_dir_is_accepted(self) -> None:
+        os.chmod(self.key_dir, 0o755)
+        fd, problem = matrix.open_key_file(self.key_dir, self.NAME)
+        self.assertIsNone(problem)
+        assert fd is not None
+        os.close(fd)
+
+    def test_a_key_dir_owned_by_another_user_is_refused(self) -> None:
+        real_fstat = os.fstat
+
+        def dir_owned_by_someone_else(fd: int) -> os.stat_result:
+            info = real_fstat(fd)
+            fields = list(info)
+            if stat.S_ISDIR(info.st_mode):
+                fields[4] = os.geteuid() + 1
+            return os.stat_result(fields)
+
+        with mock.patch.object(matrix.os, "fstat", dir_owned_by_someone_else):
+            result = matrix.open_key_file(self.key_dir, self.NAME)
+
+        self.assertEqual(result, (None, "wrong-owner"))
+
+    @unittest.skipUnless(os.geteuid() == 0, "chown to another uid needs root")
+    def test_a_key_dir_really_owned_by_another_uid(self) -> None:
+        os.chown(self.key_dir, 65534, -1)
+        try:
+            result = matrix.open_key_file(self.key_dir, self.NAME)
+        finally:
+            os.chown(self.key_dir, 0, -1)
+        self.assertEqual(result, (None, "wrong-owner"))
+
+    def test_the_key_is_opened_relative_to_the_checked_dir_descriptor(self) -> None:
+        real_open = os.open
+        calls = []
+
+        def spy(path, flags, *args, **kwargs):
+            calls.append((path, kwargs.get("dir_fd")))
+            return real_open(path, flags, *args, **kwargs)
+
+        real_open_dir = matrix.nofollow.open_dir
+        dir_fds = []
+
+        def open_dir(path):
+            dir_fds.append(real_open_dir(path))
+            return dir_fds[-1]
+
+        with mock.patch.object(matrix.os, "open", spy), mock.patch.object(matrix.nofollow, "open_dir", open_dir):
+            fd, _ = matrix.open_key_file(self.key_dir, self.NAME)
+        assert fd is not None
+        os.close(fd)
+
+        key_opens = [c for c in calls if os.path.basename(str(c[0])) == self.NAME]
+        self.assertEqual(key_opens, [(self.NAME, dir_fds[0])])
+
+    def test_problem_paths_leave_no_descriptor_open(self) -> None:
+        before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+        if before is None:
+            self.skipTest("no /proc/self/fd")
+        path = os.path.join(self.key_dir, self.NAME)
+        for plant in (lambda: os.chmod(path, 0o644), lambda: open(path, "w").close()):
+            plant()
+            fd, problem = matrix.open_key_file(self.key_dir, self.NAME)
+            self.assertIsNone(fd)
+            self.assertIsNotNone(problem)
+        os.chmod(self.key_dir, 0o770)
+        try:
+            self.assertEqual(matrix.open_key_file(self.key_dir, self.NAME), (None, "bad-dir-mode"))
+        finally:
+            os.chmod(self.key_dir, 0o700)
+        os.remove(path)
+        self.assertEqual(matrix.open_key_file(self.key_dir, self.NAME), (None, "missing"))
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    def test_a_usable_key_leaves_only_the_returned_descriptor_open(self) -> None:
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest("no /proc/self/fd")
+        before = len(os.listdir("/proc/self/fd"))
+        fd, _ = matrix.open_key_file(self.key_dir, self.NAME)
+        assert fd is not None
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before + 1)
+        os.close(fd)
 
     def test_not_run_cells_are_never_pass(self) -> None:
         os.chmod(os.path.join(self.key_dir, "ollama-api-key"), 0o644)
@@ -341,12 +579,15 @@ class PreflightTests(MatrixTestCase):
                 opened.append(path)
             return real_open(path, *args, **kwargs)
 
-        import builtins
-        from unittest import mock
+        def no_read(*_args: object) -> bytes:
+            raise AssertionError("preflight read a descriptor")
 
-        with mock.patch.object(builtins, "open", spy):
-            matrix.build_ledger(self.paths, self.key_dir)
+        import builtins
+
+        with mock.patch.object(builtins, "open", spy), mock.patch.object(matrix.os, "read", no_read):
+            led = matrix.build_ledger(self.paths, self.key_dir)
         self.assertEqual(opened, [])
+        self.assertTrue(any(e.spec.key_file for e in led.entries), "no cell has a key file to check")
 
 
 if __name__ == "__main__":

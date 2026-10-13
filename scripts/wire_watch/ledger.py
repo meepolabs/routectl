@@ -22,20 +22,37 @@ NotRunReason; every other state carries neither. `detail` is an optional
 short token (lowercase letters, digits, `-`), never free text, so nothing
 a caller passes through it can carry a credential into run.json.
 
-run.json is written by `write_atomic` (temp file in the same directory,
-fsync, rename, directory fsync): a crash at any point leaves either the
-previous run.json or the new one, never a torn file. Its bytes depend only
-on the ledger's content, so the same inputs give byte-identical files.
+run.json is written by `write_atomic` (a fresh mkstemp temp file in the
+same directory, fsync, rename, directory fsync; the temp is removed on any
+failure before the rename): a crash at any point leaves either the previous
+run.json or the new one, never a torn file. Its bytes depend only on the
+ledger's content, so the same inputs give byte-identical files.
+
+write_atomic makes each write atomic, not a read-modify-write: two writers
+that each load, transition and write lose one update. Callers must hold
+the run lock across load -> transition -> write_atomic.
 
 Public API
   CellSpec, Entry, RunInputs, RunLedger   frozen dataclasses
   CellState, Outcome, NotRunReason, CapReason, ModelTier   enums
   LedgerError                              illegal transition / bad file
+  DRIVER_RE, LANE_RE, KEY_FILE_RE, TOKEN_RE, CONNECTION_MODES
+                                           the cell-field rules matrix.py
+                                           validates cells.tsv with and
+                                           from_json validates run.json with
   RunLedger.new(inputs, specs)             every cell PENDING
   RunLedger.transition(cell_id, to, ...)   new ledger with one cell moved
   RunLedger.entry(cell_id)                 one cell's entry
   RunLedger.to_json() / RunLedger.from_json(text)
-  write_atomic(path, ledger) / load(path)
+                                           from_json decodes with strict_json:
+                                           a duplicate key or NaN/Infinity ->
+                                           LedgerError "run.json document: ..."
+                                           from_json is strict: wrong type,
+                                           unknown key or out-of-vocabulary
+                                           value -> LedgerError naming the
+                                           field; nothing is coerced
+  write_atomic(path, ledger) / load(path)   caller holds the run lock for
+                                           load -> transition -> write
   terminal_outcome(entry)                  Outcome for a terminal state
                                            other than EXITED, else None
 """
@@ -46,8 +63,14 @@ import enum
 import json
 import os
 import re
+import sys
+import tempfile
 from dataclasses import dataclass, replace
-from typing import Dict, FrozenSet, Iterable, Mapping, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, Mapping, Optional, Tuple, Type, TypeVar
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import strict_json  # noqa: E402
 
 SCHEMA = "routectl-wire-watch-run/1"
 
@@ -56,6 +79,14 @@ SCHEMA = "routectl-wire-watch-run/1"
 # leading dot or whitespace.
 CELL_ID_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
 CELL_ID_MAX = 200
+# The cell fields downstream code turns into file names, directory names and
+# argv: one definition, used both where cells.tsv is validated (matrix.py)
+# and where run.json is read back, so the two cannot drift.
+DRIVER_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.sh$")
+LANE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)?$")
+KEY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+CONNECTION_MODES = ("base-url", "front-proxy")
 DETAIL_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 DETAIL_MAX = 64
 
@@ -181,7 +212,7 @@ def _check_payload(to: CellState, rc: Optional[int], reason: Optional[str], deta
             raise LedgerError(f"{to.value} requires a reason in {sorted(vocab)}, got {reason!r}")
     elif reason is not None:
         raise LedgerError(f"{to.value} carries no reason")
-    if detail is not None and not (isinstance(detail, str) and len(detail) <= DETAIL_MAX and DETAIL_RE.match(detail)):
+    if detail is not None and not (isinstance(detail, str) and len(detail) <= DETAIL_MAX and DETAIL_RE.fullmatch(detail)):
         raise LedgerError(f"detail must match {DETAIL_RE.pattern}")
 
 
@@ -222,7 +253,7 @@ class RunLedger:
         entries = tuple(Entry(spec=spec) for spec in specs)
         seen: Dict[str, None] = {}
         for entry in entries:
-            if len(entry.spec.id) > CELL_ID_MAX or not CELL_ID_RE.match(entry.spec.id):
+            if len(entry.spec.id) > CELL_ID_MAX or not CELL_ID_RE.fullmatch(entry.spec.id):
                 raise LedgerError(f"cell id {entry.spec.id!r} is not a safe token")
             if entry.spec.id in seen:
                 raise LedgerError(f"duplicate cell id {entry.spec.id}")
@@ -265,21 +296,20 @@ class RunLedger:
 
     @staticmethod
     def from_json(text: str) -> "RunLedger":
+        """Parse run.json strictly: every field must already have the type
+        and vocabulary to_json writes; nothing is coerced."""
         try:
-            doc = json.loads(text)
-            if doc.get("schema") != SCHEMA:
-                raise LedgerError(f"run.json schema is {doc.get('schema')!r}, want {SCHEMA}")
-            raw_inputs = doc["inputs"]
-            inputs = RunInputs(
-                cells_sha256=str(raw_inputs["cells_sha256"]),
-                models_sha256=str(raw_inputs["models_sha256"]),
-                cases=tuple(str(c) for c in raw_inputs["cases"]),
-            )
-            entries = tuple(_entry_from_dict(raw) for raw in doc["cells"])
-        except LedgerError:
-            raise
-        except (ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise LedgerError(f"run.json does not parse: {exc.__class__.__name__}: {exc}") from exc
+            doc = strict_json.loads(text)
+        except strict_json.StrictJsonError as exc:
+            raise LedgerError(f"run.json document: {exc.detail}") from None
+        doc = _object(doc, _DOC_KEYS, "run.json")
+        if doc["schema"] != SCHEMA:
+            raise LedgerError(f"schema is {doc['schema']!r}, want {SCHEMA}")
+        inputs = _inputs_from_dict(doc["inputs"])
+        cells = doc["cells"]
+        if not isinstance(cells, list):
+            raise LedgerError("cells must be a list")
+        entries = tuple(_entry_from_dict(raw, f"cells[{i}]") for i, raw in enumerate(cells))
         ledger = RunLedger.new(inputs, (e.spec for e in entries))
         return replace(ledger, entries=entries)
 
@@ -304,25 +334,117 @@ def _entry_to_dict(entry: Entry) -> dict:
     }
 
 
-def _entry_from_dict(raw: dict) -> Entry:
-    spec = CellSpec(
-        id=str(raw["id"]),
-        driver=str(raw["driver"]),
-        expected_ingress=str(raw["expected_ingress"]),
-        lane=str(raw["lane"]),
-        connection_mode=str(raw["connection_mode"]),
-        providers=tuple(str(p) for p in raw["providers"]),
-        key_file=None if raw["key_file"] is None else str(raw["key_file"]),
-        model=str(raw["model"]),
-        tier=ModelTier(raw["tier"]),
-        case=str(raw["case"]),
+_DOC_KEYS = frozenset({"schema", "inputs", "cells"})
+_INPUTS_KEYS = frozenset({"cells_sha256", "models_sha256", "cases"})
+_SPEC_STR_KEYS = ("driver", "expected_ingress", "lane", "connection_mode", "model", "case")
+_ENTRY_KEYS = frozenset(
+    {"id", "providers", "key_file", "tier", "state", "rc", "reason", "detail", *_SPEC_STR_KEYS}
+)
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _object(raw: object, keys: FrozenSet[str], where: str) -> dict:
+    if not isinstance(raw, dict):
+        raise LedgerError(f"{where} must be an object")
+    if set(raw) != keys:
+        missing, extra = sorted(keys - set(raw)), sorted(set(raw) - keys)
+        raise LedgerError(f"{where} keys: missing {missing}, unexpected {extra}")
+    return raw
+
+
+def _str(raw: dict, key: str, where: str) -> str:
+    value = raw[key]
+    if not isinstance(value, str):
+        raise LedgerError(f"{where}.{key} must be a string")
+    return value
+
+
+def _str_list(raw: dict, key: str, where: str) -> Tuple[str, ...]:
+    value = raw[key]
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise LedgerError(f"{where}.{key} must be a list of strings")
+    return tuple(value)
+
+
+def _optional_str(raw: dict, key: str, where: str) -> Optional[str]:
+    return None if raw[key] is None else _str(raw, key, where)
+
+
+_E = TypeVar("_E", bound=enum.Enum)
+
+
+def _member(enum_type: Type[_E], raw: dict, key: str, where: str) -> _E:
+    value = raw[key]
+    if not isinstance(value, str):
+        raise LedgerError(f"{where}.{key} must be a string")
+    try:
+        return enum_type(value)
+    except ValueError:
+        raise LedgerError(f"{where}.{key} {value!r} is not one of {[m.value for m in enum_type]}") from None
+
+
+def _inputs_from_dict(raw: object) -> RunInputs:
+    raw = _object(raw, _INPUTS_KEYS, "inputs")
+    for key in ("cells_sha256", "models_sha256"):
+        if not (isinstance(raw[key], str) and SHA256_RE.fullmatch(raw[key])):
+            raise LedgerError(f"inputs.{key} must be 64 lowercase hex digits")
+    return RunInputs(
+        cells_sha256=raw["cells_sha256"],
+        models_sha256=raw["models_sha256"],
+        cases=_str_list(raw, "cases", "inputs"),
     )
-    state = CellState(raw["state"])
-    rc, reason, detail = raw["rc"], raw["reason"], raw["detail"]
-    if state is not CellState.PENDING:
-        _check_payload(state, rc, reason, detail)
-    elif (rc, reason, detail) != (None, None, None):
-        raise LedgerError(f"cell {spec.id}: PENDING carries rc/reason/detail")
+
+
+_FIELD_PATTERNS = {
+    "driver": DRIVER_RE,
+    "lane": LANE_RE,
+    "expected_ingress": TOKEN_RE,
+    "model": TOKEN_RE,
+    "case": TOKEN_RE,
+}
+
+
+def _check_names(fields: Mapping[str, str], raw: dict, where: str) -> None:
+    for key, pattern in _FIELD_PATTERNS.items():
+        if not pattern.fullmatch(fields[key]):
+            raise LedgerError(f"{where}.{key} must match {pattern.pattern}")
+    if fields["connection_mode"] not in CONNECTION_MODES:
+        raise LedgerError(f"{where}.connection_mode must be one of {list(CONNECTION_MODES)}")
+    providers = _str_list(raw, "providers", where)
+    if not providers or not all(TOKEN_RE.fullmatch(p) for p in providers):
+        raise LedgerError(f"{where}.providers must be a nonempty list matching {TOKEN_RE.pattern}")
+    key_file = _optional_str(raw, "key_file", where)
+    if key_file is not None and not KEY_FILE_RE.fullmatch(key_file):
+        raise LedgerError(f"{where}.key_file must be null or match {KEY_FILE_RE.pattern}")
+
+
+def _entry_from_dict(raw: object, where: str) -> Entry:
+    raw = _object(raw, _ENTRY_KEYS, where)
+    cell_id = _str(raw, "id", where)
+    if len(cell_id) > CELL_ID_MAX or not CELL_ID_RE.fullmatch(cell_id):
+        raise LedgerError(f"{where}.id is not a safe token")
+    fields = {key: _str(raw, key, where) for key in _SPEC_STR_KEYS}
+    _check_names(fields, raw, where)
+    spec = CellSpec(
+        id=cell_id,
+        providers=_str_list(raw, "providers", where),
+        key_file=_optional_str(raw, "key_file", where),
+        tier=_member(ModelTier, raw, "tier", where),
+        **fields,
+    )
+    state = _member(CellState, raw, "state", where)
+    rc = raw["rc"]
+    if rc is not None and (not isinstance(rc, int) or isinstance(rc, bool)):
+        raise LedgerError(f"{where}.rc must be an integer or null")
+    reason = _optional_str(raw, "reason", where)
+    detail = _optional_str(raw, "detail", where)
+    try:
+        if state is not CellState.PENDING:
+            _check_payload(state, rc, reason, detail)
+        elif (rc, reason, detail) != (None, None, None):
+            raise LedgerError("PENDING carries rc/reason/detail")
+    except LedgerError as exc:
+        raise LedgerError(f"{where} ({cell_id}): {exc}") from None
     return Entry(spec=spec, state=state, rc=rc, reason=reason, detail=detail)
 
 
@@ -330,18 +452,24 @@ def write_atomic(path: str, ledger: RunLedger) -> None:
     """Replace `path` with the ledger's JSON so that a crash at any point
     leaves either the old file or the new one."""
     directory = os.path.dirname(os.path.abspath(path))
-    tmp = os.path.join(directory, "." + os.path.basename(path) + ".tmp")
     data = ledger.to_json().encode("utf-8")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=directory)
     try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            view = view[written:]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     dir_fd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(dir_fd)

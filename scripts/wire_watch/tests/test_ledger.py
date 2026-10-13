@@ -153,6 +153,188 @@ class SerializationTests(unittest.TestCase):
             RunLedger.from_json(one_cell().to_json()[:40])
 
 
+def _set(path: tuple, value: object):
+    def plant(doc: dict) -> None:
+        node = doc
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+    return plant
+
+
+def _drop(path: tuple):
+    def plant(doc: dict) -> None:
+        node = doc
+        for key in path[:-1]:
+            node = node[key]
+        del node[path[-1]]
+    return plant
+
+
+# (row name, field the error must name, mutation of a valid EXITED doc)
+STRICT_ROWS = [
+    ("schema absent", "schema", _drop(("schema",))),
+    ("unknown top-level key", "run.json", _set(("extra",), 1)),
+    ("inputs is a list", "inputs", _set(("inputs",), [])),
+    ("cells_sha256 is a number", "inputs.cells_sha256", _set(("inputs", "cells_sha256"), 7)),
+    ("cells_sha256 is uppercase hex", "inputs.cells_sha256", _set(("inputs", "cells_sha256"), "A" * 64)),
+    ("cells_sha256 is short", "inputs.cells_sha256", _set(("inputs", "cells_sha256"), "a" * 63)),
+    ("models_sha256 is not hex", "inputs.models_sha256", _set(("inputs", "models_sha256"), "g" * 64)),
+    ("models_sha256 is null", "inputs.models_sha256", _set(("inputs", "models_sha256"), None)),
+    ("cases is a string", "inputs.cases", _set(("inputs", "cases"), "plain-turn-01")),
+    ("cases holds a number", "inputs.cases", _set(("inputs", "cases"), [1])),
+    ("unknown inputs key", "inputs", _set(("inputs", "extra"), "x")),
+    ("cells is an object", "cells", _set(("cells",), {"a": 1})),
+    ("cell is a list", "cells[0]", _set(("cells", 0), [])),
+    ("cell key missing", "cells[0]", _drop(("cells", 0, "driver"))),
+    ("unknown cell key", "cells[0]", _set(("cells", 0, "extra"), 1)),
+    ("id is a number", "cells[0].id", _set(("cells", 0, "id"), 5)),
+    ("id is not a safe token", "cells[0].id", _set(("cells", 0, "id"), "../x")),
+    ("driver is a number", "cells[0].driver", _set(("cells", 0, "driver"), 1)),
+    ("expected_ingress is a list", "cells[0].expected_ingress", _set(("cells", 0, "expected_ingress"), ["a"])),
+    ("lane is null", "cells[0].lane", _set(("cells", 0, "lane"), None)),
+    ("connection_mode is a bool", "cells[0].connection_mode", _set(("cells", 0, "connection_mode"), True)),
+    ("model is an object", "cells[0].model", _set(("cells", 0, "model"), {})),
+    ("case is a number", "cells[0].case", _set(("cells", 0, "case"), 3)),
+    ("providers is a string", "cells[0].providers", _set(("cells", 0, "providers"), "openai")),
+    ("providers is an object", "cells[0].providers", _set(("cells", 0, "providers"), {"openai": 1})),
+    ("providers holds a number", "cells[0].providers", _set(("cells", 0, "providers"), [1])),
+    ("key_file is a number", "cells[0].key_file", _set(("cells", 0, "key_file"), 0)),
+    ("key_file is a list", "cells[0].key_file", _set(("cells", 0, "key_file"), ["k"])),
+    ("tier is unknown", "cells[0].tier", _set(("cells", 0, "tier"), "gold")),
+    ("tier is a number", "cells[0].tier", _set(("cells", 0, "tier"), 1)),
+    ("state is unknown", "cells[0].state", _set(("cells", 0, "state"), "DONE")),
+    ("state is a list", "cells[0].state", _set(("cells", 0, "state"), ["EXITED"])),
+    ("rc is a string", "cells[0].rc", _set(("cells", 0, "rc"), "0")),
+    ("rc is a float", "cells[0].rc", _set(("cells", 0, "rc"), 0.0)),
+    ("rc is a bool", "cells[0].rc", _set(("cells", 0, "rc"), False)),
+    ("reason is a number", "cells[0].reason", _set(("cells", 0, "reason"), 1)),
+    ("detail is a number", "cells[0].detail", _set(("cells", 0, "detail"), 1)),
+]
+
+
+NAME_FIELDS = ("driver", "lane", "case", "model", "expected_ingress", "connection_mode", "key_file")
+HOSTILE = ("../x", "$(id)", "a/b", "")
+
+
+class NameFieldTests(unittest.TestCase):
+    """Fields that downstream code turns into paths, names or argv."""
+
+    def doc(self) -> dict:
+        return json.loads(reach(CellState.EXITED).to_json())
+
+    def test_hostile_values_are_refused_naming_the_field(self) -> None:
+        for field in NAME_FIELDS + ("providers",):
+            for value in HOSTILE:
+                with self.subTest(field=field, value=value):
+                    doc = self.doc()
+                    doc["cells"][0][field] = [value] if field == "providers" else value
+
+                    with self.assertRaises(LedgerError) as caught:
+                        RunLedger.from_json(json.dumps(doc))
+                    self.assertIn(f"cells[0].{field}", str(caught.exception))
+
+    def test_every_value_the_committed_matrix_produces_is_accepted(self) -> None:
+        import matrix
+
+        paths = matrix.Paths.from_root(os.path.abspath(os.path.join(WIRE_WATCH, "..", "..")))
+        specs = matrix.expand(paths, matrix.load_rows(paths))
+        led = RunLedger.new(INPUTS, specs)
+        self.assertTrue(any(s.key_file for s in specs), "no committed row has a key file")
+
+        self.assertEqual(RunLedger.from_json(led.to_json()), led)
+
+    def test_matrix_uses_the_ledger_patterns(self) -> None:
+        import matrix
+
+        for name in ("DRIVER_RE", "LANE_RE", "KEY_FILE_RE", "TOKEN_RE", "CONNECTION_MODES"):
+            with self.subTest(name):
+                self.assertIs(getattr(matrix, name), getattr(ledger, name))
+
+
+class TrailingNewlineTests(unittest.TestCase):
+    """`$` matches before a final newline; every validator must refuse it."""
+
+    def test_run_json_fields_with_a_trailing_newline_are_refused(self) -> None:
+        def cell_field(field: str):
+            return lambda d: d["cells"][0].__setitem__(field, d["cells"][0][field] + "\n")
+
+        rows = [(f"cells[0].{f}", cell_field(f)) for f in ("id", "driver", "lane", "case", "model", "expected_ingress")]
+        rows += [
+            ("cells[0].providers", lambda d: d["cells"][0].__setitem__("providers", ["openai\n"])),
+            ("cells[0].key_file", lambda d: d["cells"][0].__setitem__("key_file", "some-key\n")),
+            ("inputs.cells_sha256", lambda d: d["inputs"].__setitem__("cells_sha256", "a" * 64 + "\n")),
+            ("cells[0]", lambda d: d["cells"][0].update(state="NOT_RUN", rc=None, reason="credential", detail="missing\n")),
+        ]
+        for field, plant in rows:
+            with self.subTest(field):
+                doc = json.loads(reach(CellState.EXITED).to_json())
+                plant(doc)
+
+                with self.assertRaises(LedgerError) as caught:
+                    RunLedger.from_json(json.dumps(doc))
+                self.assertIn(field, str(caught.exception))
+
+    def test_a_new_cell_id_with_a_trailing_newline_is_refused(self) -> None:
+        with self.assertRaises(LedgerError):
+            RunLedger.new(INPUTS, [spec(CELL + "\n")])
+
+    def test_a_detail_with_a_trailing_newline_is_refused(self) -> None:
+        with self.assertRaises(LedgerError):
+            one_cell().transition(CELL, CellState.NOT_RUN, reason="credential", detail="missing\n")
+
+
+class StrictParseTests(unittest.TestCase):
+    def test_a_valid_document_parses(self) -> None:
+        led = reach(CellState.EXITED)
+        self.assertEqual(RunLedger.from_json(led.to_json()), led)
+
+    def test_each_malformed_field_is_refused_by_name(self) -> None:
+        for name, field, plant in STRICT_ROWS:
+            with self.subTest(name):
+                doc = json.loads(reach(CellState.EXITED).to_json())
+                plant(doc)
+
+                with self.assertRaises(LedgerError) as caught:
+                    RunLedger.from_json(json.dumps(doc))
+                self.assertIn(field, str(caught.exception))
+
+    def test_duplicate_keys_and_non_finite_numbers_are_refused(self) -> None:
+        text = reach(CellState.EXITED).to_json()
+        rows = [
+            ("duplicate top-level key", text.replace('"schema":', '"cells": [],\n  "schema":', 1), "duplicate key"),
+            ("duplicate key in inputs", text.replace('"cases":', '"cases": [],\n    "cases":', 1), "duplicate key"),
+            ("duplicate key in a cell", text.replace('"rc": 0', '"rc": 1, "rc": 0', 1), "duplicate key"),
+            ("NaN rc", text.replace('"rc": 0', '"rc": NaN', 1), "non-finite number"),
+            ("Infinity rc", text.replace('"rc": 0', '"rc": Infinity', 1), "non-finite number"),
+            ("-Infinity rc", text.replace('"rc": 0', '"rc": -Infinity', 1), "non-finite number"),
+        ]
+        for name, planted, detail in rows:
+            with self.subTest(name):
+                self.assertNotEqual(planted, text, "the plant did not apply")
+                with self.assertRaises(LedgerError) as caught:
+                    RunLedger.from_json(planted)
+                self.assertIn("document", str(caught.exception))
+                self.assertIn(detail, str(caught.exception))
+
+    def test_reason_outside_its_vocabulary_is_refused(self) -> None:
+        doc = json.loads(reach(CellState.NOT_RUN).to_json())
+        doc["cells"][0]["reason"] = "flaky"
+        with self.assertRaises(LedgerError):
+            RunLedger.from_json(json.dumps(doc))
+
+    def test_a_document_that_is_not_an_object_is_refused(self) -> None:
+        for text in ("[]", "null", '"x"', "1"):
+            with self.subTest(text):
+                with self.assertRaises(LedgerError) as caught:
+                    RunLedger.from_json(text)
+                self.assertIn("run.json", str(caught.exception))
+
+    def test_deeply_nested_json_is_refused(self) -> None:
+        with self.assertRaises(LedgerError):
+            RunLedger.from_json("[" * 60_000)
+
+
 class AtomicWriteTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -163,6 +345,68 @@ class AtomicWriteTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def temps(self) -> list:
+        return [
+            os.path.join(self._tmp.name, n)
+            for n in sorted(os.listdir(self._tmp.name))
+            if n != "run.json"
+        ]
+
+    def test_each_write_uses_its_own_temp_file(self) -> None:
+        made = []
+        real_mkstemp = tempfile.mkstemp
+
+        def spy(*args, **kwargs):
+            fd, name = real_mkstemp(*args, **kwargs)
+            made.append(name)
+            return fd, name
+
+        with mock.patch.object(ledger.tempfile, "mkstemp", spy):
+            ledger.write_atomic(self.path, reach(CellState.RUNNING))
+            ledger.write_atomic(self.path, reach(CellState.TIMEOUT))
+
+        self.assertEqual(len(set(made)), 2)
+        self.assertEqual({os.path.dirname(n) for n in made}, {self._tmp.name})
+
+    def test_a_stale_temp_of_the_old_fixed_name_is_not_reused(self) -> None:
+        stale = os.path.join(self._tmp.name, ".run.json.tmp")
+        os.symlink(os.path.join(self._tmp.name, "elsewhere"), stale)
+
+        ledger.write_atomic(self.path, reach(CellState.RUNNING))
+
+        self.assertFalse(os.path.exists(os.path.join(self._tmp.name, "elsewhere")))
+        self.assertIs(ledger.load(self.path).entry(CELL).state, CellState.RUNNING)
+
+    def test_a_failed_write_removes_its_temp_file(self) -> None:
+        for name, target in (("fsync", "fsync"), ("rename", "replace"), ("write", "write")):
+            with self.subTest(name):
+                with mock.patch.object(ledger.os, target, side_effect=OSError("injected")):
+                    with self.assertRaises(OSError):
+                        ledger.write_atomic(self.path, reach(CellState.RUNNING))
+
+                self.assertEqual(self.temps(), [])
+                with open(self.path, "rb") as handle:
+                    self.assertEqual(handle.read(), self.before)
+
+    def test_the_directory_is_fsynced_after_the_rename(self) -> None:
+        calls = []
+        real_replace, real_fsync = os.replace, os.fsync
+
+        def on_replace(*args):
+            calls.append("replace")
+            return real_replace(*args)
+
+        def on_fsync(fd):
+            calls.append("fsync-dir" if os.path.isdir(f"/proc/self/fd/{fd}") else "fsync-file")
+            return real_fsync(fd)
+
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest("no /proc/self/fd")
+        with mock.patch.object(ledger.os, "replace", on_replace), mock.patch.object(ledger.os, "fsync", on_fsync):
+            ledger.write_atomic(self.path, reach(CellState.RUNNING))
+
+        self.assertEqual(calls, ["fsync-file", "replace", "fsync-dir"])
 
     def test_a_write_replaces_the_file(self) -> None:
         ledger.write_atomic(self.path, reach(CellState.RUNNING))
@@ -190,9 +434,9 @@ class AtomicWriteTests(unittest.TestCase):
         proc = subprocess.run([sys.executable, "-I", "-c", child, WIRE_WATCH, self.path])
 
         self.assertEqual(proc.returncode, 9)
-        tmp = os.path.join(self._tmp.name, ".run.json.tmp")
-        self.assertTrue(os.path.exists(tmp), "the temp file was never written, so nothing was injected")
-        self.assertIs(ledger.load(tmp).entry(CELL).state, CellState.RUNNING)
+        temps = self.temps()
+        self.assertEqual(len(temps), 1, "the temp file was never written, so nothing was injected")
+        self.assertIs(ledger.load(temps[0]).entry(CELL).state, CellState.RUNNING)
         with open(self.path, "rb") as handle:
             self.assertEqual(handle.read(), self.before)
         self.assertIs(ledger.load(self.path).entry(CELL).state, CellState.PENDING)
