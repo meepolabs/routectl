@@ -172,9 +172,15 @@ def _drop(path: tuple):
 
 
 # (row name, field the error must name, mutation of a valid EXITED doc)
+TOKENS_DOC = {"input_tokens": 17, "output_tokens": 5, "reasoning_tokens": 0, "cache_read_billed": 3}
+
 STRICT_ROWS = [
     ("schema absent", "schema", _drop(("schema",))),
     ("unknown top-level key", "run.json", _set(("extra",), 1)),
+    ("run_stop absent", "run.json", _drop(("run_stop",))),
+    ("run_stop is a number", "run_stop", _set(("run_stop",), 1)),
+    ("run_stop outside its vocabulary", "run_stop", _set(("run_stop",), "deadline")),
+    ("run_stop with a trailing newline", "run_stop", _set(("run_stop",), "run-size\n")),
     ("inputs is a list", "inputs", _set(("inputs",), [])),
     ("cells_sha256 is a number", "inputs.cells_sha256", _set(("inputs", "cells_sha256"), 7)),
     ("cells_sha256 is uppercase hex", "inputs.cells_sha256", _set(("inputs", "cells_sha256"), "A" * 64)),
@@ -210,6 +216,13 @@ STRICT_ROWS = [
     ("rc is a bool", "cells[0].rc", _set(("cells", 0, "rc"), False)),
     ("reason is a number", "cells[0].reason", _set(("cells", 0, "reason"), 1)),
     ("detail is a number", "cells[0].detail", _set(("cells", 0, "detail"), 1)),
+    ("tokens key missing", "cells[0]", _drop(("cells", 0, "tokens"))),
+    ("tokens is a list", "cells[0].tokens", _set(("cells", 0, "tokens"), [])),
+    ("tokens field missing", "cells[0].tokens", _set(("cells", 0, "tokens"), {"input_tokens": 1})),
+    ("unknown tokens key", "cells[0].tokens", _set(("cells", 0, "tokens"), dict(TOKENS_DOC, extra=1))),
+    ("tokens value negative", "cells[0].tokens", _set(("cells", 0, "tokens"), dict(TOKENS_DOC, input_tokens=-1))),
+    ("tokens value a bool", "cells[0].tokens", _set(("cells", 0, "tokens"), dict(TOKENS_DOC, output_tokens=True))),
+    ("tokens value a string", "cells[0].tokens", _set(("cells", 0, "tokens"), dict(TOKENS_DOC, reasoning_tokens="1"))),
 ]
 
 
@@ -333,6 +346,96 @@ class StrictParseTests(unittest.TestCase):
     def test_deeply_nested_json_is_refused(self) -> None:
         with self.assertRaises(LedgerError):
             RunLedger.from_json("[" * 60_000)
+
+
+class BoundStoppedTests(unittest.TestCase):
+    def test_bound_stopped_by_state_and_stop_detail(self) -> None:
+        running = reach(CellState.RUNNING)
+        rows = [
+            ("pending", reach(CellState.PENDING), False),
+            ("running", running, False),
+            ("exited", reach(CellState.EXITED), False),
+            ("not run", reach(CellState.NOT_RUN), False),
+            ("timeout", reach(CellState.TIMEOUT), True),
+            ("cap reached", reach(CellState.CAP_REACHED), True),
+            ("interrupted", reach(CellState.INTERRUPTED), True),
+            ("exited 9 on its own", running.transition(CELL, CellState.EXITED, rc=9), False),
+            ("exited 9 with an unrelated detail", running.transition(CELL, CellState.EXITED, rc=9, detail="other"), False),
+        ]
+        rows += [
+            (f"exited 9 after a {d} stop", running.transition(CELL, CellState.EXITED, rc=9, detail=d), True)
+            for d in sorted(ledger.STOP_DETAILS)
+        ]
+        for name, led, want in rows:
+            with self.subTest(name):
+                self.assertIs(ledger.bound_stopped(led.entry(CELL)), want)
+
+
+class RunStopTests(unittest.TestCase):
+    def test_a_new_ledger_has_no_run_stop(self) -> None:
+        led = one_cell()
+        self.assertIsNone(led.run_stop)
+        self.assertIsNone(json.loads(led.to_json())["run_stop"])
+
+    def test_run_stop_round_trips(self) -> None:
+        led = reach(CellState.EXITED).with_run_stop(ledger.RunStop.RUN_SIZE)
+
+        self.assertIs(led.run_stop, ledger.RunStop.RUN_SIZE)
+        self.assertEqual(json.loads(led.to_json())["run_stop"], "run-size")
+        self.assertEqual(RunLedger.from_json(led.to_json()), led)
+
+    def test_run_stop_survives_a_later_transition(self) -> None:
+        led = reach(CellState.RUNNING).with_run_stop(ledger.RunStop.RUN_SIZE).transition(CELL, CellState.EXITED, rc=0)
+        self.assertIs(led.run_stop, ledger.RunStop.RUN_SIZE)
+
+    def test_every_run_stop_round_trips_and_is_a_detail_shaped_token(self) -> None:
+        self.assertEqual(
+            {m.value for m in ledger.RunStop}, {"run-size", "leftover-containers", "sweep-failed"}
+        )
+        for member in ledger.RunStop:
+            with self.subTest(member.value):
+                self.assertRegex(member.value, ledger.DETAIL_RE)
+                led = one_cell().with_run_stop(member)
+                self.assertEqual(RunLedger.from_json(led.to_json()), led)
+
+    def test_with_run_stop_refuses_anything_outside_the_vocabulary(self) -> None:
+        with self.assertRaises(LedgerError):
+            one_cell().with_run_stop("run-size")  # type: ignore[arg-type]
+
+
+class TokensTests(unittest.TestCase):
+    def test_an_exited_cell_round_trips_its_tokens(self) -> None:
+        led = reach(CellState.EXITED).with_tokens(CELL, ledger.Tokens(**TOKENS_DOC))
+
+        doc = json.loads(led.to_json())
+        self.assertEqual(doc["cells"][0]["tokens"], TOKENS_DOC)
+        self.assertEqual(RunLedger.from_json(led.to_json()), led)
+
+    def test_only_an_exited_cell_carries_tokens(self) -> None:
+        for state in CellState:
+            if state is CellState.EXITED:
+                continue
+            with self.subTest(state.value):
+                with self.assertRaises(LedgerError):
+                    reach(state).with_tokens(CELL, ledger.Tokens(**TOKENS_DOC))
+                doc = json.loads(reach(state).to_json())
+                doc["cells"][0]["tokens"] = TOKENS_DOC
+                with self.assertRaises(LedgerError) as caught:
+                    RunLedger.from_json(json.dumps(doc))
+                self.assertIn("cells[0].tokens", str(caught.exception))
+
+    def test_tokens_from_totals_needs_every_field_as_a_count(self) -> None:
+        self.assertEqual(ledger.tokens_from_totals(dict(TOKENS_DOC, requests=2)), ledger.Tokens(**TOKENS_DOC))
+        rows = [
+            ("field absent", {k: v for k, v in TOKENS_DOC.items() if k != "cache_read_billed"}),
+            ("negative", dict(TOKENS_DOC, input_tokens=-1)),
+            ("bool", dict(TOKENS_DOC, input_tokens=True)),
+            ("float", dict(TOKENS_DOC, input_tokens=1.0)),
+            ("null", dict(TOKENS_DOC, input_tokens=None)),
+        ]
+        for name, totals in rows:
+            with self.subTest(name):
+                self.assertIsNone(ledger.tokens_from_totals(totals))
 
 
 class AtomicWriteTests(unittest.TestCase):

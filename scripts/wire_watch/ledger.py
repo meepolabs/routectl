@@ -20,7 +20,9 @@ State machine (anything else raises LedgerError):
 EXITED carries an integer rc; CAP_REACHED a CapReason; NOT_RUN a
 NotRunReason; every other state carries neither. `detail` is an optional
 short token (lowercase letters, digits, `-`), never free text, so nothing
-a caller passes through it can carry a credential into run.json.
+a caller passes through it can carry a credential into run.json. An EXITED
+cell may also carry `tokens`, the token counts its usage snapshot reported
+(null when the snapshot could not be read); no other state carries them.
 
 run.json is written by `write_atomic` (a fresh mkstemp temp file in the
 same directory, fsync, rename, directory fsync; the temp is removed on any
@@ -33,8 +35,8 @@ that each load, transition and write lose one update. Callers must hold
 the run lock across load -> transition -> write_atomic.
 
 Public API
-  CellSpec, Entry, RunInputs, RunLedger   frozen dataclasses
-  CellState, Outcome, NotRunReason, CapReason, ModelTier   enums
+  CellSpec, Entry, RunInputs, RunLedger, Tokens   frozen dataclasses
+  CellState, Outcome, NotRunReason, CapReason, ModelTier, RunStop   enums
   LedgerError                              illegal transition / bad file
   DRIVER_RE, LANE_RE, KEY_FILE_RE, TOKEN_RE, CONNECTION_MODES
                                            the cell-field rules matrix.py
@@ -43,6 +45,14 @@ Public API
   RunLedger.new(inputs, specs)             every cell PENDING
   RunLedger.transition(cell_id, to, ...)   new ledger with one cell moved
   RunLedger.entry(cell_id)                 one cell's entry
+  RunLedger.run_stop                       None, or the RunStop that bound-
+                                           stopped the run as a whole
+  RunLedger.with_run_stop(run_stop)        new ledger with run_stop set
+  RunLedger.with_tokens(cell_id, tokens)   new ledger with an EXITED cell's
+                                           token counts set
+  tokens_from_totals(totals)               Tokens from a usage snapshot's
+                                           totals, or None when any field is
+                                           absent or not a non-negative int
   RunLedger.to_json() / RunLedger.from_json(text)
                                            from_json decodes with strict_json:
                                            a duplicate key or NaN/Infinity ->
@@ -55,6 +65,11 @@ Public API
                                            load -> transition -> write
   terminal_outcome(entry)                  Outcome for a terminal state
                                            other than EXITED, else None
+  bound_stopped(entry)                     whether a bound or a signal ended
+                                           the cell (any such cell makes the
+                                           run INCOMPLETE)
+  STOP_DETAILS                             the detail tokens that make an
+                                           EXITED cell bound-stopped
 """
 
 from __future__ import annotations
@@ -129,6 +144,21 @@ class CapReason(str, enum.Enum):
     RUN_SIZE = "run-size"
 
 
+class RunStop(str, enum.Enum):
+    """Why the run as a whole is INCOMPLETE whatever its cells say,
+    recorded when it happens. Only the first is kept.
+
+    RUN_SIZE             the cells' scratch trees reached the run cap
+    LEFTOVER_CONTAINERS  the end-of-run sweep found (and removed) a
+                         container of this run
+    SWEEP_FAILED         the end-of-run sweep could not be completed
+    """
+
+    RUN_SIZE = "run-size"
+    LEFTOVER_CONTAINERS = "leftover-containers"
+    SWEEP_FAILED = "sweep-failed"
+
+
 class ModelTier(str, enum.Enum):
     PRIMARY = "primary"
     SWEEP = "sweep"
@@ -183,12 +213,42 @@ class CellSpec:
 
 
 @dataclass(frozen=True)
+class Tokens:
+    """A cell's token counts, from its usage snapshot's totals."""
+
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cache_read_billed: int
+
+
+TOKEN_FIELDS: Tuple[str, ...] = ("input_tokens", "output_tokens", "reasoning_tokens", "cache_read_billed")
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def tokens_from_totals(totals: Mapping[str, object]) -> Optional[Tokens]:
+    """Tokens from a usage `totals` object, or None unless every field is a
+    non-negative integer."""
+    counts: Dict[str, int] = {}
+    for name in TOKEN_FIELDS:
+        value = totals.get(name)
+        if not isinstance(value, int) or not _is_count(value):
+            return None
+        counts[name] = value
+    return Tokens(**counts)
+
+
+@dataclass(frozen=True)
 class Entry:
     spec: CellSpec
     state: CellState = CellState.PENDING
     rc: Optional[int] = None
     reason: Optional[str] = None
     detail: Optional[str] = None
+    tokens: Optional[Tokens] = None
 
 
 @dataclass(frozen=True)
@@ -243,10 +303,26 @@ def terminal_outcome(entry: Entry) -> Optional[Outcome]:
     }.get(entry.state)
 
 
+# An EXITED cell is bound-stopped when its detail is one of these: the
+# runner stopped it (timeout, size, interrupted) but its daemon outlived
+# SIGKILL, or it is the cell that recorded the aggregate capture cap being
+# crossed (run-size) when no unstarted cell was left to carry
+# CAP_REACHED(run-size).
+STOP_DETAILS: FrozenSet[str] = frozenset({"timeout", "size", "interrupted", "run-size"})
+_BOUND_STATES = frozenset({CellState.TIMEOUT, CellState.CAP_REACHED, CellState.INTERRUPTED})
+
+
+def bound_stopped(entry: Entry) -> bool:
+    if entry.state in _BOUND_STATES:
+        return True
+    return entry.state is CellState.EXITED and entry.detail in STOP_DETAILS
+
+
 @dataclass(frozen=True)
 class RunLedger:
     inputs: RunInputs
     entries: Tuple[Entry, ...]
+    run_stop: Optional[RunStop] = None
 
     @staticmethod
     def new(inputs: RunInputs, specs: Iterable[CellSpec]) -> "RunLedger":
@@ -282,9 +358,25 @@ class RunLedger:
         moved = advance(self.entries[i], to, rc=rc, reason=reason, detail=detail)
         return replace(self, entries=self.entries[:i] + (moved,) + self.entries[i + 1:])
 
+    def with_tokens(self, cell_id: str, tokens: Tokens) -> "RunLedger":
+        i = self._index(cell_id)
+        entry = self.entries[i]
+        if entry.state is not CellState.EXITED:
+            raise LedgerError(f"cell {cell_id}: only an EXITED cell carries tokens")
+        if not isinstance(tokens, Tokens) or not all(_is_count(getattr(tokens, f)) for f in TOKEN_FIELDS):
+            raise LedgerError(f"cell {cell_id}: tokens must be non-negative integers")
+        moved = replace(entry, tokens=tokens)
+        return replace(self, entries=self.entries[:i] + (moved,) + self.entries[i + 1:])
+
+    def with_run_stop(self, run_stop: RunStop) -> "RunLedger":
+        if not isinstance(run_stop, RunStop):
+            raise LedgerError(f"run_stop must be one of {[m.value for m in RunStop]}")
+        return replace(self, run_stop=run_stop)
+
     def to_json(self) -> str:
         doc = {
             "schema": SCHEMA,
+            "run_stop": None if self.run_stop is None else self.run_stop.value,
             "inputs": {
                 "cells_sha256": self.inputs.cells_sha256,
                 "models_sha256": self.inputs.models_sha256,
@@ -310,8 +402,9 @@ class RunLedger:
         if not isinstance(cells, list):
             raise LedgerError("cells must be a list")
         entries = tuple(_entry_from_dict(raw, f"cells[{i}]") for i, raw in enumerate(cells))
+        run_stop = None if doc["run_stop"] is None else _member(RunStop, doc, "run_stop", "run.json")
         ledger = RunLedger.new(inputs, (e.spec for e in entries))
-        return replace(ledger, entries=entries)
+        return replace(ledger, entries=entries, run_stop=run_stop)
 
 
 def _entry_to_dict(entry: Entry) -> dict:
@@ -331,15 +424,17 @@ def _entry_to_dict(entry: Entry) -> dict:
         "rc": entry.rc,
         "reason": entry.reason,
         "detail": entry.detail,
+        "tokens": None if entry.tokens is None else {f: getattr(entry.tokens, f) for f in TOKEN_FIELDS},
     }
 
 
-_DOC_KEYS = frozenset({"schema", "inputs", "cells"})
+_DOC_KEYS = frozenset({"schema", "inputs", "cells", "run_stop"})
 _INPUTS_KEYS = frozenset({"cells_sha256", "models_sha256", "cases"})
 _SPEC_STR_KEYS = ("driver", "expected_ingress", "lane", "connection_mode", "model", "case")
 _ENTRY_KEYS = frozenset(
-    {"id", "providers", "key_file", "tier", "state", "rc", "reason", "detail", *_SPEC_STR_KEYS}
+    {"id", "providers", "key_file", "tier", "state", "rc", "reason", "detail", "tokens", *_SPEC_STR_KEYS}
 )
+_TOKENS_KEYS = frozenset(TOKEN_FIELDS)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -445,7 +540,20 @@ def _entry_from_dict(raw: object, where: str) -> Entry:
             raise LedgerError("PENDING carries rc/reason/detail")
     except LedgerError as exc:
         raise LedgerError(f"{where} ({cell_id}): {exc}") from None
-    return Entry(spec=spec, state=state, rc=rc, reason=reason, detail=detail)
+    tokens = _tokens_from_dict(raw["tokens"], f"{where}.tokens")
+    if tokens is not None and state is not CellState.EXITED:
+        raise LedgerError(f"{where}.tokens: only an EXITED cell carries tokens")
+    return Entry(spec=spec, state=state, rc=rc, reason=reason, detail=detail, tokens=tokens)
+
+
+def _tokens_from_dict(raw: object, where: str) -> Optional[Tokens]:
+    if raw is None:
+        return None
+    raw = _object(raw, _TOKENS_KEYS, where)
+    tokens = tokens_from_totals(raw)
+    if tokens is None:
+        raise LedgerError(f"{where} values must be non-negative integers")
+    return tokens
 
 
 def write_atomic(path: str, ledger: RunLedger) -> None:
