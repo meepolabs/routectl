@@ -163,8 +163,8 @@ MAX_REQUEST_BYTES = 1 << 20
 
 def make_handler(plants_on: bool) -> type:
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, fmt: str, *args: object) -> None:
-            sys.stderr.write("mock: " + (fmt % args) + "\n")
+        def log_message(self, format: str, *args: object) -> None:
+            sys.stderr.write("mock: " + (format % args) + "\n")
 
         def reply(self, status: int, content_type: str, payload: bytes) -> None:
             self.send_response(status)
