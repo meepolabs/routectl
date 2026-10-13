@@ -65,6 +65,8 @@ Public API
                                  checks key_dir and key by descriptor
   key_file_problem(key_dir, name)  None, or the NOT_RUN(credential) detail;
                                  open_key_file with the descriptor closed
+  key_dir_problem(key_dir)       None, or the detail open_key_file would
+                                 refuse key_dir itself with
   preflight(ledger, paths, key_dir)  ledger with unrunnable cells NOT_RUN
   build_ledger(paths, key_dir)   load_rows + expand + preflight
   run_inputs(paths)              ledger.RunInputs digests
@@ -520,6 +522,17 @@ def open_key_file(key_dir: str, name: str) -> Tuple[Optional[int], Optional[str]
     Never reads the file's content."""
     if not KEY_FILE_RE.fullmatch(name):
         return None, "bad-name"
+    dir_fd, problem = _open_key_dir(key_dir)
+    if dir_fd is None:
+        return None, problem
+    try:
+        return _open_key_in(dir_fd, name)
+    finally:
+        os.close(dir_fd)
+
+
+def _open_key_dir(key_dir: str) -> Tuple[Optional[int], Optional[str]]:
+    """(dir fd, None) when the key directory is usable, else (None, detail)."""
     if not key_dir:
         return None, "bad-dir-path"
     try:
@@ -535,15 +548,22 @@ def open_key_file(key_dir: str, name: str) -> Tuple[Optional[int], Optional[str]
     except nofollow.DirRefused as refused:
         return None, _KEY_DIR_REFUSALS[refused.detail]
     try:
-        try:
-            problem = _key_dir_problem(dir_fd)
-        except OSError:
-            problem = "unreadable"
-        if problem is not None:
-            return None, problem
-        return _open_key_in(dir_fd, name)
-    finally:
+        problem = _key_dir_problem(dir_fd)
+    except OSError:
+        problem = "unreadable"
+    if problem is not None:
         os.close(dir_fd)
+        return None, problem
+    return dir_fd, None
+
+
+def key_dir_problem(key_dir: str) -> Optional[str]:
+    """None when open_key_file would accept `key_dir` as a key directory;
+    else the detail it would refuse it with."""
+    dir_fd, problem = _open_key_dir(key_dir)
+    if dir_fd is not None:
+        os.close(dir_fd)
+    return problem
 
 
 def key_file_problem(key_dir: str, name: str) -> Optional[str]:

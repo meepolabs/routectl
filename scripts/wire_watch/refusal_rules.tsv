@@ -1,0 +1,37 @@
+# Upstream refusals that decide a cell's outcome before its wire rows are
+# read. scripts/wire_watch/refusal.py loads this table; the first row, in
+# table order, that matches any of a cell's upstream error rows wins, so a
+# more specific row must come before a more general one.
+#
+# Columns (tab-separated, header row below this comment block):
+#   egress    bedrock -- the cell's lane is a Bedrock lane (listed in
+#             models.tsv: Invoke, Converse and the Mantle vocabularies);
+#             other -- any other lane
+#   status    the upstream HTTP status the error row carries, or * for any
+#   match     -              the status alone decides
+#             key-expired    the cell's short-term Bedrock key had passed
+#                            the expiry encoded in it when the cell ended,
+#                            so whatever the upstream answered, the key
+#                            is why
+#             phrase:<text>  the error excerpt contains <text> verbatim
+#   outcome   NOT_RUN or FAILED
+#   reason    the outcome's reason token
+#   source    where the status or the phrase is documented or recorded. A
+#             bedrock row cites a docs.aws.amazon.com page, or a recorded
+#             bedrock_*.json fixture for a phrase row
+#
+# A Bedrock 403 reaches the evidence as routectl's own action-only string
+# ("bedrock access denied[: missing IAM action ...]", built in
+# crates/routectl-providers/src/aws_error.rs), never as the AWS body, so the
+# 403 rows key on the status alone. A Bedrock 400 ValidationException
+# carries its exception name in a response header the excerpt never holds,
+# so the model-access 400 row keys on the recorded message instead of the
+# exception name; any other 400 is a wire result, not a refusal.
+egress	status	match	outcome	reason	source
+bedrock	*	key-expired	FAILED	credential	https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-how.html
+bedrock	401	-	FAILED	credential	https://docs.aws.amazon.com/bedrock/latest/APIReference/CommonErrors.html
+bedrock	403	-	NOT_RUN	model-access	https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
+bedrock	404	-	NOT_RUN	model-access	https://docs.aws.amazon.com/bedrock/latest/userguide/troubleshooting-api-error-codes.html
+bedrock	400	phrase:The provided model identifier is invalid.	NOT_RUN	model-access	crates/routectl-router/tests/fixtures/bedrock_validation_capture.json
+other	401	-	FAILED	credential	https://platform.claude.com/docs/en/api/errors
+other	403	-	FAILED	permission	https://platform.claude.com/docs/en/api/errors

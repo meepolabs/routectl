@@ -16,6 +16,8 @@ it needs a routectl binary, a network, or a credential to test.
 | `cell_process.py` | Stops and reaps one cell's process group and removes its container |
 | `launch_key.py` | Reads one cell's key at launch from the descriptor `matrix.open_key_file` checked |
 | `scratch_size.py` | Measures a cell's scratch tree without trusting it: walked by descriptor, never through a link, each inode once, by allocated blocks |
+| `report.py` | Turns a run into a dated `report.md` + `findings.jsonl` (see Report) |
+| `classify.py`, `legs.py`, `refusal.py`, `refusal_rules.tsv`, `mdtext.py` | The report's per-cell outcome, leg coverage, upstream refusal rules, and Markdown escaper |
 | `wire_watch.test.sh` | Self-test (`python3 -m unittest` over `tests/`), run in CI |
 
 ## The denominator
@@ -157,3 +159,72 @@ logged, not recorded.
 | `run-size` | the cells' scratch trees and runner logs together reached `--run-cap-bytes` |
 | `leftover-containers` | the end-of-run sweep found (and removed) a container of this run |
 | `sweep-failed` | the end-of-run sweep could not ask docker, could not read its answer, failed to remove a container, or still saw one after removing |
+
+## Report
+
+```
+python3 scripts/wire_watch/report.py --report-dir <dir> [--key-dir <dir>] [--root <repo>]
+```
+
+`--root` names the checkout whose `cells.tsv` and `models.tsv` the run was expanded
+from; it defaults to the checkout holding the script.
+
+`report.py` reads the run `run.py` left in `<dir>` (`run.json` and
+`cells/<cell-id>/`) and publishes `<dir>/report-<UTC stamp>/` with
+`report.md` and `findings.jsonl`. It exits 0 when the run is COMPLETE, 1
+when the report says INCOMPLETE, 2 on a usage error and 3 when nothing could
+be published. A non-null `run_stop` in `run.json` makes the run INCOMPLETE
+and is named in the header. `cells/<cell-id>.runner.log` is never opened.
+
+Each cell gets exactly one outcome, decided from its evidence and never from
+the runner's exit code:
+
+| Outcome | When |
+|---|---|
+| `NOT_RUN(reason)`, `TIMEOUT`, `CAP_REACHED`, `INTERRUPTED` | the ledger already says so (an `EXITED` cell whose detail is a stop, `ledger.STOP_DETAILS`, reads as that stop) |
+| `INCOMPLETE(reason)` | the cell never finished, or its evidence is missing, truncated, at an unknown schema, or holds a row the report cannot read; or its loss counters exceed (or fall short of) the loss findings the health panel shows, so the rows cannot be attributed (`findings-truncated`): the daemon's 128-entry finding ring drops the oldest, and the panel shows only findings inside its status window while the counters are cumulative; or the daemon counted no clean wire check, or a check did not end clean |
+| `NOT_RUN(model-access)`, `FAILED(credential)`, `FAILED(permission)` | an upstream refusal matched `refusal_rules.tsv` (below); its wire rows are not reported |
+| `FAILED(ingress)` | the traced ingress dialect is not the one the row expects |
+| `FINDING` | any loss row or finding, unrepaired rejection, local refusal, learned negative, nonzero `rc_parser_unlocalized_total` or nonzero `rc_field_verdicts_learned_total` |
+| `FAILED(driver)` | the driver exited nonzero with nothing else to report |
+| `PASS` | everything above is clean and at least one clean check was counted |
+
+`refusal_rules.tsv` is read top to bottom; the first row that matches one of
+the cell's upstream error rows wins, and each row cites where its status or
+message is documented or recorded. On a Bedrock lane (any lane in
+`models.tsv`) a 401 is `FAILED(credential)`; a 403, a 404, or a 400 whose
+message is the recorded invalid-model text is `NOT_RUN(model-access)`. With
+`--key-dir`, a cell whose short-term Bedrock key had passed the expiry encoded
+in the key (its presigned `X-Amz-Date` plus `X-Amz-Expires`) when the cell
+ended is `FAILED(credential)` whatever the upstream answered; the key is read
+through the same descriptor checks as the runner and never printed. A
+`--key-dir` those checks refuse (missing, a symlink, not owned by you, group
+or other writable) exits 2 with the reason logged. Off
+Bedrock, a 401 is `FAILED(credential)` and a 403 is `FAILED(permission)`.
+
+The header is `COMPLETE` only when `run.json` and `cells.tsv` load, `run.json`
+was expanded from the `cells.tsv` on disk, and no cell is `INCOMPLETE`,
+`TIMEOUT`, `CAP_REACHED`, `INTERRUPTED` or unfinished; otherwise it lists
+every reason. The coverage table has one row per (harness, ingress) in
+`cells.tsv`; a pairing is covered only by a `PASS` or `FINDING` cell on at
+least one egress, so `NOT_RUN` or `FAILED` alone leaves it uncovered. Each
+cell row shows its tokens (from `run.json`) and which of the four legs the
+capture landed -- client request, upstream request, upstream response,
+client response -- so a leg no trace captured (a refused capture, or a stream
+egress that traces no body) reads as `no`, never as clean.
+
+`findings.jsonl` has one object per (lane, path_class, leg): `count`, up to
+10 `example_paths`, and the `cells`. It is ASCII (`json.dumps` with
+`ensure_ascii`), one object per line, and holds the raw strings: anything
+that renders them as Markdown escapes them with `mdtext.esc` first.
+
+Everything in `report.md` that a capture container wrote (error excerpts,
+paths, lane labels, ingress tokens, reader details) goes through
+`mdtext.esc`: characters outside printable ASCII and `.`, `:`, `@`, `#`,
+`$` become `\xNN`, other Markdown punctuation is backslash-escaped, and
+each value is length-capped, so an escape sequence, a pipe, a backtick, a
+newline, a domain, a URL or a mail address in an excerpt renders as inert
+text. `WIRE_WATCH_GH_RENDER=1` runs an opt-in test that renders the hostile
+rows through GitHub's markdown API (`gh api markdown`) and expects no link. The report is staged and checked with `scripts/scrub-fixture.sh
+--check` (the raw container strings included) before it is renamed into
+place; a key-shaped string anywhere means nothing is published.
