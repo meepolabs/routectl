@@ -56,7 +56,7 @@ check "a default dry run exits 0 without docker" "0" "$?"
 
 # The pins come from the Dockerfile's own ARG defaults; read them the same
 # way here so a re-pin of the Dockerfile does not need an edit in this file.
-for arg in CLAUDE_VERSION:claude CODEX_VERSION:codex PI_VERSION:pi HERMES_VERSION:hermes HERMES_COMMIT:hermes-commit; do
+for arg in CLAUDE_VERSION:claude CODEX_VERSION:codex HERMES_VERSION:hermes HERMES_COMMIT:hermes-commit; do
     want="$(sed -n "s/^ARG ${arg%%:*}=//p" "$HERE/Dockerfile" | head -n 1)"
     if [ -z "$want" ]; then
         check "the Dockerfile declares a default for ${arg%%:*}" "non-empty" ""
@@ -86,7 +86,6 @@ OTHER_COMMIT="$(tr '0-9a-f' '1-9a-f0' <<<"$HERMES_COMMIT_DEFAULT")"
 for row in \
     "claude|--claude-version 9.9.9" \
     "codex|--codex-version 9.9.9" \
-    "pi|--pi-version 9.9.9" \
     "hermes|--hermes-version v9.9.9 --hermes-commit $HERMES_COMMIT_DEFAULT" \
     "hermes-commit|--hermes-version $(pin_of hermes "$DEFAULT_OUT") --hermes-commit $OTHER_COMMIT"; do
     name="${row%%|*}"
@@ -106,7 +105,7 @@ done
 # rows above are not passing on a tag that varies run to run.
 check "identical pins derive an identical tag" "$BASE_TAG" "$(derived_tag)"
 check "an explicit pin equal to the default is still the default build" \
-    "1" "$(run_build --dry-run --pi-version "$(pin_of pi "$DEFAULT_OUT")" | grep -cx 'tag routectl-capture:default')"
+    "1" "$(run_build --dry-run --codex-version "$(pin_of codex "$DEFAULT_OUT")" | grep -cx 'tag routectl-capture:default')"
 
 # --- every pin is a build ARG ----------------------------------------
 CMD_LINE="$(awk '$1 == "command"' <<<"$DEFAULT_OUT")"
@@ -123,11 +122,11 @@ for row in claude-version:claude codex-version:codex pi-version:pi \
         "$(grep -c -- "--label routectl.capture.${row%%:*}=$(pin_of "${row#*:}" "$DEFAULT_OUT")" <<<"$CMD_LINE")"
 done
 
-# --- the pi lock and the pi pin agree --------------------------------
+# --- the pi lock, its manifest, and the Dockerfile agree --------------
 # pi installs from the committed lock, and PI_VERSION only checks what that
-# lock installed. A lock re-generated at another version, or a package.json
-# spec that is a range a relock could move, would let the two drift until a
-# build failed; both are held here, without docker.
+# lock installed. A package.json spec that is a range a relock could move, or
+# a Dockerfile ARG default left behind by a relock, would drift from the lock
+# until a build failed; both are held here, without docker.
 PI_DIR="$HERE/pi"
 PI_PIN="$(pin_of pi "$DEFAULT_OUT")"
 pi_lock_facts() {
@@ -154,22 +153,46 @@ print("unpinned", len(unpinned) if packages else "-")
 PY
 }
 PI_FACTS="$(pi_lock_facts)"
-check "the pi package.json pins exactly the Dockerfile's PI_VERSION" \
-    "$PI_PIN" "$(awk '$1 == "spec" { print $2 }' <<<"$PI_FACTS")"
-check "the pi lock resolves exactly the Dockerfile's PI_VERSION" \
-    "$PI_PIN" "$(awk '$1 == "locked" { print $2 }' <<<"$PI_FACTS")"
+PI_LOCKED="$(awk '$1 == "locked" { print $2 }' <<<"$PI_FACTS")"
+check "the pi lock records a pi version" "present" "$([ "$PI_LOCKED" != "-" ] && [ -n "$PI_LOCKED" ] && echo present)"
+check "the pi package.json pins exactly the lock's pi version" \
+    "$PI_LOCKED" "$(awk '$1 == "spec" { print $2 }' <<<"$PI_FACTS")"
+check "the Dockerfile's PI_VERSION default is the lock's pi version" \
+    "$PI_LOCKED" "$(sed -n 's/^ARG PI_VERSION=//p' "$HERE/Dockerfile" | head -n 1)"
 check "every package in the pi lock carries a resolved URL and an integrity" \
     "0" "$(awk '$1 == "unpinned" { print $2 }' <<<"$PI_FACTS")"
+
+# --- the tag, label, and build ARG carry the lock's pi version ---------
+# pi has no version flag: whatever the lock resolves is what `npm ci`
+# installs, so it is the only value the provenance may name.
+check "the dry run reports the lock's pi version" "$PI_LOCKED" "$PI_PIN"
+check "the derived tag's pi component is the lock's pi version" \
+    "pi$PI_LOCKED" "$(tr '_' '\n' <<<"$BASE_TAG" | grep '^pi')"
+check "the image is labelled with the lock's pi version" \
+    "1" "$(grep -c -- "--label routectl.capture.pi-version=$PI_LOCKED " <<<"$CMD_LINE")"
+check "the build passes the lock's pi version as PI_VERSION" \
+    "1" "$(grep -c -- "--build-arg PI_VERSION=$PI_LOCKED " <<<"$CMD_LINE")"
+
+# A lock with no pi entry fails the build instead of tagging a guess. The
+# script runs from a copy whose pi/ holds a lock without that entry.
+mkdir -p "$WORK/nolock/pi"
+cp "$BUILD" "$HERE/Dockerfile" "$WORK/nolock/"
+printf '{"packages": {"": {}}}\n' >"$WORK/nolock/pi/package-lock.json"
+PATH="$WORK/bin:$PATH" bash "$WORK/nolock/build.sh" --dry-run >/dev/null 2>"$WORK/stderr"
+check "a lock with no pi version fails the dry run with exit 1" "1" "$?"
+check "that failure names the unreadable lock" \
+    "1" "$(grep -c '^build: cannot read the pi version from ' "$WORK/stderr")"
 
 # --- usage refusals, each exit 2 -------------------------------------
 for row in \
     "an unknown flag|--bogus" \
     "the removed single-client --version flag|--version 1.0.0" \
-    "a flag missing its value|--pi-version" \
+    "a flag missing its value|--codex-version" \
+    "the removed --pi-version flag|--pi-version 1" \
     "--hermes-version without --hermes-commit|--hermes-version v9.9.9" \
     "--hermes-commit without --hermes-version|--hermes-commit $HERMES_COMMIT_DEFAULT" \
     "a short hermes commit|--hermes-version v9.9.9 --hermes-commit abc123" \
-    "a pin carrying the tag separator|--pi-version 1_1" \
+    "a pin carrying the tag separator|--claude-version 1_1" \
     "a pin carrying a tag-illegal character|--codex-version 1/2" \
     "a :latest tag|--tag routectl-capture:latest" \
     "a tag with no explicit tag part|--tag routectl-capture"; do
@@ -177,6 +200,9 @@ for row in \
     run_build --dry-run ${row#*|} >/dev/null
     check "${row%%|*} exits 2" "2" "$?"
 done
+run_build --dry-run --pi-version 1 >/dev/null
+check "--pi-version is refused as an unknown argument" \
+    "1" "$(grep -c '^build: unknown argument: --pi-version$' "$WORK/stderr")"
 
 # --- the stub really would have caught a docker call -----------------
 # Positive control for the no-docker claim: a non-dry run reaches the stub

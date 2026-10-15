@@ -13,16 +13,19 @@
 # of those arrive at run time as bind-mounts or environment.
 #
 # Usage:
-#   build.sh [--claude-version <v>] [--codex-version <v>] [--pi-version <v>]
+#   build.sh [--claude-version <v>] [--codex-version <v>]
 #            [--hermes-version <tag> --hermes-commit <sha>] [--tag <image-tag>]
 #            [--dry-run]
 #
-#   --claude-version, --codex-version, --pi-version, --hermes-version
+#   --claude-version, --codex-version, --hermes-version
 #               Per-client pin, passed as that client's build ARG. Each
 #               defaults to the Dockerfile's own committed ARG default, which
 #               is CONVENIENCE ONLY: the sole record of what a fixture was
 #               captured with is `meta.client.version` read off the RUNNING
 #               binary.
+#               pi has no flag: `npm ci` installs whatever the committed
+#               pi/package-lock.json resolves, so its pin is read from that
+#               lock and passed to the build only for the image to check.
 #   --hermes-commit
 #               The commit the hermes release tag must resolve to. Required
 #               with --hermes-version: the image checks the tag against it,
@@ -47,6 +50,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE="$SCRIPT_DIR/Dockerfile"
+PI_LOCK="$SCRIPT_DIR/pi/package-lock.json"
 
 IMAGE_REPO=routectl-capture
 DEFAULT_TAG="$IMAGE_REPO:default"
@@ -58,7 +62,7 @@ REPORT_USER="65534:65534"
 CLIENTS="claude codex pi hermes"
 
 usage() {
-    sed -n '2,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 die_usage() {
@@ -78,6 +82,18 @@ dockerfile_default() {
     printf '%s\n' "$value"
 }
 
+# The pi version the committed lock resolves. Fails the build when the lock
+# cannot be read, rather than tagging an image with a version it may not hold.
+lock_pi_version() {
+    local value
+    value="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["packages"]["node_modules/@earendil-works/pi-coding-agent"]["version"])' "$PI_LOCK" 2>/dev/null)" || value=""
+    if [ -z "$value" ]; then
+        echo "build: cannot read the pi version from $PI_LOCK" >&2
+        exit 1
+    fi
+    printf '%s\n' "$value"
+}
+
 # A pin becomes part of a docker tag, so it is held to a charset that is
 # valid inside one and that excludes `_`, the separator the derived tag
 # joins pins with -- which keeps the pin-to-tag mapping one-to-one.
@@ -87,7 +103,6 @@ valid_pin() {
 
 CLAUDE_VERSION=""
 CODEX_VERSION=""
-PI_VERSION=""
 HERMES_VERSION=""
 HERMES_COMMIT=""
 TAG=""
@@ -103,8 +118,6 @@ while [ $# -gt 0 ]; do
             take_value "$1" $# "${2:-}"; CLAUDE_VERSION="$2"; shift 2 ;;
         --codex-version)
             take_value "$1" $# "${2:-}"; CODEX_VERSION="$2"; shift 2 ;;
-        --pi-version)
-            take_value "$1" $# "${2:-}"; PI_VERSION="$2"; shift 2 ;;
         --hermes-version)
             take_value "$1" $# "${2:-}"; HERMES_VERSION="$2"; shift 2 ;;
         --hermes-commit)
@@ -136,11 +149,11 @@ if [ -n "$HERMES_COMMIT" ] && ! [[ "$HERMES_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 is_default=1
-[ -n "$CLAUDE_VERSION$CODEX_VERSION$PI_VERSION$HERMES_VERSION" ] && is_default=0
+[ -n "$CLAUDE_VERSION$CODEX_VERSION$HERMES_VERSION" ] && is_default=0
 
 CLAUDE_VERSION="${CLAUDE_VERSION:-$(dockerfile_default CLAUDE_VERSION)}"
 CODEX_VERSION="${CODEX_VERSION:-$(dockerfile_default CODEX_VERSION)}"
-PI_VERSION="${PI_VERSION:-$(dockerfile_default PI_VERSION)}"
+PI_VERSION="$(lock_pi_version)"
 HERMES_VERSION="${HERMES_VERSION:-$(dockerfile_default HERMES_VERSION)}"
 HERMES_COMMIT="${HERMES_COMMIT:-$(dockerfile_default HERMES_COMMIT)}"
 
@@ -148,7 +161,6 @@ HERMES_COMMIT="${HERMES_COMMIT:-$(dockerfile_default HERMES_COMMIT)}"
 if [ "$is_default" -eq 0 ] \
     && [ "$CLAUDE_VERSION" = "$(dockerfile_default CLAUDE_VERSION)" ] \
     && [ "$CODEX_VERSION" = "$(dockerfile_default CODEX_VERSION)" ] \
-    && [ "$PI_VERSION" = "$(dockerfile_default PI_VERSION)" ] \
     && [ "$HERMES_VERSION" = "$(dockerfile_default HERMES_VERSION)" ] \
     && [ "$HERMES_COMMIT" = "$(dockerfile_default HERMES_COMMIT)" ]; then
     is_default=1

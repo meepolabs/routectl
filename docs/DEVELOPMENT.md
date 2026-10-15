@@ -1341,12 +1341,15 @@ The image carries four clients -- claude, codex, pi (npm package
 `@earendil-works/pi-coding-agent`, installed with `npm ci` from the committed
 `scripts/container/pi/package-lock.json`, on an official Node tarball
 verified against its pinned sha256), and hermes (the upstream release tag, checked
-against a pinned commit, dependencies from its own `uv.lock`). Each client
-pin is a build ARG whose committed default lives in the Dockerfile; override
-one with `--claude-version`, `--codex-version`, `--pi-version`, or
+against a pinned commit, dependencies from its own `uv.lock`). The claude,
+codex, and hermes pins are build ARGs whose committed defaults live in the
+Dockerfile; override one with `--claude-version`, `--codex-version`, or
 `--hermes-version <tag> --hermes-commit <sha>` (the two hermes flags go
 together, because the build refuses a tag that does not resolve to the
-commit).
+commit). pi has no flag: its version is whatever the committed lock
+resolves, so `build.sh` reads it from that lock, and the image refuses to
+build unless `pi --version` prints exactly that version. Re-pin pi by
+regenerating the lock.
 
 The tag is derived from all four pins and the hermes commit
 (`routectl-capture:claude<v>_codex<v>_pi<v>_hermes<v>_commit<sha>`), so

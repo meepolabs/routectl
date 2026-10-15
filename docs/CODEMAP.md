@@ -8805,8 +8805,8 @@ new section or a second doc.
   pinned installers for each shipped client (claude, codex, pi, hermes), and
   the runtime deps the shipped drivers invoke
 - `container/build.sh` -- local build of that image (`--claude-version`,
-  `--codex-version`, `--pi-version`, `--hermes-version` with
-  `--hermes-commit`, `--tag`, `--dry-run`)
+  `--codex-version`, `--hermes-version` with `--hermes-commit`, `--tag`,
+  `--dry-run`; the pi version is read from `container/pi/package-lock.json`)
 - `container/run_capture.sh` -- host wrapper that runs ONE capture inside the
   image; a caller of `capture_driver.sh`, taking `--scratch` / `--image` /
   `--name` / repeatable `--provider` plus a verbatim `--` passthrough of the runner's own

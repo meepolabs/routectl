@@ -169,9 +169,9 @@ RUN mkdir -p /opt/node \
 # tree, verifying every tarball against the lock's integrity record. A
 # registry install of the bare package would resolve its ranged transitive
 # dependencies live, so two builds of one pin could carry different code.
-# build.test.sh holds the lock's pi version equal to PI_VERSION below. Same ARG
-# convention as the clients above: the fixture record is
-# `meta.client.version` off the running binary.
+# build.sh reads PI_VERSION out of that lock and passes it here only so the
+# smoke test below can check what the lock installed; it selects nothing. The
+# fixture record is still `meta.client.version` off the running binary.
 #
 # The npm cache and HOME are pointed at throwaway paths for this layer only
 # and removed in it: npm writes its cache, debug logs, and update-notifier
@@ -180,16 +180,16 @@ RUN mkdir -p /opt/node \
 # declare install scripts, and neither is needed for the CLI to run (the
 # smoke test below proves it), so none runs as root at build time.
 #
-# The smoke test runs as the unprivileged uid and requires the pinned version
-# in the output, so a lock at a different version fails here.
+# The smoke test runs as the unprivileged uid and requires `pi --version` to
+# print exactly PI_VERSION, so a lock at a different version fails here.
 # node writes a compile cache under /tmp on that first run; it is per-build
 # state like the npm cache and goes with it.
 ARG PI_VERSION=1.1.0
 
 COPY pi/package.json pi/package-lock.json /opt/pi/
 
-RUN cd /opt/pi \
-    && HOME=/tmp/pi-build-home npm_config_cache=/tmp/pi-npm-cache \
+WORKDIR /opt/pi
+RUN HOME=/tmp/pi-build-home npm_config_cache=/tmp/pi-npm-cache \
         npm ci --ignore-scripts \
         --no-audit --no-fund --no-update-notifier \
     && rm -rf /tmp/pi-build-home /tmp/pi-npm-cache \
@@ -197,8 +197,9 @@ RUN cd /opt/pi \
     && chmod -R a+rX /opt/pi \
     && su -s /bin/sh -c 'pi --version' nobody >/tmp/pi-version \
     && cat /tmp/pi-version \
-    && grep -qF "$PI_VERSION" /tmp/pi-version \
+    && test "$(cat /tmp/pi-version)" = "$PI_VERSION" \
     && rm -rf /tmp/pi-version /tmp/node-compile-cache
+WORKDIR /
 
 # hermes is installed from the UPSTREAM repository at a release tag, and the
 # tag is checked against a pinned commit: a tag can be moved, a commit
