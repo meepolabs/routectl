@@ -2149,6 +2149,15 @@ if [ -f "$work/client.txt" ]; then
         "yes" "$(grep -qF 'model_providers.routectl.wire_api="responses"' "$work/client.txt" && echo yes || echo no)"
     check "codex: the client's argv names its own credential-carrier env var" \
         "yes" "$(grep -qF 'model_providers.routectl.env_key="CODEX_ROUTECTL_LOCAL_API_KEY"' "$work/client.txt" && echo yes || echo no)"
+    # A ChatGPT-account seat serves only the models its Codex plan lists, so
+    # the default request model and the lane's fixture upstream are both a
+    # current Codex tier; a retired id fails every openai-responses cell.
+    check "codex: the client asks for the current Codex tier by default" \
+        "yes" "$(grep -qE 'argv=.*--model gpt-5\.6-sol( |$)' "$work/client.txt" && echo yes || echo no)"
+    check "codex: the lane config routes the fixture alias to the same tier" \
+        "gpt-5.6-sol" \
+        "$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["models"]["fixture-codex"]["upstream"])' \
+            "$DRIVERS/config/openai-responses.toml" 2>&1)"
     check "codex: the throwaway cwd was seeded for the case" \
         "yes" "$(client_get "$work" notes_alpha | head -1)"
     check_ne "codex: the client ran outside the invoking HOME" \

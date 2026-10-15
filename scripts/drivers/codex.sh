@@ -58,7 +58,7 @@ export DISABLE_AUTOUPDATER=1
 # computed straight off the runner's own env var rather than off
 # DRIVER_REQUEST_MODEL, which common.sh has already defaulted to
 # claude-opus-4-8 by the time this line runs.
-CODEX_MODEL="${ROUTECTL_DRIVER_REQUEST_MODEL:-gpt-5-codex}"
+CODEX_MODEL="${ROUTECTL_DRIVER_REQUEST_MODEL:-gpt-5.6-sol}"
 
 # The name codex's config reads its credential env var from. Not
 # ROUTECTL_DRIVER_CLIENT_API_KEY itself: codex wants the NAME of an env

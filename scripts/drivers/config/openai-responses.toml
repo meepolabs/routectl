@@ -50,7 +50,7 @@ auth_kind      = "chatgpt-oauth"
 
 [models.fixture-codex]
 provider = "codex"
-upstream = "gpt-5-codex"
+upstream = "gpt-5.6-sol"
 
 # `gpt-5*` catches the model ids the codex CLI asks for by name, so a
 # driver does not have to know routectl's alias vocabulary.
