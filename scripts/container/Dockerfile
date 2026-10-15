@@ -1,10 +1,11 @@
 # Capture-cell image: a thin client-installer plus the runtime deps the
 # shipped drivers invoke. It carries NO routectl binary and NO Rust
 # toolchain -- the wrapper bind-mounts the host-built `target/release/routectl`
-# read-only via ROUTECTL_BIN, and bind-mounts the repo read-only too. Nothing
-# in the capture corpus is baked into a layer, and no credential, seat file,
-# or host identity ever enters one: the upstream token arrives at run time as
-# an environment variable.
+# read-only via ROUTECTL_BIN, and bind-mounts the repo read-only too. The only
+# files copied in are pi's committed package manifest and lock. Nothing in the
+# capture corpus is baked into a layer, and no credential, seat file, or host
+# identity ever enters one: the upstream token arrives at run time as an
+# environment variable.
 #
 # Base pinned BY DIGEST, not by the floating `ubuntu:25.04` tag: a floating
 # tag lets two contributors resolve different glibc builds, and the divergence
@@ -162,28 +163,37 @@ RUN mkdir -p /opt/node \
     && su -s /bin/sh -c 'node --version' nobody
 
 # pi is installed from its published npm package at a pinned version; no
-# source build. Same ARG convention as the clients above: the fixture
-# record is `meta.client.version` off the running binary.
+# source build. The whole dependency tree is fixed by the committed
+# pi/package-lock.json (generated with `npm install --package-lock-only
+# --ignore-scripts` on this image's node), and `npm ci` installs exactly that
+# tree, verifying every tarball against the lock's integrity record. A
+# registry install of the bare package would resolve its ranged transitive
+# dependencies live, so two builds of one pin could carry different code.
+# build.test.sh holds the lock's pi version equal to PI_VERSION below. Same ARG
+# convention as the clients above: the fixture record is
+# `meta.client.version` off the running binary.
 #
 # The npm cache and HOME are pointed at throwaway paths for this layer only
 # and removed in it: npm writes its cache, debug logs, and update-notifier
 # state under them, which is per-build state that would otherwise ride the
-# layer. --ignore-scripts because no install script is needed for the CLI to
-# run (the smoke test below proves it), and the transitive set resolves at
-# build time, so a lifecycle script there would run as root unreviewed.
+# layer. --ignore-scripts: two locked packages (@google/genai, protobufjs)
+# declare install scripts, and neither is needed for the CLI to run (the
+# smoke test below proves it), so none runs as root at build time.
 #
 # The smoke test runs as the unprivileged uid and requires the pinned version
-# in the output, so a registry that served a different build fails here.
+# in the output, so a lock at a different version fails here.
 # node writes a compile cache under /tmp on that first run; it is per-build
 # state like the npm cache and goes with it.
 ARG PI_VERSION=1.1.0
 
-RUN HOME=/tmp/pi-build-home npm_config_cache=/tmp/pi-npm-cache \
-        npm install -g --prefix /opt/pi --ignore-scripts \
+COPY pi/package.json pi/package-lock.json /opt/pi/
+
+RUN cd /opt/pi \
+    && HOME=/tmp/pi-build-home npm_config_cache=/tmp/pi-npm-cache \
+        npm ci --ignore-scripts \
         --no-audit --no-fund --no-update-notifier \
-        "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && rm -rf /tmp/pi-build-home /tmp/pi-npm-cache \
-    && ln -s /opt/pi/bin/pi /usr/local/bin/pi \
+    && ln -s /opt/pi/node_modules/.bin/pi /usr/local/bin/pi \
     && chmod -R a+rX /opt/pi \
     && su -s /bin/sh -c 'pi --version' nobody >/tmp/pi-version \
     && cat /tmp/pi-version \
@@ -206,14 +216,18 @@ RUN HOME=/tmp/pi-build-home npm_config_cache=/tmp/pi-npm-cache \
 #
 # The .git directory is removed after the check, which turns off upstream's
 # self-update probe (it needs a checkout) and keeps clone metadata out of the
-# layer. The other trees removed with it are the ones upstream's own image
-# leaves out of its build context (its .dockerignore at the pinned commit):
-# test suites, the docs site, the desktop app, and packaging metadata. None is
-# on the CLI's runtime path, and their fixtures are credential-shaped by
-# design, which is noise for the layer scan rather than coverage. With no checkout, `hermes --version` reads its identity from an
-# install stamp, so one is written here from the pins -- without the
-# timestamp upstream's own stamp writer adds, which would make two builds of
-# one pin byte-different. `external` names this image, not hermes, as the
+# layer. The other trees removed with it are ones no CLI code path reads:
+# test suites, the docs site, the desktop app, and packaging metadata (all
+# outside upstream's own image build context, per its .dockerignore at the
+# pinned commit), plus the eval scripts and the `.env.example` template. At
+# the pinned commit the evals are named only in comments and in upstream's
+# own exclusion lists, and `.env.example` is read only by the installers that
+# seed a fresh `.env` from it, which this image never runs. Their fixtures and
+# placeholders are credential-shaped by design, which is noise for the layer
+# scan rather than coverage. With no checkout, `hermes --version` reads its
+# identity from an install stamp, so one is written here from the pins --
+# without the timestamp upstream's own stamp writer adds, which would make two
+# builds of one pin byte-different. `external` names this image, not hermes, as the
 # thing that replaces the tree on an update.
 #
 # The uv binary, its cache, and the lock files uv leaves in /tmp and in the
@@ -228,6 +242,7 @@ RUN set -eu \
     && test "$(git -C /opt/hermes/src rev-parse HEAD)" = "$HERMES_COMMIT" \
     && rm -rf /opt/hermes/src/.git /opt/hermes/src/.github /opt/hermes/src/tests \
         /opt/hermes/src/website /opt/hermes/src/nix /opt/hermes/src/flake.nix /opt/hermes/src/flake.lock \
+        /opt/hermes/src/evals /opt/hermes/src/.env.example \
     && find /opt/hermes/src/apps -mindepth 1 -maxdepth 1 ! -name shared -exec rm -rf {} + \
     && python3 -I -c 'import json, sys; a = json.load(open(sys.argv[1]))["packages"]["uv"]["artifacts"]["linux-x64"]; print(a["url"], file=open(sys.argv[2], "w")); print(a["sha256"] + "  /tmp/hermes-uv.tar.gz", file=open(sys.argv[3], "w"))' \
         /opt/hermes/src/pm/lock.json /tmp/hermes-uv.url /tmp/hermes-uv.sha256 \

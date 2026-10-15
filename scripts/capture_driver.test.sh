@@ -2792,6 +2792,8 @@ env_excerpt() {
 check "the run's random key is 40 chars" "40" "${#X_ENV_KEY}"
 check "error excerpt: a held credential's value in a body is omitted" "$X_OMITTED" \
     "$(env_excerpt ROUTECTL_DRIVER_BEDROCK_API_KEY="$X_ENV_KEY")"
+check "error excerpt: a held ollama key's value in a body is omitted" "$X_OMITTED" \
+    "$(env_excerpt ROUTECTL_DRIVER_OLLAMA_API_KEY="$X_ENV_KEY")"
 check "error excerpt: a held account id's value in a body is omitted" "$X_OMITTED" \
     "$(env_excerpt ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID="$X_ENV_KEY")"
 check "error excerpt: the same body is kept when no credential holds it" \
@@ -3042,7 +3044,7 @@ STRIPPED_NAMES=(
     ANTHROPIC_PROFILE ANTHROPIC_FOUNDRY_API_KEY CLAUDE_CODE_OAUTH_TOKEN
     CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_CLIENT_KEY CODEX_API_KEY
     CODEX_ACCESS_TOKEN OPENROUTER_API_KEY AZURE_CLIENT_SECRET HF_TOKEN
-    ROUTECTL-SELFTEST_API_KEY
+    ROUTECTL-SELFTEST_API_KEY OPENAI_KEY HERMES_SESSION_KEY ROUTECTL_DRIVER_UPSTREAM_KEYS
 )
 # Names that must SURVIVE: the local placeholders a driver presents to the
 # daemon, and two knobs whose names merely resemble a credential. Without

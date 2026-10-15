@@ -56,6 +56,7 @@ FAKE_HOSTNAME="devbox-17"
 # The value a fully-collapsed credential is replaced by. Mirrors
 # REDACTED_SECRET in scripts/scrub-fixture.sh; the bearer form keeps the
 # scheme in front of it.
+# shellcheck disable=SC2034 # expanded inside single-quoted assertion bodies, which shellcheck cannot see
 BARE_PLACEHOLDER="[REDACTED]"
 
 if ! command -v python3 >/dev/null 2>&1; then

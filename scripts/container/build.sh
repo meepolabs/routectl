@@ -28,10 +28,10 @@
 #               with --hermes-version: the image checks the tag against it,
 #               so a tag override alone could only fail the build.
 #   --tag       Full image tag. Defaults to one derived from all four client
-#               pins, so a change to any pin builds a different tag -- never a
-#               bare `:latest`, which would let a rebuild at a different
-#               client version silently replace the image a fixture was
-#               captured under. A build at the committed defaults with no
+#               pins and the hermes commit, so a change to any pin builds a
+#               different tag -- never a bare `:latest`, which would let a
+#               rebuild at another client version silently replace the
+#               image a fixture was captured under. A build at the committed defaults with no
 #               --tag also tags `routectl-capture:default`, the image the
 #               run wrapper and the self-tests use when given none.
 #   --dry-run   Print the resolved pins, the tag(s), and the build command,
@@ -167,7 +167,9 @@ if [ -n "$TAG" ]; then
     esac
     TAGS+=("$TAG")
 else
-    derived="claude${CLAUDE_VERSION}_codex${CODEX_VERSION}_pi${PI_VERSION}_hermes${HERMES_VERSION}"
+    # The hermes commit is its own `_` component: a version may carry `-`,
+    # so joining it to the version would make the split ambiguous.
+    derived="claude${CLAUDE_VERSION}_codex${CODEX_VERSION}_pi${PI_VERSION}_hermes${HERMES_VERSION}_commit${HERMES_COMMIT}"
     # Docker's own limit on the tag component.
     [ "${#derived}" -le 128 ] || die_usage "the derived tag is longer than 128 characters; pass --tag"
     TAGS+=("$IMAGE_REPO:$derived")
@@ -177,10 +179,11 @@ else
 fi
 
 # The build context is scripts/container/ itself, not the repo root. The
-# Dockerfile copies nothing, so a wider context would only offer a future
-# author the chance to bake a host artifact into a layer -- an image built
-# from a host copy is unauditable, unreproducible, and unavailable to a
-# contributor who has no such host artifact.
+# Dockerfile copies only pi's committed manifest and lock from it, so a wider
+# context would only offer a future author the chance to bake a host artifact
+# into a layer -- an image built from a host copy is unauditable,
+# unreproducible, and unavailable to a contributor who has no such host
+# artifact.
 build_cmd=(docker build -f "$DOCKERFILE")
 for t in "${TAGS[@]}"; do
     build_cmd+=(-t "$t")
@@ -191,6 +194,11 @@ build_cmd+=(
     --build-arg "PI_VERSION=$PI_VERSION"
     --build-arg "HERMES_VERSION=$HERMES_VERSION"
     --build-arg "HERMES_COMMIT=$HERMES_COMMIT"
+    --label "routectl.capture.claude-version=$CLAUDE_VERSION"
+    --label "routectl.capture.codex-version=$CODEX_VERSION"
+    --label "routectl.capture.pi-version=$PI_VERSION"
+    --label "routectl.capture.hermes-version=$HERMES_VERSION"
+    --label "routectl.capture.hermes-commit=$HERMES_COMMIT"
     "$SCRIPT_DIR"
 )
 

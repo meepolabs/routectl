@@ -258,7 +258,8 @@ class_is_accounted() {
 }
 
 # Individual files of VENDORED upstream content that match a gate rule,
-# each accounted by its exact in-image path AND the one class it fires.
+# each accounted by the SHA-256 of the reviewed file, its exact in-image
+# path, AND the one class it fires.
 # Every entry was opened and read before it was listed; none is a file
 # the build wrote, which is where a credential enters an image. They are
 # shipped bytes of a pinned client, interpreter, or dependency:
@@ -267,37 +268,36 @@ class_is_accounted() {
 #   run happens to start with a vendor key prefix;
 #   the cloud vendor's own documented example access key id, quoted in
 #   its SDK's API docs;
-#   placeholder keys made of a prefix and `x` filler, in an env template
-#   and a skill reference;
-#   fixed fixture bearer values in upstream eval scripts;
+#   placeholder keys made of a prefix and `x` filler, in a skill reference;
 #   the example token in a JWT library's README;
 #   a CSS class name, and a doc's example worktree path.
 #
-# The narrowing is per FILE and per CLASS, never per tree or per class: a
-# second class in a listed file, or the same class in any other file,
-# still fails. A listed entry the scan no longer reports also fails, so a
-# client re-pin that moves or drops a file forces this list to be re-read
-# instead of leaving an exemption behind for whatever lands at that path
-# next. The list follows the Dockerfile's committed default pins, which
-# are what `routectl-capture:default` is built from.
+# The narrowing is per FILE CONTENT and per CLASS, never per tree or per
+# class: a second class in a listed file, the same class in any other
+# file, or ANY byte change to a listed file (a new match beside the
+# reviewed one included) still fails, because the digest no longer
+# matches. A listed entry the scan no longer reports also fails, so a
+# client re-pin that moves, changes, or drops a file forces this list to
+# be re-read instead of leaving an exemption behind for whatever lands at
+# that path next. An unaccounted finding is printed with its digest, so a
+# re-review can paste the row once the file has been read. The list
+# follows the Dockerfile's committed default pins, which are what
+# `routectl-capture:default` is built from. Upstream eval scripts and the
+# hermes env template are not listed: the Dockerfile removes them.
 VENDORED_FINDINGS="$(cat <<'LIST'
-/opt/node/lib/node_modules/npm/node_modules/undici/lib/llhttp/llhttp-wasm.js provider-key
-/opt/node/lib/node_modules/npm/node_modules/undici/lib/llhttp/llhttp_simd-wasm.js provider-key
-/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/llhttp/llhttp_simd-wasm.js provider-key
-/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OIM2DMFI.js provider-key
-/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleCommand.d.ts provider-key
-/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleWithWebIdentityCommand.d.ts provider-key
-/opt/hermes/venv/lib/python3.14/site-packages/PIL/ImageFont.py provider-key
-/opt/hermes/src/.env.example provider-key
-/opt/hermes/src/skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md provider-key
-/opt/hermes/src/skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md bearer-token
-/opt/hermes/src/evals/desktop_mcp_oauth/backend_http_fixture.py bearer-token
-/opt/hermes/src/evals/provider_fallback/probe_104360.py bearer-token
-/opt/hermes/src/evals/mcp_device_flow.py bearer-token
-/opt/hermes/venv/lib/python3.14/site-packages/pyjwt-2.13.0.dist-info/METADATA jwt
-/opt/hermes/src/plugins/kanban/dashboard/dist/style.css home-prefix-encoded
-/opt/hermes/src/plugins/kanban/dashboard/dist/index.js home-prefix-encoded
-/opt/hermes/src/skills/autonomous-ai-agents/claude-code/SKILL.md scratch-worktree-path
+1b8fa2e4e50e4f5774dde59855f0d34d112ef9900caf97aea4b2e6ec4ca9e3f1 /opt/node/lib/node_modules/npm/node_modules/undici/lib/llhttp/llhttp_simd-wasm.js provider-key
+f6e22d23d57d86c1e613ce26ef1eb4e997e81663987a8127eef758ce5f20a655 /opt/node/lib/node_modules/npm/node_modules/undici/lib/llhttp/llhttp-wasm.js provider-key
+d6b5f96e31cdfcf6955ca63778db40cbf392b87934b6c0db399b5b71206ff609 /opt/pi/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleCommand.d.ts provider-key
+93271217ff1125ad4250d78a14941f3cc59aa477eb10207bc72c709e82790bbe /opt/pi/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleWithWebIdentityCommand.d.ts provider-key
+463db439b55a9c580d4c153492dcdd4e215fe4709ee71a876d4edff1074cdb8f /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OIM2DMFI.js provider-key
+a3f30f3307ab3c191720cb636d570febb3610c420bc7077f2e225dacfcad3295 /opt/pi/node_modules/undici/lib/llhttp/llhttp_simd-wasm.js provider-key
+c316f2e7155b288de8dd709fd8975e9dbc3af6d59a255c74039ce401fd121a3a /opt/hermes/src/plugins/kanban/dashboard/dist/index.js home-prefix-encoded
+4fec2b7a06c80dedacce78a63b05dffaaa44afe20e4288693d0d13f06a1977a4 /opt/hermes/src/plugins/kanban/dashboard/dist/style.css home-prefix-encoded
+9cf9b448e9272335d90dc8552126b4d82022ae0cdc783a6d206a657c7254ae54 /opt/hermes/src/skills/autonomous-ai-agents/claude-code/SKILL.md scratch-worktree-path
+ded08718d2eb141262a31b323f8e66eeb40f35e074e1f0e70abb76860891ec92 /opt/hermes/src/skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md bearer-token
+ded08718d2eb141262a31b323f8e66eeb40f35e074e1f0e70abb76860891ec92 /opt/hermes/src/skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md provider-key
+24fa5feeb91b4bf63eaad0ebba08a8161e9c889d9fd056a37c928134097b9649 /opt/hermes/venv/lib/python3.14/site-packages/PIL/ImageFont.py provider-key
+0d1b1321a5a688caacd763e006fbbe11f60110e9fe27ff8d23a679863d01a63c /opt/hermes/venv/lib/python3.14/site-packages/pyjwt-2.13.0.dist-info/METADATA jwt
 LIST
 )"
 
@@ -306,8 +306,8 @@ finding_is_vendored() {
 }
 
 # Walk every layer of an image and echo one `<index> <class>` line per
-# unaccounted finding, one `vendored <path> <class>` line per finding the
-# list above accounts for, plus a `layers <n>` line and a `text <n>` line.
+# unaccounted finding, one `vendored <sha256> <path> <class>` line per
+# finding the list above accounts for, plus a `layers <n>` line and a `text <n>` line.
 # The layer count is echoed rather than asserted here so the caller can
 # compare it against the image's own count.
 walk_image() {
@@ -317,7 +317,7 @@ walk_image() {
     # line above reads an unset `dir` under `set -u`.
     local tarball="$dir/image.tar"
     local -a paths=()
-    local path idx=0 lroot farm textcount verdict rc cls row
+    local path idx=0 lroot farm textcount verdict rc cls row digest
 
     if ! docker save "$image" -o "$tarball" 2>"$dir/save.err"; then
         printf 'error docker-save-failed\n'
@@ -371,12 +371,14 @@ walk_image() {
             [ -n "$row" ] || continue
             cls="${row##* }"
             class_is_accounted "$cls" && continue
-            if finding_is_vendored "$row"; then
-                printf 'vendored %s\n' "$row"
+            digest="$(sha256sum <"$farm${row% *}" 2>/dev/null)"
+            digest="${digest%% *}"
+            if [ -n "$digest" ] && finding_is_vendored "$digest $row"; then
+                printf 'vendored %s %s\n' "$digest" "$row"
                 continue
             fi
             printf '%s %s\n' "$idx" "$cls"
-            printf 'finding %s %s\n' "$idx" "$row" >&2
+            printf 'finding %s %s %s\n' "$idx" "${digest:-<unreadable>}" "$row" >&2
         done < <(finding_rows "$verdict" "$farm")
     done
     printf 'layers %s\n' "$idx"
@@ -422,7 +424,7 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
         sed -n 's/^finding /  unaccounted: layer /p' "$WORK/committed.err"
     fi
 
-    COMMITTED_VENDORED="$(awk '$1 == "vendored" { print $2, $3 }' <<<"$COMMITTED_OUT")"
+    COMMITTED_VENDORED="$(awk '$1 == "vendored" { print $2, $3, $4 }' <<<"$COMMITTED_OUT")"
     STALE_VENDORED="$(LC_ALL=C comm -23 \
         <(LC_ALL=C sort -u <<<"$VENDORED_FINDINGS") \
         <(LC_ALL=C sort -u <<<"$COMMITTED_VENDORED"))"
@@ -466,6 +468,11 @@ fi
 if [ "${#KEY_PREFIX}" -ge 4 ]; then
     CONTROL_CTX="$WORK/control-context"
     mkdir -p "$CONTROL_CTX/lower" "$CONTROL_CTX/upper"
+    # A path the exemption list accounts for, read out of the list itself:
+    # the token planted there sits under an exempt (path, class) pair, so
+    # only the digest binding can keep it from reading as vendored.
+    EXEMPT_PATH="$(awk '$3 == "provider-key" { print $2; exit }' <<<"$VENDORED_FINDINGS")"
+    mkdir -p "$CONTROL_CTX/exempt${EXEMPT_PATH%/*}"
 
     # Braced. An unbraced `$KEY_PREFIX...` would be a DIFFERENT,
     # undefined variable and the planted file would hold no token, so the
@@ -473,14 +480,18 @@ if [ "${#KEY_PREFIX}" -ge 4 ]; then
     printf 'PROVIDER_TOKEN=%s\n' "$(fake_key "${KEY_PREFIX}")" \
         >"$CONTROL_CTX/lower/service-env.txt"
     printf 'this layer carries no credential\n' >"$CONTROL_CTX/upper/notes.txt"
+    printf 'const planted = "%s";\n' "$(fake_key "${KEY_PREFIX}")" \
+        >"$CONTROL_CTX/exempt$EXEMPT_PATH"
 
-    # FROM scratch: two layers, no base image, no network. The token is
+    # FROM scratch: three layers, no base image, no network. The token is
     # in the LOWER one, which is the only reason this control can tell a
-    # walk over every layer apart from a walk over the top one.
+    # walk over every layer apart from a walk over the top one. The top
+    # layer replaces an exempt file with different bytes.
     cat >"$CONTROL_CTX/Dockerfile" <<'DOCKERFILE'
 FROM scratch
 COPY lower/ /seeded/
 COPY upper/ /extra/
+COPY exempt/ /
 DOCKERFILE
 
     if docker build -q -t "$CONTROL_IMAGE" "$CONTROL_CTX" >/dev/null 2>"$WORK/control-build.err"; then
@@ -522,11 +533,17 @@ DOCKERFILE
             fail "the planted token was found in the LOWER layer, not the top -- the walk is not reaching every layer"
         fi
 
-        # The paired accept direction: the top layer is clean, so the
+        # The paired accept direction: the middle layer is clean, so the
         # scan is not simply reporting every layer of every image dirty.
         CONTROL_UPPER="$(awk '$1 == "2" { print $2 }' <<<"$CONTROL_FINDINGS" | sort -u)"
-        check "the control's clean top layer reports no credential class" \
+        check "the control's clean middle layer reports no credential class" \
             "" "$CONTROL_UPPER"
+
+        # An exemption is bound to the reviewed bytes, not to a path: other
+        # content at an exempt path, firing the exempt class, is a finding.
+        CONTROL_EXEMPT="$(awk '$1 == "3" { print $2 }' <<<"$CONTROL_FINDINGS" | sort -u)"
+        check "a token at an exempt path with unreviewed bytes is not vendored" \
+            "provider-key" "$CONTROL_EXEMPT"
     else
         fail "the positive control image could not be built; the scan is unverified"
         sed -n '1,5p' "$WORK/control-build.err"

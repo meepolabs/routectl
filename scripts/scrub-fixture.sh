@@ -982,6 +982,13 @@ PY
 # tokens each rule keys on, spelled so they appear VERBATIM in that rule's regex.
 PROVIDER_SHAPE_KINDS=(
   "anthropic-api=sk-ant-api03,sk-ant-oat01,sk-ant-ort01"
+  # The Ollama Cloud deployment of openai-compat (provider `ollama`) has no
+  # rule here: its API key is documented only as an opaque bearer value with
+  # no prefix or shape (https://docs.ollama.com/api/authentication). The
+  # layer that sees it is held-value omission, HELD_CREDENTIAL_NAME in
+  # scripts/drivers/lib/cell_evidence.py, which matches
+  # ROUTECTL_DRIVER_OLLAMA_API_KEY and omits wire-watch error excerpts that
+  # carry its value. That layer covers excerpts, not a promoted fixture body.
   "openai-compat=sk-proj,sk-or-v1,nvapi"
   "openai-responses=sk-proj"
   "gemini=ya29,AIza"

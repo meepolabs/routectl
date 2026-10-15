@@ -71,7 +71,7 @@ check "a default build also tags routectl-capture:default" \
 check "no tag is :latest" "0" "$(grep -c ':latest$' <<<"$DEFAULT_TAGS")"
 
 BASE_TAG="$(derived_tag)"
-for pin in claude codex pi hermes; do
+for pin in claude codex pi hermes hermes-commit; do
     if ! grep -qF -- "$(pin_of "$pin" "$DEFAULT_OUT")" <<<"$BASE_TAG"; then
         check "the derived tag carries the $pin pin" "present" "absent"
     else
@@ -81,11 +81,14 @@ done
 
 # --- any one pin changes the tag ------------------------------------
 HERMES_COMMIT_DEFAULT="$(pin_of hermes-commit "$DEFAULT_OUT")"
+# A different 40-hex commit, derived so it can never equal the default.
+OTHER_COMMIT="$(tr '0-9a-f' '1-9a-f0' <<<"$HERMES_COMMIT_DEFAULT")"
 for row in \
     "claude|--claude-version 9.9.9" \
     "codex|--codex-version 9.9.9" \
     "pi|--pi-version 9.9.9" \
-    "hermes|--hermes-version v9.9.9 --hermes-commit $HERMES_COMMIT_DEFAULT"; do
+    "hermes|--hermes-version v9.9.9 --hermes-commit $HERMES_COMMIT_DEFAULT" \
+    "hermes-commit|--hermes-version $(pin_of hermes "$DEFAULT_OUT") --hermes-commit $OTHER_COMMIT"; do
     name="${row%%|*}"
     # shellcheck disable=SC2086 # the row's flags are word-split on purpose
     tag="$(derived_tag ${row#*|})"
@@ -110,6 +113,53 @@ CMD_LINE="$(awk '$1 == "command"' <<<"$DEFAULT_OUT")"
 for arg in CLAUDE_VERSION CODEX_VERSION PI_VERSION HERMES_VERSION HERMES_COMMIT; do
     check "the build command passes $arg" "1" "$(grep -c -- "--build-arg $arg=" <<<"$CMD_LINE")"
 done
+
+# --- every pin is a provenance label ---------------------------------
+# The label records the full pin, so an image's provenance is readable off
+# the image itself and not only off its tag.
+for row in claude-version:claude codex-version:codex pi-version:pi \
+    hermes-version:hermes hermes-commit:hermes-commit; do
+    check "the build command labels the image with the ${row#*:} pin" "1" \
+        "$(grep -c -- "--label routectl.capture.${row%%:*}=$(pin_of "${row#*:}" "$DEFAULT_OUT")" <<<"$CMD_LINE")"
+done
+
+# --- the pi lock and the pi pin agree --------------------------------
+# pi installs from the committed lock, and PI_VERSION only checks what that
+# lock installed. A lock re-generated at another version, or a package.json
+# spec that is a range a relock could move, would let the two drift until a
+# build failed; both are held here, without docker.
+PI_DIR="$HERE/pi"
+PI_PIN="$(pin_of pi "$DEFAULT_OUT")"
+pi_lock_facts() {
+    python3 -I - "$PI_DIR/package.json" "$PI_DIR/package-lock.json" <<'PY'
+import json, sys
+
+name = "@earendil-works/pi-coding-agent"
+try:
+    manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+    lock = json.load(open(sys.argv[2], encoding="utf-8"))
+except (OSError, ValueError):
+    print("spec -")
+    print("locked -")
+    print("unpinned -")
+    raise SystemExit(0)
+packages = lock.get("packages", {})
+print("spec", manifest.get("dependencies", {}).get(name, "-"))
+print("locked", packages.get("node_modules/" + name, {}).get("version", "-"))
+unpinned = [
+    path for path, entry in packages.items()
+    if path and not entry.get("link") and not (entry.get("integrity") and entry.get("resolved"))
+]
+print("unpinned", len(unpinned) if packages else "-")
+PY
+}
+PI_FACTS="$(pi_lock_facts)"
+check "the pi package.json pins exactly the Dockerfile's PI_VERSION" \
+    "$PI_PIN" "$(awk '$1 == "spec" { print $2 }' <<<"$PI_FACTS")"
+check "the pi lock resolves exactly the Dockerfile's PI_VERSION" \
+    "$PI_PIN" "$(awk '$1 == "locked" { print $2 }' <<<"$PI_FACTS")"
+check "every package in the pi lock carries a resolved URL and an integrity" \
+    "0" "$(awk '$1 == "unpinned" { print $2 }' <<<"$PI_FACTS")"
 
 # --- usage refusals, each exit 2 -------------------------------------
 for row in \

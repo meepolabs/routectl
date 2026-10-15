@@ -358,6 +358,14 @@ jobs:
           fi
           echo "smoke: release binary started, served /health, and shut down cleanly"
 
+      # Runs where the release binary exists, so the end-to-end half drives
+      # a mock upstream through target/release/routectl instead of skipping;
+      # the weld to the known-undeclared list and the source hygiene checks
+      # run in the same invocation.
+      - name: planted-drop proof
+        timeout-minutes: 10
+        run: bash scripts/wire_watch/planted_drop.test.sh
+
   audit:
     name: cargo audit
     runs-on: ubuntu-22.04
@@ -637,12 +645,6 @@ jobs:
       # Stdlib python only -- no binary, no credential.
       - name: lane config self-test
         run: bash scripts/drivers/config/lane_configs.test.sh
-
-      # The planted-drop proof needs a release binary this job does not
-      # build, so here it runs the weld to the known-undeclared list and its
-      # source hygiene checks, and SKIPS the end-to-end half by name.
-      - name: planted-drop proof (weld; end to end skips without a binary)
-        run: bash scripts/wire_watch/planted_drop.test.sh
 
       # The wire-watch denominator, run ledger and evidence reader: every
       # committed cells.tsv row validates, the expansion count and bytes

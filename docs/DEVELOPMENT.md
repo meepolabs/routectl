@@ -1335,8 +1335,9 @@ bash scripts/container/build.sh
 ```
 
 The image carries four clients -- claude, codex, pi (npm package
-`@earendil-works/pi-coding-agent`, on an official Node tarball verified
-against its pinned sha256), and hermes (the upstream release tag, checked
+`@earendil-works/pi-coding-agent`, installed with `npm ci` from the committed
+`scripts/container/pi/package-lock.json`, on an official Node tarball
+verified against its pinned sha256), and hermes (the upstream release tag, checked
 against a pinned commit, dependencies from its own `uv.lock`). Each client
 pin is a build ARG whose committed default lives in the Dockerfile; override
 one with `--claude-version`, `--codex-version`, `--pi-version`, or
@@ -1344,9 +1345,10 @@ one with `--claude-version`, `--codex-version`, `--pi-version`, or
 together, because the build refuses a tag that does not resolve to the
 commit).
 
-The tag is derived from all four pins
-(`routectl-capture:claude<v>_codex<v>_pi<v>_hermes<v>`), so changing any one
-pin builds a different tag; a build at the committed defaults also tags
+The tag is derived from all four pins and the hermes commit
+(`routectl-capture:claude<v>_codex<v>_pi<v>_hermes<v>_commit<sha>`), so
+changing any one pin builds a different tag, and each pin is also recorded as
+a `routectl.capture.*` image label; a build at the committed defaults also tags
 `routectl-capture:default`, which is what the run wrapper and the self-tests
 use when given no `--image`. `--tag <repo>:<tag>` names the tag outright.
 Never a bare `:latest`, which would let a rebuild replace the image a fixture

@@ -936,16 +936,18 @@ fi
 #
 # Matched by NAME SHAPE rather than listed, because the clients' own lists
 # are long and grow every release: any environment name ending in a
-# credential suffix, or carrying a token/secret/credentials component, is
-# removed. The two local-client placeholders are the only
-# exemption -- they are what a driver presents to the local daemon.
+# credential suffix (`_KEY` and `_KEYS` among them), or carrying a
+# token/secret/credentials component, is removed. The two local-client
+# placeholders are the only exemption -- they are what a driver presents to
+# the local daemon. A plural `_TOKENS` is a budget knob, not a credential,
+# and is deliberately not a suffix here.
 # AWS_PROFILE, AWS_CONFIG_FILE and ANTHROPIC_PROFILE select a stored
 # credential without matching any suffix, so they are named outright.
 is_upstream_credential_name() {
   case "$1" in
     ROUTECTL_DRIVER_CLIENT_API_KEY|ROUTECTL_DRIVER_CLIENT_BEARER) return 1 ;;
     AWS_PROFILE|AWS_CONFIG_FILE|ANTHROPIC_PROFILE) return 0 ;;
-    API_KEY|TOKEN|*_API_KEY|*_ACCOUNT_ID|*_ACCESS_KEY|*_ACCESS_KEY_ID|*_CLIENT_KEY) return 0 ;;
+    API_KEY|TOKEN|*_KEY|*_KEYS|*_ACCOUNT_ID|*_ACCESS_KEY_ID) return 0 ;;
     *_TOKEN|*_TOKEN_*|*_SECRET|*_SECRET_*|*_BEARER|*_PASSWORD|*_PASSPHRASE) return 0 ;;
     *CREDENTIALS*) return 0 ;;
   esac
