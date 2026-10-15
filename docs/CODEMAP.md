@@ -72,9 +72,10 @@ license.
   `WireTap` with per-direction slots (request `deposit` / `declare` drained by
   `take_request`; response `deposit_response` / `push_response_frame` /
   `finish_response_stream` / `declare_response` drained by `take_response`;
-  test-utils drop-on-deposit hook on the request leg); admission fixed at
-  creation rides the tap (`admitted` / `checking_response` constructors,
-  `is_admitted`, `checks_response`); opaque `TapContents` and borrowed
+  test-utils drop-on-deposit hook on the request leg); admission, the
+  response check and the response fold are fixed at creation and ride the tap
+  (`admitted` / `checking_response` constructors, `folding_response` builder;
+  `is_admitted`, `checks_response`, `folds_response`); opaque `TapContents` and borrowed
   `AttemptRecord` read per `Leg`; no Debug renders body bytes
 - `src/wire_check/assemble.rs` -- `StreamAssembler`: folds one streamed
   response, per `SseFrame` (SSE `event:` name + `data:` text), into the
@@ -270,7 +271,8 @@ license.
   wrapper, untrimmed; the single definition of that literal
 - `src/safe_token.rs` -- `is_safe_token`: shape gate for one token lifted
   from an upstream error message
-- `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions),
+- `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions)
+  and their `body_trace_enabled` gate,
   prompt and credential-key redaction (`redact_error_body_text` for upstream
   error bodies), structural-summary extractor, `[log]`-block override
   seeding
@@ -3413,7 +3415,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   expansion), `install_wire_tap` (a fresh `WireTap` per provider call on both
   surfaces, only when the request carries an ingress body; the sampler decides
   admission here and returns `(Option<WireTap>, SampleCharge)` -- a FIDELITY
-  admission also checks the response; the charge is given back on drop unless
+  admission also checks the response, and `traced_translation_fold` adds a
+  `folding_response` fold to a TRANSLATION-lane stream while the body trace is
+  on; the charge is given back on drop unless
   a successful attempt calls `SampleCharge::keep`), and
   `Router::check_request_wire` (when the tap `is_admitted`, FIDELITY lanes diff
   the ingress JSON against the deposit, TRANSLATION lanes diff canonical
@@ -3444,12 +3448,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   deduped)
 - `src/router/wire_response.rs` -- the response leg of the live wire check:
   `ResponseCheck` (public, opaque), carried on `DispatchMeta::response_check`
-  from the serving attempt when the sampler admitted it on a FIDELITY lane;
-  the ingress renderer calls `compare_body` / `compare_stream` with the client
-  document, which diffs it against the upstream body or folded stream with
-  `Leg::Response`; an unfinished or unreadable side records `incomplete`.
-  Declares the router's own response edits (model relabel, provider
-  attribution)
+  from the serving attempt; the ingress renderer hands it the client document
+  through `compare_body`, `compare_stream` or `compare_traced_stream` (which
+  also traces both stream documents), diffed with `Leg::Response`, or traced
+  only, uncompared, for a trace-only check; declares the router's own
+  response edits (model relabel, provider attribution)
 - `src/router/beta_withhold.rs` -- per-target withheld client beta set
   (`withhold_betas_on_chain`), resolved pin > override > learned > seed; a
   seed-clear marker on the cell stops the seed withholding; a lapsed learned
@@ -6306,12 +6309,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   client version (stable Claude CLI version, else the first safe
   user-agent `product/version` token) as `routectl_internal.ingress_wire`
 - `src/handlers/response_wire.rs` -- client side of the response-leg wire
-  check: `ClientSink` / `ClientStreamCheck` fold every frame `drive_stream`
-  sends (read-only, before the send) into a `StreamAssembler` only when the
-  dispatch carried a `ResponseCheck`, and compare at drop with the exit each
-  `drive_stream` return names (disconnect, upstream error, render failure,
-  natural end; cancelled by default); `response_edits_for` /
-  `abandon_unrendered` serve the complete path
+  check: `ClientSink` / `ClientStreamCheck` (built with the rendering ingress
+  adapter's id) fold the frames `drive_stream` sends when the dispatch carried
+  a `ResponseCheck` and hand them to `compare_traced_stream` at drop;
+  `CheckedBody`, `response_edits_for` and `abandon_unrendered` serve the
+  complete path
 - `src/handlers/pure_proxy_metrics.rs` -- forwarded-mode (pure-proxy) ingress
   admission-rejection counter + structured rejection log.
   `PureProxyRejectionReason` (closed 2-variant enum: `TokenMissing` /
@@ -8800,12 +8802,14 @@ depth, navigation-only (what the file IS, not how it behaves) -- never a
 new section or a second doc.
 
 - `container/Dockerfile` -- the capture-cell image: a digest-pinned base,
-  pinned installers for each shipped client (claude, codex), and the
-  runtime deps the shipped drivers invoke
-- `container/build.sh` -- local build of that image (`--version`, `--tag`)
+  pinned installers for each shipped client (claude, codex, pi, hermes), and
+  the runtime deps the shipped drivers invoke
+- `container/build.sh` -- local build of that image (`--claude-version`,
+  `--codex-version`, `--pi-version`, `--hermes-version` with
+  `--hermes-commit`, `--tag`, `--dry-run`)
 - `container/run_capture.sh` -- host wrapper that runs ONE capture inside the
   image; a caller of `capture_driver.sh`, taking `--scratch` / `--image` /
-  repeatable `--provider` plus a verbatim `--` passthrough of the runner's own
+  `--name` / repeatable `--provider` plus a verbatim `--` passthrough of the runner's own
   argv. The one owner of the `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` credential
   convention: per-provider resolution from the seat or the environment, with
   the chatgpt-oauth account-id variable
@@ -8844,6 +8848,58 @@ new section or a second doc.
   profiles: the closed-set and `key=value` rules, the forbidden keys, and the
   ordering constraint `driver_load_client_profile` enforces (a profile loads
   before the connection-mode apply; a load after it is refused)
+- `drivers/config/bedrock-invoke.toml` -- committed lane config for Bedrock
+  InvokeModel (the Anthropic Messages body) on bedrock-runtime (us-west-2),
+  one `[models.<nick>]` entry per Claude candidate
+- `drivers/config/bedrock-converse.toml` -- committed lane config for the
+  Converse API on bedrock-runtime (us-west-2), one `[models.<nick>]` entry
+  per chat-model candidate
+- `drivers/config/bedrock-mantle.toml` -- committed lane config for the
+  bedrock-mantle endpoint (us-east-1): its Messages, Responses and Chat
+  Completions vocabularies, one `[models.<nick>]` entry per candidate
+- `drivers/config/openai-compat.ollama.toml` -- the `openai-compat` lane's
+  Ollama Cloud variant: Chat Completions wire shape against ollama.com
+- `wire_watch/README.md` -- the wire-watch run's navigation home: the file
+  table, the denominator, key files, cell states, evidence, running, report
+- `wire_watch/cells.tsv` -- the committed denominator: one row per (driver,
+  lane, connection mode) the run owes a result for, with its expected
+  ingress, providers, key file and sweep tables
+- `wire_watch/matrix.py` -- `validate` / `expand`: checks `cells.tsv`
+  against the closed vocabularies, expands it into cells, preflights key files
+  (`open_key_file`, `preflight`, `build_ledger`)
+- `wire_watch/ledger.py` -- the run ledger: `CellState` / `Outcome` /
+  reason vocabularies, the `advance` state machine, `RunLedger`, atomic
+  `run.json` (`write_atomic`, `load`)
+- `wire_watch/evidence.py` -- reader of one cell's `.cell-evidence/` into
+  `CellEvidence` or `Incomplete(IncompleteReason)` (`read_dir`, `read_cell`)
+- `wire_watch/run.py` -- the matrix runner: one `container/run_capture.sh`
+  per cell under the concurrency, timeout, deadline and size bounds, with
+  `run.json` written after every transition
+- `wire_watch/cell_process.py` -- stops and reaps one cell's process group
+  and removes its container (`stop`, `remove_container`, `sweep`, `close_out`,
+  `spawn_runner`)
+- `wire_watch/launch_key.py` -- `read_key`: one cell's key, read at launch
+  from the descriptor `matrix.open_key_file` checked
+- `wire_watch/scratch_size.py` -- `tree_size` / `runner_log_bytes`: a
+  cell's scratch size, measured by descriptor without following links
+- `wire_watch/report.py` -- turns a run dir into a dated `report.md` +
+  `findings.jsonl`, published only after a scrub check
+- `wire_watch/classify.py` -- `classify`: one final outcome per cell from
+  `run.json` and the cell's evidence
+- `wire_watch/legs.py` -- `legs_captured`: which of the four wire legs a
+  cell's landed fixture holds
+- `wire_watch/refusal.py` -- `load_rules` / `first_match` over
+  `refusal_rules.tsv`, plus `key_expiry` for short-term Bedrock keys
+- `wire_watch/refusal_rules.tsv` -- the upstream-refusal table that fixes a
+  cell's outcome (NOT_RUN or FAILED) before its wire rows are read
+- `wire_watch/mdtext.py` -- the report's Markdown escaper (`Md`, `esc`,
+  `lit`, `num`, `cat`, `lines_text`)
+- `wire_watch/strict_json.py` -- `loads`: strict JSON decoding for every
+  file the wire-watch scripts read back
+- `wire_watch/nofollow.py` -- `open_dir`: opens a caller-named directory
+  without following a symlink at its final component
+- `wire_watch/wire_watch.test.sh` -- self-test: `python3 -m unittest` over
+  `wire_watch/tests/`
 - `promote_fixture.sh` -- promotion of one captured fixture from a scratch
   root into the committed driver corpus (`--from`, `--scratch-root`,
   `--expected-ingress`, `--to`); re-runs the landing gates on the staged copy

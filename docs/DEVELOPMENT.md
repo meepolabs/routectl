@@ -1383,10 +1383,10 @@ Two `--` separators, and that is deliberate: the wrapper's own flags stop at
 the first one, everything after it is the runner's argv verbatim, and the
 runner's own `--` still introduces the driver command. `--image <tag>`
 selects a non-default image. `--name <name>` names the container so an
-orchestrator can `docker kill` exactly that cell; it must be
+orchestrator can `docker rm -f` exactly that cell; it must be
 `routectl-cell-` followed by 1-63 of `[a-z0-9_.-]` (first `[a-z0-9]`),
 anything else is exit 2. The fixed prefix keeps a name from reading as a
-hex container-id prefix, which `docker kill` would otherwise resolve to
+hex container-id prefix, which `docker rm -f` would otherwise resolve to
 another container.
 
 What crosses the boundary, and nothing else:
