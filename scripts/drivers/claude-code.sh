@@ -49,6 +49,20 @@ SETTLE_SECONDS="${ROUTECTL_DRIVER_SETTLE_SECONDS:-8}"
 TURN_SECONDS="${ROUTECTL_DRIVER_TURN_SECONDS:-45}"
 EXIT_SECONDS="${ROUTECTL_DRIVER_EXIT_SECONDS:-5}"
 
+# Seconds between typing a line and pressing Enter. The client reads a
+# multi-byte burst arriving in one write as a PASTE, and inside a paste a
+# carriage return is text, not submit: a long prompt written together with
+# its `\r` sat unsent in the input box, the `/exit` after it joined the same
+# box, and the session never ended. A separate, later `\r` is a keypress.
+SUBMIT_SECONDS="${ROUTECTL_DRIVER_SUBMIT_SECONDS:-1}"
+
+# Seconds the session may stay open after the keystroke script has typed
+# `/exit` and finished, before the driver ends it. Whatever kept the client
+# up (a swallowed `/exit`, a turn still streaming, an unforeseen dialog),
+# the run fails with a named error instead of hanging the cell.
+EXIT_GRACE_SECONDS="${ROUTECTL_DRIVER_EXIT_GRACE_SECONDS:-30}"
+KILL_AFTER_SECONDS=5
+
 driver_require_runner_env
 driver_require_daemon
 CASE_FILE="$(driver_case_file)"
@@ -158,20 +172,39 @@ KEYS="$ROUTECTL_DRIVER_RUN/keystrokes.sh"
   printf '#!/usr/bin/env bash\nset -u\n'
   printf 'sleep %s\n' "$SETTLE_SECONDS"
   driver_case_turns "$CASE_FILE" | while IFS= read -r prompt; do
-    printf 'printf "%%s\\r" %q\n' "$prompt"
+    printf 'printf "%%s" %q\n' "$prompt"
+    printf 'sleep %s\n' "$SUBMIT_SECONDS"
+    printf 'printf "\\r"\n'
     printf 'sleep %s\n' "$TURN_SECONDS"
   done
-  printf 'printf "/exit\\r"\n'
+  printf 'printf "/exit"\n'
+  printf 'sleep %s\n' "$SUBMIT_SECONDS"
+  printf 'printf "\\r"\n'
   printf 'sleep %s\n' "$EXIT_SECONDS"
 } >"$KEYS"
 chmod +x "$KEYS"
 
+TURN_COUNT="$(driver_case_turns "$CASE_FILE" | wc -l)"
+SESSION_BUDGET="$(awk -v s="$SETTLE_SECONDS" -v n="$TURN_COUNT" -v t="$TURN_SECONDS" \
+  -v k="$SUBMIT_SECONDS" -v e="$EXIT_SECONDS" -v g="$EXIT_GRACE_SECONDS" \
+  'BEGIN { print s + n * (k + t) + k + e + g }')"
+
 # `script -q -c <cmd> /dev/null` gives the client a real pty while stdin
 # stays ours to write into. The typescript goes to /dev/null: the capture
 # sink is the daemon's trace, and a terminal transcript would only add a
-# file full of escape sequences to scrub.
+# file full of escape sequences to scrub. On `timeout`'s TERM, `script`
+# kills the client it spawned, so the bound ends the whole session.
 rc=0
-"$KEYS" | script -q -e -c "$(printf '%q ' "${argv[@]}")" /dev/null >"$ROUTECTL_DRIVER_RUN/session.log" 2>&1 || rc=$?
+"$KEYS" | timeout --kill-after="$KILL_AFTER_SECONDS" "$SESSION_BUDGET" \
+  script -q -e -c "$(printf '%q ' "${argv[@]}")" /dev/null >"$ROUTECTL_DRIVER_RUN/session.log" 2>&1 || rc=$?
+
+if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+  echo "driver: --- session.log tail (escape sequences stripped) ---" >&2
+  sed 's/\x1b\[[0-9;?<>=]*[a-zA-Z~]//g; s/\x1b\][^\x07]*\x07//g' "$ROUTECTL_DRIVER_RUN/session.log" |
+    tr '\r' '\n' | tail -c 2000 >&2 || true
+  echo >&2
+  driver_die "$CLAUDE_BIN session still open ${EXIT_GRACE_SECONDS}s after /exit; ended it after ${SESSION_BUDGET}s (rc $rc)" 1
+fi
 
 if [ "$rc" != 0 ]; then
   echo "driver: $CLAUDE_BIN exited $rc" >&2
@@ -179,4 +212,4 @@ if [ "$rc" != 0 ]; then
   exit "$rc"
 fi
 
-echo "driver: claude-code case=$ROUTECTL_FIXTURE_CASE_ID mode=$ROUTECTL_FIXTURE_CONNECTION_MODE turns=$(driver_case_turns "$CASE_FILE" | wc -l)"
+echo "driver: claude-code case=$ROUTECTL_FIXTURE_CASE_ID mode=$ROUTECTL_FIXTURE_CONNECTION_MODE turns=$TURN_COUNT"

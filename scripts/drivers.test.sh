@@ -1644,6 +1644,9 @@ SH
 # that needle and does NOT wait for it -- modeling a client that leaks its
 # MCP stdio child instead of letting it die on exit, which is the one
 # misbehavior the driver's post-run leak check exists to catch.
+# `STUB_CLIENT_HANG`, when set to a needle, makes the client drain stdin and
+# then never exit, running under that needle as its own command line: the
+# shape of an interactive session that outlives its `/exit`.
 write_stub_client() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
@@ -1679,6 +1682,9 @@ stdin_bytes="$(cat | wc -c | tr -d ' ')"
         "$(wc -l filler-*.txt 2>/dev/null | awk '$2!="total"{if($1>m)m=$1}END{print m+0}')"
     printf 'invocation table=%s\n' "$([ -f reference-table.txt ] && echo yes || echo no)"
 } >>"$CLIENT_OUT"
+if [ -n "${STUB_CLIENT_HANG:-}" ]; then
+    exec -a "$STUB_CLIENT_HANG" sleep 300
+fi
 exit "${STUB_CLIENT_RC:-0}"
 SH
     chmod +x "$1"
@@ -3104,6 +3110,88 @@ check "claude-code: a long local key is approved by its trailing 20 characters" 
     "0123456789abcdefghij" \
     "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["customApiKeyResponses"]["approved"]))' \
         "$kept/client-home/.claude.json" 2>/dev/null)"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# THE KEYSTROKE SCRIPT. The client reads a line and its carriage return
+# arriving in one write as a paste, where the return is text rather than
+# submit: the turn never sends and the session never ends. Every line the
+# script types -- each prompt and the `/exit` -- is therefore written alone,
+# followed by a pause, and only then by a carriage return of its own.
+work="$(make_work)"
+canned_trace_tools >"$work/canned-trace.log"
+rc=0
+driver_run "$work" claude-code.sh tools-multiturn-01 || rc=$?
+check "claude-code: a multi-turn run exits 0" "0" "$rc"
+kept="$(kept_run "$work")"
+keys_verdict="$(python3 - "$kept/keystrokes.sh" "$CASES/tools-multiturn-01.json" <<'PY'
+import json
+import shlex
+import sys
+
+lines = [line.strip() for line in open(sys.argv[1], encoding="utf-8")]
+prompts = [turn["prompt"] for turn in json.load(open(sys.argv[2], encoding="utf-8"))["turns"]]
+CR = 'printf "\\r"'
+typed = []
+problems = []
+for i, line in enumerate(lines):
+    if not line.startswith("printf ") or line == CR:
+        continue
+    words = shlex.split(line)
+    text = words[-1]
+    if "\\r" in line:
+        problems.append(f"line {i + 1} types a carriage return with its text")
+    if not (i + 2 < len(lines) and lines[i + 1].startswith("sleep ") and lines[i + 2] == CR):
+        problems.append(f"line {i + 1} is not followed by a pause and its own carriage return")
+    typed.append(text)
+if typed != prompts + ["/exit"]:
+    problems.append(f"typed={typed!r}")
+print(" ".join(problems) or "ok")
+PY
+)"
+check "claude-code: every typed line is submitted by its own later carriage return" "ok" "$keys_verdict"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# A SESSION ALWAYS ENDS. A client still open after the keystroke script has
+# typed `/exit` and finished is ended by the driver once the grace runs out,
+# and the run fails naming the hang and quoting the session tail, instead of
+# holding the cell open. The suite's own wait is bounded too, so a driver
+# that lost the bound shows up red here rather than hanging the suite.
+work="$(make_work)"
+canned_trace >"$work/canned-trace.log"
+hang_needle="routectl-stub-hung-client-$$-$RANDOM"
+rc=0
+SECONDS=0
+STUB_CLIENT_HANG="$hang_needle" ROUTECTL_DRIVER_EXIT_GRACE_SECONDS=2 \
+    timeout 60 bash -c "$(declare -f driver_run free_port free_port_pair); driver_run \"\$@\"" _ \
+    "$work" claude-code.sh plain-turn-01 || rc=$?
+hang_elapsed="$SECONDS"
+check_ne "claude-code: a session that outlives /exit fails the run" "0" "$rc"
+check_ne "claude-code: the suite's own bound did not have to end the run" "124" "$rc"
+if [ "$hang_elapsed" -lt 30 ]; then
+    echo "PASS: claude-code: the hung session was ended within its bound (${hang_elapsed}s)"
+else
+    fail "claude-code: the hung session took ${hang_elapsed}s to end"
+fi
+if grep -qF 'session still open 2s after /exit' "$work/runner.log"; then
+    echo "PASS: claude-code: the failure names the session left open after /exit"
+else
+    fail "claude-code: the failure did not name the session left open after /exit"
+    sed -n '1,30p' "$work/runner.log"
+fi
+if grep -qF 'session.log tail' "$work/runner.log"; then
+    echo "PASS: claude-code: the failure quotes the session log tail"
+else
+    fail "claude-code: the failure did not quote the session log tail"
+fi
+hang_leftover="$(. "$DRIVERS/lib/common.sh"; driver_processes_matching "$hang_needle")"
+if [ -z "$hang_leftover" ]; then
+    echo "PASS: claude-code: no hung client outlived the driver"
+else
+    fail "claude-code: a hung client outlived the driver (pid(s): $(printf '%s' "$hang_leftover" | tr '\n' ' '))"
+fi
+kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
 

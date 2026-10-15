@@ -288,6 +288,9 @@
 #   ROUTECTL_DRIVER_TURN_SECONDS          pty pacing for the interactive
 #   ROUTECTL_DRIVER_SETTLE_SECONDS        driver; matrix-wide "set once,
 #   ROUTECTL_DRIVER_EXIT_SECONDS          never varied"
+#   ROUTECTL_DRIVER_SUBMIT_SECONDS
+#   ROUTECTL_DRIVER_EXIT_GRACE_SECONDS    how long a session may outlive
+#                                         its /exit before it is ended
 #   ROUTECTL_DRIVER_OUT_ROOT              the landing-root seam a run that
 #                                         mounts this repo read-only needs
 #   ROUTECTL_DRIVER_SESSION_ID            the print driver's resume id,
