@@ -7,7 +7,7 @@
 # identity ever enters one: the upstream token arrives at run time as an
 # environment variable.
 #
-# Base pinned BY DIGEST, not by the floating `ubuntu:25.04` tag: a floating
+# Base pinned BY DIGEST, not by the floating `ubuntu:26.04` tag: a floating
 # tag lets two contributors resolve different glibc builds, and the divergence
 # surfaces only as an unreproducible fixture. The comment records the
 # human-readable version the digest stood for when it was pinned.

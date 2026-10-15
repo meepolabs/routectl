@@ -990,7 +990,7 @@ check "a runner exit 9 comes out of the wrapper as 9" "9" "$rc"
 # Part 5b: --name, against the recorded docker argv
 # ---------------------------------------------------------------------
 #
-# `docker kill X` resolves X as an exact id, then an exact name, then an
+# `docker kill X` / `docker rm -f X` resolve X as an exact id, then an exact name, then an
 # id PREFIX -- so a name that reads as hex could kill some other
 # container. The wrapper accepts exactly one layout: `routectl-cell-`
 # plus 1-63 of [a-z0-9_.-], the first [a-z0-9]. Every refusal is a usage

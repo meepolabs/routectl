@@ -39,11 +39,12 @@
 #               which is what scripts/container/build.sh writes with no
 #               --version. Never a bare `:latest`.
 #   --name      Name for the container, so the caller can `docker kill`
-#               exactly this cell (an orphan left by a timeout). Must be
-#               `routectl-cell-` followed by 1-63 characters from
-#               [a-z0-9_.-], the first of them [a-z0-9]; anything else is
-#               a usage error (exit 2). The fixed prefix is what makes the
-#               name non-hex: `docker kill X` tries X as a container id
+#               or `docker rm -f` exactly this cell (an orphan left by a
+#               timeout). Must be `routectl-cell-` followed by 1-63
+#               characters from [a-z0-9_.-], the first of them [a-z0-9];
+#               anything else is a usage error (exit 2). The fixed prefix
+#               is what makes the name non-hex: `docker kill X` and
+#               `docker rm -f X` try X as a container id
 #               PREFIX after the exact id and name lookups, so a hex-only
 #               name could resolve to some other container. Omitted, docker
 #               picks a name and nothing else changes.
@@ -345,7 +346,7 @@ while [ $# -gt 0 ]; do
         --name)
             [ $# -ge 2 ] && [ -n "$2" ] || die "--name needs a non-empty value" 2
             valid_cell_name "$2" ||
-                die "refusing --name '$2': a cell name is ${CELL_NAME_PREFIX} followed by 1-${CELL_NAME_SUFFIX_MAX} of [a-z0-9_.-], starting with [a-z0-9]. the fixed prefix keeps it from reading as a container id prefix, which docker kill would resolve to another container." 2
+                die "refusing --name '$2': a cell name is ${CELL_NAME_PREFIX} followed by 1-${CELL_NAME_SUFFIX_MAX} of [a-z0-9_.-], starting with [a-z0-9]. the fixed prefix keeps it from reading as a container id prefix, which docker kill or docker rm -f would resolve to another container." 2
             CELL_NAME="$2"
             shift 2
             ;;
