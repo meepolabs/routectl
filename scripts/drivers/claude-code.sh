@@ -72,8 +72,18 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 # dialogue. Seed exactly the three answers those screens persist, in the
 # shape the client itself writes to `$HOME/.claude.json` after answering
 # them by hand: onboarding done, the LOCAL placeholder key approved, and the
-# run workspace trusted. Nothing else: no account, no OAuth state, no
-# settings, and never a real credential.
+# run workspace trusted.
+#
+# A tools case runs with `--permission-mode bypassPermissions`, which opens
+# one more blocking screen ("running in Bypass Permissions mode ... No, exit
+# / Yes, I accept") whose default answer exits the client before any
+# request. Its persisted answer is the user-settings key
+# `skipDangerousModePermissionPrompt`, so `$HOME/.claude/settings.json`
+# carries that one key and nothing else. Print mode never shows this screen,
+# which is why claude-code-print.sh seeds no home.
+#
+# Nothing beyond those four answers: no account, no OAuth state, no other
+# setting, and never a real credential.
 #
 # The key is recorded by its trailing 20 characters, which is the form the
 # client stores an approval under; a full-value entry is not matched and
@@ -91,18 +101,21 @@ seed_client_home() {
   if [ "${#key}" -gt "$CLIENT_KEY_APPROVAL_SUFFIX_LEN" ]; then
     key="${key: -$CLIENT_KEY_APPROVAL_SUFFIX_LEN}"
   fi
-  python3 - "$HOME/.claude.json" "$workspace" "$key" <<'PY'
+  mkdir -p "$HOME/.claude"
+  python3 - "$HOME/.claude.json" "$HOME/.claude/settings.json" "$workspace" "$key" <<'PY'
 import json
 import sys
 
-path, workspace, key_suffix = sys.argv[1:]
+state_path, settings_path, workspace, key_suffix = sys.argv[1:]
 state = {
     "hasCompletedOnboarding": True,
     "customApiKeyResponses": {"approved": [key_suffix], "rejected": []},
     "projects": {workspace: {"hasTrustDialogAccepted": True}},
 }
-with open(path, "x", encoding="utf-8") as handle:
+with open(state_path, "x", encoding="utf-8") as handle:
     json.dump(state, handle)
+with open(settings_path, "x", encoding="utf-8") as handle:
+    json.dump({"skipDangerousModePermissionPrompt": True}, handle)
 PY
 }
 seed_client_home

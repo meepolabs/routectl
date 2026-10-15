@@ -3062,6 +3062,23 @@ PY
 else
     fail "claude-code: the base-url run left no seeded client home at $seed"
 fi
+
+# The bypass-permissions screen opens before the prompt on every tools case
+# and its default answer exits the client, so its persisted answer is part
+# of the seed: one user-settings key, nothing else.
+settings_seed="$kept/client-home/.claude/settings.json"
+if [ -n "$kept" ] && [ -f "$settings_seed" ]; then
+    check "claude-code: the user settings seed carries only the bypass-screen answer" \
+        '{"skipDangerousModePermissionPrompt": true}' \
+        "$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$settings_seed" 2>&1)"
+    if grep -qE 'oauth|[Aa]ccount|sk-ant-' "$settings_seed"; then
+        fail "claude-code: the user settings seed carries account or credential state"
+    else
+        echo "PASS: claude-code: the user settings seed carries no account or credential state"
+    fi
+else
+    fail "claude-code: the base-url run left no user settings seed at $settings_seed"
+fi
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
 
