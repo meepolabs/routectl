@@ -54,6 +54,21 @@ driver_processes_matching() {
   done
 }
 
+# PIDs of every process in session `sid`, one per line, read from
+# /proc/<pid>/stat like the probe above. The command name in that file is
+# parenthesised and may hold spaces or parentheses, so the fields are read
+# after its LAST `) `; the session id is the fourth of them.
+driver_session_pids() {
+  local sid="$1" dir stat rest _state _ppid _pgrp session
+  for dir in /proc/[0-9]*; do
+    stat="$(cat "$dir/stat" 2>/dev/null)" || continue
+    rest="${stat##*) }"
+    read -r _state _ppid _pgrp session _ <<<"$rest"
+    [ "$session" = "$sid" ] && printf '%s\n' "${dir#/proc/}"
+  done
+  return 0
+}
+
 # Fail closed on the runner's contract rather than on a downstream
 # symptom. A driver launched outside the runner would otherwise reach a
 # client with an empty base URL and produce a capture of nothing.

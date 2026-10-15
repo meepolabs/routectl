@@ -45,23 +45,47 @@ CLAUDE_BIN="${ROUTECTL_DRIVER_CLAUDE_BIN:-claude}"
 # between turns. A turn typed before the previous one's tool loop finished
 # would land as an interrupt rather than as a new turn, which captures a
 # shape no user produces.
-SETTLE_SECONDS="${ROUTECTL_DRIVER_SETTLE_SECONDS:-8}"
-TURN_SECONDS="${ROUTECTL_DRIVER_TURN_SECONDS:-45}"
-EXIT_SECONDS="${ROUTECTL_DRIVER_EXIT_SECONDS:-5}"
+SETTLE_SECONDS="${ROUTECTL_DRIVER_SETTLE_SECONDS-8}"
+TURN_SECONDS="${ROUTECTL_DRIVER_TURN_SECONDS-45}"
+EXIT_SECONDS="${ROUTECTL_DRIVER_EXIT_SECONDS-5}"
 
 # Seconds between typing a line and pressing Enter. The client reads a
 # multi-byte burst arriving in one write as a PASTE, and inside a paste a
 # carriage return is text, not submit: a long prompt written together with
 # its `\r` sat unsent in the input box, the `/exit` after it joined the same
 # box, and the session never ended. A separate, later `\r` is a keypress.
-SUBMIT_SECONDS="${ROUTECTL_DRIVER_SUBMIT_SECONDS:-1}"
+SUBMIT_SECONDS="${ROUTECTL_DRIVER_SUBMIT_SECONDS-1}"
 
 # Seconds the session may stay open after the keystroke script has typed
 # `/exit` and finished, before the driver ends it. Whatever kept the client
 # up (a swallowed `/exit`, a turn still streaming, an unforeseen dialog),
 # the run fails with a named error instead of hanging the cell.
-EXIT_GRACE_SECONDS="${ROUTECTL_DRIVER_EXIT_GRACE_SECONDS:-30}"
+EXIT_GRACE_SECONDS="${ROUTECTL_DRIVER_EXIT_GRACE_SECONDS-30}"
 KILL_AFTER_SECONDS=5
+
+# Every pacing value reaches a `sleep` in the keystroke script and the
+# session bound below, so each must be a whole number of seconds in a sane
+# range; anything else fails the run before the client starts.
+MAX_PACING_SECONDS=3600
+require_pacing_seconds() {
+  local name="$1" value="$2"
+  case "$value" in
+    '' | *[!0-9]*) driver_die "$name='$value' is not a whole number of seconds" 2 ;;
+  esac
+  if [ "${#value}" -gt 4 ] || [ "$((10#$value))" -gt "$MAX_PACING_SECONDS" ]; then
+    driver_die "$name='$value' is above the ${MAX_PACING_SECONDS}s ceiling" 2
+  fi
+}
+require_pacing_seconds ROUTECTL_DRIVER_SETTLE_SECONDS "$SETTLE_SECONDS"
+require_pacing_seconds ROUTECTL_DRIVER_TURN_SECONDS "$TURN_SECONDS"
+require_pacing_seconds ROUTECTL_DRIVER_EXIT_SECONDS "$EXIT_SECONDS"
+require_pacing_seconds ROUTECTL_DRIVER_SUBMIT_SECONDS "$SUBMIT_SECONDS"
+require_pacing_seconds ROUTECTL_DRIVER_EXIT_GRACE_SECONDS "$EXIT_GRACE_SECONDS"
+SETTLE_SECONDS=$((10#$SETTLE_SECONDS))
+TURN_SECONDS=$((10#$TURN_SECONDS))
+EXIT_SECONDS=$((10#$EXIT_SECONDS))
+SUBMIT_SECONDS=$((10#$SUBMIT_SECONDS))
+EXIT_GRACE_SECONDS=$((10#$EXIT_GRACE_SECONDS))
 
 driver_require_runner_env
 driver_require_daemon
@@ -185,23 +209,49 @@ KEYS="$ROUTECTL_DRIVER_RUN/keystrokes.sh"
 chmod +x "$KEYS"
 
 TURN_COUNT="$(driver_case_turns "$CASE_FILE" | wc -l)"
-SESSION_BUDGET="$(awk -v s="$SETTLE_SECONDS" -v n="$TURN_COUNT" -v t="$TURN_SECONDS" \
-  -v k="$SUBMIT_SECONDS" -v e="$EXIT_SECONDS" -v g="$EXIT_GRACE_SECONDS" \
-  'BEGIN { print s + n * (k + t) + k + e + g }')"
+SESSION_BUDGET=$((SETTLE_SECONDS + TURN_COUNT * (SUBMIT_SECONDS + TURN_SECONDS) + SUBMIT_SECONDS + EXIT_SECONDS + EXIT_GRACE_SECONDS))
+
+# End every process left in the client's pty session: TERM, a short wait,
+# then KILL. Ending `script` alone is not enough -- it signals only its
+# direct child, so a client that ignores TERM, or a child it moved into a
+# process group of its own, would outlive the run. The session id survives
+# both, and only processes the client's session spawned carry it.
+end_client_session() {
+  local sid waited=0
+  sid="$(cat "$SESSION_ID_FILE" 2>/dev/null)" || return 0
+  case "$sid" in ''|*[!0-9]*) return 0 ;; esac
+  # shellcheck disable=SC2046
+  kill -TERM $(driver_session_pids "$sid") 2>/dev/null || true
+  while [ -n "$(driver_session_pids "$sid")" ] && [ "$waited" -lt "$KILL_AFTER_SECONDS" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # shellcheck disable=SC2046
+  kill -KILL $(driver_session_pids "$sid") 2>/dev/null || true
+}
 
 # `script -q -c <cmd> /dev/null` gives the client a real pty while stdin
 # stays ours to write into. The typescript goes to /dev/null: the capture
 # sink is the daemon's trace, and a terminal transcript would only add a
-# file full of escape sequences to scrub. On `timeout`'s TERM, `script`
-# kills the client it spawned, so the bound ends the whole session.
+# file full of escape sequences to scrub. The shell `script` starts on the
+# pty leads a new session, so its pid, recorded before it execs the client,
+# is the session id `end_client_session` sweeps.
+SESSION_ID_FILE="$ROUTECTL_DRIVER_RUN/client-session.id"
+pty_command="printf '%s' \"\$\$\" >$(printf '%q' "$SESSION_ID_FILE"); exec $(printf '%q ' "${argv[@]}")"
 rc=0
 "$KEYS" | timeout --kill-after="$KILL_AFTER_SECONDS" "$SESSION_BUDGET" \
-  script -q -e -c "$(printf '%q ' "${argv[@]}")" /dev/null >"$ROUTECTL_DRIVER_RUN/session.log" 2>&1 || rc=$?
+  script -q -e -c "$pty_command" /dev/null >"$ROUTECTL_DRIVER_RUN/session.log" 2>&1 || rc=$?
+end_client_session
 
 if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
-  echo "driver: --- session.log tail (escape sequences stripped) ---" >&2
-  sed 's/\x1b\[[0-9;?<>=]*[a-zA-Z~]//g; s/\x1b\][^\x07]*\x07//g' "$ROUTECTL_DRIVER_RUN/session.log" |
-    tr '\r' '\n' | tail -c 2000 >&2 || true
+  # The tail is client output headed for an operator's terminal, so it is
+  # reduced to an allowlist rather than scrubbed of known sequences: tab,
+  # newline and printable ASCII survive, a carriage return becomes a
+  # newline, and every other byte (ESC, BEL, BS, the C1 range, non-ASCII)
+  # becomes `?`. Sequence parameters remain as inert text.
+  echo "driver: --- session.log tail (non-printable bytes shown as ?) ---" >&2
+  tail -c 2000 "$ROUTECTL_DRIVER_RUN/session.log" |
+    LC_ALL=C tr '\r' '\n' | LC_ALL=C tr -c '\t\n\040-\176' '?' >&2 || true
   echo >&2
   driver_die "$CLAUDE_BIN session still open ${EXIT_GRACE_SECONDS}s after /exit; ended it after ${SESSION_BUDGET}s (rc $rc)" 1
 fi

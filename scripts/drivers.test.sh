@@ -1646,7 +1646,12 @@ SH
 # misbehavior the driver's post-run leak check exists to catch.
 # `STUB_CLIENT_HANG`, when set to a needle, makes the client drain stdin and
 # then never exit, running under that needle as its own command line: the
-# shape of an interactive session that outlives its `/exit`.
+# shape of an interactive session that outlives its `/exit`. It first
+# prints `STUB_CLIENT_PLANT` (printf %b escapes) to its terminal, and writes
+# every pid it leaves running to `STUB_CLIENT_PID_FILE`.
+# `STUB_CLIENT_HANG_MODE` makes the hang hostile: `ignore-term` ignores
+# TERM, HUP and INT; `grandchild` also leaves a child that moved into its
+# own process group and ignores the same signals.
 write_stub_client() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
@@ -1683,6 +1688,23 @@ stdin_bytes="$(cat | wc -c | tr -d ' ')"
     printf 'invocation table=%s\n' "$([ -f reference-table.txt ] && echo yes || echo no)"
 } >>"$CLIENT_OUT"
 if [ -n "${STUB_CLIENT_HANG:-}" ]; then
+    [ -z "${STUB_CLIENT_PLANT:-}" ] || printf '%b' "$STUB_CLIENT_PLANT"
+    case "${STUB_CLIENT_HANG_MODE:-}" in
+        ignore-term)
+            trap '' TERM HUP INT
+            ;;
+        grandchild)
+            ( exec -a "$STUB_CLIENT_HANG" python3 -c '
+import os, signal, time
+os.setpgid(0, 0)
+for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(sig, signal.SIG_IGN)
+time.sleep(300)
+' ) &
+            printf '%s\n' "$!" >>"${STUB_CLIENT_PID_FILE:-/dev/null}"
+            ;;
+    esac
+    printf '%s\n' "$$" >>"${STUB_CLIENT_PID_FILE:-/dev/null}"
     exec -a "$STUB_CLIENT_HANG" sleep 300
 fi
 exit "${STUB_CLIENT_RC:-0}"
@@ -3193,6 +3215,143 @@ else
 fi
 kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# THE WHOLE SESSION ENDS. A client that ignores TERM, or that left a child
+# in a process group of its own, must not outlive the bound either: the
+# driver ends every process in the client's pty session. Survival is read
+# per recorded pid, after the run, so the suite's own wait cannot stand in
+# for the driver's cleanup; the suite then reaps any survivor itself.
+for hang_mode in ignore-term grandchild; do
+    work="$(make_work)"
+    canned_trace >"$work/canned-trace.log"
+    hang_needle="routectl-stub-hostile-client-$$-$RANDOM"
+    : >"$work/hang.pids"
+    rc=0
+    STUB_CLIENT_HANG="$hang_needle" STUB_CLIENT_HANG_MODE="$hang_mode" \
+    STUB_CLIENT_PID_FILE="$work/hang.pids" ROUTECTL_DRIVER_EXIT_GRACE_SECONDS=2 \
+        timeout 60 bash -c "$(declare -f driver_run free_port free_port_pair); driver_run \"\$@\"" _ \
+        "$work" claude-code.sh plain-turn-01 || rc=$?
+    check_ne "claude-code ($hang_mode): the hostile session fails the run" "0" "$rc"
+    check_ne "claude-code ($hang_mode): the suite's own bound did not have to end the run" "124" "$rc"
+    want_pids=1
+    [ "$hang_mode" = grandchild ] && want_pids=2
+    check "claude-code ($hang_mode): the stub recorded every pid it left running" \
+        "$want_pids" "$(grep -c '^[0-9][0-9]*$' "$work/hang.pids")"
+    survivors=""
+    while IFS= read -r hang_pid; do
+        if [ -n "$hang_pid" ] && [ -d "/proc/$hang_pid" ] &&
+            tr '\0' ' ' <"/proc/$hang_pid/cmdline" 2>/dev/null | grep -qF -- "$hang_needle"; then
+            survivors="$survivors $hang_pid"
+            kill -KILL "$hang_pid" 2>/dev/null
+        fi
+    done <"$work/hang.pids"
+    check "claude-code ($hang_mode): no process of the client's session outlived the driver" \
+        "" "$survivors"
+    kept="$(kept_run "$work")"
+    [ -n "$kept" ] && rm -rf "$kept"
+    rm -rf "$work"
+done
+
+# PACING VALUES ARE BOUNDED WHOLE SECONDS. Each one reaches a `sleep` and the
+# session bound, so a value that is empty, negative, fractional, not a
+# number, or above the 3600s ceiling refuses the run with exit 2 before any
+# client starts. One accepted boundary row per knob is the paired control: a
+# value of 3600 passes validation and the run goes on to the daemon check,
+# which a closed port refuses with exit 1.
+pacing_work="$(mktemp -d)"
+mkdir -p "$pacing_work/run/client-home" "$pacing_work/cwd"
+pacing_port="$(free_port)"
+pacing_run() {
+    local knob="$1" value="$2"
+    env HOME="$pacing_work/run/client-home" \
+        ROUTECTL_DRIVER_CLAUDE_BIN="$pacing_work/no-client" \
+        ROUTECTL_BASE_URL="http://127.0.0.1:$pacing_port" \
+        ROUTECTL_DRIVER_RUN="$pacing_work/run" \
+        ROUTECTL_DRIVER_WORK="$pacing_work/cwd" \
+        ROUTECTL_FIXTURE_CASE_ID=plain-turn-01 \
+        ROUTECTL_FIXTURE_CONFIG_SHA=deadbeef \
+        ROUTECTL_FIXTURE_CONNECTION_MODE=base-url \
+        "$knob=$value" \
+        bash "$DRIVERS/claude-code.sh" >"$pacing_work/out" 2>&1
+}
+for knob in ROUTECTL_DRIVER_SETTLE_SECONDS ROUTECTL_DRIVER_TURN_SECONDS \
+    ROUTECTL_DRIVER_EXIT_SECONDS ROUTECTL_DRIVER_SUBMIT_SECONDS \
+    ROUTECTL_DRIVER_EXIT_GRACE_SECONDS; do
+    for value in "" "-1" "1.5" "abc" "3601" "99999999999999999999" " 5"; do
+        rc=0
+        pacing_run "$knob" "$value" || rc=$?
+        check "$knob='$value' is refused with exit 2" "2" "$rc"
+        if grep -qF "$knob='$value'" "$pacing_work/out"; then
+            echo "PASS: $knob='$value': the refusal names the knob and its value"
+        else
+            fail "$knob='$value': the refusal did not name the knob and its value"
+            sed -n '1,5p' "$pacing_work/out"
+        fi
+    done
+    rc=0
+    pacing_run "$knob" 3600 || rc=$?
+    check "$knob=3600 passes validation and reaches the daemon check" "1" "$rc"
+    if grep -qF 'unreachable' "$pacing_work/out"; then
+        echo "PASS: $knob=3600: the run stopped at the closed daemon port"
+    else
+        fail "$knob=3600: the run did not reach the daemon check"
+        sed -n '1,5p' "$pacing_work/out"
+    fi
+done
+rm -rf "$pacing_work"
+
+# THE SESSION TAIL IS INERT. A hung client's last output is quoted to the
+# operator's terminal, so the driver passes only tab, newline and printable
+# ASCII. The plant carries one of each hostile class -- OSC 8 hyperlink and
+# OSC title (ST- and BEL-terminated), DCS, CSI, backspace, carriage return,
+# raw C1 bytes, and a UTF-8 encoded C1 -- beside a marker that must survive.
+# The driver's stderr is captured on its own, outside the runner's log.
+work="$(make_work)"
+mkdir -p "$work/tail-run/client-home" "$work/tail-cwd"
+tail_port="$(free_port)"
+python3 "$work/bin/listener.py" "$tail_port" >/dev/null 2>&1 &
+tail_listener=$!
+i=0
+while [ "$i" -lt 40 ] && ! curl -fsS -m 1 "http://127.0.0.1:$tail_port/health" >/dev/null 2>&1; do
+    sleep 0.1
+    i=$((i + 1))
+done
+tail_marker="tail-marker-$$"
+tail_plant='\033]8;;http://plant.invalid/\033\\link\033]8;;\033\\ \033]0;planted-title\007 \033P1$r0m\033\\ \033[31mred\033[0m \033[2J back\010\010 cr\rret \233c \235x\234 \302\233c '"$tail_marker"'\n'
+rc=0
+(
+    cd "$work/repo" || exit 2
+    HOME="$work/tail-run/client-home" \
+    CLIENT_OUT="$work/client.txt" \
+    STUB_CLIENT_HANG="routectl-stub-tail-client-$$" \
+    STUB_CLIENT_PLANT="$tail_plant" \
+    ROUTECTL_DRIVER_CLAUDE_BIN="$work/bin/client-stub" \
+    ROUTECTL_DRIVER_SETTLE_SECONDS=0 \
+    ROUTECTL_DRIVER_TURN_SECONDS=0 \
+    ROUTECTL_DRIVER_EXIT_SECONDS=0 \
+    ROUTECTL_DRIVER_EXIT_GRACE_SECONDS=2 \
+    ROUTECTL_BASE_URL="http://127.0.0.1:$tail_port" \
+    ROUTECTL_DRIVER_RUN="$work/tail-run" \
+    ROUTECTL_DRIVER_WORK="$work/tail-cwd" \
+    ROUTECTL_FIXTURE_CASE_ID=plain-turn-01 \
+    ROUTECTL_FIXTURE_CONFIG_SHA=deadbeef \
+    ROUTECTL_FIXTURE_CONNECTION_MODE=base-url \
+        timeout 60 bash scripts/drivers/claude-code.sh
+) >"$work/tail.stdout" 2>"$work/tail.stderr" || rc=$?
+kill "$tail_listener" 2>/dev/null
+wait "$tail_listener" 2>/dev/null
+check "claude-code: the planted-tail session fails the run" "1" "$rc"
+if grep -qF "$tail_marker" "$work/tail-run/session.log" && grep -qF "$tail_marker" "$work/tail.stderr"; then
+    echo "PASS: claude-code: the plant reached the session log and the quoted tail"
+else
+    fail "claude-code: the plant did not reach both the session log and the quoted tail"
+    sed -n '1,10p' "$work/tail.stderr"
+fi
+check "claude-code: the session log holds the raw plant (ESC bytes present)" \
+    "yes" "$(LC_ALL=C grep -q $'\033' "$work/tail-run/session.log" && echo yes || echo no)"
+check "claude-code: no byte outside tab, newline and printable ASCII reaches stderr" \
+    "0" "$(LC_ALL=C tr -d '\t\n\040-\176' <"$work/tail.stderr" | wc -c | tr -d ' ')"
 rm -rf "$work"
 
 work="$(make_work)"
