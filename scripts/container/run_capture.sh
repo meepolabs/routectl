@@ -66,6 +66,11 @@
 #                         plus ROUTECTL_DRIVER_<PROVIDER>_ACCOUNT_ID for a
 #                         provider whose egress requires an account id
 #
+# A forwarded credential is stripped from the driven client's own
+# environment by capture_driver.sh, but the runner (PID 1) and the daemon
+# share the client's uid, so /proc/<pid>/environ inside the cell still
+# holds it. That residual is accepted; see capture_driver.sh "Drive".
+#
 # THE READ-ONLY REPO IS LOAD-BEARING, not tidiness. A driven agent runs
 # with file tools and permission prompts disabled; a writable repo mount
 # would let the thing under capture edit tracked source, and a capture is

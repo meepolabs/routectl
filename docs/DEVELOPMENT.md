@@ -971,7 +971,10 @@ PROVIDER (`anthropic`, `openai`, `gemini`, `bedrock`, `ollama`), never on
 the lane. The daemon reads the real credentials; the runner removes them,
 and every other credential-shaped variable (`*_API_KEY`, `*_TOKEN`,
 `*_SECRET`, `*CREDENTIALS*`, `AWS_PROFILE`, ...), from the driven client's
-environment before it starts, keeping only the two placeholders.
+environment before it starts, keeping only the two placeholders. That
+keeps a client from picking a real key up natively; it does not hide the
+key from a client that goes looking (see "Residual credential exposure in
+a cell" below).
 
 The header is not prose a rename can silently outdate:
 `scripts/capture_driver.test.sh` derives all three lists from it, derives
@@ -1433,6 +1436,22 @@ it -- `openai-responses` with `auth_kind = "chatgpt-oauth"` REQUIRES the
 seat's ChatGPT account id, so a codex lane config pairs
 `api_key_ref = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"` with
 `account_id_ref = "env://ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID"`.
+
+**Residual credential exposure in a cell.** The runner strips every
+upstream credential from the driven client's own environment, so no
+client picks a provider key up natively and puts it on the daemon's wire
+or into a fixture. That strip is not an isolation boundary against a
+client that deliberately looks. The runner (PID 1 in the cell) and the
+daemon run under the same uid in the same container as the client, so
+their `/proc/<pid>/environ` still holds every forwarded
+`ROUTECTL_DRIVER_<PROVIDER>_*` value, including the seat access token on
+anthropic and openai cells, and a shell tool in the driven agent can
+read it. This is accepted: a cell runs the project's fixed prompts, and
+the agent has the access the operator's own client already has. Stronger
+isolation would need a separate uid for the client, or key delivery that
+never enters a process environment. `scripts/container/run_capture.test.sh`
+pins both sides: the key is absent from the client's environment and
+present in `/proc/1/environ`.
 
 `--provider <name>` (repeatable, default `anthropic`) selects which
 credentials cross the boundary. How each one is obtained depends on whether

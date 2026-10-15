@@ -924,15 +924,25 @@ fi
 # Drive
 # ---------------------------------------------------------------------
 
-# UPSTREAM CREDENTIALS NEVER REACH THE DRIVEN CLIENT. The daemon resolved
-# its lane's credential at boot from its own environment; the client talks
-# only to that daemon and holds a placeholder. A real key left in the
-# driver's environment is readable by the driven agent's shell tools and,
-# worse, read natively by the clients themselves (claude, codex, pi and
-# hermes each pick up provider keys such as ANTHROPIC_API_KEY,
-# OPENAI_API_KEY, CODEX_API_KEY, GEMINI_API_KEY, OLLAMA_API_KEY and the
-# AWS_* Bedrock family), which would put a real upstream credential on the
-# hermetic daemon's wire and into a fixture.
+# UPSTREAM CREDENTIALS ARE STRIPPED FROM THE DRIVEN CLIENT'S ENVIRONMENT.
+# The daemon resolved its lane's credential at boot from its own
+# environment; the client talks only to that daemon and holds a
+# placeholder. The clients read provider keys natively (claude, codex, pi
+# and hermes each pick up names such as ANTHROPIC_API_KEY, OPENAI_API_KEY,
+# CODEX_API_KEY, GEMINI_API_KEY, OLLAMA_API_KEY and the AWS_* Bedrock
+# family), so a real key left in the client's environment would be put on
+# the hermetic daemon's wire and into a fixture. Keeping it out of that
+# environment is the property this strip enforces.
+#
+# It is NOT an isolation boundary against a client that deliberately
+# looks. This script (PID 1 in a capture cell) and the daemon run under
+# the same uid in the same capture cell as the client, so their
+# /proc/<pid>/environ still holds every forwarded upstream credential,
+# including the seat access token on anthropic and openai cells, and a
+# shell tool in the driven agent can read it. That is accepted: a cell
+# runs fixed project prompts, with the access the operator's own client
+# already has. Stronger isolation would need a separate uid for the
+# client, or key delivery that never enters a process environment.
 #
 # Matched by NAME SHAPE rather than listed, because the clients' own lists
 # are long and grow every release: any environment name ending in a

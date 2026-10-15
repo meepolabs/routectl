@@ -355,6 +355,12 @@ report_credential() {
     report_credential openai_account "${ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID:-}"
     report_credential gemini_key "${ROUTECTL_DRIVER_GEMINI_API_KEY:-}"
     report_credential bedrock_key "${ROUTECTL_DRIVER_BEDROCK_API_KEY:-}"
+    # The documented residual: PID 1 (the runner) shares this uid, so its
+    # environment is readable here and still holds what was forwarded.
+    printf 'pid1_cmdline=%s\n' "$(tr '\0' ' ' </proc/1/cmdline 2>/dev/null)"
+    report_credential pid1_bedrock_key \
+        "$(tr '\0' '\n' </proc/1/environ 2>/dev/null |
+            sed -n 's/^ROUTECTL_DRIVER_BEDROCK_API_KEY=//p' | head -1)"
     printf 'seat_at_xdg=%s\n' "$([ -e "$seat_xdg" ] && echo yes || echo no)"
     printf 'seat_at_home=%s\n' "$([ -e "$seat_home" ] && echo yes || echo no)"
     printf 'seat_anywhere=%s\n' \
@@ -1265,7 +1271,7 @@ run_container_legs() {
         fail "the env-sourced openai leg's driver never ran (log: $root.log)"
     fi
 
-    # --- bedrock: env passthrough to the daemon, never the client ------
+    # --- bedrock: env passthrough to the daemon, not the client's env -
     root="$(new_scratch healthy)"
     rc=0
     provider_run "$root" \
@@ -1280,6 +1286,14 @@ run_container_legs() {
             "$(sha_of "$FAKE_BEDROCK_KEY")" "$(daemon_get "$root/land" bedrock_key_sha)"
         check "the bedrock key did not reach the driven client" "no" \
             "$(probe_get "$root/land" bedrock_key_present)"
+        # The strip covers the client's own environment, not the cell: the
+        # runner is PID 1 under the client's uid, so /proc/1/environ still
+        # holds the forwarded key. This is the accepted residual, and the
+        # positive control that the probe above could have seen a key.
+        check "PID 1 in the cell is the capture runner" "yes" \
+            "$(case "$(probe_get "$root/land" pid1_cmdline)" in *capture_driver.sh*) echo yes ;; *) echo no ;; esac)"
+        check "the bedrock key is readable from /proc/1/environ inside the cell" \
+            "$(sha_of "$FAKE_BEDROCK_KEY")" "$(probe_get "$root/land" pid1_bedrock_key_sha)"
     else
         fail "the bedrock leg's driver never ran inside the container (log: $root.log)"
     fi
