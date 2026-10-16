@@ -211,37 +211,111 @@ chmod +x "$KEYS"
 TURN_COUNT="$(driver_case_turns "$CASE_FILE" | wc -l)"
 SESSION_BUDGET=$((SETTLE_SECONDS + TURN_COUNT * (SUBMIT_SECONDS + TURN_SECONDS) + SUBMIT_SECONDS + EXIT_SECONDS + EXIT_GRACE_SECONDS))
 
+# Seconds the driver waits for the pty's session leader to report in.
+HANDSHAKE_SECONDS=30
+
+# Open `path` (a fifo) as a read-only and a write-only descriptor without
+# blocking: a read-write open first gives each end a peer, and is dropped.
+# The read-only end is what lets a reader see EOF once every writer closes.
+open_fifo_pair() {
+  local path="$1" hold
+  exec {hold}<>"$path"
+  exec {FIFO_READ}<"$path" {FIFO_WRITE}>"$path"
+  exec {hold}<&-
+}
+
+# Why `sid` cannot be the client's session, or nothing when it can. The id
+# came off a pipe only the session leader held, and is still checked
+# against what this driver started: a pid in its own session, other than
+# the driver's, whose parent is the `script` that `timeout` (the driver's
+# own child, `pty_pid`) is running.
+session_leader_problem() {
+  local sid="$1" stat own_sid leader_ppid leader_session script_ppid _x
+  case "$sid" in
+    '' | *[!0-9]* | ??????????*) echo "the leader reported '$sid', not a pid"; return ;;
+  esac
+  [ "$sid" -gt 1 ] || { echo "the leader reported pid $sid"; return; }
+  stat="$(driver_proc_stat "$$")" || { echo "the driver cannot read its own session"; return; }
+  read -r _x own_sid _x <<<"$stat"
+  [ "$sid" != "$own_sid" ] || { echo "pid $sid is the driver's own session"; return; }
+  stat="$(driver_proc_stat "$sid")" || { echo "pid $sid is not running"; return; }
+  read -r leader_ppid leader_session _x <<<"$stat"
+  [ "$leader_session" = "$sid" ] || { echo "pid $sid does not lead its own session"; return; }
+  stat="$(driver_proc_stat "$leader_ppid")" || { echo "the parent of pid $sid is not running"; return; }
+  read -r script_ppid _x <<<"$stat"
+  [ "$script_ppid" = "$pty_pid" ] || echo "pid $sid was not started by this driver's pty"
+}
+
+# Stop a pty whose leader never proved itself: closing the ack makes the
+# leader exit without starting the client, and the driver's own children
+# are ended directly. Then fail the run.
+abort_pty() {
+  exec {ack_w}>&-
+  kill -TERM "$pty_pid" 2>/dev/null || true
+  kill -TERM -- "-$keys_pid" 2>/dev/null || true
+  wait "$pty_pid" "$keys_pid" 2>/dev/null || true
+  driver_die "client session handshake failed: $1" 1
+}
+
 # End every process left in the client's pty session: TERM, a short wait,
 # then KILL. Ending `script` alone is not enough -- it signals only its
 # direct child, so a client that ignores TERM, or a child it moved into a
 # process group of its own, would outlive the run. The session id survives
 # both, and only processes the client's session spawned carry it.
 end_client_session() {
-  local sid waited=0
-  sid="$(cat "$SESSION_ID_FILE" 2>/dev/null)" || return 0
-  case "$sid" in ''|*[!0-9]*) return 0 ;; esac
-  # shellcheck disable=SC2046
-  kill -TERM $(driver_session_pids "$sid") 2>/dev/null || true
-  while [ -n "$(driver_session_pids "$sid")" ] && [ "$waited" -lt "$KILL_AFTER_SECONDS" ]; do
+  local waited=0
+  driver_signal_session TERM "$leader_sid"
+  while [ -n "$(driver_session_pids "$leader_sid")" ] && [ "$waited" -lt "$KILL_AFTER_SECONDS" ]; do
     sleep 1
     waited=$((waited + 1))
   done
-  # shellcheck disable=SC2046
-  kill -KILL $(driver_session_pids "$sid") 2>/dev/null || true
+  driver_signal_session KILL "$leader_sid"
 }
 
 # `script -q -c <cmd> /dev/null` gives the client a real pty while stdin
 # stays ours to write into. The typescript goes to /dev/null: the capture
 # sink is the daemon's trace, and a terminal transcript would only add a
-# file full of escape sequences to scrub. The shell `script` starts on the
-# pty leads a new session, so its pid, recorded before it execs the client,
-# is the session id `end_client_session` sweeps.
-SESSION_ID_FILE="$ROUTECTL_DRIVER_RUN/client-session.id"
-pty_command="printf '%s' \"\$\$\" >$(printf '%q' "$SESSION_ID_FILE"); exec $(printf '%q ' "${argv[@]}")"
+# file full of escape sequences to scrub.
+#
+# The shell `script` starts on the pty leads a new session, and that
+# session id is what `end_client_session` sweeps. The leader hands it over
+# on fd 9, an unlinked pipe, closes fd 9, and starts the client only after
+# the driver acknowledges on fd 8. Nothing the client can write is ever
+# read back: the driver reads one line, and the leader's line is written
+# before the client exists.
+pty_dir="$(mktemp -d "$ROUTECTL_DRIVER_RUN/pty.XXXXXX")"
+mkfifo "$pty_dir/handshake" "$pty_dir/ack" "$pty_dir/keys"
+open_fifo_pair "$pty_dir/handshake"
+hs_r="$FIFO_READ" hs_w="$FIFO_WRITE"
+open_fifo_pair "$pty_dir/ack"
+ack_r="$FIFO_READ" ack_w="$FIFO_WRITE"
+rm -f "$pty_dir/handshake" "$pty_dir/ack"
+
+pty_command="printf '%s\\n' \"\$\$\" >&9; exec 9>&-; IFS= read -r go <&8; exec 8<&-; [ \"\$go\" = go ] || exit 97; exec $(printf '%q ' "${argv[@]}")"
+
+setsid "$KEYS" >"$pty_dir/keys" {hs_r}<&- {hs_w}>&- {ack_r}<&- {ack_w}>&- &
+keys_pid=$!
+timeout --kill-after="$KILL_AFTER_SECONDS" "$SESSION_BUDGET" \
+  script -q -e -c "$pty_command" /dev/null <"$pty_dir/keys" >"$ROUTECTL_DRIVER_RUN/session.log" 2>&1 \
+  9>&"$hs_w" 8<&"$ack_r" {hs_r}<&- {hs_w}>&- {ack_r}<&- {ack_w}>&- &
+pty_pid=$!
+exec {hs_w}>&- {ack_r}<&-
+
+leader_sid=""
+IFS= read -r -t "$HANDSHAKE_SECONDS" -u "$hs_r" leader_sid ||
+  { exec {hs_r}<&-; abort_pty "the pty's session leader reported no pid within ${HANDSHAKE_SECONDS}s"; }
+exec {hs_r}<&-
+leader_problem="$(session_leader_problem "$leader_sid")"
+[ -z "$leader_problem" ] || abort_pty "$leader_problem"
+printf 'go\n' >&"$ack_w"
+exec {ack_w}>&-
+
 rc=0
-"$KEYS" | timeout --kill-after="$KILL_AFTER_SECONDS" "$SESSION_BUDGET" \
-  script -q -e -c "$pty_command" /dev/null >"$ROUTECTL_DRIVER_RUN/session.log" 2>&1 || rc=$?
+wait "$pty_pid" || rc=$?
 end_client_session
+kill -TERM -- "-$keys_pid" 2>/dev/null || true
+wait "$keys_pid" 2>/dev/null || true
+rm -rf "$pty_dir"
 
 if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
   # The tail is client output headed for an operator's terminal, so it is

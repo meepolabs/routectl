@@ -54,19 +54,41 @@ driver_processes_matching() {
   done
 }
 
-# PIDs of every process in session `sid`, one per line, read from
-# /proc/<pid>/stat like the probe above. The command name in that file is
+# `ppid session starttime` of process `pid`, read from /proc/<pid>/stat;
+# fails when the process is gone. The command name in that file is
 # parenthesised and may hold spaces or parentheses, so the fields are read
-# after its LAST `) `; the session id is the fourth of them.
+# after its LAST `) `.
+driver_proc_stat() {
+  local stat rest fields
+  stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+  rest="${stat##*) }"
+  read -r -a fields <<<"$rest"
+  [ "${#fields[@]}" -ge 20 ] || return 1
+  printf '%s %s %s\n' "${fields[1]}" "${fields[3]}" "${fields[19]}"
+}
+
+# PIDs of every process in session `sid`, one per line.
 driver_session_pids() {
-  local sid="$1" dir stat rest _state _ppid _pgrp session
+  local sid="$1" dir stat _ppid session _start
   for dir in /proc/[0-9]*; do
-    stat="$(cat "$dir/stat" 2>/dev/null)" || continue
-    rest="${stat##*) }"
-    read -r _state _ppid _pgrp session _ <<<"$rest"
+    stat="$(driver_proc_stat "${dir#/proc/}")" || continue
+    read -r _ppid session _start <<<"$stat"
     [ "$session" = "$sid" ] && printf '%s\n' "${dir#/proc/}"
   done
   return 0
+}
+
+# Send `signal` to every process in session `sid`, rereading each one's
+# session immediately before signalling it so a pid that exited and was
+# reused by an unrelated process in the meantime is left alone.
+driver_signal_session() {
+  local signal="$1" sid="$2" pid stat _ppid session _start
+  for pid in $(driver_session_pids "$sid"); do
+    stat="$(driver_proc_stat "$pid")" || continue
+    read -r _ppid session _start <<<"$stat"
+    [ "$session" = "$sid" ] || continue
+    kill "-$signal" "$pid" 2>/dev/null || true
+  done
 }
 
 # Fail closed on the runner's contract rather than on a downstream

@@ -1652,6 +1652,10 @@ SH
 # `STUB_CLIENT_HANG_MODE` makes the hang hostile: `ignore-term` ignores
 # TERM, HUP and INT; `grandchild` also leaves a child that moved into its
 # own process group and ignores the same signals.
+# `STUB_CLIENT_FORGE_SID`, when set to a pid, makes the client try to steer
+# the driver's sweep onto that pid's session: it writes the pid into every
+# file in the run directory that held one before, and into fd 9, the
+# descriptor the session leader reported on.
 write_stub_client() {
     cat >"$1" <<'SH'
 #!/usr/bin/env bash
@@ -1687,6 +1691,14 @@ stdin_bytes="$(cat | wc -c | tr -d ' ')"
         "$(wc -l filler-*.txt 2>/dev/null | awk '$2!="total"{if($1>m)m=$1}END{print m+0}')"
     printf 'invocation table=%s\n' "$([ -f reference-table.txt ] && echo yes || echo no)"
 } >>"$CLIENT_OUT"
+if [ -n "${STUB_CLIENT_FORGE_SID:-}" ]; then
+    printf '%s' "$STUB_CLIENT_FORGE_SID" >"$ROUTECTL_DRIVER_RUN/client-session.id" 2>/dev/null
+    for forged in "$ROUTECTL_DRIVER_RUN"/pty.*/*; do
+        [ -p "$forged" ] || [ -f "$forged" ] || continue
+        timeout 1 sh -c 'printf "%s\n" "$1" >"$2"' _ "$STUB_CLIENT_FORGE_SID" "$forged" 2>/dev/null
+    done
+    { printf '%s\n' "$STUB_CLIENT_FORGE_SID" >&9; } 2>/dev/null
+fi
 if [ -n "${STUB_CLIENT_HANG:-}" ]; then
     [ -z "${STUB_CLIENT_PLANT:-}" ] || printf '%b' "$STUB_CLIENT_PLANT"
     case "${STUB_CLIENT_HANG_MODE:-}" in
@@ -3353,6 +3365,105 @@ check "claude-code: the session log holds the raw plant (ESC bytes present)" \
 check "claude-code: no byte outside tab, newline and printable ASCII reaches stderr" \
     "0" "$(LC_ALL=C tr -d '\t\n\040-\176' <"$work/tail.stderr" | wc -c | tr -d ' ')"
 rm -rf "$work"
+
+# THE SWEEP NEVER LEAVES THE CLIENT'S SESSION. A client can write to the run
+# directory and anything else it inherited, so it forges every handover the
+# driver could read, naming an unrelated session leader started here. That
+# bystander must still be alive after the run, and the client's own
+# processes must not be.
+work="$(make_work)"
+canned_trace >"$work/canned-trace.log"
+bystander_needle="routectl-stub-bystander-$$-$RANDOM"
+setsid bash -c "exec -a '$bystander_needle' sleep 120" </dev/null >/dev/null 2>&1 &
+bystander_pid=$!
+sleep 0.3
+check "the bystander leads a session of its own" "$bystander_pid" \
+    "$(. "$DRIVERS/lib/common.sh"; driver_proc_stat "$bystander_pid" | cut -d' ' -f2)"
+forge_needle="routectl-stub-forging-client-$$-$RANDOM"
+: >"$work/forge.pids"
+rc=0
+STUB_CLIENT_HANG="$forge_needle" STUB_CLIENT_HANG_MODE=grandchild \
+STUB_CLIENT_FORGE_SID="$bystander_pid" STUB_CLIENT_PID_FILE="$work/forge.pids" \
+ROUTECTL_DRIVER_EXIT_GRACE_SECONDS=2 \
+    timeout 60 bash -c "$(declare -f driver_run free_port free_port_pair); driver_run \"\$@\"" _ \
+    "$work" claude-code.sh plain-turn-01 || rc=$?
+check_ne "claude-code (forged session id): the hung run fails" "0" "$rc"
+check_ne "claude-code (forged session id): the suite's own bound did not have to end the run" "124" "$rc"
+if [ -d "/proc/$bystander_pid" ] &&
+    tr '\0' ' ' <"/proc/$bystander_pid/cmdline" 2>/dev/null | grep -qF -- "$bystander_needle"; then
+    echo "PASS: claude-code (forged session id): the named bystander session is untouched"
+else
+    fail "claude-code (forged session id): the driver signalled the session the client named"
+fi
+check "claude-code (forged session id): the stub recorded both pids it left running" \
+    "2" "$(grep -c '^[0-9][0-9]*$' "$work/forge.pids")"
+forge_survivors=""
+while IFS= read -r forge_pid; do
+    if [ -n "$forge_pid" ] && [ -d "/proc/$forge_pid" ] &&
+        tr '\0' ' ' <"/proc/$forge_pid/cmdline" 2>/dev/null | grep -qF -- "$forge_needle"; then
+        forge_survivors="$forge_survivors $forge_pid"
+        kill -KILL "$forge_pid" 2>/dev/null
+    fi
+done <"$work/forge.pids"
+check "claude-code (forged session id): no process of the client's own session survived" \
+    "" "$forge_survivors"
+kill -KILL "$bystander_pid" 2>/dev/null
+wait "$bystander_pid" 2>/dev/null
+kept="$(kept_run "$work")"
+[ -n "$kept" ] && rm -rf "$kept"
+rm -rf "$work"
+
+# A HANDOVER THAT FAILS IS LOUD. The pty's leader reports its session on fd
+# 9; a leader that reports nothing, or a pid that is not the session it
+# leads, stops the run with a named driver error before any client starts,
+# rather than running a session the driver could not end. Each row swaps
+# the report through the `script` binary the driver resolves from PATH.
+# `silent` waits out the driver's 30s handshake read: the pipe's write end
+# is still held by the `timeout` above the leader, so no EOF arrives early.
+# `unrelated` names a real session leader the driver did not start, which
+# only the ancestry check can tell apart from the pty's own.
+setsid bash -c "exec -a 'routectl-stub-handshake-bystander-$$' sleep 300" </dev/null >/dev/null 2>&1 &
+handshake_bystander=$!
+for handshake_row in "silent:exec 9>&-" "forged:printf '1\\n' >&9; exec 9>&-" \
+    "foreign:printf '%s\\n' \"\$PPID\" >&9; exec 9>&-" \
+    "unrelated:printf '%s\\n' $handshake_bystander >&9; exec 9>&-"; do
+    row_name="${handshake_row%%:*}"
+    row_report="${handshake_row#*:}"
+    work="$(make_work)"
+    canned_trace >"$work/canned-trace.log"
+    mkdir -p "$work/script-bin"
+    cat >"$work/script-bin/script" <<SCRIPT
+#!/usr/bin/env bash
+# Runs the leader's report, then sits on the ack like a real leader would.
+$row_report
+IFS= read -r go <&8
+[ "\$go" = go ] || exit 97
+printf 'client-started\n' >>"$work/client-started"
+exit 0
+SCRIPT
+    chmod +x "$work/script-bin/script"
+    rc=0
+    PATH="$work/script-bin:$PATH" \
+        timeout 60 bash -c "$(declare -f driver_run free_port free_port_pair); driver_run \"\$@\"" _ \
+        "$work" claude-code.sh plain-turn-01 || rc=$?
+    check_ne "claude-code (handshake $row_name): the run fails" "0" "$rc"
+    check_ne "claude-code (handshake $row_name): the suite's own bound did not have to end it" "124" "$rc"
+    if grep -qF 'client session handshake failed' "$work/runner.log"; then
+        echo "PASS: claude-code (handshake $row_name): the failure names the handshake"
+    else
+        fail "claude-code (handshake $row_name): the failure did not name the handshake"
+        sed -n '1,20p' "$work/runner.log"
+    fi
+    check "claude-code (handshake $row_name): the client was never started" \
+        "no" "$([ -f "$work/client-started" ] && echo yes || echo no)"
+    kept="$(kept_run "$work")"
+    [ -n "$kept" ] && rm -rf "$kept"
+    rm -rf "$work"
+done
+check "the handshake bystander is still running" "yes" \
+    "$([ -d "/proc/$handshake_bystander" ] && echo yes || echo no)"
+kill -KILL "$handshake_bystander" 2>/dev/null
+wait "$handshake_bystander" 2>/dev/null
 
 work="$(make_work)"
 # A front-proxy fixture must prove TRANSIT, not just intent: the rig refuses
