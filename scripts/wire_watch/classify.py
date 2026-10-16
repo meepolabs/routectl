@@ -17,10 +17,19 @@ Order, first that applies:
   6. An upstream refusal (refusal_rules.tsv)       its NOT_RUN / FAILED, and
                                                    no finding rows
   7. Traced ingress lacks the expected one         FAILED(ingress)
-  8. Loss counters the shown loss findings do not account for exactly,
-     per (lane, path_class) (the daemon's finding ring dropped some, or
-     the health panel's status window hid them)
+  8. Retained loss findings a (lane, path_class) counter does not cover:
+     no positive counter, or a counter below them (the rows disagree)
                                                    INCOMPLETE(findings-truncated)
+     Every counter at or above its retained findings and one above it
+     (the daemon's 128-entry finding ring overflowed)
+                                                   FINDING, the retained rows
+                                                   plus one per short (lane,
+                                                   path_class): leg `unknown`,
+                                                   no path, count = counter -
+                                                   retained; a short counter
+                                                   with a label outside the
+                                                   daemon's vocabulary is
+                                                   INCOMPLETE(snapshot-shape)
   9. Any loss row or finding, unrepaired rejection, local refusal,
      nonzero rc_parser_unlocalized_total, nonzero
      rc_field_verdicts_learned_total, or any learned_negatives row (the
@@ -38,7 +47,7 @@ Public API
   Finding, CellResult, Context    frozen dataclasses
   classify(entry, cell_dir, ctx)  CellResult
   is_wire_path(path)              whether a path has the daemon's pointer shape
-  LEGS, PATH_CLASSES, REJECTION_CLASS, PARSER_UNLOCALIZED, VERDICTS_LEARNED
+  LEGS, LEG_UNKNOWN, PATH_CLASSES, REJECTION_CLASS, PARSER_UNLOCALIZED, VERDICTS_LEARNED
 """
 
 from __future__ import annotations
@@ -62,6 +71,9 @@ from ledger import CellState, Entry, Outcome  # noqa: E402
 from legs import NONE_CAPTURED, legs_captured  # noqa: E402
 
 LEGS = ("request", "response")
+# The leg of an overflow finding: the counters say how many losses the
+# ring dropped, never on which leg.
+LEG_UNKNOWN = "unknown"
 # Replicas of the daemon's closed labels (routectl-core wire_check);
 # test_report welds them to the Rust source. A label outside them makes the
 # cell INCOMPLETE rather than a finding under a name nobody reads.
@@ -103,7 +115,10 @@ class Finding:
     lane: str
     leg: str
     path_class: str
-    path: str
+    # None only on an overflow finding, which stands for losses whose rows
+    # the daemon's ring dropped.
+    path: Optional[str]
+    count: int = 1
 
 
 @dataclass(frozen=True)
@@ -223,17 +238,25 @@ def _rows(ev: CellEvidence) -> _Rows:
     )
 
 
-def _losses_attributed(rows: _Rows) -> bool:
-    """Whether the retained loss findings account for every counted loss.
-    The daemon counts each loss and keeps its finding in a bounded ring
-    that drops the oldest first, and the health panel shows only the
-    findings inside its status window while the counters stay cumulative.
-    Either way a counter above the shown findings of its (lane, path_class)
-    means details are missing and the findings table would undercount; a
-    counter below them means the rows disagree."""
+def _overflow(rows: _Rows) -> Optional[Tuple[Finding, ...]]:
+    """The findings the daemon's ring dropped, one per (lane, path_class)
+    whose loss counter is above its retained loss findings; None when the
+    rows disagree. The daemon counts each loss and keeps its finding in a
+    ring of the newest 128 per kind, so a counter may run past its
+    retained findings; a retained (lane, path_class) with no positive
+    counter, or a counter below its retained findings, cannot happen on
+    an overflow and means the rows cannot be attributed."""
     retained = Counter((f.lane, f.path_class) for f in rows.findings if f.path_class != REJECTION_CLASS)
     counted = {key: count for key, count in rows.loss_counts if count > 0}
-    return counted == dict(retained)
+    if any(counted.get(key, 0) < n for key, n in retained.items()):
+        return None
+    short = [(key, count - retained[key]) for key, count in counted.items() if count > retained[key]]
+    for (lane, path_class), _ in short:
+        if not LANE_LABEL_RE.fullmatch(lane):
+            raise _Shape("lane")
+        if path_class not in PATH_CLASSES:
+            raise _Shape("path_class")
+    return tuple(Finding(lane, LEG_UNKNOWN, path_class, None, n) for (lane, path_class), n in sorted(short))
 
 
 def _cell_end(cell_dir: str) -> Optional[datetime]:
@@ -294,9 +317,16 @@ def _has_finding(rows: _Rows, counters: Mapping[str, int]) -> bool:
     )
 
 
+def _retained_losses(rows: _Rows) -> int:
+    return sum(1 for f in rows.findings if f.path_class != REJECTION_CLASS)
+
+
 def _loss_summary(rows: _Rows) -> str:
-    retained = sum(1 for f in rows.findings if f.path_class != REJECTION_CLASS)
-    return f"{rows.losses} losses counted, {retained} findings retained (ring or window)"
+    return f"{rows.losses} losses counted, {_retained_losses(rows)} findings retained (ring or window)"
+
+
+def _overflow_summary(rows: _Rows) -> str:
+    return f"{_retained_losses(rows)} of {rows.losses} losses detailed (finding ring full)"
 
 
 def _check_summary(checks: Sequence[Tuple[str, int]]) -> str:
@@ -322,8 +352,15 @@ def _from_evidence(base: CellResult, cell_dir: str, ev: CellEvidence, ctx: Conte
         return replace(base, outcome=rule.outcome, reason=rule.reason, refused_by=error)
     if entry.spec.expected_ingress not in ev.ingress_kinds:
         return replace(base, outcome=Outcome.FAILED, reason="ingress")
-    if not _losses_attributed(rows):
+    try:
+        overflow = _overflow(rows)
+    except _Shape as shape:
+        return replace(base, reason=IncompleteReason.SNAPSHOT_SHAPE.value, detail=f"health.json {shape}")
+    if overflow is None:
         return replace(base, reason=FINDINGS_TRUNCATED, detail=_loss_summary(rows))
+    if overflow:
+        return replace(base, outcome=Outcome.FINDING, findings=rows.findings + overflow,
+                       detail=_overflow_summary(rows))
     if _has_finding(rows, counters):
         return replace(base, outcome=Outcome.FINDING, findings=rows.findings)
     if ev.driver_rc != 0:

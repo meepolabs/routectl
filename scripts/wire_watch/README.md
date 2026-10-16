@@ -182,10 +182,10 @@ the runner's exit code:
 | Outcome | When |
 |---|---|
 | `NOT_RUN(reason)`, `TIMEOUT`, `CAP_REACHED`, `INTERRUPTED` | the ledger already says so (an `EXITED` cell whose detail is a stop, `ledger.STOP_DETAILS`, reads as that stop) |
-| `INCOMPLETE(reason)` | the cell never finished, or its evidence is missing, truncated, at an unknown schema, or holds a row the report cannot read; or its loss counters exceed (or fall short of) the loss findings the health panel shows, so the rows cannot be attributed (`findings-truncated`): the daemon's 128-entry finding ring drops the oldest, and the panel shows only findings inside its status window while the counters are cumulative; or the daemon counted no clean wire check, or a check did not end clean |
+| `INCOMPLETE(reason)` | the cell never finished, or its evidence is missing, truncated, at an unknown schema, or holds a row the report cannot read; or it retains loss findings for a (lane, path_class) whose loss counter is absent, zero or below them, so the rows disagree (`findings-truncated`); or the daemon counted no clean wire check, or a check did not end clean |
 | `NOT_RUN(model-access)`, `FAILED(credential)`, `FAILED(permission)` | an upstream refusal matched `refusal_rules.tsv` (below); its wire rows are not reported |
 | `FAILED(ingress)` | the traced ingress dialect is not the one the row expects |
-| `FINDING` | any loss row or finding, unrepaired rejection, local refusal, learned negative, nonzero `rc_parser_unlocalized_total` or nonzero `rc_field_verdicts_learned_total` |
+| `FINDING` | any loss row or finding, unrepaired rejection, local refusal, learned negative, nonzero `rc_parser_unlocalized_total` or nonzero `rc_field_verdicts_learned_total`; when a loss counter runs past its retained findings (the daemon's 128-entry finding ring per kind dropped the oldest), the cell's findings add one row per short (lane, path_class) at leg `unknown` with no path, counting the difference, and its detail reads `<retained> of <counted> losses detailed (finding ring full)` |
 | `FAILED(driver)` | the driver exited nonzero with nothing else to report |
 | `PASS` | everything above is clean and at least one clean check was counted |
 
@@ -214,7 +214,9 @@ client response -- so a leg no trace captured (a refused capture, or a stream
 egress that traces no body) reads as `no`, never as clean.
 
 `findings.jsonl` has one object per (lane, path_class, leg): `count`, up to
-10 `example_paths`, and the `cells`. It is ASCII (`json.dumps` with
+10 `example_paths`, and the `cells`. Losses a full finding ring dropped
+count under leg `unknown` with empty `example_paths`, so the counts per
+(lane, path_class) equal the daemon's loss counters. It is ASCII (`json.dumps` with
 `ensure_ascii`), one object per line, and holds the raw strings: anything
 that renders them as Markdown escapes them with `mdtext.esc` first.
 

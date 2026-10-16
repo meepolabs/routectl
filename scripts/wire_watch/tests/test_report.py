@@ -89,6 +89,27 @@ def _with_loss(data: dict) -> None:
     data["wire_check"] = rc.recorded_doc("request-leg-plant")["data"]["wire_check"]
 
 
+RING_LANE = "responses->openai-responses"
+
+
+def ring_health(counters: Sequence[tuple], retained: Sequence[tuple], lane: str = RING_LANE,
+                counter_lane: Optional[str] = None) -> str:
+    """request-leg-plant with its loss counters and retained loss findings
+    replaced: `counters` are (path_class, count) rows, `retained` are
+    (path_class, how many findings) with one distinct indexed path each,
+    the shape a long tool session leaves once the daemon's 128-entry
+    finding ring is full."""
+    def edit(data: dict) -> None:
+        wc = data["wire_check"]
+        template = wc["loss_findings"][0]
+        wc["loss"] = [dict(wc["loss"][0], lane=counter_lane or lane, path_class=cls, count=n)
+                      for cls, n in counters]
+        wc["loss_findings"] = [dict(template, lane=lane, path_class=cls, path=f"/input/{i}/name")
+                               for cls, n in retained for i in range(n)]
+
+    return rc.edited_health("request-leg-plant", edit)
+
+
 KEY_FILE_NAME = "bedrock-api-key.us-west-2"
 
 
@@ -192,31 +213,22 @@ class IncompleteEvidenceTests(RunCase):
         self.assert_incomplete(plant("clean-control", health=rc.edited_health("clean-control", zero_checks)),
                                "wire-check")
 
-    def test_a_loss_counter_beyond_the_retained_findings_is_incomplete(self) -> None:
-        # The daemon bumps rc_wire_loss_total{lane,path_class} and pushes one
-        # finding on every loss (crates/routectl-router/src/wire_check_state.rs:451-454)
-        # into a ring that keeps the newest 128 (same file, :47 and :276-277),
-        # and the health panel keeps only findings inside the status window
-        # while the counters stay cumulative
-        # (crates/routectl-cli/src/handlers/status/wire_check_rows.rs:130-136);
-        # 129 losses with no retained finding cannot be attributed to a leg.
-        def dropped(data: dict) -> None:
-            data["wire_check"]["loss"] = [{"lane": "responses->openai-responses", "path_class": "missing",
-                                           "count": 129, "last_seen_unix_secs": 1}]
-            data["wire_check"]["loss_findings"] = []
-
-        result = self.one(plant("request-leg-plant", health=rc.edited_health("request-leg-plant", dropped)))
-
-        self.assertEqual((result.outcome, result.reason, result.detail),
-                         (Outcome.INCOMPLETE, "findings-truncated",
-                          "129 losses counted, 0 findings retained (ring or window)"))
-
-    def test_retained_findings_beyond_the_loss_counter_are_incomplete(self) -> None:
-        def extra(data: dict) -> None:
-            data["wire_check"]["loss"] = []
-
-        self.assert_incomplete(plant("request-leg-plant", health=rc.edited_health("request-leg-plant", extra)),
-                               "findings-truncated")
+    def test_retained_findings_the_loss_counters_do_not_cover_are_incomplete(self) -> None:
+        cases = [
+            ("counter-below-retained", [("missing", 1)], [("missing", 2)], "1 losses counted, 2 findings retained"),
+            ("retained-without-counter", [], [("missing", 1)], "0 losses counted, 1 findings retained"),
+            ("zero-counter", [("missing", 0)], [("missing", 1)], "0 losses counted, 1 findings retained"),
+            ("one-class-short-other-over", [("missing", 200), ("added", 4)], [("missing", 128), ("added", 5)],
+             "204 losses counted, 133 findings retained"),
+        ]
+        for name, counters, retained, detail in cases:
+            with self.subTest(name):
+                self.fresh()
+                built = self.build([plant("request-leg-plant", health=ring_health(counters, retained))])
+                result = built.results[0]
+                self.assertEqual((result.outcome, result.reason, result.detail),
+                                 (Outcome.INCOMPLETE, "findings-truncated", detail + " (ring or window)"))
+                self.assertFalse(built.complete)
 
     def test_a_path_outside_the_daemon_pointer_grammar_is_incomplete(self) -> None:
         hostile = (
@@ -268,6 +280,105 @@ class IncompleteEvidenceTests(RunCase):
 
         self.assertFalse(built.complete)
         self.assertIn("different `cells.tsv`", built.files[report.REPORT_MD])
+
+
+class RingOverflowTests(RunCase):
+    """The daemon bumps rc_wire_loss_total{lane,path_class} and pushes one
+    finding per loss into a ring that keeps the newest 128 per kind
+    (crates/routectl-router/src/wire_check_state.rs), so a long session's
+    counters run past its retained findings."""
+
+    def test_counters_past_the_retained_findings_are_a_finding_whose_totals_match_the_counters(self) -> None:
+        health = ring_health([("missing", 200), ("added", 5)], [("missing", 128), ("added", 5)])
+
+        built = self.build([plant("request-leg-plant", health=health)])
+
+        self.assertEqual(built.results[0].outcome, Outcome.FINDING)
+        totals: dict = {}
+        for row in self.findings(built):
+            key = (row["lane"], row["path_class"])
+            totals[key] = totals.get(key, 0) + row["count"]
+        self.assertEqual(totals, {(RING_LANE, "missing"): 200, (RING_LANE, "added"): 5})
+
+    def test_each_short_counter_gets_one_unknown_leg_row_without_example_paths(self) -> None:
+        cases = [
+            ("one-class-short", [("missing", 200), ("added", 5)], [("missing", 128), ("added", 5)],
+             [("missing", 72)]),
+            ("nothing-retained", [("missing", 129)], [], [("missing", 129)]),
+            ("two-classes-short", [("missing", 300), ("changed", 40)], [("missing", 100), ("changed", 28)],
+             [("changed", 12), ("missing", 200)]),
+        ]
+        for name, counters, retained, expected in cases:
+            with self.subTest(name):
+                self.fresh()
+                rows = self.findings(self.build([plant("request-leg-plant", health=ring_health(counters, retained))]))
+                overflow = [(r["lane"], r["path_class"], r["count"], r["example_paths"])
+                            for r in rows if r["leg"] == classify.LEG_UNKNOWN]
+                self.assertEqual(overflow, [(RING_LANE, cls, n, []) for cls, n in expected])
+
+    def test_counters_matching_the_retained_findings_add_no_overflow_row(self) -> None:
+        built = self.build([plant("request-leg-plant", health=ring_health([("missing", 3)], [("missing", 3)]))])
+
+        rows = self.findings(built)
+
+        self.assertEqual([(r["leg"], r["count"]) for r in rows], [("request", 3)])
+        self.assertIsNone(built.results[0].detail)
+
+    def test_an_overflow_cell_leaves_the_report_complete_and_names_retained_of_counted(self) -> None:
+        overflow = plant("request-leg-plant",
+                         health=ring_health([("missing", 200), ("added", 5)], [("missing", 128), ("added", 5)]))
+
+        built = self.build([overflow, plant("clean-control")])
+
+        self.assertTrue(built.complete)
+        text = built.files[report.REPORT_MD]
+        self.assertIn("Status: COMPLETE", text)
+        row = next(line for line in text.splitlines() if line.startswith("| " + mdtext.esc(overflow.cell_id) + " |"))
+        self.assertIn("| FINDING |", row)
+        self.assertIn(mdtext.esc("133 of 205 losses detailed (finding ring full)"), row)
+        self.assertIn(f"| {mdtext.esc(RING_LANE)} | missing | unknown | 72 |  | ", text)
+
+    def test_overflow_counter_labels_outside_the_daemon_vocabulary_are_refused_and_shown_nowhere(self) -> None:
+        cases = [
+            ("pipe-lane", "responses->x|y", "missing"),
+            ("esc-lane", "responses->x\x1b]0;owned\x07", "missing"),
+            ("newline-lane", "responses->x\n| forged |", "missing"),
+            ("unknown-class", RING_LANE, "vanished|\x1b[31m"),
+        ]
+        for name, lane, path_class in cases:
+            with self.subTest(name):
+                self.fresh()
+
+                def hostile(data: dict) -> None:
+                    data["wire_check"]["loss"].append({"lane": lane, "path_class": path_class, "count": 7,
+                                                       "last_seen_unix_secs": 1})
+
+                health = rc.edited_health("request-leg-plant", hostile)
+                self.assertIn(json.dumps(lane)[1:-1], health)
+                self.assertIn(json.dumps(path_class)[1:-1], health)
+                built = self.build([plant("request-leg-plant", health=health)])
+                result = built.results[0]
+                self.assertEqual((result.outcome, result.reason), (Outcome.INCOMPLETE, "snapshot-shape"))
+                for text in built.files.values():
+                    self.assertNotIn("\x1b", text)
+                    self.assertNotIn("vanished", text)
+                    self.assertNotIn("responses->x", text)
+                    self.assertNotIn("forged", text)
+
+    def test_rules_six_and_seven_still_win_over_an_overflow(self) -> None:
+        health = ring_health([("missing", 200)], [("missing", 128)])
+        cases = [
+            ("refusal", converse(health=health, errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),)),
+             (Outcome.NOT_RUN, "model-access")),
+            ("ingress", plant("request-leg-plant", health=health, trace_ingress="anthropic"),
+             (Outcome.FAILED, "ingress")),
+        ]
+        for name, plan, expected in cases:
+            with self.subTest(name):
+                self.fresh()
+                built = self.build([plan])
+                self.assertEqual((built.results[0].outcome, built.results[0].reason), expected)
+                self.assertEqual(self.findings(built), [])
 
 
 class FindingTests(RunCase):

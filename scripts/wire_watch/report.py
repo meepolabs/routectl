@@ -13,7 +13,10 @@ landed fixture legs) -- gives every cell exactly one final outcome
                   tokens and which of the four wire legs were captured
   findings.jsonl  one JSON object per (lane, path_class, leg): count,
                   up to 10 example paths, the cell ids; ASCII-only
-                  (json.dumps ensure_ascii), one object per line
+                  (json.dumps ensure_ascii), one object per line. The
+                  losses a full finding ring dropped count under leg
+                  `unknown` with no example path, so the counts per
+                  (lane, path_class) equal the daemon's loss counters
 
 cells/<cell-id>.runner.log is never opened: it is the runner's raw
 output and may hold the cell's key. Only the ledger and the files under
@@ -211,8 +214,9 @@ def finding_rows(results: Sequence[CellResult]) -> List[FindingRow]:
             continue
         for f in result.findings:
             key = (f.lane, f.path_class, f.leg)
-            counts[key] += 1
-            paths[key].add(f.path)
+            counts[key] += f.count
+            if f.path is not None:
+                paths[key].add(f.path)
             cells[key].add(result.entry.spec.id)
     return [
         FindingRow(lane, cls, leg, counts[(lane, cls, leg)],
@@ -328,7 +332,7 @@ def container_texts(results: Sequence[CellResult]) -> List[str]:
     texts: List[str] = []
     for r in results:
         texts += [r.reason or "", r.detail or "", *r.ingress_kinds]
-        texts += [f.path for f in r.findings] + [f.lane for f in r.findings]
+        texts += [f.path or "" for f in r.findings] + [f.lane for f in r.findings]
         if r.refused_by is not None:
             texts += [r.refused_by.provider_kind, r.refused_by.excerpt]
     return [t for t in texts if t]
