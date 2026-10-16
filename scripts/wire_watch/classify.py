@@ -21,7 +21,8 @@ Order, first that applies:
      no positive counter, or a counter below them (the rows disagree)
                                                    INCOMPLETE(findings-truncated)
      Every counter at or above its retained findings and one above it
-     (the daemon's 128-entry finding ring overflowed)
+     (the daemon's 128-entry finding ring overflowed, or the health
+     panel's status window hid findings)
                                                    FINDING, the retained rows
                                                    plus one per short (lane,
                                                    path_class): leg `unknown`,
@@ -97,6 +98,10 @@ _PATH_SEGMENT_RE = re.compile(
     % (PATH_KEY_MAX_CHARS - 1, re.escape(PATH_WILDCARD), "|".join(re.escape(k) for k in PATH_SCHEMA_SIGIL_KEYWORDS)),
     re.ASCII,
 )
+# The largest count read from a health row. The daemon adds one per event
+# within a single cell, far below it, and findings.jsonl readers refuse a
+# count past 2**53.
+COUNT_MAX = 2**32
 PARSER_UNLOCALIZED = "rc_parser_unlocalized_total"
 VERDICTS_LEARNED = "rc_field_verdicts_learned_total"
 # An EXITED cell carries in its detail the stop the runner made (EXITED(9))
@@ -170,7 +175,7 @@ def _str_field(row: object, key: str) -> str:
 
 def _count_field(row: object, key: str) -> int:
     value = row.get(key) if isinstance(row, dict) else None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= COUNT_MAX:
         raise _Shape(key)
     return value
 
@@ -326,7 +331,7 @@ def _loss_summary(rows: _Rows) -> str:
 
 
 def _overflow_summary(rows: _Rows) -> str:
-    return f"{_retained_losses(rows)} of {rows.losses} losses detailed (finding ring full)"
+    return f"{_retained_losses(rows)} of {rows.losses} losses detailed (finding ring or status window)"
 
 
 def _check_summary(checks: Sequence[Tuple[str, int]]) -> str:

@@ -52,7 +52,7 @@ import unittest
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
-from typing import Any, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -92,7 +92,7 @@ def _with_loss(data: dict) -> None:
 RING_LANE = "responses->openai-responses"
 
 
-def ring_health(counters: Sequence[tuple], retained: Sequence[tuple], lane: str = RING_LANE,
+def ring_health(counters: Sequence[Tuple[str, int]], retained: Sequence[Tuple[str, int]], lane: str = RING_LANE,
                 counter_lane: Optional[str] = None) -> str:
     """request-leg-plant with its loss counters and retained loss findings
     replaced: `counters` are (path_class, count) rows, `retained` are
@@ -294,27 +294,41 @@ class RingOverflowTests(RunCase):
         built = self.build([plant("request-leg-plant", health=health)])
 
         self.assertEqual(built.results[0].outcome, Outcome.FINDING)
-        totals: dict = {}
+        totals: Dict[Tuple[str, str], int] = {}
         for row in self.findings(built):
             key = (row["lane"], row["path_class"])
             totals[key] = totals.get(key, 0) + row["count"]
         self.assertEqual(totals, {(RING_LANE, "missing"): 200, (RING_LANE, "added"): 5})
 
     def test_each_short_counter_gets_one_unknown_leg_row_without_example_paths(self) -> None:
+        other_lane = "chat->openai-compat"
         cases = [
-            ("one-class-short", [("missing", 200), ("added", 5)], [("missing", 128), ("added", 5)],
+            ("one-class-short", RING_LANE, [("missing", 200), ("added", 5)], [("missing", 128), ("added", 5)],
              [("missing", 72)]),
-            ("nothing-retained", [("missing", 129)], [], [("missing", 129)]),
-            ("two-classes-short", [("missing", 300), ("changed", 40)], [("missing", 100), ("changed", 28)],
-             [("changed", 12), ("missing", 200)]),
+            ("nothing-retained", RING_LANE, [("missing", 129)], [], [("missing", 129)]),
+            ("two-classes-short", RING_LANE, [("missing", 300), ("changed", 40)],
+             [("missing", 100), ("changed", 28)], [("changed", 12), ("missing", 200)]),
+            ("lane-from-the-counter", other_lane, [("added", 9)], [], [("added", 9)]),
+            ("count-at-the-bound", RING_LANE, [("missing", classify.COUNT_MAX)], [],
+             [("missing", 2**32)]),
         ]
-        for name, counters, retained, expected in cases:
+        for name, counter_lane, counters, retained, expected in cases:
             with self.subTest(name):
                 self.fresh()
-                rows = self.findings(self.build([plant("request-leg-plant", health=ring_health(counters, retained))]))
+                health = ring_health(counters, retained, counter_lane=counter_lane)
+                rows = self.findings(self.build([plant("request-leg-plant", health=health)]))
                 overflow = [(r["lane"], r["path_class"], r["count"], r["example_paths"])
                             for r in rows if r["leg"] == classify.LEG_UNKNOWN]
-                self.assertEqual(overflow, [(RING_LANE, cls, n, []) for cls, n in expected])
+                self.assertEqual(overflow, [(counter_lane, cls, n, []) for cls, n in expected])
+
+    def test_a_counter_past_the_count_bound_is_refused(self) -> None:
+        for count in (2**32 + 1, 2**53 + 1):
+            with self.subTest(count):
+                self.fresh()
+                built = self.build([plant("request-leg-plant", health=ring_health([("missing", count)], []))])
+                result = built.results[0]
+                self.assertEqual((result.outcome, result.reason), (Outcome.INCOMPLETE, "snapshot-shape"))
+                self.assertNotIn(str(count), built.files[report.FINDINGS_JSONL])
 
     def test_counters_matching_the_retained_findings_add_no_overflow_row(self) -> None:
         built = self.build([plant("request-leg-plant", health=ring_health([("missing", 3)], [("missing", 3)]))])
@@ -335,7 +349,7 @@ class RingOverflowTests(RunCase):
         self.assertIn("Status: COMPLETE", text)
         row = next(line for line in text.splitlines() if line.startswith("| " + mdtext.esc(overflow.cell_id) + " |"))
         self.assertIn("| FINDING |", row)
-        self.assertIn(mdtext.esc("133 of 205 losses detailed (finding ring full)"), row)
+        self.assertIn(mdtext.esc("133 of 205 losses detailed (finding ring or status window)"), row)
         self.assertIn(f"| {mdtext.esc(RING_LANE)} | missing | unknown | 72 |  | ", text)
 
     def test_overflow_counter_labels_outside_the_daemon_vocabulary_are_refused_and_shown_nowhere(self) -> None:
