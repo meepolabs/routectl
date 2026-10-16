@@ -321,14 +321,29 @@ class RingOverflowTests(RunCase):
                             for r in rows if r["leg"] == classify.LEG_UNKNOWN]
                 self.assertEqual(overflow, [(counter_lane, cls, n, []) for cls, n in expected])
 
-    def test_a_counter_past_the_count_bound_is_refused(self) -> None:
-        for count in (2**32 + 1, 2**53 + 1):
-            with self.subTest(count):
+    def test_a_count_past_the_bound_is_refused(self) -> None:
+        def check_count(data: dict) -> None:
+            data["wire_check"]["checks"][0]["count"] = 2**32 + 1
+
+        def refusal_count(data: dict) -> None:
+            data["wire_check"]["local_refusals"] = [{"lane": RING_LANE, "count": 2**32 + 1,
+                                                     "last_seen_unix_secs": 1}]
+
+        cases = [
+            ("loss-past-2-32", ring_health([("missing", 2**32 + 1)], []), str(2**32 + 1)),
+            ("loss-past-2-53", ring_health([("missing", 2**53 + 1)], []), str(2**53 + 1)),
+            ("duplicate-loss-rows-summing-past-the-bound",
+             ring_health([("missing", 2**32), ("missing", 2**32)], []), str(2**33)),
+            ("checks-past-2-32", rc.edited_health("request-leg-plant", check_count), str(2**32 + 1)),
+            ("local-refusals-past-2-32", rc.edited_health("request-leg-plant", refusal_count), str(2**32 + 1)),
+        ]
+        for name, health, absent in cases:
+            with self.subTest(name):
                 self.fresh()
-                built = self.build([plant("request-leg-plant", health=ring_health([("missing", count)], []))])
+                built = self.build([plant("request-leg-plant", health=health)])
                 result = built.results[0]
                 self.assertEqual((result.outcome, result.reason), (Outcome.INCOMPLETE, "snapshot-shape"))
-                self.assertNotIn(str(count), built.files[report.FINDINGS_JSONL])
+                self.assertNotIn(absent, built.files[report.FINDINGS_JSONL])
 
     def test_counters_matching_the_retained_findings_add_no_overflow_row(self) -> None:
         built = self.build([plant("request-leg-plant", health=ring_health([("missing", 3)], [("missing", 3)]))])

@@ -232,7 +232,9 @@ def _rows(ev: CellEvidence) -> _Rows:
     loss_counts: Dict[Tuple[str, str], int] = {}
     for row in _list(wc, "loss"):
         key = (_str_field(row, "lane"), _str_field(row, "path_class"))
-        loss_counts[key] = loss_counts.get(key, 0) + _count_field(row, "count")
+        if key in loss_counts:
+            raise _Shape("loss")
+        loss_counts[key] = _count_field(row, "count")
     return _Rows(
         findings=tuple(findings),
         losses=sum(loss_counts.values()),
