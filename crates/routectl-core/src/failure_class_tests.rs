@@ -409,6 +409,24 @@ fn non_upstream_variants_are_unknown_matched_by_variant() {
 }
 
 #[test]
+fn credential_reason_leaves_an_auth_status_classified_auth() {
+    let rows = [
+        (401, crate::UpstreamReason::CredentialExpired),
+        (401, crate::UpstreamReason::CredentialInvalid),
+        (403, crate::UpstreamReason::CredentialExpired),
+        (403, crate::UpstreamReason::CredentialInvalid),
+    ];
+    for (status, reason) in rows {
+        let err = upstream(status, None, None).with_upstream_reason(Some(reason));
+        assert_eq!(err.upstream_reason(), Some(reason), "{status} {reason:?}");
+
+        let classified = classify(&err, None);
+
+        assert_eq!(classified.class, FailureClass::Auth, "{status} {reason:?}");
+    }
+}
+
+#[test]
 fn auth_error_variant_is_auth_matched_by_variant() {
     // Arrange: a local credential/signing failure with no HTTP status.
     let err = Error::Auth("bad token".into());

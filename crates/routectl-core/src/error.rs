@@ -9,15 +9,15 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::{ParsedErrorBody, UpstreamBody};
+use crate::{ParsedErrorBody, UpstreamBody, UpstreamReason};
 
 /// Convenience alias defaulting the error type to [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 // `Error` is returned pervasively as `Result<_, Error>`, so its size is the
 // success slot's size too. The two upstream classifier strings are
-// `Box<str>` (16 bytes) rather than `String` (24), and the request id and
-// parsed body share one boxed `UpstreamExtras`, to keep the enum below
+// `Box<str>` (16 bytes) rather than `String` (24), and the request id,
+// parsed body and typed reason share one boxed `UpstreamExtras`, to keep the enum below
 // clippy's `result_large_err` threshold (it fires AT 128 bytes) without a
 // lint suppression.
 const _: () = assert!(std::mem::size_of::<Error>() <= 128);
@@ -229,8 +229,9 @@ impl fmt::Debug for Error {
     }
 }
 
-/// Boxed tail of [`Error::Upstream`]: the upstream correlation id and the
-/// parsed body, one pointer wide, allocated only when either is present.
+/// Boxed tail of [`Error::Upstream`]: the upstream correlation id, the
+/// parsed body and the typed reason, one pointer wide, allocated only when
+/// any of them is present.
 /// Built only by the `Error::upstream*` constructors -- it has no public
 /// constructor, so no struct literal outside this crate can build the variant
 /// -- and a carried parse therefore always describes the variant's `body`.
@@ -240,14 +241,36 @@ pub struct UpstreamExtras(Option<Box<UpstreamExtrasInner>>);
 struct UpstreamExtrasInner {
     request_id: Option<Box<str>>,
     parsed: Option<ParsedErrorBody>,
+    reason: Option<UpstreamReason>,
 }
 
+type ExtrasParts = (
+    Option<Box<str>>,
+    Option<ParsedErrorBody>,
+    Option<UpstreamReason>,
+);
+
 impl UpstreamExtras {
-    fn new(request_id: Option<Box<str>>, parsed: Option<ParsedErrorBody>) -> Self {
-        if request_id.is_none() && parsed.is_none() {
+    fn new(
+        request_id: Option<Box<str>>,
+        parsed: Option<ParsedErrorBody>,
+        reason: Option<UpstreamReason>,
+    ) -> Self {
+        if request_id.is_none() && parsed.is_none() && reason.is_none() {
             return Self(None);
         }
-        Self(Some(Box::new(UpstreamExtrasInner { request_id, parsed })))
+        Self(Some(Box::new(UpstreamExtrasInner {
+            request_id,
+            parsed,
+            reason,
+        })))
+    }
+
+    fn take_parts(&mut self) -> ExtrasParts {
+        match self.0.take() {
+            Some(inner) => (inner.request_id, inner.parsed, inner.reason),
+            None => (None, None, None),
+        }
     }
 
     /// The upstream correlation id; see [`Error::upstream_request_id`].
@@ -258,6 +281,11 @@ impl UpstreamExtras {
     /// The parsed body; see [`Error::parsed_body`].
     pub fn parsed(&self) -> Option<&ParsedErrorBody> {
         self.0.as_ref()?.parsed.as_ref()
+    }
+
+    /// The typed reason; see [`Error::upstream_reason`].
+    pub fn reason(&self) -> Option<UpstreamReason> {
+        self.0.as_ref()?.reason
     }
 }
 
@@ -399,7 +427,7 @@ impl Error {
             retry_after,
             upstream_type: upstream_type.map(Into::into),
             upstream_code: upstream_code.map(Into::into),
-            extras: UpstreamExtras::new(None, parsed_body),
+            extras: UpstreamExtras::new(None, parsed_body, None),
         }
     }
 
@@ -413,10 +441,31 @@ impl Error {
     #[must_use]
     pub fn with_upstream_request_id(mut self, id: Option<String>) -> Self {
         if let Self::Upstream { extras, .. } = &mut self {
-            let parsed = extras.0.take().and_then(|inner| inner.parsed);
-            *extras = UpstreamExtras::new(id.map(Into::into), parsed);
+            let (_, parsed, reason) = extras.take_parts();
+            *extras = UpstreamExtras::new(id.map(Into::into), parsed, reason);
         }
         self
+    }
+
+    /// Attach the typed reason an upstream gave for the rejection, returning
+    /// the updated error. A no-op on any other variant, so a mapper can chain
+    /// it unconditionally. Pass `None` to leave the error unclassified.
+    #[must_use]
+    pub fn with_upstream_reason(mut self, reason: Option<UpstreamReason>) -> Self {
+        if let Self::Upstream { extras, .. } = &mut self {
+            let (request_id, parsed, _) = extras.take_parts();
+            *extras = UpstreamExtras::new(request_id, parsed, reason);
+        }
+        self
+    }
+
+    /// The typed reason attached by [`Error::with_upstream_reason`]. `None`
+    /// on any other variant, or when the rejection is unclassified.
+    pub fn upstream_reason(&self) -> Option<UpstreamReason> {
+        match self {
+            Self::Upstream { extras, .. } => extras.reason(),
+            _ => None,
+        }
     }
 
     /// The upstream provider's own correlation id lifted from the response
@@ -454,6 +503,10 @@ impl Error {
         Self::NormalizeResponse(provider.into(), msg.into())
     }
 }
+
+#[cfg(test)]
+#[path = "error_reason_tests.rs"]
+mod reason_tests;
 
 #[cfg(test)]
 mod tests {

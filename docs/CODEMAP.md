@@ -117,6 +117,13 @@ license.
   response-head quota carrier with a stream-body carrier; `has_quota_family`
   is the quota consumers' test (opening usage or a usage source alone is not
   a quota reading)
+- `src/upstream_reason.rs` -- `#[non_exhaustive] UpstreamReason`
+  (`CredentialExpired` / `CredentialInvalid`): the typed reason an upstream
+  gave for a rejection, carried on `Error::Upstream` beside the failure class
+  (never changes it: both still classify `Auth`); `as_str` is the single
+  kebab-case token source (`credential-expired` / `credential-invalid`) and
+  `from_token` matches exactly, `None` for an unknown token. Additive only;
+  an absent reason means unclassified
 - `src/content_part.rs` -- typed `ContentPart` enum
   (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking
   (plus the `Other` catchall)) for `MessageContent::Parts`
@@ -356,7 +363,11 @@ license.
   `upstream_type`/`upstream_code`/`upstream_request_id` diagnostic fields
   (all `Option<Box<str>>` -- kept small so a `const _` assert holds
   `size_of::<Error>() <= 128`, the `Result` success-slot size) and the
-  `upstream_with_retry_after` / `with_upstream_request_id` ctors; `Debug` is
+  `upstream_with_retry_after` / `with_upstream_request_id` ctors, plus
+  `with_upstream_reason` / `upstream_reason()` for the typed
+  `UpstreamReason` (the request id, parse and reason share the boxed
+  `UpstreamExtras`, unallocated when all three are absent, and each
+  `with_*` rebuild keeps the other two); `Debug` is
   hand-written (not derived)
   so `Error::Upstream`'s `body` renders as a bounded `body_excerpt` (capped at
   `MAX_LOG_BODY_EXCERPT` chars) + `body_len` marker -- every `?e` log sink is
