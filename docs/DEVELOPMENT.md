@@ -400,8 +400,8 @@ LC_ALL=C comm -23 before.txt after.txt   # REMOVED
 LC_ALL=C comm -13 before.txt after.txt   # ADDED
 ```
 
-The `comm` output means something only when both `inventory` runs returned 0
-and `before.txt` is non-empty; otherwise it compares a failed or partial list.
+The `comm` output means something only when both `inventory` runs returned 0;
+otherwise it compares a failed or partial list.
 
 Swap the cargo selection (for example `--all-features --profile
 test-release`) on both sides to audit a gate-command change.
