@@ -253,3 +253,16 @@ chmod 0640 "$AWS_LOOSE_CRED"
 aws_refusal "a credential file readable by group" "readable or writable by group or other" \
     "$(printf '[profile %s]\ncredential_process = /bin/cat %s' "$AWS_FIX_PROFILE" "$AWS_LOOSE_CRED")" \
     "$AWS_LOOSE_CRED"
+
+# The staged config is removed by an EXIT trap; the runner's exit code must
+# still come out of the wrapper untouched on a bedrock run.
+AWS_ROOT="$(new_scratch)"
+mkdir -p "$AWS_ROOT.mounts"
+rc=0
+fake_docker_run "$AWS_ROOT" "FAKE_DOCKER_RUN_EXIT=9" "FAKE_DOCKER_MOUNT_DUMP=$AWS_ROOT.mounts" -- \
+    --scratch "$AWS_ROOT/land" --provider bedrock \
+    --aws-profile "$AWS_FIX_PROFILE" --aws-config "$AWS_GOOD_CONFIG" --aws-credential-file "$AWS_CRED" -- \
+    "${AWS_RUNNER_ARGS[@]}" -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "a runner exit 9 on a bedrock run comes out of the wrapper as 9" "9" "$rc"
+check "the staged AWS config is removed after a nonzero runner exit too" "0" \
+    "$(find "$AWS_ROOT" -maxdepth 1 -name 'land.aws.*' | wc -l | tr -d ' ')"
