@@ -777,15 +777,14 @@ where
     }
 }
 
-/// Map a `bedrock::auth::resolve` failure to a probe outcome. A
-/// credential-resolution error (`Error::Auth`, the only kind `resolve`
-/// emits today) is an auth problem; any other error is treated as the
-/// chain being unreachable. Reason strings are fixed literals so no
+/// Map a `bedrock::auth::resolve` failure to a probe outcome. A credential
+/// error (`Error::Auth` or `Error::Credential`) is an auth problem; any other
+/// error is treated as the chain being unreachable. Reason strings are fixed literals so no
 /// profile name, ARN, or SDK detail leaks into an operator-facing
 /// message.
 fn probe_outcome_for_resolve_error(err: &Error) -> routectl_core::ProbeOutcome {
     match err {
-        Error::Auth(_) => {
+        Error::Auth(_) | Error::Credential { .. } => {
             routectl_core::ProbeOutcome::AuthFailed("credential resolution failed".into())
         }
         _ => routectl_core::ProbeOutcome::Unreachable("credential chain unavailable".into()),
@@ -1209,25 +1208,43 @@ mod tests {
         );
     }
 
-    /// The resolve-error mapping: an `Error::Auth` (the credential kind
-    /// `resolve` emits) is `AuthFailed`; any other error is `Unreachable`.
-    /// Reason strings carry no profile name, ARN, or SDK detail.
+    /// The resolve-error mapping: a credential error (`Error::Auth` or
+    /// `Error::Credential`) is `AuthFailed`; any other error is
+    /// `Unreachable`. Reason strings carry no profile name, ARN, or SDK
+    /// detail.
     #[test]
     fn probe_outcome_maps_resolve_errors() {
-        let auth_err = Error::Auth("bedrock: failed to load AWS profile `x`: boom".into());
-        match probe_outcome_for_resolve_error(&auth_err) {
-            routectl_core::ProbeOutcome::AuthFailed(reason) => {
-                assert!(!reason.contains("profile"));
-                assert!(!reason.contains('x'));
+        let rows = [
+            (
+                "auth",
+                Error::Auth("bedrock: failed to load AWS profile `x`: boom".into()),
+                true,
+            ),
+            (
+                "credential",
+                Error::Credential {
+                    detail: "bedrock: profile `x` credential expired".into(),
+                    reason: routectl_core::UpstreamReason::CredentialExpired,
+                    parked_until_ms: None,
+                },
+                true,
+            ),
+            (
+                "config",
+                Error::Config("some non-auth failure".into()),
+                false,
+            ),
+        ];
+        for (name, err, is_auth_failure) in rows {
+            match (probe_outcome_for_resolve_error(&err), is_auth_failure) {
+                (routectl_core::ProbeOutcome::AuthFailed(reason), true) => {
+                    assert!(!reason.contains("profile"), "{name}: {reason}");
+                    assert!(!reason.contains('x'), "{name}: {reason}");
+                }
+                (routectl_core::ProbeOutcome::Unreachable(_), false) => {}
+                (other, _) => panic!("{name}: unexpected outcome {other:?}"),
             }
-            other => panic!("expected AuthFailed, got {other:?}"),
         }
-
-        let other_err = Error::Config("some non-auth failure".into());
-        assert!(matches!(
-            probe_outcome_for_resolve_error(&other_err),
-            routectl_core::ProbeOutcome::Unreachable(_)
-        ));
     }
 
     /// The credential-resolution probe is bounded: a resolver that would
