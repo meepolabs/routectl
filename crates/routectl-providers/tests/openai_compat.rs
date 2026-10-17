@@ -929,7 +929,7 @@ async fn complete_flat_body_lifts_type_from_aws_error_type_header() {
             ResponseTemplate::new(400)
                 .insert_header(
                     "x-amzn-errortype",
-                    "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
+                    "ValidationException:urn:example:ignored-suffix",
                 )
                 .set_body_json(json!({"message": "invalid model identifier"})),
         )

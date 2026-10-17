@@ -11,8 +11,7 @@ use reqwest::header::HeaderMap;
 use routectl_core::ParsedErrorBody;
 use routectl_testkit::{CapturedEvent, capture_events};
 
-const DENY_HEADER: &str =
-    "AccessDeniedException:http://internal.amazon.com/coral/com.amazon.coral.service/";
+const DENY_HEADER: &str = "AccessDeniedException:urn:example:ignored-suffix";
 
 fn map(read: UpstreamErrorRead) -> (Error, Vec<CapturedEvent>) {
     let mut err = None;

@@ -147,7 +147,7 @@ fn a_capture_body_truncated_at_the_cap_is_not_evidence() {
 
 #[test]
 fn evidence_short_of_a_recorded_row_yields_no_reason() {
-    let deny = "AccessDeniedException:http://internal.amazon.com/coral/com.amazon.coral.service/";
+    let deny = "AccessDeniedException:urn:example:ignored-suffix";
     let none = HeaderMap::new();
     let cases: [(&str, u16, HeaderMap, &str); 20] = [
         ("status 401 alone", 401, none.clone(), ""),
@@ -316,7 +316,7 @@ pub const CARRY_403_ROWS: [Carry403Row; 5] = [
     ("empty body, no header", None, "", None),
     (
         "type from the header",
-        Some("AccessDeniedException:http://internal.amazon.com/coral/"),
+        Some("AccessDeniedException:urn:example:ignored-suffix"),
         "<html>Forbidden</html>",
         Some("bedrock access denied (AccessDeniedException)"),
     ),

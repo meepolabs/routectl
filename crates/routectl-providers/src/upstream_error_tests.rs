@@ -69,7 +69,7 @@ mod tokens {
 
     #[test]
     fn token_precedence_rows() {
-        let header = headers_with_type("ValidationException:http://internal.amazon.com/coral/");
+        let header = headers_with_type("ValidationException:urn:example:ignored-suffix");
         let no_header = HeaderMap::new();
         let cases: [TokenRow<'_>; 5] = [
             (

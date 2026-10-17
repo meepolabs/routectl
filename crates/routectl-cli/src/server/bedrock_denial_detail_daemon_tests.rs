@@ -18,8 +18,7 @@ const IAM_DENY_403: &str =
     include_str!("../../../routectl-providers/tests/fixtures/bedrock/error_403_access_denied.json");
 const DETAIL_STRINGS: &str =
     include_str!("../../../routectl-providers/tests/fixtures/bedrock_403_detail_strings.json");
-const ACCESS_DENIED_TYPE: &str =
-    "AccessDeniedException:http://internal.amazon.com/coral/com.amazon.coral.service/";
+const ACCESS_DENIED_TYPE: &str = "AccessDeniedException:urn:example:ignored-suffix";
 
 /// One recorded 403 and the key of the detail string the native lane renders
 /// for it.

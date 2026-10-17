@@ -125,9 +125,7 @@ mod weld {
 
     #[test]
     fn detail_strings_fixture_is_what_the_native_lane_renders() {
-        let deny = headers_with_type(
-            "AccessDeniedException:http://internal.amazon.com/coral/com.amazon.coral.service/",
-        );
+        let deny = headers_with_type("AccessDeniedException:urn:example:ignored-suffix");
         let rendered = [
             (
                 "expired",
