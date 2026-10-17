@@ -378,19 +378,30 @@ rebuild the test binaries there. The `awk` tags each test with its binary
 
 ```bash
 inventory() {
+    local raw rc=0
+    raw="$(mktemp)"
     CARGO_TARGET_DIR=.cargo-target-inventory \
-        cargo test --workspace --features bedrock --release -- --list 2>&1 </dev/null |
+        cargo test --workspace --features bedrock --release -- --list \
+        >"$raw" 2>&1 </dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "inventory: cargo failed (exit $rc), log kept at $raw" >&2
+        return 1
+    fi
     awk '/Running .*\(/ { b = $0; sub(/.*\(/, "", b); sub(/\).*/, "", b)
                          sub(/.*\//, "", b); sub(/-[0-9a-f]+$/, "", b); next }
          /Doc-tests/    { b = ""; next }
-         b != "" && /: test$/ { sub(/: test$/, ""); print b "::" $0 }' |
-    LC_ALL=C sort -u
+         b != "" && /: test$/ { sub(/: test$/, ""); print b "::" $0 }' "$raw" |
+        LC_ALL=C sort -u
+    rm -f "$raw"
 }
 inventory >before.txt     # at the base
 inventory >after.txt      # at the tip
 LC_ALL=C comm -23 before.txt after.txt   # REMOVED
 LC_ALL=C comm -13 before.txt after.txt   # ADDED
 ```
+
+The `comm` output means something only when both `inventory` runs returned 0
+and `before.txt` is non-empty; otherwise it compares a failed or partial list.
 
 Swap the cargo selection (for example `--all-features --profile
 test-release`) on both sides to audit a gate-command change.
