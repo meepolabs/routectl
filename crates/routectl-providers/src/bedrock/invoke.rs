@@ -93,10 +93,10 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     flush_response_format_tally(&response_format);
     let (mut body, deferred) = assembled?;
     let obj = body.as_object_mut().ok_or_else(|| {
-        Error::NormalizeRequest(
-            cfg.id.clone(),
-            "anthropic_api::request assembly returned non-object".into(),
-        )
+        Error::Internal(format!(
+            "provider `{}`: anthropic_api::request assembly returned non-object",
+            cfg.id
+        ))
     })?;
 
     // Bedrock requires the body-side anthropic_version. Override

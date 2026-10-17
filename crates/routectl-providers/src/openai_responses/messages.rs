@@ -548,8 +548,9 @@ fn append_function_calls_from_tool_calls(
         tool_calls.push(ResponseInputItem::FunctionCall {
             call_id: call.id,
             name: call.name,
-            arguments: serde_json::to_string(&call.arguments)
-                .map_err(|e| Error::normalize_request(id, e.to_string()))?,
+            arguments: serde_json::to_string(&call.arguments).map_err(|e| {
+                Error::Internal(format!("provider `{id}`: serialize tool arguments: {e}"))
+            })?,
         });
     }
     Ok(())
@@ -986,8 +987,9 @@ fn walk_assistant_part(
             tool_calls.push(ResponseInputItem::FunctionCall {
                 call_id: crate::tool_id::sanitize_tool_id(tu_id).into_owned(),
                 name: name.clone(),
-                arguments: serde_json::to_string(input)
-                    .map_err(|e| Error::normalize_request(id, e.to_string()))?,
+                arguments: serde_json::to_string(input).map_err(|e| {
+                    Error::Internal(format!("provider `{id}`: serialize tool arguments: {e}"))
+                })?,
             });
         }
         ContentPart::Known(other) => {

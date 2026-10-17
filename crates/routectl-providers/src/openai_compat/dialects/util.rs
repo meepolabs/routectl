@@ -237,7 +237,7 @@ pub(in crate::openai_compat) fn strip_history_reasoning(
     let messages = obj
         .get_mut("messages")
         .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| Error::normalize_request(id, "messages is not an array"))?;
+        .ok_or_else(|| Error::Internal(format!("provider `{id}`: messages is not an array")))?;
 
     for (index, msg) in messages.iter_mut().enumerate() {
         let Some(m) = msg.as_object_mut() else {
@@ -289,7 +289,7 @@ pub(super) fn preserve_history_reasoning_content(
     let messages = obj
         .get_mut("messages")
         .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| Error::normalize_request(id, "messages is not an array"))?;
+        .ok_or_else(|| Error::Internal(format!("provider `{id}`: messages is not an array")))?;
 
     for msg in messages.iter_mut() {
         let Some(m) = msg.as_object_mut() else {
@@ -363,7 +363,7 @@ pub(super) fn preserve_history_reasoning_details(
     let messages = obj
         .get_mut("messages")
         .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| Error::normalize_request(id, "messages is not an array"))?;
+        .ok_or_else(|| Error::Internal(format!("provider `{id}`: messages is not an array")))?;
 
     for msg in messages.iter_mut() {
         let Some(m) = msg.as_object_mut() else {

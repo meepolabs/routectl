@@ -93,12 +93,14 @@ pub fn normalize(
     // dropped a field and then failed translation still counts.
     check_dropped_anthropic_fields(id, req, strict_translation)?.flush();
 
-    let mut body =
-        serde_json::to_value(req).map_err(|e| Error::normalize_request(id, e.to_string()))?;
+    let mut body = serde_json::to_value(req)
+        .map_err(|e| Error::Internal(format!("provider `{id}`: serialize request: {e}")))?;
 
-    let obj = body
-        .as_object_mut()
-        .ok_or_else(|| Error::normalize_request(id, "serialized request is not an object"))?;
+    let obj = body.as_object_mut().ok_or_else(|| {
+        Error::Internal(format!(
+            "provider `{id}`: serialized request is not an object"
+        ))
+    })?;
 
     let tap = crate::wire_declare::tap(req);
     declare_fingerprint_strip(tap, &system);
@@ -286,14 +288,18 @@ fn apply_system_projection(
 ) -> Result<()> {
     if let Some(messages) = system.messages {
         let messages = serde_json::to_value(messages)
-            .map_err(|e| Error::normalize_request(id, e.to_string()))?;
+            .map_err(|e| Error::Internal(format!("provider `{id}`: serialize messages: {e}")))?;
         obj.insert("messages".into(), messages);
     }
     if let Some(text) = system.lowered {
         obj.entry("messages")
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .ok_or_else(|| Error::normalize_request(id, "serialized messages is not an array"))?
+            .ok_or_else(|| {
+                Error::Internal(format!(
+                    "provider `{id}`: serialized messages is not an array"
+                ))
+            })?
             .insert(0, serde_json::json!({"role": "system", "content": text}));
     }
     Ok(())

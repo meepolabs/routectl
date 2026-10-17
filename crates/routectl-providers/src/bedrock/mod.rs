@@ -336,10 +336,12 @@ impl BedrockProvider {
 
         let url = self.inference_url(false);
 
-        let body_str = bytes::Bytes::from(
-            serde_json::to_vec(&body)
-                .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?,
-        );
+        let body_str = bytes::Bytes::from(serde_json::to_vec(&body).map_err(|e| {
+            Error::Internal(format!(
+                "provider `{}`: serialize request body: {e}",
+                self.cfg.id
+            ))
+        })?);
         let tap = crate::anthropic_api::wire_edits::tap_of(req);
         let sent_copy = tap.map(|_| body_str.clone());
 
@@ -425,10 +427,12 @@ impl BedrockProvider {
 
         let url = self.inference_url(true);
 
-        let body_str = bytes::Bytes::from(
-            serde_json::to_vec(&body)
-                .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?,
-        );
+        let body_str = bytes::Bytes::from(serde_json::to_vec(&body).map_err(|e| {
+            Error::Internal(format!(
+                "provider `{}`: serialize request body: {e}",
+                self.cfg.id
+            ))
+        })?);
         let tap = crate::anthropic_api::wire_edits::tap_of(req);
         let sent_copy = tap.map(|_| body_str.clone());
 
@@ -504,10 +508,12 @@ impl BedrockProvider {
             self.runtime_origin,
             endpoint::count_tokens_path(&self.cfg.model_id)
         );
-        let body_str = bytes::Bytes::from(
-            serde_json::to_vec(&body)
-                .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?,
-        );
+        let body_str = bytes::Bytes::from(serde_json::to_vec(&body).map_err(|e| {
+            Error::Internal(format!(
+                "provider `{}`: serialize request body: {e}",
+                self.cfg.id
+            ))
+        })?);
         let request = self
             .build_signed_request(body_str, req, &url, "application/json")
             .await?;

@@ -139,7 +139,9 @@ fn tool_use_to_tool_call(id: &str, part: &Value) -> Result<Value> {
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
     let arguments = serde_json::to_string(&input).map_err(|e| {
-        Error::normalize_request(id, format!("failed to encode tool_use input: {e}"))
+        Error::Internal(format!(
+            "provider `{id}`: failed to encode tool_use input: {e}"
+        ))
     })?;
     Ok(serde_json::json!({
         "id": tool_id,

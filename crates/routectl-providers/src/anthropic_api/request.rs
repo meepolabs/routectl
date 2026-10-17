@@ -887,8 +887,8 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // upstream from cap/ordering violations regardless of build mode.
     validate_breakpoints(&ar)?;
 
-    let mut body =
-        serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
+    let mut body = serde_json::to_value(&ar)
+        .map_err(|e| Error::Internal(format!("provider `{id}`: serialize request body: {e}")))?;
 
     merge_provider_extras(id, &mut body, req.provider_extras.as_ref());
 

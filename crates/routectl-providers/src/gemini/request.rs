@@ -176,8 +176,11 @@ fn assemble_provider_body(
     fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<Value> {
     let translated = translate_counted(provider_id, req, fingerprint)?;
-    let mut body = serde_json::to_value(&translated)
-        .map_err(|e| routectl_core::Error::normalize_request(provider_id, e.to_string()))?;
+    let mut body = serde_json::to_value(&translated).map_err(|e| {
+        routectl_core::Error::Internal(format!(
+            "provider `{provider_id}`: serialize request body: {e}"
+        ))
+    })?;
     // The merge is shallow: an entry colliding with a routectl-managed key --
     // including the whole `generationConfig` object -- is dropped with a WARN,
     // so no field nested inside one is reachable. See `is_gemini_managed_key`.

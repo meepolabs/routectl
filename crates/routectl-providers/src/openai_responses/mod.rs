@@ -156,7 +156,12 @@ impl Provider for OpenAiResponsesProvider {
 
     fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
         let r = request::translate(&self.cfg, req)?;
-        serde_json::to_value(&r).map_err(|e| Error::normalize_request(&self.cfg.id, e.to_string()))
+        serde_json::to_value(&r).map_err(|e| {
+            Error::Internal(format!(
+                "provider `{}`: serialize request body: {e}",
+                self.cfg.id
+            ))
+        })
     }
 
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {

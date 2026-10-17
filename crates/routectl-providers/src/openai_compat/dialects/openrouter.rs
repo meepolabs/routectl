@@ -36,8 +36,9 @@ impl Dialect for OpenRouterDialect {
         req: &ChatRequest,
     ) -> Result<()> {
         if let Some(reasoning) = req.reasoning.as_ref() {
-            let value = serde_json::to_value(reasoning)
-                .map_err(|e| Error::normalize_request(id, e.to_string()))?;
+            let value = serde_json::to_value(reasoning).map_err(|e| {
+                Error::Internal(format!("provider `{id}`: serialize reasoning: {e}"))
+            })?;
             if value.as_object().is_some_and(|o| !o.is_empty()) {
                 obj.insert("reasoning".into(), value);
                 if let Some(tap) = crate::wire_declare::tap(req) {

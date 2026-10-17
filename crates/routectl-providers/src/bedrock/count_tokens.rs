@@ -49,8 +49,11 @@ const CONVERSE_TOKENS_KEYS: [&str; 4] = [
 /// filtering: the token-count lane must see the same bytes InvokeModel
 /// would, including the fields InvokeModel requires.
 pub(super) fn invoke_tokens_body(provider_id: &str, invoke_body: &Value) -> Result<Value> {
-    let bytes = serde_json::to_vec(invoke_body)
-        .map_err(|e| Error::normalize_request(provider_id, e.to_string()))?;
+    let bytes = serde_json::to_vec(invoke_body).map_err(|e| {
+        Error::Internal(format!(
+            "provider `{provider_id}`: serialize invoke body: {e}"
+        ))
+    })?;
     Ok(json!({ "input": { "invokeModel": { "body": B64_STANDARD.encode(bytes) } } }))
 }
 
@@ -59,7 +62,9 @@ pub(super) fn invoke_tokens_body(provider_id: &str, invoke_body: &Value) -> Resu
 /// absent rather than serializing as null.
 pub(super) fn converse_tokens_body(provider_id: &str, converse_body: &Value) -> Result<Value> {
     let obj = converse_body.as_object().ok_or_else(|| {
-        Error::normalize_request(provider_id, "converse body is not a JSON object")
+        Error::Internal(format!(
+            "provider `{provider_id}`: converse body is not a JSON object"
+        ))
     })?;
     let mut kept = Map::new();
     for key in CONVERSE_TOKENS_KEYS {
@@ -168,7 +173,7 @@ mod tests {
     fn converse_tokens_body_rejects_non_object_body() {
         let err = converse_tokens_body("prov", &json!([1, 2, 3]))
             .expect_err("a non-object body must not silently build");
-        assert!(matches!(err, Error::NormalizeRequest(..)), "got {err:?}");
+        assert!(matches!(err, Error::Internal(..)), "got {err:?}");
     }
 
     #[test]

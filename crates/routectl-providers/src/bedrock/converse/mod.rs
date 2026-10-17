@@ -71,7 +71,12 @@ pub(crate) const LANE: &str = PROVIDER_KIND;
 /// Build the Converse request body from a routectl `ChatRequest`.
 pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value> {
     let cr = request::translate(cfg, req)?;
-    serde_json::to_value(&cr).map_err(|e| Error::normalize_request(&cfg.id, e.to_string()))
+    serde_json::to_value(&cr).map_err(|e| {
+        Error::Internal(format!(
+            "provider `{}`: serialize request body: {e}",
+            cfg.id
+        ))
+    })
 }
 
 /// Parse the Bedrock Converse response body into a `ChatResponse`.
