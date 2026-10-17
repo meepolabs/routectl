@@ -23,7 +23,7 @@ use routectl_router::{
 };
 use routectl_usage::{AggRow, RowCost};
 
-use crate::commands::doctor::{ResidentLearned, ServedInputs};
+use crate::commands::doctor::{ParkedSeat, ResidentLearned, ServedInputs};
 use crate::commands::usage::cost_for_row;
 use crate::server::capability_rebuild::WarmReport;
 
@@ -152,7 +152,8 @@ impl StatusRouterView {
     /// generation, and neither is re-read from disk. The learned layer is the
     /// resident registry, read once; its clock anchors are taken after that
     /// read, so every entry's instants lie at or before them. `warm` is the
-    /// boot warm that filled the registry.
+    /// boot warm that filled the registry. The credential-parked seats come off
+    /// the same per-target status read the health panel uses.
     ///
     /// The returned value's fields are private to the doctor module: a panel
     /// holding it can pass it to the gather and nothing else.
@@ -171,6 +172,27 @@ impl StatusRouterView {
             learned,
             warm,
         )
+        .with_parked_seats(self.parked_seats())
+    }
+
+    /// Every seat whose credential is parked right now, with its deadline as
+    /// epoch ms.
+    fn parked_seats(&self) -> Vec<ParkedSeat> {
+        let now = Instant::now();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.router
+            .status_targets(now)
+            .into_iter()
+            .filter_map(|target| {
+                let park = target.gate.credential_park?;
+                let remaining_ms = i64::try_from(park.remaining.as_millis()).unwrap_or(i64::MAX);
+                Some(ParkedSeat {
+                    state_key: target.state_key,
+                    reason: park.reason,
+                    parked_until_ms: now_ms.saturating_add(remaining_ms),
+                })
+            })
+            .collect()
     }
 }
 

@@ -255,13 +255,26 @@ async fn lane_router(lane: FidelityLane, origin: &str) -> (Config, Router) {
 /// [`Daemon::shutdown`].
 pub(super) struct Daemon {
     pub(super) base_url: String,
+    /// The daemon's own isolated usage ledger.
+    pub(super) usage_db: std::path::PathBuf,
     handle: tokio::task::JoinHandle<()>,
     _usage_dir: tempfile::TempDir,
 }
 
 impl Daemon {
-    pub(super) async fn spawn(mut config: Config, router: Router) -> Self {
+    pub(super) async fn spawn(config: Config, router: Router) -> Self {
+        Self::spawn_at(config, router, None).await
+    }
+
+    /// [`Self::spawn`] with an on-disk config path, which the served doctor
+    /// needs to build its report.
+    pub(super) async fn spawn_at(
+        mut config: Config,
+        router: Router,
+        config_path: Option<std::path::PathBuf>,
+    ) -> Self {
         let usage_dir = isolate_usage_db(&mut config);
+        let usage_db = config.usage.db_path.clone();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
@@ -272,7 +285,7 @@ impl Daemon {
                 Arc::new(config),
                 Arc::new(CatalogOverlay::default()),
                 listener,
-                None,
+                config_path,
                 Some(secrets),
                 super::serve::DaemonTestSeams {
                     injected_router: Some(router),
@@ -284,6 +297,7 @@ impl Daemon {
         });
         let daemon = Self {
             base_url,
+            usage_db,
             handle,
             _usage_dir: usage_dir,
         };

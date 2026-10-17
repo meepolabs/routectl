@@ -943,6 +943,12 @@ head commits, while a mid-stream provider failure keeps 200 and is carried
 by `outcome` / `error_class` / `stream_stage` instead (streaming rows
 written before this rule was in force are NULL and are not back-migrated).
 
+A row whose terminal error carried a typed credential reason records it as
+`extra.upstream_reason` (`credential-expired` or `credential-invalid`; no
+schema column). A reasonless error leaves the key absent, and a rejection the
+fallback chain recovered from is not the terminal error, so its row carries
+none. Treat an unrecognized token as unknown.
+
 An Anthropic-ingress streaming row also carries its context meter opening in
 the same `extra` JSON (no schema column): `opening_present` (`false`, and no
 other opening key, when no opening event was enqueued for the client -- a

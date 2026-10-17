@@ -80,6 +80,7 @@ fn ctx(
         pricing,
         knobs,
         reload_failure: None,
+        parked_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
     }
 }
@@ -688,8 +689,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_sixteen() {
-    assert_eq!(SCHEMA_VERSION, 16);
+fn schema_version_is_seventeen() {
+    assert_eq!(SCHEMA_VERSION, 17);
 
     let context = ctx(
         config_with_overrides(),
@@ -698,7 +699,7 @@ fn schema_version_is_sixteen() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 16);
+    assert_eq!(report.schema_version, 17);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2405,6 +2406,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         pricing: Some(Vec::new()),
         knobs: Some(Vec::new()),
         reload_failure: None,
+        parked_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
     };
     let report = build_report(&context);
@@ -2569,7 +2571,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 16);
+    assert_eq!(no_net.schema_version, 17);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"

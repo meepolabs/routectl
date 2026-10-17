@@ -915,7 +915,9 @@ impl UsageCapture {
     /// the upstream HTTP status (when the error carries one), the short
     /// error-class token, and -- gated on the request having reached a
     /// dispatch attempt -- the canonical `resolved_class` failure token.
-    /// Never the Display string.
+    /// Never the Display string. A typed upstream reason lands in
+    /// `extra.upstream_reason`; only the terminal error reaches here, so a
+    /// rejection a fallback recovered from leaves no key.
     ///
     /// `http_status` is the transport status the CLIENT received. Once the
     /// SSE head has committed (`mark_stream_http_committed` stamped 200), a
@@ -941,6 +943,9 @@ impl UsageCapture {
             self.record.http_status = Some(*status);
         }
         self.record.error_class = Some(error_class_of(e).to_string());
+        if let Some(reason) = e.upstream_reason() {
+            self.stamp_extra("upstream_reason", reason.as_str());
+        }
         if let Some(provider_kind) = self.record.provider_kind.as_deref() {
             self.record.resolved_class = classify(e, Some(provider_kind))
                 .class
@@ -1293,3 +1298,7 @@ impl Drop for UsageCapture {
 #[cfg(test)]
 #[path = "usage_capture_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "usage_capture_reason_tests.rs"]
+mod reason_tests;

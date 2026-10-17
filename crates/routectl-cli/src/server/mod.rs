@@ -219,3 +219,7 @@ mod wire_loss_daemon_tests;
 #[cfg(test)]
 #[path = "bedrock_denial_detail_daemon_tests.rs"]
 mod bedrock_denial_detail_daemon_tests;
+
+#[cfg(test)]
+#[path = "mantle_credential_park_daemon_tests.rs"]
+mod mantle_credential_park_daemon_tests;

@@ -6471,7 +6471,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   attempt (only when `provider_kind` was already set by `observe_meta`): it
   classifies via `routectl_core::failure_class::classify` +
   `FailureClass::class_token` (a pre-dispatch / validation / local-gate row,
-  or an `Unknown` class with no token, persists NULL -> "unclassified"). Also
+  or an `Unknown` class with no token, persists NULL -> "unclassified"), and
+  stamps the terminal error's typed credential reason
+  (`Error::upstream_reason()`) into `extra.upstream_reason` (key absent for a
+  reasonless error; only the terminal error reaches `observe_error`, so a 401
+  a fallback recovered from leaves no key). Also
   owns `drain_capability_events`, which drains `DispatchMeta`'s captured
   capability signals into the unified `capability_events` ledger (one
   `try_send_capability_event` per event, stamped with the `(catalog_version,
@@ -6645,8 +6649,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `served_doctor_inputs(warm)` (an OWNED `commands::doctor::ServedInputs`:
   the pinned Router's config + overlay as one generation pair, the resident
   learned snapshot and seed-clear markers with clock anchors taken after the
-  read, and the boot `WarmReport`; its fields are private to the doctor
-  module), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
+  read, the boot `WarmReport`, and the credential-parked seats read off the
+  same `status_targets` call `route_targets` uses; its fields are private to
+  the doctor module), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
   pricing facade over one pinned snapshot whose only method costs an `AggRow`
   through `commands::usage::cost_for_row` (so `/status/query` and the CLI usage
   report price a row through one function, and a hot-swap mid-query cannot make
@@ -6698,7 +6703,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
   reads `route_targets` + `learned_capabilities` from that single view,
   mapping to `HealthPanel` (per-target
-  `state_key`/`learned_lane`/`nickname`/`provider_name`/`upstream`/`seat_label`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`
+  `state_key`/`learned_lane`/`nickname`/`provider_name`/`upstream`/`seat_label`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`/`park_reason`/`parked_until_ms`
   + learned rows keyed by lane, joined to targets on `learned_lane`
   `state_key`/`capability_key`/`verdict`/`signal_tier`/`observations`/`phase`/`source`/`last_seen_ms`
   (epoch-ms of the last observation from the single pinned snapshot clock,
@@ -6709,7 +6714,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Serialize` derives on the router enums);
   `open_since_ms`/`last_outcome_at_ms` are epoch-ms converted from the gate's
   monotonic elapsed ages (`None` == closed/never-seen, never a 0/epoch
-  sentinel); `last_outcome` renders the derived `circuit_open` when the phase
+  sentinel); `park_reason`/`parked_until_ms` come off the gate's credential
+  park (reason token and epoch-ms lapse, both null when unparked, additive so
+  schema_version stays 6); `last_outcome` renders the derived `circuit_open` when the phase
   is open, else the stored outcome token; `feature_key` is renamed to the
   contract token `capability_key`. Adds the `wire_check` section (see
   `wire_check_rows.rs`) from the same view. No dial, no mutation. Also calls the
@@ -8241,7 +8248,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `WarmReport`; `with_reload_failure` attaches the daemon meta's last rejected
   reload (set at `handlers/status/doctor.rs`, `None` from the disk layers),
   which the config section renders as one `reload` Warn finding naming the
-  class and age. `served_layers` folds them into the shared gather's layers with
+  class and age; `with_parked_seats` attaches the daemon's credential-parked
+  seats (`ParkedSeat`: state key, reason, epoch-ms deadline; empty from the
+  disk layers, so the CLI doctor reports no parks), which the auth section
+  renders through `parked_seat_finding` as one `parked seat <state_key>` Warn
+  each naming the reason and the RFC3339 deadline. `served_layers` folds them into the shared gather's layers with
   `MatrixOrigin::Resident` (panel `source: resident`, `warm` set with an
   `unreadable` warm's class, no replay tally) and the accepted config's
   version, which the version finding reports instead of preflighting the

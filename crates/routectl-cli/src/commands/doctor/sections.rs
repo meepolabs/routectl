@@ -16,6 +16,7 @@ use crate::commands::seat_report::{
 use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::{SecretCheck, SecretPresence};
+use super::served::parked_seat_finding;
 use super::{
     DoctorContext, EquivalenceBasis, FreshnessInputs, KnobRow, OutputCeilingSource, PricingRow,
     PricingRowSource,
@@ -508,6 +509,12 @@ fn logout_target(seat_key: &str) -> String {
 }
 
 pub(super) fn section_auth(ctx: &DoctorContext) -> Vec<Finding> {
+    let mut findings = oauth_seat_findings(ctx);
+    findings.extend(ctx.parked_seats.iter().map(parked_seat_finding));
+    findings
+}
+
+fn oauth_seat_findings(ctx: &DoctorContext) -> Vec<Finding> {
     if let Some(err) = &ctx.auth_store_error {
         return vec![Finding {
             section: "auth",

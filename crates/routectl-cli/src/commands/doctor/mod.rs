@@ -57,7 +57,7 @@ use self::sections::{
 };
 
 pub(crate) use self::gather::{gather_context_no_network, sanitize_store_open_error};
-pub(crate) use self::served::{GatherSources, ResidentLearned, ServedInputs};
+pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, ServedInputs};
 
 /// UNSTABLE report schema version. Bumped on ANY structural or semantic
 /// change a consumer would care about -- including an ADDITIVE one, since the
@@ -142,7 +142,12 @@ pub(crate) use self::served::{GatherSources, ResidentLearned, ServedInputs};
 ///
 /// v15 -> v16: the capability matrix renders every observed capability key
 /// as its own column, and the panel drops its overflow count field.
-const SCHEMA_VERSION: u32 = 16;
+///
+/// v16 -> v17: the served report's `auth` section gains one `parked seat
+/// <state_key>` Warn per credential-parked dispatch seat, naming the reason
+/// and the park deadline. The CLI report, which cannot see daemon state,
+/// carries none.
+const SCHEMA_VERSION: u32 = 17;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -277,6 +282,9 @@ pub(crate) struct DoctorContext {
     /// class and an age. Only a served gather sets it; the CLI reads the files
     /// itself, so their errors render directly.
     reload_failure: Option<ReloadFailureSnapshot>,
+    /// The running daemon's credential-parked seats. Only a served gather
+    /// sets any; the CLI cannot see daemon state and reports no parks.
+    parked_seats: Vec<ParkedSeat>,
     /// Every soft cell-value defect of the overlay this gather holds: the
     /// on-disk overlay for the CLI, the router's own overlay when served.
     /// Read off the overlay itself, so a hand edit that kept the revision

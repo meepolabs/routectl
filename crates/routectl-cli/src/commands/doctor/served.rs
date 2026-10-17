@@ -9,8 +9,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use routectl_router::{CatalogOverlay, Config, LearnedRegistryEntry, MatrixWarm, SeedClearMarker};
+use routectl_core::UpstreamReason;
+use routectl_router::{
+    CatalogOverlay, Config, Finding, LearnedRegistryEntry, MatrixWarm, SeedClearMarker, Status,
+};
 
+use crate::commands::seat_report::safe;
 use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
 use crate::server::reload_failure::ReloadFailureSnapshot;
 
@@ -36,6 +40,21 @@ pub struct ServedInputs {
     learned: ResidentLearned,
     warm: WarmReport,
     reload_failure: Option<ReloadFailureSnapshot>,
+    parked_seats: Vec<ParkedSeat>,
+}
+
+/// One dispatch seat whose credential the running daemon has parked: the
+/// seat's runtime key, the reason the upstream gave, and the epoch-ms the park
+/// lapses into a re-test. Only a running daemon holds parks, so only a served
+/// gather carries any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedSeat {
+    /// The seat's runtime state key (`nickname[#member]`).
+    pub state_key: String,
+    /// Why the upstream rejected the credential.
+    pub reason: UpstreamReason,
+    /// Epoch-ms the park lapses.
+    pub parked_until_ms: i64,
 }
 
 /// The resident learned registry, read once, with the clock anchors the read
@@ -66,6 +85,16 @@ impl ServedInputs {
             learned,
             warm,
             reload_failure: None,
+            parked_seats: Vec::new(),
+        }
+    }
+
+    /// Attach the seats whose credential the daemon has parked.
+    #[must_use]
+    pub fn with_parked_seats(self, parked_seats: Vec<ParkedSeat>) -> Self {
+        Self {
+            parked_seats,
+            ..self
         }
     }
 
@@ -76,6 +105,31 @@ impl ServedInputs {
             reload_failure,
             ..self
         }
+    }
+}
+
+/// One parked seat as an `auth` Warn: the seat's state key, the reason token,
+/// and the deadline as RFC3339 UTC. The state key carries an operator-written
+/// member label, so it routes through the log-safe helper.
+pub(super) fn parked_seat_finding(seat: &ParkedSeat) -> Finding {
+    let deadline = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(seat.parked_until_ms)
+        .map_or_else(
+            || format!("epoch ms {}", seat.parked_until_ms),
+            |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+    Finding {
+        section: "auth",
+        name: format!("parked seat {}", safe(&seat.state_key)),
+        status: Status::Warn,
+        detail: format!(
+            "credential parked ({}) until {deadline}; requests skip this seat until then",
+            seat.reason.as_str(),
+        ),
+        remediation: Some(
+            "renew or replace the credential; a credentials or config reload lifts every park, \
+             otherwise the seat is re-tested once the park lapses"
+                .to_string(),
+        ),
     }
 }
 
@@ -96,6 +150,9 @@ pub(super) struct GatheredLayers {
     pub(super) matrix_origin: MatrixOrigin,
     /// The daemon's last rejected reload; always `None` from disk.
     pub(super) reload_failure: Option<ReloadFailureSnapshot>,
+    /// The daemon's credential-parked seats; always empty from disk, which
+    /// cannot see daemon state.
+    pub(super) parked_seats: Vec<ParkedSeat>,
 }
 
 /// The served layers. The daemon accepted this config and overlay, so neither
@@ -107,6 +164,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         learned,
         warm,
         reload_failure,
+        parked_seats,
     } = *inputs;
     GatheredLayers {
         accepted_config_version: Some(config.version),
@@ -117,6 +175,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         capability_matrix: resident_matrix(learned, &warm),
         matrix_origin: MatrixOrigin::Resident(matrix_warm(&warm)),
         reload_failure,
+        parked_seats,
     }
 }
 

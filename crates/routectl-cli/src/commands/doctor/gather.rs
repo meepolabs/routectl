@@ -79,6 +79,7 @@ pub async fn gather_context_no_network(
         capability_matrix,
         matrix_origin,
         reload_failure,
+        parked_seats,
     } = layers;
 
     let overlay_verified_at = overlay
@@ -142,6 +143,7 @@ pub async fn gather_context_no_network(
         pricing,
         knobs,
         reload_failure,
+        parked_seats,
         overlay_soft_defects,
     }
 }
@@ -194,6 +196,7 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
         capability_matrix,
         matrix_origin: MatrixOrigin::LedgerReplay,
         reload_failure: None,
+        parked_seats: Vec::new(),
     }
 }
 
