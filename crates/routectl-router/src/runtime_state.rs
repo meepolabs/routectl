@@ -91,7 +91,8 @@ pub struct ProviderState {
     last_outcome_at: Option<Instant>,
 
     /// Credential park, set only by [`Self::park_credential_until`] and
-    /// cleared only by [`Self::clear_credential_park`]. Shares
+    /// cleared only by [`Self::clear_credential_park`] (directly, gated on
+    /// the generation, or by a reload's reset). Shares
     /// `half_open_in_flight` with the breaker, so a lapsed park and a lapsed
     /// cooldown still admit one re-test between them.
     credential_park: Option<CredentialPark>,
@@ -406,6 +407,18 @@ impl ProviderState {
     /// Lift the credential park, if any.
     pub const fn clear_credential_park(&mut self) {
         self.credential_park = None;
+    }
+
+    /// Lift the credential park only when `generation` is still the current
+    /// credential generation, returning whether it was eligible. A success
+    /// admitted before a reload proves the old credential, not the one a
+    /// rejection under the new generation parked.
+    pub const fn clear_credential_park_in_generation(&mut self, generation: u64) -> bool {
+        if generation != self.credential_generation {
+            return false;
+        }
+        self.clear_credential_park();
+        true
     }
 
     /// Lift the credential park and start a new credential generation, so a

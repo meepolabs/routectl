@@ -21,20 +21,20 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
 const EXPIRED: Option<UpstreamReason> = Some(UpstreamReason::CredentialExpired);
-const INVALID: Option<UpstreamReason> = Some(UpstreamReason::CredentialInvalid);
+pub(super) const INVALID: Option<UpstreamReason> = Some(UpstreamReason::CredentialInvalid);
 
 #[derive(Clone, Copy, Debug)]
-enum Step {
+pub(super) enum Step {
     Ok,
     Reject(u16, Option<UpstreamReason>),
 }
 
 /// The reason an auth refresh fails with: `Some` is a terminal refresh
 /// (`Error::Credential`), `None` any other refresh failure (`Error::Auth`).
-type RefreshErr = Option<UpstreamReason>;
+pub(super) type RefreshErr = Option<UpstreamReason>;
 
 #[derive(Clone, Copy, Debug)]
-enum Surface {
+pub(super) enum Surface {
     Complete,
     Stream,
     CountTokens,
@@ -44,20 +44,20 @@ const SURFACES: [Surface; 3] = [Surface::Complete, Surface::Stream, Surface::Cou
 
 /// Answers every surface from one script, one step per dispatch, and repeats
 /// the last step once the script runs out.
-struct ScriptedProvider {
+pub(super) struct ScriptedProvider {
     id: String,
     script: Mutex<VecDeque<Step>>,
     refresh_err: Option<RefreshErr>,
-    calls: AtomicUsize,
+    pub(super) calls: AtomicUsize,
     hold: Option<Arc<Hold>>,
 }
 
 /// Holds the first dispatch inside the upstream call until released, so a
 /// test can act between the attempt's admission and its outcome.
 #[derive(Default)]
-struct Hold {
-    entered: Notify,
-    release: Notify,
+pub(super) struct Hold {
+    pub(super) entered: Notify,
+    pub(super) release: Notify,
     taken: AtomicBool,
 }
 
@@ -71,7 +71,7 @@ impl Hold {
 }
 
 impl ScriptedProvider {
-    fn new(id: &str, script: &[Step]) -> Arc<Self> {
+    pub(super) fn new(id: &str, script: &[Step]) -> Arc<Self> {
         Self::with_refresh(id, script, None)
     }
 
@@ -85,7 +85,7 @@ impl ScriptedProvider {
         })
     }
 
-    fn held(
+    pub(super) fn held(
         id: &str,
         script: &[Step],
         refresh_err: Option<RefreshErr>,
@@ -119,7 +119,7 @@ impl ScriptedProvider {
     }
 }
 
-fn rejection(id: &str, status: u16, reason: Option<UpstreamReason>) -> Error {
+pub(super) fn rejection(id: &str, status: u16, reason: Option<UpstreamReason>) -> Error {
     Error::upstream(id, status, "credential rejected").with_upstream_reason(reason)
 }
 
@@ -184,7 +184,7 @@ impl Provider for ScriptedProvider {
 /// Alias `alias` -> `[m-a, m-b]`, both anthropic-api entries so every surface
 /// (count_tokens included) admits them. Single-attempt retry policy, so each
 /// seat is dialed once per request plus the one auth-recovery retry.
-fn chain_router(
+pub(super) fn chain_router(
     primary: Arc<ScriptedProvider>,
     sibling: Arc<ScriptedProvider>,
     primary_forwarded: bool,
@@ -268,7 +268,7 @@ fn chain_router_with(
     router
 }
 
-fn request(max_tokens: Option<u32>, forwarded: bool) -> ChatRequest {
+pub(super) fn request(max_tokens: Option<u32>, forwarded: bool) -> ChatRequest {
     let mut req = ChatRequest {
         model: "alias".into(),
         max_tokens,
@@ -283,7 +283,7 @@ fn request(max_tokens: Option<u32>, forwarded: bool) -> ChatRequest {
 
 /// Dispatch one request on `surface`, draining a stream, and report whether
 /// it succeeded.
-async fn dispatch(router: &Router, surface: Surface, req: ChatRequest) -> bool {
+pub(super) async fn dispatch(router: &Router, surface: Surface, req: ChatRequest) -> bool {
     use futures::stream::StreamExt as _;
     match surface {
         Surface::Complete => router.complete(req).await.is_ok(),
@@ -298,7 +298,7 @@ async fn dispatch(router: &Router, surface: Surface, req: ChatRequest) -> bool {
     }
 }
 
-fn park_reason(router: &Router, state_key: &str) -> Option<UpstreamReason> {
+pub(super) fn park_reason(router: &Router, state_key: &str) -> Option<UpstreamReason> {
     router
         .gate_status_for_tests(state_key)
         .credential_park

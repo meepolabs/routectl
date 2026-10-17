@@ -250,12 +250,45 @@ impl Router {
         self.park_credential_on_rejection(&target.state_key, err, is_probe, generation)
     }
 
-    /// Settle a success through the seat keyed by `state_key`: record the
-    /// breaker success when `record_breaker` is set, and lift the credential
-    /// park, since a success proves the credential works. One critical
-    /// section, so a concurrent rejection cannot park between the two and
-    /// then be lifted by a success that preceded it.
-    pub(super) fn settle_seat_success(&self, state_key: &str, record_breaker: bool) {
+    /// Settle a success through the seat keyed by `state_key` for the attempt
+    /// admitted through `guard`: record the breaker success when
+    /// `record_breaker` is set, and lift the credential park when the
+    /// admission's generation is still current, since a success proves the
+    /// credential it was admitted under. One critical section, so a
+    /// concurrent rejection cannot park between the two and then be lifted by
+    /// a success that preceded it.
+    pub(super) fn settle_seat_success(
+        &self,
+        state_key: &str,
+        record_breaker: bool,
+        guard: &ProbeSlotGuard,
+    ) {
+        self.settle_seat_success_in_generation(
+            state_key,
+            record_breaker,
+            guard.credential_generation(),
+        );
+    }
+
+    /// [`Self::settle_seat_success`] for an attempt admitted under
+    /// `generation`. Test seam for a success held across a reload.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn settle_seat_success_for_tests(
+        &self,
+        state_key: &str,
+        record_breaker: bool,
+        generation: u64,
+    ) {
+        self.settle_seat_success_in_generation(state_key, record_breaker, generation);
+    }
+
+    fn settle_seat_success_in_generation(
+        &self,
+        state_key: &str,
+        record_breaker: bool,
+        generation: u64,
+    ) {
         let Some(state) = self.state.get(state_key) else {
             return;
         };
@@ -265,6 +298,10 @@ impl Router {
         }
         #[cfg(test)]
         run_within_success_settle_hook();
-        state.clear_credential_park();
+        state.clear_credential_park_in_generation(generation);
     }
 }
+
+#[cfg(test)]
+#[path = "credential_park_generation_tests.rs"]
+mod credential_park_generation_tests;

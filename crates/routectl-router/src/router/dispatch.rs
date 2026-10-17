@@ -650,7 +650,7 @@ impl Router {
 
                 match result {
                     Ok(mut resp) => {
-                        self.settle_seat_success(state_key, true);
+                        self.settle_seat_success(state_key, true, &probe_guard);
                         probe_guard.disarm();
                         sample_charge.keep();
                         self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
@@ -1473,7 +1473,7 @@ impl Router {
                         let state = self.state.get(state_key).cloned();
                         // First content proves the credential works, whatever
                         // the breaker phase was.
-                        self.settle_seat_success(state_key, was_half_open_probe);
+                        self.settle_seat_success(state_key, was_half_open_probe, &probe_guard);
                         // The probe (if any) is settled; the wrapped stream's
                         // BreakerAccounting owns the tail. Disarm so a drop here
                         // does not free a slot a later probe may hold.

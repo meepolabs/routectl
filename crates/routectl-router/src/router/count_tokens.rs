@@ -486,7 +486,7 @@ impl Router {
             attempts_made += 1;
             match result {
                 Ok(tc) => {
-                    self.settle_seat_success(&target.state_key, true);
+                    self.settle_seat_success(&target.state_key, true, &probe_guard);
                     probe_guard.disarm();
                     // Settle the replay carry WITHOUT persisting or emitting:
                     // dropping the plan releases every single-flight slot it
