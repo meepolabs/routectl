@@ -101,6 +101,30 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   the probed error text -- but a request that needs it will silently lose
   the directive rather than fail, so this is where to start.
 
+- **An empty or blank forwarded system turn is dropped, not forwarded.**
+  After an idle compaction Claude Code sends an in-band `role: "system"`
+  turn with no content (`content: []`, `content: ""`, or only blank text
+  blocks) next to a top-level `system`, which puts the walk on the forward
+  policy. `screen_forwarded_system_content` returns
+  `SystemTurnVerdict::DroppedEmpty` for it and `emit_forwarded_system_turn`
+  in `crates/routectl-providers/src/anthropic_api/messages.rs` omits the
+  turn, merges the neighbors the omission leaves adjacent, carries its cache
+  breakpoint over the seam, and declares the drop to the wire check. The
+  recorded verdict is a lossless repair: the turn carries no content, so
+  nothing the model would see is lost, and the session continues on both
+  the complete and the stream leg with no local refusal (pinned in
+  `crates/routectl-cli/tests/anthropic_ingress.rs` by
+  `empty_in_band_system_turn_is_omitted_not_refused`,
+  `empty_cached_system_turn_between_user_turns_merges_and_keeps_breakpoint`,
+  `empty_in_band_system_turn_is_omitted_on_the_stream_leg` and
+  `a_session_across_an_empty_system_turn_survives_without_a_local_refusal`). Whether
+  Anthropic itself accepts an empty system turn is NOT grounded: no
+  committed envelope records its answer to this shape, and what is
+  recorded about blank content concerns empty text blocks, a different
+  shape. A live capture that gets a 200 for
+  the empty turn would let a follow-up remove the drop and forward the
+  turn verbatim; until then the drop stays.
+
 - **Seven canonical sampling knobs have no counterpart here.** `n`,
   `seed`, `logprobs`, `top_logprobs`, `logit_bias`, `presence_penalty`
   and `frequency_penalty` do not appear in the Anthropic Messages API

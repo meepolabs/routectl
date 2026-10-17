@@ -476,6 +476,226 @@ async fn empty_cached_system_turn_between_user_turns_merges_and_keeps_breakpoint
     );
 }
 
+/// Whether `body` carries a `role: "system"` message whose content is
+/// empty or blank: `[]`, `""`, or only blank text blocks.
+fn has_empty_system_turn(body: &Value) -> bool {
+    body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["role"] == "system")
+        .any(|m| match &m["content"] {
+            Value::String(text) => text.trim().is_empty(),
+            Value::Array(blocks) => blocks
+                .iter()
+                .all(|b| b["text"].as_str().is_some_and(|t| t.trim().is_empty())),
+            _ => false,
+        })
+}
+
+/// The streaming leg of the post-compaction body: the empty in-band system
+/// turn is omitted from the upstream body and the client gets a complete
+/// SSE stream rather than a refusal.
+#[tokio::test]
+async fn empty_in_band_system_turn_is_omitted_on_the_stream_leg() {
+    for (name, empty) in [("empty parts", json!([])), ("empty string", json!(""))] {
+        // Arrange
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(meter_sse_body(None))
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&upstream)
+            .await;
+        let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+        let base = helpers::spawn(config).await;
+        let body = json!({
+            "model": "heavy",
+            "max_tokens": 16,
+            "stream": true,
+            "system": [{"type": "text", "text": "you are helpful"}],
+            "messages": [
+                {"role": "user", "content": "summary of earlier work"},
+                {"role": "system", "content": empty},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "continue"}
+            ]
+        });
+        assert!(has_empty_system_turn(&body), "{name}: fixture shape");
+
+        // Act
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/v1/messages"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let downstream = resp.text().await.unwrap();
+
+        // Assert
+        assert_eq!(status, 200, "{name}: {downstream}");
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "{name}: content-type {content_type}"
+        );
+        assert!(
+            downstream.contains("message_stop"),
+            "{name}: the stream must complete: {downstream}"
+        );
+        let received = upstream.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1, "{name}");
+        let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(up["stream"], true, "{name}: {up}");
+        let roles: Vec<&str> = up["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant", "user"], "{name}: {up}");
+    }
+}
+
+/// The `wire_check.local_refusals` rows on `/status/health`.
+async fn local_refusal_rows(client: &reqwest::Client, base: &str) -> Value {
+    let resp = client
+        .get(format!("{base}/status/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "GET /status/health");
+    let panel: Value = resp.json().await.unwrap();
+    panel["data"]["wire_check"]["local_refusals"].clone()
+}
+
+/// A Claude Code session across an idle compaction, on one daemon: a clean
+/// turn, the post-compaction body carrying an empty in-band system turn,
+/// then a clean continuation carrying the prior turns. Every request gets a
+/// 2xx, every one reaches the upstream without an empty system turn, and the
+/// session leaves no local-refusal row behind. The paired control proves the
+/// same panel does surface a refusal the ingress raises.
+#[tokio::test]
+async fn a_session_across_an_empty_system_turn_survives_without_a_local_refusal() {
+    // Arrange
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+    let client = reqwest::Client::new();
+    let system = json!([{"type": "text", "text": "you are helpful"}]);
+    let session = [
+        json!({
+            "model": "heavy",
+            "max_tokens": 16,
+            "system": system,
+            "messages": [{"role": "user", "content": "start the task"}]
+        }),
+        json!({
+            "model": "heavy",
+            "max_tokens": 16,
+            "system": system,
+            "messages": [
+                {"role": "user", "content": "summary of earlier work"},
+                {"role": "system", "content": []},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "continue"}
+            ]
+        }),
+        json!({
+            "model": "heavy",
+            "max_tokens": 16,
+            "system": system,
+            "messages": [
+                {"role": "user", "content": "summary of earlier work"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "continue"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "next step"}
+            ]
+        }),
+    ];
+    assert!(
+        has_empty_system_turn(&session[1]),
+        "the post-compaction body must carry the empty system turn"
+    );
+
+    // Act
+    let mut statuses = Vec::new();
+    for body in &session {
+        let resp = client
+            .post(format!("{base}/v1/messages"))
+            .json(body)
+            .send()
+            .await
+            .unwrap();
+        statuses.push((resp.status(), resp.text().await.unwrap()));
+    }
+    let refusals_after_session = local_refusal_rows(&client, &base).await;
+
+    // Assert
+    for (i, (status, text)) in statuses.iter().enumerate() {
+        assert!(status.is_success(), "request {i}: {status} {text}");
+    }
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 3, "every session turn reaches the upstream");
+    for (i, request) in received.iter().enumerate() {
+        let up: Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(!has_empty_system_turn(&up), "upstream request {i}: {up}");
+    }
+    assert_eq!(
+        refusals_after_session,
+        json!([]),
+        "the session refused nothing"
+    );
+
+    // Positive control: a non-string `thinking.display` is refused at the
+    // ingress and shows up on the same panel.
+    let control = json!({
+        "model": "heavy",
+        "max_tokens": 4096,
+        "thinking": {"type": "enabled", "budget_tokens": 2048, "display": 42},
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let resp = client
+        .post(format!("{base}/v1/messages"))
+        .json(&control)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "{}", resp.text().await.unwrap());
+    let refusals_after_control = local_refusal_rows(&client, &base).await;
+    let rows: Vec<(&str, u64)> = refusals_after_control
+        .as_array()
+        .expect("local_refusals array")
+        .iter()
+        .map(|r| {
+            (
+                r["lane"].as_str().unwrap_or_default(),
+                r["count"].as_u64().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("anthropic->local", 1)],
+        "{refusals_after_control}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4-breakpoint cap and TTL ordering rejected at ingress
 // ---------------------------------------------------------------------------
