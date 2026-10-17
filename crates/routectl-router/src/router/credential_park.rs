@@ -54,10 +54,11 @@ pub(super) fn parked_seat_error(reason: UpstreamReason, until: Instant, now: Ins
     }
 }
 
-/// Fold a gate refusal into the chain's running error. The first error stays
-/// unless both are parked-seat refusals and the new one lapses strictly
-/// sooner, so an all-parked chain reports its earliest deadline and no gate
-/// refusal ever replaces a dialed seat's real error.
+/// Fold a gate refusal into the chain's running error. A parked-seat refusal
+/// is held only while every refusal so far is one: between two the earlier
+/// deadline wins, and any other gate refusal replaces it, so the all-parked
+/// error surfaces only when every seat was parked. Any other held error,
+/// including a dialed seat's real error, is kept.
 pub(super) fn merge_gate_refusal(last_err: &mut Option<Error>, refusal: Error) {
     let replace = match (last_err.as_ref(), &refusal) {
         (None, _) => true,
@@ -71,6 +72,13 @@ pub(super) fn merge_gate_refusal(last_err: &mut Option<Error>, refusal: Error) {
                 ..
             },
         ) => new < held,
+        (
+            Some(Error::Credential {
+                parked_until_ms: Some(_),
+                ..
+            }),
+            _,
+        ) => true,
         _ => false,
     };
     if replace {

@@ -581,7 +581,8 @@ impl Router {
                         // chain entry must not overwrite an earlier entry's
                         // genuine upstream failure, or the client sees the
                         // synthetic error instead of the real 503/timeout.
-                        // Between two parked seats the earlier deadline wins.
+                        // Between two parked seats the earlier deadline wins, and
+                        // any other gate refusal replaces a parked one.
                         merge_gate_refusal(&mut last_err, gate_err);
                         if opts.disable_fallbacks {
                             break 'chain;
@@ -1395,7 +1396,8 @@ impl Router {
                     // chain entry must not overwrite an earlier entry's
                     // genuine upstream failure, or the client sees the
                     // synthetic error instead of the real 503/timeout.
-                    // Between two parked seats the earlier deadline wins.
+                    // Between two parked seats the earlier deadline wins, and
+                    // any other gate refusal replaces a parked one.
                     merge_gate_refusal(&mut last_err, gate_err);
                     if opts.disable_fallbacks {
                         break 'chain;

@@ -199,6 +199,18 @@ fn chain_router_with_auth_fallback(
     primary_forwarded: bool,
     auth_fallback: Option<bool>,
 ) -> Router {
+    chain_router_with(primary, sibling, primary_forwarded, auth_fallback, |_| {})
+}
+
+/// [`chain_router_with_auth_fallback`] with `tweak` applied to the config
+/// before the router is built.
+fn chain_router_with(
+    primary: Arc<ScriptedProvider>,
+    sibling: Arc<ScriptedProvider>,
+    primary_forwarded: bool,
+    auth_fallback: Option<bool>,
+    tweak: impl FnOnce(&mut Config),
+) -> Router {
     let mut retry = RetryPolicy {
         max_attempts: 1,
         initial_backoff_ms: 0,
@@ -231,6 +243,7 @@ fn chain_router_with_auth_fallback(
         "alias".into(),
         AliasValue::Chain(vec!["m-a".into(), "m-b".into()]),
     );
+    tweak(&mut config);
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
         "m-a".into(),
@@ -744,6 +757,125 @@ async fn a_dialed_seat_error_outranks_a_parked_seat() {
             );
         }
     }
+}
+
+/// The refusal a seat's gate answers with in [`a_parked_seat_never_masks_another_gate_refusal`].
+#[derive(Clone, Copy, Debug)]
+enum Gate {
+    Parked,
+    BreakerOpen,
+    RpmExhausted,
+}
+
+/// Alias `alias` -> `[m-a, m-b]` with the gate of each seat set to refuse as
+/// `gates` names. An RPM-exhausted seat gets a zero-request budget.
+fn gated_chain_router(
+    primary: Arc<ScriptedProvider>,
+    sibling: Arc<ScriptedProvider>,
+    gates: [Gate; 2],
+) -> Router {
+    let seats = [("m-a", "p-a"), ("m-b", "p-b")];
+    let router = chain_router_with(primary, sibling, false, None, |config| {
+        for ((_, provider), gate) in seats.iter().zip(gates) {
+            if matches!(gate, Gate::RpmExhausted) {
+                let entry = config.providers.get_mut(*provider).expect("seat provider");
+                let mut runtime = entry.runtime().clone();
+                runtime.rpm_limit = Some(0);
+                *entry = entry.clone().with_runtime(runtime);
+            }
+        }
+    });
+    let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
+    for ((key, _), gate) in seats.iter().zip(gates) {
+        match gate {
+            Gate::Parked => assert!(router.park_credential_for_tests(
+                key,
+                UpstreamReason::CredentialExpired,
+                until
+            )),
+            Gate::BreakerOpen => {
+                assert!(router.force_open_breaker(key, Duration::from_hours(1)));
+            }
+            Gate::RpmExhausted => {}
+        }
+    }
+    router
+}
+
+#[tokio::test]
+async fn a_parked_seat_never_masks_another_gate_refusal() {
+    let rows = [
+        (
+            "park then breaker",
+            [Gate::Parked, Gate::BreakerOpen],
+            "circuit breaker open",
+        ),
+        (
+            "breaker then park",
+            [Gate::BreakerOpen, Gate::Parked],
+            "circuit breaker open",
+        ),
+        (
+            "park then rpm",
+            [Gate::Parked, Gate::RpmExhausted],
+            "local rpm_limit exceeded",
+        ),
+    ];
+    for surface in SURFACES {
+        for (name, gates, expected_message) in rows {
+            // Arrange
+            let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
+            let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+            let router = gated_chain_router(primary.clone(), sibling.clone(), gates);
+
+            // Act
+            let err = dispatch_err(&router, surface, request(None, false)).await;
+
+            // Assert
+            let label = format!("{surface:?} {name}");
+            assert_eq!(primary.calls.load(Ordering::SeqCst), 0, "{label}");
+            assert_eq!(sibling.calls.load(Ordering::SeqCst), 0, "{label}");
+            let Some(err @ Error::Upstream { status: 0, .. }) = err else {
+                panic!("{label}: expected the other gate's refusal, got {err:?}");
+            };
+            assert!(
+                err.to_string().contains(expected_message),
+                "{label}: expected {expected_message:?}, got {err}",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_held_credential_error_without_a_park_deadline_outranks_a_parked_seat() {
+    // Arrange: a dialed seat's terminal refresh error carries no deadline.
+    let dialed = Error::Credential {
+        detail: "oauth refresh failed".into(),
+        reason: UpstreamReason::CredentialInvalid,
+        parked_until_ms: None,
+    };
+    let mut last_err = Some(dialed);
+    let parked = super::credential_park::parked_seat_error(
+        UpstreamReason::CredentialExpired,
+        Instant::now() + CREDENTIAL_PARK_BACKSTOP,
+        Instant::now(),
+    );
+
+    // Act
+    super::credential_park::merge_gate_refusal(&mut last_err, parked);
+
+    // Assert
+    assert!(
+        matches!(
+            last_err,
+            Some(Error::Credential {
+                reason: UpstreamReason::CredentialInvalid,
+                parked_until_ms: None,
+                ..
+            })
+        ),
+        "the dialed error must be kept, got {last_err:?}",
+    );
 }
 
 /// Alias `alias` -> `[pooled, m-b]`: `pooled` is a two-seat pool on its own
