@@ -62,19 +62,19 @@ use crate::feature_keys::{FORCED_TOOL_CHOICE, canonical_tool_key};
 /// The openai-compat provider `kind` string. For this family the
 /// `FeatureUnsupported` class carries an `error.code` token rather than a
 /// capability, so the resolver reads `/error/param` instead.
-const OPENAI_COMPAT_KIND: &str = "openai-compat";
+const OPENAI_COMPAT_KIND: &str = routectl_core::provider_kind::config::OPENAI_COMPAT;
 
 /// The native AWS Bedrock provider `kind` string. On a generic `BadRequest`
 /// this family reports the rejected field in a FLAT `{"__type","message"}`
 /// envelope, not the nested `/error/message` shape the inferred arm reads --
 /// so it gets its own top-level reader and an anchored-template extraction
 /// path rather than the whole-phrase table.
-const BEDROCK_KIND: &str = "bedrock";
+const BEDROCK_KIND: &str = routectl_core::provider_kind::config::BEDROCK;
 
 /// The native OpenAI Responses provider `kind` string. Its lanes differ in
 /// which reasoning artifacts they accept on replay, so its inferred table
 /// carries the replay-rejection phrase.
-const OPENAI_RESPONSES_KIND: &str = "openai-responses";
+const OPENAI_RESPONSES_KIND: &str = routectl_core::provider_kind::config::OPENAI_RESPONSES;
 
 /// Closed-set translation of an openai-compat `error.param` WIRE param name
 /// onto the canonical request-capability key the request side derives and

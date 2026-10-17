@@ -74,7 +74,7 @@ pub fn is_prod_host(base_url: &str) -> bool {
 /// carries a `thought_signature`) and replay it as thought parts.
 pub(crate) const GEMINI_FORMAT: &str = "gemini-v1";
 
-const PROVIDER_KIND: &str = "gemini";
+pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::GEMINI;
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 /// Resolved configuration for one Gemini provider entry.

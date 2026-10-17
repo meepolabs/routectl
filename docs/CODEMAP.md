@@ -41,6 +41,10 @@ license.
 - `src/beta_repair_report.rs` -- `BetaRepairReport`: clone-shared slot where a
   provider records the client beta flags it stripped after a named rejection
   (deduped, first-seen order); the router `take`s it after the call
+- `src/provider_kind.rs` -- the two provider-kind vocabularies: `config::*`
+  (the `kind = "..."` token the usage ledger persists) and `trace::*` (the
+  `provider_kind=` token providers log), plus `trace_kind` mapping each
+  `EgressKind` to its trace token
 - `src/translation_report.rs` -- `TranslationReport`: clone-shared per-attempt
   slot where an egress records a tool it withheld or could not translate, as a
   closed `TranslationReason` (`HostedToolWithheld`, `TranslationRejected`)

@@ -70,7 +70,7 @@ pub(super) const REPLAY_REASON_UPSTREAM_REJECTION: &str = "upstream_replay_rejec
 /// OpenAI-Responses-dialect `reasoning.context` / `reasoning.mode`
 /// sub-keys. Matches `ProviderEntry::kind_str`, so it round-trips with the
 /// `kind = "..."` discriminant in the operator's provider table.
-const RESPONSES_PROVIDER_KIND: &str = "openai-responses";
+const RESPONSES_PROVIDER_KIND: &str = routectl_core::provider_kind::config::OPENAI_RESPONSES;
 
 /// Whether `req` carries a Responses-dialect `reasoning.context` or
 /// `reasoning.mode` under `provider_extras`. `summary` is deliberately

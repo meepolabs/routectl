@@ -20,6 +20,7 @@ pub mod identity;
 pub mod log_safe;
 pub mod parsed_error_body;
 pub(crate) mod provider;
+pub mod provider_kind;
 pub(crate) mod reasoning_dialect;
 pub mod reasoning_envelope;
 pub mod reasoning_format;

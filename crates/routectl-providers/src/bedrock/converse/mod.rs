@@ -57,12 +57,9 @@ use routectl_core::{ChatRequest, ChatResponse, Error, Result};
 
 use super::BedrockConfig;
 
-/// Provider-kind discriminator string for this Bedrock shape. Defined
-/// HERE, on the surface that owns the shape, and read back by
-/// `BedrockApiShape::provider_kind_str` -- the Bedrock egress carries two
-/// shapes, so the shape's own module is the one place that can hold the
-/// spelling without a second module needing to agree with it.
-pub(crate) const PROVIDER_KIND: &str = "bedrock-converse";
+/// Provider-kind discriminator string for this Bedrock shape, read back by
+/// `BedrockApiShape::provider_kind_str`.
+pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::BEDROCK_CONVERSE;
 
 /// The lane spelling every `record_translation_drop` /
 /// `record_translation_policy_action` / `record_translation_lane_seen`

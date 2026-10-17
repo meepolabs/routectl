@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use routectl_core::ChatRequest;
 use routectl_core::wire_check::{
-    Assembled, DeclaredEdit, EditKind, EditSite, EgressKind, IncompleteReason, Lane, LaneClass,
-    Leg, PathClass, StreamExit, TapContents, WirePath, WireTap, diff,
+    Assembled, DeclaredEdit, EditKind, EditSite, IncompleteReason, Lane, LaneClass, Leg, PathClass,
+    StreamExit, TapContents, WirePath, WireTap, diff,
 };
 use serde_json::Value;
 
@@ -244,29 +244,13 @@ impl ResponseCheck {
     /// token it reads.
     fn trace_stream_documents(&self, upstream: &Value, client: &Value, ingress: &str) {
         let (Some(kind), Some(provider_id)) = (
-            provider_trace_kind(self.lane.egress()),
+            routectl_core::provider_kind::trace_kind(self.lane.egress()),
             self.provider_id.as_deref(),
         ) else {
             return;
         };
         routectl_core::trace_upstream_success_body(kind, provider_id, upstream);
         routectl_core::trace_egress_body(ingress, client);
-    }
-}
-
-/// The `provider_kind` token the provider serving `egress` traces its
-/// outgoing request under: the providers' own vocabulary, not the config
-/// kind (`anthropic`, never `anthropic-api`; each Bedrock shape apart). A
-/// Mantle sub-lane is served by its standard sibling's provider.
-const fn provider_trace_kind(egress: EgressKind) -> Option<&'static str> {
-    match egress {
-        EgressKind::AnthropicApi | EgressKind::AnthropicApiMantle => Some("anthropic"),
-        EgressKind::BedrockInvoke => Some("bedrock-invoke"),
-        EgressKind::BedrockConverse => Some("bedrock-converse"),
-        EgressKind::OpenaiCompat | EgressKind::OpenaiCompatMantle => Some("openai-compat"),
-        EgressKind::OpenaiResponses | EgressKind::OpenaiResponsesMantle => Some("openai-responses"),
-        EgressKind::Gemini => Some("gemini"),
-        EgressKind::Local => None,
     }
 }
 

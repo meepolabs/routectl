@@ -32,9 +32,8 @@ use super::betas::{operator_floor, withhold_betas};
 const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
 
 /// Provider-kind discriminator string for this Bedrock shape, read back by
-/// `BedrockApiShape::provider_kind_str`. Homed on the shape's own module for
-/// the same reason as the Converse spelling.
-pub(crate) const PROVIDER_KIND: &str = "bedrock-invoke";
+/// `BedrockApiShape::provider_kind_str`.
+pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::BEDROCK_INVOKE;
 
 /// The lane spelling every translation counter call on this egress uses.
 /// Bound to `PROVIDER_KIND` so the telemetry lane and the `provider_kind=`

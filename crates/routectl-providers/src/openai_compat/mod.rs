@@ -52,7 +52,7 @@ use crate::mantle::MantleAuth;
 /// Provider-kind discriminator string used in tracing fields. Single
 /// source of truth so call sites grep clean (`provider_kind=openai-compat`)
 /// and a typo-on-rename can't silently break operator log filters.
-const PROVIDER_KIND: &str = "openai-compat";
+pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::OPENAI_COMPAT;
 
 /// The lane spelling every `record_translation_drop` /
 /// `record_translation_policy_action` / `record_translation_lane_seen`

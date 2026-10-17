@@ -515,7 +515,7 @@ pub struct WindowReport {
 /// `candidatesTokenCount`), so it alone prices reasoning as its own dimension.
 /// Matches `ProviderEntry::kind_str`, which is also the token the ledger
 /// persists per row.
-const DISJOINT_REASONING_KIND: &str = "gemini";
+const DISJOINT_REASONING_KIND: &str = routectl_core::provider_kind::config::GEMINI;
 
 /// The provider kinds whose reasoning tokens are already INSIDE their output
 /// count, so pricing reasoning again would double-charge.

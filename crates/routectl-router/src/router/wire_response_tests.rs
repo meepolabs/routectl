@@ -498,42 +498,6 @@ async fn a_traced_stream_compare_emits_both_documents_only_when_both_are_whole()
     }
 }
 
-/// Each egress kind traces under the token its provider spells its own
-/// request lines with; the config kind and the Mantle suffix never appear.
-#[cfg(feature = "bedrock")]
-#[test]
-fn each_egress_traces_under_its_providers_own_token() {
-    use routectl_core::wire_check::EgressKind;
-    use routectl_providers::bedrock::BedrockApiShape;
-    let rows = [
-        (EgressKind::AnthropicApi, Some("anthropic")),
-        (EgressKind::AnthropicApiMantle, Some("anthropic")),
-        (
-            EgressKind::BedrockInvoke,
-            Some(BedrockApiShape::Invoke.provider_kind_str()),
-        ),
-        (
-            EgressKind::BedrockConverse,
-            Some(BedrockApiShape::Converse.provider_kind_str()),
-        ),
-        (EgressKind::OpenaiCompat, Some("openai-compat")),
-        (EgressKind::OpenaiCompatMantle, Some("openai-compat")),
-        (EgressKind::OpenaiResponses, Some("openai-responses")),
-        (EgressKind::OpenaiResponsesMantle, Some("openai-responses")),
-        (EgressKind::Gemini, Some("gemini")),
-        (EgressKind::Local, None),
-    ];
-    assert_eq!(rows.len(), EgressKind::ALL.len());
-    for (egress, token) in rows {
-        assert_eq!(
-            super::provider_trace_kind(egress),
-            token,
-            "{}",
-            egress.label()
-        );
-    }
-}
-
 /// Dispatch one streamed or complete request on `dialect` and return
 /// whether a response check rode out, with TRACE on or off for the
 /// dispatch.

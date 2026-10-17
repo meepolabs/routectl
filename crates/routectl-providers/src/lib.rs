@@ -322,3 +322,7 @@ mod streaming_role_parity_tests;
     feature = "bedrock"
 ))]
 mod hosted_mcp_tool_egress_tests;
+
+// Each provider's own `provider_kind=` token agrees with the shared table.
+#[cfg(test)]
+mod provider_kind_tests;

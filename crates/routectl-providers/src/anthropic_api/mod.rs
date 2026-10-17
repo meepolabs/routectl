@@ -79,7 +79,7 @@ pub(crate) mod wire_edits;
 
 /// Provider-kind discriminator string used in tracing fields. See
 /// the openai_compat module for the rationale.
-const PROVIDER_KIND: &str = "anthropic";
+pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::ANTHROPIC;
 
 /// The lane spelling every `record_translation_drop` /
 /// `record_translation_policy_action` / `record_translation_lane_seen`

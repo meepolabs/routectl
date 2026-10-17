@@ -1,5 +1,6 @@
 //! Config value types.
 
+use routectl_core::provider_kind::config as kind;
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
@@ -1938,14 +1939,14 @@ pub struct BedrockMantleConfig {
 /// configurable with zero baked rows (today `gemini`); catalog lookups still
 /// serve overlay cells keyed on it.
 pub const CONFIG_PROVIDER_KINDS: &[&str] = &[
-    "openai-compat",
-    "anthropic-api",
+    kind::OPENAI_COMPAT,
+    kind::ANTHROPIC_API,
     #[cfg(feature = "bedrock")]
-    "bedrock",
+    kind::BEDROCK,
     #[cfg(feature = "openai-responses")]
-    "openai-responses",
+    kind::OPENAI_RESPONSES,
     #[cfg(feature = "gemini")]
-    "gemini",
+    kind::GEMINI,
 ];
 
 /// True when `kind` is a provider-kind token a `[providers.X]` block can
@@ -1964,14 +1965,14 @@ impl ProviderEntry {
     /// Every token this can return is in [`CONFIG_PROVIDER_KINDS`].
     pub const fn kind_str(&self) -> &'static str {
         match self {
-            Self::OpenaiCompat { .. } => "openai-compat",
-            Self::AnthropicApi { .. } => "anthropic-api",
+            Self::OpenaiCompat { .. } => kind::OPENAI_COMPAT,
+            Self::AnthropicApi { .. } => kind::ANTHROPIC_API,
             #[cfg(feature = "bedrock")]
-            Self::Bedrock { .. } => "bedrock",
+            Self::Bedrock { .. } => kind::BEDROCK,
             #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { .. } => "openai-responses",
+            Self::OpenaiResponses { .. } => kind::OPENAI_RESPONSES,
             #[cfg(feature = "gemini")]
-            Self::Gemini { .. } => "gemini",
+            Self::Gemini { .. } => kind::GEMINI,
         }
     }
 

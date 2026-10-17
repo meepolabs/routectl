@@ -823,6 +823,9 @@ fn resolve_str(
             })?;
             name = rest.to_string();
         }
+        if let Some(path) = name.strip_prefix(CORE_PROVIDER_KIND_PATH) {
+            return core_provider_kind(path, where_);
+        }
         if name.contains("::") {
             return Err(format!(
                 "{where_} names {expr}, a path shape this resolver does not read; resolve it by \
@@ -841,6 +844,49 @@ fn resolve_str(
     Err(format!(
         "{where_} names a constant chain too deep to resolve, ending at {expr}"
     ))
+}
+
+/// The core module holding the provider-kind vocabularies, as a call site
+/// spells its path.
+const CORE_PROVIDER_KIND_PATH: &str = "routectl_core::provider_kind::";
+
+/// Resolve `<vocabulary>::NAME` against the core provider-kind file: the
+/// `pub const NAME: &str = "..."` inside its inline `mod <vocabulary>` block.
+/// The core file lies outside this crate's population, so it is read here.
+fn core_provider_kind(path: &str, where_: &str) -> Result<String, String> {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../routectl-core/src/provider_kind.rs");
+    let source = std::fs::read_to_string(&file)
+        .map_err(|err| format!("{where_} needs {} ({err})", file.display()))?;
+    let Some((vocabulary, name)) = path.split_once("::") else {
+        return Err(format!(
+            "{where_} names provider_kind::{path}, which is not `<vocabulary>::NAME`"
+        ));
+    };
+    let blocks = inline_mod_blocks(&source)?;
+    let Some((_, body)) = blocks.iter().find(|(block, _)| block == vocabulary) else {
+        return Err(format!(
+            "{where_} names the provider-kind vocabulary {vocabulary}, which the core file \
+             does not define"
+        ));
+    };
+    let scanned = code_only(&source);
+    // The blanked text decides that a line is a definition; the literal is
+    // read from the original, since blanking erases it.
+    let definition = format!("pub const {name}: &str =");
+    scanned[body.clone()]
+        .lines()
+        .zip(source[body.clone()].lines())
+        .find(|(code, _)| code.trim_start().starts_with(&definition))
+        .and_then(|(_, original)| original.trim_start().strip_prefix(&definition))
+        .and_then(|rest| rest.trim_start().strip_prefix('"'))
+        .and_then(|rest| rest.split('"').next())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "{where_} names provider_kind::{path}, and the core file's `mod {vocabulary}` \
+                 defines no `&str` literal constant {name}"
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------

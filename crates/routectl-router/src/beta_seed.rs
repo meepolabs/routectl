@@ -7,7 +7,7 @@
 
 /// The provider kind ([`crate::config::ProviderEntry::kind_str`]) the seed
 /// applies to.
-pub const BEDROCK_SEED_PROVIDER_KIND: &str = "bedrock";
+pub const BEDROCK_SEED_PROVIDER_KIND: &str = routectl_core::provider_kind::config::BEDROCK;
 
 /// Client-lifted beta flags AWS Bedrock rejects outright: each one alone 400s
 /// the whole request on every Claude model measured, so forwarding any of them

@@ -86,7 +86,7 @@ pub(crate) const OPENAI_RESPONSES_FORMAT: &str = routectl_core::OPENAI_RESPONSES
 
 /// Provider-kind discriminator string used in tracing fields. See
 /// the openai_compat module for the rationale.
-const PROVIDER_KIND: &str = "openai-responses";
+pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::OPENAI_RESPONSES;
 
 /// The lane spelling every `record_translation_drop` /
 /// `record_translation_policy_action` / `record_translation_lane_seen`

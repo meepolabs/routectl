@@ -13,7 +13,7 @@ use crate::field_verdict_value::VerdictValue;
 
 /// The native AWS Bedrock provider `kind` string; the only kind whose flat
 /// `ValidationException` envelope the drift observer inspects.
-const BEDROCK_PROVIDER_KIND: &str = "bedrock";
+const BEDROCK_PROVIDER_KIND: &str = routectl_core::provider_kind::config::BEDROCK;
 
 /// Per-request dedupe key for the learn path. The capability arm dedupes on
 /// `(learned_key, feature_key)`; the drift signals dedupe on `state_key` alone;

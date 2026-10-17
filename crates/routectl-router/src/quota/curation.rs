@@ -35,10 +35,10 @@ use super::window::WindowRole;
 
 /// Provider kind of the Anthropic subscription egress, as the rest of the
 /// crate spells it.
-pub const ANTHROPIC_PROVIDER_KIND: &str = "anthropic-api";
+pub const ANTHROPIC_PROVIDER_KIND: &str = routectl_core::provider_kind::config::ANTHROPIC_API;
 
 /// Provider kind of the Codex subscription egress.
-pub const CODEX_PROVIDER_KIND: &str = "openai-responses";
+pub const CODEX_PROVIDER_KIND: &str = routectl_core::provider_kind::config::OPENAI_RESPONSES;
 
 /// Upstream id of Anthropic's five-hour window -- the one CAPACITY-WINDOW
 /// utilization the shipped header parser types (it types five other suffixes

@@ -56,7 +56,7 @@ use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, Dispatch
 
 /// `anthropic-api`, as `ProviderEntry::kind_str` spells it: one of the kinds
 /// field repair admits ([`field_repair_admits_kind`]).
-pub(super) const ANTHROPIC_API_KIND: &str = "anthropic-api";
+pub(super) const ANTHROPIC_API_KIND: &str = routectl_core::provider_kind::config::ANTHROPIC_API;
 
 /// Action token for the field-repair WARN: the L0 repair dropped the mapped
 /// envelope field and re-dispatched the same target once. Closed set.
@@ -874,10 +874,10 @@ pub(super) fn recheck_payloads(
 const FIELD_REPAIR_KINDS: &[&str] = &[ANTHROPIC_API_KIND, BEDROCK_KIND, OPENAI_COMPAT_KIND];
 
 /// `bedrock`, as `ProviderEntry::kind_str` spells it.
-const BEDROCK_KIND: &str = "bedrock";
+const BEDROCK_KIND: &str = routectl_core::provider_kind::config::BEDROCK;
 
 /// `openai-compat`, as `ProviderEntry::kind_str` spells it.
-const OPENAI_COMPAT_KIND: &str = "openai-compat";
+const OPENAI_COMPAT_KIND: &str = routectl_core::provider_kind::config::OPENAI_COMPAT;
 
 /// Whether a field stage may act on a lane of `provider_kind` at all.
 pub(super) fn field_repair_admits_kind(provider_kind: &str) -> bool {

@@ -35,7 +35,7 @@ const ENV_OFFERABLE_KINDS: &[&str] = &["anthropic-api"];
 const OAUTH_OFFERABLE_IDS: &[&str] = &["anthropic"];
 
 /// The config kind the forwarded (MITM/RC) lane routes through.
-const FORWARDED_KIND: &str = "anthropic-api";
+const FORWARDED_KIND: &str = routectl_core::provider_kind::config::ANTHROPIC_API;
 
 /// Compose the offered credential inventory from the operator config and a
 /// set of local oauth probes. PURE: reads the process environment and the
