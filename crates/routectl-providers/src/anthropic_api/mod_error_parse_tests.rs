@@ -89,7 +89,7 @@ fn over_cap_native_envelope_is_never_parsed() {
 }
 
 #[test]
-fn aws_lift_403_carries_no_parse_of_the_raw_principal_body() {
+fn aws_lift_403_carries_its_envelope_not_the_raw_principal_body() {
     let raw = serde_json::json!({
         "__type": "com.amazonaws.bedrock#AccessDeniedException",
         "message": format!(
@@ -110,7 +110,7 @@ fn aws_lift_403_carries_no_parse_of_the_raw_principal_body() {
     assert_eq!(parses, 1);
     assert_eq!(
         msg,
-        "bedrock access denied: missing IAM action bedrock:InvokeModel"
+        "bedrock access denied (AccessDeniedException): missing IAM action bedrock:InvokeModel"
     );
     let Error::Upstream {
         body: carried_text,
@@ -120,7 +120,11 @@ fn aws_lift_403_carries_no_parse_of_the_raw_principal_body() {
     else {
         panic!("expected Error::Upstream, got {err:?}");
     };
-    assert_eq!(carried_text, &msg);
+    assert_eq!(
+        err.parsed_body().and_then(ParsedErrorBody::error_message),
+        Some(msg.as_str())
+    );
+    assert!(!carried_text.contains(ARN_SENTINEL), "{carried_text}");
     assert_eq!(upstream_type.as_deref(), Some("AccessDeniedException"));
     let carried_parse = err.parsed_body().map(|p| p.value().to_string());
     assert!(
@@ -129,4 +133,61 @@ fn aws_lift_403_carries_no_parse_of_the_raw_principal_body() {
             .is_some_and(|v| v.contains(ARN_SENTINEL)),
         "the carried parse leaked the principal ARN: {carried_parse:?}"
     );
+}
+
+/// Each recorded Mantle Anthropic 401 reaches this lane's error with its
+/// reason; an unrecorded 401 stays reasonless.
+#[test]
+fn mantle_credential_rejections_carry_their_reason() {
+    use crate::upstream_error::reason_tests::{MANTLE_CAPTURE, captured};
+    use routectl_core::UpstreamReason::{CredentialExpired, CredentialInvalid};
+    let cases = [
+        ("mantle-anthropic-expired", Some(CredentialExpired)),
+        (
+            "mantle-anthropic-expired-security-token",
+            Some(CredentialExpired),
+        ),
+        ("mantle-anthropic-invalid", Some(CredentialInvalid)),
+    ];
+    for (key, want) in cases {
+        let row = captured(MANTLE_CAPTURE, key);
+
+        let (_, err) =
+            parses_during(|| anthropic_error_from_read("anthropic-parse-once", row.read())).0;
+
+        assert_eq!(err.upstream_reason(), want, "{key}");
+    }
+    let body =
+        r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+    let unrecorded = crate::upstream_error::UpstreamErrorRead::from_parts(
+        401,
+        &reqwest::header::HeaderMap::new(),
+        body,
+        false,
+    )
+    .aws_backed(true);
+    let (_, err) =
+        parses_during(|| anthropic_error_from_read("anthropic-parse-once", unrecorded)).0;
+    assert_eq!(err.upstream_reason(), None, "unrecorded message");
+}
+
+#[test]
+fn a_403_carries_the_envelope_only_when_it_is_aws_shaped() {
+    use crate::upstream_error::reason_tests::{
+        CARRY_403_ROWS, PLAIN_403_TEXT, assert_403_carry, carry_403_read,
+    };
+    for row in &CARRY_403_ROWS {
+        let read = carry_403_read(row.1, row.2);
+
+        let (msg, err) =
+            parses_during(|| anthropic_error_from_read("anthropic-parse-once", read)).0;
+
+        assert_403_carry("anthropic-api", row, &err);
+        assert_eq!(
+            msg,
+            row.3.unwrap_or(PLAIN_403_TEXT),
+            "anthropic-api {}",
+            row.0
+        );
+    }
 }

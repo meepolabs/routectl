@@ -300,7 +300,7 @@ impl Provider for AnthropicApiProvider {
         // grepping `body_excerpt=...` get a consistent shape across
         // providers.
         if status >= 400 {
-            let (msg, err) = read_anthropic_error(&self.cfg.id, resp).await;
+            let (msg, err) = read_anthropic_error(&self.cfg.id, resp, self.is_mantle()).await;
             // Extend the auth-only WARN to all 4xx/5xx so an operator
             // never has to guess WHY a request failed. Sanitize before
             // tracing: the upstream may return untrusted control bytes
@@ -515,7 +515,7 @@ impl Provider for AnthropicApiProvider {
             // `complete()` -- see comment there. Helper extracted at
             // `read_anthropic_error`. Sanitize the excerpt for the
             // same reason as `complete()`.
-            let (msg, err) = read_anthropic_error(&self.cfg.id, resp).await;
+            let (msg, err) = read_anthropic_error(&self.cfg.id, resp, self.is_mantle()).await;
             let safe_excerpt = sanitize_for_log(&msg);
             crate::upstream_log::warn_upstream_failure(
                 &self.cfg.id,
@@ -797,7 +797,7 @@ impl Provider for AnthropicApiProvider {
             // `complete()` -- a non-JSON 502/503 from a misconfigured
             // proxy must not collapse to an opaque serde error.
             // Helper extracted at `read_anthropic_error`.
-            let (msg, err) = read_anthropic_error(&self.cfg.id, resp).await;
+            let (msg, err) = read_anthropic_error(&self.cfg.id, resp, self.is_mantle()).await;
             // Sanitize before tracing: the upstream may return
             // untrusted control bytes (CRLF, control chars, very
             // long lines) and `body_excerpt = %msg` would otherwise
@@ -947,8 +947,14 @@ impl Provider for AnthropicApiProvider {
 /// page, plain-text 529) must not collapse to an opaque serde error.
 /// Returns both the client message (for the caller's `body_excerpt` log)
 /// and the constructed `Error::Upstream`.
-async fn read_anthropic_error(provider_id: &str, resp: reqwest::Response) -> (String, Error) {
-    let read = UpstreamErrorRead::read(provider_id, resp).await;
+async fn read_anthropic_error(
+    provider_id: &str,
+    resp: reqwest::Response,
+    aws_backed: bool,
+) -> (String, Error) {
+    let read = UpstreamErrorRead::read(provider_id, resp)
+        .await
+        .aws_backed(aws_backed);
     anthropic_error_from_read(provider_id, read)
 }
 
@@ -968,9 +974,10 @@ fn anthropic_error_from_read(provider_id: &str, read: UpstreamErrorRead) -> (Str
     let is_aws_lift = read
         .parsed()
         .and_then(ParsedErrorBody::error_type)
-        .is_none();
+        .is_none()
+        || read.needs_access_denied_scrub();
     let debug_body = if is_aws_lift {
-        crate::aws_error::sanitized_debug_body(status, read.text())
+        crate::aws_error::sanitized_debug_body(status, read.text(), &read.access_denied_detail())
     } else {
         read.text().to_string()
     };
@@ -988,14 +995,22 @@ fn anthropic_error_from_read(provider_id: &str, read: UpstreamErrorRead) -> (Str
         );
         return (msg, err);
     }
-    // The client-facing message prefers the Anthropic `/error/message`. On
-    // the AWS-lift path it runs through the shared Bedrock scrub instead of
-    // echoing the AWS top-level `message` verbatim: a 403 AccessDenied
-    // message names the principal ARN, account id, and resource ARN, while
-    // a non-403 body is sanitized and capped.
-    let msg = match read.parsed().and_then(ParsedErrorBody::error_message) {
-        Some(m) => m.to_string(),
-        None => crate::aws_error::classify_parsed_client_error_message(status, read.body()),
+    // The client-facing message prefers the Anthropic `/error/message`. A
+    // 403 needing the access-denied scrub renders routectl's own string
+    // instead (its message can name the principal ARN, account id and
+    // resource ARN, even inside an `{"error":...}` envelope); any other
+    // AWS-lift body is sanitized and capped.
+    let msg = if read.needs_access_denied_scrub() {
+        read.access_denied_client_message()
+    } else {
+        match read.parsed().and_then(ParsedErrorBody::error_message) {
+            Some(m) => m.to_string(),
+            None => crate::aws_error::classify_parsed_client_error_message(
+                status,
+                read.body(),
+                &read.access_denied_detail(),
+            ),
+        }
     };
     // On the NATIVE Anthropic path the structured `{error:...}` envelope is
     // carried RAW so the ingress can surface the upstream's own
@@ -1006,10 +1021,10 @@ fn anthropic_error_from_read(provider_id: &str, read: UpstreamErrorRead) -> (Str
     // non-envelope body (HTML page, plain-text gateway error, over-cap JSON)
     // takes the same path, so the ingress falls back to a status-only
     // message, never a raw body dump.
-    let carried = if !is_aws_lift || msg == read.text() {
-        CarriedBody::Original
+    let carried = if is_aws_lift {
+        read.aws_carried(msg.clone())
     } else {
-        CarriedBody::Replacement(msg.clone())
+        CarriedBody::Original
     };
     let err = read.into_error(provider_id, carried, retry_after);
     (msg, err)
@@ -1065,6 +1080,10 @@ mod tests;
 #[cfg(test)]
 #[path = "mod_error_parse_tests.rs"]
 mod error_parse_tests;
+
+#[cfg(test)]
+#[path = "principal_403_tests.rs"]
+mod principal_403_tests;
 
 // Host-gated reasoning-envelope unwrap on the redacted_thinking egress.
 #[cfg(test)]

@@ -49,6 +49,20 @@ impl UpstreamBody {
         Self { text, parsed }
     }
 
+    /// A `{"error":{"message":<message>}}` envelope, built with `serde_json`
+    /// so any message escapes correctly. Its parse is the value it was
+    /// serialized from, so building one runs no parser; a message too long
+    /// for the parse cap yields the text with no parse, as
+    /// [`UpstreamBody::new`] would.
+    #[must_use]
+    pub fn error_envelope(message: &str) -> Self {
+        let value = serde_json::json!({ "error": { "message": message } });
+        let text = value.to_string();
+        let parsed =
+            (text.len() <= crate::MAX_ERROR_BODY_BYTES).then(|| ParsedErrorBody(Arc::new(value)));
+        Self { text, parsed }
+    }
+
     /// The body text.
     pub fn text(&self) -> &str {
         &self.text
@@ -148,8 +162,32 @@ pub fn upstream_message_or_excerpt(body: &str, parsed: Option<&ParsedErrorBody>)
 
 #[cfg(test)]
 mod tests {
-    use super::ParsedErrorBody;
+    use super::{ParsedErrorBody, UpstreamBody};
     use crate::log_safe::capped_parse_count;
+
+    #[test]
+    fn error_envelope_carries_the_parse_of_its_own_text_without_parsing() {
+        let message = "denied \"quoted\" \\ and\nnewline";
+        let before = capped_parse_count();
+
+        let body = UpstreamBody::error_envelope(message);
+
+        assert_eq!(capped_parse_count() - before, 0);
+        let reparsed = ParsedErrorBody::parse(body.text()).expect("text is JSON");
+        let carried = body.parsed().expect("in-cap envelope carries its parse");
+        assert_eq!(carried.value(), reparsed.value());
+        assert_eq!(carried.error_message(), Some(message));
+    }
+
+    #[test]
+    fn error_envelope_over_the_cap_carries_no_parse() {
+        let message = "x".repeat(crate::MAX_ERROR_BODY_BYTES);
+
+        let body = UpstreamBody::error_envelope(&message);
+
+        assert!(body.parsed().is_none());
+        assert!(body.text().len() > crate::MAX_ERROR_BODY_BYTES);
+    }
 
     #[test]
     fn over_cap_body_yields_no_parse_and_never_runs_the_parser() {

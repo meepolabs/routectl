@@ -64,10 +64,10 @@ use routectl_core::{
     sanitize_for_log,
 };
 
-use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
+use crate::upstream_error::UpstreamErrorRead;
 
 use crate::aws_error::{
-    BedrockErrorClass, access_denied_message, classify_bedrock_error,
+    AccessDeniedDetail, BedrockErrorClass, access_denied_message, classify_bedrock_error,
     classify_parsed_client_error_message, sanitized_debug_body,
 };
 
@@ -561,7 +561,9 @@ impl BedrockProvider {
     /// stream, and count_tokens so the three paths log, classify, and lift
     /// identically.
     async fn map_error_response(&self, resp: reqwest::Response) -> Error {
-        let read = UpstreamErrorRead::read(&self.cfg.id, resp).await;
+        let read = UpstreamErrorRead::read(&self.cfg.id, resp)
+            .await
+            .aws_backed(true);
         map_bedrock_upstream_error(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, read)
     }
 
@@ -813,12 +815,8 @@ fn map_bedrock_upstream_error(
     read: UpstreamErrorRead,
 ) -> Error {
     log_error_read(provider_kind, provider, &read);
-    let message = map_error_message(read.status(), read.body(), read.hit_cap());
-    let carried = if message == read.text() {
-        CarriedBody::Original
-    } else {
-        CarriedBody::Replacement(message)
-    };
+    let message = map_error_message(&read);
+    let carried = read.aws_carried(message);
     let retry_after = read.retry_after();
     read.into_error(provider, carried, retry_after)
 }
@@ -844,12 +842,13 @@ fn log_error_read(provider_kind: &str, provider: &str, read: &UpstreamErrorRead)
             "bedrock upstream error-type header unusable",
         );
     }
-    log_bedrock_upstream_error(provider, status, read.body(), read.hit_cap());
+    let detail = read.access_denied_detail();
+    log_bedrock_upstream_error(provider, status, read.body(), read.hit_cap(), &detail);
     // The full (capped) upstream error body at debug level, beside the
     // status-specific WARN above. A 403 body carries the caller's principal
     // ARN, account id, and the resource ARN, so for a 403 an action-only
     // string derived from the classifier is logged instead.
-    let debug_body = sanitized_debug_body(status, read.text());
+    let debug_body = sanitized_debug_body(status, read.text(), &detail);
     routectl_core::debug_upstream_error_body(provider_kind, provider, status, &debug_body);
 }
 
@@ -886,10 +885,14 @@ const fn is_request_fault_status(status: u16) -> bool {
 /// ([`log_bedrock_upstream_error`]) keeps its own 512-char excerpt
 /// independently, so the operator log surface is unchanged. A 403 stays
 /// scrubbed on the `Other`/`AccessDenied` split below.
-fn map_error_message(status: u16, prefix: &UpstreamBody, hit_cap: bool) -> String {
+fn map_error_message(read: &UpstreamErrorRead) -> String {
+    let (status, prefix, hit_cap) = (read.status(), read.body(), read.hit_cap());
+    let detail = read.access_denied_detail();
     if hit_cap {
         match classify_bedrock_error(status, prefix.text()) {
-            BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
+            BedrockErrorClass::AccessDenied { action, .. } => {
+                access_denied_message(&detail, action)
+            }
             BedrockErrorClass::Other => crate::http_client::body_cap_exceeded_message(),
         }
     } else if is_request_fault_status(status)
@@ -900,7 +903,7 @@ fn map_error_message(status: u16, prefix: &UpstreamBody, hit_cap: bool) -> Strin
             routectl_core::MAX_ERROR_BODY_BYTES,
         )
     } else {
-        classify_parsed_client_error_message(status, prefix)
+        classify_parsed_client_error_message(status, prefix, &detail)
     }
 }
 
@@ -929,12 +932,22 @@ fn map_error_message(status: u16, prefix: &UpstreamBody, hit_cap: bool) -> Strin
 /// bytes reach WARN level. The 403 IAM action (classifier-derived,
 /// shape-checked) still lifts -- it is a bounded token, not free-form
 /// body text.
-fn log_bedrock_upstream_error(provider: &str, status: u16, body: &UpstreamBody, hit_cap: bool) {
+fn log_bedrock_upstream_error(
+    provider: &str,
+    status: u16,
+    body: &UpstreamBody,
+    hit_cap: bool,
+    detail: &AccessDeniedDetail,
+) {
     // sanitize_upstream_body_with_cap trims edges, collapses HTML pages to
     // a short marker, and caps length. It does NOT filter mid-string control
     // characters (\n, \r, ANSI escapes). sanitize_for_log applied next
-    // handles that separately.
-    let safe_excerpt = if hit_cap {
+    // handles that separately. A 403 body names the principal ARN, account
+    // id and resource ARN, which prompt redaction does not touch, so its
+    // excerpt is the same access-denied string the DEBUG line carries.
+    let safe_excerpt = if status == 403 {
+        sanitize_for_log(&sanitized_debug_body(status, body.text(), detail))
+    } else if hit_cap {
         crate::http_client::body_cap_exceeded_message()
     } else {
         let excerpt = routectl_core::sanitize_upstream_body_with_cap(
@@ -966,7 +979,7 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &UpstreamBody, 
             tracing::warn!(
                 provider = %provider,
                 status,
-                action = ?action,
+                action = ?action.filter(|a| crate::aws_error::is_iam_action_shape(a)),
                 principal_present,
                 body_excerpt = %safe_excerpt,
                 "bedrock IAM access denied",
@@ -1017,6 +1030,10 @@ mod error_parse_tests;
 mod error_read_tests;
 
 #[cfg(test)]
+#[path = "access_denied_tests.rs"]
+mod access_denied_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::aws_error::classify_client_error_message;
@@ -1046,7 +1063,13 @@ mod tests {
     }
 
     fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: bool) {
-        super::log_bedrock_upstream_error(provider, status, &UpstreamBody::new(body), hit_cap);
+        super::log_bedrock_upstream_error(
+            provider,
+            status,
+            &UpstreamBody::new(body),
+            hit_cap,
+            &AccessDeniedDetail::default(),
+        );
     }
 
     #[test]
@@ -1286,7 +1309,7 @@ mod tests {
                 assert_eq!(status, 403);
                 assert_eq!(
                     body,
-                    "bedrock access denied: missing IAM action bedrock:InvokeModel"
+                    r#"{"error":{"message":"bedrock access denied: missing IAM action bedrock:InvokeModel"}}"#
                 );
                 assert!(
                     !body.contains("arn:aws"),
@@ -1307,7 +1330,7 @@ mod tests {
                 assert_eq!(status, 400);
                 assert_eq!(
                     body,
-                    classify_client_error_message(400, prefix),
+                    classify_client_error_message(400, prefix, &Default::default()),
                     "under-cap path must classify exactly as before"
                 );
             }

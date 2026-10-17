@@ -229,7 +229,10 @@ fn map_upstream_error_lifts_aws_signature_token_from_403() {
             assert_eq!(status, 403);
             assert_eq!(upstream_type.as_deref(), Some("SignatureDoesNotMatch"));
             assert_eq!(upstream_code, None);
-            assert_eq!(body, "bedrock access denied");
+            assert_eq!(
+                body,
+                r#"{"error":{"message":"bedrock access denied (SignatureDoesNotMatch)"}}"#
+            );
             assert!(!body.contains("__type"));
         }
         other => panic!("expected Error::Upstream, got: {other:?}"),
@@ -281,7 +284,7 @@ fn map_upstream_error_403_scrubs_aws_access_denied_arn() {
             assert_eq!(upstream_type.as_deref(), Some("AccessDeniedException"));
             assert_eq!(
                 body,
-                "bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"
+                r#"{"error":{"message":"bedrock access denied (AccessDeniedException): missing IAM action bedrock-runtime:InvokeModel"}}"#
             );
             assert!(!body.contains("arn:aws:"), "leaked ARN: {body}");
             assert!(!body.contains("123456789012"), "leaked account id: {body}");
@@ -307,7 +310,7 @@ fn map_upstream_error_403_scrubs_aws_body_without_type_token() {
             Error::Upstream { body, .. } => {
                 assert_eq!(
                     body,
-                    "bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"
+                    r#"{"error":{"message":"bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"}}"#
                 );
                 assert!(!body.contains("arn:aws:"), "client body leaked ARN: {body}");
                 assert!(

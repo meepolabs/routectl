@@ -2135,7 +2135,7 @@ async fn read_anthropic_error_carries_raw_envelope_for_structured_400() {
                     blocks in the latest assistant message cannot be modified.\"}}";
     let resp = reqwest_response(400, raw);
 
-    let (msg, err) = read_anthropic_error("anthropic_oauth_prod", resp).await;
+    let (msg, err) = read_anthropic_error("anthropic_oauth_prod", resp, false).await;
 
     // The returned `msg` stays the clean extracted message for logging.
     assert!(
@@ -2178,7 +2178,7 @@ async fn read_anthropic_error_sanitizes_non_json_body() {
         "<html><body>upstream-host gateway timeout</body></html>",
     );
 
-    let (_msg, err) = read_anthropic_error("anthropic_oauth_prod", resp).await;
+    let (_msg, err) = read_anthropic_error("anthropic_oauth_prod", resp, false).await;
 
     match err {
         Error::Upstream { status, body, .. } => {
@@ -2196,8 +2196,9 @@ async fn read_anthropic_error_sanitizes_non_json_body() {
 /// exception token in `upstream_type` (403 already classifies Auth by
 /// status; the lifted token is what makes the log truthful). The
 /// free-text message is scrubbed by the shared Bedrock 403 path -- every
-/// 403 collapses to the generic "bedrock access denied" client message
-/// (the actionable classifier survives in `upstream_type`), so an AWS
+/// 403 collapses to the generic "bedrock access denied (<AwsType>)" client
+/// message carried in an `{"error":{"message":...}}` envelope (the
+/// actionable classifier also survives in `upstream_type`), so an AWS
 /// AccessDenied body can never leak a principal ARN / account / resource.
 #[cfg(feature = "bedrock")]
 #[tokio::test]
@@ -2205,10 +2206,10 @@ async fn read_anthropic_error_lifts_aws_signature_token_from_403() {
     let raw = r#"{"__type":"com.amazonaws.bedrock#SignatureDoesNotMatch","message":"The request signature we calculated does not match."}"#;
     let resp = reqwest_response(403, raw);
 
-    let (msg, err) = read_anthropic_error("mantle_prod", resp).await;
+    let (msg, err) = read_anthropic_error("mantle_prod", resp, true).await;
 
     assert_eq!(
-        msg, "bedrock access denied",
+        msg, "bedrock access denied (SignatureDoesNotMatch)",
         "a 403 free-text message must collapse to the generic scrub: {msg:?}"
     );
     match err {
@@ -2229,7 +2230,7 @@ async fn read_anthropic_error_lifts_aws_signature_token_from_403() {
                 "AWS envelope must not be carried raw in .body: {body:?}"
             );
             assert_eq!(
-                body, "bedrock access denied",
+                body, r#"{"error":{"message":"bedrock access denied (SignatureDoesNotMatch)"}}"#,
                 "the client-facing body must be the scrubbed message: {body:?}"
             );
         }
@@ -2245,7 +2246,7 @@ async fn read_anthropic_error_lifts_aws_throttling_code_from_429() {
     let raw = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
     let resp = reqwest_response(429, raw);
 
-    let (msg, err) = read_anthropic_error("mantle_prod", resp).await;
+    let (msg, err) = read_anthropic_error("mantle_prod", resp, true).await;
 
     assert!(msg.contains("Too many requests"), "extracted msg: {msg:?}");
     match err {
@@ -2272,7 +2273,7 @@ async fn read_anthropic_error_prefers_anthropic_shape_over_aws() {
     let raw = r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"},"__type":"com.amazonaws.bedrock#ThrottlingException"}"#;
     let resp = reqwest_response(529, raw);
 
-    let (_msg, err) = read_anthropic_error("mantle_prod", resp).await;
+    let (_msg, err) = read_anthropic_error("mantle_prod", resp, true).await;
 
     match err {
         Error::Upstream {
@@ -2303,7 +2304,7 @@ async fn read_anthropic_error_never_panics_on_malformed_bodies() {
     ];
     for (idx, body) in cases.into_iter().enumerate() {
         let resp = reqwest_response(400, body);
-        let (_msg, err) = read_anthropic_error("mantle_prod", resp).await;
+        let (_msg, err) = read_anthropic_error("mantle_prod", resp, true).await;
         match err {
             Error::Upstream {
                 status,

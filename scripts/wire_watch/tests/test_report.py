@@ -7,10 +7,13 @@ daemon by planted_drop.test.sh --record, copied byte for byte.
 
 Upstream error samples and where each comes from:
   Bedrock 403   the evidence never holds the AWS body: routectl replaces a
-                Bedrock 403 body with its own action-only string before the
-                DEBUG line (crates/routectl-providers/src/aws_error.rs,
-                access_denied_message / sanitized_debug_body). Status 403
-                AccessDeniedException per
+                Bedrock 403 body with its own string before the DEBUG line
+                (crates/routectl-providers/src/aws_error.rs,
+                access_denied_message / sanitized_debug_body), naming the AWS
+                type and any credential reason. The strings are loaded from
+                crates/routectl-providers/tests/fixtures/bedrock_403_detail_strings.json,
+                which a Rust test asserts byte-equal to that rendering of the
+                recorded captures. Status 403 AccessDeniedException per
                 https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
   Mantle 404    the Mantle Anthropic vocabulary answers with the Anthropic
                 error envelope; shape and not_found_error quoted from
@@ -74,7 +77,18 @@ GENERATED = "2026-10-12T18:00:00Z"
 CORE_WIRE_CHECK = os.path.join(rc.REPO, "crates", "routectl-core", "src", "wire_check")
 CAPTURE_FIXTURES = os.path.join(rc.REPO, "scripts", "capture_fixtures.sh")
 
-BEDROCK_403 = "bedrock access denied: missing IAM action bedrock:InvokeModel"
+DETAIL_STRINGS = os.path.join(rc.REPO, "crates", "routectl-providers", "tests", "fixtures",
+                              "bedrock_403_detail_strings.json")
+
+
+def bedrock_403(name: str = "model_access") -> str:
+    """The DEBUG body routectl renders for a Bedrock 403 of kind `name`."""
+    if not os.path.isfile(DETAIL_STRINGS):
+        raise unittest.SkipTest("crates/ absent: no rendered 403 strings to load")
+    with open(DETAIL_STRINGS, encoding="utf-8") as handle:
+        return json.load(handle)["strings"][name]
+
+
 MANTLE_404 = '{"type":"error","error":{"type":"not_found_error","message":"The requested resource could not be found."}}'
 INVALID_MODEL_400 = '{"message":"The provided model identifier is invalid."}'
 SCHEMA_400 = (
@@ -397,7 +411,7 @@ class RingOverflowTests(RunCase):
     def test_rules_six_and_seven_still_win_over_an_overflow(self) -> None:
         health = ring_health([("missing", 200)], [("missing", 128)])
         cases = [
-            ("refusal", converse(health=health, errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),)),
+            ("refusal", converse(health=health, errors=(rc.error_line("bedrock-converse", 403, bedrock_403()),)),
              (Outcome.NOT_RUN, "model-access")),
             ("ingress", plant("request-leg-plant", health=health, trace_ingress="anthropic"),
              (Outcome.FAILED, "ingress")),
@@ -449,7 +463,7 @@ class FindingTests(RunCase):
 class RefusalRuleTests(RunCase):
     def test_model_access_refusals_are_not_run_and_hide_their_wire_rows(self) -> None:
         cases = [
-            ("bedrock-403", converse(errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),))),
+            ("bedrock-403", converse(errors=(rc.error_line("bedrock-converse", 403, bedrock_403()),))),
             ("mantle-404", converse(lane="bedrock-mantle", key_file="bedrock-api-key.us-east-1",
                                     errors=(rc.error_line("anthropic", 404, MANTLE_404),))),
             ("invalid-model-400", converse(errors=(rc.error_line("bedrock-converse", 400, INVALID_MODEL_400),))),
@@ -462,6 +476,20 @@ class RefusalRuleTests(RunCase):
                 result = built.results[0]
                 self.assertEqual((result.outcome, result.reason), (Outcome.NOT_RUN, "model-access"))
                 self.assertEqual(self.findings(built), [])
+
+    def test_bedrock_403_outcome_follows_the_rendered_detail(self) -> None:
+        cases = [
+            ("expired key", "expired", (Outcome.FAILED, "credential")),
+            ("invalid key", "invalid", (Outcome.FAILED, "credential")),
+            ("model not enabled", "model_access", (Outcome.NOT_RUN, "model-access")),
+            ("unrecognized 403", "untyped", (Outcome.FAILED, "permission")),
+        ]
+        for name, kind, expected in cases:
+            with self.subTest(name):
+                self.fresh()
+                result = self.one(converse(errors=(rc.error_line("bedrock-converse", 403, bedrock_403(kind)),)))
+
+                self.assertEqual((result.outcome, result.reason), expected)
 
     def test_bedrock_401_is_a_credential_failure(self) -> None:
         result = self.one(converse(errors=(rc.error_line("bedrock-converse", 401, AUTH_401),)))
@@ -508,7 +536,7 @@ class KeyExpiryTests(RunCase):
 
     def test_a_403_with_a_key_past_its_encoded_expiry_is_a_credential_failure(self) -> None:
         keys = self.key_dir(short_term_key(datetime(2020, 1, 1, tzinfo=timezone.utc), 900))
-        plan = converse(errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),))
+        plan = converse(errors=(rc.error_line("bedrock-converse", 403, bedrock_403()),))
 
         result = self.one(plan, key_dir=keys)
 
@@ -516,7 +544,7 @@ class KeyExpiryTests(RunCase):
 
     def test_a_403_with_a_live_key_stays_model_access(self) -> None:
         keys = self.key_dir(short_term_key(datetime.now(timezone.utc), 43200))
-        plan = converse(errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),))
+        plan = converse(errors=(rc.error_line("bedrock-converse", 403, bedrock_403()),))
 
         result = self.one(plan, key_dir=keys)
 
@@ -531,7 +559,7 @@ class KeyExpiryTests(RunCase):
             self.skipTest("no writable tmpfs at /dev/shm")
         self.run_dir = tempfile.mkdtemp(prefix="run-", dir=shm)
         self.addCleanup(shutil.rmtree, self.run_dir, True)
-        plan = converse(errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),))
+        plan = converse(errors=(rc.error_line("bedrock-converse", 403, bedrock_403()),))
         rc.build_run(self.run_dir, [plan])
         result_json = os.path.join(self.run_dir, "cells", plan.cell_id, rc.evidence.EVIDENCE_DIRNAME,
                                    rc.evidence.RESULT_NAME)
@@ -682,7 +710,7 @@ class HostileTextTests(RunCase):
 
     def excerpt_cell(self, excerpt: str) -> CellPlan:
         row = json.dumps({"excerpt": excerpt, "provider_kind": "bedrock-converse", "status": 403})
-        return converse(errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),),
+        return converse(errors=(rc.error_line("bedrock-converse", 403, bedrock_403()),),
                         extra_files={"upstream_errors.jsonl": row + "\n"})
 
     def path_cell(self, path: str) -> CellPlan:
@@ -747,7 +775,7 @@ class HostileTextTests(RunCase):
             plant("clean-control", model="b", trace_ingress="x"),
             plant("clean-control", model="c", health_status="http 500"),
             plant("clean-control", model="d", tokens=Tokens(1, 2, 3, 4)),
-            converse(errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),)),
+            converse(errors=(rc.error_line("bedrock-converse", 403, bedrock_403()),)),
             CellPlan(driver="codex.sh", ingress="openai-responses", lane="anthropic-api", state=CellState.TIMEOUT),
         ]
         with mock.patch.object(report, "lit", recording_lit):
@@ -1104,7 +1132,7 @@ class PublishTests(RunCase):
     def test_a_key_shaped_excerpt_is_caught_and_nothing_is_published(self) -> None:
         planted = "sk-" + "ant-api03-" + "Q" * 40
         row = json.dumps({"excerpt": "echo " + planted, "provider_kind": "bedrock-converse", "status": 403})
-        plan = converse(errors=(rc.error_line("bedrock-converse", 403, BEDROCK_403),),
+        plan = converse(errors=(rc.error_line("bedrock-converse", 403, bedrock_403()),),
                         extra_files={"upstream_errors.jsonl": row + "\n"})
         built = self.build([plan])
         self.assertNotIn(planted, built.files[report.REPORT_MD])

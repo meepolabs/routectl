@@ -200,6 +200,14 @@ pub(crate) mod upstream_request_id;
 ))]
 pub(crate) mod upstream_error;
 
+#[cfg(all(
+    test,
+    feature = "bedrock",
+    feature = "openai-compat",
+    feature = "openai-responses"
+))]
+mod seat_reason_tests;
+
 // Shared tool-call id charset sanitizer. Anthropic and Bedrock Converse
 // require `tool_use.id` to match `^[a-zA-Z0-9_-]+$`; an OpenAI-origin id
 // with `.`/`:`/`/` 400s the upstream. Applied at every id-emit site and

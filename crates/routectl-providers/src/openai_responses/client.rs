@@ -244,6 +244,19 @@ impl OpenAiResponsesProvider {
         Ok(())
     }
 
+    /// True when this provider egresses on the Bedrock mantle lane. Always
+    /// `false` in a build without the `bedrock` feature.
+    pub(super) const fn is_mantle(&self) -> bool {
+        #[cfg(feature = "bedrock")]
+        {
+            self.cfg.mantle.is_some()
+        }
+        #[cfg(not(feature = "bedrock"))]
+        {
+            false
+        }
+    }
+
     /// Record the mantle lane context (`lane`, `auth_mode`, `region`) on
     /// the current tracing span so every event within it -- including the
     /// shared upstream-failure WARN -- carries the lane fields. A no-op on

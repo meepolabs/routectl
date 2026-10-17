@@ -87,7 +87,7 @@ fn over_cap_validation_envelope_is_never_parsed() {
 }
 
 #[test]
-fn access_denied_403_carries_no_parse_of_the_raw_principal_body() {
+fn access_denied_403_carries_its_envelope_not_the_raw_principal_body() {
     let raw = serde_json::json!({
         "__type": "com.amazonaws.bedrock#AccessDeniedException",
         "message": format!(
@@ -115,7 +115,7 @@ fn access_denied_403_carries_no_parse_of_the_raw_principal_body() {
     };
     assert_eq!(
         carried_text,
-        "bedrock access denied: missing IAM action bedrock:InvokeModel"
+        r#"{"error":{"message":"bedrock access denied (AccessDeniedException): missing IAM action bedrock:InvokeModel"}}"#
     );
     assert_eq!(upstream_type.as_deref(), Some("AccessDeniedException"));
     let carried_parse = err.parsed_body().map(|p| p.value().to_string());

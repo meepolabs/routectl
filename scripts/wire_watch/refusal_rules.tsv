@@ -20,17 +20,22 @@
 #             bedrock row cites a docs.aws.amazon.com page, or a recorded
 #             bedrock_*.json fixture for a phrase row
 #
-# A Bedrock 403 reaches the evidence as routectl's own action-only string
-# ("bedrock access denied[: missing IAM action ...]", built in
-# crates/routectl-providers/src/aws_error.rs), never as the AWS body, so the
-# 403 rows key on the status alone. A Bedrock 400 ValidationException
+# A Bedrock 403 reaches the evidence as routectl's own string, never as the
+# AWS body: "bedrock access denied (<AwsType>)[: <reason>][: missing IAM
+# action ...]", built in crates/routectl-providers/src/aws_error.rs. The 403
+# rows key on that string: a recognized credential reason first, then the
+# AccessDeniedException type an IAM or model-access deny carries, then any
+# other 403 (no recognizable type). A Bedrock 400 ValidationException
 # carries its exception name in a response header the excerpt never holds,
 # so the model-access 400 row keys on the recorded message instead of the
 # exception name; any other 400 is a wire result, not a refusal.
 egress	status	match	outcome	reason	source
 bedrock	*	key-expired	FAILED	credential	https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-how.html
 bedrock	401	-	FAILED	credential	https://docs.aws.amazon.com/bedrock/latest/APIReference/CommonErrors.html
-bedrock	403	-	NOT_RUN	model-access	https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
+bedrock	403	phrase:bedrock access denied (AccessDeniedException): credential-expired	FAILED	credential	crates/routectl-providers/tests/fixtures/bedrock_native_credential_capture.json
+bedrock	403	phrase:bedrock access denied (AccessDeniedException): credential-invalid	FAILED	credential	crates/routectl-providers/tests/fixtures/bedrock_native_credential_capture.json
+bedrock	403	phrase:(AccessDeniedException)	NOT_RUN	model-access	https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
+bedrock	403	-	FAILED	permission	https://docs.aws.amazon.com/bedrock/latest/APIReference/CommonErrors.html
 bedrock	404	-	NOT_RUN	model-access	https://docs.aws.amazon.com/bedrock/latest/userguide/troubleshooting-api-error-codes.html
 bedrock	400	phrase:The provided model identifier is invalid.	NOT_RUN	model-access	crates/routectl-router/tests/fixtures/bedrock_validation_capture.json
 other	401	-	FAILED	credential	https://platform.claude.com/docs/en/api/errors

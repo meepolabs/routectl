@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::borrow::Cow;
 
 use reqwest::header::HeaderMap;
-use routectl_core::{ParsedErrorBody, UpstreamBody, sanitize_for_log};
+use routectl_core::{ParsedErrorBody, UpstreamBody, UpstreamReason, sanitize_for_log};
 use serde_json::Value;
 
 /// Lift AWS/Bedrock error-envelope tokens from an already-parsed error body,
@@ -85,6 +85,66 @@ fn is_bounded_aws_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'#' | b'_' | b'-'))
+}
+
+/// Length of an AWS account id: a run this long is treated as one.
+const ACCOUNT_ID_DIGITS: usize = 12;
+
+/// True when `text` holds a run of at least [`ACCOUNT_ID_DIGITS`] ASCII
+/// digits, the shape of an AWS account id.
+fn has_account_id_run(text: &str) -> bool {
+    let mut run = 0;
+    text.bytes().any(|b| {
+        run = if b.is_ascii_digit() { run + 1 } else { 0 };
+        run >= ACCOUNT_ID_DIGITS
+    })
+}
+
+/// True when `text` names an AWS principal or account in an AWS shape: an
+/// AWS ARN (`arn:aws:` or a partition variant `arn:aws-<x>:`, starting a
+/// token), which covers `User: arn:`, `Principal: arn:` and the
+/// `assumed-role/` / `user/` paths that follow one, or an account id
+/// written after the word `account`. A loose marker (a word ending in
+/// `arn:`, `User:` before free text, a long number such as a timestamp)
+/// is not one. Run it over decoded strings, never raw JSON text, where an
+/// escape can spell any marker.
+pub fn names_aws_principal(text: &str) -> bool {
+    has_aws_arn(text) || has_account_id_after_account(text)
+}
+
+/// True when an AWS ARN starts a token in `text`: `arn:aws:` or
+/// `arn:aws-<partition>:`, with no letter, digit, `_` or `-` before it.
+fn has_aws_arn(text: &str) -> bool {
+    text.match_indices("arn:aws").any(|(at, _)| {
+        let starts_token = text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        let rest = &text[at + "arn:aws".len()..];
+        let partition = rest.strip_prefix('-').map_or(Some(rest), |tail| {
+            let end = tail.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))?;
+            (end > 0).then(|| &tail[end..])
+        });
+        starts_token && partition.is_some_and(|after| after.starts_with(':'))
+    })
+}
+
+/// True when an [`ACCOUNT_ID_DIGITS`]-digit run follows the word `account`
+/// (any case), separated only by spaces, `:`, `=` or `#`.
+fn has_account_id_after_account(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.match_indices("account").any(|(at, word)| {
+        let after = lower[at + word.len()..].trim_start_matches([' ', ':', '=', '#', '_', '-']);
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        digits == ACCOUNT_ID_DIGITS
+    })
+}
+
+/// True when `token` may reach a client-facing `error.type` / `error.code`
+/// from a 403: bounded ([`is_bounded_aws_token`]) and free of an
+/// account-id-shaped digit run.
+pub fn is_client_safe_token(token: &str) -> bool {
+    is_bounded_aws_token(token) && !has_account_id_run(token)
 }
 
 /// Strip an AWS namespace prefix from an exception token:
@@ -371,21 +431,70 @@ pub fn classify_bedrock_error(status: u16, body: &str) -> BedrockErrorClass {
     }
 }
 
+/// What an access-denied rendering names beside the IAM action: the AWS
+/// exception type (body `__type` or the `x-amzn-errortype` header) and the
+/// recognized credential reason. Both are optional; the default names
+/// neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccessDeniedDetail {
+    pub aws_type: Option<String>,
+    pub reason: Option<UpstreamReason>,
+}
+
+impl AccessDeniedDetail {
+    /// The type segment [`access_denied_message`] renders: a bounded token,
+    /// namespace-stripped, non-empty.
+    fn rendered_type(&self) -> Option<&str> {
+        self.aws_type
+            .as_deref()
+            .filter(|raw| is_bounded_aws_token(raw) && !has_account_id_run(raw))
+            .map(strip_aws_namespace)
+            .filter(|bare| !bare.is_empty())
+    }
+
+    /// True when a 403 carries AWS evidence: a renderable AWS type, a
+    /// recognized reason, or an IAM action extracted from `body`. A 403
+    /// without any of these (a proxy's HTML page) is not known to come from
+    /// AWS.
+    pub fn is_aws_shaped(&self, body: &str) -> bool {
+        self.rendered_type().is_some()
+            || self.reason.is_some()
+            || extract_iam_action(body).is_some_and(|a| is_iam_action_shape(&a))
+    }
+}
+
 /// Build the access-denied string shared by the client-facing message
 /// ([`classify_client_error_message`]) and the DEBUG body
-/// ([`sanitized_debug_body`]) so the two cannot drift on the 403 arm.
+/// ([`sanitized_debug_body`]) so the two cannot drift on the 403 arm:
+/// `bedrock access denied (<AwsType>)[: <reason>][: missing IAM action X]`.
+///
+/// The type segment is rendered only for a type that passes
+/// [`is_bounded_aws_token`], namespace-stripped; any other type omits the
+/// segment, so a type carrying an ARN or free text never reaches either
+/// surface. The reason is the fixed vocabulary token, never upstream text.
 ///
 /// The action is only surfaced if it matches an IAM `service:Action`
 /// shape (`^[A-Za-z0-9._-]+:[A-Za-z0-9*]+$`). A malformed upstream 403
 /// could leave ARN/account text as the post-`perform:` token; an ARN
 /// (`arn:aws:...` -- multiple colons, digit-only account segments,
-/// slashes) fails the shape check and falls back to the generic string
-/// so no principal/account/resource identifier leaks via the action.
-pub fn access_denied_message(action: Option<String>) -> String {
-    match action.filter(|a| is_iam_action_shape(a)) {
-        Some(action) => format!("bedrock access denied: missing IAM action {action}"),
-        None => "bedrock access denied".to_string(),
+/// slashes) fails the shape check and the segment is dropped so no
+/// principal/account/resource identifier leaks via the action.
+pub fn access_denied_message(detail: &AccessDeniedDetail, action: Option<String>) -> String {
+    let mut message = String::from("bedrock access denied");
+    if let Some(aws_type) = detail.rendered_type() {
+        message.push_str(" (");
+        message.push_str(aws_type);
+        message.push(')');
     }
+    if let Some(reason) = detail.reason {
+        message.push_str(": ");
+        message.push_str(reason.as_str());
+    }
+    if let Some(action) = action.filter(|a| is_iam_action_shape(a)) {
+        message.push_str(": missing IAM action ");
+        message.push_str(&action);
+    }
+    message
 }
 
 /// True if `s` matches an IAM `service:Action` shape: a service segment
@@ -393,7 +502,7 @@ pub fn access_denied_message(action: Option<String>) -> String {
 /// `[A-Za-z0-9*]+`. Pure char scan (no regex dependency, matching
 /// `extract_iam_action`'s rationale). An ARN fails because it has more
 /// than one colon and the resource segment carries `/`.
-fn is_iam_action_shape(s: &str) -> bool {
+pub fn is_iam_action_shape(s: &str) -> bool {
     let Some((service, action)) = s.split_once(':') else {
         return false;
     };
@@ -415,9 +524,9 @@ fn is_iam_action_shape(s: &str) -> bool {
 /// action survives as the actionable bit; ARNs and account id are dropped).
 /// Every other status returns the raw body unchanged -- the shared core
 /// helper sanitizes and caps it before it is logged.
-pub fn sanitized_debug_body(status: u16, body: &str) -> String {
+pub fn sanitized_debug_body(status: u16, body: &str, detail: &AccessDeniedDetail) -> String {
     match classify_bedrock_error(status, body) {
-        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
+        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(detail, action),
         BedrockErrorClass::Other => body.to_string(),
     }
 }
@@ -431,13 +540,14 @@ pub fn sanitized_debug_body(status: u16, body: &str) -> String {
 ///   with the extracted IAM action. NEVER the principal ARN, account
 ///   id, or resource ARN.
 /// - **other** -> sanitized body excerpt capped at `MAX_LOG_BODY_EXCERPT`.
-#[cfg_attr(
-    not(any(feature = "openai-compat", feature = "openai-responses")),
-    allow(dead_code)
-)]
-pub fn classify_client_error_message(status: u16, body: &str) -> String {
+#[cfg(test)]
+pub fn classify_client_error_message(
+    status: u16,
+    body: &str,
+    detail: &AccessDeniedDetail,
+) -> String {
     match classify_bedrock_error(status, body) {
-        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
+        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(detail, action),
         BedrockErrorClass::Other => client_excerpt(&routectl_core::redact_error_body_text(body)),
     }
 }
@@ -446,9 +556,13 @@ pub fn classify_client_error_message(status: u16, body: &str) -> String {
 /// the non-403 excerpt is redacted from the carried parse
 /// ([`redacted_body_text`]) rather than a second parse of the text.
 #[cfg_attr(not(feature = "anthropic-api"), allow(dead_code))]
-pub fn classify_parsed_client_error_message(status: u16, body: &UpstreamBody) -> String {
+pub fn classify_parsed_client_error_message(
+    status: u16,
+    body: &UpstreamBody,
+    detail: &AccessDeniedDetail,
+) -> String {
     match classify_bedrock_error(status, body.text()) {
-        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
+        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(detail, action),
         BedrockErrorClass::Other => client_excerpt(&redacted_body_text(body)),
     }
 }
@@ -490,6 +604,10 @@ fn extract_iam_action(body: &str) -> Option<String> {
         Some(rest[..end].to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "aws_error_render_tests.rs"]
+mod render_tests;
 
 #[cfg(test)]
 mod tests {
@@ -740,7 +858,7 @@ mod tests {
         let body = "User: arn:aws:iam::123456789012:user/foo is not authorized to \
                     perform: bedrock-runtime:InvokeModelWithResponseStream on resource: \
                     arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5";
-        let got = sanitized_debug_body(403, body);
+        let got = sanitized_debug_body(403, body, &AccessDeniedDetail::default());
         assert!(
             !got.contains("arn:aws:"),
             "403 debug body must not contain any ARN, got: {got}"
@@ -760,8 +878,14 @@ mod tests {
         // Non-403 statuses keep the current behavior: the raw body is
         // returned (the shared core helper sanitizes + caps it on log).
         let body = "validation error: malformed request";
-        assert_eq!(sanitized_debug_body(400, body), body);
-        assert_eq!(sanitized_debug_body(500, body), body);
+        assert_eq!(
+            sanitized_debug_body(400, body, &AccessDeniedDetail::default()),
+            body
+        );
+        assert_eq!(
+            sanitized_debug_body(500, body, &AccessDeniedDetail::default()),
+            body
+        );
     }
 
     #[test]
@@ -773,7 +897,7 @@ mod tests {
         // generic message.
         let body = "User: x is not authorized to perform: \
                     arn:aws:iam::123456789012:role/x on resource: y";
-        let got = sanitized_debug_body(403, body);
+        let got = sanitized_debug_body(403, body, &AccessDeniedDetail::default());
         assert!(
             !got.contains("arn:aws:"),
             "malformed-action 403 debug body must not contain any ARN, got: {got}"
@@ -813,7 +937,7 @@ mod tests {
                     authorized to perform: bedrock-runtime:InvokeModel on \
                     resource: arn:aws:bedrock:us-east-1::foundation-model/\
                     anthropic.claude-haiku-4-5";
-        let msg = classify_client_error_message(403, body);
+        let msg = classify_client_error_message(403, body, &AccessDeniedDetail::default());
         assert!(
             msg.contains("bedrock-runtime:InvokeModel"),
             "client message should carry the IAM action: {msg}"
@@ -838,7 +962,7 @@ mod tests {
         // a generic message with NO body leak.
         let body = "User: arn:aws:iam::123456789012:role/AppRole denied for \
                     some other reason";
-        let msg = classify_client_error_message(403, body);
+        let msg = classify_client_error_message(403, body, &AccessDeniedDetail::default());
         assert!(
             !msg.contains("arn:aws:iam"),
             "generic 403 message leaked the principal ARN: {msg}"
@@ -859,7 +983,7 @@ mod tests {
         const MARKER_LEN: usize = "... [truncated]".len();
         let oversized = routectl_core::MAX_LOG_BODY_EXCERPT * 4;
         let body = "x".repeat(oversized);
-        let msg = classify_client_error_message(400, &body);
+        let msg = classify_client_error_message(400, &body, &AccessDeniedDetail::default());
         assert!(
             msg.len() <= routectl_core::MAX_LOG_BODY_EXCERPT + MARKER_LEN,
             "non-403 client message exceeded the bounded excerpt: {} > {}",

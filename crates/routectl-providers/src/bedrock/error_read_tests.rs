@@ -156,3 +156,28 @@ async fn untyped_request_fault_names_the_unusable_error_type_header() {
     assert_eq!(unusable[0].field("reason"), Some("missing"));
     assert!(crate::aws_error::error_type_header_unusable_count("missing") > before);
 }
+
+#[tokio::test]
+async fn a_recorded_credential_rejection_carries_its_reason_over_http() {
+    use crate::upstream_error::reason_tests::{NATIVE_CAPTURE, captured};
+    use routectl_core::UpstreamReason::{CredentialExpired, CredentialInvalid};
+    let rows = [
+        ("expired-invoke", CredentialExpired),
+        ("invalid-converse", CredentialInvalid),
+    ];
+    for shape in SHAPES {
+        for (key, want) in rows {
+            let row = captured(NATIVE_CAPTURE, key);
+            let mut template = ResponseTemplate::new(row.status).set_body_string(row.body);
+            for (name, value) in &row.headers {
+                template = template.insert_header(name.as_str(), value.to_str().expect("ascii"));
+            }
+            let server = server_answering(template).await;
+            let provider = provider_at(&server, shape).await;
+
+            let err = provider.complete(request()).await.expect_err(key);
+
+            assert_eq!(err.upstream_reason(), Some(want), "{shape:?} {key}");
+        }
+    }
+}

@@ -192,8 +192,13 @@ the runner's exit code:
 `refusal_rules.tsv` is read top to bottom; the first row that matches one of
 the cell's upstream error rows wins, and each row cites where its status or
 message is documented or recorded. On a Bedrock lane (any lane in
-`models.tsv`) a 401 is `FAILED(credential)`; a 403, a 404, or a 400 whose
-message is the recorded invalid-model text is `NOT_RUN(model-access)`. With
+`models.tsv`) a 401 is `FAILED(credential)`. A 403 reaches the evidence as
+routectl's own `bedrock access denied (<AwsType>)[: <reason>]...` string: a
+`credential-expired` or `credential-invalid` reason is `FAILED(credential)`,
+an `AccessDeniedException` without one (an IAM or model-access deny) is
+`NOT_RUN(model-access)`, and a 403 with no recognizable type is
+`FAILED(permission)`. A 404, or a 400 whose message is the recorded
+invalid-model text, is `NOT_RUN(model-access)`. With
 `--key-dir`, a cell whose short-term Bedrock key had passed the expiry encoded
 in the key (its presigned `X-Amz-Date` plus `X-Amz-Expires`) when the cell
 ended is `FAILED(credential)` whatever the upstream answered; the key is read

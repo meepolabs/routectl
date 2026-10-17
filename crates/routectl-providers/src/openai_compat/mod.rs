@@ -382,7 +382,9 @@ impl Provider for OpenAiCompatProvider {
             ));
         }
         if !resp.status().is_success() {
-            let read = UpstreamErrorRead::read(&self.cfg.id, resp).await;
+            let read = UpstreamErrorRead::read(&self.cfg.id, resp)
+                .await
+                .aws_backed(self.is_mantle());
             return Err(map_openai_compat_upstream_error(&self.cfg.id, read));
         }
 
@@ -429,6 +431,7 @@ impl Provider for OpenAiCompatProvider {
             &raw,
             &response_headers,
             &String::from_utf8_lossy(&body_bytes),
+            self.is_mantle(),
         ) {
             return Err(err);
         }
@@ -505,7 +508,9 @@ impl Provider for OpenAiCompatProvider {
             ));
         }
         if !resp.status().is_success() {
-            let read = UpstreamErrorRead::read(&self.cfg.id, resp).await;
+            let read = UpstreamErrorRead::read(&self.cfg.id, resp)
+                .await
+                .aws_backed(self.is_mantle());
             return Err(map_openai_compat_upstream_error(&self.cfg.id, read));
         }
 
@@ -970,8 +975,9 @@ fn map_openai_compat_upstream_error(provider_id: &str, read: UpstreamErrorRead) 
     // NON-envelope body routes its free text through the shared Bedrock
     // scrub, gated on shape (not on a lifted token) so a 403 AccessDenied
     // body cannot leak the principal ARN / account / resource even when AWS
-    // omits the top-level `__type` / `code` tokens.
-    let is_native_envelope = read.is_native_envelope();
+    // omits the top-level `__type` / `code` tokens. A native envelope whose
+    // 403 message names an AWS principal takes the same scrub.
+    let is_native_envelope = read.is_native_envelope() && !read.needs_access_denied_scrub();
     let client_msg = if is_native_envelope {
         upstream_message_or_excerpt(read.text(), read.parsed())
     } else {
@@ -1000,10 +1006,10 @@ fn map_openai_compat_upstream_error(provider_id: &str, read: UpstreamErrorRead) 
     // parse rides along only when the scrub left the text unchanged.
     let carried = if read.hit_cap() {
         CarriedBody::Replacement(crate::http_client::body_cap_exceeded_message())
-    } else if is_native_envelope || client_msg == read.text() {
+    } else if is_native_envelope {
         CarriedBody::Original
     } else {
-        CarriedBody::Replacement(client_msg)
+        read.aws_carried(client_msg)
     };
     let retry_after = read.retry_after();
     read.into_error(provider_id, carried, retry_after)
@@ -1028,6 +1034,7 @@ fn detect_inline_error_2xx(
     raw: &Value,
     headers: &HeaderMap,
     body_text: &str,
+    aws_backed: bool,
 ) -> Option<Error> {
     let err = raw.get("error")?;
     if err.is_null() || err.as_object().is_some_and(serde_json::Map::is_empty) {
@@ -1040,7 +1047,7 @@ fn detect_inline_error_2xx(
         .unwrap_or(502);
     Some(map_openai_compat_upstream_error(
         provider_id,
-        UpstreamErrorRead::from_parts(status, headers, body_text, false),
+        UpstreamErrorRead::from_parts(status, headers, body_text, false).aws_backed(aws_backed),
     ))
 }
 
@@ -1686,7 +1693,10 @@ mod helper_tests {
                 assert_eq!(upstream_code, None);
                 // A 403 free-text message collapses to the generic scrub; the
                 // raw AWS envelope must never be carried.
-                assert_eq!(body, "bedrock access denied");
+                assert_eq!(
+                    body,
+                    r#"{"error":{"message":"bedrock access denied (SignatureDoesNotMatch)"}}"#
+                );
                 assert!(!body.contains("__type"));
             }
             other => panic!("expected Error::Upstream, got: {other:?}"),
@@ -1737,7 +1747,7 @@ mod helper_tests {
                 assert_eq!(upstream_type.as_deref(), Some("AccessDeniedException"));
                 assert_eq!(
                     body,
-                    "bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"
+                    r#"{"error":{"message":"bedrock access denied (AccessDeniedException): missing IAM action bedrock-runtime:InvokeModel"}}"#
                 );
                 assert!(!body.contains("arn:aws:"), "leaked ARN: {body}");
                 assert!(!body.contains("123456789012"), "leaked account id: {body}");
@@ -1763,7 +1773,7 @@ mod helper_tests {
                 Error::Upstream { body, .. } => {
                     assert_eq!(
                         body,
-                        "bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"
+                        r#"{"error":{"message":"bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"}}"#
                     );
                     assert!(!body.contains("arn:aws:"), "client body leaked ARN: {body}");
                     assert!(
@@ -1857,7 +1867,7 @@ mod helper_tests {
         let raw: serde_json::Value = serde_json::from_str(body).unwrap();
 
         // Act
-        let err = detect_inline_error_2xx("p", &raw, &HeaderMap::new(), body)
+        let err = detect_inline_error_2xx("p", &raw, &HeaderMap::new(), body, false)
             .expect("inline error envelope must be detected");
 
         // Assert
@@ -1890,7 +1900,7 @@ mod helper_tests {
         let body = r#"{"error":{"type":"server_error","code":503,"message":"overloaded"}}"#;
         let raw: serde_json::Value = serde_json::from_str(body).unwrap();
 
-        let err = detect_inline_error_2xx("p", &raw, &HeaderMap::new(), body)
+        let err = detect_inline_error_2xx("p", &raw, &HeaderMap::new(), body, false)
             .expect("inline error envelope must be detected");
 
         match err {
@@ -1909,21 +1919,21 @@ mod helper_tests {
             "id": "cmpl-1",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}}]
         });
-        assert!(detect_inline_error_2xx("p", &ok, &HeaderMap::new(), "").is_none());
+        assert!(detect_inline_error_2xx("p", &ok, &HeaderMap::new(), "", false).is_none());
 
         // A healthy body carrying a null `error` sentinel (LiteLLM shape).
         let null_err = serde_json::json!({
             "choices": [{"index": 0, "message": {"content": "hi"}}],
             "error": null
         });
-        assert!(detect_inline_error_2xx("p", &null_err, &HeaderMap::new(), "").is_none());
+        assert!(detect_inline_error_2xx("p", &null_err, &HeaderMap::new(), "", false).is_none());
 
         // A healthy body carrying an empty `error: {}` sentinel.
         let empty_err = serde_json::json!({
             "choices": [{"index": 0, "message": {"content": "hi"}}],
             "error": {}
         });
-        assert!(detect_inline_error_2xx("p", &empty_err, &HeaderMap::new(), "").is_none());
+        assert!(detect_inline_error_2xx("p", &empty_err, &HeaderMap::new(), "", false).is_none());
     }
 
     #[test]

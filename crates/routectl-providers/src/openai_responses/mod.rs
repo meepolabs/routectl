@@ -230,7 +230,9 @@ impl Provider for OpenAiResponsesProvider {
             ));
         }
         if status >= 400 {
-            let read = UpstreamErrorRead::read(&self.cfg.id, resp).await;
+            let read = UpstreamErrorRead::read(&self.cfg.id, resp)
+                .await
+                .aws_backed(self.is_mantle());
             return Err(map_responses_upstream_error(
                 &self.cfg.id,
                 &self.cfg.auth_kind,
@@ -436,7 +438,9 @@ impl Provider for OpenAiResponsesProvider {
             ));
         }
         if status >= 400 {
-            let read = UpstreamErrorRead::read(&self.cfg.id, resp).await;
+            let read = UpstreamErrorRead::read(&self.cfg.id, resp)
+                .await
+                .aws_backed(self.is_mantle());
             return Err(map_responses_upstream_error(
                 &self.cfg.id,
                 &self.cfg.auth_kind,
@@ -625,17 +629,13 @@ fn map_responses_upstream_error(
     let (warn_excerpt, carried) = if read.hit_cap() {
         let capped = crate::http_client::body_cap_exceeded_message();
         (capped.clone(), CarriedBody::Replacement(capped))
-    } else if read.is_native_envelope() {
+    } else if read.is_native_envelope() && !read.needs_access_denied_scrub() {
         let excerpt = sanitize_for_log(&upstream_message_or_excerpt(read.text(), read.parsed()));
         (excerpt, CarriedBody::Original)
     } else {
         let scrubbed = read.non_envelope_client_message();
         let excerpt = sanitize_for_log(&scrubbed);
-        if scrubbed == read.text() {
-            (excerpt, CarriedBody::Original)
-        } else {
-            (excerpt, CarriedBody::Replacement(scrubbed))
-        }
+        (excerpt, read.aws_carried(scrubbed))
     };
     crate::upstream_log::warn_upstream_failure(
         provider_id,

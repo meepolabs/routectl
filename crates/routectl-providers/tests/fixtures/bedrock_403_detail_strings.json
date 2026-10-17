@@ -1,0 +1,9 @@
+{
+  "note": "The DEBUG upstream-error-body strings the native Bedrock lane renders for a 403: an expired and an invalid API key (bedrock_native_credential_capture.json), an IAM / model-access deny (bedrock/error_403_access_denied.json), and a 403 with no recognizable type. A Rust test asserts each byte-equal to the lane's rendering; the wire-watch refusal-rule tests load them.",
+  "strings": {
+    "expired": "bedrock access denied (AccessDeniedException): credential-expired",
+    "invalid": "bedrock access denied (AccessDeniedException): credential-invalid",
+    "model_access": "bedrock access denied (AccessDeniedException): missing IAM action bedrock:InvokeModel",
+    "untyped": "bedrock access denied"
+  }
+}
