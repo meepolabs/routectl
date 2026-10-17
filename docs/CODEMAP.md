@@ -4078,7 +4078,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   parks a seat when a terminal rejection (or a terminal auth refresh) carries
   a typed `UpstreamReason`, never for a probe, and only in the credential
   generation the attempt was admitted under; `settle_seat_success` records the
-  breaker success and lifts the park in one critical section;
+  breaker success and, in the same generation only, lifts the park in one
+  critical section;
   `clear_all_credential_parks` (reload coordinator) lifts every park and
   advances every seat's generation; `log_gate_refusal` logs a park refusal at
   DEBUG and every other gate kind at WARN; `parked_seat_error` builds a parked
@@ -4146,13 +4147,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   drift, and never claims the half-open probe slot the way a
   `try_dispatch`-based read would. A credential park (`CredentialPark`:
   `UpstreamReason` + deadline, `CREDENTIAL_PARK_BACKSTOP` = 1 h) sits beside
-  the breaker: only `park_credential*` / `clear_credential_park` /
+  the breaker: only `park_credential*` / `clear_credential_park*` /
   `reset_credential_parks` touch it (never `record_success` /
   `record_failure` / `force_open`), the gate refuses with
   `GateDecision::CredentialParked { reason, until }`, and a lapsed park
   shares the single half-open re-test slot with a lapsed cooldown. A
   credential generation, advanced by `reset_credential_parks`, gates
-  `park_credential_in_generation` so a pre-reload attempt cannot re-park
+  `park_credential_in_generation` and `clear_credential_park_in_generation`
+  so a pre-reload attempt cannot re-park or un-park the seat.
 - `src/seat_naming.rs` -- THE naming convention for OAuth account entries and
   their pool, pure over a `Config` (never the credential store): `pool_name`
   (plain provider-family name), `account_entry_name` (`<family>-default` /
