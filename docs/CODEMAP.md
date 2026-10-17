@@ -32,7 +32,8 @@ license.
 ## routectl-core
 
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider
-  trait, log helpers, and the canonical-key allowlist
+  trait, log helpers, the canonical-key allowlist, and `UpstreamReason`;
+  declares the `provider_kind` and `upstream_reason` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `ReasoningDetail`, `Usage`, `RequestProvenance`, and
   the `RoutectlInternal` carrier (resolved per-model knobs plus the
@@ -359,8 +360,9 @@ license.
   `ide_version`/`ide_name` metadata) and seeded into
   `GeminiConfig.user_agent` by `new_cloud_code`
 - `src/error.rs` -- `Error` enum
-  (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Config/NotImplemented/...)
-  and `Result` alias; `Error::LocalRefusal{provider, detail}` is a provider's
+  (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Credential/Config/NotImplemented/...)
+  and `Result` alias; `Error::Credential{detail, reason, parked_until_ms}` is a local
+  credential-unusable error (terminal OAuth refresh, or every seat parked); `Error::LocalRefusal{provider, detail}` is a provider's
   pre-egress refusal: classified `BadRequest` by variant, carrying no status so
   no per-provider remap reaches it, and never retried, debited, or learned; `Error::Upstream` carries a structural `retry_after:
   Option<Duration>` (populated only on a rate-limit/overload reset hint) plus
@@ -390,7 +392,7 @@ license.
   unrecognized kind) keyed by the config `kind` string; reads only the
   structured `Error::Upstream` fields, zero config / router / provider
   coupling; never returns `Timeout`. Non-`Upstream` variants classify by
-  variant alone (`Streaming` -> `NetworkError`, `Auth` -> `Auth`, every other
+  variant alone (`Streaming` -> `NetworkError`, `Auth` / `Credential` -> `Auth`, every other
   variant -> `Unknown`). `FailureClass::class_token(&self) -> Option<&'static
   str>` is THE single kebab-token vocabulary source
   (`rate-limited`/`auth`/`bad-request`/`content-policy`/`context-window`/`server-error`/`timeout`/`network-error`/`overloaded`/`feature-unsupported`;
@@ -475,7 +477,7 @@ license.
   crate-internal feature-gated helper modules `system_filter`,
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
   `retry_after`, `sampling_drop_guard`, `bounded_diagnostics`,
-  `stream_completion`
+  `stream_completion`, `upstream_error`, `aws_error`
 - `src/alloc_probe.rs` -- test-only thread-local allocation counter for
   OpenAI Responses request tests; absent from other feature combinations
 - `src/bounded_diagnostics.rs` -- `MAX_LOGGED_DIAGNOSTIC_ITEMS` (8) and
@@ -576,18 +578,13 @@ license.
   verdict for lanes whose wire closes each turn with a terminal event; each
   lane injects its own predicate, and a stream that ends before it yields a
   status-0 `Upstream` error instead of a clean close
-- `src/upstream_error.rs` -- `UpstreamErrorRead`: the one read of a
-  non-success upstream response every migrated lane's error mapper takes
-  (openai-compat, openai-responses): the error body under the shared
-  response-body cap (cap WARN `path="error_body"`, transport-failure WARN),
-  its single capped parse, the rate-limit-gated `Retry-After`, the
-  correlation id, the `x-amzn-errortype` lift, and the classifier tokens
-  (`tokens()`: nested `/error/type` + `/error/code` on a native envelope,
-  else `aws_error::lift_aws_error_tokens`, then the header fills a missing
-  type); also `non_envelope_client_message` (mantle 403 scrub),
-  `debug_body`, `into_error`, and `lift_nested_error_tokens`, shared with the
-  openai-compat 2xx inline and SSE mid-frame detection. Lane message
-  building and the upstream-failure WARN stay in the lane
+- `src/upstream_error.rs` -- `UpstreamErrorRead` (+ `CarriedBody`): the one
+  read of a non-success upstream response every lane's error mapper takes
+  (all five lanes); capped body + parse, gated `Retry-After`, request id,
+  `x-amzn-errortype` lift, and `tokens()`. Also `map_success_body`,
+  `recognize_upstream_reason` (the credential `UpstreamReason` table), and
+  `lift_nested_error_tokens` / `lift_nested_status_tokens` for the in-band
+  and SSE error readers
 - `src/upstream_request_id.rs` -- `parse_upstream_request_id(&HeaderMap)`:
   lifts the upstream provider's correlation id (first of `x-request-id` /
   `x-oai-request-id` / `cf-ray`) off an error response so the ingress can
@@ -610,8 +607,8 @@ license.
   bodies; each token is bounded at the lift boundary via
   `is_bounded_aws_token` -- token-shaped charset + 128-char cap -- so an
   ARN/account/body-text blob smuggled through `__type`/`code` lifts as `None`
-  instead of reaching a client-facing error field past the 403 scrub) shared
-  by the `anthropic_api` mantle lift and both OpenAI readers; gated
+  instead of reaching a client-facing error field past the 403 scrub), read
+  by every lane through `UpstreamErrorRead::tokens`; gated
   `any(anthropic-api, bedrock, openai-compat, openai-responses)` (no AWS SDK)
   so every lane that can front a mantle upstream shares one classifier and
   cannot drift; also owns `is_carryable_flat_envelope(body, max_bytes)` -- the
@@ -621,11 +618,10 @@ license.
   the byte ceiling), so any other 400/422 shape (nested
   `{"error":{"message":...}}` from a proxy, HTML, plain text) keeps the short
   512-char excerpt and cannot reflect a large body to the caller; also owns
-  `lift_aws_error_type_from_headers` / `classify_aws_error_type_header` --
-  the `x-amzn-errortype` response-header lift (a single unambiguous value,
-  split at the first `:` to drop the coral URL tail, validated through the
-  same bounded-token path) the native Bedrock lane falls back to when the
-  400 body carries no `__type`; a duplicate / conflicting / malformed /
+  `classify_aws_error_type_header` -- the `x-amzn-errortype` response-header
+  lift (a single unambiguous value, split at the first `:` to drop the coral
+  URL tail, validated through the same bounded-token path) that
+  `UpstreamErrorRead` takes when the body carries no `__type`; a duplicate / conflicting / malformed /
   missing header fails closed with a bounded reason label
   (`missing|invalid|ambiguous|conflict`) and the URL tail never reaches an
   `Error` field or a log line. The crate root re-exports the discriminator
@@ -636,7 +632,9 @@ license.
   (the router's `is_bedrock_validation_exception`) gates through one
   reduction and a
   still-namespaced discriminator is never silently missed by an exact match
-  against the bare name; `strip_aws_namespace` itself stays crate-private
+  against the bare name; `strip_aws_namespace` itself stays crate-private.
+  Also `AccessDeniedDetail` (the 403 scrub input) and
+  `aws_stream_exception_status` (in-stream exception member -> HTTP status)
 - `src/translation_drop_metrics.rs` -- process-wide `(lane, class)` translation
   drop and policy-action counters with their snapshot readers, plus the
   crate-internal `ClientFingerprintStripTally`
@@ -668,18 +666,11 @@ license.
 - `src/anthropic_api/mod.rs` -- request/response/stream orchestration: `impl
   Provider for AnthropicApiProvider`
   (`normalize_request`/`normalize_response`, `complete`, `stream` + SSE drain,
-  `count_tokens`, `on_auth_failure`, `probe`) plus the upstream-error/body
-  helpers `map_success_body`, `parse_anthropic_error_type`,
-  `read_anthropic_error` (text-first-then-opportunistic-JSON error mapping
-  shared by all three HTTP paths; when the Anthropic `error.type` shape is
-  absent it lifts flat AWS/Bedrock envelope tokens via
-  `aws_error::lift_aws_error_tokens` (`__type` namespace-stripped + top-level
-  `code`) into `upstream_type`/`upstream_code` and derives the client-facing
-  message via `aws_error::classify_client_error_message` (403 AccessDenied
-  collapses to an IAM-action-only line; other statuses get the capped
-  sanitized excerpt), so a mantle-lane 403/429 classifies and logs
-  truthfully), and `build_count_tokens_body` (the count_tokens field
-  allowlist). Re-exports the public construction surface
+  `count_tokens`, `on_auth_failure`, `probe`) plus
+  `read_anthropic_error` / `anthropic_error_from_read` (the error mapper all
+  three HTTP paths share, built from an `upstream_error::UpstreamErrorRead`,
+  mantle 403 scrubbed through `aws_error`) and `build_count_tokens_body` (the
+  count_tokens field allowlist). Re-exports the public construction surface
   (`AnthropicApiProvider`, `AnthropicApiConfig`, `AuthKind`, plus `MantleAuth`
   under cfg `bedrock`, re-exported from `crate::mantle`) from `client.rs` so
   downstream `anthropic_api::` paths are unchanged. On the mantle lane (cfg
@@ -1164,7 +1155,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `handle_project_rejection` is the shared hook on both cloud-code >=400 error
   branches (complete + stream) -- it latches the configured id off (WARN) when
   the host rejected exactly that value and invalidates the cache
-  (`clear_if_matches`), never reissuing the request. Wiremock tests pin the
+  (`clear_if_matches`), never reissuing the request;
+  `map_gemini_upstream_error` maps an `upstream_error::UpstreamErrorRead`
+  (tokens via `lift_nested_status_tokens`). Wiremock tests pin the
   cloud-code transport
   (`envelope_wrap_and_response_unwrap`, `stream_unwraps_response_envelope`,
   `onboards_via_loadcodeassist`, `onboards_via_onboarduser`,
@@ -1234,8 +1227,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 ### bedrock
 
 - `src/bedrock/mod.rs` -- `BedrockProvider`; topology comment for Invoke vs
-  Converse dispatch; `with_runtime_origin_for_tests` (behind `test-utils`)
-  points a real provider at a mock origin
+  Converse dispatch; `map_bedrock_upstream_error` / `map_error_message` (the
+  lane's error mapper over an `upstream_error::UpstreamErrorRead`);
+  `with_runtime_origin_for_tests` (behind `test-utils`) points a real
+  provider at a mock origin
 - `src/bedrock/auth.rs` -- AWS credential resolution (`Bearer` short-circuit,
   `SigV4` via `SharedCredentialsProvider`)
 - `src/bedrock/signing.rs` -- SigV4 signing entry points; merges
@@ -1252,8 +1247,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   TRACE); both the InvokeModel-stream and ConverseStream decoders delegate to
   `decode_frames`. Also owns `frame_type` (protocol frame classification from
   `:message-type` / `:event-type` / `:exception-type`) and `exception_error`
-  (exception member name -> HTTP status), shared so the two lanes classify
-  upstream failures identically
+  (builds the in-stream error, status from
+  `aws_error::aws_stream_exception_status`), shared by both lanes
 - `src/bedrock/eventstream.rs` -- InvokeModel-stream frame handler / payload
   interpreter (base64-unwrap of Anthropic SSE per frame, parsed by the shared
   `anthropic_api::sse::SseState` labelled `OpeningUsageOrigin::BedrockInvoke`,
@@ -5197,6 +5192,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   --label`), `refresh_under_lock` (near-expiry 300s lead + 401-recovery +
   reload-generation guard), `reload_from_disk`, transient-failure cooldown
   bookkeeping, and the transient-vs-terminal error classifier
+  (`refresh_failure_error`: `Error::Credential` only for a refused grant)
 - `src/oauth/store/seat.rs` -- `SecretStore` impl for `OAuthStore`: resolves
   labeled seats by `seat_key`, `list_seats` enumerates one ref per stored seat
   for a bare `oauth://<provider>` ref (a store INVENTORY primitive -- no
@@ -6003,7 +5999,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   message text through a local macro so every arm is byte-identical)
   or `handle_credentials_reload` -> `rebuild_router_for_seat_change`
   (seat-set-gated rebuild off the unchanged config + the coordinator's current
-  overlay, which the replacement Router both merges and retains). Two bounded
+  overlay, which the replacement Router both merges and retains);
+  `clear_credential_parks` lifts every seat credential park after a reload
+  that may have fixed the credential. Two bounded
   interval drivers ride the same pipeline and the same `shutdown_rx`, both
   reading the live router PER TICK so a publication switches them onto the
   replacement cleanly: `run_router_metrics_snapshot_driver` (in
