@@ -296,7 +296,8 @@ HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NODE_EXTRA_CA_CERTS"
 DRIVER_CONNECTION_MODE_APPLIED=0
 
 # Load one committed client profile from scripts/drivers/profiles/ (see
-# that directory's README for the closed-set rule and the forbidden keys).
+# docs/DEVELOPMENT.md "Client profiles" for the closed-set rule and the
+# forbidden keys).
 #
 # BEFORE the connection-mode apply, never after. A profile sourced late
 # could re-set ANTHROPIC_BASE_URL -- which the apply had just cleared --

@@ -8832,22 +8832,10 @@ new section or a second doc.
   copy the capture rig, the driver runner, and the promotion script validate
   their expected-ingress pin against, welded to `IngressAdapter::id()` by
   the shell self-tests
-- `drivers/config/credential_probe.sh` -- per-lane credential-resolution probe
-  (`CONFIG_FILE VAR...`): boots a lane config hermetically to establish that its
-  credential refs resolve, which a structural config check does not establish
-- `drivers/config/credential_probe.test.sh` -- self-test for that probe, run
-  against the committed lane configs themselves
-- `drivers/lib/resolve_bin.sh` -- sourced binary-resolution helper
-  (`resolve_bin`); the one copy the credential probe and its self-test share, so
-  a probe and the test that checks it cannot resolve different binaries
 - `drivers/lib/structural_shape.sh` -- sourced drift check for the shell
   self-tests' hand-written structural summary lines (`structural_line_drift`,
   `assert_structural_replica`, `assert_trace_replicas`): field shape derived
   from `log_safe.rs`'s emitter, plus the claimed pattern via `verify_pattern.py`
-- `drivers/profiles/README.md` -- the client-profile seam, committed with ZERO
-  profiles: the closed-set and `key=value` rules, the forbidden keys, and the
-  ordering constraint `driver_load_client_profile` enforces (a profile loads
-  before the connection-mode apply; a load after it is refused)
 - `drivers/config/bedrock-invoke.toml` -- committed lane config for Bedrock
   InvokeModel (the Anthropic Messages body) on bedrock-runtime (us-west-2),
   one `[models.<nick>]` entry per Claude candidate
@@ -8918,16 +8906,6 @@ new section or a second doc.
   exits 0. Self-tested in `test-gate.test.sh`, which also pins that CI's
   `public-api` job runs it, continues on error, and is not in
   `required.needs`, and that no hook runs the check
-- `test-inventory.sh` -- named-test enumeration + diff (`dump`, `diff`)
-  over `cargo test -- --list` output, for auditing a test-consolidation
-  or gate-command change by exact test name (cargo selection and doctest
-  inclusion set by environment variable); informational, gates nothing
-- `stray-build-dirs.sh` -- reports (never deletes) stray cargo
-  build-scratch directories outside the normal `target/` tree, including
-  ones nested inside it or sitting outside the git repo entirely
-- `coverage.sh` -- runs cargo-llvm-cov over the workspace and writes a
-  JSON + summary coverage report to an output dir; informational, not
-  wired into the commit gate
 - `bench.sh` -- perf bench runner: the workspace's criterion targets plus
   the allocation-count pass, with a two-run noise contract, writing a
   distilled baseline record to an output dir

@@ -144,8 +144,8 @@ assert_exit "script named in CODEMAP.md by basename passes" 0 \
 
 assert_exit "script named in DEVELOPMENT.md by basename passes" 0 \
     "" \
-    "bash scripts/bootstrap.sh" \
-    ": >scripts/bootstrap.sh"
+    "bash scripts/demo-helper.sh" \
+    ": >scripts/demo-helper.sh"
 
 assert_exit "unindexed script fails" 1 \
     "" \

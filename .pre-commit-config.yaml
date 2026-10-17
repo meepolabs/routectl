@@ -9,7 +9,8 @@
 # commit carried the index, so a partial stage could pass on code that was
 # never committed -- or fail on code that was never staged.
 #
-# Install (once per clone; see scripts/bootstrap.sh):
+# Install (once per clone; see docs/DEVELOPMENT.md "Commit gate (one-time
+# setup)"):
 #   pre-commit install --install-hooks
 #
 # `cargo test` is deliberately absent FROM THE COMMIT STAGE: it was 275 of

@@ -180,17 +180,22 @@ mix live calls and multi-minute benchmarks into one run.
 
 The local commit gate is a [pre-commit](https://pre-commit.com) config,
 [`.pre-commit-config.yaml`](../.pre-commit-config.yaml). Install it once
-per clone:
+per clone (install `pre-commit` itself first, e.g. `pipx install
+pre-commit`, `pip install --user pre-commit` or `brew install pre-commit`):
 
 ```bash
-bash scripts/bootstrap.sh
+pre-commit install --install-hooks
 ```
 
 That installs the `pre-commit`, `commit-msg` and `pre-push` stages and
-pre-builds each hook's environment. Installing from a linked worktree
-writes the clone's shared hooks directory, so one run covers every
-worktree. Re-run it after any change to the stage list, since a stage
-added to the config is not installed until something installs it.
+pre-builds each hook's environment, so the first commit does not pay for
+a toolchain fetch. Do not pass `--hook-type`: the stage list comes from
+`default_install_hook_types` in the config, and naming stages on the
+command line stops the config being the single source of truth for which
+stages are wired. The command is idempotent. Installing from a linked
+worktree writes the clone's shared hooks directory, so one run covers
+every worktree. Re-run it after any change to the stage list, since a
+stage added to the config is not installed until something installs it.
 
 A clone that previously used the retired hand-rolled hooks will also
 carry `.git/hooks/*.legacy` files: pre-commit preserves whatever hook it
@@ -333,6 +338,86 @@ arguments:
 ```bash
 bash scripts/fmt-fragments.sh
 ```
+
+## Maintenance recipes
+
+Informational, run by hand, gating nothing. Each leaves the workspace
+`rust-toolchain.toml` pin in charge: leave `RUSTUP_TOOLCHAIN` unset.
+
+### Coverage snapshot
+
+`cargo-llvm-cov` over the workspace. There is no baseline in the repo and
+no threshold; it shows where production behavior is exercised (test
+sidecars are excluded from its report by default). Install once per
+machine, then run from the repo root into an output dir outside the tree:
+
+```bash
+cargo install cargo-llvm-cov --locked --version 0.8.7
+rustup component add llvm-tools-preview
+
+out=<outdir>; mkdir -p "$out"
+git rev-parse HEAD >"$out/git-head.txt"
+CARGO_TARGET_DIR=.cargo-target-cov RUSTFLAGS="-C debuginfo=0" \
+    cargo llvm-cov --workspace --features bedrock --release \
+    --json --output-path "$out/coverage.json"
+CARGO_TARGET_DIR=.cargo-target-cov RUSTFLAGS="-C debuginfo=0" \
+    cargo llvm-cov report --release --summary-only >"$out/summary.txt"
+```
+
+`debuginfo=0` keeps the instrumented binaries small. Both commands use the
+same target dir because `report` reads the profile data the first one wrote
+there.
+
+### Test inventory
+
+To audit a test-consolidation or gate-command change by test NAME rather
+than by count, enumerate before and after (`--list` runs nothing) and diff.
+Use a dedicated target dir: one warmed at another commit can fail to
+rebuild the test binaries there. The `awk` tags each test with its binary
+(cargo's hash suffix stripped) and drops doctests:
+
+```bash
+inventory() {
+    CARGO_TARGET_DIR=.cargo-target-inventory \
+        cargo test --workspace --features bedrock --release -- --list 2>&1 </dev/null |
+    awk '/Running .*\(/ { b = $0; sub(/.*\(/, "", b); sub(/\).*/, "", b)
+                         sub(/.*\//, "", b); sub(/-[0-9a-f]+$/, "", b); next }
+         /Doc-tests/    { b = ""; next }
+         b != "" && /: test$/ { sub(/: test$/, ""); print b "::" $0 }' |
+    LC_ALL=C sort -u
+}
+inventory >before.txt     # at the base
+inventory >after.txt      # at the tip
+LC_ALL=C comm -23 before.txt after.txt   # REMOVED
+LC_ALL=C comm -13 before.txt after.txt   # ADDED
+```
+
+Swap the cargo selection (for example `--all-features --profile
+test-release`) on both sides to audit a gate-command change.
+
+### Stray build dirs
+
+A private `CARGO_TARGET_DIR` (used to dodge the shared `target/` lock) is
+never torn down, and two of its hiding places are invisible to `git
+status`: a dir nested inside `target/` (covered by the `target` ignore
+rule) and one beside the repo, outside it. List the candidates with their
+sizes from the repo root:
+
+```bash
+du -sh .cargo-target-* target-* .target-* 2>/dev/null
+ls -d target/*/ 2>/dev/null |
+    grep -Ev '^target/(debug|release|doc|tmp|package|flycheck[^/]*)/$' |
+    xargs -r du -sh
+du -sh ../*target* ../.*target* 2>/dev/null
+du -sh target/debug 2>/dev/null
+```
+
+A dir holding a `CACHEDIR.TAG`, or nothing but `debug`/`release`/`doc`/
+`tmp`/`package`, is cargo scratch. This is a report, never a deletion:
+removing a build cache mid-gate breaks the run, so check `pgrep -a
+'cargo|rustc'` first and remove only what you do not need. A large
+`target/debug` is cheaper to drop alone (`rm -rf target/debug`) than via
+`cargo clean`, which also discards the slower-to-rebuild release cache.
 
 ## When the Anthropic ingress breaks (a real client sending a real body)
 
@@ -988,9 +1073,26 @@ without a header row.
 `scripts/drivers/profiles/` holds named, committed CLIENT settings a driver
 applies before launching its client, loaded by
 `driver_load_client_profile` in `scripts/drivers/lib/common.sh`. The
-directory is deliberately EMPTY of profiles today -- the seam and its rules
-ship first, populated by whoever has a cell that needs one. The rules live
-in [../scripts/drivers/profiles/README.md](../scripts/drivers/profiles/README.md).
+directory holds no profiles today (and so is absent from the tree) -- the
+seam and its rules ship first, populated by whoever has a cell that needs
+one, and the rules below are the ones the first profile author must follow.
+
+The set of profiles is CLOSED and committed: a driver names a profile that
+exists in that directory (`<client>.<profile>.env`) or the run fails. There
+is no path argument, no environment seam naming an out-of-tree file, and no
+default, because a profile is part of what a fixture was captured under. A
+profile earns a file only if it changes the request body SHAPE (thinking
+tier, tool permission, an MCP server list, the model); settings set once and
+never varied belong in the driver.
+
+A profile is PARSED, not sourced: every line is `KEY=VALUE`, `#` comments and
+blank lines aside, and the value is taken literally with no expansion and no
+quote stripping. The loader refuses, by name: connection carriers
+(`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, the proxy variables,
+`NODE_EXTRA_CA_CERTS`); any key ending in `_API_KEY`, `_TOKEN`, `_SECRET`,
+`_BEARER`, `_PASSWORD` or `_CREDENTIALS` (a suffix match, so
+`MAX_THINKING_TOKENS` stays legal); and a `$` or a backtick anywhere in a
+value.
 
 One of them is enforced in code rather than stated, and it is the reason
 the seam shipped before its first user:
@@ -1543,14 +1645,9 @@ The scripts have shell self-tests in the same directory, which skip BY NAME
 when docker is absent rather than silently:
 
 ```
-bash scripts/container/build.test.sh
 bash scripts/container/run_capture.test.sh
 bash scripts/container/image_scan.test.sh
 ```
-
-`build.test.sh` needs no docker at all: it drives `build.sh --dry-run` with a
-failing `docker` stub on PATH and asserts the argument refusals and that
-changing any one client pin changes the derived tag.
 
 The wrapper's refusal legs need no docker at all -- the wrapper decides every
 one of them from its argv and the host filesystem -- so they run everywhere;

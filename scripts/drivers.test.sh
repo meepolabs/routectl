@@ -3855,7 +3855,7 @@ rm -rf "$work"
 # ZERO profiles are committed (the closed set is empty until a cell needs
 # one), so every leg here writes a throwaway profile into a throwaway repo.
 # What is asserted is the RULE, not any profile: the ordering latch, and
-# the forbidden classes the README states.
+# the forbidden classes the loader refuses.
 #
 # The ordering is the load-bearing one. `driver_apply_anthropic_connection_mode`
 # clears both modes' carriers precisely because the runner forwards the
@@ -3924,7 +3924,7 @@ fi
 check "the refused late load exported nothing" "no" \
     "$([ -f "$work/profile.txt" ] && echo yes || echo no)"
 
-# The forbidden classes the README states, each refused by name, each
+# The forbidden classes docs/DEVELOPMENT.md states, each refused by name, each
 # against the same accepted-order call the control above proved works --
 # so a refusal is attributable to the profile's content and to nothing else.
 profile_refuses() {
@@ -4012,46 +4012,10 @@ else
 fi
 rm -rf "$work"
 
-# ZERO profiles are committed, and the README is what carries the rules
-# until one is. Each grep names a LOAD-BEARING statement rather than a
-# heading: a heading can be reworded, and a rule the README stops stating
-# is a rule the first profile author will get wrong.
+# ZERO profiles are committed: the closed set stays empty until a cell
+# needs one.
 committed_profiles="$(find "$DRIVERS/profiles" -maxdepth 1 -name '*.env' 2>/dev/null | wc -l)"
 check "the committed profile set is still empty" "0" "$committed_profiles"
-PROFILES_README="$DRIVERS/profiles/README.md"
-check "the profiles directory carries its README" "yes" \
-    "$([ -r "$PROFILES_README" ] && echo yes || echo no)"
-readme_states() {
-    check "the profiles README states $1" "yes" \
-        "$(grep -qF -- "$2" "$PROFILES_README" && echo yes || echo no)"
-}
-readme_states "the closed-set rule" "The set of profiles is CLOSED"
-readme_states "that a profile is parsed, not sourced" "PARSED, not sourced"
-readme_states "the forbidden connection carriers" "ANTHROPIC_BASE_URL"
-readme_states "the forbidden credential suffixes" "_BEARER"
-readme_states "the forbidden shell substitution" "backtick"
-readme_states "the before-apply half of the ordering rule" \
-    "BEFORE \`driver_apply_anthropic_connection_mode\`"
-readme_states "the after-apply refusal" "load after it is REFUSED"
-readme_states "the deferred client-side pin" "client_config_sha"
-
-# Positive control: every grep above MUST fire on a file that does carry
-# the statement, and MUST NOT on one that does not. Without it a mistyped
-# needle reads as a clean pass on a README that says nothing.
-readme_control="$(mktemp)"
-printf 'nothing load-bearing here\n' >"$readme_control"
-control_misses=0
-while IFS= read -r needle; do
-    grep -qF -- "$needle" "$PROFILES_README" || control_misses=$((control_misses + 1))
-    ! grep -qF -- "$needle" "$readme_control" || control_misses=$((control_misses + 1))
-done <<'NEEDLES'
-The set of profiles is CLOSED
-PARSED, not sourced
-load after it is REFUSED
-NEEDLES
-check "the README greps fire on the README and not on an empty control" "0" \
-    "$control_misses"
-rm -f "$readme_control"
 
 # No `client_config_sha` anywhere yet: it lands with the first profile, and
 # an always-empty pin answers neither question the two-pin design separates.
