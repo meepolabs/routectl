@@ -300,11 +300,14 @@ impl IngressAdapter for OpenAiIngress {
     ) -> Vec<SseEvent> {
         // The caller in `handlers::ingress_handle` already strips
         // provider names, upstream bodies, and tokens before passing
-        // `error`, but a second `sanitize_for_log` pass here filters
+        // `error`, but a second `sanitize_for_log_with_cap` pass here filters
         // control chars (CRLF, ANSI escapes, NULs) that would
         // otherwise break SSE wire framing or forge log lines on
         // downstream text-format subscribers. Defense in depth.
-        let msg = routectl_core::sanitize_for_log(&error.to_string());
+        let msg = routectl_core::sanitize_for_log_with_cap(
+            &error.to_string(),
+            crate::ingress::STREAM_ERROR_MESSAGE_CAP,
+        );
         let payload = serde_json::json!({
             "error": {
                 "type": class.openai_type,

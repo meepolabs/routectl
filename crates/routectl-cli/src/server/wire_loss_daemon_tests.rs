@@ -27,7 +27,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::test_support::isolate_usage_db;
 
-const ALIAS: &str = "a";
+pub(super) const ALIAS: &str = "a";
 const NICKNAME: &str = "m";
 const PROVIDER: &str = "p";
 const UPSTREAM: &str = "upstream";
@@ -175,7 +175,7 @@ fn bearer_key() -> String {
     ["wire", "loss", "test", "key"].join("-")
 }
 
-fn bedrock_config() -> Config {
+pub(super) fn bedrock_config() -> Config {
     let text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.{PROVIDER}]\n\
@@ -195,7 +195,7 @@ fn bedrock_config() -> Config {
     parse_config(&text).expect("valid bedrock test config")
 }
 
-async fn bedrock_router(config: Arc<Config>, origin: &str) -> Router {
+pub(super) async fn bedrock_router(config: Arc<Config>, origin: &str) -> Router {
     let creds = BedrockCreds::BearerKey { key: bearer_key() };
     let cfg = BedrockConfig {
         id: format!("bedrock:{PROVIDER}"),
@@ -253,14 +253,14 @@ async fn lane_router(lane: FidelityLane, origin: &str) -> (Config, Router) {
 
 /// A running daemon serving an injected router, torn down by
 /// [`Daemon::shutdown`].
-struct Daemon {
-    base_url: String,
+pub(super) struct Daemon {
+    pub(super) base_url: String,
     handle: tokio::task::JoinHandle<()>,
     _usage_dir: tempfile::TempDir,
 }
 
 impl Daemon {
-    async fn spawn(mut config: Config, router: Router) -> Self {
+    pub(super) async fn spawn(mut config: Config, router: Router) -> Self {
         let usage_dir = isolate_usage_db(&mut config);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -327,7 +327,7 @@ impl Daemon {
         body["data"]["wire_check"].clone()
     }
 
-    async fn shutdown(self) {
+    pub(super) async fn shutdown(self) {
         self.handle.abort();
         let _ = self.handle.await;
     }

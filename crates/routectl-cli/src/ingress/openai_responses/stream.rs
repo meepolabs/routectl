@@ -711,7 +711,7 @@ fn accumulated_response(state: &ResponsesStreamState) -> ChatResponse {
 /// clean failure rather than a truncated stream. `response.failed` (not
 /// `response.completed`) is the discriminator: the egress reader treats
 /// it as a fatal `Err` (`sse::handle_failed`), so a client distinguishes
-/// it from success. The message is sanitized via `sanitize_for_log` to
+/// it from success. The message is sanitized via `sanitize_for_log_with_cap` to
 /// strip control chars that would break SSE framing.
 pub(super) fn render_error_eos_internal(
     state: &mut ResponsesStreamState,
@@ -727,7 +727,10 @@ pub(super) fn render_error_eos_internal(
     ensure_created(state, &mut events);
     close_open_item(state, &mut events);
 
-    let msg = routectl_core::sanitize_for_log(&error.to_string());
+    let msg = routectl_core::sanitize_for_log_with_cap(
+        &error.to_string(),
+        crate::ingress::STREAM_ERROR_MESSAGE_CAP,
+    );
     let mut body = response_skeleton(state, "failed", Vec::new(), None);
     if let Some(obj) = body.as_object_mut() {
         obj.insert(

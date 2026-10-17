@@ -215,3 +215,7 @@ mod beta_capability_restart_tests;
 #[cfg(test)]
 #[path = "wire_loss_daemon_tests.rs"]
 mod wire_loss_daemon_tests;
+
+#[cfg(test)]
+#[path = "bedrock_denial_detail_daemon_tests.rs"]
+mod bedrock_denial_detail_daemon_tests;

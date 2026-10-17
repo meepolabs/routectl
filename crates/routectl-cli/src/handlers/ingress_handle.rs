@@ -1193,7 +1193,7 @@ fn stamp_opening(capture: &mut UsageCapture, meter: Option<&OpeningMeter>) {
 /// non-streaming path goes through `map_error`, which carries
 /// caller-actionable validation detail and is appropriate to surface.
 fn sanitize_stream_error_for_client(e: &Error) -> String {
-    match e {
+    let message = match e {
         Error::Upstream { status, .. } => match upstream_error_detail(e.parsed_body()) {
             Some(detail) => format!("upstream stream error (HTTP {status}): {detail}"),
             None => format!("upstream stream error (HTTP {status})"),
@@ -1207,7 +1207,8 @@ fn sanitize_stream_error_for_client(e: &Error) -> String {
             ..
         } => super::credential_message::credential_error_message_now(*reason, *parked_until_ms),
         _ => "upstream stream error".to_string(),
-    }
+    };
+    super::reason_detail::with_reason_suffix(message, e.upstream_reason())
 }
 
 /// The `error.type` a local refusal carries on both envelopes: the one the
@@ -1459,6 +1460,8 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
     // can carry one; every other class leaves it absent so the envelope
     // emits `param: null`.
     let upstream_param = upstream_error_param(e.parsed_body());
+    let public_message =
+        super::reason_detail::with_reason_suffix(public_message, e.upstream_reason());
     error_response(
         shape,
         status,
@@ -1801,6 +1804,10 @@ mod local_refusal_envelope_tests;
 #[cfg(test)]
 #[path = "credential_error_envelope_tests.rs"]
 mod credential_error_envelope_tests;
+
+#[cfg(test)]
+#[path = "reason_detail_tests.rs"]
+mod reason_detail_tests;
 
 #[cfg(test)]
 #[path = "ingress_refusal_count_tests.rs"]

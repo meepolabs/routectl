@@ -631,7 +631,7 @@ pub(super) fn emit_message_stop(state: &mut AnthropicStreamState, events: &mut V
 /// anyway, but keeping the invariant prevents a future refactor
 /// from silently regressing).
 ///
-/// The error message is sanitized via `routectl_core::sanitize_for_log`
+/// The error message is sanitized via `routectl_core::sanitize_for_log_with_cap`
 /// to filter control chars (CRLF, ANSI escapes, NULs) that would
 /// otherwise break SSE framing or forge log lines on downstream
 /// text-format subscribers. The caller already strips provider names,
@@ -651,7 +651,10 @@ pub(super) fn render_error_eos_internal(
         return Vec::new();
     }
     state.finished = true;
-    let msg = routectl_core::sanitize_for_log(&error.to_string());
+    let msg = routectl_core::sanitize_for_log_with_cap(
+        &error.to_string(),
+        crate::ingress::STREAM_ERROR_MESSAGE_CAP,
+    );
     let payload = json!({
         "type": "error",
         "error": {

@@ -6367,6 +6367,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/credential_message.rs` -- the fixed client message for a
   local `Error::Credential`: the reason token and, when every seat is parked,
   the remaining wait in seconds; never the provider id or OAuth detail
+- `src/handlers/reason_detail.rs` -- `with_reason_suffix`: appends
+  ` (reason: <token>)` from the error's typed `UpstreamReason` to every
+  client error message (non-stream envelope and stream terminal, all three
+  dialects), skipped when the message already names the token
 - `src/handlers/pure_proxy_metrics.rs` -- forwarded-mode (pure-proxy) ingress
   admission-rejection counter + structured rejection log.
   `PureProxyRejectionReason` (closed 2-variant enum: `TokenMissing` /

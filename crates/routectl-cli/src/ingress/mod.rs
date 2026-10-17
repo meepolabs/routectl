@@ -117,6 +117,13 @@ impl std::fmt::Debug for MitmSeamNonce {
 /// dialect impls and their tests cannot drift on the magic string.
 pub(crate) const STREAM_ERROR_TYPE: &str = "api_error";
 
+/// Character cap on a stream terminal error message. Control characters are
+/// filtered as in a log field, but the cap must exceed the longest message
+/// the handler builds (lead-in, the bounded upstream detail and its truncation
+/// marker, the reason suffix), or the terminal event would cut the detail the
+/// non-stream envelope delivers whole.
+pub(crate) const STREAM_ERROR_MESSAGE_CAP: usize = 2 * routectl_core::MAX_LOG_BODY_EXCERPT;
+
 /// Resolved classifier for a mid-stream terminal error event, derived
 /// from the upstream `Error` so the terminal SSE event carries a
 /// status-aware (and, when present, upstream-aware) `error.type` instead
