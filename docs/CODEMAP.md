@@ -362,7 +362,7 @@ license.
 - `src/error.rs` -- `Error` enum
   (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Credential/Config/NotImplemented/...)
   and `Result` alias; `Error::Credential{detail, reason, parked_until_ms}` is a local
-  credential-unusable error (terminal OAuth refresh, or every seat parked); `Error::LocalRefusal{provider, detail}` is a provider's
+  credential-unusable error (terminal OAuth refresh, or every reachable seat parked); `Error::LocalRefusal{provider, detail}` is a provider's
   pre-egress refusal: classified `BadRequest` by variant, carrying no status so
   no per-provider remap reaches it, and never retried, debited, or learned; `Error::Upstream` carries a structural `retry_after:
   Option<Duration>` (populated only on a rate-limit/overload reset hint) plus
@@ -608,7 +608,7 @@ license.
   `is_bounded_aws_token` -- token-shaped charset + 128-char cap -- so an
   ARN/account/body-text blob smuggled through `__type`/`code` lifts as `None`
   instead of reaching a client-facing error field past the 403 scrub), read
-  by every lane through `UpstreamErrorRead::tokens`; gated
+  by the four AWS-capable lanes through `UpstreamErrorRead::tokens`; gated
   `any(anthropic-api, bedrock, openai-compat, openai-responses)` (no AWS SDK)
   so every lane that can front a mantle upstream shares one classifier and
   cannot drift; also owns `is_carryable_flat_envelope(body, max_bytes)` -- the
@@ -6365,7 +6365,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `CheckedBody`, `response_edits_for` and `abandon_unrendered` serve the
   complete path
 - `src/handlers/credential_message.rs` -- the fixed client message for a
-  local `Error::Credential`: the reason token and, when every seat is parked,
+  local `Error::Credential`: the reason token and, when every reachable seat is parked,
   the remaining wait in seconds; never the provider id or OAuth detail
 - `src/handlers/reason_detail.rs` -- `with_reason_suffix`: appends
   ` (reason: <token>)` from the error's typed `UpstreamReason` to every
