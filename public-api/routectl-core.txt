@@ -701,6 +701,10 @@ pub mod routectl_core::error
 pub enum routectl_core::error::Error
 pub routectl_core::error::Error::Auth(alloc::string::String)
 pub routectl_core::error::Error::Config(alloc::string::String)
+pub routectl_core::error::Error::Credential
+pub routectl_core::error::Error::Credential::detail: alloc::string::String
+pub routectl_core::error::Error::Credential::parked_until_ms: core::option::Option<u64>
+pub routectl_core::error::Error::Credential::reason: routectl_core::upstream_reason::UpstreamReason
 pub routectl_core::error::Error::Internal(alloc::string::String)
 pub routectl_core::error::Error::Io(core::io::error::Error)
 pub routectl_core::error::Error::Json(serde_json::error::Error)
@@ -728,9 +732,11 @@ pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<
 pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
 pub fn routectl_core::error::Error::upstream(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_full(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn routectl_core::error::Error::upstream_reason(&self) -> core::option::Option<routectl_core::upstream_reason::UpstreamReason>
 pub fn routectl_core::error::Error::upstream_request_id(&self) -> core::option::Option<&str>
 pub fn routectl_core::error::Error::upstream_with_body(impl core::convert::Into<alloc::string::String>, u16, routectl_core::parsed_error_body::UpstreamBody, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_with_retry_after(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>) -> Self
+pub fn routectl_core::error::Error::with_upstream_reason(self, core::option::Option<routectl_core::upstream_reason::UpstreamReason>) -> Self
 pub fn routectl_core::error::Error::with_upstream_request_id(self, core::option::Option<alloc::string::String>) -> Self
 impl core::convert::From<core::io::error::Error> for routectl_core::error::Error
 pub fn routectl_core::error::Error::from(core::io::error::Error) -> Self
@@ -772,6 +778,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::error::Error
 pub struct routectl_core::error::UpstreamExtras(_)
 impl routectl_core::error::UpstreamExtras
 pub fn routectl_core::error::UpstreamExtras::parsed(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
+pub fn routectl_core::error::UpstreamExtras::reason(&self) -> core::option::Option<routectl_core::upstream_reason::UpstreamReason>
 pub fn routectl_core::error::UpstreamExtras::request_id(&self) -> core::option::Option<&str>
 impl core::fmt::Debug for routectl_core::error::UpstreamExtras
 pub fn routectl_core::error::UpstreamExtras::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1302,6 +1309,7 @@ impl<T> tracing::instrument::Instrument for routectl_core::parsed_error_body::Pa
 impl<T> tracing::instrument::WithSubscriber for routectl_core::parsed_error_body::ParsedErrorBody
 pub struct routectl_core::parsed_error_body::UpstreamBody
 impl routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::UpstreamBody::error_envelope(&str) -> Self
 pub fn routectl_core::parsed_error_body::UpstreamBody::new(impl core::convert::Into<alloc::string::String>) -> Self
 pub const fn routectl_core::parsed_error_body::UpstreamBody::parsed(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
 pub fn routectl_core::parsed_error_body::UpstreamBody::text(&self) -> &str
@@ -1333,6 +1341,21 @@ pub fn routectl_core::parsed_error_body::UpstreamBody::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::parsed_error_body::UpstreamBody
 impl<T> tracing::instrument::WithSubscriber for routectl_core::parsed_error_body::UpstreamBody
 pub fn routectl_core::parsed_error_body::upstream_message_or_excerpt(&str, core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>) -> alloc::string::String
+pub mod routectl_core::provider_kind
+pub mod routectl_core::provider_kind::config
+pub const routectl_core::provider_kind::config::ANTHROPIC_API: &str
+pub const routectl_core::provider_kind::config::BEDROCK: &str
+pub const routectl_core::provider_kind::config::GEMINI: &str
+pub const routectl_core::provider_kind::config::OPENAI_COMPAT: &str
+pub const routectl_core::provider_kind::config::OPENAI_RESPONSES: &str
+pub mod routectl_core::provider_kind::trace
+pub const routectl_core::provider_kind::trace::ANTHROPIC: &str
+pub const routectl_core::provider_kind::trace::BEDROCK_CONVERSE: &str
+pub const routectl_core::provider_kind::trace::BEDROCK_INVOKE: &str
+pub const routectl_core::provider_kind::trace::GEMINI: &str
+pub const routectl_core::provider_kind::trace::OPENAI_COMPAT: &str
+pub const routectl_core::provider_kind::trace::OPENAI_RESPONSES: &str
+pub const fn routectl_core::provider_kind::trace_kind(routectl_core::wire_check::EgressKind) -> core::option::Option<&'static str>
 pub mod routectl_core::reasoning_envelope
 pub fn routectl_core::reasoning_envelope::unwrap(&str) -> core::option::Option<(&str, core::option::Option<&str>, &str)>
 pub fn routectl_core::reasoning_envelope::wrap(&str, core::option::Option<&str>, &str) -> alloc::string::String
@@ -1436,6 +1459,71 @@ pub fn routectl_core::reasoning_format::is_responses_family(core::option::Option
 pub fn routectl_core::reasoning_format::scheme_of(core::option::Option<&str>) -> routectl_core::reasoning_format::ReplayScheme
 pub mod routectl_core::reasoning_ingest
 pub fn routectl_core::reasoning_ingest::normalize_reasoning_detail_payloads(&mut routectl_core::schema::ChatRequest)
+pub mod routectl_core::refusal_reason
+#[non_exhaustive] pub enum routectl_core::refusal_reason::RefusalReason
+pub routectl_core::refusal_reason::RefusalReason::BetaHeaderCap
+pub routectl_core::refusal_reason::RefusalReason::CacheBreakpointCap
+pub routectl_core::refusal_reason::RefusalReason::CacheTtlOrder
+pub routectl_core::refusal_reason::RefusalReason::CloakRelocation
+pub routectl_core::refusal_reason::RefusalReason::FieldType
+pub routectl_core::refusal_reason::RefusalReason::ForwardedBearerMissing
+pub routectl_core::refusal_reason::RefusalReason::GeminiSeed
+pub routectl_core::refusal_reason::RefusalReason::PreviousResponseId
+pub routectl_core::refusal_reason::RefusalReason::SchemaDepth
+pub routectl_core::refusal_reason::RefusalReason::SchemaSize
+pub routectl_core::refusal_reason::RefusalReason::StrictTranslation
+pub routectl_core::refusal_reason::RefusalReason::ToolCallIdMissing
+pub routectl_core::refusal_reason::RefusalReason::ToolPairing
+pub routectl_core::refusal_reason::RefusalReason::TranslationAccounting
+pub routectl_core::refusal_reason::RefusalReason::Unparseable
+pub routectl_core::refusal_reason::RefusalReason::Unrepresentable
+impl routectl_core::refusal_reason::RefusalReason
+pub const routectl_core::refusal_reason::RefusalReason::ALL: [Self; 16]
+pub const fn routectl_core::refusal_reason::RefusalReason::as_str(self) -> &'static str
+pub const fn routectl_core::refusal_reason::RefusalReason::failure_class(self) -> routectl_core::failure_class::FailureClass
+pub fn routectl_core::refusal_reason::RefusalReason::from_token(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::clone(&self) -> routectl_core::refusal_reason::RefusalReason
+impl core::cmp::Eq for routectl_core::refusal_reason::RefusalReason
+impl core::cmp::PartialEq for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::eq(&self, &routectl_core::refusal_reason::RefusalReason) -> bool
+impl core::fmt::Debug for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::refusal_reason::RefusalReason
+impl core::marker::StructuralPartialEq for routectl_core::refusal_reason::RefusalReason
+impl core::marker::Freeze for routectl_core::refusal_reason::RefusalReason
+impl core::marker::Send for routectl_core::refusal_reason::RefusalReason
+impl core::marker::Sync for routectl_core::refusal_reason::RefusalReason
+impl core::marker::Unpin for routectl_core::refusal_reason::RefusalReason
+impl core::marker::UnsafeUnpin for routectl_core::refusal_reason::RefusalReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::refusal_reason::RefusalReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::refusal_reason::RefusalReason
+impl<T, U> core::convert::Into<U> for routectl_core::refusal_reason::RefusalReason where U: core::convert::From<T>
+pub fn routectl_core::refusal_reason::RefusalReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::refusal_reason::RefusalReason where U: core::convert::Into<T>
+pub type routectl_core::refusal_reason::RefusalReason::Error = core::convert::Infallible
+pub fn routectl_core::refusal_reason::RefusalReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::refusal_reason::RefusalReason where U: core::convert::TryFrom<T>
+pub type routectl_core::refusal_reason::RefusalReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::refusal_reason::RefusalReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::refusal_reason::RefusalReason where T: core::clone::Clone
+pub type routectl_core::refusal_reason::RefusalReason::Owned = T
+pub fn routectl_core::refusal_reason::RefusalReason::clone_into(&self, &mut T)
+pub fn routectl_core::refusal_reason::RefusalReason::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::refusal_reason::RefusalReason where T: 'static + ?core::marker::Sized
+pub fn routectl_core::refusal_reason::RefusalReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::refusal_reason::RefusalReason where T: ?core::marker::Sized
+pub fn routectl_core::refusal_reason::RefusalReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::refusal_reason::RefusalReason where T: ?core::marker::Sized
+pub fn routectl_core::refusal_reason::RefusalReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::refusal_reason::RefusalReason where T: core::clone::Clone
+pub unsafe fn routectl_core::refusal_reason::RefusalReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::refusal_reason::RefusalReason
+impl<T> tracing::instrument::WithSubscriber for routectl_core::refusal_reason::RefusalReason
 pub mod routectl_core::safe_token
 pub const routectl_core::safe_token::MAX_SAFE_TOKEN_LEN: usize
 pub fn routectl_core::safe_token::is_safe_token(&str) -> bool
@@ -2946,6 +3034,55 @@ pub fn routectl_core::upstream_meta::UpstreamMeta::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::UpstreamMeta
 impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::UpstreamMeta
 pub const routectl_core::upstream_meta::OVERAGE_CLAIM: &str
+pub mod routectl_core::upstream_reason
+#[non_exhaustive] pub enum routectl_core::upstream_reason::UpstreamReason
+pub routectl_core::upstream_reason::UpstreamReason::CredentialExpired
+pub routectl_core::upstream_reason::UpstreamReason::CredentialInvalid
+impl routectl_core::upstream_reason::UpstreamReason
+pub const fn routectl_core::upstream_reason::UpstreamReason::as_str(self) -> &'static str
+pub fn routectl_core::upstream_reason::UpstreamReason::from_token(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::clone(&self) -> routectl_core::upstream_reason::UpstreamReason
+impl core::cmp::Eq for routectl_core::upstream_reason::UpstreamReason
+impl core::cmp::PartialEq for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::eq(&self, &routectl_core::upstream_reason::UpstreamReason) -> bool
+impl core::fmt::Debug for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::StructuralPartialEq for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::Freeze for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::Send for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::Sync for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::Unpin for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::UnsafeUnpin for routectl_core::upstream_reason::UpstreamReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::upstream_reason::UpstreamReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::upstream_reason::UpstreamReason
+impl<T, U> core::convert::Into<U> for routectl_core::upstream_reason::UpstreamReason where U: core::convert::From<T>
+pub fn routectl_core::upstream_reason::UpstreamReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::upstream_reason::UpstreamReason where U: core::convert::Into<T>
+pub type routectl_core::upstream_reason::UpstreamReason::Error = core::convert::Infallible
+pub fn routectl_core::upstream_reason::UpstreamReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::upstream_reason::UpstreamReason where U: core::convert::TryFrom<T>
+pub type routectl_core::upstream_reason::UpstreamReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::upstream_reason::UpstreamReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::upstream_reason::UpstreamReason where T: core::clone::Clone
+pub type routectl_core::upstream_reason::UpstreamReason::Owned = T
+pub fn routectl_core::upstream_reason::UpstreamReason::clone_into(&self, &mut T)
+pub fn routectl_core::upstream_reason::UpstreamReason::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::upstream_reason::UpstreamReason where T: 'static + ?core::marker::Sized
+pub fn routectl_core::upstream_reason::UpstreamReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::upstream_reason::UpstreamReason where T: ?core::marker::Sized
+pub fn routectl_core::upstream_reason::UpstreamReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::upstream_reason::UpstreamReason where T: ?core::marker::Sized
+pub fn routectl_core::upstream_reason::UpstreamReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::upstream_reason::UpstreamReason where T: core::clone::Clone
+pub unsafe fn routectl_core::upstream_reason::UpstreamReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::upstream_reason::UpstreamReason
+impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_reason::UpstreamReason
 pub mod routectl_core::warn_dedup
 pub enum routectl_core::warn_dedup::WarnDecision
 pub routectl_core::warn_dedup::WarnDecision::AlreadyWarned
@@ -4374,6 +4511,10 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::CoreReasoningDial
 pub enum routectl_core::Error
 pub routectl_core::Error::Auth(alloc::string::String)
 pub routectl_core::Error::Config(alloc::string::String)
+pub routectl_core::Error::Credential
+pub routectl_core::Error::Credential::detail: alloc::string::String
+pub routectl_core::Error::Credential::parked_until_ms: core::option::Option<u64>
+pub routectl_core::Error::Credential::reason: routectl_core::upstream_reason::UpstreamReason
 pub routectl_core::Error::Internal(alloc::string::String)
 pub routectl_core::Error::Io(core::io::error::Error)
 pub routectl_core::Error::Json(serde_json::error::Error)
@@ -4401,9 +4542,11 @@ pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<
 pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
 pub fn routectl_core::error::Error::upstream(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_full(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn routectl_core::error::Error::upstream_reason(&self) -> core::option::Option<routectl_core::upstream_reason::UpstreamReason>
 pub fn routectl_core::error::Error::upstream_request_id(&self) -> core::option::Option<&str>
 pub fn routectl_core::error::Error::upstream_with_body(impl core::convert::Into<alloc::string::String>, u16, routectl_core::parsed_error_body::UpstreamBody, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_with_retry_after(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>) -> Self
+pub fn routectl_core::error::Error::with_upstream_reason(self, core::option::Option<routectl_core::upstream_reason::UpstreamReason>) -> Self
 pub fn routectl_core::error::Error::with_upstream_request_id(self, core::option::Option<alloc::string::String>) -> Self
 impl core::convert::From<core::io::error::Error> for routectl_core::error::Error
 pub fn routectl_core::error::Error::from(core::io::error::Error) -> Self
@@ -4977,6 +5120,70 @@ impl<T> core::convert::From<T> for routectl_core::context_reduction::ReductionOu
 pub fn routectl_core::context_reduction::ReductionOutcome::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::context_reduction::ReductionOutcome
 impl<T> tracing::instrument::WithSubscriber for routectl_core::context_reduction::ReductionOutcome
+#[non_exhaustive] pub enum routectl_core::RefusalReason
+pub routectl_core::RefusalReason::BetaHeaderCap
+pub routectl_core::RefusalReason::CacheBreakpointCap
+pub routectl_core::RefusalReason::CacheTtlOrder
+pub routectl_core::RefusalReason::CloakRelocation
+pub routectl_core::RefusalReason::FieldType
+pub routectl_core::RefusalReason::ForwardedBearerMissing
+pub routectl_core::RefusalReason::GeminiSeed
+pub routectl_core::RefusalReason::PreviousResponseId
+pub routectl_core::RefusalReason::SchemaDepth
+pub routectl_core::RefusalReason::SchemaSize
+pub routectl_core::RefusalReason::StrictTranslation
+pub routectl_core::RefusalReason::ToolCallIdMissing
+pub routectl_core::RefusalReason::ToolPairing
+pub routectl_core::RefusalReason::TranslationAccounting
+pub routectl_core::RefusalReason::Unparseable
+pub routectl_core::RefusalReason::Unrepresentable
+impl routectl_core::refusal_reason::RefusalReason
+pub const routectl_core::refusal_reason::RefusalReason::ALL: [Self; 16]
+pub const fn routectl_core::refusal_reason::RefusalReason::as_str(self) -> &'static str
+pub const fn routectl_core::refusal_reason::RefusalReason::failure_class(self) -> routectl_core::failure_class::FailureClass
+pub fn routectl_core::refusal_reason::RefusalReason::from_token(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::clone(&self) -> routectl_core::refusal_reason::RefusalReason
+impl core::cmp::Eq for routectl_core::refusal_reason::RefusalReason
+impl core::cmp::PartialEq for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::eq(&self, &routectl_core::refusal_reason::RefusalReason) -> bool
+impl core::fmt::Debug for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::refusal_reason::RefusalReason
+impl core::marker::StructuralPartialEq for routectl_core::refusal_reason::RefusalReason
+impl core::marker::Freeze for routectl_core::refusal_reason::RefusalReason
+impl core::marker::Send for routectl_core::refusal_reason::RefusalReason
+impl core::marker::Sync for routectl_core::refusal_reason::RefusalReason
+impl core::marker::Unpin for routectl_core::refusal_reason::RefusalReason
+impl core::marker::UnsafeUnpin for routectl_core::refusal_reason::RefusalReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::refusal_reason::RefusalReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::refusal_reason::RefusalReason
+impl<T, U> core::convert::Into<U> for routectl_core::refusal_reason::RefusalReason where U: core::convert::From<T>
+pub fn routectl_core::refusal_reason::RefusalReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::refusal_reason::RefusalReason where U: core::convert::Into<T>
+pub type routectl_core::refusal_reason::RefusalReason::Error = core::convert::Infallible
+pub fn routectl_core::refusal_reason::RefusalReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::refusal_reason::RefusalReason where U: core::convert::TryFrom<T>
+pub type routectl_core::refusal_reason::RefusalReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::refusal_reason::RefusalReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::refusal_reason::RefusalReason where T: core::clone::Clone
+pub type routectl_core::refusal_reason::RefusalReason::Owned = T
+pub fn routectl_core::refusal_reason::RefusalReason::clone_into(&self, &mut T)
+pub fn routectl_core::refusal_reason::RefusalReason::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::refusal_reason::RefusalReason where T: 'static + ?core::marker::Sized
+pub fn routectl_core::refusal_reason::RefusalReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::refusal_reason::RefusalReason where T: ?core::marker::Sized
+pub fn routectl_core::refusal_reason::RefusalReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::refusal_reason::RefusalReason where T: ?core::marker::Sized
+pub fn routectl_core::refusal_reason::RefusalReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::refusal_reason::RefusalReason where T: core::clone::Clone
+pub unsafe fn routectl_core::refusal_reason::RefusalReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::refusal_reason::RefusalReason
+pub fn routectl_core::refusal_reason::RefusalReason::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::refusal_reason::RefusalReason
+impl<T> tracing::instrument::WithSubscriber for routectl_core::refusal_reason::RefusalReason
 pub enum routectl_core::ReplayScheme
 pub routectl_core::ReplayScheme::Codex
 pub routectl_core::ReplayScheme::Gray
@@ -5394,6 +5601,54 @@ impl<T> core::convert::From<T> for routectl_core::TranslationReason
 pub fn routectl_core::TranslationReason::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::TranslationReason
 impl<T> tracing::instrument::WithSubscriber for routectl_core::TranslationReason
+#[non_exhaustive] pub enum routectl_core::UpstreamReason
+pub routectl_core::UpstreamReason::CredentialExpired
+pub routectl_core::UpstreamReason::CredentialInvalid
+impl routectl_core::upstream_reason::UpstreamReason
+pub const fn routectl_core::upstream_reason::UpstreamReason::as_str(self) -> &'static str
+pub fn routectl_core::upstream_reason::UpstreamReason::from_token(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::clone(&self) -> routectl_core::upstream_reason::UpstreamReason
+impl core::cmp::Eq for routectl_core::upstream_reason::UpstreamReason
+impl core::cmp::PartialEq for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::eq(&self, &routectl_core::upstream_reason::UpstreamReason) -> bool
+impl core::fmt::Debug for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::StructuralPartialEq for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::Freeze for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::Send for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::Sync for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::Unpin for routectl_core::upstream_reason::UpstreamReason
+impl core::marker::UnsafeUnpin for routectl_core::upstream_reason::UpstreamReason
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::upstream_reason::UpstreamReason
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::upstream_reason::UpstreamReason
+impl<T, U> core::convert::Into<U> for routectl_core::upstream_reason::UpstreamReason where U: core::convert::From<T>
+pub fn routectl_core::upstream_reason::UpstreamReason::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::upstream_reason::UpstreamReason where U: core::convert::Into<T>
+pub type routectl_core::upstream_reason::UpstreamReason::Error = core::convert::Infallible
+pub fn routectl_core::upstream_reason::UpstreamReason::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::upstream_reason::UpstreamReason where U: core::convert::TryFrom<T>
+pub type routectl_core::upstream_reason::UpstreamReason::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::upstream_reason::UpstreamReason::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::upstream_reason::UpstreamReason where T: core::clone::Clone
+pub type routectl_core::upstream_reason::UpstreamReason::Owned = T
+pub fn routectl_core::upstream_reason::UpstreamReason::clone_into(&self, &mut T)
+pub fn routectl_core::upstream_reason::UpstreamReason::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::upstream_reason::UpstreamReason where T: 'static + ?core::marker::Sized
+pub fn routectl_core::upstream_reason::UpstreamReason::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::upstream_reason::UpstreamReason where T: ?core::marker::Sized
+pub fn routectl_core::upstream_reason::UpstreamReason::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::upstream_reason::UpstreamReason where T: ?core::marker::Sized
+pub fn routectl_core::upstream_reason::UpstreamReason::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::upstream_reason::UpstreamReason where T: core::clone::Clone
+pub unsafe fn routectl_core::upstream_reason::UpstreamReason::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::upstream_reason::UpstreamReason
+pub fn routectl_core::upstream_reason::UpstreamReason::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::upstream_reason::UpstreamReason
+impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_reason::UpstreamReason
 #[non_exhaustive] pub enum routectl_core::UsageInputSource
 pub routectl_core::UsageInputSource::ExplicitFinal
 pub routectl_core::UsageInputSource::InterimCarry
@@ -7298,6 +7553,7 @@ impl<T> tracing::instrument::Instrument for routectl_core::TranslationReport
 impl<T> tracing::instrument::WithSubscriber for routectl_core::TranslationReport
 pub struct routectl_core::UpstreamBody
 impl routectl_core::parsed_error_body::UpstreamBody
+pub fn routectl_core::parsed_error_body::UpstreamBody::error_envelope(&str) -> Self
 pub fn routectl_core::parsed_error_body::UpstreamBody::new(impl core::convert::Into<alloc::string::String>) -> Self
 pub const fn routectl_core::parsed_error_body::UpstreamBody::parsed(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
 pub fn routectl_core::parsed_error_body::UpstreamBody::text(&self) -> &str

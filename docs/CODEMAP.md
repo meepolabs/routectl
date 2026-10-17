@@ -32,8 +32,9 @@ license.
 ## routectl-core
 
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider
-  trait, log helpers, the canonical-key allowlist, and `UpstreamReason`;
-  declares the `provider_kind` and `upstream_reason` modules
+  trait, log helpers, the canonical-key allowlist, `UpstreamReason`, and
+  `RefusalReason`; declares the `provider_kind`, `upstream_reason` and
+  `refusal_reason` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `ReasoningDetail`, `Usage`, `RequestProvenance`, and
   the `RoutectlInternal` carrier (resolved per-model knobs plus the
@@ -129,6 +130,9 @@ license.
   kebab-case token source (`credential-expired` / `credential-invalid`) and
   `from_token` matches exactly, `None` for an unknown token. Additive only;
   an absent reason means unclassified
+- `src/refusal_reason.rs` -- `#[non_exhaustive] RefusalReason`: the closed
+  register of local-refusal reasons, with `as_str` / `from_token` tokens,
+  `ALL`, and the per-reason `failure_class`
 - `src/content_part.rs` -- typed `ContentPart` enum
   (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking
   (plus the `Other` catchall)) for `MessageContent::Parts`

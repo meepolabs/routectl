@@ -25,6 +25,7 @@ pub(crate) mod reasoning_dialect;
 pub mod reasoning_envelope;
 pub mod reasoning_format;
 pub mod reasoning_ingest;
+pub mod refusal_reason;
 pub(crate) mod reserved;
 pub mod safe_token;
 pub mod schema;
@@ -87,6 +88,7 @@ pub use reasoning_format::{
     is_replayable, is_responses_family, scheme_of,
 };
 pub use reasoning_ingest::normalize_reasoning_detail_payloads;
+pub use refusal_reason::RefusalReason;
 pub use reserved::is_canonical_request_key;
 pub use safe_token::{MAX_SAFE_TOKEN_LEN, is_safe_token};
 pub use schema::{
