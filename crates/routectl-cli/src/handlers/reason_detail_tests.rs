@@ -231,8 +231,9 @@ async fn the_reason_leaves_the_envelope_type_and_code_unchanged() {
         let error = client_error(sink, mantle_invalid()).await;
 
         assert_eq!(error["type"], wire_type, "{sink:?}");
-        if let Some(code) = wire_code {
-            assert_eq!(error["code"], code, "{sink:?}");
+        match wire_code {
+            Some(code) => assert_eq!(error["code"], code, "{sink:?}"),
+            None => assert_eq!(error.get("code"), None, "{sink:?}"),
         }
     }
 }
