@@ -474,6 +474,10 @@ async fn a_success_settles_the_breaker_and_the_park_in_one_critical_section() {
             fired.load(Ordering::SeqCst),
             "{surface:?}: the success must settle through the seat"
         );
+        assert!(
+            waited_for_the_settle.load(Ordering::SeqCst),
+            "{surface:?}: the rejection must wait out the settlement's lock"
+        );
         assert_eq!(
             park_reason(&router, "m-a"),
             INVALID,
