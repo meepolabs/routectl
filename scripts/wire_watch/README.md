@@ -127,7 +127,7 @@ the three for those cells only and, per cell:
   (`capture_driver.sh` strips every one).
 
 The daemon resolves the profile when it builds its providers, so a profile
-it cannot resolve (an expired or malformed credential file) keeps it from
+it cannot resolve (an unreadable or malformed credential file) keeps it from
 becoming healthy: the cell exits 3, never a silent fallback. A key-expiry
 check (`--key-dir`, below) has nothing to read on these lanes; an expired
 credential reaches the report as the upstream's own refusal.
