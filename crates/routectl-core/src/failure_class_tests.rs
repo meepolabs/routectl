@@ -427,21 +427,33 @@ fn credential_reason_leaves_an_auth_status_classified_auth() {
 }
 
 #[test]
-fn auth_error_variant_is_auth_matched_by_variant() {
-    // Arrange: a local credential/signing failure with no HTTP status.
-    let err = Error::Auth("bad token".into());
+fn local_credential_variants_are_auth_matched_by_variant() {
+    // Arrange: local credential failures with no HTTP status.
+    let rows = [
+        ("auth", Error::Auth("bad token".into())),
+        (
+            "credential",
+            Error::Credential {
+                detail: "refresh token expired".into(),
+                reason: crate::UpstreamReason::CredentialInvalid,
+                parked_until_ms: None,
+            },
+        ),
+    ];
+    for (name, err) in &rows {
+        // Act
+        let got = classify(err, None);
 
-    // Act
-    let got = classify(&err, None);
-
-    // Assert: the variant alone decides Auth, without an upstream status.
-    assert_eq!(
-        got,
-        ClassifiedFailure {
-            class: FailureClass::Auth,
-            matched_by: MatchedBy::Variant,
-        }
-    );
+        // Assert: the variant alone decides Auth, without an upstream status.
+        assert_eq!(
+            got,
+            ClassifiedFailure {
+                class: FailureClass::Auth,
+                matched_by: MatchedBy::Variant,
+            },
+            "{name}"
+        );
+    }
 }
 
 // --- Totality + Timeout is never produced ---

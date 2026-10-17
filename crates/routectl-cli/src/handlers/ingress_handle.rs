@@ -1201,6 +1201,11 @@ fn sanitize_stream_error_for_client(e: &Error) -> String {
         Error::LocalRefusal { detail, .. } => {
             local_refusal_message(detail, "upstream stream error")
         }
+        Error::Credential {
+            reason,
+            parked_until_ms,
+            ..
+        } => super::credential_message::credential_error_message_now(*reason, *parked_until_ms),
         _ => "upstream stream error".to_string(),
     }
 }
@@ -1289,6 +1294,23 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         Error::Auth(_) => {
             tracing::error!(error = %e, "auth error suppressed in HTTP response");
             "auth error: server-side credential resolution failed".to_string()
+        }
+        // A local decision, not the client's own key: the fixed message carries
+        // only the reason token and the remaining park. Logged at WARN, not
+        // ERROR: while every seat is parked, each request lands here, and the
+        // park itself already logged its one WARN per seat.
+        Error::Credential {
+            reason,
+            parked_until_ms,
+            ..
+        } => {
+            tracing::warn!(
+                error = %e,
+                reason = reason.as_str(),
+                parked_until_ms = ?parked_until_ms,
+                "credential error suppressed in HTTP response"
+            );
+            super::credential_message::credential_error_message_now(*reason, *parked_until_ms)
         }
         Error::Config(_) => {
             tracing::error!(error = %e, "config error suppressed in HTTP response");
@@ -1548,7 +1570,9 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
         Error::NormalizeResponse(_, _) => (StatusCode::BAD_GATEWAY, "bad_gateway"),
         Error::Validation(_) => (StatusCode::BAD_REQUEST, "validation_error"),
         Error::LocalRefusal { .. } => (StatusCode::BAD_REQUEST, "bad_request"),
-        Error::Auth(_) => (StatusCode::SERVICE_UNAVAILABLE, "auth_error"),
+        Error::Auth(_) | Error::Credential { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, "auth_error")
+        }
         Error::Streaming(_) => (StatusCode::BAD_GATEWAY, "streaming_error"),
         Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
         Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
@@ -1773,6 +1797,10 @@ mod opening_accuracy_boundary_tests;
 #[cfg(test)]
 #[path = "local_refusal_envelope_tests.rs"]
 mod local_refusal_envelope_tests;
+
+#[cfg(test)]
+#[path = "credential_error_envelope_tests.rs"]
+mod credential_error_envelope_tests;
 
 #[cfg(test)]
 #[path = "ingress_refusal_count_tests.rs"]

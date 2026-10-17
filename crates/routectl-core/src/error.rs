@@ -92,6 +92,23 @@ pub enum Error {
     #[error("auth: {0}")]
     Auth(String),
 
+    /// A credential is known to be unusable with exact evidence of why, and
+    /// no upstream error is left to carry the reason: a terminal OAuth
+    /// refresh, or every reachable seat already parked on a credential
+    /// rejection. Displays like [`Error::Auth`] and classifies the same; read
+    /// the reason through [`Error::upstream_reason`].
+    #[error("auth: {detail}")]
+    Credential {
+        /// Operator detail; never surfaced to a client.
+        detail: String,
+        /// Why the credential is unusable.
+        reason: UpstreamReason,
+        /// Epoch-ms deadline of the earliest seat park when every reachable
+        /// seat was parked; `None` for a terminal refresh failure, which
+        /// parks nothing until the seat's next attempt settles it.
+        parked_until_ms: Option<u64>,
+    },
+
     /// A configuration value failed validation: malformed TOML, a
     /// missing required field, an invalid alias/model/provider entry,
     /// or a startup policy check (e.g. refusing a public bind without
@@ -218,6 +235,16 @@ impl fmt::Debug for Error {
             Self::UnknownProvider(s) => f.debug_tuple("UnknownProvider").field(s).finish(),
             Self::UnknownAlias(s) => f.debug_tuple("UnknownAlias").field(s).finish(),
             Self::Auth(s) => f.debug_tuple("Auth").field(s).finish(),
+            Self::Credential {
+                detail,
+                reason,
+                parked_until_ms,
+            } => f
+                .debug_struct("Credential")
+                .field("detail", detail)
+                .field("reason", &reason.as_str())
+                .field("parked_until_ms", parked_until_ms)
+                .finish(),
             Self::Config(s) => f.debug_tuple("Config").field(s).finish(),
             Self::Internal(s) => f.debug_tuple("Internal").field(s).finish(),
             Self::Validation(s) => f.debug_tuple("Validation").field(s).finish(),
@@ -466,11 +493,14 @@ impl Error {
         self
     }
 
-    /// The typed reason attached by [`Error::with_upstream_reason`]. `None`
-    /// on any other variant, or when the rejection is unclassified.
+    /// The typed reason a credential was rejected for: the one attached by
+    /// [`Error::with_upstream_reason`], or the one an [`Error::Credential`]
+    /// carries. `None` on any other variant, or when the rejection is
+    /// unclassified.
     pub fn upstream_reason(&self) -> Option<UpstreamReason> {
         match self {
             Self::Upstream { extras, .. } => extras.reason(),
+            Self::Credential { reason, .. } => Some(*reason),
             _ => None,
         }
     }

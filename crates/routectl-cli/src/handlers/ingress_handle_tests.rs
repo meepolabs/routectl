@@ -145,6 +145,8 @@ struct PersistedRow {
     /// `would_trim_tokens`: `None` whenever the trim advisory declined,
     /// which a below-trigger request always does.
     would_trim_tokens: Option<i64>,
+    /// `error_class` column: the error-variant family token, `None` on success.
+    error_class: Option<String>,
 }
 
 fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
@@ -153,7 +155,7 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
         .prepare(
             "SELECT request_id, outcome, ttfb_ms, input_tokens, output_tokens, \
              attempt_count, fallback_count, provider, alias, http_status, extra, \
-             calib_estimated_tokens, would_trim_tokens FROM requests \
+             calib_estimated_tokens, would_trim_tokens, error_class FROM requests \
              ORDER BY rowid",
         )
         .expect("prepare select");
@@ -182,6 +184,7 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
             stream_stage,
             calib_estimated_tokens: r.get(11)?,
             would_trim_tokens: r.get(12)?,
+            error_class: r.get(13)?,
         })
     })
     .expect("query rows")
@@ -2605,6 +2608,86 @@ async fn dispatch_err_gate_blocked_maps_to_gate_blocked() {
     assert_eq!(
         outcome_for_dispatch_err(&dispatched.meta),
         Outcome::GateBlocked
+    );
+}
+
+/// A request whose every seat is credential-parked is refused before any
+/// upstream contact and still writes exactly one ledger row: gate_blocked,
+/// error class `auth`, no attempt charged.
+#[tokio::test]
+async fn an_all_parked_request_is_never_dialed_and_still_writes_one_row() {
+    use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    // Arrange: a two-seat chain, both seats parked on a credential rejection.
+    let closing = ClosingUpstream::start().await;
+    let mut providers = BTreeMap::new();
+    let mut models = BTreeMap::new();
+    for (provider, model) in [("p1", "m1"), ("p2", "m2")] {
+        providers.insert(
+            provider.to_string(),
+            ProviderEntry::openai_compat(closing.base(), crate::test_secret::file_ref("k")),
+        );
+        models.insert(model.to_string(), ModelEntry::new(provider, "gpt-4o"));
+    }
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "a".to_string(),
+        AliasValue::Chain(vec!["m1".to_string(), "m2".to_string()]),
+    );
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        retry,
+        ..Default::default()
+    });
+    let router = build_test_router(config).await;
+    let until = std::time::Instant::now() + std::time::Duration::from_hours(1);
+    for seat in ["m1", "m2"] {
+        assert!(router.park_credential_for_tests(
+            seat,
+            routectl_core::UpstreamReason::CredentialExpired,
+            until
+        ));
+    }
+
+    // Act
+    let rig = CaptureRig::new();
+    let req = sample_request("a", false);
+    let mut capture = rig.capture("openai", &req, "req-all-parked");
+    let dispatched = router.complete_with_options(req, Default::default()).await;
+    capture.observe_meta(&dispatched.meta, 0, 0);
+    let err = dispatched.result.expect_err("every seat is parked");
+    capture.observe_error(&err);
+    capture.finalize(outcome_for_dispatch_err(&dispatched.meta));
+    drop(capture);
+    let rows = rig.flush_and_read().await;
+
+    // Assert
+    assert_eq!(closing.accepted(), 0, "no seat was dialed");
+    assert!(
+        matches!(
+            err,
+            Error::Credential {
+                parked_until_ms: Some(_),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(rows.len(), 1, "exactly one row");
+    let row = &rows[0];
+    assert_eq!(row.request_id, "req-all-parked");
+    assert_eq!(row.outcome, "gate_blocked");
+    assert_eq!(row.attempt_count, 0);
+    assert_eq!(row.error_class.as_deref(), Some("auth"));
+    assert_eq!(
+        row.http_status, None,
+        "a local refusal has no upstream status"
     );
 }
 

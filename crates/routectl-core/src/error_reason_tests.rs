@@ -90,3 +90,44 @@ fn upstream_debug_renders_the_reason_token_only_when_carried() {
         assert!(!rendered.contains(reason.as_str()), "{rendered}");
     }
 }
+
+fn credential(reason: UpstreamReason, parked_until_ms: Option<u64>) -> Error {
+    Error::Credential {
+        detail: "oauth refresh failed for p: refresh token expired".to_string(),
+        reason,
+        parked_until_ms,
+    }
+}
+
+#[test]
+fn a_credential_error_exposes_its_reason_through_the_one_accessor() {
+    for reason in REASONS {
+        for parked_until_ms in [None, Some(1_700_000_000_000)] {
+            let err = credential(reason, parked_until_ms);
+
+            assert_eq!(err.upstream_reason(), Some(reason), "{parked_until_ms:?}");
+        }
+    }
+}
+
+#[test]
+fn a_credential_error_displays_like_an_auth_error() {
+    let err = credential(UpstreamReason::CredentialInvalid, None);
+    let auth = Error::Auth("oauth refresh failed for p: refresh token expired".to_string());
+
+    assert_eq!(err.to_string(), auth.to_string());
+}
+
+#[test]
+fn a_credential_error_debug_renders_the_reason_token_and_deadline() {
+    let err = credential(UpstreamReason::CredentialExpired, Some(42));
+
+    let rendered = format!("{err:?}");
+
+    assert!(rendered.starts_with("Credential {"), "{rendered}");
+    assert!(
+        rendered.contains("reason: \"credential-expired\""),
+        "{rendered}"
+    );
+    assert!(rendered.contains("parked_until_ms: Some(42)"), "{rendered}");
+}

@@ -38,7 +38,7 @@ use super::capability_observe::{UntranslatedCapabilities, install_translation_re
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
-use super::credential_park::log_gate_refusal;
+use super::credential_park::{log_gate_refusal, merge_gate_refusal};
 use super::edit_declare::{
     declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
 };
@@ -581,9 +581,8 @@ impl Router {
                         // chain entry must not overwrite an earlier entry's
                         // genuine upstream failure, or the client sees the
                         // synthetic error instead of the real 503/timeout.
-                        if last_err.is_none() {
-                            last_err = Some(gate_err);
-                        }
+                        // Between two parked seats the earlier deadline wins.
+                        merge_gate_refusal(&mut last_err, gate_err);
                         if opts.disable_fallbacks {
                             break 'chain;
                         }
@@ -1396,9 +1395,8 @@ impl Router {
                     // chain entry must not overwrite an earlier entry's
                     // genuine upstream failure, or the client sees the
                     // synthetic error instead of the real 503/timeout.
-                    if last_err.is_none() {
-                        last_err = Some(gate_err);
-                    }
+                    // Between two parked seats the earlier deadline wins.
+                    merge_gate_refusal(&mut last_err, gate_err);
                     if opts.disable_fallbacks {
                         break 'chain;
                     }

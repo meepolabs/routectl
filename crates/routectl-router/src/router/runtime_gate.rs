@@ -174,9 +174,9 @@ impl Router {
                 "circuit_breaker",
                 Error::upstream(provider_name_for_err, 0, "circuit breaker open"),
             )),
-            GateDecision::CredentialParked { .. } => Some((
+            GateDecision::CredentialParked { reason, until } => Some((
                 super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
-                Error::upstream(provider_name_for_err, 0, "credential parked"),
+                super::credential_park::parked_seat_error(reason, until, now),
             )),
         };
         (refusal, guard)

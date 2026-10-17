@@ -52,6 +52,9 @@ pub(super) enum RefreshOutcome {
     /// Simulate a transient upstream failure (network / 5xx) that
     /// the cooldown classifier accepts. Drives the cooldown tests.
     Transient,
+    /// A token endpoint that answered with this HTTP status, shaped the way
+    /// the provider flows format it (`"{status} {url}"`).
+    TokenEndpoint(u16),
 }
 
 /// Tracks simultaneous `refresh_token` invocations so a test can
@@ -228,6 +231,9 @@ impl OAuthFlow for CountingFlow {
             RefreshOutcome::Transient => {
                 Err(OAuthError::Network("simulated upstream outage".into()))
             }
+            RefreshOutcome::TokenEndpoint(status) => Err(OAuthError::TokenEndpoint(format!(
+                "{status} https://idp.example/token"
+            ))),
         }
     }
 }

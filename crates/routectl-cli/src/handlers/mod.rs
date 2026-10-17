@@ -1,6 +1,7 @@
 pub mod capability_ack_drain;
 pub mod chat_completions;
 pub mod control;
+mod credential_message;
 pub mod health;
 pub mod ingress_handle;
 mod ingress_wire;

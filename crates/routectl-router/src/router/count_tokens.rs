@@ -39,7 +39,7 @@ use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
 use super::capability_learn::LearnDedupeKey;
 use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
-use super::credential_park::log_gate_refusal;
+use super::credential_park::{log_gate_refusal, merge_gate_refusal};
 use super::dispatch::{
     REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap, class_debits,
     emit_replay_degradation, forwarded_terminal_status, is_capability_error,
@@ -94,8 +94,10 @@ pub(super) enum CountSeatOutcome {
     Count(TokenCount),
     /// A definitive result for this request -- return the error verbatim.
     /// Covers a settled health error (breaker already debited/parked), a
-    /// non-fallbackable 4xx, a gate block, or an auth-refresh failure.
+    /// non-fallbackable 4xx, a breaker/RPM gate block, or an auth-refresh failure.
     Terminal(Error),
+    /// The seat's credential is parked; it was skipped without a dial.
+    Parked(Error),
     /// The seat was admitted as capable but its upstream cannot count (local
     /// `NotImplemented` or a wire 501). The probe slot was released
     /// without a breaker debit; advance to the next capable seat.
@@ -293,8 +295,7 @@ impl Router {
     }
 
     /// The per-seat walk itself: `Some(result)` when a seat settled the
-    /// request (a count or a terminal error), `None` when the walk exhausted
-    /// without one and the caller must build the terminal 501.
+    /// request or was skipped as parked, else `None` (the caller's 501).
     ///
     /// Split out of [`Router::count_tokens`] so the aggregated degradation
     /// WARN fires on every exit of the walk rather than only the exhausted
@@ -308,6 +309,7 @@ impl Router {
         mode: FieldSettlementMode,
         meta: &mut DispatchMeta,
     ) -> Option<Result<TokenCount>> {
+        let mut parked: Option<Error> = None;
         for candidate in chain {
             if !seat_can_count_tokens(candidate.provider_kind, &candidate.upstream) {
                 tracing::debug!(
@@ -327,6 +329,7 @@ impl Router {
             {
                 CountSeatOutcome::Count(tc) => return Some(Ok(tc)),
                 CountSeatOutcome::Terminal(e) => return Some(Err(e)),
+                CountSeatOutcome::Parked(e) => merge_gate_refusal(&mut parked, e),
                 // Capability error: the seat was admitted as capable but its
                 // upstream cannot count. The slot was already released
                 // without a breaker debit; advance to the next capable
@@ -335,7 +338,7 @@ impl Router {
                 CountSeatOutcome::Capability => continue,
             }
         }
-        None
+        parked.map(Err)
     }
 
     /// Dispatch `count_tokens` to ONE already-selected capable seat and
@@ -468,7 +471,7 @@ impl Router {
                     &gate_err,
                     "count_tokens gate blocked",
                 );
-                return CountSeatOutcome::Terminal(gate_err);
+                return CountSeatOutcome::of_gate_refusal(gate_kind, gate_err);
             }
 
             // Lazy probe activation at the ADMITTED boundary, the same

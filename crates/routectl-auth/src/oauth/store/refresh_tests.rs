@@ -1,5 +1,6 @@
 use super::*;
 use crate::oauth::store::test_support::*;
+use routectl_core::UpstreamReason;
 
 #[tokio::test]
 async fn get_near_expiry_triggers_refresh_and_returns_new_token() {
@@ -1108,4 +1109,48 @@ async fn cooldown_observability_contract() {
         "recovery reports the accumulated suppressed count"
     );
     assert_eq!(recovered[0].field("consecutive_failures"), Some("2"));
+}
+
+#[tokio::test]
+async fn only_a_terminal_refresh_failure_carries_a_credential_reason() {
+    let rows = [
+        (
+            "refresh expired",
+            RefreshOutcome::RefreshExpired,
+            Some(UpstreamReason::CredentialInvalid),
+        ),
+        ("network", RefreshOutcome::Transient, None),
+        (
+            "token endpoint 429",
+            RefreshOutcome::TokenEndpoint(429),
+            None,
+        ),
+        (
+            "token endpoint 503",
+            RefreshOutcome::TokenEndpoint(503),
+            None,
+        ),
+    ];
+    for (name, outcome, expected) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let flow = Arc::new(CountingFlow::new(outcome));
+        let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
+
+        // Act
+        let err = store
+            .on_auth_failure(&anthropic_ref())
+            .await
+            .expect_err(name);
+
+        // Assert
+        assert_eq!(flow.call_count(), 1, "{name}: the refresh was attempted");
+        assert_eq!(err.upstream_reason(), expected, "{name}: {err:?}");
+        assert!(
+            err.to_string()
+                .contains("re-run `routectl login anthropic`"),
+            "{name}: the operator detail keeps its login hint: {err}"
+        );
+    }
 }

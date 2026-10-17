@@ -370,10 +370,7 @@ impl OAuthStore {
                 if is_transient_refresh_error(&e) {
                     self.record_transient_failure(provider, seat, &e);
                 }
-                return Err(Error::Auth(format!(
-                    "oauth refresh failed for {provider}: {e}; \
-                     re-run `routectl login {provider}`"
-                )));
+                return Err(refresh_failure_error(provider, &e));
             }
         };
 
@@ -501,6 +498,25 @@ fn is_transient_refresh_error(err: &OAuthError) -> bool {
             None => true,
         },
         _ => false,
+    }
+}
+
+/// The error a failed refresh surfaces. Only `RefreshExpired` (the identity
+/// provider refused the grant itself) is exact evidence the credential is
+/// dead, so only it carries a reason; every other failure stays a plain
+/// `Error::Auth`, which never parks the seat.
+fn refresh_failure_error(provider: &str, err: &OAuthError) -> Error {
+    let detail = format!(
+        "oauth refresh failed for {provider}: {err}; \
+         re-run `routectl login {provider}`"
+    );
+    match err {
+        OAuthError::RefreshExpired(_) => Error::Credential {
+            detail,
+            reason: routectl_core::UpstreamReason::CredentialInvalid,
+            parked_until_ms: None,
+        },
+        _ => Error::Auth(detail),
     }
 }
 

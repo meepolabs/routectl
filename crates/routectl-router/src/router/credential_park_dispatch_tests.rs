@@ -29,8 +29,9 @@ enum Step {
     Reject(u16, Option<UpstreamReason>),
 }
 
-/// The status and reason an auth refresh fails with.
-type RefreshErr = (u16, Option<UpstreamReason>);
+/// The reason an auth refresh fails with: `Some` is a terminal refresh
+/// (`Error::Credential`), `None` any other refresh failure (`Error::Auth`).
+type RefreshErr = Option<UpstreamReason>;
 
 #[derive(Clone, Copy, Debug)]
 enum Surface {
@@ -46,7 +47,7 @@ const SURFACES: [Surface; 3] = [Surface::Complete, Surface::Stream, Surface::Cou
 struct ScriptedProvider {
     id: String,
     script: Mutex<VecDeque<Step>>,
-    refresh_err: Option<(u16, Option<UpstreamReason>)>,
+    refresh_err: Option<RefreshErr>,
     calls: AtomicUsize,
     hold: Option<Arc<Hold>>,
 }
@@ -74,11 +75,7 @@ impl ScriptedProvider {
         Self::with_refresh(id, script, None)
     }
 
-    fn with_refresh(
-        id: &str,
-        script: &[Step],
-        refresh_err: Option<(u16, Option<UpstreamReason>)>,
-    ) -> Arc<Self> {
+    fn with_refresh(id: &str, script: &[Step], refresh_err: Option<RefreshErr>) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
             script: Mutex::new(script.iter().copied().collect()),
@@ -91,7 +88,7 @@ impl ScriptedProvider {
     fn held(
         id: &str,
         script: &[Step],
-        refresh_err: Option<(u16, Option<UpstreamReason>)>,
+        refresh_err: Option<RefreshErr>,
         hold: Arc<Hold>,
     ) -> Arc<Self> {
         let mut provider = Arc::into_inner(Self::with_refresh(id, script, refresh_err))
@@ -173,7 +170,12 @@ impl Provider for ScriptedProvider {
     }
     async fn on_auth_failure(&self) -> Result<()> {
         match self.refresh_err {
-            Some((status, reason)) => Err(rejection(&self.id, status, reason)),
+            Some(Some(reason)) => Err(Error::Credential {
+                detail: format!("oauth refresh failed for {}", self.id),
+                reason,
+                parked_until_ms: None,
+            }),
+            Some(None) => Err(Error::Auth(format!("oauth refresh failed for {}", self.id))),
             None => Ok(()),
         }
     }
@@ -187,13 +189,33 @@ fn chain_router(
     sibling: Arc<ScriptedProvider>,
     primary_forwarded: bool,
 ) -> Router {
+    chain_router_with_auth_fallback(primary, sibling, primary_forwarded, None)
+}
+
+/// [`chain_router`] with the operator's `auth` class fallback override.
+fn chain_router_with_auth_fallback(
+    primary: Arc<ScriptedProvider>,
+    sibling: Arc<ScriptedProvider>,
+    primary_forwarded: bool,
+    auth_fallback: Option<bool>,
+) -> Router {
+    let mut retry = RetryPolicy {
+        max_attempts: 1,
+        initial_backoff_ms: 0,
+        jitter_ms: 0,
+        ..RetryPolicy::default()
+    };
+    if let Some(fallback) = auth_fallback {
+        retry.classes.insert(
+            crate::class_policy::ConfigFailureClass::Auth,
+            crate::class_policy::ClassPolicy {
+                retry: None,
+                fallback: Some(fallback),
+            },
+        );
+    }
     let mut config = Config {
-        retry: RetryPolicy {
-            max_attempts: 1,
-            initial_backoff_ms: 0,
-            jitter_ms: 0,
-            ..RetryPolicy::default()
-        },
+        retry,
         ..Config::default()
     };
     let mut primary_entry = ProviderEntry::anthropic_api("literal:k");
@@ -332,7 +354,7 @@ async fn a_terminal_refresh_failure_with_a_reason_parks_the_seat() {
             let primary = ScriptedProvider::with_refresh(
                 "p-a",
                 &[Step::Reject(401, None)],
-                Some((400, refresh_reason)),
+                Some(refresh_reason),
             );
             let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
             let router = chain_router(primary, sibling, false);
@@ -348,22 +370,38 @@ async fn a_terminal_refresh_failure_with_a_reason_parks_the_seat() {
 
 #[tokio::test]
 async fn a_parked_seat_is_skipped_and_the_chain_falls_back() {
-    for surface in [Surface::Complete, Surface::Stream] {
-        // Arrange
-        let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
-        let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
-        let router = chain_router(primary.clone(), sibling.clone(), false);
-        let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
-        assert!(router.park_credential_for_tests("m-a", UpstreamReason::CredentialExpired, until));
+    let policies = [
+        ("default auth policy", None),
+        ("auth fallback disabled", Some(false)),
+    ];
+    for surface in SURFACES {
+        for (name, auth_fallback) in policies {
+            // Arrange
+            let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
+            let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+            let router = chain_router_with_auth_fallback(
+                primary.clone(),
+                sibling.clone(),
+                false,
+                auth_fallback,
+            );
+            let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
+            assert!(router.park_credential_for_tests(
+                "m-a",
+                UpstreamReason::CredentialExpired,
+                until
+            ));
 
-        // Act
-        let served = dispatch(&router, surface, request(None, false)).await;
+            // Act
+            let served = dispatch(&router, surface, request(None, false)).await;
 
-        // Assert
-        assert!(served, "{surface:?}: the sibling must serve");
-        assert_eq!(primary.calls.load(Ordering::SeqCst), 0, "{surface:?}");
-        assert_eq!(sibling.calls.load(Ordering::SeqCst), 1, "{surface:?}");
-        assert_eq!(park_reason(&router, "m-a"), EXPIRED, "{surface:?}");
+            // Assert
+            let label = format!("{surface:?} {name}");
+            assert!(served, "{label}: the sibling must serve");
+            assert_eq!(primary.calls.load(Ordering::SeqCst), 0, "{label}");
+            assert_eq!(sibling.calls.load(Ordering::SeqCst), 1, "{label}");
+            assert_eq!(park_reason(&router, "m-a"), EXPIRED, "{label}");
+        }
     }
 }
 
@@ -493,7 +531,7 @@ async fn a_rejection_admitted_before_a_reload_parks_only_when_no_reload_landed()
         (
             "terminal refresh failure",
             &[Step::Reject(401, None)],
-            Some((400, INVALID)),
+            Some(INVALID),
         ),
     ];
     for surface in SURFACES {
@@ -615,5 +653,209 @@ async fn requests_against_an_open_breaker_still_warn_per_request() {
             .filter(|(level, kind)| *level == tracing::Level::WARN && kind == "circuit_breaker")
             .count();
         assert_eq!(breaker_warns, REQUESTS, "{surface:?}");
+    }
+}
+
+fn epoch_ms_in(from_now: Duration) -> u64 {
+    let at = std::time::SystemTime::now() + from_now;
+    let ms = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    u64::try_from(ms).unwrap()
+}
+
+/// Dispatch one request on `surface` and return its error, if any.
+async fn dispatch_err(router: &Router, surface: Surface, req: ChatRequest) -> Option<Error> {
+    match surface {
+        Surface::Complete => router.complete(req).await.err(),
+        Surface::Stream => router.stream(req).await.err(),
+        Surface::CountTokens => router.count_tokens(req).await.err(),
+    }
+}
+
+#[tokio::test]
+async fn every_seat_parked_fails_fast_with_the_earliest_deadline_and_its_reason() {
+    const LATE: Duration = Duration::from_hours(1);
+    const EARLY: Duration = Duration::from_mins(30);
+    let rows = [
+        ("earliest first", (INVALID, EARLY), (EXPIRED, LATE), INVALID),
+        ("earliest last", (INVALID, LATE), (EXPIRED, EARLY), EXPIRED),
+    ];
+    for surface in SURFACES {
+        for (name, (a_reason, a_in), (b_reason, b_in), expected_reason) in rows {
+            // Arrange
+            let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
+            let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+            let router = chain_router(primary.clone(), sibling.clone(), false);
+            let now = Instant::now();
+            for (key, reason, park_for) in [("m-a", a_reason, a_in), ("m-b", b_reason, b_in)] {
+                assert!(router.park_credential_for_tests(key, reason.unwrap(), now + park_for));
+            }
+
+            // Act
+            let err = dispatch_err(&router, surface, request(None, false)).await;
+
+            // Assert
+            let label = format!("{surface:?} {name}");
+            assert_eq!(primary.calls.load(Ordering::SeqCst), 0, "{label}");
+            assert_eq!(sibling.calls.load(Ordering::SeqCst), 0, "{label}");
+            let Some(Error::Credential {
+                reason,
+                parked_until_ms: Some(until_ms),
+                ..
+            }) = err
+            else {
+                panic!("{label}: expected an all-parked credential error, got {err:?}");
+            };
+            assert_eq!(Some(reason), expected_reason, "{label}");
+            let expected_ms = epoch_ms_in(EARLY);
+            assert!(
+                until_ms.abs_diff(expected_ms) < 5_000,
+                "{label}: deadline {until_ms} is not the earliest park ({expected_ms})",
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_dialed_seat_error_outranks_a_parked_seat() {
+    let orders = [("parked first", "m-a"), ("parked last", "m-b")];
+    for surface in SURFACES {
+        for (name, parked_key) in orders {
+            // Arrange: one seat parked, the other answers a plain 401.
+            let primary = ScriptedProvider::new("p-a", &[Step::Reject(401, None)]);
+            let sibling = ScriptedProvider::new("p-b", &[Step::Reject(401, None)]);
+            let router = chain_router(primary, sibling, false);
+            let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
+            assert!(router.park_credential_for_tests(
+                parked_key,
+                UpstreamReason::CredentialExpired,
+                until
+            ));
+
+            // Act
+            let err = dispatch_err(&router, surface, request(None, false)).await;
+
+            // Assert
+            assert!(
+                matches!(err, Some(Error::Upstream { status: 401, .. })),
+                "{surface:?} {name}: the dialed seat's own error must surface, got {err:?}",
+            );
+        }
+    }
+}
+
+/// Alias `alias` -> `[pooled, m-b]`: `pooled` is a two-seat pool on its own
+/// provider pair, `m-b` a single seat on another provider.
+fn pool_then_sibling_router(
+    seats: [Arc<ScriptedProvider>; 2],
+    sibling: Arc<ScriptedProvider>,
+) -> Router {
+    use crate::config::PoolEntry;
+    use crate::seat_pool::SeatTarget;
+    let members = ["pool-a", "pool-b"];
+    let mut config = Config {
+        retry: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            jitter_ms: 0,
+            ..RetryPolicy::default()
+        },
+        ..Config::default()
+    };
+    for member in members {
+        config.providers.insert(
+            member.into(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
+    }
+    config
+        .providers
+        .insert("p-b".into(), ProviderEntry::anthropic_api("literal:k"));
+    config.pools.insert(
+        "the-pool".into(),
+        PoolEntry::new(members.iter().map(|m| (*m).to_string()).collect()),
+    );
+    config.aliases.insert(
+        "alias".into(),
+        AliasValue::Chain(vec!["pooled".into(), "m-b".into()]),
+    );
+    let seat_targets: Vec<SeatTarget> = members
+        .iter()
+        .zip(seats)
+        .map(|(member, provider)| SeatTarget {
+            provider_name: (*member).to_string(),
+            provider: provider as Arc<dyn Provider>,
+            auth_secret_ref: Some(routectl_auth::SecretRef::OAuth {
+                provider: (*member).to_string(),
+                label: None,
+            }),
+        })
+        .collect();
+    let default_provider = seat_targets[0].provider.clone();
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "pooled".into(),
+        Arc::new(
+            ResolvedModel::new("pooled", "the-pool", default_provider, "claude-a")
+                .with_seats(Arc::from(seat_targets)),
+        ),
+    );
+    models.insert(
+        "m-b".into(),
+        Arc::new(ResolvedModel::new(
+            "m-b",
+            "p-b",
+            sibling as Arc<dyn Provider>,
+            "claude-b",
+        )),
+    );
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(models);
+    router
+}
+
+#[tokio::test]
+async fn every_seat_of_one_provider_parked_still_falls_back_to_another_provider() {
+    for surface in SURFACES {
+        // Arrange
+        let seats = [
+            ScriptedProvider::new("pool-a", &[Step::Ok]),
+            ScriptedProvider::new("pool-b", &[Step::Ok]),
+        ];
+        let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+        let router = pool_then_sibling_router(seats.clone(), sibling.clone());
+        let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
+        let keys: Vec<String> = router
+            .dispatch_chain("alias", None)
+            .expect("chain resolves")
+            .into_iter()
+            .map(|t| t.state_key)
+            .filter(|key| key.starts_with("pooled#"))
+            .collect();
+        assert_eq!(keys.len(), 2, "both pool seats are in the chain: {keys:?}");
+        for key in &keys {
+            assert!(router.park_credential_for_tests(
+                key,
+                UpstreamReason::CredentialInvalid,
+                until
+            ));
+        }
+
+        // Act
+        let served = dispatch(&router, surface, request(None, false)).await;
+
+        // Assert
+        assert!(served, "{surface:?}: the other provider must serve");
+        for seat in &seats {
+            assert_eq!(
+                seat.calls.load(Ordering::SeqCst),
+                0,
+                "{surface:?} {}",
+                seat.id
+            );
+        }
+        assert_eq!(sibling.calls.load(Ordering::SeqCst), 1, "{surface:?}");
     }
 }

@@ -3,9 +3,9 @@
 //! the seat, and lifts everywhere on a reload. The park state and its gate
 //! behavior live in [`crate::runtime_state::ProviderState`].
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use routectl_core::{ChatRequest, Error, sanitize_for_log};
+use routectl_core::{ChatRequest, Error, UpstreamReason, sanitize_for_log};
 
 use super::runtime_gate::{ProbeSlotGuard, is_probe_request};
 use super::{DispatchTarget, Router};
@@ -36,6 +36,57 @@ fn run_within_success_settle_hook() {
     let hook = WITHIN_SUCCESS_SETTLE.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
+    }
+}
+
+/// The refusal a credential-parked seat answers with: the park's reason and
+/// its deadline as epoch ms, read against `now`, the admission's own instant.
+pub(super) fn parked_seat_error(reason: UpstreamReason, until: Instant, now: Instant) -> Error {
+    let deadline = SystemTime::now() + until.saturating_duration_since(now);
+    let parked_until_ms = deadline
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok());
+    Error::Credential {
+        detail: format!("seat credential parked: {}", reason.as_str()),
+        reason,
+        parked_until_ms,
+    }
+}
+
+/// Fold a gate refusal into the chain's running error. The first error stays
+/// unless both are parked-seat refusals and the new one lapses strictly
+/// sooner, so an all-parked chain reports its earliest deadline and no gate
+/// refusal ever replaces a dialed seat's real error.
+pub(super) fn merge_gate_refusal(last_err: &mut Option<Error>, refusal: Error) {
+    let replace = match (last_err.as_ref(), &refusal) {
+        (None, _) => true,
+        (
+            Some(Error::Credential {
+                parked_until_ms: Some(held),
+                ..
+            }),
+            Error::Credential {
+                parked_until_ms: Some(new),
+                ..
+            },
+        ) => new < held,
+        _ => false,
+    };
+    if replace {
+        *last_err = Some(refusal);
+    }
+}
+
+impl super::count_tokens::CountSeatOutcome {
+    /// A token-count seat's gate refusal: a parked seat is skipped like on the
+    /// message surfaces; a breaker or RPM refusal stays terminal.
+    pub(super) fn of_gate_refusal(gate_kind: &'static str, gate_err: Error) -> Self {
+        if gate_kind == CREDENTIAL_PARKED_GATE_KIND {
+            Self::Parked(gate_err)
+        } else {
+            Self::Terminal(gate_err)
+        }
     }
 }
 

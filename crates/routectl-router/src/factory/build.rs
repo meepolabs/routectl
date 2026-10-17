@@ -992,7 +992,9 @@ fn member_secret_ref(entry: &ProviderEntry) -> std::result::Result<SecretRef, Po
 /// base URL, an incoherent provider block).
 const fn omission_reason_for_build_error(e: &routectl_core::Error) -> PoolOmissionReason {
     match e {
-        routectl_core::Error::Auth(_) => PoolOmissionReason::CredentialUnreadable,
+        routectl_core::Error::Auth(_) | routectl_core::Error::Credential { .. } => {
+            PoolOmissionReason::CredentialUnreadable
+        }
         _ => PoolOmissionReason::ProviderInitFailed,
     }
 }

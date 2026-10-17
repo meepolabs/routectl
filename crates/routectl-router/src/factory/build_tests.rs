@@ -2769,3 +2769,38 @@ mod managed_credential_factory_tests {
         assert!(!err.to_string().contains("sentinel-host"), "{err}");
     }
 }
+
+#[cfg(test)]
+mod omission_reason_tests {
+    use super::*;
+    use crate::pool_build::PoolOmissionReason;
+    use routectl_core::{Error, UpstreamReason};
+
+    #[test]
+    fn a_credential_failure_omits_the_member_as_credential_unreadable() {
+        let rows = [
+            (
+                "auth",
+                Error::Auth("not logged in".into()),
+                PoolOmissionReason::CredentialUnreadable,
+            ),
+            (
+                "credential",
+                Error::Credential {
+                    detail: "refresh token expired".into(),
+                    reason: UpstreamReason::CredentialInvalid,
+                    parked_until_ms: None,
+                },
+                PoolOmissionReason::CredentialUnreadable,
+            ),
+            (
+                "config",
+                Error::Config("bad base url".into()),
+                PoolOmissionReason::ProviderInitFailed,
+            ),
+        ];
+        for (name, err, expected) in rows {
+            assert_eq!(omission_reason_for_build_error(&err), expected, "{name}");
+        }
+    }
+}

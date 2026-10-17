@@ -4081,7 +4081,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   breaker success and lifts the park in one critical section;
   `clear_all_credential_parks` (reload coordinator) lifts every park and
   advances every seat's generation; `log_gate_refusal` logs a park refusal at
-  DEBUG and every other gate kind at WARN
+  DEBUG and every other gate kind at WARN; `parked_seat_error` builds a parked
+  seat's refusal (`Error::Credential` with the epoch-ms deadline) and
+  `merge_gate_refusal` folds a gate refusal into the chain's running error,
+  keeping the first real error and, between parked seats, the earliest deadline;
+  `CountSeatOutcome::of_gate_refusal` skips a parked token-count seat and keeps
+  a breaker or RPM refusal terminal
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `admit_dispatch`/`admit_probe_dispatch` (admission returns the
   half-open ownership guard, which also carries the seat's credential
@@ -6359,6 +6364,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   a `ResponseCheck` and hand them to `compare_traced_stream` at drop;
   `CheckedBody`, `response_edits_for` and `abandon_unrendered` serve the
   complete path
+- `src/handlers/credential_message.rs` -- the fixed client message for a
+  local `Error::Credential`: the reason token and, when every seat is parked,
+  the remaining wait in seconds; never the provider id or OAuth detail
 - `src/handlers/pure_proxy_metrics.rs` -- forwarded-mode (pure-proxy) ingress
   admission-rejection counter + structured rejection log.
   `PureProxyRejectionReason` (closed 2-variant enum: `TokenMissing` /
