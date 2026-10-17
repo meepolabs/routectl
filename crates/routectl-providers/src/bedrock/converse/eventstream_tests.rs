@@ -587,6 +587,84 @@ fn model_timeout_exception_surfaces_as_upstream_408() {
     }
 }
 
+/// The same member named in `:event-type` (the protocol-violating framing)
+/// reaches the same 408 instead of being skipped as an unknown frame.
+#[test]
+fn event_type_model_timeout_exception_surfaces_as_upstream_408() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let res = handle_converse_frame(
+        "test",
+        make_frame("modelTimeoutException", r#"{"message":"too slow"}"#),
+        &mut state,
+    );
+
+    // Assert
+    match res {
+        Err(Error::Upstream { status, body, .. }) => {
+            assert_eq!(status, 408);
+            assert!(body.contains("too slow"), "body: {body}");
+        }
+        other => panic!("expected Upstream error, got {other:?}"),
+    }
+}
+
+/// Every exception member named in `:event-type` fails the stream with its
+/// documented status; one row per member, so a name dropped from the
+/// fallback arm reads as a skipped frame and fails its row.
+#[test]
+fn event_type_exception_members_map_to_documented_status() {
+    let cases = [
+        ("throttlingException", 429),
+        ("validationException", 400),
+        ("serviceUnavailableException", 503),
+        ("accessDeniedException", 403),
+        ("unauthorizedException", 401),
+        ("modelStreamErrorException", 424),
+        ("modelTimeoutException", 408),
+        ("internalServerException", 500),
+    ];
+    for (name, want) in cases {
+        let mut state = ConverseStreamState::default();
+
+        let res = handle_converse_frame("test", make_frame(name, r#"{"message":"m"}"#), &mut state);
+
+        match res {
+            Err(Error::Upstream { status, .. }) => assert_eq!(status, want, "{name}"),
+            other => panic!("{name}: expected Upstream error, got {other:?}"),
+        }
+    }
+}
+
+/// An unknown `:event-type` stays a skipped frame (forward compatibility),
+/// while an unknown protocol-shaped exception fails closed as 500.
+#[test]
+fn unknown_exception_name_skips_as_event_and_fails_closed_as_exception() {
+    let mut state = ConverseStreamState::default();
+
+    let as_event = handle_converse_frame(
+        "test",
+        make_frame("someFutureAwsException", "{}"),
+        &mut state,
+    );
+    let as_exception = handle_converse_frame(
+        "test",
+        make_exception_frame("someFutureAwsException", "{}"),
+        &mut state,
+    );
+
+    assert!(
+        matches!(as_event, Ok(ref v) if v.is_empty()),
+        "got {as_event:?}"
+    );
+    match as_exception {
+        Err(Error::Upstream { status, .. }) => assert_eq!(status, 500),
+        other => panic!("expected Upstream error, got {other:?}"),
+    }
+}
+
 /// A protocol-shaped `modelStreamErrorException` (the real wire framing)
 /// must reach the same 424, not just the `:event-type` fallback path.
 #[test]

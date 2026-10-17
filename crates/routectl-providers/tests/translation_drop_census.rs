@@ -164,6 +164,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "bedrock/converse/request_tests_parity.rs",
     "bedrock/converse/response_history_compat_tests.rs",
     "gemini/cloud_project_id_tests.rs",
+    "gemini/error_read_tests.rs",
     "gemini/parse_once_tests.rs",
     "gemini/redirect_tests.rs",
     "gemini/request_drop_counter_tests.rs",

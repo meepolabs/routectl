@@ -899,7 +899,7 @@ async fn unmatched_bedrock_validation_warns_and_counts_once() {
     // only the token-free safe fields, and nothing is learned.
     // The REAL native-lane shape: the namespaced wire form rides in the body
     // byte-exact, and the lift lands the stripped `ValidationException` on
-    // `upstream_type` -- exactly what `build_client_error` produces for a
+    // `upstream_type` -- exactly what the bedrock lane's error mapper produces for a
     // Bedrock 400. The drift predicate reads the lifted token, so this proves
     // the signal fires on production input, not a synthetic unnamespaced body.
     let body = r#"{"__type":"com.amazon.coral.validate#ValidationException","message":"The parameter response_schema is not supported for this model."}"#;

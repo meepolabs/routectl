@@ -10,34 +10,6 @@ use super::*;
 use routectl_core::{StaticToken, TokenSource};
 use tracing_test::traced_test;
 
-/// The upstream classifier (`error.type`) lifts from a body that parses
-/// -- including a cap-trip prefix whose envelope survived truncation --
-/// and yields `None` from an incomplete/unparseable prefix. This is the
-/// seam the cap-trip branch of `read_anthropic_error` relies on to attempt
-/// classification over the capped prefix.
-#[test]
-fn parse_anthropic_error_type_lifts_when_prefix_parses() {
-    let envelope = r#"{"type":"error","error":{"type":"overloaded_error","message":"x"}}"#;
-    let parsed = serde_json::from_str::<Value>(envelope).ok();
-    assert_eq!(
-        parse_anthropic_error_type(parsed.as_ref()).as_deref(),
-        Some("overloaded_error"),
-        "classifier must lift from a parseable envelope"
-    );
-
-    // An incomplete envelope (truncated mid-value) fails to parse.
-    let truncated = serde_json::from_str::<Value>(r#"{"type":"error","error":{"type":"overl"#).ok();
-    assert_eq!(
-        parse_anthropic_error_type(truncated.as_ref()),
-        None,
-        "an unparseable prefix yields no classifier"
-    );
-
-    // Parseable JSON with no `error.type` yields None.
-    let no_type = serde_json::from_str::<Value>(r#"{"ok":true}"#).ok();
-    assert_eq!(parse_anthropic_error_type(no_type.as_ref()), None);
-}
-
 /// Body fields routectl forwards to Anthropic's
 /// `/v1/messages/count_tokens` endpoint. This is the forwarding
 /// allowlist, a subset of the count_tokens schema (`messages`,
@@ -2163,7 +2135,7 @@ async fn read_anthropic_error_carries_raw_envelope_for_structured_400() {
                     blocks in the latest assistant message cannot be modified.\"}}";
     let resp = reqwest_response(400, raw);
 
-    let (msg, err) = read_anthropic_error("anthropic_oauth_prod", 400, resp).await;
+    let (msg, err) = read_anthropic_error("anthropic_oauth_prod", resp).await;
 
     // The returned `msg` stays the clean extracted message for logging.
     assert!(
@@ -2206,7 +2178,7 @@ async fn read_anthropic_error_sanitizes_non_json_body() {
         "<html><body>upstream-host gateway timeout</body></html>",
     );
 
-    let (_msg, err) = read_anthropic_error("anthropic_oauth_prod", 502, resp).await;
+    let (_msg, err) = read_anthropic_error("anthropic_oauth_prod", resp).await;
 
     match err {
         Error::Upstream { status, body, .. } => {
@@ -2233,7 +2205,7 @@ async fn read_anthropic_error_lifts_aws_signature_token_from_403() {
     let raw = r#"{"__type":"com.amazonaws.bedrock#SignatureDoesNotMatch","message":"The request signature we calculated does not match."}"#;
     let resp = reqwest_response(403, raw);
 
-    let (msg, err) = read_anthropic_error("mantle_prod", 403, resp).await;
+    let (msg, err) = read_anthropic_error("mantle_prod", resp).await;
 
     assert_eq!(
         msg, "bedrock access denied",
@@ -2273,7 +2245,7 @@ async fn read_anthropic_error_lifts_aws_throttling_code_from_429() {
     let raw = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
     let resp = reqwest_response(429, raw);
 
-    let (msg, err) = read_anthropic_error("mantle_prod", 429, resp).await;
+    let (msg, err) = read_anthropic_error("mantle_prod", resp).await;
 
     assert!(msg.contains("Too many requests"), "extracted msg: {msg:?}");
     match err {
@@ -2300,7 +2272,7 @@ async fn read_anthropic_error_prefers_anthropic_shape_over_aws() {
     let raw = r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"},"__type":"com.amazonaws.bedrock#ThrottlingException"}"#;
     let resp = reqwest_response(529, raw);
 
-    let (_msg, err) = read_anthropic_error("mantle_prod", 529, resp).await;
+    let (_msg, err) = read_anthropic_error("mantle_prod", resp).await;
 
     match err {
         Error::Upstream {
@@ -2331,7 +2303,7 @@ async fn read_anthropic_error_never_panics_on_malformed_bodies() {
     ];
     for (idx, body) in cases.into_iter().enumerate() {
         let resp = reqwest_response(400, body);
-        let (_msg, err) = read_anthropic_error("mantle_prod", 400, resp).await;
+        let (_msg, err) = read_anthropic_error("mantle_prod", resp).await;
         match err {
             Error::Upstream {
                 status,

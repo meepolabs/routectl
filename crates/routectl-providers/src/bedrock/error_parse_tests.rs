@@ -19,21 +19,12 @@ fn parses_during<T>(run: impl FnOnce() -> T) -> (T, usize) {
     })
 }
 
-/// Everything `read_error_body` and its caller do after the body bytes are
-/// read, from the text on.
+/// Everything the lane's error path does after the body bytes are read,
+/// from the text on.
 fn read(status: u16, text: String) -> Error {
-    let body = UpstreamBody::new(text);
-    let (upstream_type, upstream_code) =
-        classify_and_log_error_body("bedrock-invoke", "prov", status, &body, false, None, None);
-    build_client_error(
-        "prov",
-        status,
-        None,
-        body,
-        false,
-        upstream_type,
-        upstream_code,
-    )
+    let read =
+        UpstreamErrorRead::from_parts(status, &reqwest::header::HeaderMap::new(), text, false);
+    map_bedrock_upstream_error("bedrock-invoke", "prov", read)
 }
 
 fn validation_envelope(padding: usize) -> String {

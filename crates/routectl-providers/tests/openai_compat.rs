@@ -1036,7 +1036,10 @@ async fn complete_error_body_over_cap_preserves_status() {
 
     let cap_warns: Vec<_> = events
         .iter()
-        .filter(|e| e.level == tracing::Level::WARN && e.field("path").is_some())
+        .filter(|e| {
+            e.level == tracing::Level::WARN
+                && e.message == "upstream response body exceeded cap; truncated"
+        })
         .collect();
     assert_eq!(cap_warns.len(), 1, "exactly one cap-trip WARN per trip");
     let w = cap_warns[0];

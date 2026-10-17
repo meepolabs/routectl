@@ -288,13 +288,9 @@ pub fn handle_converse_frame(
         // that violates the protocol's `:message-type: exception` framing.
         // Status codes come from the shared frame-layer mapping so the two
         // Bedrock lanes classify identically.
-        "internalServerException"
-        | "modelStreamErrorException"
-        | "validationException"
-        | "throttlingException"
-        | "serviceUnavailableException"
-        | "accessDeniedException"
-        | "unauthorizedException" => Err(frame::exception_error(provider_id, &event_type, payload)),
+        name if crate::aws_error::aws_stream_exception_status(name).is_some() => {
+            Err(frame::exception_error(provider_id, name, payload))
+        }
         // Unknown frames -- log + skip per the same forward-compat
         // policy as invoke_stream.
         other => {

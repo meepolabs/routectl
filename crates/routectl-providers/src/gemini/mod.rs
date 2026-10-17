@@ -19,9 +19,11 @@ use serde_json::Value;
 use routectl_core::identity::antigravity::antigravity_user_agent;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, CloudProjectCache, Error, Provider, Result, StaticToken,
-    TokenSource, UpstreamBody, debug_upstream_error_body, sanitize_for_log, trace_outgoing_body,
+    TokenSource, debug_upstream_error_body, sanitize_for_log, trace_outgoing_body,
     trace_upstream_success_body, upstream_message_or_excerpt,
 };
+
+use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 
 pub(crate) mod auth;
 pub(crate) mod cloudcode;
@@ -413,36 +415,14 @@ impl GeminiProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))
     }
 
-    /// Read a `>= 400` error body under the shared response-body cap and map
-    /// it to the client-facing error, preserving the original upstream status
-    /// and reset hint. A truncated body is untrustworthy and is never echoed
-    /// to the client. The caller runs the upstream header trace BEFORE this
-    /// consumes `resp` where that path traces on the error branch.
-    async fn map_error_response(&self, resp: reqwest::Response, status: u16) -> Error {
-        let headers = resp.headers().clone();
-        let content_length = resp.content_length();
-        let (bytes, hit_cap) = match crate::http_client::read_body_capped(
-            resp,
-            crate::http_client::MAX_RESPONSE_BODY_BYTES,
-        )
-        .await
-        {
-            Ok(read) => read,
-            Err(e) => {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    error = %e,
-                    "failed to read upstream error body",
-                );
-                (Vec::new(), false)
-            }
-        };
-        if hit_cap {
-            crate::http_client::warn_body_cap(&self.cfg.id, status, content_length, "error_body");
-        }
-        let body_text = String::from_utf8_lossy(&bytes);
-        map_gemini_upstream_error(&self.cfg.id, status, &headers, &body_text, hit_cap)
+    /// Read a `>= 400` error body through the shared upstream-error read and
+    /// map it to the client-facing error, preserving the original upstream
+    /// status and reset hint. The caller runs the upstream header trace
+    /// BEFORE this consumes `resp` where that path traces on the error
+    /// branch.
+    async fn map_error_response(&self, resp: reqwest::Response) -> Error {
+        let read = UpstreamErrorRead::read(&self.cfg.id, resp).await;
+        map_gemini_upstream_error(&self.cfg.id, read)
     }
 
     async fn complete_api_key(&self, req: ChatRequest) -> Result<ChatResponse> {
@@ -477,7 +457,7 @@ impl GeminiProvider {
             ));
         }
         if status >= 400 {
-            return Err(self.map_error_response(resp, status).await);
+            return Err(self.map_error_response(resp).await);
         }
 
         let raw_body: Value = self.read_success_json(resp, status).await?;
@@ -530,7 +510,7 @@ impl GeminiProvider {
         }
         if status >= 400 {
             let err = cloudcode::annotate_host_rejection(
-                self.map_error_response(resp, status).await,
+                self.map_error_response(resp).await,
                 &cloudcode::host_label(&self.cfg.base_url),
             );
             self.handle_project_rejection(&err, &project).await;
@@ -582,7 +562,7 @@ impl GeminiProvider {
             ));
         }
         if status >= 400 {
-            return Err(self.map_error_response(resp, status).await);
+            return Err(self.map_error_response(resp).await);
         }
 
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
@@ -626,7 +606,7 @@ impl GeminiProvider {
         }
         if status >= 400 {
             let err = cloudcode::annotate_host_rejection(
-                self.map_error_response(resp, status).await,
+                self.map_error_response(resp).await,
                 &cloudcode::host_label(&self.cfg.base_url),
             );
             self.handle_project_rejection(&err, &project).await;
@@ -701,88 +681,45 @@ impl GeminiProvider {
     }
 }
 
-/// Best-effort lift of the Gemini error classifier from a 4xx/5xx body.
-/// The Gemini error envelope is `{"error":{"code":<int>,"message":...,
-/// "status":"<UPPER_SNAKE>"}}`. `error.status` (e.g. `RESOURCE_EXHAUSTED`,
-/// `INVALID_ARGUMENT`, `PERMISSION_DENIED`) is the string an SDK branches
-/// on, so it lifts to `upstream_type`; the numeric `error.code` lifts to
-/// `upstream_code` (stringified). Either is `None` when absent or the body
-/// is not JSON. The Gemini envelope names its classifier `status`, unlike
-/// the OpenAI `error.type`, hence the dedicated parser.
+/// Best-effort lift of the Gemini error classifier from a 4xx/5xx body
+/// (see [`crate::upstream_error::lift_nested_status_tokens`]); `(None, None)`
+/// when the body is not JSON.
 pub(super) fn parse_gemini_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
     match serde_json::from_str::<Value>(body_text) {
-        Ok(v) => classify_gemini_error_value(&v),
+        Ok(v) => crate::upstream_error::lift_nested_status_tokens(&v),
         Err(_) => (None, None),
     }
 }
 
-/// [`parse_gemini_error_classifier`] over an already-decoded body.
-pub(super) fn classify_gemini_error_value(v: &Value) -> (Option<String>, Option<String>) {
-    let upstream_type = v
-        .pointer("/error/status")
-        .and_then(|s| s.as_str())
-        .map(str::to_string);
-    let upstream_code = v.pointer("/error/code").and_then(|c| match c {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    });
-    (upstream_type, upstream_code)
-}
-
 /// Map a Gemini `>= 400` upstream response to the client-facing error.
 ///
-/// When `hit_cap` is set the body was truncated at the shared response-body
-/// cap and is untrustworthy: the client-facing message AND the
-/// upstream-failure WARN excerpt both collapse to the fixed cap-exceeded text
-/// (never echoing truncated bytes), while the classifier enum tokens
-/// (`error.status` / `error.code`) still lift when the prefix happens to
-/// parse. An intact body classifies and logs exactly as before.
-fn map_gemini_upstream_error(
-    provider_id: &str,
-    status: u16,
-    headers: &reqwest::header::HeaderMap,
-    body_text: &str,
-    hit_cap: bool,
-) -> Error {
-    let header_hint = if crate::retry_after::is_rate_limit_status(status) {
-        crate::retry_after::parse_retry_after(headers)
-    } else {
-        None
-    };
-    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
-    let body = UpstreamBody::new(body_text);
-    let (upstream_type, upstream_code) = body
-        .parsed()
-        .map_or((None, None), |p| classify_gemini_error_value(p.value()));
-    let msg = upstream_message_or_excerpt(body.text(), body.parsed());
-    let safe_excerpt = if hit_cap {
+/// When the body was truncated at the shared response-body cap it is
+/// untrustworthy: the client-facing message AND the upstream-failure WARN
+/// excerpt both collapse to the fixed cap-exceeded text (never echoing
+/// truncated bytes), while the classifier enum tokens (`error.status` /
+/// `error.code`) still lift when the prefix happens to parse.
+fn map_gemini_upstream_error(provider_id: &str, read: UpstreamErrorRead) -> Error {
+    let status = read.status();
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, read.text());
+    let tokens = read.parsed().map_or((None, None), |p| {
+        crate::upstream_error::lift_nested_status_tokens(p.value())
+    });
+    let msg = upstream_message_or_excerpt(read.text(), read.parsed());
+    let safe_excerpt = if read.hit_cap() {
         crate::http_client::body_cap_exceeded_message()
     } else {
         sanitize_for_log(&msg)
     };
     crate::upstream_log::warn_upstream_failure(provider_id, status, None, &safe_excerpt, "gemini");
-    let is_envelope = body
-        .parsed()
-        .is_some_and(routectl_core::ParsedErrorBody::is_error_envelope);
-    let carried = if hit_cap {
-        UpstreamBody::new(crate::http_client::body_cap_exceeded_message())
-    } else if is_envelope || msg == body.text() {
-        body
+    let carried = if read.hit_cap() {
+        CarriedBody::Replacement(crate::http_client::body_cap_exceeded_message())
+    } else if read.is_native_envelope() || msg == read.text() {
+        CarriedBody::Original
     } else {
-        UpstreamBody::new(msg)
+        CarriedBody::Replacement(msg)
     };
-    Error::upstream_with_body(
-        provider_id,
-        status,
-        carried,
-        header_hint,
-        upstream_type,
-        upstream_code,
-    )
-    .with_upstream_request_id(crate::upstream_request_id::parse_upstream_request_id(
-        headers,
-    ))
+    let retry_after = read.retry_after();
+    read.into_error_with_tokens(provider_id, carried, retry_after, tokens)
 }
 
 #[cfg(test)]
@@ -866,6 +803,10 @@ mod host_tests {
 #[cfg(test)]
 #[path = "parse_once_tests.rs"]
 mod parse_once_tests;
+
+#[cfg(test)]
+#[path = "error_read_tests.rs"]
+mod error_read_tests;
 
 #[cfg(test)]
 #[path = "redirect_tests.rs"]
@@ -1023,7 +964,10 @@ mod e2e_tests {
         let body =
             r#"{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED"}}"#;
 
-        let err = map_gemini_upstream_error("gemini:test", 429, &headers, body, false);
+        let err = map_gemini_upstream_error(
+            "gemini:test",
+            UpstreamErrorRead::from_parts(429, &headers, body, false),
+        );
 
         match err {
             Error::Upstream {
@@ -1059,10 +1003,7 @@ mod e2e_tests {
         let events = routectl_testkit::capture_events(|| {
             err = Some(map_gemini_upstream_error(
                 "gemini:test",
-                422,
-                &headers,
-                &body,
-                false,
+                UpstreamErrorRead::from_parts(422, &headers, &body, false),
             ));
         });
         let warn = events
@@ -1087,10 +1028,12 @@ mod e2e_tests {
         let events = routectl_testkit::capture_events(|| {
             let err = map_gemini_upstream_error(
                 "gemini:test",
-                429,
-                &reqwest::header::HeaderMap::new(),
-                prefix,
-                true,
+                UpstreamErrorRead::from_parts(
+                    429,
+                    &reqwest::header::HeaderMap::new(),
+                    prefix,
+                    true,
+                ),
             );
             match err {
                 Error::Upstream {

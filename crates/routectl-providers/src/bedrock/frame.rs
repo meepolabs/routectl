@@ -203,26 +203,9 @@ pub fn exception_error(provider_id: &str, exception_type: &str, payload: &[u8]) 
     // a multi-megabyte String that is then cloned along the retry/fallback
     // chain.
     let msg = truncate_on_char_boundary(raw, routectl_core::MAX_ERROR_BODY_BYTES);
-    // Statuses are AWS's own, per the ConverseStream response-element docs
-    // (API_runtime_ConverseStream): each in-stream exception member
-    // documents an HTTP Status Code. Preserving them keeps the router's
-    // failure classification (retry class, breaker debit) aligned with
-    // what AWS actually said went wrong -- collapsing everything to 500
-    // would turn a documented-retryable 424/408 into a generic server
-    // failure.
-    let status: u16 = match exception_type {
-        "throttlingException" => 429,
-        "validationException" => 400,
-        "serviceUnavailableException" => 503,
-        "accessDeniedException" => 403,
-        "unauthorizedException" => 401,
-        // "A streaming error occurred. Retry your request." -- 424.
-        "modelStreamErrorException" => 424,
-        // "Processing time exceeded the model timeout length." -- 408.
-        "modelTimeoutException" => 408,
-        "internalServerException" => 500,
-        _ => 500,
-    };
+    // An unrecognized exception still ends the stream, failing closed as a
+    // generic server fault.
+    let status = crate::aws_error::aws_stream_exception_status(exception_type).unwrap_or(500);
     if matches!(
         exception_type,
         "accessDeniedException" | "unauthorizedException"

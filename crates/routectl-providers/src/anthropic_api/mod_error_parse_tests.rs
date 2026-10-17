@@ -7,6 +7,7 @@
 
 use super::*;
 use routectl_core::MAX_ERROR_BODY_BYTES;
+use routectl_core::UpstreamBody;
 use routectl_core::test_utils::capped_parse_count;
 
 const ARN_SENTINEL: &str = "arn:aws:iam::999988887777:role/SentinelRole";
@@ -20,7 +21,13 @@ fn parses_during<T>(run: impl FnOnce() -> T) -> (T, usize) {
 }
 
 fn read(status: u16, body: String) -> (String, Error) {
-    anthropic_error_from_body("anthropic-parse-once", status, body, false, None)
+    let read = crate::upstream_error::UpstreamErrorRead::from_parts(
+        status,
+        &reqwest::header::HeaderMap::new(),
+        body,
+        false,
+    );
+    anthropic_error_from_read("anthropic-parse-once", read)
 }
 
 fn native_envelope(padding: usize) -> String {

@@ -21,9 +21,10 @@ use routectl_core::identity::anthropic::is_anthropic_api_host;
 use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, Result, TokenCount,
-    UpstreamBody, debug_upstream_error_body, sanitize_for_log, trace_outgoing_body,
-    trace_upstream_success_body,
+    debug_upstream_error_body, sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
 };
+
+use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 
 mod client;
 mod cloak;
@@ -299,7 +300,7 @@ impl Provider for AnthropicApiProvider {
         // grepping `body_excerpt=...` get a consistent shape across
         // providers.
         if status >= 400 {
-            let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
+            let (msg, err) = read_anthropic_error(&self.cfg.id, resp).await;
             // Extend the auth-only WARN to all 4xx/5xx so an operator
             // never has to guess WHY a request failed. Sanitize before
             // tracing: the upstream may return untrusted control bytes
@@ -355,7 +356,8 @@ impl Provider for AnthropicApiProvider {
             );
         }
         let body_bytes = crate::wire_declare::deposit_response(&req, body_bytes);
-        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
+        let raw_body: Value =
+            crate::upstream_error::map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         // Trace upstream success body pre-normalize.
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
         // Clone the raw body before normalize consumes it. Only pay the
@@ -513,7 +515,7 @@ impl Provider for AnthropicApiProvider {
             // `complete()` -- see comment there. Helper extracted at
             // `read_anthropic_error`. Sanitize the excerpt for the
             // same reason as `complete()`.
-            let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
+            let (msg, err) = read_anthropic_error(&self.cfg.id, resp).await;
             let safe_excerpt = sanitize_for_log(&msg);
             crate::upstream_log::warn_upstream_failure(
                 &self.cfg.id,
@@ -795,7 +797,7 @@ impl Provider for AnthropicApiProvider {
             // `complete()` -- a non-JSON 502/503 from a misconfigured
             // proxy must not collapse to an opaque serde error.
             // Helper extracted at `read_anthropic_error`.
-            let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
+            let (msg, err) = read_anthropic_error(&self.cfg.id, resp).await;
             // Sanitize before tracing: the upstream may return
             // untrusted control bytes (CRLF, control chars, very
             // long lines) and `body_excerpt = %msg` would otherwise
@@ -860,7 +862,8 @@ impl Provider for AnthropicApiProvider {
                 "count_tokens_success_body",
             );
         }
-        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
+        let raw_body: Value =
+            crate::upstream_error::map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
         let token_count: TokenCount = serde_json::from_value(raw_body).map_err(|e| {
             Error::normalize_response(&self.cfg.id, format!("count_tokens response parse: {e}"))
@@ -937,195 +940,78 @@ impl Provider for AnthropicApiProvider {
     }
 }
 
-/// Map a non-streaming success body `(bytes, hit_cap)` to the parsed JSON.
-///
-/// A cap trip on a 2xx means the upstream returned an unreadable success
-/// response -- an invalid upstream protocol result. It maps to a 502
-/// `Error::upstream`, which classifies as a ServerError (debits the
-/// breaker, retries/fallbacks) exactly like any other upstream protocol
-/// failure. Otherwise the buffered bytes are parsed once.
-fn map_success_body(provider_id: &str, status: u16, bytes: &[u8], hit_cap: bool) -> Result<Value> {
-    if hit_cap {
-        return Err(Error::upstream(
-            provider_id,
-            502,
-            crate::http_client::body_cap_exceeded_message(),
-        ));
-    }
-    serde_json::from_slice(bytes).map_err(|e| Error::upstream(provider_id, status, e.to_string()))
+/// Read a 4xx/5xx upstream response through the shared upstream-error read
+/// and build the routectl `Error::Upstream` from it. The single chokepoint
+/// for `complete()`, `stream()`, and `count_tokens()`: a non-JSON upstream
+/// response (HTML 502 from a misconfigured proxy, a CDN cleartext error
+/// page, plain-text 529) must not collapse to an opaque serde error.
+/// Returns both the client message (for the caller's `body_excerpt` log)
+/// and the constructed `Error::Upstream`.
+async fn read_anthropic_error(provider_id: &str, resp: reqwest::Response) -> (String, Error) {
+    let read = UpstreamErrorRead::read(provider_id, resp).await;
+    anthropic_error_from_read(provider_id, read)
 }
 
-/// Lift the Anthropic upstream classifier (`error.type`) from an
-/// already-parsed error body. Best-effort: `None` when the body was not
-/// JSON (a truncated/incomplete prefix, an HTML gateway page) or carries no
-/// `error.type`. Shared by the cap-trip and intact error paths so a
-/// truncated prefix that still parses keeps the classifier signal.
-fn parse_anthropic_error_type(parsed: Option<&Value>) -> Option<String> {
-    parsed
-        .and_then(|v| v.pointer("/error/type"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-}
-
-/// Read a 4xx/5xx upstream response body and build a routectl
-/// `Error::Upstream` from it. Encapsulates the
-/// "text-first-then-opportunistic-JSON" pattern shared by
-/// `complete()`, `stream()`, and `count_tokens()`: a non-JSON
-/// upstream response (HTML 502 from a misconfigured proxy, a CDN
-/// cleartext error page, plain-text 529) must not collapse to an
-/// opaque serde error. Returns both the parsed message (for the
-/// caller's `body_excerpt` log) and the constructed `Error::Upstream`.
-///
-/// The body is read under the shared [`crate::http_client::read_body_capped`]
-/// ceiling: a lying or hostile upstream error body is bounded like any
-/// other. On a cap trip a single WARN records the truncation and the
-/// client-facing message collapses to a fixed cap-exceeded string --
-/// the truncated prefix is never echoed or classified.
-async fn read_anthropic_error(
-    provider_id: &str,
-    status: u16,
-    resp: reqwest::Response,
-) -> (String, Error) {
-    // Capture the reset hint from response headers BEFORE the body read
-    // moves `resp`, gated on rate-limit statuses. This is the single
-    // chokepoint for complete/stream/count_tokens, so all three HTTP
-    // paths pick up the hint here.
-    let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-        crate::retry_after::parse_retry_after(resp.headers())
-    } else {
-        None
-    };
-    // Lift the upstream correlation id from the same pre-body-read headers
-    // (ungated: an id is useful for vendor-support correlation on any error
-    // status, not just rate limits). Captured before `resp` is moved below.
-    let upstream_request_id = crate::upstream_request_id::parse_upstream_request_id(resp.headers());
-    let content_length = resp.content_length();
-    let (bytes, hit_cap) = match crate::http_client::read_body_capped(
-        resp,
-        crate::http_client::MAX_RESPONSE_BODY_BYTES,
-    )
-    .await
-    {
-        Ok(read) => read,
-        Err(e) => {
-            // A transport failure while reading the error body is not a
-            // cap trip; surface it so the error path is not silently
-            // blind (the 2xx path turns the same failure into an Error).
-            tracing::warn!(
-                provider = %provider_id,
-                status,
-                error = %e,
-                "failed to read upstream error body",
-            );
-            (Vec::new(), false)
-        }
-    };
-    if hit_cap {
-        crate::http_client::warn_body_cap(provider_id, status, content_length, "error_body");
-    }
-    let body_text = String::from_utf8_lossy(&bytes).into_owned();
-    let (msg, err) =
-        anthropic_error_from_body(provider_id, status, body_text, hit_cap, retry_after);
-    (msg, err.with_upstream_request_id(upstream_request_id))
-}
-
-/// Build the `(message, Error::Upstream)` pair from an error body already
-/// read under the response cap. The body is parsed once, within
-/// [`routectl_core::MAX_ERROR_BODY_BYTES`]; the classifier, the DEBUG body,
-/// and the client message all read from that parse. Anthropic shape
-/// `{type:"error",error:{type,message}}`; errors carry no separate `code`,
-/// so only `upstream_type` is populated.
-fn anthropic_error_from_body(
-    provider_id: &str,
-    status: u16,
-    body_text: String,
-    hit_cap: bool,
-    retry_after: Option<std::time::Duration>,
-) -> (String, Error) {
-    let raw = UpstreamBody::new(body_text);
-    let parsed = raw.parsed();
-    let anthropic_type = parse_anthropic_error_type(parsed.map(ParsedErrorBody::value));
+/// Build the `(message, Error::Upstream)` pair from an error response
+/// already read. The classifier, the DEBUG body, and the client message all
+/// read the read's single parse. Anthropic shape
+/// `{type:"error",error:{type,message}}`; tokens come from the shared
+/// precedence rule ([`UpstreamErrorRead::tokens`]).
+fn anthropic_error_from_read(provider_id: &str, read: UpstreamErrorRead) -> (String, Error) {
+    let status = read.status();
     // A native Anthropic error body (`/error/type` present) carries no AWS
     // principal identifiers. A mantle (Bedrock) upstream returns a flat AWS
     // envelope whose 403 AccessDenied message names the caller principal
     // ARN, account id, and resource ARN. The AWS-lift path routes its
     // free-text through the shared Bedrock 403 scrub before any of it
     // reaches the DEBUG body, the WARN excerpt, or the client-facing Error.
-    let is_aws_lift = anthropic_type.is_none();
-    // Emit the (capped) upstream error body at debug level so triage doesn't
-    // have to reproduce. On the AWS-lift path a 403 body collapses to the
-    // IAM action only; a native Anthropic body logs in full. The caller's
-    // WARN excerpt is derived from the returned `msg`, which is scrubbed on
-    // the same path, so `routectl-warn.log` stays leak-free too.
+    let is_aws_lift = read
+        .parsed()
+        .and_then(ParsedErrorBody::error_type)
+        .is_none();
     let debug_body = if is_aws_lift {
-        crate::aws_error::sanitized_debug_body(status, raw.text())
+        crate::aws_error::sanitized_debug_body(status, read.text())
     } else {
-        raw.text().to_string()
+        read.text().to_string()
     };
     debug_upstream_error_body(PROVIDER_KIND, provider_id, status, &debug_body);
-    // Anthropic nests the classifier under `/error/type`; a mantle
-    // (Bedrock) upstream uses a flat AWS envelope instead. Prefer the
-    // Anthropic shape, then fall back to lifting AWS `__type` / `code` so
-    // SignatureDoesNotMatch / RequestTimeTooSkewed / ThrottlingException
-    // classify and log truthfully. These lifted TYPE/CODE tokens are
-    // bounded classifier inputs -- safe to keep verbatim; only the
-    // free-text message needs the scrub.
-    let (upstream_type, upstream_code) = match anthropic_type {
-        Some(ty) => (Some(ty), None),
-        None => crate::aws_error::lift_aws_error_tokens(parsed.map(ParsedErrorBody::value)),
-    };
-    if hit_cap {
+    let retry_after = read.retry_after();
+    if read.hit_cap() {
         // A body truncated at the cap is untrustworthy: never echo it to the
         // client. The client-facing message stays the fixed cap-exceeded
-        // string (upstream status and captured reset hint preserved). The
-        // read cap is far above the parse cap, so a truncated prefix carries
-        // no parse and lifts no classifier.
+        // string (upstream status and captured reset hint preserved).
         let msg = crate::http_client::body_cap_exceeded_message();
-        let err = Error::upstream_with_body(
+        let err = read.into_error(
             provider_id,
-            status,
-            UpstreamBody::new(msg.clone()),
+            CarriedBody::Replacement(msg.clone()),
             retry_after,
-            upstream_type,
-            upstream_code,
         );
         return (msg, err);
     }
     // The client-facing message prefers the Anthropic `/error/message`. On
-    // the AWS-lift path (no Anthropic shape) it runs through the shared
-    // Bedrock scrub instead of echoing the AWS top-level `message` verbatim:
-    // a 403 AccessDenied message names the principal ARN, account id, and
-    // resource ARN, while a non-403 body is sanitized and capped. The lifted
-    // TYPE/CODE classifier tokens above are unaffected -- only this free-text
-    // message is scrubbed.
-    let msg = match parsed.and_then(ParsedErrorBody::error_message) {
+    // the AWS-lift path it runs through the shared Bedrock scrub instead of
+    // echoing the AWS top-level `message` verbatim: a 403 AccessDenied
+    // message names the principal ARN, account id, and resource ARN, while
+    // a non-403 body is sanitized and capped.
+    let msg = match read.parsed().and_then(ParsedErrorBody::error_message) {
         Some(m) => m.to_string(),
-        None => crate::aws_error::classify_parsed_client_error_message(status, &raw),
+        None => crate::aws_error::classify_parsed_client_error_message(status, read.body()),
     };
-    // On the NATIVE Anthropic path the body is a structured `{error:...}`
-    // envelope (an `/error/type` implies one), carried RAW so the ingress
-    // can surface the upstream's own `error.message` to the client. A
-    // client (e.g. Claude Code) can then recognize and self-heal an
-    // actionable upstream 400 instead of hitting a status-only wall. The
-    // AWS-lift path NEVER carries the raw body -- its 403 envelope names
-    // principal identifiers -- so it carries the already-scrubbed message,
-    // with the parse of that message, never the raw body's parse. A
-    // non-envelope body (HTML page, plain-text gateway error, over-cap
-    // JSON) takes the same path, so the ingress falls back to a status-only
+    // On the NATIVE Anthropic path the structured `{error:...}` envelope is
+    // carried RAW so the ingress can surface the upstream's own
+    // `error.message` to the client, letting a client (e.g. Claude Code)
+    // self-heal an actionable upstream 400. The AWS-lift path NEVER carries
+    // the raw body (its 403 envelope names principal identifiers): it
+    // carries the scrubbed message, with the parse of that message. A
+    // non-envelope body (HTML page, plain-text gateway error, over-cap JSON)
+    // takes the same path, so the ingress falls back to a status-only
     // message, never a raw body dump.
-    let err_body = if is_aws_lift {
-        crate::aws_error::carried_body(raw, msg.clone())
+    let carried = if !is_aws_lift || msg == read.text() {
+        CarriedBody::Original
     } else {
-        raw
+        CarriedBody::Replacement(msg.clone())
     };
-    let err = Error::upstream_with_body(
-        provider_id,
-        status,
-        err_body,
-        retry_after,
-        upstream_type,
-        upstream_code,
-    );
+    let err = read.into_error(provider_id, carried, retry_after);
     (msg, err)
 }
 

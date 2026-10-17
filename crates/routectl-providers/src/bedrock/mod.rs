@@ -60,9 +60,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, Result, TokenCount,
-    UpstreamBody, sanitize_for_log,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, TokenCount, UpstreamBody,
+    sanitize_for_log,
 };
+
+use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 
 use crate::aws_error::{
     BedrockErrorClass, access_denied_message, classify_bedrock_error,
@@ -361,27 +363,7 @@ impl BedrockProvider {
             ));
         }
         if status >= 400 {
-            // Capture the reset hint from response headers BEFORE
-            // `read_error_body` moves `resp`, gated on rate-limit statuses.
-            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
-            let upstream_request_id =
-                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
-            let (prefix, hit_cap, upstream_type, upstream_code) =
-                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
-            return Err(build_client_error(
-                &self.cfg.id,
-                status,
-                retry_after,
-                prefix,
-                hit_cap,
-                upstream_type,
-                upstream_code,
-            )
-            .with_upstream_request_id(upstream_request_id));
+            return Err(self.map_error_response(resp).await);
         }
 
         // Dir 3: upstream response headers, read BEFORE the body read
@@ -405,7 +387,8 @@ impl BedrockProvider {
             );
         }
         let body_bytes = crate::wire_declare::deposit_response(req, body_bytes);
-        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
+        let raw_body: Value =
+            crate::upstream_error::map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         // Trace upstream success body pre-normalize. Distinct
         // provider_kind per shape so operators can grep
         // `provider_kind=bedrock-invoke` vs `bedrock-converse`.
@@ -469,27 +452,7 @@ impl BedrockProvider {
             ));
         }
         if status >= 400 {
-            // Capture the reset hint from response headers BEFORE
-            // `read_error_body` moves `resp`, gated on rate-limit statuses.
-            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
-            let upstream_request_id =
-                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
-            let (prefix, hit_cap, upstream_type, upstream_code) =
-                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
-            return Err(build_client_error(
-                &self.cfg.id,
-                status,
-                retry_after,
-                prefix,
-                hit_cap,
-                upstream_type,
-                upstream_code,
-            )
-            .with_upstream_request_id(upstream_request_id));
+            return Err(self.map_error_response(resp).await);
         }
 
         // Dir 3: upstream response headers, read BEFORE `resp` is moved
@@ -562,26 +525,7 @@ impl BedrockProvider {
             ));
         }
         if status >= 400 {
-            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
-            let upstream_request_id =
-                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
-            let (prefix, hit_cap, upstream_type, upstream_code) =
-                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
-            let client_error = build_client_error(
-                &self.cfg.id,
-                status,
-                retry_after,
-                prefix,
-                hit_cap,
-                upstream_type,
-                upstream_code,
-            )
-            .with_upstream_request_id(upstream_request_id);
-            return Err(client_error);
+            return Err(self.map_error_response(resp).await);
         }
 
         crate::header_trace::upstream(
@@ -602,13 +546,23 @@ impl BedrockProvider {
                 "count_tokens_success_body",
             );
         }
-        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
+        let raw_body: Value =
+            crate::upstream_error::map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         routectl_core::trace_upstream_success_body(
             self.cfg.api_shape.provider_kind_str(),
             &self.cfg.id,
             &raw_body,
         );
         count_tokens::parse_token_count(&self.cfg.id, &raw_body)
+    }
+
+    /// Read a `>= 400` response through the shared upstream-error read and
+    /// map it to the client-facing error. One chokepoint for complete,
+    /// stream, and count_tokens so the three paths log, classify, and lift
+    /// identically.
+    async fn map_error_response(&self, resp: reqwest::Response) -> Error {
+        let read = UpstreamErrorRead::read(&self.cfg.id, resp).await;
+        map_bedrock_upstream_error(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, read)
     }
 
     /// The InvokeModel or Converse URL for this lane's shape and model.
@@ -836,116 +790,51 @@ fn probe_outcome_for_resolve_error(err: &Error) -> routectl_core::ProbeOutcome {
     }
 }
 
-/// Read a Bedrock upstream error body under the shared response-body cap,
-/// log it, and return the `(capped-prefix, hit_cap, upstream_type,
-/// upstream_code)` tuple the client-facing `Error` is built from. Used by
-/// both `complete()` and `stream()` so the two paths log, classify, and lift
-/// identically.
+/// Map a Bedrock `>= 400` response, already read, to the client-facing
+/// `Error::Upstream`, emitting the lane's WARN and DEBUG lines.
 ///
-/// The flat AWS envelope carries no first-party `error.type` / `error.code`,
-/// so the body is parsed once here ([`UpstreamBody::new`], within
-/// [`routectl_core::MAX_ERROR_BODY_BYTES`]) and the bounded classifier
-/// tokens are lifted via [`lift_error_tokens`]. The returned prefix carries
-/// that parse into [`build_client_error`]. When the body carries no `__type` (the
-/// native lane's minimal `{"message":...}` shape), the discriminator is
-/// lifted from the `x-amzn-errortype` response header instead, read before
-/// the body consumes `resp`. Those TYPE/CODE tokens are safe to carry
-/// on every status class (they name the exception, not a principal); the
-/// body/message redaction split by status happens downstream in
-/// [`build_client_error`].
-///
-/// The body is read via [`crate::http_client::read_body_capped`]: a lying or
-/// hostile upstream error body is bounded like any other. On a cap trip a
-/// single WARN records the truncation; classification and logging then run
-/// on the capped prefix only.
+/// Tokens follow the shared precedence rule ([`UpstreamErrorRead::tokens`]):
+/// the native lane's 400 body is the flat minimal `{"message":...}` shape with
+/// no `__type`, so the `x-amzn-errortype` header is the only in-band source of
+/// the `ValidationException` token the capability matcher gates on. Those
+/// TYPE/CODE tokens ride on every status class (they name the exception, not
+/// a principal); the body/message redaction split by status happens in
+/// [`map_error_message`].
 ///
 /// Redaction contract: a Bedrock 403 body names the principal ARN, account
-/// id, and resource ARN. None of those reach the client -- only the IAM
+/// id, and resource ARN. None of those reach the client: only the IAM
 /// action (the actionable bit) survives. All other statuses are sanitized
-/// and capped at `MAX_LOG_BODY_EXCERPT` so an unbounded raw upstream body
-/// never reaches the caller.
-///
-/// Side effect: emits a structured `tracing::warn!` classifying the failure
-/// (full action + principal-present flag stays server-side).
-async fn read_error_body(
+/// and capped so an unbounded raw upstream body never reaches the caller.
+/// The error carries the parse of the message it carries: the read's own
+/// parse when the message is the body verbatim, else a parse of the message.
+fn map_bedrock_upstream_error(
     provider_kind: &str,
     provider: &str,
-    resp: reqwest::Response,
-) -> (UpstreamBody, bool, Option<String>, Option<String>) {
-    let status = resp.status().as_u16();
-    let content_length = resp.content_length();
-    // Read the AWS exception discriminator from the response headers BEFORE
-    // the body read consumes `resp`. The native lane's 400 body is the flat
-    // minimal `{"message":...}` shape with no `__type`, so the header is the
-    // only in-band source of the `ValidationException` token the capability
-    // matcher gates on; the body `__type` keeps precedence when present
-    // (mantle-proxied shapes). The reason label is captured alongside so an
-    // unusable header can be surfaced without re-reading (the response is
-    // gone after the body read).
-    let header_type = crate::aws_error::lift_aws_error_type_from_headers(resp.headers());
-    let header_unusable_reason =
-        crate::aws_error::classify_aws_error_type_header(resp.headers()).unusable_reason();
-    let (bytes, hit_cap) = match crate::http_client::read_body_capped(
-        resp,
-        crate::http_client::MAX_RESPONSE_BODY_BYTES,
-    )
-    .await
-    {
-        Ok(read) => read,
-        Err(e) => {
-            // A transport failure while reading the error body is not a
-            // cap trip; surface it so the error path is not silently blind
-            // (the 2xx path already turns the same failure into an Error).
-            tracing::warn!(
-                provider = %provider,
-                status,
-                error = %e,
-                "failed to read upstream error body",
-            );
-            (Vec::new(), false)
-        }
+    read: UpstreamErrorRead,
+) -> Error {
+    log_error_read(provider_kind, provider, &read);
+    let message = map_error_message(read.status(), read.body(), read.hit_cap());
+    let carried = if message == read.text() {
+        CarriedBody::Original
+    } else {
+        CarriedBody::Replacement(message)
     };
-    if hit_cap {
-        crate::http_client::warn_body_cap(provider, status, content_length, "error_body");
-    }
-    let body = UpstreamBody::new(String::from_utf8_lossy(&bytes));
-    let (upstream_type, upstream_code) = classify_and_log_error_body(
-        provider_kind,
-        provider,
-        status,
-        &body,
-        hit_cap,
-        header_type,
-        header_unusable_reason,
-    );
-    (body, hit_cap, upstream_type, upstream_code)
+    let retry_after = read.retry_after();
+    read.into_error(provider, carried, retry_after)
 }
 
-/// The synchronous half of [`read_error_body`]: lift the classifier tokens
-/// from the body's parse (falling back to the header-lifted discriminator),
-/// and emit the WARN and DEBUG lines. Returns `(upstream_type,
-/// upstream_code)`.
-fn classify_and_log_error_body(
-    provider_kind: &str,
-    provider: &str,
-    status: u16,
-    body: &UpstreamBody,
-    hit_cap: bool,
-    header_type: Option<String>,
-    header_unusable_reason: Option<&'static str>,
-) -> (Option<String>, Option<String>) {
-    let (body_type, upstream_code) = lift_error_tokens(body);
-    // The flat native envelope carries no body `__type`, so fall back to the
-    // header-lifted discriminator; a present body `__type` (mantle shapes)
-    // wins. On a request-fault status (400/422) the discriminator is what the
-    // capability matcher gates its learn path on, so an unusable header there
-    // surfaces a bounded, reason-labeled WARN -- a stripped or garbled header
-    // stays visible instead of a silent non-attributed rejection. Other
-    // statuses (5xx without the header) are not gated on it and would only
-    // add noise. The raw header value is never logged.
+/// Emit the WARN and DEBUG lines for a Bedrock error read.
+fn log_error_read(provider_kind: &str, provider: &str, read: &UpstreamErrorRead) {
+    let status = read.status();
+    // On a request-fault status (400/422) the type token is what the
+    // capability matcher gates its learn path on, so an unusable header
+    // there (when the body supplied no type) surfaces a bounded,
+    // reason-labeled WARN: a stripped or garbled header stays visible
+    // instead of a silent non-attributed rejection. Other statuses are not
+    // gated on it and would only add noise. The raw header value is never
+    // logged.
     if is_request_fault_status(status)
-        && body_type.is_none()
-        && let Some(reason) = header_unusable_reason
+        && let Some(reason) = read.unusable_error_type_header_reason()
     {
         crate::aws_error::incr_error_type_header_unusable(reason);
         tracing::warn!(
@@ -955,49 +844,13 @@ fn classify_and_log_error_body(
             "bedrock upstream error-type header unusable",
         );
     }
-    let upstream_type = body_type.or(header_type);
-    log_bedrock_upstream_error(provider, status, body, hit_cap);
-    // Emit the full (capped) upstream error body at debug level alongside
-    // the status-specific WARN above. The WARN excerpt (cap via
-    // sanitize_for_log) keeps `routectl-warn.log` scannable; DEBUG gives
-    // operators field-level detail when they flip log level during triage.
-    //
-    // A 403 body carries the caller's principal ARN, account id, and the
-    // resource ARN. Those must not reach the DEBUG log, so for a 403 we
-    // substitute an action-only string derived from the existing
-    // classifier (the IAM action is the actionable bit; ARNs/account are
-    // dropped). Non-403 statuses log the sanitized raw body as before.
-    let debug_body = sanitized_debug_body(status, body.text());
+    log_bedrock_upstream_error(provider, status, read.body(), read.hit_cap());
+    // The full (capped) upstream error body at debug level, beside the
+    // status-specific WARN above. A 403 body carries the caller's principal
+    // ARN, account id, and the resource ARN, so for a 403 an action-only
+    // string derived from the classifier is logged instead.
+    let debug_body = sanitized_debug_body(status, read.text());
     routectl_core::debug_upstream_error_body(provider_kind, provider, status, &debug_body);
-    (upstream_type, upstream_code)
-}
-
-/// Lift the bounded AWS-envelope classifier tokens (`__type`
-/// namespace-stripped, top-level `code`) from a Bedrock error body's parse
-/// via [`crate::aws_error::lift_aws_error_tokens`]. Best-effort: a body with
-/// no parse or carrying neither token yields `(None, None)`. Inert on a
-/// native nested `{"error": {...}}` shape, so it never overrides a
-/// first-party classifier.
-fn lift_error_tokens(body: &UpstreamBody) -> (Option<String>, Option<String>) {
-    crate::aws_error::lift_aws_error_tokens(body.parsed().map(ParsedErrorBody::value))
-}
-
-/// Map a non-streaming success body `(bytes, hit_cap)` to the parsed JSON.
-///
-/// A cap trip on a 2xx means the upstream returned an unreadable success
-/// response -- an invalid upstream protocol result. It maps to a 502
-/// `Error::upstream`, which classifies as a ServerError (debits the
-/// breaker, retries/fallbacks) exactly like any other upstream protocol
-/// failure. Otherwise the buffered bytes are parsed once.
-fn map_success_body(provider_id: &str, status: u16, bytes: &[u8], hit_cap: bool) -> Result<Value> {
-    if hit_cap {
-        return Err(Error::upstream(
-            provider_id,
-            502,
-            crate::http_client::body_cap_exceeded_message(),
-        ));
-    }
-    serde_json::from_slice(bytes).map_err(|e| Error::upstream(provider_id, status, e.to_string()))
 }
 
 /// Bedrock upstream statuses whose flat AWS envelope is a request fault the
@@ -1049,34 +902,6 @@ fn map_error_message(status: u16, prefix: &UpstreamBody, hit_cap: bool) -> Strin
     } else {
         classify_parsed_client_error_message(status, prefix)
     }
-}
-
-/// Assemble the final client-facing `Error` for an upstream error response,
-/// preserving the caller-captured `status` and `retry_after` while deriving
-/// the message from the (possibly truncated) body prefix. The error carries
-/// the parse of the message it carries: the prefix's own parse when the
-/// message is the prefix verbatim, else a parse of the message. The lifted
-/// `upstream_type` / `upstream_code` ride onto the `Error` on every status
-/// class -- they are bounded exception tokens, not free-form body text, so
-/// they are safe even where the body/message is scrubbed (403, cap trip).
-fn build_client_error(
-    provider_id: &str,
-    status: u16,
-    retry_after: Option<std::time::Duration>,
-    prefix: UpstreamBody,
-    hit_cap: bool,
-    upstream_type: Option<String>,
-    upstream_code: Option<String>,
-) -> Error {
-    let message = map_error_message(status, &prefix, hit_cap);
-    Error::upstream_with_body(
-        provider_id,
-        status,
-        crate::aws_error::carried_body(prefix, message),
-        retry_after,
-        upstream_type,
-        upstream_code,
-    )
 }
 
 /// Classify a Bedrock upstream error and emit a structured log line.
@@ -1188,34 +1013,36 @@ mod wire_tap_tests;
 mod error_parse_tests;
 
 #[cfg(test)]
+#[path = "error_read_tests.rs"]
+mod error_read_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::aws_error::classify_client_error_message;
 
-    // Text-taking shims over the reader helpers, which take an already-parsed
-    // body; they shadow the glob import so these tests feed plain text.
-    fn build_client_error(
+    /// Map a text body through the lane's error mapper, as `complete()`
+    /// does after the shared read; `headers` are `(name, value)` pairs.
+    fn map_with_headers(
         provider_id: &str,
         status: u16,
-        retry_after: Option<std::time::Duration>,
-        prefix: &str,
+        headers: &[(&str, &str)],
+        body: &str,
         hit_cap: bool,
-        upstream_type: Option<String>,
-        upstream_code: Option<String>,
     ) -> Error {
-        super::build_client_error(
-            provider_id,
-            status,
-            retry_after,
-            UpstreamBody::new(prefix),
-            hit_cap,
-            upstream_type,
-            upstream_code,
-        )
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in headers {
+            map.append(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        let read = UpstreamErrorRead::from_parts(status, &map, body, hit_cap);
+        map_bedrock_upstream_error("bedrock-invoke", provider_id, read)
     }
 
-    fn lift_error_tokens(body: &str) -> (Option<String>, Option<String>) {
-        super::lift_error_tokens(&UpstreamBody::new(body))
+    fn map_text(provider_id: &str, status: u16, body: &str, hit_cap: bool) -> Error {
+        map_with_headers(provider_id, status, &[], body, hit_cap)
     }
 
     fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: bool) {
@@ -1422,56 +1249,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn success_body_over_cap_maps_to_502() {
-        let err = map_success_body("prov", 200, b"partial-json", true)
-            .expect_err("a capped 2xx body must be an error");
-        match err {
-            Error::Upstream {
-                provider,
-                status,
-                body,
-                ..
-            } => {
-                assert_eq!(provider, "prov");
-                assert_eq!(
-                    status, 502,
-                    "unreadable 2xx must classify as 502 ServerError"
-                );
-                assert_eq!(body, crate::http_client::body_cap_exceeded_message());
-                assert!(
-                    !body.contains("partial-json"),
-                    "cap message must not echo the raw body"
-                );
-            }
-            other => panic!("expected Error::Upstream, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn success_body_under_cap_parses_json() {
-        let raw = br#"{"ok":true,"n":7}"#;
-        let value = map_success_body("prov", 200, raw, false).expect("valid json must parse");
-        assert_eq!(value["ok"], serde_json::json!(true));
-        assert_eq!(value["n"], serde_json::json!(7));
-    }
-
-    #[test]
-    fn success_body_under_cap_invalid_json_errors_with_original_status() {
-        let err =
-            map_success_body("prov", 200, b"not json", false).expect_err("invalid json must error");
-        match err {
-            Error::Upstream { status, .. } => {
-                assert_eq!(status, 200, "parse error keeps the success status");
-            }
-            other => panic!("expected Error::Upstream, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn error_body_over_cap_preserves_status_and_retry_after() {
         let retry = std::time::Duration::from_secs(30);
         let raw_prefix = "a giant throttling body that was truncated at the cap";
-        let err = build_client_error("prov", 429, Some(retry), raw_prefix, true, None, None);
+        let err = map_with_headers("prov", 429, &[("retry-after", "30")], raw_prefix, true);
         match err {
             Error::Upstream {
                 status,
@@ -1483,7 +1264,7 @@ mod tests {
                 assert_eq!(
                     retry_after,
                     Some(retry),
-                    "caller-captured retry_after must be preserved"
+                    "the header retry_after must survive the cap trip"
                 );
                 assert_eq!(body, crate::http_client::body_cap_exceeded_message());
                 assert!(
@@ -1499,7 +1280,7 @@ mod tests {
     fn error_body_over_cap_403_keeps_iam_action_only() {
         let prefix = "User: arn:aws:iam::123456789012:user/bob is not authorized to \
                       perform: bedrock:InvokeModel on resource: arn:aws:bedrock:...";
-        let err = build_client_error("prov", 403, None, prefix, true, None, None);
+        let err = map_text("prov", 403, prefix, true);
         match err {
             Error::Upstream { status, body, .. } => {
                 assert_eq!(status, 403);
@@ -1520,7 +1301,7 @@ mod tests {
     #[test]
     fn error_body_under_cap_classifies_unchanged() {
         let prefix = "some 400 validation detail";
-        let err = build_client_error("prov", 400, None, prefix, false, None, None);
+        let err = map_text("prov", 400, prefix, false);
         match err {
             Error::Upstream { status, body, .. } => {
                 assert_eq!(status, 400);
@@ -1540,16 +1321,7 @@ mod tests {
     #[test]
     fn native_lane_403_access_denied_scrubs_body_but_lifts_type() {
         let fixture = include_str!("../../tests/fixtures/bedrock/error_403_access_denied.json");
-        let (upstream_type, upstream_code) = lift_error_tokens(fixture);
-        let err = build_client_error(
-            "bedrock-invoke",
-            403,
-            None,
-            fixture,
-            false,
-            upstream_type,
-            upstream_code,
-        );
+        let err = map_text("bedrock-invoke", 403, fixture, false);
         match err {
             Error::Upstream {
                 status,
@@ -1588,16 +1360,7 @@ mod tests {
     #[test]
     fn native_lane_400_validation_carries_envelope_and_lifts_type() {
         let fixture = include_str!("../../tests/fixtures/bedrock/error_400_validation.json");
-        let (upstream_type, upstream_code) = lift_error_tokens(fixture);
-        let err = build_client_error(
-            "bedrock-invoke",
-            400,
-            None,
-            fixture,
-            false,
-            upstream_type,
-            upstream_code,
-        );
+        let err = map_text("bedrock-invoke", 400, fixture, false);
         match err {
             Error::Upstream {
                 status,
@@ -1644,16 +1407,7 @@ mod tests {
             "message": long_message,
         })
         .to_string();
-        let (upstream_type, upstream_code) = lift_error_tokens(&fixture);
-        let err = build_client_error(
-            "bedrock-invoke",
-            400,
-            None,
-            &fixture,
-            false,
-            upstream_type,
-            upstream_code,
-        );
+        let err = map_text("bedrock-invoke", 400, &fixture, false);
         let Error::Upstream { status, body, .. } = err else {
             panic!("expected Error::Upstream");
         };
@@ -1689,7 +1443,7 @@ mod tests {
             fixture.len() > routectl_core::MAX_ERROR_BODY_BYTES,
             "sanity: body must exceed the matcher ceiling"
         );
-        let err = build_client_error("bedrock-invoke", 400, None, &fixture, false, None, None);
+        let err = map_text("bedrock-invoke", 400, &fixture, false);
         let Error::Upstream { body, .. } = err else {
             panic!("expected Error::Upstream");
         };
@@ -1723,7 +1477,7 @@ mod tests {
             fixture.len() <= routectl_core::MAX_ERROR_BODY_BYTES,
             "sanity: body is within the matcher ceiling (isolates the shape gate)"
         );
-        let err = build_client_error("bedrock-invoke", 400, None, &fixture, false, None, None);
+        let err = map_text("bedrock-invoke", 400, &fixture, false);
         let Error::Upstream { body, .. } = err else {
             panic!("expected Error::Upstream");
         };
@@ -1739,19 +1493,17 @@ mod tests {
     }
 
     /// A cap trip collapses the body to the fixed cap message (the truncated
-    /// prefix is never echoed), yet a token lifted before the collapse still
-    /// rides onto the `Error`.
+    /// prefix is never echoed), yet a header-lifted token still rides onto
+    /// the `Error`.
     #[test]
     fn cap_trip_keeps_fixed_message_but_tokens_still_ride() {
         let truncated = r#"{"__type":"com.amazonaws.bedrock#ThrottlingExcept"#;
-        let err = build_client_error(
+        let err = map_with_headers(
             "prov",
             400,
-            None,
+            &[("x-amzn-errortype", "ThrottlingException")],
             truncated,
             true,
-            Some("ThrottlingException".to_string()),
-            None,
         );
         match err {
             Error::Upstream {
@@ -1767,7 +1519,7 @@ mod tests {
                 assert_eq!(
                     upstream_type.as_deref(),
                     Some("ThrottlingException"),
-                    "a token lifted before the cap collapse must still ride"
+                    "a header-lifted token must still ride past the cap collapse"
                 );
             }
             other => panic!("expected Error::Upstream, got {other:?}"),
@@ -1812,7 +1564,7 @@ mod tests {
         let events = routectl_testkit::capture_events(|| {
             log_bedrock_upstream_error("prov", 400, &body, false);
         });
-        let err = build_client_error("prov", 400, None, &body, false, None, None);
+        let err = map_text("prov", 400, &body, false);
         let warn = events
             .iter()
             .find(|e| e.level == tracing::Level::WARN)
@@ -1853,9 +1605,15 @@ mod tests {
     /// Spawn a one-shot raw TCP server returning `status` with a chunked
     /// (no Content-Length) `body`, and return the URL to GET. wiremock sets
     /// an honest Content-Length, so a chunked server is the only way to
-    /// drive `read_error_body` down its streaming read path.
+    /// drive the shared error read down its streaming read path.
     async fn spawn_chunked_error_server(status: u16, body: &'static str) -> String {
         spawn_chunked_error_server_with_headers(status, body, "").await
+    }
+
+    /// Read `resp` through the shared seam and map it as the lane does.
+    async fn read_and_map(resp: reqwest::Response) -> Error {
+        let read = UpstreamErrorRead::read("prov", resp).await;
+        map_bedrock_upstream_error("bedrock-invoke", "prov", read)
     }
 
     /// Variant of [`spawn_chunked_error_server`] that injects
@@ -1899,17 +1657,7 @@ mod tests {
         let url = spawn_chunked_error_server_with_headers(400, body, error_type).await;
         let resp = reqwest::get(url).await.unwrap();
 
-        let (prefix, _hit_cap, upstream_type, upstream_code) =
-            read_error_body("bedrock-invoke", "prov", resp).await;
-        let err = build_client_error(
-            "prov",
-            400,
-            None,
-            prefix.text(),
-            false,
-            upstream_type,
-            upstream_code,
-        );
+        let err = read_and_map(resp).await;
         let Error::Upstream {
             body: err_body,
             upstream_type,
@@ -1952,8 +1700,9 @@ mod tests {
         let url = spawn_chunked_error_server_with_headers(400, body, error_type).await;
         let resp = reqwest::get(url).await.unwrap();
 
-        let (_prefix, _hit_cap, upstream_type, _upstream_code) =
-            read_error_body("bedrock-invoke", "prov", resp).await;
+        let Error::Upstream { upstream_type, .. } = read_and_map(resp).await else {
+            panic!("expected Error::Upstream");
+        };
         assert_eq!(
             upstream_type.as_deref(),
             Some("ThrottlingException"),
@@ -1962,20 +1711,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_error_body_under_cap_logs_error_but_not_a_cap_trip() {
-        // An under-cap error body is read fully: the pre-existing upstream
-        // error WARN fires (on the prefix), and the cap-trip WARN (the one
-        // carrying `path`) must NOT fire. This pins that the cap WARN is
-        // gated on an actual trip and is a separate signal from the
-        // error-classification WARN.
+    async fn error_read_under_cap_logs_error_but_not_a_cap_trip() {
+        // An under-cap error body is read fully: the upstream error WARN
+        // fires (on the body), and the cap-trip WARN (the one carrying
+        // `path`) must NOT fire. This pins that the cap WARN is gated on an
+        // actual trip and is a separate signal from the error-classification
+        // WARN.
         let url = spawn_chunked_error_server(500, "upstream boom detail").await;
         let resp = reqwest::get(url).await.unwrap();
 
-        let ((prefix, hit_cap, _upstream_type, _upstream_code), events) =
-            routectl_testkit::with_capture(read_error_body("bedrock-invoke", "prov", resp)).await;
+        let (err, events) = routectl_testkit::with_capture(read_and_map(resp)).await;
 
-        assert!(!hit_cap, "an under-cap error body must not trip the cap");
-        assert!(prefix.text().contains("upstream boom detail"));
+        let Error::Upstream { body, .. } = err else {
+            panic!("expected Error::Upstream");
+        };
+        assert!(body.contains("upstream boom detail"), "body: {body}");
         assert!(
             events.iter().all(|e| e.field("path").is_none()),
             "no cap-trip WARN (carrying `path`) may fire under cap",
@@ -1984,7 +1734,7 @@ mod tests {
             events
                 .iter()
                 .any(|e| e.level == tracing::Level::WARN && e.message.contains("bedrock upstream")),
-            "the pre-existing upstream error WARN must still fire on the prefix",
+            "the upstream error WARN must still fire on the body",
         );
     }
 }

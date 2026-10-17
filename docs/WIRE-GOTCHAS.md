@@ -482,7 +482,7 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   (`ValidationException:http://internal.amazon.com/coral/...`, a fixed
   public value, not account-specific). The capability matcher gates its
   learn path on this token, so the native lane lifts it:
-  `read_error_body` in `crates/routectl-providers/src/bedrock/mod.rs`
+  `UpstreamErrorRead` in `crates/routectl-providers/src/upstream_error.rs`
   reads the header BEFORE the body read consumes the response and falls
   back to it when the body carries no `__type` (body `__type` still
   wins). The lift

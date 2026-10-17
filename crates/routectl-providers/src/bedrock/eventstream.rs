@@ -269,17 +269,9 @@ fn handle_invoke_frame(
         // An upstream that violates the protocol by naming an exception in
         // `:event-type` (with `:message-type: event`, or absent) still
         // classifies as a failure rather than an unknown frame to skip.
-        "internalServerException"
-        | "modelStreamErrorException"
-        | "validationException"
-        | "throttlingException"
-        | "serviceUnavailableException"
-        | "accessDeniedException"
-        | "unauthorizedException" => Err(frame::exception_error(
-            provider_id,
-            event_type.as_str(),
-            payload_bytes,
-        )),
+        name if crate::aws_error::aws_stream_exception_status(name).is_some() => {
+            Err(frame::exception_error(provider_id, name, payload_bytes))
+        }
         // Unknown frame types -- log and skip rather than fail. AWS
         // adds new events occasionally and we don't want clients
         // breaking on extensions.
@@ -379,6 +371,45 @@ mod tests {
         let err = handle("internalServerException", "{}").unwrap_err();
         match err {
             Error::Upstream { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// Every exception member an upstream names in `:event-type` (the
+    /// protocol-violating framing) fails the stream with its documented
+    /// status. One row per member, so a name dropped from the fallback arm
+    /// reads as a skipped frame and fails its row.
+    #[test]
+    fn event_type_exception_members_map_to_documented_status() {
+        let cases = [
+            ("throttlingException", 429),
+            ("validationException", 400),
+            ("serviceUnavailableException", 503),
+            ("accessDeniedException", 403),
+            ("unauthorizedException", 401),
+            ("modelStreamErrorException", 424),
+            ("modelTimeoutException", 408),
+            ("internalServerException", 500),
+        ];
+        for (name, want) in cases {
+            let res = handle(name, r#"{"message":"m"}"#);
+
+            match res {
+                Err(Error::Upstream { status, .. }) => assert_eq!(status, want, "{name}"),
+                other => panic!("{name}: expected Upstream error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn event_type_model_timeout_exception_maps_to_408() {
+        let err = handle("modelTimeoutException", r#"{"message":"too slow"}"#).unwrap_err();
+
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 408);
+                assert!(body.contains("too slow"), "body: {body}");
+            }
             other => panic!("expected Upstream, got {other:?}"),
         }
     }

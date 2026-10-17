@@ -393,7 +393,7 @@ fn detect_in_band_error(provider_id: &str, val: &Value) -> Option<Error> {
         .and_then(Value::as_str)
         .unwrap_or("upstream error in stream")
         .to_string();
-    let (upstream_type, upstream_code) = super::classify_gemini_error_value(val);
+    let (upstream_type, upstream_code) = crate::upstream_error::lift_nested_status_tokens(val);
     Some(Error::upstream_full(
         provider_id,
         status,

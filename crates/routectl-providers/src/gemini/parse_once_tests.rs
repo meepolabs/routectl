@@ -2,6 +2,7 @@
 //! shared error-body cap, and carries that parse on the error it builds.
 
 use super::map_gemini_upstream_error;
+use crate::upstream_error::UpstreamErrorRead;
 use reqwest::header::HeaderMap;
 use routectl_core::test_utils::capped_parse_count;
 use routectl_core::{Error, MAX_ERROR_BODY_BYTES};
@@ -20,7 +21,10 @@ fn capped_parses_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
 
 fn map(body: &str) -> (Error, usize) {
     capped_parses_during(|| {
-        map_gemini_upstream_error("gemini:test", 429, &HeaderMap::new(), body, false)
+        map_gemini_upstream_error(
+            "gemini:test",
+            UpstreamErrorRead::from_parts(429, &HeaderMap::new(), body, false),
+        )
     })
 }
 

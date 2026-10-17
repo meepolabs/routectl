@@ -249,21 +249,6 @@ pub fn classify_aws_error_type_header(headers: &HeaderMap) -> ErrorTypeHeaderLif
     }
 }
 
-/// Lift the bare AWS exception name from the `x-amzn-errortype` response
-/// header, or `None` when the header is absent, duplicated, conflicting,
-/// or malformed. Thin wrapper over [`classify_aws_error_type_header`] that
-/// discards the failure reason; the native lane uses the classifier
-/// directly to label its WARN. Separate from [`lift_aws_error_tokens`]:
-/// different input (headers, not a parsed body), different split char
-/// (`:` before the URL tail, not `#`), different provenance.
-#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
-pub fn lift_aws_error_type_from_headers(headers: &HeaderMap) -> Option<String> {
-    match classify_aws_error_type_header(headers) {
-        ErrorTypeHeaderLift::Lifted(token) => Some(token),
-        _ => None,
-    }
-}
-
 /// Whether a request-fault (400/422) body may be carried RAW (byte-capped)
 /// into [`routectl_core::Error::Upstream`]'s `body` for the capability
 /// matcher to read, versus collapsed to the short sanitized excerpt.
@@ -321,18 +306,35 @@ pub fn redacted_body_text(body: &UpstreamBody) -> Cow<'_, str> {
     }
 }
 
-/// The body to carry on the client-facing error when the reader carries
-/// `text` in place of the raw upstream body. The raw parse is reused only
-/// when `text` is byte-identical to the raw text; any other text gets its
-/// own parse, so a parse of the raw AWS body never rides under scrubbed
-/// text.
-#[cfg_attr(not(feature = "anthropic-api"), allow(dead_code))]
-pub fn carried_body(raw: UpstreamBody, text: String) -> UpstreamBody {
-    if text == raw.text() {
-        raw
-    } else {
-        UpstreamBody::new(text)
-    }
+/// The Bedrock in-stream exception members routectl recognizes, with the
+/// HTTP status AWS documents for each in the ConverseStream /
+/// InvokeModelWithResponseStream response elements. Preserving the
+/// documented status keeps the router's retry class and breaker debit
+/// aligned with what AWS said went wrong: collapsing everything to 500
+/// would turn a documented-retryable 424/408 into a generic server failure.
+/// The one table both eventstream lanes and the frame layer read.
+#[cfg(feature = "bedrock")]
+const AWS_STREAM_EXCEPTION_STATUS: [(&str, u16); 8] = [
+    ("throttlingException", 429),
+    ("validationException", 400),
+    ("serviceUnavailableException", 503),
+    ("accessDeniedException", 403),
+    ("unauthorizedException", 401),
+    // "A streaming error occurred. Retry your request."
+    ("modelStreamErrorException", 424),
+    // "Processing time exceeded the model timeout length."
+    ("modelTimeoutException", 408),
+    ("internalServerException", 500),
+];
+
+/// The documented status for a recognized in-stream exception member, or
+/// `None` for a name not in the table.
+#[cfg(feature = "bedrock")]
+pub fn aws_stream_exception_status(exception_type: &str) -> Option<u16> {
+    AWS_STREAM_EXCEPTION_STATUS
+        .iter()
+        .find(|(name, _)| *name == exception_type)
+        .map(|&(_, status)| status)
 }
 
 /// Shared 403-vs-other classification for an AWS/Bedrock upstream error.
@@ -493,6 +495,15 @@ fn extract_iam_action(body: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The lifted token of [`classify_aws_error_type_header`], `None` for
+    /// any unusable header.
+    fn lifted_header_type(headers: &HeaderMap) -> Option<String> {
+        match classify_aws_error_type_header(headers) {
+            ErrorTypeHeaderLift::Lifted(token) => Some(token),
+            _ => None,
+        }
+    }
+
     fn carryable(body: &str) -> bool {
         is_carryable_flat_envelope(UpstreamBody::new(body).parsed())
     }
@@ -599,16 +610,14 @@ mod tests {
     /// bare one yields, across both the plain and the coral-URL-tailed form.
     #[test]
     fn header_lift_of_namespaced_type_equals_lift_of_bare_type() {
-        let bare = lift_aws_error_type_from_headers(&headers_with_error_type(&[
-            VALIDATION_EXCEPTION_TYPE,
-        ]));
+        let bare = lifted_header_type(&headers_with_error_type(&[VALIDATION_EXCEPTION_TYPE]));
         assert_eq!(bare.as_deref(), Some(VALIDATION_EXCEPTION_TYPE));
         for raw in [
             "com.amazon.coral.service#ValidationException",
             "com.amazon.coral.service#ValidationException:http://internal.example/coral/",
         ] {
             assert_eq!(
-                lift_aws_error_type_from_headers(&headers_with_error_type(&[raw])),
+                lifted_header_type(&headers_with_error_type(&[raw])),
                 bare,
                 "header `{raw}` must lift to the bare token"
             );
@@ -948,7 +957,7 @@ mod tests {
     fn header_lift_reads_real_captured_value() {
         let headers = headers_with_error_type(&[REAL_ERROR_TYPE_VALUE]);
         assert_eq!(
-            lift_aws_error_type_from_headers(&headers),
+            lifted_header_type(&headers),
             Some("ValidationException".to_string())
         );
     }
@@ -959,14 +968,14 @@ mod tests {
     fn header_lift_handles_bare_and_namespaced_heads() {
         let bare = headers_with_error_type(&["ThrottlingException"]);
         assert_eq!(
-            lift_aws_error_type_from_headers(&bare),
+            lifted_header_type(&bare),
             Some("ThrottlingException".to_string())
         );
         let namespaced = headers_with_error_type(&[
             "com.amazon.coral.validate#ValidationException:http://internal.example/coral/",
         ]);
         assert_eq!(
-            lift_aws_error_type_from_headers(&namespaced),
+            lifted_header_type(&namespaced),
             Some("ValidationException".to_string())
         );
     }
@@ -977,14 +986,14 @@ mod tests {
     #[test]
     fn header_lift_fails_closed_on_duplicate_and_conflicting_values() {
         let duplicate = headers_with_error_type(&[REAL_ERROR_TYPE_VALUE, REAL_ERROR_TYPE_VALUE]);
-        assert_eq!(lift_aws_error_type_from_headers(&duplicate), None);
+        assert_eq!(lifted_header_type(&duplicate), None);
         assert_eq!(
             classify_aws_error_type_header(&duplicate).unusable_reason(),
             Some("ambiguous")
         );
         let conflicting =
             headers_with_error_type(&["ValidationException:x", "ThrottlingException:y"]);
-        assert_eq!(lift_aws_error_type_from_headers(&conflicting), None);
+        assert_eq!(lifted_header_type(&conflicting), None);
         assert_eq!(
             classify_aws_error_type_header(&conflicting).unusable_reason(),
             Some("conflict")
@@ -1002,14 +1011,14 @@ mod tests {
             name.clone(),
             HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
         );
-        assert_eq!(lift_aws_error_type_from_headers(&non_utf8), None);
+        assert_eq!(lifted_header_type(&non_utf8), None);
         assert_eq!(
             classify_aws_error_type_header(&non_utf8).unusable_reason(),
             Some("invalid")
         );
 
         let empty = headers_with_error_type(&[""]);
-        assert_eq!(lift_aws_error_type_from_headers(&empty), None);
+        assert_eq!(lifted_header_type(&empty), None);
         assert_eq!(
             classify_aws_error_type_header(&empty).unusable_reason(),
             Some("invalid")
@@ -1017,14 +1026,14 @@ mod tests {
 
         let url_tail_only =
             headers_with_error_type(&[":http://internal.amazon.com/coral/com.amazon.bedrock/"]);
-        assert_eq!(lift_aws_error_type_from_headers(&url_tail_only), None);
+        assert_eq!(lifted_header_type(&url_tail_only), None);
         assert_eq!(
             classify_aws_error_type_header(&url_tail_only).unusable_reason(),
             Some("invalid")
         );
 
         let absent = HeaderMap::new();
-        assert_eq!(lift_aws_error_type_from_headers(&absent), None);
+        assert_eq!(lifted_header_type(&absent), None);
         assert_eq!(
             classify_aws_error_type_header(&absent).unusable_reason(),
             Some("missing")

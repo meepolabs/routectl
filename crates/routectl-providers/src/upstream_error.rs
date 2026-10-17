@@ -14,31 +14,92 @@
 //! 403 scrub decision for the carried body, the upstream-failure WARN, and
 //! any lane-specific reset hint that outranks the header (the Codex
 //! usage-limit body hint).
+//!
+//! The AWS half (the `x-amzn-errortype` lift and the flat-envelope token
+//! fallback) is compiled only with the lanes that can front a Bedrock
+//! upstream; a gemini-only build reads its own `/error/status` classifier
+//! and passes the tokens in.
 
 use std::time::Duration;
 
 use reqwest::header::HeaderMap;
-use routectl_core::{Error, ParsedErrorBody, UpstreamBody, upstream_message_or_excerpt};
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+use routectl_core::upstream_message_or_excerpt;
+use routectl_core::{Error, ParsedErrorBody, UpstreamBody};
 use serde_json::Value;
 
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-compat",
+    feature = "openai-responses"
+))]
 use crate::aws_error::ErrorTypeHeaderLift;
 
+/// The nested `/error/code`, stringified because the wire admits both a
+/// string code (`"context_length_exceeded"`) and a numeric one.
+fn nested_error_code(v: &Value) -> Option<String> {
+    v.pointer("/error/code").and_then(|c| match c {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
 /// Lift the nested first-party classifier (`/error/type`, `/error/code`)
-/// from an already-parsed value. `code` is stringified because the wire
-/// admits both a string code (`"context_length_exceeded"`) and a numeric
-/// one. Shared by the non-2xx read, inline 2xx error detection, and
-/// mid-stream error-frame detection so all three surface the same tokens.
+/// from an already-parsed value. Shared by the non-2xx read, inline 2xx
+/// error detection, and mid-stream error-frame detection so all three
+/// surface the same tokens.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-compat",
+    feature = "openai-responses"
+))]
 pub fn lift_nested_error_tokens(v: &Value) -> (Option<String>, Option<String>) {
     let upstream_type = v
         .pointer("/error/type")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let upstream_code = v.pointer("/error/code").and_then(|c| match c {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    });
-    (upstream_type, upstream_code)
+    (upstream_type, nested_error_code(v))
+}
+
+/// Lift the Gemini classifier from an already-parsed value. The Gemini
+/// envelope is `{"error":{"code":<int>,"message":...,"status":"<UPPER_SNAKE>"}}`:
+/// `error.status` (`RESOURCE_EXHAUSTED`, `INVALID_ARGUMENT`, ...) is the
+/// string an SDK branches on, so it is the type; the numeric `error.code`
+/// is the code.
+#[cfg(feature = "gemini")]
+pub fn lift_nested_status_tokens(v: &Value) -> (Option<String>, Option<String>) {
+    let upstream_type = v
+        .pointer("/error/status")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    (upstream_type, nested_error_code(v))
+}
+
+/// Map a non-streaming success body `(bytes, hit_cap)` to the parsed JSON.
+///
+/// A cap trip on a 2xx means the upstream returned an unreadable success
+/// response, an invalid upstream protocol result: it maps to a 502
+/// `Error::upstream`, which classifies as a ServerError (debits the
+/// breaker, retries/fallbacks) like any other upstream protocol failure.
+/// Otherwise the buffered bytes are parsed once.
+#[cfg(feature = "anthropic-api")]
+pub fn map_success_body(
+    provider_id: &str,
+    status: u16,
+    bytes: &[u8],
+    hit_cap: bool,
+) -> routectl_core::Result<Value> {
+    if hit_cap {
+        return Err(Error::upstream(
+            provider_id,
+            502,
+            crate::http_client::body_cap_exceeded_message(),
+        ));
+    }
+    serde_json::from_slice(bytes).map_err(|e| Error::upstream(provider_id, status, e.to_string()))
 }
 
 /// Which text the built error carries as its body.
@@ -56,6 +117,12 @@ pub struct UpstreamErrorRead {
     hit_cap: bool,
     retry_after: Option<Duration>,
     request_id: Option<String>,
+    #[cfg(any(
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-compat",
+        feature = "openai-responses"
+    ))]
     header_type: ErrorTypeHeaderLift,
 }
 
@@ -118,6 +185,12 @@ impl UpstreamErrorRead {
             hit_cap,
             retry_after,
             request_id: crate::upstream_request_id::parse_upstream_request_id(headers),
+            #[cfg(any(
+                feature = "anthropic-api",
+                feature = "bedrock",
+                feature = "openai-compat",
+                feature = "openai-responses"
+            ))]
             header_type: crate::aws_error::classify_aws_error_type_header(headers),
         }
     }
@@ -150,18 +223,41 @@ impl UpstreamErrorRead {
             .is_some_and(ParsedErrorBody::is_error_envelope)
     }
 
-    /// The classifier tokens. A native envelope lifts its nested
-    /// type/code; any other body lifts the flat AWS `__type` / `code`. The
-    /// `x-amzn-errortype` header then fills the TYPE only when the body
-    /// supplied none: it never overrides a body token and never supplies a
-    /// code.
-    pub fn tokens(&self) -> (Option<String>, Option<String>) {
+    /// The body's parse, for a lane that builds its message from it.
+    #[cfg(feature = "anthropic-api")]
+    pub const fn body(&self) -> &UpstreamBody {
+        &self.body
+    }
+
+    /// The tokens the body alone supplies: a native envelope lifts its
+    /// nested type/code; any other body lifts the flat AWS `__type` /
+    /// `code`.
+    #[cfg(any(
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-compat",
+        feature = "openai-responses"
+    ))]
+    fn body_tokens(&self) -> (Option<String>, Option<String>) {
         let parsed = self.parsed();
-        let (body_type, code) = if self.is_native_envelope() {
+        if self.is_native_envelope() {
             parsed.map_or((None, None), |p| lift_nested_error_tokens(p.value()))
         } else {
             crate::aws_error::lift_aws_error_tokens(parsed.map(ParsedErrorBody::value))
-        };
+        }
+    }
+
+    /// The classifier tokens: the body's own (see `body_tokens`), then the
+    /// `x-amzn-errortype` header fills the TYPE only when the body supplied
+    /// none: it never overrides a body token and never supplies a code.
+    #[cfg(any(
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-compat",
+        feature = "openai-responses"
+    ))]
+    pub fn tokens(&self) -> (Option<String>, Option<String>) {
+        let (body_type, code) = self.body_tokens();
         let upstream_type = body_type.or_else(|| match &self.header_type {
             ErrorTypeHeaderLift::Lifted(token) => Some(token.clone()),
             _ => None,
@@ -169,9 +265,22 @@ impl UpstreamErrorRead {
         (upstream_type, code)
     }
 
+    /// The bounded reason label for an unusable `x-amzn-errortype` header
+    /// (`missing` included), reported only when the body supplied no type,
+    /// i.e. only when the header was the type's last source. `None` when
+    /// the body typed itself or the header lifted a token.
+    #[cfg(feature = "bedrock")]
+    pub fn unusable_error_type_header_reason(&self) -> Option<&'static str> {
+        if self.body_tokens().0.is_some() {
+            return None;
+        }
+        self.header_type.unusable_reason()
+    }
+
     /// Client message for a body without a native envelope, treated as a
     /// potential mantle (AWS) body: a 403 AccessDenied collapses to the IAM
     /// action only; anything else gets the redacted, sanitized excerpt.
+    #[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
     pub fn non_envelope_client_message(&self) -> String {
         let text = self.text();
         match crate::aws_error::classify_bedrock_error(self.status, text) {
@@ -186,6 +295,7 @@ impl UpstreamErrorRead {
 
     /// The upstream body for the DEBUG log: a non-envelope 403 collapses to
     /// the IAM action so no ARN or account id reaches the log.
+    #[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
     pub fn debug_body(&self) -> String {
         if self.is_native_envelope() {
             self.text().to_string()
@@ -198,13 +308,32 @@ impl UpstreamErrorRead {
     /// and the correlation id. `retry_after` is passed in so a lane hint
     /// that outranks the header can win; pass [`Self::retry_after`]
     /// otherwise.
+    #[cfg(any(
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-compat",
+        feature = "openai-responses"
+    ))]
     pub fn into_error(
         self,
         provider_id: &str,
         carried: CarriedBody,
         retry_after: Option<Duration>,
     ) -> Error {
-        let (upstream_type, upstream_code) = self.tokens();
+        let tokens = self.tokens();
+        self.into_error_with_tokens(provider_id, carried, retry_after, tokens)
+    }
+
+    /// [`Self::into_error`] for a lane whose classifier lives in a
+    /// different field than the shared lift reads (Gemini's
+    /// `error.status`): the lane passes its own `(type, code)`.
+    pub fn into_error_with_tokens(
+        self,
+        provider_id: &str,
+        carried: CarriedBody,
+        retry_after: Option<Duration>,
+        (upstream_type, upstream_code): (Option<String>, Option<String>),
+    ) -> Error {
         let body = match carried {
             CarriedBody::Original => self.body,
             CarriedBody::Replacement(text) => UpstreamBody::new(text),
@@ -222,112 +351,5 @@ impl UpstreamErrorRead {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{UpstreamErrorRead, lift_nested_error_tokens};
-    use reqwest::header::HeaderMap;
-    use serde_json::json;
-
-    const HEADER: &str = "x-amzn-errortype";
-
-    type TokenRow<'a> = (
-        &'a str,
-        &'a HeaderMap,
-        &'a str,
-        Option<&'a str>,
-        Option<&'a str>,
-    );
-
-    fn headers_with_type(value: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(HEADER, value.parse().unwrap());
-        headers
-    }
-
-    fn tokens(headers: &HeaderMap, body: &str) -> (Option<String>, Option<String>) {
-        UpstreamErrorRead::from_parts(400, headers, body, false).tokens()
-    }
-
-    #[test]
-    fn nested_lift_stringifies_numeric_code() {
-        let v = json!({"error": {"type": "invalid_request_error", "code": 400}});
-
-        let got = lift_nested_error_tokens(&v);
-
-        assert_eq!(
-            got,
-            (Some("invalid_request_error".into()), Some("400".into()))
-        );
-    }
-
-    #[test]
-    fn token_precedence_rows() {
-        let header = headers_with_type("ValidationException:http://internal.amazon.com/coral/");
-        let no_header = HeaderMap::new();
-        let cases: [TokenRow<'_>; 5] = [
-            (
-                "native envelope lifts nested type and code",
-                &no_header,
-                r#"{"error":{"type":"invalid_request_error","code":"bad"}}"#,
-                Some("invalid_request_error"),
-                Some("bad"),
-            ),
-            (
-                "flat body lifts namespaced __type and code",
-                &no_header,
-                r#"{"__type":"com.amazonaws.bedrock#ThrottlingException","code":"T"}"#,
-                Some("ThrottlingException"),
-                Some("T"),
-            ),
-            (
-                "header fills type when the flat body has none",
-                &header,
-                r#"{"message":"bad"}"#,
-                Some("ValidationException"),
-                None,
-            ),
-            (
-                "body __type wins over the header",
-                &header,
-                r#"{"__type":"AccessDeniedException","message":"no"}"#,
-                Some("AccessDeniedException"),
-                None,
-            ),
-            (
-                "header fills type on a native envelope without one",
-                &header,
-                r#"{"error":{"code":"bad"}}"#,
-                Some("ValidationException"),
-                Some("bad"),
-            ),
-        ];
-        for (name, headers, body, want_type, want_code) in cases {
-            let (got_type, got_code) = tokens(headers, body);
-
-            assert_eq!(got_type.as_deref(), want_type, "{name}");
-            assert_eq!(got_code.as_deref(), want_code, "{name}");
-        }
-    }
-
-    #[test]
-    fn unusable_header_lifts_no_type() {
-        let mut headers = HeaderMap::new();
-        headers.append(HEADER, "ValidationException".parse().unwrap());
-        headers.append(HEADER, "ThrottlingException".parse().unwrap());
-
-        let (got_type, _) = tokens(&headers, r#"{"message":"bad"}"#);
-
-        assert_eq!(got_type, None);
-    }
-
-    #[test]
-    fn retry_after_is_gated_on_rate_limit_status() {
-        let mut headers = HeaderMap::new();
-        headers.insert("retry-after", "30".parse().unwrap());
-        let cases = [(429, true), (503, true), (400, false), (500, false)];
-        for (status, want) in cases {
-            let read = UpstreamErrorRead::from_parts(status, &headers, "", false);
-
-            assert_eq!(read.retry_after().is_some(), want, "status {status}");
-        }
-    }
-}
+#[path = "upstream_error_tests.rs"]
+mod tests;

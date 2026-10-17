@@ -115,18 +115,100 @@ async fn integration_complete_error_body_over_cap_preserves_status_bounded() {
     let provider = make_provider(&mock_server.uri());
     let req = base_req("claude-3-opus", vec![user_msg("hi")]);
 
-    let err = provider.complete(req).await.unwrap_err();
+    let (result, events) = routectl_testkit::with_capture(provider.complete(req)).await;
+    let err = result.unwrap_err();
     match err {
         routectl_core::Error::Upstream { status, body, .. } => {
             assert_eq!(status, 429, "original upstream status must be preserved");
-            assert!(
-                body.contains("cap"),
-                "message must be the bounded cap-exceeded text: {body:?}"
+            assert_eq!(
+                body, "response body exceeded 16777216-byte cap",
+                "message must be the bounded cap-exceeded text"
             );
-            assert!(
-                !body.contains("aaaa"),
-                "capped error body must not be echoed: {body:?}"
-            );
+        }
+        other => panic!("expected Error::Upstream, got {other:?}"),
+    }
+    let cap_warns: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.level == tracing::Level::WARN
+                && e.message == "upstream response body exceeded cap; truncated"
+        })
+        .collect();
+    assert_eq!(cap_warns.len(), 1, "exactly one cap-trip WARN per trip");
+    assert_eq!(cap_warns[0].field("path"), Some("error_body"));
+    assert_eq!(cap_warns[0].field("status"), Some("429"));
+    assert_eq!(cap_warns[0].field("body_truncated"), Some("true"));
+}
+
+/// The `Retry-After` hint reaches the error only on a rate-limit status: a
+/// stray header on a 400 must not park the provider.
+#[tokio::test]
+async fn integration_complete_retry_after_is_gated_on_rate_limit_status() {
+    let cases: [(&str, u16, Option<std::time::Duration>); 2] = [
+        (
+            "429 carries the hint",
+            429,
+            Some(std::time::Duration::from_secs(30)),
+        ),
+        ("400 drops the hint", 400, None),
+    ];
+    for (name, status, want) in cases {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("retry-after", "30")
+                    .set_body_json(json!({
+                        "type": "error",
+                        "error": {"type": "rate_limit_error", "message": "m"}
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+        let provider = make_provider(&mock_server.uri());
+
+        let err = provider
+            .complete(base_req("claude-3-opus", vec![user_msg("hi")]))
+            .await
+            .unwrap_err();
+
+        match err {
+            routectl_core::Error::Upstream { retry_after, .. } => {
+                assert_eq!(retry_after, want, "{name}");
+            }
+            other => panic!("{name}: expected Error::Upstream, got {other:?}"),
+        }
+    }
+}
+
+/// A flat mantle body with no `__type` takes its exception type from the
+/// `x-amzn-errortype` header (the coral URL tail is dropped).
+#[tokio::test]
+async fn integration_complete_flat_body_lifts_type_from_aws_error_type_header() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header(
+                    "x-amzn-errortype",
+                    "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
+                )
+                .set_body_json(json!({"message": "invalid model identifier"})),
+        )
+        .mount(&mock_server)
+        .await;
+    let provider = make_provider(&mock_server.uri());
+
+    let err = provider
+        .complete(base_req("claude-3-opus", vec![user_msg("hi")]))
+        .await
+        .unwrap_err();
+
+    match err {
+        routectl_core::Error::Upstream { upstream_type, .. } => {
+            assert_eq!(upstream_type.as_deref(), Some("ValidationException"));
         }
         other => panic!("expected Error::Upstream, got {other:?}"),
     }
