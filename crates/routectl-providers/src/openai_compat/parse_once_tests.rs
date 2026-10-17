@@ -2,6 +2,7 @@
 //! shared error-body cap, and carries that parse on the error it builds.
 
 use super::map_openai_compat_upstream_error;
+use crate::upstream_error::UpstreamErrorRead;
 use reqwest::header::HeaderMap;
 use routectl_core::test_utils::capped_parse_count;
 use routectl_core::{Error, MAX_ERROR_BODY_BYTES};
@@ -22,7 +23,10 @@ fn capped_parses_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
 
 fn map(status: u16, body: &str) -> (Error, usize) {
     capped_parses_during(|| {
-        map_openai_compat_upstream_error("p", status, &HeaderMap::new(), body, false)
+        map_openai_compat_upstream_error(
+            "p",
+            UpstreamErrorRead::from_parts(status, &HeaderMap::new(), body, false),
+        )
     })
 }
 

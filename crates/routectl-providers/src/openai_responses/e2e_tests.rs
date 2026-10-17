@@ -482,6 +482,109 @@ async fn error_body_over_cap_preserves_status_and_hides_body() {
     );
 }
 
+/// The header `Retry-After` reaches the error only on a rate-limit status:
+/// a stray header on a 400 must not park the provider.
+#[tokio::test]
+async fn retry_after_is_gated_on_rate_limit_status() {
+    let cases: [(&str, u16, Option<std::time::Duration>); 2] = [
+        (
+            "429 carries the hint",
+            429,
+            Some(std::time::Duration::from_secs(30)),
+        ),
+        ("400 drops the hint", 400, None),
+    ];
+    for (name, status, want) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("retry-after", "30")
+                    .set_body_json(serde_json::json!({"error": {"type": "t", "message": "m"}})),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let err = provider.complete(base_req()).await.expect_err(name);
+
+        match err {
+            Error::Upstream { retry_after, .. } => assert_eq!(retry_after, want, "{name}"),
+            other => panic!("{name}: expected Error::Upstream, got {other:?}"),
+        }
+    }
+}
+
+/// A native Responses 4xx envelope lifts its nested `error.type` /
+/// `error.code` onto the canonical error.
+#[tokio::test]
+async fn native_error_envelope_lifts_type_and_code() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "validation_error",
+                "message": "encrypted content missing recognized prefix"
+            }
+        })))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    let err = provider.complete(base_req()).await.expect_err("400");
+
+    match err {
+        Error::Upstream {
+            status,
+            upstream_type,
+            upstream_code,
+            ..
+        } => {
+            assert_eq!(status, 400);
+            assert_eq!(upstream_type.as_deref(), Some("invalid_request_error"));
+            assert_eq!(upstream_code.as_deref(), Some("validation_error"));
+        }
+        other => panic!("expected Error::Upstream, got {other:?}"),
+    }
+}
+
+/// A flat mantle body with no `__type` takes its exception type from the
+/// `x-amzn-errortype` header (the coral URL tail is dropped).
+#[tokio::test]
+async fn flat_body_lifts_type_from_aws_error_type_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header(
+                    "x-amzn-errortype",
+                    "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
+                )
+                .set_body_json(serde_json::json!({"message": "invalid model identifier"})),
+        )
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    let err = provider.complete(base_req()).await.expect_err("400");
+
+    match err {
+        Error::Upstream {
+            upstream_type,
+            upstream_code,
+            ..
+        } => {
+            assert_eq!(upstream_type.as_deref(), Some("ValidationException"));
+            assert_eq!(upstream_code, None);
+        }
+        other => panic!("expected Error::Upstream, got {other:?}"),
+    }
+}
+
 /// A normal (under-cap) error body is unregressed: the upstream
 /// `error.message` still reaches the client and NO cap-trip WARN fires.
 #[tokio::test]

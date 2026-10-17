@@ -1,6 +1,7 @@
 //! Excerpt-sanitization tests.
 
 use super::{AuthKind, map_responses_upstream_error};
+use crate::upstream_error::UpstreamErrorRead;
 use reqwest::header::HeaderMap;
 use routectl_core::{Error, UpstreamBody, sanitize_for_log, upstream_message_or_excerpt};
 
@@ -34,7 +35,11 @@ fn map_upstream_error_preserves_retry_after_for_both_callers() {
     let body = r#"{"error":{"type":"rate_limit_exceeded","message":"slow down"}}"#;
 
     // Act
-    let err = map_responses_upstream_error("p", 429, &headers, &AuthKind::ApiKey, body, false);
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ApiKey,
+        UpstreamErrorRead::from_parts(429, &headers, body, false),
+    );
 
     // Assert
     match err {
@@ -68,8 +73,11 @@ fn map_upstream_error_codex_body_hint_wins_over_header() {
         r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":7200,"message":"capped"}}"#;
 
     // Act
-    let err =
-        map_responses_upstream_error("p", 429, &headers, &AuthKind::ChatgptOauth, body, false);
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ChatgptOauth,
+        UpstreamErrorRead::from_parts(429, &headers, body, false),
+    );
 
     // Assert: the body's 7200s reset, not the header's 30s.
     match err {
@@ -96,8 +104,11 @@ fn map_upstream_error_over_cap_hides_body_and_preserves_status() {
     headers.insert("retry-after", "30".parse().unwrap());
     let prefix = r#"{"error":{"message":"secret upstream detail"#;
 
-    let err =
-        map_responses_upstream_error("p", 429, &headers, &AuthKind::ChatgptOauth, prefix, true);
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ChatgptOauth,
+        UpstreamErrorRead::from_parts(429, &headers, prefix, true),
+    );
 
     match err {
         Error::Upstream {
@@ -133,8 +144,11 @@ fn map_upstream_error_over_cap_lifts_codex_hint_when_prefix_parses() {
     let prefix =
         r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":7200,"message":"capped"}}"#;
 
-    let err =
-        map_responses_upstream_error("p", 429, &headers, &AuthKind::ChatgptOauth, prefix, true);
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ChatgptOauth,
+        UpstreamErrorRead::from_parts(429, &headers, prefix, true),
+    );
 
     match err {
         Error::Upstream {
@@ -165,11 +179,8 @@ fn map_upstream_error_over_cap_warn_excerpt_is_fixed_message() {
     let events = routectl_testkit::capture_events(|| {
         let _ = map_responses_upstream_error(
             "p",
-            429,
-            &HeaderMap::new(),
             &AuthKind::ChatgptOauth,
-            prefix,
-            true,
+            UpstreamErrorRead::from_parts(429, &HeaderMap::new(), prefix, true),
         );
     });
 
@@ -202,8 +213,11 @@ fn map_upstream_error_over_cap_warn_excerpt_is_fixed_message() {
 #[test]
 fn map_upstream_error_lifts_aws_signature_token_from_403() {
     let body = r#"{"__type":"com.amazonaws.bedrock#SignatureDoesNotMatch","message":"The request signature we calculated does not match."}"#;
-    let err =
-        map_responses_upstream_error("p", 403, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ApiKey,
+        UpstreamErrorRead::from_parts(403, &HeaderMap::new(), body, false),
+    );
     match err {
         Error::Upstream {
             status,
@@ -227,8 +241,11 @@ fn map_upstream_error_lifts_aws_signature_token_from_403() {
 #[test]
 fn map_upstream_error_lifts_aws_throttling_code_from_429() {
     let body = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
-    let err =
-        map_responses_upstream_error("p", 429, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ApiKey,
+        UpstreamErrorRead::from_parts(429, &HeaderMap::new(), body, false),
+    );
     match err {
         Error::Upstream {
             status,
@@ -250,8 +267,11 @@ fn map_upstream_error_lifts_aws_throttling_code_from_429() {
 #[test]
 fn map_upstream_error_403_scrubs_aws_access_denied_arn() {
     let body = r#"{"__type":"com.amazonaws.bedrock#AccessDeniedException","message":"User: arn:aws:iam::123456789012:role/App is not authorized to perform: bedrock-runtime:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5"}"#;
-    let err =
-        map_responses_upstream_error("p", 403, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ApiKey,
+        UpstreamErrorRead::from_parts(403, &HeaderMap::new(), body, false),
+    );
     match err {
         Error::Upstream {
             upstream_type,
@@ -280,11 +300,8 @@ fn map_upstream_error_403_scrubs_aws_body_without_type_token() {
     let events = routectl_testkit::capture_events(|| {
         let err = map_responses_upstream_error(
             "p",
-            403,
-            &HeaderMap::new(),
             &AuthKind::ApiKey,
-            body,
-            false,
+            UpstreamErrorRead::from_parts(403, &HeaderMap::new(), body, false),
         );
         match err {
             Error::Upstream { body, .. } => {
@@ -311,15 +328,17 @@ fn map_upstream_error_403_scrubs_aws_body_without_type_token() {
 }
 
 /// The native Responses `/error` shape WINS over any sibling top-level AWS
-/// key: a body carrying both keeps the native message and never routes
-/// through the AWS scrub. The AWS lift reads TOP-LEVEL keys, so it stays
-/// inert and the tokens remain None (this reader lifts only AWS tokens).
+/// key: a body carrying both keeps the native message, never routes through
+/// the AWS scrub, and lifts the NESTED type/code rather than the top-level
+/// `__type`.
 #[test]
 fn map_upstream_error_native_shape_wins_over_aws() {
-    let body =
-        r#"{"error":{"type":"invalid_request_error","message":"bad model id"},"x_trace":"t-7"}"#;
-    let err =
-        map_responses_upstream_error("p", 400, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    let body = r#"{"error":{"type":"invalid_request_error","code":"model_not_found","message":"bad model id"},"__type":"ThrottlingException","x_trace":"t-7"}"#;
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ApiKey,
+        UpstreamErrorRead::from_parts(400, &HeaderMap::new(), body, false),
+    );
     match err {
         Error::Upstream {
             upstream_type,
@@ -327,10 +346,8 @@ fn map_upstream_error_native_shape_wins_over_aws() {
             body,
             ..
         } => {
-            // No top-level AWS token -> no lift; the native envelope is
-            // carried raw for the ingress sanitizer.
-            assert_eq!(upstream_type, None);
-            assert_eq!(upstream_code, None);
+            assert_eq!(upstream_type.as_deref(), Some("invalid_request_error"));
+            assert_eq!(upstream_code.as_deref(), Some("model_not_found"));
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(
                 parsed.pointer("/error/message").and_then(|v| v.as_str()),
@@ -348,8 +365,11 @@ fn map_upstream_error_native_shape_wins_over_aws() {
 #[test]
 fn map_upstream_error_tokens_reach_classify() {
     let body = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
-    let err =
-        map_responses_upstream_error("p", 429, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    let err = map_responses_upstream_error(
+        "p",
+        &AuthKind::ApiKey,
+        UpstreamErrorRead::from_parts(429, &HeaderMap::new(), body, false),
+    );
     let classified = routectl_core::failure_class::classify(&err, Some("openai-responses"));
     assert_eq!(
         classified.class,
@@ -378,11 +398,8 @@ fn map_upstream_error_never_panics_on_malformed_bodies() {
     for body in cases {
         let err = map_responses_upstream_error(
             "p",
-            400,
-            &HeaderMap::new(),
             &AuthKind::ApiKey,
-            body,
-            false,
+            UpstreamErrorRead::from_parts(400, &HeaderMap::new(), body, false),
         );
         match err {
             Error::Upstream {

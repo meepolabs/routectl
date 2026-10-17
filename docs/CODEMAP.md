@@ -576,6 +576,18 @@ license.
   verdict for lanes whose wire closes each turn with a terminal event; each
   lane injects its own predicate, and a stream that ends before it yields a
   status-0 `Upstream` error instead of a clean close
+- `src/upstream_error.rs` -- `UpstreamErrorRead`: the one read of a
+  non-success upstream response every migrated lane's error mapper takes
+  (openai-compat, openai-responses): the error body under the shared
+  response-body cap (cap WARN `path="error_body"`, transport-failure WARN),
+  its single capped parse, the rate-limit-gated `Retry-After`, the
+  correlation id, the `x-amzn-errortype` lift, and the classifier tokens
+  (`tokens()`: nested `/error/type` + `/error/code` on a native envelope,
+  else `aws_error::lift_aws_error_tokens`, then the header fills a missing
+  type); also `non_envelope_client_message` (mantle 403 scrub),
+  `debug_body`, `into_error`, and `lift_nested_error_tokens`, shared with the
+  openai-compat 2xx inline and SSE mid-frame detection. Lane message
+  building and the upstream-failure WARN stay in the lane
 - `src/upstream_request_id.rs` -- `parse_upstream_request_id(&HeaderMap)`:
   lifts the upstream provider's correlation id (first of `x-request-id` /
   `x-oai-request-id` / `cf-ray`) off an error response so the ingress can
@@ -927,9 +939,9 @@ license.
 
 - `src/openai_compat/mod.rs` -- `OpenAiCompatProvider` impl; owns
   `ThinkTagAccumulator` for cross-chunk `<think>` state;
-  `map_openai_compat_upstream_error` lifts the native OpenAI
-  `error.type`/`code` classifier and, for a non-envelope (flat AWS mantle)
-  body, lifts `aws_error::lift_aws_error_tokens` and routes a 403 through the
+  `map_openai_compat_upstream_error` builds the client error from an
+  `upstream_error::UpstreamErrorRead` (tokens, gated `Retry-After`, request
+  id) and routes a non-envelope (flat AWS mantle) 403 through the
   `aws_error` scrub; the optional `OpenAiCompatConfig::mantle` selects the
   Bedrock mantle lane (SigV4/bearer-signed body bytes via `mantle::sign`, no
   first-party Bearer, no-redirect client, `mantle::probe` credential check)
@@ -1012,9 +1024,10 @@ license.
 
 - `src/openai_responses/mod.rs` -- `impl Provider` orchestration:
   force-streams `complete()`, drains to `response.completed`; upstream-error
-  mapping helpers (`map_responses_upstream_error` builds
-  `Error::upstream_full`, lifting AWS mantle `__type`/`code` tokens and
-  routing a 403 body through the `aws_error` scrub). On the mantle lane (cfg
+  mapping helpers (`map_responses_upstream_error` builds the client error
+  from an `upstream_error::UpstreamErrorRead`, letting the Codex usage-limit
+  body hint outrank the header `Retry-After`, and routes a non-envelope 403
+  body through the `aws_error` scrub). On the mantle lane (cfg
   `bedrock`) both dispatch paths (`complete`, `stream`) serialize the body to
   bytes and `sign_mantle` the built request BEFORE the header trace and
   execute (the first-party lane is byte-unchanged: same bytes + one

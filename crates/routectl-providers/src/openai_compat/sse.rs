@@ -379,7 +379,7 @@ fn detect_error_envelope(id: &str, val: &Value) -> Option<Error> {
     // instead of collapsing to a generic bucket; the message stays in the
     // error body, matching what the non-stream path surfaces. No new log
     // is emitted here -- the raw frame is never widened onto a log line.
-    let (upstream_type, upstream_code) = super::classify_error_value(val);
+    let (upstream_type, upstream_code) = crate::upstream_error::lift_nested_error_tokens(val);
     Some(Error::upstream_full(
         id,
         status,

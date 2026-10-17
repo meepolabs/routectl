@@ -882,6 +882,78 @@ async fn probe_connection_refused_is_unreachable() {
     ));
 }
 
+/// The `Retry-After` hint reaches the error only on a rate-limit status: a
+/// stray header on a 400 must not park the provider.
+#[tokio::test]
+async fn complete_retry_after_is_gated_on_rate_limit_status() {
+    let cases: [(&str, u16, Option<std::time::Duration>); 2] = [
+        (
+            "429 carries the hint",
+            429,
+            Some(std::time::Duration::from_secs(30)),
+        ),
+        ("400 drops the hint", 400, None),
+    ];
+    for (name, status, want) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("retry-after", "30")
+                    .set_body_json(json!({"error": {"type": "t", "message": "m"}})),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+
+        let err = provider.complete(user_request("gpt-4o")).await.unwrap_err();
+
+        match err {
+            routectl_core::Error::Upstream { retry_after, .. } => {
+                assert_eq!(retry_after, want, "{name}");
+            }
+            other => panic!("{name}: expected Upstream, got: {other:?}"),
+        }
+    }
+}
+
+/// A flat mantle body with no `__type` takes its exception type from the
+/// `x-amzn-errortype` header (the coral URL tail is dropped).
+#[tokio::test]
+async fn complete_flat_body_lifts_type_from_aws_error_type_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header(
+                    "x-amzn-errortype",
+                    "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
+                )
+                .set_body_json(json!({"message": "invalid model identifier"})),
+        )
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+
+    let err = provider.complete(user_request("gpt-4o")).await.unwrap_err();
+
+    match err {
+        routectl_core::Error::Upstream {
+            status,
+            upstream_type,
+            upstream_code,
+            ..
+        } => {
+            assert_eq!(status, 400);
+            assert_eq!(upstream_type.as_deref(), Some("ValidationException"));
+            assert_eq!(upstream_code, None);
+        }
+        other => panic!("expected Upstream, got: {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Response-body cap adoption (the DoS response-body cap). One byte over the 16 MiB ceiling
 // exercised end-to-end; wiremock advertises an honest Content-Length, so the

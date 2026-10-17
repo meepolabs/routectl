@@ -187,6 +187,12 @@ pub(crate) mod retry_after;
 ))]
 pub(crate) mod upstream_request_id;
 
+// The one read of a non-success upstream response (capped body, gated
+// Retry-After, correlation id, AWS header lift, classifier tokens). Gated on
+// the lanes that route their error mapping through it.
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+pub(crate) mod upstream_error;
+
 // Shared tool-call id charset sanitizer. Anthropic and Bedrock Converse
 // require `tool_use.id` to match `^[a-zA-Z0-9_-]+$`; an OpenAI-origin id
 // with `.`/`:`/`/` 400s the upstream. Applied at every id-emit site and
