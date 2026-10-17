@@ -21,6 +21,8 @@
 //! config-nameable kind can have zero rows in (today `gemini`) while still
 //! being fully configurable.
 
+use routectl_core::provider_kind::config as kind;
+
 /// Config-nameable provider kinds paired with their single conventional
 /// credential env var. Keys are the stable `kind_str()` discriminants
 /// (`anthropic-api`, `openai-compat`, ...). Both openai-family kinds share
@@ -29,10 +31,10 @@
 /// oauth-only and has no env var to offer, but this table names one
 /// convention per kind, not per auth mode).
 static ENV_VAR_TABLE: &[(&str, &str)] = &[
-    ("anthropic-api", "ANTHROPIC_API_KEY"),
-    ("openai-compat", "OPENAI_API_KEY"),
-    ("openai-responses", "OPENAI_API_KEY"),
-    ("gemini", "GEMINI_API_KEY"),
+    (kind::ANTHROPIC_API, "ANTHROPIC_API_KEY"),
+    (kind::OPENAI_COMPAT, "OPENAI_API_KEY"),
+    (kind::OPENAI_RESPONSES, "OPENAI_API_KEY"),
+    (kind::GEMINI, "GEMINI_API_KEY"),
 ];
 
 /// Config-nameable provider kinds deliberately omitted from
@@ -43,7 +45,7 @@ pub static EXCLUDED_KINDS: &[&str] = &[
     // (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, plus an optional
     // AWS_SESSION_TOKEN and region), so there is no single env var to
     // offer as one `env://VAR` credential ref.
-    "bedrock",
+    kind::BEDROCK,
 ];
 
 /// The conventional credential env-var name for a config-nameable provider

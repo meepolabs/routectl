@@ -32,6 +32,7 @@
 use std::fmt;
 
 use routectl_core::capability::SignalTier;
+use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::WirePath;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
 
@@ -266,9 +267,9 @@ enum Dialect {
 impl Dialect {
     fn of_kind(provider_kind: &str) -> Option<Self> {
         match provider_kind {
-            "anthropic-api" => Some(Self::AnthropicApi),
-            "bedrock" => Some(Self::Bedrock),
-            "openai-compat" => Some(Self::OpenAi),
+            kind::ANTHROPIC_API => Some(Self::AnthropicApi),
+            kind::BEDROCK => Some(Self::Bedrock),
+            kind::OPENAI_COMPAT => Some(Self::OpenAi),
             _ => None,
         }
     }

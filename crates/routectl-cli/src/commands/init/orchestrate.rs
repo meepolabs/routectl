@@ -513,10 +513,10 @@ fn recovery_error(err: Error) -> Error {
 /// id). Purely illustrative; any real id the provider serves is accepted.
 fn example_hint_for_kind(kind: &str) -> &'static str {
     match kind {
-        "anthropic-api" => "claude-sonnet-4-5",
-        "openai-compat" => "gpt-4o",
-        "openai-responses" => "gpt-5",
-        "gemini" => "gemini-2.5-pro",
+        routectl_core::provider_kind::config::ANTHROPIC_API => "claude-sonnet-4-5",
+        routectl_core::provider_kind::config::OPENAI_COMPAT => "gpt-4o",
+        routectl_core::provider_kind::config::OPENAI_RESPONSES => "gpt-5",
+        routectl_core::provider_kind::config::GEMINI => "gemini-2.5-pro",
         _ => "the provider's upstream model id",
     }
 }

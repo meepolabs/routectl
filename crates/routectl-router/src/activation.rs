@@ -220,10 +220,10 @@ impl ActivationDelta {
 #[must_use]
 pub fn provider_kind_for_oauth_id(oauth_id: &str) -> Option<&'static str> {
     match oauth_id {
-        "anthropic" => Some("anthropic-api"),
-        "codex" => Some("openai-responses"),
-        "xai" => Some("openai-compat"),
-        "antigravity" => Some("gemini"),
+        "anthropic" => Some(routectl_core::provider_kind::config::ANTHROPIC_API),
+        "codex" => Some(routectl_core::provider_kind::config::OPENAI_RESPONSES),
+        "xai" => Some(routectl_core::provider_kind::config::OPENAI_COMPAT),
+        "antigravity" => Some(routectl_core::provider_kind::config::GEMINI),
         _ => None,
     }
 }

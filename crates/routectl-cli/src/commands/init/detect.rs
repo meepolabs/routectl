@@ -20,7 +20,7 @@ use crate::commands::provider_env::env_var_for_kind;
 /// supply -- and `openai-responses` is not a kind `provider add` constructs
 /// from an api-key ref at all. An env var whose kind is outside this set is
 /// surfaced by no offer even when it resolves.
-const ENV_OFFERABLE_KINDS: &[&str] = &["anthropic-api"];
+const ENV_OFFERABLE_KINDS: &[&str] = &[routectl_core::provider_kind::config::ANTHROPIC_API];
 
 /// OAuth login ids `init` may OFFER. Restricted to the ids `provider add` can
 /// actually build a provider block for through the oauth login path -- today

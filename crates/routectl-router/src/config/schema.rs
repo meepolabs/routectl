@@ -1367,7 +1367,7 @@ impl CacheCapability {
     /// breakpoint to an upstream routectl does not understand.
     pub fn for_provider_kind(kind: &str) -> Self {
         match kind {
-            "anthropic-api" => Self::new(true, true),
+            kind::ANTHROPIC_API => Self::new(true, true),
             // Conservative kind-level default used only when no
             // `api_shape` is known (the kind token carries no shape).
             // `ProviderEntry::cache_capability()` special-cases the
@@ -1382,14 +1382,14 @@ impl CacheCapability {
             // so the dispatch path never auto-emits to a shape it cannot
             // reason about. Caller-supplied per-block markers cache
             // normally regardless; operators may override per-entry.
-            "bedrock" => Self::new(false, true),
+            kind::BEDROCK => Self::new(false, true),
             // OpenAI auto-caches server-side; there is no explicit
             // breakpoint to emit, but `cached_tokens` IS reported back.
-            "openai-responses" => Self::new(false, true),
+            kind::OPENAI_RESPONSES => Self::new(false, true),
             // Gemini has implicit prefix caching (automatic, free writes)
             // and explicit context caching. No top-level breakpoint to
             // emit, but `cachedContentTokenCount` is reported back.
-            "gemini" => Self::new(false, true),
+            kind::GEMINI => Self::new(false, true),
             // openai-compat and every unknown kind: emit nothing.
             _ => Self::new(false, false),
         }

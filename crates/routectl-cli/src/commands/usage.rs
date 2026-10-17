@@ -529,10 +529,10 @@ const DISJOINT_REASONING_KIND: &str = routectl_core::provider_kind::config::GEMI
 /// [`DISJOINT_REASONING_KIND`] this must cover every `ProviderEntry::kind_str`
 /// token; the test below pins that it does.
 const SUBSUMED_REASONING_KINDS: [&str; 4] = [
-    "openai-compat",
-    "anthropic-api",
-    "bedrock",
-    "openai-responses",
+    routectl_core::provider_kind::config::OPENAI_COMPAT,
+    routectl_core::provider_kind::config::ANTHROPIC_API,
+    routectl_core::provider_kind::config::BEDROCK,
+    routectl_core::provider_kind::config::OPENAI_RESPONSES,
 ];
 
 /// How a row's reasoning tokens relate to its output count, resolved from the

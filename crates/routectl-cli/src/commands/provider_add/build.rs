@@ -1,6 +1,7 @@
 //! Provider entry construction from args (direct / forwarded / oauth).
 
 use routectl_auth::{SecretRef, env_ref};
+use routectl_core::provider_kind::config as kind;
 use routectl_core::{Error, Result};
 use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::ProviderEntry;
@@ -14,7 +15,7 @@ use super::{AddIo, ProviderAddArgs};
 /// non-interactive scope: Bedrock takes a multi-field credential block, and
 /// OpenAI Responses defaults to OAuth; both are configured by hand or through
 /// the interactive flow.
-const SUPPORTED_KINDS: &[&str] = &["openai-compat", "anthropic-api", "gemini"];
+const SUPPORTED_KINDS: &[&str] = &[kind::OPENAI_COMPAT, kind::ANTHROPIC_API, kind::GEMINI];
 
 /// The login provider id an oauth-backed `--kind` delegates to, or `None`
 /// for an ordinary api-key kind. Hardcode-then-abstract: the login flow
@@ -60,7 +61,7 @@ pub(super) fn build_entry(
     }
 
     match args.kind.as_str() {
-        "openai-compat" => {
+        kind::OPENAI_COMPAT => {
             let base_url = args.base_url.as_deref().ok_or_else(|| {
                 Error::Config("`openai-compat` requires `--base-url <URL>`".into())
             })?;
@@ -71,7 +72,7 @@ pub(super) fn build_entry(
                 pending,
             ))
         }
-        "anthropic-api" => {
+        kind::ANTHROPIC_API => {
             let (ref_str, cred_class, pending) = resolve_secret(args, io)?;
             let entry = ProviderEntry::anthropic_api(ref_str);
             let entry = match args.base_url.as_deref() {
@@ -80,7 +81,7 @@ pub(super) fn build_entry(
             };
             Ok((entry, cred_class, pending))
         }
-        "gemini" => {
+        kind::GEMINI => {
             // Gemini has no public base-URL setter; its constructor pins the
             // public v1beta endpoint. A custom endpoint is a hand-edit, so a
             // `--base-url` here is rejected rather than silently ignored.
@@ -107,7 +108,7 @@ pub(super) fn build_entry(
 /// to the Anthropic origin the shared gate requires. Forwarded is valid for
 /// `anthropic-api` ONLY, and never mixes with a secret-source flag.
 fn build_forwarded(args: &ProviderAddArgs) -> Result<(ProviderEntry, &'static str, PendingSecret)> {
-    if args.kind != "anthropic-api" {
+    if args.kind != kind::ANTHROPIC_API {
         return Err(Error::Config(format!(
             "`--credential-source forwarded` is only valid for `--kind anthropic-api` \
              (got `{}`)",

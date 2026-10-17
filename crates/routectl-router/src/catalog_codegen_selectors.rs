@@ -11,6 +11,8 @@
 //! and `crate::catalog_import::build_import_candidate` (never
 //! feature-gated) calls it on freshly fetched sources.
 
+use routectl_core::provider_kind::config as kind;
+
 use crate::catalog::SENTINEL_MIN_PREFIX_TOKENS;
 
 /// One Anthropic-shaped selector: a provider-direct or Bedrock Claude
@@ -416,7 +418,7 @@ pub struct CatchAllRow {
 
 pub const CATCH_ALL_ROWS: &[CatchAllRow] = &[
     CatchAllRow {
-        provider_kind: "anthropic-api",
+        provider_kind: kind::ANTHROPIC_API,
         wm: 1.25,
         rm: 0.10,
         ttl_seconds: 300,
@@ -424,7 +426,7 @@ pub const CATCH_ALL_ROWS: &[CatchAllRow] = &[
         auto_cacher: false,
     },
     CatchAllRow {
-        provider_kind: "bedrock",
+        provider_kind: kind::BEDROCK,
         wm: 1.25,
         rm: 0.10,
         ttl_seconds: 300,
@@ -432,7 +434,7 @@ pub const CATCH_ALL_ROWS: &[CatchAllRow] = &[
         auto_cacher: false,
     },
     CatchAllRow {
-        provider_kind: "openai-compat",
+        provider_kind: kind::OPENAI_COMPAT,
         wm: 1.0,
         rm: 0.10,
         ttl_seconds: 300,

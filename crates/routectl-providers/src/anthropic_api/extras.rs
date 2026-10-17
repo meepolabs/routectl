@@ -16,6 +16,7 @@
 
 use serde_json::Value;
 
+use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
 
@@ -313,7 +314,7 @@ enum BudgetSource {
 /// tree -- it re-derives the reader set from the call sites on disk and
 /// fails when a lane starts or stops reading the knob without this list
 /// moving with it.
-pub const MAX_THINKING_BUDGET_READER_KINDS: &[&str] = &["anthropic-api", "bedrock"];
+pub const MAX_THINKING_BUDGET_READER_KINDS: &[&str] = &[kind::ANTHROPIC_API, kind::BEDROCK];
 
 /// Whether an egress of `provider_kind` reads the operator-declared
 /// `max_thinking_budget`, per [`MAX_THINKING_BUDGET_READER_KINDS`]. An

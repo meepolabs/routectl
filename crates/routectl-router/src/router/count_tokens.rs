@@ -35,6 +35,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use routectl_core::failure_class::{LastOutcome, classify, classify_with_attempt};
+use routectl_core::provider_kind::config as config_kind;
 use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
 use super::capability_learn::LearnDedupeKey;
@@ -76,13 +77,12 @@ use crate::anthropic_family::{AnthropicFamily, anthropic_family};
 /// context windows with this number, so a clean 501 is the better
 /// answer than a plausible wrong count.
 ///
-/// The `bedrock` arm needs no feature gate: it matches a plain string
-/// literal, so a build without that egress compiled in simply never
-/// produces a seat that reaches it.
+/// The `bedrock` arm needs no feature gate: its kind constant exists in every
+/// build, and a build without that egress never produces a seat reaching it.
 pub(super) fn seat_can_count_tokens(kind: Option<&str>, upstream: &str) -> bool {
     match kind {
-        Some("anthropic-api") => true,
-        Some("bedrock") => matches!(anthropic_family(upstream), AnthropicFamily::Yes),
+        Some(config_kind::ANTHROPIC_API) => true,
+        Some(config_kind::BEDROCK) => matches!(anthropic_family(upstream), AnthropicFamily::Yes),
         _ => false,
     }
 }

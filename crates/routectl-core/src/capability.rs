@@ -371,7 +371,7 @@ const BEDROCK_REQUEST_BAG_PREFIXES: &[&str] = &["additionalModelRequestFields", 
 /// segment), so a producer of non-field keys must test this function's
 /// OUTPUT.
 pub fn normalize_capability_key(raw: &str, provider_kind: &str) -> String {
-    if provider_kind == "bedrock" && !is_field_namespace_key(raw) {
+    if provider_kind == crate::provider_kind::config::BEDROCK && !is_field_namespace_key(raw) {
         return normalize_bedrock_key(raw);
     }
     raw.to_string()

@@ -340,7 +340,7 @@ fn match_inferred(
 /// provider has no inferred matcher.
 fn inferred_table_for(provider_kind: &str) -> Option<&'static [InferredPhrase]> {
     match provider_kind {
-        "anthropic-api" => Some(ANTHROPIC_INFERRED),
+        routectl_core::provider_kind::config::ANTHROPIC_API => Some(ANTHROPIC_INFERRED),
         OPENAI_RESPONSES_KIND => Some(OPENAI_RESPONSES_INFERRED),
         _ => None,
     }
@@ -366,7 +366,7 @@ type PatternTable = &'static [(&'static str, &'static str)];
 
 fn feature_naming_tables_for(provider_kind: &str) -> Option<(PatternTable, PatternTable)> {
     match provider_kind {
-        "anthropic-api" => Some((
+        routectl_core::provider_kind::config::ANTHROPIC_API => Some((
             ANTHROPIC_FEATURE_NAMING_TEMPLATES,
             ANTHROPIC_FEATURE_NAMING_TRANSLATIONS,
         )),

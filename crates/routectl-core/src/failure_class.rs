@@ -196,6 +196,8 @@ pub struct ClassifiedFailure {
 /// the same policy row; it never changes retry / fallback / debit
 /// behavior.
 mod tables {
+    use crate::provider_kind::config as kind;
+
     /// One provider family's token sets. Each field lists the tokens that
     /// trigger a same-row lift into the corresponding class.
     pub struct FamilyTokens {
@@ -274,9 +276,9 @@ mod tables {
     /// the [`UNION`] when the kind is absent or unrecognized.
     pub fn family_for(kind: Option<&str>) -> &'static FamilyTokens {
         match kind {
-            Some("anthropic-api") => &ANTHROPIC,
-            Some("openai-compat") => &OPENAI,
-            Some("bedrock") => &BEDROCK,
+            Some(kind::ANTHROPIC_API) => &ANTHROPIC,
+            Some(kind::OPENAI_COMPAT) => &OPENAI,
+            Some(kind::BEDROCK) => &BEDROCK,
             _ => &UNION,
         }
     }
@@ -313,7 +315,7 @@ mod replay {
     /// GATE 3: provider `kind` strings for which a replay rejection
     /// envelope has actually been captured. Closed on purpose -- a family
     /// with no captured envelope can never match, whatever its body says.
-    const FIXTURE_BACKED_KINDS: &[&str] = &["openai-responses"];
+    const FIXTURE_BACKED_KINDS: &[&str] = &[crate::provider_kind::config::OPENAI_RESPONSES];
 
     /// One proven rejection shape.
     ///
