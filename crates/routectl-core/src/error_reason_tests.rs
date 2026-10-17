@@ -1,6 +1,7 @@
 //! Tests for the typed upstream reason carried on `Error::Upstream`: it
 //! survives the request-id rebuild in either order, reads `None` off the
-//! variant, and keeps the boxed tail unallocated when nothing is carried.
+//! variant, keeps the boxed tail unallocated when nothing is carried, and
+//! renders as its token in `Debug`.
 
 use super::Error;
 use crate::UpstreamReason;
@@ -69,4 +70,23 @@ fn extras_stay_unallocated_when_nothing_is_carried() {
         panic!("expected Error::Upstream, got {err:?}");
     };
     assert!(extras.0.is_none());
+}
+
+#[test]
+fn upstream_debug_renders_the_reason_token_only_when_carried() {
+    for reason in REASONS {
+        let err = upstream_with_parse().with_upstream_reason(Some(reason));
+
+        let rendered = format!("{err:?}");
+
+        let field = format!("upstream_reason: Some({:?})", reason.as_str());
+        assert!(rendered.contains(&field), "{rendered}");
+    }
+
+    let rendered = format!("{:?}", upstream_with_parse());
+
+    assert!(rendered.contains("upstream_reason: None"), "{rendered}");
+    for reason in REASONS {
+        assert!(!rendered.contains(reason.as_str()), "{rendered}");
+    }
 }
