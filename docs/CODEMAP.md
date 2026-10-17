@@ -4074,6 +4074,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   latch -- rather than copying entries, so an observation racing the router swap
   is neither lost nor reclassified against a stale baseline, and
   once-per-process holds literally across a reload
+- `src/router/credential_park.rs` -- seat credential park, router side:
+  parks a seat when a terminal rejection (or a terminal auth refresh) carries
+  a typed `UpstreamReason`, never for a probe; lifts it on a success through
+  the seat; `clear_all_credential_parks` for the reload coordinator
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `admit_dispatch`/`admit_probe_dispatch` (admission returns the
   half-open ownership guard), the
@@ -4130,7 +4134,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `is_dispatchable`) for least-loaded seat selection -- it shares the leak
   arithmetic with `refill_tokens` (via `projected_tokens`) so the two cannot
   drift, and never claims the half-open probe slot the way a
-  `try_dispatch`-based read would
+  `try_dispatch`-based read would. A credential park (`CredentialPark`:
+  `UpstreamReason` + deadline, `CREDENTIAL_PARK_BACKSTOP` = 1 h) sits beside
+  the breaker: only `park_credential*` / `clear_credential_park` touch it
+  (never `record_success` / `record_failure` / `force_open`), the gate refuses
+  with `GateDecision::CredentialParked { reason, until }`, and a lapsed park
+  shares the single half-open re-test slot with a lapsed cooldown
 - `src/seat_naming.rs` -- THE naming convention for OAuth account entries and
   their pool, pure over a `Config` (never the credential store): `pool_name`
   (plain provider-family name), `account_entry_name` (`<family>-default` /

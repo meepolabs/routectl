@@ -650,6 +650,7 @@ impl Router {
                 match result {
                     Ok(mut resp) => {
                         self.record_success(state_key);
+                        self.clear_credential_park(state_key);
                         probe_guard.disarm();
                         sample_charge.keep();
                         self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
@@ -808,6 +809,11 @@ impl Router {
                             // attempt claimed via the gate, or the breaker
                             // stays locked open until restart.
                             if let Err(refresh_err) = provider.on_auth_failure().await {
+                                self.park_credential_on_rejection(
+                                    state_key,
+                                    &refresh_err,
+                                    is_probe,
+                                );
                                 probe_guard.release();
                                 return Err(refresh_err);
                             }
@@ -962,6 +968,9 @@ impl Router {
                             }
                             probe_guard.disarm();
                         }
+                        // Outside the debit gate: a credential rejection
+                        // classifies Auth, which never debits.
+                        self.park_credential_on_rejection(state_key, &e, is_probe);
                         self.emit_class_observability(
                             &e,
                             &cf,
@@ -1459,6 +1468,9 @@ impl Router {
                         if was_half_open_probe && let Some(st) = state.as_ref() {
                             st.lock().record_success(Instant::now());
                         }
+                        // First content proves the credential works, whatever
+                        // the breaker phase was.
+                        self.clear_credential_park(state_key);
                         // The probe (if any) is settled; the wrapped stream's
                         // BreakerAccounting owns the tail. Disarm so a drop here
                         // does not free a slot a later probe may hold.
@@ -1582,6 +1594,11 @@ impl Router {
                                 "stream 401 pre-content; refreshing auth and retrying once",
                             );
                             if let Err(refresh_err) = provider.on_auth_failure().await {
+                                self.park_credential_on_rejection(
+                                    state_key,
+                                    &refresh_err,
+                                    is_probe,
+                                );
                                 probe_guard.release();
                                 return Err(refresh_err);
                             }
@@ -1697,6 +1714,9 @@ impl Router {
                             }
                             probe_guard.disarm();
                         }
+                        // Outside the debit gate: a credential rejection
+                        // classifies Auth, which never debits.
+                        self.park_credential_on_rejection(state_key, &e, is_probe);
                         self.emit_class_observability(
                             &e,
                             &cf,

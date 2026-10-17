@@ -49,6 +49,7 @@ use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
+use super::runtime_gate::is_probe_request;
 use super::{
     CountedTokens, DispatchMeta, DispatchTarget, ReplayDegradation, Router, StripDecision,
     apply_layered_overlays,
@@ -483,6 +484,7 @@ impl Router {
             match result {
                 Ok(tc) => {
                     self.record_success(&target.state_key);
+                    self.clear_credential_park(&target.state_key);
                     probe_guard.disarm();
                     // Settle the replay carry WITHOUT persisting or emitting:
                     // dropping the plan releases every single-flight slot it
@@ -549,6 +551,7 @@ impl Router {
                     // The carried-artifact signal comes from the plan, so a
                     // proven replay rejection lifts here and nowhere else.
                     let policy = self.policy_for(&req.model);
+                    let is_probe = is_probe_request(req, &policy);
                     let native_cf = match replay_plan.as_ref() {
                         Some(plan) => {
                             classify_with_attempt(&e, target.provider_kind, plan.attempt())
@@ -598,6 +601,11 @@ impl Router {
                             "count_tokens 401; refreshing auth and retrying once",
                         );
                         if let Err(refresh_err) = provider.on_auth_failure().await {
+                            self.park_credential_on_rejection(
+                                &target.state_key,
+                                &refresh_err,
+                                is_probe,
+                            );
                             probe_guard.release();
                             return CountSeatOutcome::Terminal(refresh_err);
                         }
@@ -782,6 +790,9 @@ impl Router {
                     } else {
                         probe_guard.release();
                     }
+                    // Outside the debit gate: a credential rejection
+                    // classifies Auth, which never debits.
+                    self.park_credential_on_rejection(&target.state_key, &e, is_probe);
                     return CountSeatOutcome::Terminal(e);
                 }
             }

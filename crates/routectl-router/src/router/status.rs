@@ -65,6 +65,7 @@ impl Router {
                 circuit_open_elapsed: None,
                 last_outcome: None,
                 last_outcome_elapsed: None,
+                credential_park: None,
             },
             |s| s.lock().gate_status(now),
         )

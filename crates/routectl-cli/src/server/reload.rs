@@ -475,6 +475,12 @@ pub(super) async fn handle_credentials_reload(
         "credentials reloaded from disk",
     );
 
+    // The live router already dials with the reloaded tokens (the OAuth store
+    // is shared), so a seat parked on the old credential gets a fresh attempt
+    // now, before the seat-set gate below can return early on a token-only
+    // change. A seat-set rebuild carries this cleared state onward.
+    clear_credential_parks(&router_swap.load(), "credentials");
+
     // Recompute activation on EVERY successful credentials reload, before the
     // seat-gated router-rebuild early return below: activation tracks token
     // PRESENCE (expired -> present is a real transition), not the seat-key set,
@@ -505,6 +511,19 @@ pub(super) async fn handle_credentials_reload(
         &after,
     )
     .await;
+}
+
+/// Lift every credential park on `router` after a reload of `source` that may
+/// have fixed the credential a seat was parked on.
+fn clear_credential_parks(router: &Router, source: &'static str) {
+    let cleared = router.clear_all_credential_parks();
+    if cleared > 0 {
+        tracing::info!(
+            source,
+            cleared,
+            "reload cleared credential parks; parked seats will be retried",
+        );
+    }
 }
 
 /// Rebuild the live Router from the unchanged config + overlay after a
@@ -692,6 +711,10 @@ pub(super) async fn handle_config_reload(
     } else {
         publish_router(router_swap, Arc::new(new_router));
     }
+    // Only past the commit point: the candidate shares the live router's gate
+    // slots from carry-over on, so clearing any earlier would lift the live
+    // parks on a reload that is then rejected.
+    clear_credential_parks(&router_swap.load(), "config");
 
     // Soft overlay defects are logged once per accepted overlay revision, not
     // on every reload that happens to re-read an unchanged file.

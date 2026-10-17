@@ -38,6 +38,7 @@ mod capability_purge;
 mod chain;
 mod class_observe;
 mod count_tokens;
+mod credential_park;
 mod dispatch;
 mod edit_declare;
 mod feature_filter;
@@ -3248,6 +3249,10 @@ use routectl_core::failure_class::classify;
 use routectl_core::{ChatRequest, Error};
 #[cfg(test)]
 use std::time::Instant;
+
+#[cfg(test)]
+#[path = "credential_park_dispatch_tests.rs"]
+mod credential_park_dispatch_tests;
 
 #[cfg(test)]
 #[path = "probe_guard_generation_tests.rs"]

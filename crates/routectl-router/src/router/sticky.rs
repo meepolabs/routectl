@@ -286,6 +286,7 @@ impl Router {
                         crate::runtime_state::CapacitySnapshot {
                             rpm_available: Some(0.0),
                             circuit: crate::runtime_state::CircuitPhase::Open,
+                            credential_blocked: false,
                         },
                     )
             })

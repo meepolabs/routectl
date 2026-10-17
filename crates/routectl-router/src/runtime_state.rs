@@ -7,12 +7,40 @@
 
 use std::time::{Duration, Instant};
 
+use routectl_core::UpstreamReason;
 use routectl_core::failure_class::LastOutcome;
 
 use crate::config::ProviderRuntimePolicy;
 
 const DEFAULT_CIRCUIT_COOLDOWN_MS: u64 = 30_000;
 const RPM_WINDOW_MS: u64 = 60_000;
+
+/// How long a credential park holds before the half-open path re-tests the
+/// seat. Fixed rather than configurable: a false park costs at most this long
+/// plus one request, and a credentials or config reload clears every park.
+pub const CREDENTIAL_PARK_BACKSTOP: Duration = Duration::from_hours(1);
+
+/// A seat parked because its upstream rejected the credential itself, with
+/// exact evidence of why. Lives beside the breaker rather than inside it: the
+/// breaker's trip and reset paths never clear it, so a transient success or a
+/// rate-limit park cannot un-park a dead credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialPark {
+    /// Why the upstream rejected the credential.
+    pub reason: UpstreamReason,
+    /// When the park stops refusing outright and the seat becomes eligible
+    /// for a single half-open re-test.
+    pub until: Instant,
+}
+
+impl CredentialPark {
+    const fn refusal(self) -> GateDecision {
+        GateDecision::CredentialParked {
+            reason: self.reason,
+            until: self.until,
+        }
+    }
+}
 
 /// Runtime gate for a single model nickname. Created from a config
 /// `ProviderRuntimePolicy`; if all knobs are unset, the gate is a
@@ -61,6 +89,12 @@ pub struct ProviderState {
     /// Monotonic instant `last_outcome` was stamped, for elapsed-age
     /// exposure via `gate_status`.
     last_outcome_at: Option<Instant>,
+
+    /// Credential park, set only by [`Self::park_credential_until`] and
+    /// cleared only by [`Self::clear_credential_park`]. Shares
+    /// `half_open_in_flight` with the breaker, so a lapsed park and a lapsed
+    /// cooldown still admit one re-test between them.
+    credential_park: Option<CredentialPark>,
 }
 
 /// One gate admission: the decision, plus whether this call claimed the
@@ -126,6 +160,15 @@ pub enum GateDecision {
     /// already in flight). Treat as a fallbackable failure and skip
     /// this provider until the next cooldown cycle.
     CircuitOpen,
+    /// The seat's credential is parked (or its single re-test is already in
+    /// flight). Treat as a fallbackable failure; the reason and deadline are
+    /// what an all-seats-parked error reports.
+    CredentialParked {
+        /// Why the upstream rejected the credential.
+        reason: UpstreamReason,
+        /// When the park lapses into a single half-open re-test.
+        until: Instant,
+    },
 }
 
 impl ProviderState {
@@ -150,6 +193,7 @@ impl ProviderState {
             half_open_in_flight: false,
             last_outcome: None,
             last_outcome_at: None,
+            credential_park: None,
         }
     }
 
@@ -189,18 +233,26 @@ impl ProviderState {
     }
 
     fn try_dispatch_inner(&mut self, now: Instant, kind: AdmissionKind) -> GateAdmission {
-        let claimed_half_open = if let Some(opened_at) = self.circuit_opened_at {
-            if now.duration_since(opened_at) < self.active_cooldown {
+        if let Some(park) = self.credential_park
+            && (now < park.until || self.half_open_in_flight)
+        {
+            return GateAdmission::refused(park.refusal());
+        }
+        let retest_ready = match self.circuit_opened_at {
+            Some(opened_at) if now.duration_since(opened_at) < self.active_cooldown => {
                 return GateAdmission::refused(GateDecision::CircuitOpen);
             }
-            // Cooldown elapsed. Allow exactly one probe through; other
-            // callers see CircuitOpen until the probe records its
-            // outcome. We do NOT clear `circuit_opened_at` or reset
-            // the failure counter here -- only `record_success` /
-            // `record_failure` mutate that state, ensuring the breaker
-            // is closed only after a verified success.
+            Some(_) => true,
+            None => self.credential_park.is_some(),
+        };
+        let claimed_half_open = if retest_ready {
+            // Cooldown or credential park lapsed. Allow exactly one probe
+            // through; other callers are refused until the probe records its
+            // outcome. We do NOT clear `circuit_opened_at`, the park, or the
+            // failure counter here -- only the settle paths mutate that
+            // state, so the gate reopens only after a verified outcome.
             if self.half_open_in_flight {
-                return GateAdmission::refused(GateDecision::CircuitOpen);
+                return GateAdmission::refused(self.half_open_refusal());
             }
             // A BACKGROUND probe stops here, before claiming and before the
             // RPM check below. Returning now is what leaves the recovery
@@ -208,7 +260,7 @@ impl ProviderState {
             // budget untouched -- the RPM debit below is not refunded on any
             // later path.
             if matches!(kind, AdmissionKind::BackgroundProbe) {
-                return GateAdmission::refused(GateDecision::CircuitOpen);
+                return GateAdmission::refused(self.half_open_refusal());
             }
             self.half_open_in_flight = true;
             // Claimed HERE, in the same critical section that will report it.
@@ -221,14 +273,13 @@ impl ProviderState {
         if let Some(capacity) = self.rpm_capacity {
             self.refill_tokens(now, capacity);
             if self.rpm_tokens < 1.0 {
-                // The RPM gate refused, so we're NOT actually issuing
-                // the probe; release the half-open slot if we just
-                // claimed it.
-                if self.circuit_opened_at.is_some() {
+                // The RPM gate refused, so we're NOT actually issuing the
+                // probe; hand back the half-open slot if this call claimed it.
+                // Keyed on the claim, not on the breaker phase: a lapsed
+                // credential park claims with the breaker closed.
+                if claimed_half_open {
                     self.half_open_in_flight = false;
                 }
-                // The claim was taken and immediately given back inside this
-                // same critical section, so the caller never owned it.
                 return GateAdmission::refused(GateDecision::RateLimited);
             }
             self.rpm_tokens -= 1.0;
@@ -238,6 +289,14 @@ impl ProviderState {
             decision: GateDecision::Allow,
             claimed_half_open,
         }
+    }
+
+    /// The refusal a half-open-ready gate gives a caller that cannot take the
+    /// re-test: the credential park when one is set (it names the reason and
+    /// deadline an all-parked error needs), else the breaker.
+    fn half_open_refusal(&self) -> GateDecision {
+        self.credential_park
+            .map_or(GateDecision::CircuitOpen, CredentialPark::refusal)
     }
 
     /// Mark the most recent dispatch as successful. Resets the
@@ -309,6 +368,28 @@ impl ProviderState {
         self.half_open_in_flight = false;
     }
 
+    /// Park the seat's credential for [`CREDENTIAL_PARK_BACKSTOP`] from `now`.
+    pub fn park_credential(&mut self, now: Instant, reason: UpstreamReason) {
+        self.park_credential_until(reason, now + CREDENTIAL_PARK_BACKSTOP);
+    }
+
+    /// Park the seat's credential until `until`, replacing any earlier park.
+    /// Leaves the half-open slot alone: the dispatch that observed the
+    /// rejection settles its own claim through its probe guard.
+    pub const fn park_credential_until(&mut self, reason: UpstreamReason, until: Instant) {
+        self.credential_park = Some(CredentialPark { reason, until });
+    }
+
+    /// Lift the credential park, if any.
+    pub const fn clear_credential_park(&mut self) {
+        self.credential_park = None;
+    }
+
+    /// The seat's credential park, if any.
+    pub const fn credential_park(&self) -> Option<CredentialPark> {
+        self.credential_park
+    }
+
     /// Release a half-open probe slot claimed by `try_dispatch` WITHOUT
     /// recording an outcome. Used when the dispatch path declines to
     /// count an attempt as a provider fault (e.g. a probe fast-fail on a
@@ -373,10 +454,14 @@ impl ProviderState {
                 }
             }
         };
+        let credential_blocked = self
+            .credential_park
+            .is_some_and(|park| now < park.until || self.half_open_in_flight);
 
         CapacitySnapshot {
             rpm_available,
             circuit,
+            credential_blocked,
         }
     }
 
@@ -398,8 +483,23 @@ impl ProviderState {
                 .map(|opened_at| now.duration_since(opened_at)),
             last_outcome: self.last_outcome,
             last_outcome_elapsed: self.last_outcome_at.map(|at| now.duration_since(at)),
+            credential_park: self.credential_park.map(|park| CredentialParkStatus {
+                reason: park.reason,
+                remaining: park.until.saturating_duration_since(now),
+            }),
         }
     }
+}
+
+/// Status view of a credential park: the reason and how long until the park
+/// lapses into a half-open re-test (zero once it has lapsed). Monotonic, like
+/// the other gate ages; the DTO layer converts it to an epoch-ms deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialParkStatus {
+    /// Why the upstream rejected the credential.
+    pub reason: UpstreamReason,
+    /// Time left before the park lapses; zero once lapsed.
+    pub remaining: Duration,
 }
 
 /// Non-mutating health view of a `ProviderState` for the status surface.
@@ -428,6 +528,9 @@ pub struct ProviderGateStatus {
     /// Elapsed time since `last_outcome` was stamped; `None` when no dispatch
     /// has settled yet.
     pub last_outcome_elapsed: Option<Duration>,
+    /// The seat's credential park, if any: `None` when the credential is not
+    /// parked.
+    pub credential_park: Option<CredentialParkStatus>,
 }
 
 /// Read-only classification of the circuit breaker, mirroring the decision
@@ -457,15 +560,18 @@ pub struct CapacitySnapshot {
     pub rpm_available: Option<f64>,
     /// Read-only circuit-breaker phase.
     pub circuit: CircuitPhase,
+    /// Whether a credential park would refuse the dispatch: the park has not
+    /// lapsed, or its single re-test is already in flight.
+    pub credential_blocked: bool,
 }
 
 impl CapacitySnapshot {
     /// Predict whether `try_dispatch` would return `Allow` from this state,
-    /// without mutating anything: the circuit is not `Open` (i.e. `Closed`
-    /// or `HalfOpenReady`) AND there is RPM headroom (unlimited, or at least
-    /// one whole token available).
+    /// without mutating anything: no credential park refuses it, the circuit
+    /// is not `Open` (i.e. `Closed` or `HalfOpenReady`) AND there is RPM
+    /// headroom (unlimited, or at least one whole token available).
     pub fn is_dispatchable(&self) -> bool {
-        let circuit_ok = self.circuit != CircuitPhase::Open;
+        let circuit_ok = !self.credential_blocked && self.circuit != CircuitPhase::Open;
         let rpm_ok = match self.rpm_available {
             None => true,
             Some(tokens) => tokens >= 1.0,
@@ -477,3 +583,7 @@ impl CapacitySnapshot {
 #[cfg(test)]
 #[path = "runtime_state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "runtime_state_credential_park_tests.rs"]
+mod credential_park_tests;

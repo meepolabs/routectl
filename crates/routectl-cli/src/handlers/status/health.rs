@@ -328,6 +328,7 @@ mod tests {
                 circuit_open_elapsed: None,
                 last_outcome: None,
                 last_outcome_elapsed: None,
+                credential_park: None,
             },
         }
     }
@@ -354,6 +355,7 @@ mod tests {
                 circuit_open_elapsed,
                 last_outcome,
                 last_outcome_elapsed,
+                credential_park: None,
             },
         }
     }

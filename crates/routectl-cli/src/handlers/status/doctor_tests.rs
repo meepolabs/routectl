@@ -90,6 +90,7 @@ fn sample_target(last_outcome: Option<LastOutcome>) -> RouteTargetStatus {
             circuit_open_elapsed: None,
             last_outcome,
             last_outcome_elapsed: None,
+            credential_park: None,
         },
     }
 }
