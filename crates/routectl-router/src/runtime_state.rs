@@ -95,6 +95,12 @@ pub struct ProviderState {
     /// `half_open_in_flight` with the breaker, so a lapsed park and a lapsed
     /// cooldown still admit one re-test between them.
     credential_park: Option<CredentialPark>,
+
+    /// Advanced by every [`Self::reset_credential_parks`]. An attempt captures
+    /// it at admission, and its rejection parks only while it still matches,
+    /// so an attempt admitted before a reload cannot re-park the seat after
+    /// the reload lifted every park.
+    credential_generation: u64,
 }
 
 /// One gate admission: the decision, plus whether this call claimed the
@@ -194,6 +200,7 @@ impl ProviderState {
             last_outcome: None,
             last_outcome_at: None,
             credential_park: None,
+            credential_generation: 0,
         }
     }
 
@@ -380,9 +387,41 @@ impl ProviderState {
         self.credential_park = Some(CredentialPark { reason, until });
     }
 
+    /// Park the seat's credential for [`CREDENTIAL_PARK_BACKSTOP`] from `now`
+    /// only when `generation` is still the current credential generation,
+    /// returning whether it parked.
+    pub fn park_credential_in_generation(
+        &mut self,
+        now: Instant,
+        reason: UpstreamReason,
+        generation: u64,
+    ) -> bool {
+        if generation != self.credential_generation {
+            return false;
+        }
+        self.park_credential(now, reason);
+        true
+    }
+
     /// Lift the credential park, if any.
     pub const fn clear_credential_park(&mut self) {
         self.credential_park = None;
+    }
+
+    /// Lift the credential park and start a new credential generation, so a
+    /// rejection admitted before this call can no longer park the seat.
+    /// Advances even when nothing is parked: the attempt that would park may
+    /// still be in flight. Returns whether a park was lifted.
+    pub const fn reset_credential_parks(&mut self) -> bool {
+        let was_parked = self.credential_park.is_some();
+        self.credential_park = None;
+        self.credential_generation = self.credential_generation.wrapping_add(1);
+        was_parked
+    }
+
+    /// The credential generation an admission captures.
+    pub const fn credential_generation(&self) -> u64 {
+        self.credential_generation
     }
 
     /// The seat's credential park, if any.

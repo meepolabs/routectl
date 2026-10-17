@@ -676,7 +676,7 @@ async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
 
     // Heal the original home seat. The session must NOT flap back: the pin
     // now points at the healthy sibling, so it STAYS there.
-    router.record_success(&home);
+    router.settle_seat_success(&home, true);
     let healed = chain_state_keys_for(&router, Some("S"));
     assert_eq!(
         healed[0], sibling,

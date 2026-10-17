@@ -146,20 +146,24 @@ impl Router {
         kind: AdmissionKind,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
         let Some(state) = self.state.get(state_key).cloned() else {
-            return (None, ProbeSlotGuard::new(None));
+            return (None, ProbeSlotGuard::new(None, 0));
         };
         let now = Instant::now();
-        let admission = match kind {
-            AdmissionKind::ClientDispatch => state.lock().try_dispatch_admitting(now),
-            AdmissionKind::BackgroundProbe => state.lock().try_dispatch_probe(now),
+        // The credential generation is read in the admission's own critical
+        // section: a reload landing between two acquisitions would hand this
+        // attempt the post-reload generation and let its rejection re-park.
+        let (admission, credential_generation) = {
+            let mut st = state.lock();
+            let admission = match kind {
+                AdmissionKind::ClientDispatch => st.try_dispatch_admitting(now),
+                AdmissionKind::BackgroundProbe => st.try_dispatch_probe(now),
+            };
+            (admission, st.credential_generation())
         };
         #[cfg(test)]
         run_after_admission_hook();
-        let guard = if admission.claimed_half_open {
-            ProbeSlotGuard::new(Some(state))
-        } else {
-            ProbeSlotGuard::new(None)
-        };
+        let claimed = admission.claimed_half_open.then_some(state);
+        let guard = ProbeSlotGuard::new(claimed, credential_generation);
         let refusal = match admission.decision {
             GateDecision::Allow => None,
             GateDecision::RateLimited => Some((
@@ -171,17 +175,11 @@ impl Router {
                 Error::upstream(provider_name_for_err, 0, "circuit breaker open"),
             )),
             GateDecision::CredentialParked { .. } => Some((
-                "credential_parked",
+                super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
                 Error::upstream(provider_name_for_err, 0, "credential parked"),
             )),
         };
         (refusal, guard)
-    }
-
-    pub(super) fn record_success(&self, state_key: &str) {
-        if let Some(state) = self.state.get(state_key) {
-            state.lock().record_success(Instant::now());
-        }
     }
 
     pub(super) fn record_failure(&self, state_key: &str, outcome: LastOutcome) {
@@ -248,14 +246,26 @@ pub(super) struct ProbeSlotGuard {
     /// `Some` while armed; `None` once an outcome settled the slot or the
     /// dispatch never claimed it.
     state: Option<Arc<Mutex<ProviderState>>>,
+    /// The seat's credential generation at admission. Outlives `disarm`:
+    /// the terminal park sites run after the breaker settle disarmed.
+    credential_generation: u64,
 }
 
 impl ProbeSlotGuard {
     /// Arm a guard for a dispatch that claimed the half-open probe slot. Pass
     /// `None` for a dispatch that did not (closed breaker): the guard is then
     /// inert and its drop is a no-op.
-    const fn new(state: Option<Arc<Mutex<ProviderState>>>) -> Self {
-        Self { state }
+    const fn new(state: Option<Arc<Mutex<ProviderState>>>, credential_generation: u64) -> Self {
+        Self {
+            state,
+            credential_generation,
+        }
+    }
+
+    /// The credential generation this attempt was admitted under; a
+    /// credential rejection parks the seat only while it is still current.
+    pub(super) const fn credential_generation(&self) -> u64 {
+        self.credential_generation
     }
 
     /// Whether this guard still holds the half-open claim its admission took.

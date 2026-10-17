@@ -38,6 +38,7 @@ use super::capability_observe::{UntranslatedCapabilities, install_translation_re
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
+use super::credential_park::log_gate_refusal;
 use super::edit_declare::{
     declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
 };
@@ -568,11 +569,11 @@ impl Router {
                 let mut probe_guard = {
                     let (refusal, guard) = self.admit_dispatch(state_key, provider_name);
                     if let Some((gate_kind, gate_err)) = refusal {
-                        tracing::warn!(
-                            provider = provider_name,
-                            model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
+                        log_gate_refusal(
+                            provider_name,
+                            target.nickname.as_deref().unwrap_or(""),
                             gate_kind,
-                            error = ?gate_err,
+                            &gate_err,
                             "gate blocked",
                         );
                         // Keep the FIRST real error: a synthetic gate error
@@ -649,8 +650,7 @@ impl Router {
 
                 match result {
                     Ok(mut resp) => {
-                        self.record_success(state_key);
-                        self.clear_credential_park(state_key);
+                        self.settle_seat_success(state_key, true);
                         probe_guard.disarm();
                         sample_charge.keep();
                         self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
@@ -813,6 +813,7 @@ impl Router {
                                     state_key,
                                     &refresh_err,
                                     is_probe,
+                                    probe_guard.credential_generation(),
                                 );
                                 probe_guard.release();
                                 return Err(refresh_err);
@@ -970,7 +971,12 @@ impl Router {
                         }
                         // Outside the debit gate: a credential rejection
                         // classifies Auth, which never debits.
-                        self.park_credential_on_rejection(state_key, &e, is_probe);
+                        self.park_credential_on_rejection(
+                            state_key,
+                            &e,
+                            is_probe,
+                            probe_guard.credential_generation(),
+                        );
                         self.emit_class_observability(
                             &e,
                             &cf,
@@ -1378,11 +1384,11 @@ impl Router {
                 // took (see `complete_inner`).
                 let (refusal, mut probe_guard) = self.admit_dispatch(state_key, provider_name);
                 if let Some((gate_kind, gate_err)) = refusal {
-                    tracing::warn!(
-                        provider = provider_name,
-                        model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
+                    log_gate_refusal(
+                        provider_name,
+                        target.nickname.as_deref().unwrap_or(""),
                         gate_kind,
-                        error = ?gate_err,
+                        &gate_err,
                         "stream gate blocked",
                     );
                     // Keep the FIRST real error: a synthetic gate error
@@ -1465,12 +1471,9 @@ impl Router {
                         // quarantine tradeoff of closing on first content
                         // (see runtime_state.rs).
                         let state = self.state.get(state_key).cloned();
-                        if was_half_open_probe && let Some(st) = state.as_ref() {
-                            st.lock().record_success(Instant::now());
-                        }
                         // First content proves the credential works, whatever
                         // the breaker phase was.
-                        self.clear_credential_park(state_key);
+                        self.settle_seat_success(state_key, was_half_open_probe);
                         // The probe (if any) is settled; the wrapped stream's
                         // BreakerAccounting owns the tail. Disarm so a drop here
                         // does not free a slot a later probe may hold.
@@ -1598,6 +1601,7 @@ impl Router {
                                     state_key,
                                     &refresh_err,
                                     is_probe,
+                                    probe_guard.credential_generation(),
                                 );
                                 probe_guard.release();
                                 return Err(refresh_err);
@@ -1716,7 +1720,12 @@ impl Router {
                         }
                         // Outside the debit gate: a credential rejection
                         // classifies Auth, which never debits.
-                        self.park_credential_on_rejection(state_key, &e, is_probe);
+                        self.park_credential_on_rejection(
+                            state_key,
+                            &e,
+                            is_probe,
+                            probe_guard.credential_generation(),
+                        );
                         self.emit_class_observability(
                             &e,
                             &cf,

@@ -514,7 +514,9 @@ pub(super) async fn handle_credentials_reload(
 }
 
 /// Lift every credential park on `router` after a reload of `source` that may
-/// have fixed the credential a seat was parked on.
+/// have fixed the credential a seat was parked on. Also starts a new credential
+/// generation on every seat, so an attempt admitted before the reload cannot
+/// re-park its seat when its rejection lands after it.
 fn clear_credential_parks(router: &Router, source: &'static str) {
     let cleared = router.clear_all_credential_parks();
     if cleared > 0 {

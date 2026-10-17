@@ -237,3 +237,40 @@ fn capacity_snapshot_reads_a_credential_blocked_seat_as_not_dispatchable() {
         assert_eq!(snapshot.is_dispatchable(), dispatchable, "{name}");
     }
 }
+
+#[test]
+fn a_rejection_parks_only_in_the_credential_generation_it_was_admitted_under() {
+    let rows: [(&str, bool, bool, bool); 3] = [
+        (
+            "no reset between admission and rejection",
+            false,
+            false,
+            true,
+        ),
+        ("a reset with nothing parked", false, true, false),
+        ("a reset that lifted a park", true, true, false),
+    ];
+    for (name, parked_before, reset, parks) in rows {
+        // Arrange
+        let mut s = state_with_breaker(None);
+        let t0 = Instant::now();
+        if parked_before {
+            s.park_credential(t0, UpstreamReason::CredentialInvalid);
+        }
+        let admitted_under = s.credential_generation();
+        if reset {
+            s.reset_credential_parks();
+        }
+
+        // Act
+        let parked = s.park_credential_in_generation(t0, EXPIRED, admitted_under);
+
+        // Assert
+        assert_eq!(parked, parks, "{name}");
+        let expected = parks.then(|| CredentialPark {
+            reason: EXPIRED,
+            until: t0 + CREDENTIAL_PARK_BACKSTOP,
+        });
+        assert_eq!(s.credential_park(), expected, "{name}");
+    }
+}

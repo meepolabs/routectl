@@ -17,7 +17,8 @@ use routectl_core::{
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::sync::Notify;
 
 const EXPIRED: Option<UpstreamReason> = Some(UpstreamReason::CredentialExpired);
 const INVALID: Option<UpstreamReason> = Some(UpstreamReason::CredentialInvalid);
@@ -27,6 +28,9 @@ enum Step {
     Ok,
     Reject(u16, Option<UpstreamReason>),
 }
+
+/// The status and reason an auth refresh fails with.
+type RefreshErr = (u16, Option<UpstreamReason>);
 
 #[derive(Clone, Copy, Debug)]
 enum Surface {
@@ -44,6 +48,25 @@ struct ScriptedProvider {
     script: Mutex<VecDeque<Step>>,
     refresh_err: Option<(u16, Option<UpstreamReason>)>,
     calls: AtomicUsize,
+    hold: Option<Arc<Hold>>,
+}
+
+/// Holds the first dispatch inside the upstream call until released, so a
+/// test can act between the attempt's admission and its outcome.
+#[derive(Default)]
+struct Hold {
+    entered: Notify,
+    release: Notify,
+    taken: AtomicBool,
+}
+
+impl Hold {
+    async fn wait_once(&self) {
+        if !self.taken.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
 }
 
 impl ScriptedProvider {
@@ -61,7 +84,27 @@ impl ScriptedProvider {
             script: Mutex::new(script.iter().copied().collect()),
             refresh_err,
             calls: AtomicUsize::new(0),
+            hold: None,
         })
+    }
+
+    fn held(
+        id: &str,
+        script: &[Step],
+        refresh_err: Option<(u16, Option<UpstreamReason>)>,
+        hold: Arc<Hold>,
+    ) -> Arc<Self> {
+        let mut provider = Arc::into_inner(Self::with_refresh(id, script, refresh_err))
+            .expect("freshly built provider is unshared");
+        provider.hold = Some(hold);
+        Arc::new(provider)
+    }
+
+    async fn held_next(&self) -> Result<()> {
+        if let Some(hold) = &self.hold {
+            hold.wait_once().await;
+        }
+        self.next()
     }
 
     fn next(&self) -> Result<()> {
@@ -110,7 +153,7 @@ impl Provider for ScriptedProvider {
         Err(Error::normalize_response(&self.id, "unused"))
     }
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-        self.next()?;
+        self.held_next().await?;
         Ok(ChatResponse {
             model: req.model,
             ..Default::default()
@@ -118,11 +161,11 @@ impl Provider for ScriptedProvider {
     }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         use futures::stream::StreamExt as _;
-        self.next()?;
+        self.held_next().await?;
         Ok(futures::stream::iter(vec![Ok(content_chunk())]).boxed())
     }
     async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
-        self.next()?;
+        self.held_next().await?;
         Ok(TokenCount {
             input_tokens: 7,
             extras: Default::default(),
@@ -386,4 +429,187 @@ async fn clear_all_credential_parks_lifts_every_seat() {
     assert_eq!(cleared, 2);
     assert_eq!(park_reason(&router, "m-a"), None);
     assert_eq!(park_reason(&router, "m-b"), None);
+}
+
+#[tokio::test]
+async fn a_success_settles_the_breaker_and_the_park_in_one_critical_section() {
+    for surface in SURFACES {
+        // Arrange: a lapsed park whose re-test succeeds, and a rejection that
+        // tries to park the seat from inside the success settlement.
+        let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
+        let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+        let router = chain_router(primary, sibling, false);
+        assert!(router.park_credential_for_tests(
+            "m-a",
+            UpstreamReason::CredentialExpired,
+            Instant::now()
+        ));
+        let slot = router.state.get("m-a").cloned().expect("m-a slot");
+        let fired = Arc::new(AtomicBool::new(false));
+        let waited_for_the_settle = Arc::new(AtomicBool::new(false));
+        {
+            let (slot, fired, waited) =
+                (slot.clone(), fired.clone(), waited_for_the_settle.clone());
+            super::credential_park::set_within_success_settle_hook(move || {
+                fired.store(true, Ordering::SeqCst);
+                match slot.try_lock() {
+                    Some(mut state) => {
+                        state.park_credential(Instant::now(), UpstreamReason::CredentialInvalid)
+                    }
+                    None => waited.store(true, Ordering::SeqCst),
+                }
+            });
+        }
+
+        // Act
+        let served = dispatch(&router, surface, request(None, false)).await;
+        if waited_for_the_settle.load(Ordering::SeqCst) {
+            slot.lock()
+                .park_credential(Instant::now(), UpstreamReason::CredentialInvalid);
+        }
+
+        // Assert
+        assert!(served, "{surface:?}");
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "{surface:?}: the success must settle through the seat"
+        );
+        assert_eq!(
+            park_reason(&router, "m-a"),
+            INVALID,
+            "{surface:?}: a rejection after the success must stay parked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_rejection_admitted_before_a_reload_parks_only_when_no_reload_landed() {
+    let rejections: [(&str, &[Step], Option<RefreshErr>); 2] = [
+        ("terminal rejection", &[Step::Reject(403, INVALID)], None),
+        (
+            "terminal refresh failure",
+            &[Step::Reject(401, None)],
+            Some((400, INVALID)),
+        ),
+    ];
+    for surface in SURFACES {
+        for (name, script, refresh_err) in rejections {
+            for (reload, expected) in [(true, None), (false, INVALID)] {
+                // Arrange: the seat is healthy at admission; the attempt is
+                // held inside the upstream call.
+                let hold = Arc::new(Hold::default());
+                let primary = ScriptedProvider::held("p-a", script, refresh_err, hold.clone());
+                let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+                let router = chain_router(primary, sibling, false);
+
+                // Act: a reload lands while the attempt is in flight, then
+                // the attempt's rejection comes back.
+                let in_flight = dispatch(&router, surface, request(None, false));
+                let reloader = async {
+                    hold.entered.notified().await;
+                    if reload {
+                        router.clear_all_credential_parks();
+                    }
+                    hold.release.notify_one();
+                };
+                tokio::join!(in_flight, reloader);
+
+                // Assert
+                assert_eq!(
+                    park_reason(&router, "m-a"),
+                    expected,
+                    "{surface:?} {name} reload={reload}",
+                );
+            }
+        }
+    }
+}
+
+fn gate_logs(events: &[routectl_testkit::CapturedEvent]) -> Vec<(tracing::Level, String)> {
+    const MESSAGES: [&str; 4] = [
+        "gate blocked",
+        "stream gate blocked",
+        "count_tokens gate blocked",
+        "seat credential rejected; parking the seat",
+    ];
+    events
+        .iter()
+        .filter(|event| MESSAGES.contains(&event.message.as_str()))
+        .map(|event| {
+            let kind = event.field("gate_kind").unwrap_or("park").to_string();
+            (event.level, kind)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn requests_against_a_parked_seat_warn_once_at_the_park_and_not_per_request() {
+    const REQUESTS: usize = 4;
+    for surface in SURFACES {
+        // Arrange
+        let primary = ScriptedProvider::new("p-a", &[Step::Reject(403, INVALID)]);
+        let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+        let router = chain_router(primary.clone(), sibling, false);
+
+        // Act
+        let ((), events) = routectl_testkit::with_capture(Box::pin(async {
+            for _ in 0..REQUESTS {
+                dispatch(&router, surface, request(None, false)).await;
+            }
+        }))
+        .await;
+
+        // Assert
+        let logs = gate_logs(&events);
+        let warns: Vec<_> = logs
+            .iter()
+            .filter(|(level, _)| *level == tracing::Level::WARN)
+            .collect();
+        let parked_debugs = logs
+            .iter()
+            .filter(|(level, kind)| *level == tracing::Level::DEBUG && kind == "credential_parked")
+            .count();
+        assert_eq!(
+            primary.calls.load(Ordering::SeqCst),
+            1,
+            "{surface:?}: only the first request dials"
+        );
+        assert_eq!(
+            warns,
+            [&(tracing::Level::WARN, "park".to_string())],
+            "{surface:?}"
+        );
+        assert_eq!(
+            parked_debugs,
+            REQUESTS - 1,
+            "{surface:?}: every later request hit the park"
+        );
+    }
+}
+
+#[tokio::test]
+async fn requests_against_an_open_breaker_still_warn_per_request() {
+    const REQUESTS: usize = 3;
+    for surface in SURFACES {
+        // Arrange
+        let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
+        let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+        let router = chain_router(primary, sibling, false);
+        assert!(router.force_open_breaker("m-a", Duration::from_hours(1)));
+
+        // Act
+        let ((), events) = routectl_testkit::with_capture(Box::pin(async {
+            for _ in 0..REQUESTS {
+                dispatch(&router, surface, request(None, false)).await;
+            }
+        }))
+        .await;
+
+        // Assert
+        let breaker_warns = gate_logs(&events)
+            .into_iter()
+            .filter(|(level, kind)| *level == tracing::Level::WARN && kind == "circuit_breaker")
+            .count();
+        assert_eq!(breaker_warns, REQUESTS, "{surface:?}");
+    }
 }

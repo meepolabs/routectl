@@ -1,7 +1,8 @@
 //! A credentials reload or an accepted config reload lifts every credential
 //! park: the operator just changed the credentials or the routes, so a seat
 //! parked on the old ones deserves a fresh attempt. A reload that fails
-//! leaves every park in place.
+//! leaves every park in place, and an attempt admitted before an accepted
+//! reload cannot re-park its seat after it.
 
 use super::*;
 use routectl_core::UpstreamReason;
@@ -185,4 +186,98 @@ async fn a_config_reload_rejected_after_carry_over_keeps_every_park() {
         park_reason(&swap.load(), "glm"),
         Some(UpstreamReason::CredentialExpired),
     );
+}
+
+fn typed_rejection() -> routectl_core::Error {
+    routectl_core::Error::upstream("p", 401, "credential rejected")
+        .with_upstream_reason(Some(UpstreamReason::CredentialInvalid))
+}
+
+#[tokio::test]
+async fn a_rejection_admitted_before_a_credentials_reload_does_not_park_after_it() {
+    for reload in [true, false] {
+        // Arrange: a healthy seat admits an attempt that is still in flight.
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("routectl").join("credentials.json");
+        write_pool_credentials(&creds, &[("anthropic", "tok-old")]);
+        let config = pooled_oauth_config();
+        let (oauth, secrets, swap) = coordinator_rig(&creds, &config).await;
+        let admitted_under = swap
+            .load()
+            .admit_for_credential_tests("claude")
+            .expect("a healthy seat admits");
+        write_pool_credentials(&creds, &[("anthropic", "tok-new")]);
+
+        // Act
+        if reload {
+            handle_credentials_reload(
+                &Some(oauth),
+                &config,
+                &Arc::new(CatalogOverlay::default()),
+                secrets,
+                &swap,
+                &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
+            )
+            .await;
+        }
+        let parked = swap.load().settle_credential_rejection_for_tests(
+            "claude",
+            &typed_rejection(),
+            admitted_under,
+        );
+
+        // Assert
+        let expected = (!reload).then_some(UpstreamReason::CredentialInvalid);
+        assert_eq!(parked, !reload, "reload={reload}");
+        assert_eq!(
+            park_reason(&swap.load(), "claude"),
+            expected,
+            "reload={reload}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_rejection_admitted_before_a_config_reload_does_not_park_after_it() {
+    // Arrange: a healthy seat admits an attempt that is still in flight.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let _key = ScopedEnv::set("ROUTECTL_PROMPT_SHAPING_TEST_KEY", "test-key");
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, prompt_shaping_config_text("strip")).unwrap();
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let (config, swap, _usage_dir) = glm_router(&secrets).await;
+    let (usage, writer) = build_usage_writer(&config);
+    let old_router = swap.load_full();
+    let admitted_under = old_router
+        .admit_for_credential_tests("glm")
+        .expect("a healthy seat admits");
+
+    // Act: the attempt settles through the router that admitted it, after
+    // the reload published a successor sharing its gate slot.
+    handle_config_reload(
+        Some(&cfg_path),
+        &config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::ConfigFile,
+        &mut never_shutdown(),
+    )
+    .await
+    .expect("config reload applies")
+    .expect("a successful reload returns its config");
+    let parked =
+        old_router.settle_credential_rejection_for_tests("glm", &typed_rejection(), admitted_under);
+
+    // Assert
+    assert!(
+        !Arc::ptr_eq(&old_router, &swap.load_full()),
+        "router swapped"
+    );
+    assert!(!parked);
+    assert_eq!(park_reason(&swap.load(), "glm"), None);
+    drop(usage);
+    drain_usage_writer_strict(writer).await;
 }
