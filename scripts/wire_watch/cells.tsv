@@ -15,8 +15,8 @@
 #                     the lane config declares
 #   key_file          the file in the key directory holding that provider's
 #                     API key, owner-only (mode 0600); `-` when the
-#                     credential is an OAuth seat. Each row names its own
-#                     file: a Bedrock key serves one service in one region.
+#                     credential is an OAuth seat or, on a Bedrock lane, the
+#                     AWS profile run.py is given (--aws-profile).
 #   sweep             `-`, or the lane config provider tables whose
 #                     sweep-tier candidates this row runs. One row per
 #                     provider table sweeps; every other row on a Bedrock
@@ -29,56 +29,56 @@ driver	expected_ingress	lane	connection_mode	providers	key_file	sweep
 claude-code.sh	anthropic	anthropic-api	base-url	anthropic	-	-
 claude-code.sh	anthropic	openai-responses	base-url	openai	-	-
 claude-code.sh	anthropic	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-claude-code.sh	anthropic	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	-
-claude-code.sh	anthropic	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	-
-claude-code.sh	anthropic	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	-
+claude-code.sh	anthropic	bedrock-invoke	base-url	bedrock	-	-
+claude-code.sh	anthropic	bedrock-converse	base-url	bedrock	-	-
+claude-code.sh	anthropic	bedrock-mantle	base-url	bedrock	-	-
 claude-code.sh	anthropic	anthropic-api.front-proxy	front-proxy	anthropic	-	-
 claude-code-print.sh	anthropic	anthropic-api	base-url	anthropic	-	-
 claude-code-print.sh	anthropic	openai-responses	base-url	openai	-	-
 claude-code-print.sh	anthropic	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-claude-code-print.sh	anthropic	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	bedrock
-claude-code-print.sh	anthropic	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	bedrock
-claude-code-print.sh	anthropic	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	mantle-anthropic
+claude-code-print.sh	anthropic	bedrock-invoke	base-url	bedrock	-	bedrock
+claude-code-print.sh	anthropic	bedrock-converse	base-url	bedrock	-	bedrock
+claude-code-print.sh	anthropic	bedrock-mantle	base-url	bedrock	-	mantle-anthropic
 claude-code-print.sh	anthropic	anthropic-api.front-proxy	front-proxy	anthropic	-	-
 codex.sh	openai-responses	anthropic-api	base-url	anthropic	-	-
 codex.sh	openai-responses	openai-responses	base-url	openai	-	-
 codex.sh	openai-responses	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-codex.sh	openai-responses	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	-
-codex.sh	openai-responses	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	-
-codex.sh	openai-responses	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	mantle-responses
+codex.sh	openai-responses	bedrock-invoke	base-url	bedrock	-	-
+codex.sh	openai-responses	bedrock-converse	base-url	bedrock	-	-
+codex.sh	openai-responses	bedrock-mantle	base-url	bedrock	-	mantle-responses
 hermes-anthropic.sh	anthropic	anthropic-api	base-url	anthropic	-	-
 hermes-anthropic.sh	anthropic	openai-responses	base-url	openai	-	-
 hermes-anthropic.sh	anthropic	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-hermes-anthropic.sh	anthropic	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	-
-hermes-anthropic.sh	anthropic	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	-
-hermes-anthropic.sh	anthropic	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	-
+hermes-anthropic.sh	anthropic	bedrock-invoke	base-url	bedrock	-	-
+hermes-anthropic.sh	anthropic	bedrock-converse	base-url	bedrock	-	-
+hermes-anthropic.sh	anthropic	bedrock-mantle	base-url	bedrock	-	-
 hermes-responses.sh	openai-responses	anthropic-api	base-url	anthropic	-	-
 hermes-responses.sh	openai-responses	openai-responses	base-url	openai	-	-
 hermes-responses.sh	openai-responses	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-hermes-responses.sh	openai-responses	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	-
-hermes-responses.sh	openai-responses	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	-
-hermes-responses.sh	openai-responses	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	-
+hermes-responses.sh	openai-responses	bedrock-invoke	base-url	bedrock	-	-
+hermes-responses.sh	openai-responses	bedrock-converse	base-url	bedrock	-	-
+hermes-responses.sh	openai-responses	bedrock-mantle	base-url	bedrock	-	-
 hermes-chat.sh	openai	anthropic-api	base-url	anthropic	-	-
 hermes-chat.sh	openai	openai-responses	base-url	openai	-	-
 hermes-chat.sh	openai	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-hermes-chat.sh	openai	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	-
-hermes-chat.sh	openai	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	-
-hermes-chat.sh	openai	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	mantle-chat
+hermes-chat.sh	openai	bedrock-invoke	base-url	bedrock	-	-
+hermes-chat.sh	openai	bedrock-converse	base-url	bedrock	-	-
+hermes-chat.sh	openai	bedrock-mantle	base-url	bedrock	-	mantle-chat
 pi-anthropic.sh	anthropic	anthropic-api	base-url	anthropic	-	-
 pi-anthropic.sh	anthropic	openai-responses	base-url	openai	-	-
 pi-anthropic.sh	anthropic	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-pi-anthropic.sh	anthropic	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	-
-pi-anthropic.sh	anthropic	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	-
-pi-anthropic.sh	anthropic	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	-
+pi-anthropic.sh	anthropic	bedrock-invoke	base-url	bedrock	-	-
+pi-anthropic.sh	anthropic	bedrock-converse	base-url	bedrock	-	-
+pi-anthropic.sh	anthropic	bedrock-mantle	base-url	bedrock	-	-
 pi-responses.sh	openai-responses	anthropic-api	base-url	anthropic	-	-
 pi-responses.sh	openai-responses	openai-responses	base-url	openai	-	-
 pi-responses.sh	openai-responses	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-pi-responses.sh	openai-responses	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	-
-pi-responses.sh	openai-responses	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	-
-pi-responses.sh	openai-responses	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	-
+pi-responses.sh	openai-responses	bedrock-invoke	base-url	bedrock	-	-
+pi-responses.sh	openai-responses	bedrock-converse	base-url	bedrock	-	-
+pi-responses.sh	openai-responses	bedrock-mantle	base-url	bedrock	-	-
 pi-chat.sh	openai	anthropic-api	base-url	anthropic	-	-
 pi-chat.sh	openai	openai-responses	base-url	openai	-	-
 pi-chat.sh	openai	openai-compat.ollama	base-url	ollama	ollama-api-key	-
-pi-chat.sh	openai	bedrock-invoke	base-url	bedrock	bedrock-api-key.us-west-2	-
-pi-chat.sh	openai	bedrock-converse	base-url	bedrock	bedrock-api-key.us-west-2	-
-pi-chat.sh	openai	bedrock-mantle	base-url	bedrock	bedrock-api-key.us-east-1	-
+pi-chat.sh	openai	bedrock-invoke	base-url	bedrock	-	-
+pi-chat.sh	openai	bedrock-converse	base-url	bedrock	-	-
+pi-chat.sh	openai	bedrock-mantle	base-url	bedrock	-	-

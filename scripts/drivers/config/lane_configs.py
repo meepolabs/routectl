@@ -27,9 +27,9 @@ TABLE_RE = re.compile(r"^\[([A-Za-z0-9_.-]+)\]$")
 KEY_RE = re.compile(r'^("(?:[^"\\]|\\.)*"|[A-Za-z0-9_-]+)\s*=\s*(.+)$')
 STRING_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$')
 
-# Region scope per Bedrock lane: each lane's key is minted for one
-# service in one region, so a config naming any other region could only
-# ever answer 403.
+# Region scope per Bedrock lane: each lane is exercised in one region,
+# and a config naming any other region would move the capture somewhere
+# the wire watch never measured.
 LANE_REGIONS = {
     "bedrock-invoke": "us-west-2",
     "bedrock-converse": "us-west-2",

@@ -45,8 +45,9 @@ python3 scripts/wire_watch/matrix.py expand --key-dir <dir>   # run.json to stdo
 
 ## Key files
 
-Each `cells.tsv` row names its own key file (or `-` for an OAuth seat) in a
-key directory given as an argument; no path to it is committed. Preflight
+Each `cells.tsv` row names its own key file (or `-` for an OAuth seat or an
+AWS profile) in a key directory given as an argument; no path to it is
+committed. Preflight
 only `stat`s and opens the file -- it never reads the key -- and marks the
 row's cells `NOT_RUN(credential)` when the file is missing, unreadable,
 empty, not a regular file, or has any group/other permission bit
@@ -77,8 +78,62 @@ reason -- never an empty, clean-looking result.
 ```
 python3 scripts/wire_watch/run.py --report-dir <dir> [--key-dir <dir>] \
     [--image <tag>] [--concurrency 2] [--cell-timeout <s>] [--deadline <s>] \
-    [--cell-cap-bytes <n>] [--run-cap-bytes <n>] [--seat <file>] [--only <glob>]...
+    [--cell-cap-bytes <n>] [--run-cap-bytes <n>] [--seat <file>] [--only <glob>]... \
+    [--aws-profile <name> --aws-config <file> --aws-credential-file <file>]
 ```
+
+## AWS profile (Bedrock and Mantle lanes)
+
+The `bedrock-invoke`, `bedrock-converse` and `bedrock-mantle` lanes sign
+with an AWS shared-config profile, not a forwarded key. Their committed
+configs name the placeholder profile `routectl-cell`; the operator's own
+profile name and files are run inputs, never committed:
+
+```
+python3 scripts/wire_watch/run.py --report-dir <dir> ... \
+    --aws-profile <name> --aws-config <path to the AWS config file> \
+    --aws-credential-file <path to the file the profile's credential_process reads>
+```
+
+All three or none (a partial set exits 2). Without them every cell whose
+providers include `bedrock` is `NOT_RUN(credential)`, detail
+`no-aws-profile`, and is never launched. With them, `run_capture.sh` gets
+the three for those cells only and, per cell:
+
+- reads ONLY the named profile's section of the config with a strict
+  parser (`scripts/container/aws_profile.py`). It refuses a missing,
+  repeated or whitespace-ambiguous profile header, a bare section of the
+  same name, repeated keys, keys other than `credential_process`, `region`
+  and `output` (`role_arn`, `source_profile`, `sso_*` and the rest change
+  what the profile means), and any credential_process other than
+  `/bin/cat <absolute path>`; that path must be the same file
+  `--aws-credential-file` names, a regular file owned by you with no group
+  or other bits (`chmod 600`). The credential file is never opened on the
+  host. Every refusal is the runner's exit 20 (`NOT_RUN(credential)`), and
+  its message names the profile and the problem only;
+- writes `[profile routectl-cell]` with `credential_process = /bin/cat
+  /etc/routectl-aws/credential` (and the profile's `region`, if set) to a
+  0700 directory beside the cell's scratch, `cells/<id>.aws.<random>/`,
+  removed when the cell's runner exits; it holds no secret;
+- mounts that file and the credential file read-only at
+  `/etc/routectl-aws/config` and `/etc/routectl-aws/credential`. No other
+  file from the operator's AWS directory, no other profile and no
+  shared-credentials file crosses;
+- sets `AWS_CONFIG_FILE=/etc/routectl-aws/config` and
+  `AWS_SHARED_CREDENTIALS_FILE=/dev/null` for the in-cell daemon only. The
+  driven client's environment carries no `AWS_*` name
+  (`capture_driver.sh` strips every one).
+
+The daemon resolves the profile when it builds its providers, so a profile
+it cannot resolve (an expired or malformed credential file) keeps it from
+becoming healthy: the cell exits 3, never a silent fallback. A key-expiry
+check (`--key-dir`, below) has nothing to read on these lanes; an expired
+credential reaches the report as the upstream's own refusal.
+
+Accepted limits: the credential file is readable inside the cell by the
+client's uid, the same residual as a forwarded key in `/proc/<pid>/environ`
+(see `capture_driver.sh` "Drive"). The mount is of one file, so a refresh
+that replaces the file by rename reaches the next cell, not a running one.
 
 `run.py` takes a lock on `<report-dir>/run.lock` for the whole run (a
 second run on the same dir exits 3 and touches nothing), refuses a report
@@ -199,9 +254,11 @@ an `AccessDeniedException` without one (an IAM or model-access deny) is
 `NOT_RUN(model-access)`, and a 403 with no recognizable type is
 `FAILED(permission)`. A 404, or a 400 whose message is the recorded
 invalid-model text, is `NOT_RUN(model-access)`. With
-`--key-dir`, a cell whose short-term Bedrock key had passed the expiry encoded
-in the key (its presigned `X-Amz-Date` plus `X-Amz-Expires`) when the cell
-ended is `FAILED(credential)` whatever the upstream answered; the key is read
+`--key-dir`, a cell with a key file holding a short-term Bedrock key that had
+passed the expiry encoded in the key (its presigned `X-Amz-Date` plus
+`X-Amz-Expires`) when the cell ended is `FAILED(credential)` whatever the
+upstream answered (the committed Bedrock rows sign with an AWS profile and
+carry no key file, so this applies only to a row that does); the key is read
 through the same descriptor checks as the runner and never printed. A
 `--key-dir` those checks refuse (missing, a symlink, not owned by you, group
 or other writable) exits 2 with the reason logged. Off

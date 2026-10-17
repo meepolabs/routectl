@@ -38,6 +38,8 @@ PARENT_KEY = "PLANTEDPARENTKEY-93b0e6a1c7d24f58-do-not-forward"
 SEAT_PAIRING = "claude-code-print.anthropic-api.base-url.*"
 OTHER_SEAT_PAIRING = "codex.openai-responses.base-url.*"
 KEYED_PAIRING = "claude-code-print.openai-compat.ollama.base-url.*"
+BEDROCK_PAIRING = "claude-code.bedrock-invoke.base-url.*"
+MANTLE_PAIRING = "codex.bedrock-mantle.base-url.*"
 
 STUB = r'''#!/usr/bin/env python3
 import fnmatch, json, os, signal, subprocess, sys, time
@@ -87,6 +89,7 @@ for pattern, override in cfg.get("cells", {}).items():
 
 record = {
     "cell": cell,
+    "own": opts,
     "name": opts["--name"],
     "image": opts.get("--image"),
     "providers": providers,
@@ -933,6 +936,68 @@ class CredentialTests(RunTestCase):
 
         entry = self.states()[cells[1]]
         self.assertEqual((entry.state, entry.reason, entry.detail), (CellState.NOT_RUN, "credential", "insecure-mode"))
+
+    AWS_FLAGS = ("--aws-profile", "--aws-config", "--aws-credential-file")
+
+    def aws_args(self) -> tuple:
+        return (
+            "--aws-profile", "synthetic-cell-profile",
+            "--aws-config", os.path.join(self.rig.root, "aws-config"),
+            "--aws-credential-file", os.path.join(self.rig.root, "aws-credential.json"),
+        )
+
+    def test_bedrock_cells_without_aws_profile_inputs_are_not_run(self) -> None:
+        bedrock = ids_matching(BEDROCK_PAIRING)[:1]
+        seat = ids_matching(SEAT_PAIRING)[:1]
+
+        done = self.rig.run(bedrock + seat, "--concurrency", "1")
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        entry = self.states()[bedrock[0]]
+        self.assertEqual((entry.state, entry.reason, entry.detail), (CellState.NOT_RUN, "credential", "no-aws-profile"))
+        records = self.rig.records("start")
+        self.assertNotIn(bedrock[0], records)
+        self.assertIn(seat[0], records, "the control cell never launched, so the refusal proves nothing")
+        self.assertIn("--aws-profile", done.stderr)
+
+    def test_aws_profile_inputs_reach_bedrock_cells_only(self) -> None:
+        bedrock = ids_matching(BEDROCK_PAIRING)[:1]
+        mantle = ids_matching(MANTLE_PAIRING)[:1]
+        seat = ids_matching(SEAT_PAIRING)[:1]
+        args = self.aws_args()
+
+        done = self.rig.run(bedrock + mantle + seat, "--concurrency", "1", *args)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        records = self.rig.records("start")
+        for cell in bedrock + mantle:
+            with self.subTest(cell=cell):
+                own = records[cell]["own"]
+                for flag, value in zip(args[::2], args[1::2]):
+                    self.assertEqual(own.get(flag), value)
+                self.assertEqual(records[cell]["providers"], ["bedrock"])
+                self.assertEqual(records[cell]["driver_env"], [])
+        own = records[seat[0]]["own"]
+        for flag in self.AWS_FLAGS:
+            self.assertNotIn(flag, own)
+
+    def test_partial_aws_profile_inputs_are_a_usage_error(self) -> None:
+        args = self.aws_args()
+        for drop in range(3):
+            partial = [a for i, a in enumerate(args) if i // 2 != drop]
+            with self.subTest(missing=args[drop * 2]):
+                done = self.rig.run(ids_matching(BEDROCK_PAIRING)[:1], *partial)
+                self.assertEqual(done.returncode, run.EXIT_USAGE)
+                self.assertIn("all three or none", done.stderr)
+                self.assertFalse(os.path.exists(os.path.join(self.rig.report, "run.json")))
+
+    def test_a_malformed_aws_profile_name_is_a_usage_error(self) -> None:
+        args = list(self.aws_args())
+        for bad in ("default", "-leading-dash", "has space", "x" * 65):
+            args[1] = bad
+            with self.subTest(name=bad):
+                done = self.rig.run(ids_matching(BEDROCK_PAIRING)[:1], *args)
+                self.assertEqual(done.returncode, run.EXIT_USAGE)
 
     def test_runner_exit_20_is_not_run_credential(self) -> None:
         cell = ids_matching(SEAT_PAIRING)[0]

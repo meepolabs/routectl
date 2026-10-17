@@ -3039,6 +3039,7 @@ STRIPPED_NAMES=(
     AWS_BEARER_TOKEN_BEDROCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
     AWS_SESSION_TOKEN AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
     AWS_WEB_IDENTITY_TOKEN_FILE AWS_CONTAINER_CREDENTIALS_FULL_URI
+    AWS_DEFAULT_PROFILE AWS_REGION AWS_DEFAULT_REGION AWS_ROLE_ARN
     OPENAI_API_KEY OLLAMA_API_KEY GEMINI_API_KEY GOOGLE_APPLICATION_CREDENTIALS
     ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN ANTHROPIC_TOKEN
     ANTHROPIC_PROFILE ANTHROPIC_FOUNDRY_API_KEY CLAUDE_CODE_OAUTH_TOKEN
@@ -3092,6 +3093,63 @@ else
     sed -n '1,20p' "$work/runner.log"
     fails=$((fails + 1))
 fi
+rm -rf "$work"
+
+# --- Case 19: --aws-config reaches the daemon and never the client -------
+# The capture-cell wrapper hands the daemon its one-profile AWS config by
+# argv. The daemon must hold AWS_CONFIG_FILE at exactly that path and
+# AWS_SHARED_CREDENTIALS_FILE at /dev/null (the positive control); the
+# driven client must hold no AWS_* name at all, including ones planted in
+# the runner's own environment that the old named list did not cover.
+AWS_CELL_CONFIG="/nonexistent/routectl-selftest-aws/config"
+work="$(make_work)"
+port_s="$(free_port)"
+rc=0
+env AWS_DEFAULT_PROFILE=selftest-planted AWS_REGION=selftest-planted \
+    STUB_ENV_DUMP="$work/daemon.env" PROBE_ENV_DUMP="$work/driver.env" \
+    ROUTECTL_DRIVER_PORT_MIN="$port_s" ROUTECTL_DRIVER_PORT_MAX="$port_s" \
+    bash -c "$(declare -f runner_run); runner_run \"\$1\" --lane anthropic-api --case driver-selftest-18 --aws-config \"\$2\"" \
+    _ "$work" "$AWS_CELL_CONFIG" || rc=$?
+check "a run given --aws-config exits 0" "0" "$rc"
+if [ -s "$work/daemon.env" ] && [ -s "$work/driver.env" ]; then
+    check "the daemon env holds AWS_CONFIG_FILE at the given path" "yes" \
+        "$(tr '\0' '\n' <"$work/daemon.env" | grep -qxF "AWS_CONFIG_FILE=$AWS_CELL_CONFIG" && echo yes || echo no)"
+    check "the daemon env points AWS_SHARED_CREDENTIALS_FILE at /dev/null" "yes" \
+        "$(tr '\0' '\n' <"$work/daemon.env" | grep -qxF "AWS_SHARED_CREDENTIALS_FILE=/dev/null" && echo yes || echo no)"
+    check "the driven client env holds no AWS_* name" "0" \
+        "$(tr '\0' '\n' <"$work/driver.env" | grep -c '^AWS_' || true)"
+    check "the driven client env does not hold the daemon's AWS config path" "0" \
+        "$(tr '\0' '\n' <"$work/driver.env" | grep -cF "$AWS_CELL_CONFIG" || true)"
+else
+    echo "FAIL: the daemon or the driver env dump is missing (runner log: $work/runner.log)"
+    sed -n '1,20p' "$work/runner.log"
+    fails=$((fails + 1))
+fi
+rm -rf "$work"
+
+# Without --aws-config the daemon gets neither variable from the runner.
+work="$(make_work)"
+port_s="$(free_port)"
+rc=0
+env -u AWS_CONFIG_FILE -u AWS_SHARED_CREDENTIALS_FILE \
+    STUB_ENV_DUMP="$work/daemon.env" \
+    ROUTECTL_DRIVER_PORT_MIN="$port_s" ROUTECTL_DRIVER_PORT_MAX="$port_s" \
+    bash -c "$(declare -f runner_run); runner_run \"\$1\" --lane anthropic-api --case driver-selftest-18" \
+    _ "$work" || rc=$?
+check "a run without --aws-config exits 0" "0" "$rc"
+check "without --aws-config the daemon env holds no AWS config variable" "0" \
+    "$(tr '\0' '\n' <"$work/daemon.env" 2>/dev/null | grep -cE '^AWS_(CONFIG|SHARED_CREDENTIALS)_FILE=' || true)"
+rm -rf "$work"
+
+# A second --aws-config is refused before any daemon boots: the daemon reads
+# exactly one AWS config, the one the wrapper vetted.
+work="$(make_work)"
+rc=0
+runner_run "$work" --lane anthropic-api --case driver-selftest-18 \
+    --aws-config /nonexistent/a --aws-config /nonexistent/b || rc=$?
+check "a repeated --aws-config is a usage error" "2" "$rc"
+check "the repeated --aws-config refusal names itself" "yes" \
+    "$(grep -qF -- '--aws-config given twice' "$work/runner.log" && echo yes || echo no)"
 rm -rf "$work"
 
 if [ "$fails" -gt 0 ]; then

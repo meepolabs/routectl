@@ -13,6 +13,7 @@ Usage
          [--run-cap-bytes N] [--seat FILE] [--only GLOB]...
          [--run-capture PATH] [--kill-grace S] [--poll-seconds S]
          [--size-poll-seconds S]
+         [--aws-profile NAME --aws-config FILE --aws-credential-file FILE]
 
   --report-dir   where run.json, run.lock and cells/<cell-id>/ go. Created
                  0700 when absent; must be owned by this user, writable by
@@ -33,6 +34,13 @@ Usage
                  (ROUTECTL_CAPTURE_CELL_SEAT); default is its own lookup
   --only         run only cells whose id matches this fnmatch glob
                  (repeatable); the others are not in run.json at all
+  --aws-profile, --aws-config, --aws-credential-file
+                 the AWS shared-config profile the Bedrock cells sign with,
+                 the config file holding it, and the file its
+                 credential_process (`/bin/cat <file>`) reads. All three or
+                 none; passed to run_capture.sh for cells whose providers
+                 include bedrock and for no other cell. Without them every
+                 such cell is NOT_RUN(credential), detail no-aws-profile
   --run-capture  the runner to launch per cell (self-test seam)
   --kill-grace, --poll-seconds, --size-poll-seconds
                  tuning: the SIGTERM -> SIGKILL grace, and how often the
@@ -49,7 +57,10 @@ ROUTECTL_DRIVER_<PROVIDER>_API_KEY; the child's environment is built from
 an allowlist, so no other credential reaches it. The key is never placed
 in an argument vector or in run.py's own log. cells/<id>.runner.log is
 untrusted container output and may contain the cell's key: it is 0600, must
-not be shared, and must not be printed to a terminal.
+not be shared, and must not be printed to a terminal. A cell whose providers
+include bedrock gets the --aws-* inputs as run_capture.sh flags (paths and a
+profile name, no secret); without them it is NOT_RUN(credential) before
+launch.
 
 Stop sequence (timeout, size cap, interrupt), in cell_process.py: SIGTERM
 to the cell's process group, grace, SIGKILL, `docker rm -f <name>`, then a
@@ -183,12 +194,24 @@ CHILD_ENV_ALLOW = (
     "ROUTECTL_BIN",
 )
 SEAT_ENV = "ROUTECTL_CAPTURE_CELL_SEAT"
+AWS_PROFILE_PROVIDER = matrix.AWS_PROFILE_PROVIDER
+AWS_PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+NO_AWS_PROFILE = "no-aws-profile"
 
 
 class Refused(Exception):
     def __init__(self, code: int, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class AwsProfile:
+    """The operator's AWS profile inputs: a name and two host paths."""
+
+    profile: str
+    config: str
+    credential_file: str
 
 
 @dataclass(frozen=True)
@@ -207,6 +230,7 @@ class Options:
     kill_grace: float
     poll: float
     size_poll: float
+    aws: Optional[AwsProfile] = None
 
 
 @dataclass
@@ -256,6 +280,12 @@ def capture_argv(opts: Options, spec: CellSpec, name: str, scratch: str) -> List
     argv = [opts.run_capture, "--scratch", scratch, "--image", opts.image, "--name", name]
     for provider in spec.providers:
         argv += ["--provider", provider]
+    if opts.aws is not None and AWS_PROFILE_PROVIDER in spec.providers:
+        argv += [
+            "--aws-profile", opts.aws.profile,
+            "--aws-config", opts.aws.config,
+            "--aws-credential-file", opts.aws.credential_file,
+        ]
     argv += [
         "--",
         "--lane", spec.lane,
@@ -696,7 +726,28 @@ def plan(opts: Options) -> RunLedger:
         if not specs:
             raise Refused(EXIT_USAGE, "--only matches no cell")
     led = RunLedger.new(matrix.run_inputs(paths), specs)
-    return matrix.preflight(led, paths, opts.key_dir)
+    return refuse_without_aws_profile(matrix.preflight(led, paths, opts.key_dir), opts.aws)
+
+
+def refuse_without_aws_profile(led: RunLedger, aws: Optional[AwsProfile]) -> RunLedger:
+    """Without the AWS profile inputs every still-PENDING cell that needs
+    them is NOT_RUN(credential): none is launched to fail at the upstream."""
+    if aws is not None:
+        return led
+    needing = [
+        e.spec.id
+        for e in led.entries
+        if e.state is CellState.PENDING and AWS_PROFILE_PROVIDER in e.spec.providers
+    ]
+    for cell_id in needing:
+        led = led.transition(cell_id, CellState.NOT_RUN, reason=NotRunReason.CREDENTIAL.value, detail=NO_AWS_PROFILE)
+    if needing:
+        LOG.warning(
+            "event=no-aws-profile cells=%d hint=%r",
+            len(needing),
+            "pass --aws-profile, --aws-config and --aws-credential-file to run the bedrock cells",
+        )
+    return led
 
 
 # ---------------------------------------------------------------------
@@ -731,10 +782,21 @@ def parse_args(argv: Sequence[str], environ: Dict[str, str]) -> Options:
     p.add_argument("--kill-grace", type=_positive(float), default=DEFAULT_KILL_GRACE_S)
     p.add_argument("--poll-seconds", type=_positive(float), default=DEFAULT_POLL_S)
     p.add_argument("--size-poll-seconds", type=_positive(float), default=DEFAULT_SIZE_POLL_S)
+    p.add_argument("--aws-profile", default=None)
+    p.add_argument("--aws-config", default=None)
+    p.add_argument("--aws-credential-file", default=None)
     ns = p.parse_args(list(argv))
     run_capture = os.path.abspath(ns.run_capture)
     if not (os.path.isfile(run_capture) and os.access(run_capture, os.X_OK)):
         p.error("--run-capture is not an executable file")
+    aws_inputs = (ns.aws_profile, ns.aws_config, ns.aws_credential_file)
+    aws: Optional[AwsProfile] = None
+    if any(v is not None for v in aws_inputs):
+        if not all(aws_inputs):
+            p.error("--aws-profile, --aws-config and --aws-credential-file go together: pass all three or none")
+        if not AWS_PROFILE_RE.fullmatch(ns.aws_profile) or ns.aws_profile == "default":
+            p.error("--aws-profile must match [A-Za-z0-9][A-Za-z0-9._-]{0,63} and not be 'default'")
+        aws = AwsProfile(ns.aws_profile, os.path.abspath(ns.aws_config), os.path.abspath(ns.aws_credential_file))
     return Options(
         report_dir=ns.report_dir,
         key_dir=ns.key_dir if ns.key_dir is not None else default_key_dir(environ),
@@ -750,6 +812,7 @@ def parse_args(argv: Sequence[str], environ: Dict[str, str]) -> Options:
         kill_grace=ns.kill_grace,
         poll=ns.poll_seconds,
         size_poll=ns.size_poll_seconds,
+        aws=aws,
     )
 
 

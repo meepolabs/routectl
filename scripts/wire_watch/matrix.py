@@ -13,9 +13,11 @@ cells.tsv (tab-separated, `#` comments, one header row) has one row per
   connection_mode   base-url (config has no [mitm]) or front-proxy (has one)
   providers         comma list; exactly the providers whose
                     ROUTECTL_DRIVER_<PROVIDER>_* env refs the lane config
-                    declares
+                    declares, plus `bedrock` when it declares an AWS
+                    profile credential (`kind = "profile"`)
   key_file          a file name in the key directory holding the one
                     provider's API key, or `-` when the credential is a seat
+                    or an AWS profile (always `-` for `bedrock`)
   sweep             `-`, or the comma list of the lane config's provider
                     tables whose sweep-tier models this row runs
 
@@ -121,6 +123,10 @@ CELLS_COLUMNS = [
 NONE = "-"
 
 PROVIDER_REF_RE = re.compile(r"env://ROUTECTL_DRIVER_([A-Z0-9]+)_(?:API_KEY|ACCOUNT_ID|TOKEN)\b")
+AWS_PROFILE_CREDS_RE = re.compile(r'^creds\s*=\s*\{\s*kind\s*=\s*"profile"\s*,\s*name\s*=\s*"([^"]*)"\s*\}\s*$', re.MULTILINE)
+# The provider whose credential is an AWS profile the runner is given, never
+# a key file.
+AWS_PROFILE_PROVIDER = "bedrock"
 MITM_RE = re.compile(r"^\[mitm\]$", re.MULTILINE)
 INGRESS_BLOCK_RE = re.compile(
     r"^# --- BEGIN INGRESS_KINDS ---\n(.*?)^# --- END INGRESS_KINDS ---$",
@@ -231,7 +237,15 @@ def _split_list(value: str) -> Tuple[str, ...]:
 
 
 def _config_providers(text: str) -> Set[str]:
-    return {m.group(1).lower() for m in PROVIDER_REF_RE.finditer(text)}
+    declared = {m.group(1).lower() for m in PROVIDER_REF_RE.finditer(text)}
+    if AWS_PROFILE_CREDS_RE.search(text):
+        declared.add(AWS_PROFILE_PROVIDER)
+    return declared
+
+
+def aws_profile_names(text: str) -> Set[str]:
+    """The profile names a lane config's `kind = "profile"` creds reference."""
+    return {m.group(1) for m in AWS_PROFILE_CREDS_RE.finditer(text)}
 
 
 def _provider_tables(tables: lane_configs.Tables) -> Set[str]:
@@ -263,6 +277,8 @@ def _row_failures(paths: Paths, raw: Dict[str, str], kinds: Tuple[str, ...], bed
         failures.append(f"key_file {key_file!r} must be '-' or a plain file name")
     if key_file != NONE and len(providers) != 1:
         failures.append("a key_file serves exactly one provider")
+    if key_file != NONE and AWS_PROFILE_PROVIDER in providers:
+        failures.append(f"provider {AWS_PROFILE_PROVIDER!r} authenticates by AWS profile; its key_file must be '-'")
     if not LANE_RE.fullmatch(raw["lane"]):
         failures.append(f"lane {raw['lane']!r} must match {LANE_RE.pattern}")
         return failures

@@ -1518,6 +1518,8 @@ What crosses the boundary, and nothing else:
 | the host routectl binary | `/usr/local/lib/routectl/bin/routectl` | READ-ONLY |
 | `--scratch <dir>` | `/scratch` | writable, the only one |
 | one credential per `--provider` | `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` | forwarded BY NAME |
+| `--provider bedrock` only: a generated one-profile AWS config | `/etc/routectl-aws/config` | READ-ONLY |
+| `--provider bedrock` only: that profile's credential_process file | `/etc/routectl-aws/credential` | READ-ONLY |
 
 #### The per-provider credential convention
 
@@ -1582,10 +1584,24 @@ provider:
   `openai` credential lives under `codex`.
 - **neither** -- REFUSED BY NAME, exit 20. An empty credential would 401 at
   the upstream and surface as the runner's retryable exit 7, which is
-  indistinguishable from a case that produced no request. `gemini`,
-  `bedrock` and `ollama` are not OAuth providers, so their credentials
-  (`ROUTECTL_DRIVER_GEMINI_API_KEY`, `ROUTECTL_DRIVER_BEDROCK_API_KEY`,
-  `ROUTECTL_DRIVER_OLLAMA_API_KEY`) can only arrive as an env passthrough.
+  indistinguishable from a case that produced no request. `gemini` and
+  `ollama` are not OAuth providers, so their credentials
+  (`ROUTECTL_DRIVER_GEMINI_API_KEY`, `ROUTECTL_DRIVER_OLLAMA_API_KEY`) can
+  only arrive as an env passthrough.
+- **`bedrock` is an AWS profile**, never a forwarded key. The Bedrock lane
+  configs use `creds = { kind = "profile", name = "routectl-cell" }`, a
+  fixed placeholder. `--provider bedrock` requires `--aws-profile <name>
+  --aws-config <file> --aws-credential-file <file>`: the wrapper reads only
+  that profile's section of the operator's config
+  (`scripts/container/aws_profile.py`, strict, fails closed on duplicates,
+  ambiguity, keys outside `credential_process` / `region` / `output`, or any
+  credential_process other than `/bin/cat <absolute path>`), writes
+  `[profile routectl-cell]` with the credential_process pointed at
+  `/etc/routectl-aws/credential`, and mounts that file and the credential
+  file read-only. The runner sets `AWS_CONFIG_FILE` (and
+  `AWS_SHARED_CREDENTIALS_FILE=/dev/null`) for the daemon alone; the driven
+  client's environment carries no `AWS_*` name. Missing or refused inputs
+  are exit 20, naming the profile and the problem, never a value.
 
 - **The read-only repo is load-bearing**, not tidiness. A driven agent runs
   with file tools and permission prompts disabled; a writable repo mount
@@ -1659,6 +1675,12 @@ when docker is absent rather than silently:
 bash scripts/container/run_capture.test.sh
 bash scripts/container/image_scan.test.sh
 ```
+
+`run_capture.test.sh` sources `run_capture_aws.test.sh`, the bedrock AWS
+profile legs: a synthetic AWS directory with a second profile, a
+`[default]` and a shared-credentials file planted as markers, the exact
+bytes the cell config must carry, and one refusal row per ambiguity or
+foreign shape the reader must reject.
 
 The wrapper's refusal legs need no docker at all -- the wrapper decides every
 one of them from its argv and the host filesystem -- so they run everywhere;

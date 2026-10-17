@@ -15,6 +15,8 @@
 # Usage:
 #   run_capture.sh --scratch <host-dir> [--image <tag>] \
 #                  [--name <container-name>] [--provider <name>]... \
+#                  [--aws-profile <name> --aws-config <file> \
+#                   --aws-credential-file <file>] \
 #                  -- <capture_driver.sh args...>
 #
 #   e.g.
@@ -57,6 +59,11 @@
 #               resolves; this flag decides which ones cross the boundary,
 #               and an unresolvable one is refused here rather than after
 #               a daemon boots.
+#   --aws-profile, --aws-config, --aws-credential-file
+#               The `bedrock` provider's credential: an AWS shared-config
+#               profile whose credential_process is `/bin/cat <file>`. All
+#               three are required with `--provider bedrock` and refused
+#               without it. See THE AWS PROFILE below.
 #
 # WHAT CROSSES THE BOUNDARY, and nothing else:
 #
@@ -66,6 +73,9 @@
 #   per --provider     -> ROUTECTL_DRIVER_<PROVIDER>_API_KEY (by NAME)
 #                         plus ROUTECTL_DRIVER_<PROVIDER>_ACCOUNT_ID for a
 #                         provider whose egress requires an account id
+#   with --provider bedrock only:
+#     a generated one-profile config -> /etc/routectl-aws/config      READ-ONLY
+#     the credential_process file    -> /etc/routectl-aws/credential  READ-ONLY
 #
 # A forwarded credential is stripped from the driven client's own
 # environment by capture_driver.sh, but the runner (PID 1) and the daemon
@@ -90,8 +100,8 @@
 #   ROUTECTL_DRIVER_<PROVIDER>_API_KEY
 #
 # with <PROVIDER> the upper-cased form of a name in routectl's own
-# provider vocabulary (`anthropic`, `openai`, `gemini`, `bedrock`,
-# `ollama`). Both openai kinds
+# provider vocabulary (`anthropic`, `openai`, `gemini`, `ollama`; `bedrock`
+# authenticates by AWS profile instead). Both openai kinds
 # -- `openai-responses` and `openai-compat` -- share the ONE `openai`
 # name, because routectl's own conventional-env-var table gives them one
 # variable; a lane is not a provider, so `openai-responses.toml` and
@@ -135,10 +145,10 @@
 #   no seat entry, env var set-> passed straight through from the host
 #                                environment (the gemini shape: gemini is
 #                                not an OAuth provider, so its credential
-#                                is an API key the operator exports; bedrock
-#                                and ollama take the same path, as
-#                                ROUTECTL_DRIVER_BEDROCK_API_KEY and
+#                                is an API key the operator exports; ollama
+#                                takes the same path, as
 #                                ROUTECTL_DRIVER_OLLAMA_API_KEY)
+#   bedrock                   -> neither: an AWS profile (THE AWS PROFILE)
 #   neither                   -> REFUSED BY NAME, exit 20. Never
 #                                forwarded empty: an empty credential
 #                                resolves to an upstream 401, which the
@@ -179,7 +189,8 @@
 #   17  docker is not installed or not on PATH
 #   18  the image is not present locally
 #   19  the seat file is unreadable
-#   20  an asked-for provider has neither a seat entry nor its env var
+#   20  an asked-for provider has neither a seat entry nor its env var,
+#       or (bedrock) its AWS profile inputs are absent or refused
 #
 # The first four exist because each one individually dissolves the
 # isolation the cell is for, and a shared exit code would let a caller who
@@ -196,6 +207,29 @@
 #
 # Exit codes 0 and 2-9 are the runner's, propagated verbatim. 2 doubles as
 # this script's own usage error, which is the same class of fault.
+#
+# THE AWS PROFILE. The bedrock lane configs authenticate with
+# `creds = { kind = "profile", name = "routectl-cell" }`: a fixed
+# placeholder, so no operator's profile name is committed and the config
+# bytes (and their sha) are the same for everyone. On the host, this
+# script reads ONLY the --aws-profile section of --aws-config
+# (scripts/container/aws_profile.py, strict, fails closed) and writes a
+# config holding just `[profile routectl-cell]`, its credential_process
+# rewritten to `/bin/cat /etc/routectl-aws/credential`, and its region if
+# set. That file and the credential file are each mounted read-only; the
+# operator's config, any other profile, any shared-credentials file and
+# the rest of the operator's AWS directory never cross. Only the
+# `/bin/cat <absolute path>` credential_process shape is accepted, and
+# --aws-credential-file must name the same file it reads. The generated
+# config is staged in a 0700 directory BESIDE --scratch (never inside it,
+# so neither the cell nor the evidence reader sees it) and removed on
+# exit; it holds no secret. capture_driver.sh then points the DAEMON
+# alone at it (AWS_CONFIG_FILE, with AWS_SHARED_CREDENTIALS_FILE at
+# /dev/null); the driven client's environment carries no AWS_* name.
+# The credential file is readable inside the cell by the client's uid,
+# the same accepted residual as a forwarded key in /proc/<pid>/environ.
+# Any problem with these inputs is refused with exit 20, by profile name
+# and problem only; no value or line of either file is printed.
 #
 # `ROUTECTL_BIN` selects the host binary to mount (default
 # `target/release/routectl`). `ROUTECTL_CAPTURE_CELL_SEAT` selects the
@@ -232,6 +266,13 @@ CELL_REPO=/workspace
 CELL_SCRATCH=/scratch
 CELL_BIN_DIR=/usr/local/lib/routectl/bin
 CELL_BIN="$CELL_BIN_DIR/routectl"
+CELL_AWS_DIR=/etc/routectl-aws
+CELL_AWS_CONFIG="$CELL_AWS_DIR/config"
+CELL_AWS_CREDENTIAL="$CELL_AWS_DIR/credential"
+# The profile name every bedrock lane config references. Welded to the lane
+# configs by scripts/wire_watch/tests/test_matrix.py.
+CELL_AWS_PROFILE="routectl-cell"
+AWS_PROFILE_LIB="$HERE/aws_profile.py"
 
 DEFAULT_IMAGE="routectl-capture:default"
 
@@ -254,6 +295,7 @@ DEFAULT_IMAGE="routectl-capture:default"
 DEFAULT_PROVIDERS="anthropic"
 KNOWN_PROVIDERS="anthropic openai gemini bedrock ollama"
 ACCOUNT_ID_PROVIDERS="openai"
+AWS_PROFILE_PROVIDERS="bedrock"
 
 # `case` rather than an associative array: this script runs under `set -eu`
 # in whatever bash the image and the host agree on, and a function reads
@@ -282,6 +324,13 @@ account_id_var_for() {
 
 needs_account_id() {
     case " $ACCOUNT_ID_PROVIDERS " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+uses_aws_profile() {
+    case " $AWS_PROFILE_PROVIDERS " in
         *" $1 "*) return 0 ;;
         *) return 1 ;;
     esac
@@ -325,6 +374,9 @@ SCRATCH=""
 IMAGE="$DEFAULT_IMAGE"
 PROVIDERS=""
 CELL_NAME=""
+AWS_PROFILE_NAME=""
+AWS_CONFIG_SRC=""
+AWS_CREDENTIAL_SRC=""
 
 # This script's own flags stop at the FIRST `--`; everything after it is
 # the runner's argv, which carries its own `--` for the driver command.
@@ -364,6 +416,15 @@ while [ $# -gt 0 ]; do
             case " $PROVIDERS " in
                 *" $2 "*) ;;
                 *) PROVIDERS="${PROVIDERS:+$PROVIDERS }$2" ;;
+            esac
+            shift 2
+            ;;
+        --aws-profile|--aws-config|--aws-credential-file)
+            [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a non-empty value" 2
+            case "$1" in
+                --aws-profile) AWS_PROFILE_NAME="$2" ;;
+                --aws-config) AWS_CONFIG_SRC="$2" ;;
+                --aws-credential-file) AWS_CREDENTIAL_SRC="$2" ;;
             esac
             shift 2
             ;;
@@ -427,6 +488,16 @@ refuse_isolation_flags() {
 }
 
 refuse_isolation_flags "$@"
+
+# The daemon's AWS config is this script's to name: a caller's own
+# `--aws-config` in the runner argv could point the daemon at a file this
+# script never vetted.
+for arg in "$@"; do
+    case "$arg" in
+        --aws-config|--aws-config=*)
+            die "refusing '--aws-config' after \`--\`: the daemon's AWS config is generated and passed by this script only" 2 ;;
+    esac
+done
 
 # ---------------------------------------------------------------------
 # The scratch root
@@ -607,6 +678,7 @@ resolve_credential() {
 }
 
 for provider in $PROVIDERS; do
+    uses_aws_profile "$provider" && continue
     api_key_var="$(api_key_var_for "$provider")"
     seat_key="$(seat_key_for "$provider")" || seat_key="$provider"
     resolve_credential "$provider" "$api_key_var" "access_token" ||
@@ -624,6 +696,47 @@ for provider in $PROVIDERS; do
     resolve_credential "$provider" "$account_id_var" "account.account_id" ||
         die "provider '$provider' resolved a seat access token but no account id: the seat file '$SEAT' carries no usable providers.$seat_key.account.account_id and \$$account_id_var is unset or empty. the chatgpt-oauth surface REQUIRES the account id, so a run without it is refused here rather than at the upstream." 20
 done
+
+# ---------------------------------------------------------------------
+# The AWS profile: one section, extracted HERE, mounted read-only
+# ---------------------------------------------------------------------
+
+AWS_WANTED=0
+for provider in $PROVIDERS; do
+    uses_aws_profile "$provider" && AWS_WANTED=1
+done
+
+AWS_ANY_INPUT="$AWS_PROFILE_NAME$AWS_CONFIG_SRC$AWS_CREDENTIAL_SRC"
+if [ "$AWS_WANTED" = 0 ] && [ -n "$AWS_ANY_INPUT" ]; then
+    die "--aws-profile, --aws-config and --aws-credential-file serve only --provider bedrock; refusing to mount AWS files into a cell that does not use them" 2
+fi
+
+AWS_STAGE=""
+AWS_MOUNT_FLAGS=()
+AWS_RUNNER_FLAGS=()
+
+cleanup_aws_stage() {
+    [ -z "$AWS_STAGE" ] || rm -rf "$AWS_STAGE"
+}
+
+if [ "$AWS_WANTED" = 1 ]; then
+    [ -n "$AWS_PROFILE_NAME" ] && [ -n "$AWS_CONFIG_SRC" ] && [ -n "$AWS_CREDENTIAL_SRC" ] ||
+        die "provider 'bedrock' authenticates by AWS profile: pass --aws-profile, --aws-config and --aws-credential-file. refusing to start a cell that could only fail at the upstream." 20
+    trap cleanup_aws_stage EXIT
+    AWS_STAGE="$(mktemp -d "$SCRATCH_ABS.aws.XXXXXX")" ||
+        die "could not create the AWS config staging directory beside '$SCRATCH_ABS'" 2
+    aws_credential_abs="$(python3 -I "$AWS_PROFILE_LIB" \
+        --config "$AWS_CONFIG_SRC" --profile "$AWS_PROFILE_NAME" \
+        --credential-file "$AWS_CREDENTIAL_SRC" \
+        --cell-profile "$CELL_AWS_PROFILE" --cell-credential "$CELL_AWS_CREDENTIAL" \
+        --out "$AWS_STAGE/config")" ||
+        die "the AWS profile inputs were refused (reason above); no cell started" 20
+    AWS_MOUNT_FLAGS=(
+        -v "$AWS_STAGE/config:$CELL_AWS_CONFIG:ro"
+        -v "$aws_credential_abs:$CELL_AWS_CREDENTIAL:ro"
+    )
+    AWS_RUNNER_FLAGS=(--aws-config "$CELL_AWS_CONFIG")
+fi
 
 # ---------------------------------------------------------------------
 # Docker
@@ -675,11 +788,13 @@ docker run \
     -v "$REPO_ABS:$CELL_REPO:ro" \
     -v "$HOST_BIN_ABS:$CELL_BIN:ro" \
     -v "$SCRATCH_ABS:$CELL_SCRATCH" \
-    "${CREDENTIAL_ENV_FLAGS[@]}" \
+    ${AWS_MOUNT_FLAGS[@]+"${AWS_MOUNT_FLAGS[@]}"} \
+    ${CREDENTIAL_ENV_FLAGS[@]+"${CREDENTIAL_ENV_FLAGS[@]}"} \
     -e "ROUTECTL_BIN=$CELL_BIN" \
     -e "ROUTECTL_DRIVER_OUT_ROOT=$CELL_SCRATCH" \
     "$IMAGE" \
     bash "$CELL_REPO/scripts/capture_driver.sh" \
     --out "$CELL_SCRATCH" \
     --out-root "$CELL_SCRATCH" \
+    ${AWS_RUNNER_FLAGS[@]+"${AWS_RUNNER_FLAGS[@]}"} \
     "$@"

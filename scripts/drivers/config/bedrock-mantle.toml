@@ -16,10 +16,12 @@
 # not a hazard, but it means an edit is a deliberate act.
 #
 # Nothing here is environment-derived: no real path, no account, no
-# credential. The only credential is a REFERENCE to an env var the runner
-# forwards from its caller (the `ROUTECTL_DRIVER_*` passthrough
-# namespace); an unset one keeps the daemon from starting rather than
-# silently routing somewhere else.
+# credential. The only credential is a REFERENCE to the AWS profile
+# `routectl-cell`, a fixed placeholder: the capture-cell wrapper
+# (scripts/container/run_capture.sh) writes a one-profile AWS config under
+# that name from the operator's own profile and points the daemon alone at
+# it. With no such config the daemon cannot resolve the profile and never
+# becomes healthy, rather than silently routing somewhere else.
 #
 # The daemon's state (usage database, catalog state) lands under
 # `$XDG_CONFIG_HOME/routectl/`, which the runner points at a throwaway
@@ -47,18 +49,15 @@ host = "127.0.0.1"
 port = 8787
 
 # The mantle endpoint speaks three vocabularies, one provider kind each,
-# all on the SAME region and the SAME key. The key is service-scoped: one
-# minted for bedrock-mantle in us-east-1 serves only this endpoint there,
-# which is why this lane names only that region. `region` derives both the
-# endpoint host and the signing scope, so no `base_url` appears. The env
-# var is keyed on the provider name (`bedrock`), per the
-# `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` convention.
+# all on the SAME region and the SAME AWS profile (`routectl-cell`, see the
+# header), SigV4-signed. This lane names only us-east-1. `region` derives
+# both the endpoint host and the signing scope, so no `base_url` appears.
 [providers.mantle-anthropic]
 kind = "anthropic-api"
 
 [providers.mantle-anthropic.bedrock_mantle]
 region = "us-east-1"
-creds  = { kind = "bearer-key", key_ref = "env://ROUTECTL_DRIVER_BEDROCK_API_KEY" }
+creds  = { kind = "profile", name = "routectl-cell" }
 
 # `api_key_ref` is a required key on this kind and must be empty: the
 # sub-table carries the credential.
@@ -68,7 +67,7 @@ api_key_ref = ""
 
 [providers.mantle-responses.bedrock_mantle]
 region = "us-east-1"
-creds  = { kind = "bearer-key", key_ref = "env://ROUTECTL_DRIVER_BEDROCK_API_KEY" }
+creds  = { kind = "profile", name = "routectl-cell" }
 
 [providers.mantle-chat]
 kind        = "openai-compat"
@@ -76,7 +75,7 @@ api_key_ref = ""
 
 [providers.mantle-chat.bedrock_mantle]
 region = "us-east-1"
-creds  = { kind = "bearer-key", key_ref = "env://ROUTECTL_DRIVER_BEDROCK_API_KEY" }
+creds  = { kind = "profile", name = "routectl-cell" }
 
 [models.mantle-claude-opus-5-5]
 provider = "mantle-anthropic"

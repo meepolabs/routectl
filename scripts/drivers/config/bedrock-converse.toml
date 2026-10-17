@@ -12,10 +12,12 @@
 # not a hazard, but it means an edit is a deliberate act.
 #
 # Nothing here is environment-derived: no real path, no account, no
-# credential. The only credential is a REFERENCE to an env var the runner
-# forwards from its caller (the `ROUTECTL_DRIVER_*` passthrough
-# namespace); an unset one keeps the daemon from starting rather than
-# silently routing somewhere else.
+# credential. The only credential is a REFERENCE to the AWS profile
+# `routectl-cell`, a fixed placeholder: the capture-cell wrapper
+# (scripts/container/run_capture.sh) writes a one-profile AWS config under
+# that name from the operator's own profile and points the daemon alone at
+# it. With no such config the daemon cannot resolve the profile and never
+# becomes healthy, rather than silently routing somewhere else.
 #
 # The daemon's state (usage database, catalog state) lands under
 # `$XDG_CONFIG_HOME/routectl/`, which the runner points at a throwaway
@@ -42,16 +44,14 @@ version = 5
 host = "127.0.0.1"
 port = 8787
 
-# A Bedrock API key (bearer), not SigV4. The key is service-scoped: one
-# minted for bedrock-runtime in us-west-2 serves Invoke and Converse there
-# and nothing else, which is why this lane and its sibling name only that
-# region. The env var is keyed on the provider name (`bedrock`), per the
-# `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` convention.
+# SigV4 through the AWS profile `routectl-cell` (see the header). This
+# lane and its sibling name only us-west-2, the region the profile is
+# exercised on for Invoke and Converse.
 [providers.bedrock]
 kind      = "bedrock"
 region    = "us-west-2"
 api_shape = "converse"
-creds     = { kind = "bearer-key", key_ref = "env://ROUTECTL_DRIVER_BEDROCK_API_KEY" }
+creds     = { kind = "profile", name = "routectl-cell" }
 
 [models.converse-claude-haiku-5-5]
 provider = "bedrock"

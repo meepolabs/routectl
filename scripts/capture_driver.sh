@@ -85,6 +85,12 @@
 #   --timeout          seconds to wait for /health. Default 20.
 #   --keep             keep the run workspace (trace log included) for
 #                      debugging instead of removing it on exit.
+#   --aws-config       an AWS shared-config file for the DAEMON alone. The
+#                      daemon is started with AWS_CONFIG_FILE set to it and
+#                      AWS_SHARED_CREDENTIALS_FILE set to /dev/null, so a
+#                      `kind = "profile"` lane resolves only that file; the
+#                      driven client never sees either variable. Given at
+#                      most once (the capture-cell wrapper passes it).
 #
 # THE DRIVER CONTRACT. The command after `--` runs with cwd set to the
 # run's throwaway git repo and with these variables exported:
@@ -107,8 +113,8 @@
 #   ROUTECTL_DRIVER_PROXY_CA          the CA pem the client must trust
 #
 # And REMOVED: every upstream credential in the caller's environment
-# (any name shaped like a key, token, secret or credentials file, plus
-# AWS_PROFILE / AWS_CONFIG_FILE / ANTHROPIC_PROFILE). The daemon already
+# (any name shaped like a key, token, secret or credentials file, every
+# AWS_* name, and ANTHROPIC_PROFILE). The daemon already
 # holds the lane's credential; a driver presents only the local-client
 # placeholders, which are the one exemption.
 #
@@ -259,7 +265,6 @@
 #   ROUTECTL_DRIVER_ANTHROPIC_API_KEY     the REAL upstream credentials,
 #   ROUTECTL_DRIVER_OPENAI_API_KEY        under the per-provider
 #   ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID     convention
-#   ROUTECTL_DRIVER_BEDROCK_API_KEY
 #   ROUTECTL_DRIVER_OLLAMA_API_KEY
 #                                         ROUTECTL_DRIVER_<PROVIDER>_API_KEY
 #                                         (plus _ACCOUNT_ID where the
@@ -396,6 +401,7 @@ OUT_ROOT=""
 WORK_PARENT=""
 HEALTH_TIMEOUT=20
 KEEP=0
+DAEMON_AWS_CONFIG=""
 
 # Print the header block as usage, sentinel-delimited: a magic line range
 # starts silently cutting content the moment the header grows, and the
@@ -426,6 +432,10 @@ while [ $# -gt 0 ]; do
     --work) [ $# -ge 2 ] || die "--work requires a value" 2; WORK_PARENT="$2"; shift 2 ;;
     --timeout) [ $# -ge 2 ] || die "--timeout requires a value" 2; HEALTH_TIMEOUT="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
+    --aws-config)
+      [ $# -ge 2 ] && [ -n "$2" ] || die "--aws-config requires a value" 2
+      [ -z "$DAEMON_AWS_CONFIG" ] || die "--aws-config given twice; the daemon reads exactly one AWS config" 2
+      DAEMON_AWS_CONFIG="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     *) die "unknown arg: $1" 2 ;;
@@ -824,9 +834,16 @@ fi
 # NO_COLOR is unset because the evidence extractors anchor on the styled
 # event target: styling is the only boundary a span value (the client's
 # model name) cannot forge, since the sink escapes ESC inside field text.
+# The AWS variables are set inside this subshell only, so the daemon is the
+# one process that holds them; the driver below starts from this script's
+# own environment, which never carries them.
 (
   cd "$RUN_WORK"
   unset NO_COLOR
+  if [ -n "$DAEMON_AWS_CONFIG" ]; then
+    export AWS_CONFIG_FILE="$DAEMON_AWS_CONFIG"
+    export AWS_SHARED_CREDENTIALS_FILE=/dev/null
+  fi
   HOME="$RUN_HOME" \
   XDG_CONFIG_HOME="$RUN_XDG" \
   ROUTECTL_LOG="routectl=info,routectl_core::log_safe=trace" \
@@ -954,12 +971,15 @@ fi
 # placeholders are the only exemption -- they are what a driver presents to
 # the local daemon. A plural `_TOKENS` is a budget knob, not a credential,
 # and is deliberately not a suffix here.
-# AWS_PROFILE, AWS_CONFIG_FILE and ANTHROPIC_PROFILE select a stored
-# credential without matching any suffix, so they are named outright.
+# ANTHROPIC_PROFILE selects a stored credential without matching any
+# suffix, so it is named outright. Every AWS_* name is removed: the AWS SDKs
+# the clients embed read profile, config-file and region selectors under
+# that prefix (AWS_PROFILE, AWS_DEFAULT_PROFILE, AWS_CONFIG_FILE, ...), and
+# a client talking only to the local daemon needs none of them.
 is_upstream_credential_name() {
   case "$1" in
     ROUTECTL_DRIVER_CLIENT_API_KEY|ROUTECTL_DRIVER_CLIENT_BEARER) return 1 ;;
-    AWS_PROFILE|AWS_CONFIG_FILE|ANTHROPIC_PROFILE) return 0 ;;
+    AWS_*|ANTHROPIC_PROFILE) return 0 ;;
     API_KEY|TOKEN|*_KEY|*_KEYS|*_ACCOUNT_ID|*_ACCESS_KEY_ID) return 0 ;;
     *_TOKEN|*_TOKEN_*|*_SECRET|*_SECRET_*|*_BEARER|*_PASSWORD|*_PASSPHRASE) return 0 ;;
     *CREDENTIALS*) return 0 ;;

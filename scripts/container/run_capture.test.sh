@@ -265,6 +265,12 @@ daemon_credential() {
     daemon_credential openai_account "${ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID:-}"
     daemon_credential gemini_key "${ROUTECTL_DRIVER_GEMINI_API_KEY:-}"
     daemon_credential bedrock_key "${ROUTECTL_DRIVER_BEDROCK_API_KEY:-}"
+    printf 'aws_config_file=%s\n' "${AWS_CONFIG_FILE:-}"
+    printf 'aws_shared_credentials_file=%s\n' "${AWS_SHARED_CREDENTIALS_FILE:-}"
+    # What the SDK's credential_process would print, run the way it runs it
+    # (`sh -c <command>`), as a digest: the in-cell path and /bin/cat work.
+    aws_process="$(sed -n 's/^credential_process = //p' "${AWS_CONFIG_FILE:-/nonexistent}" 2>/dev/null)"
+    daemon_credential aws_process_output "$( [ -n "$aws_process" ] && sh -c "$aws_process" 2>/dev/null)"
 } >"$assets/daemon.txt"
 mode="$(cat "$assets/mode" 2>/dev/null || echo healthy)"
 trace="$assets/trace-$mode.log"
@@ -355,6 +361,12 @@ report_credential() {
     report_credential openai_account "${ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID:-}"
     report_credential gemini_key "${ROUTECTL_DRIVER_GEMINI_API_KEY:-}"
     report_credential bedrock_key "${ROUTECTL_DRIVER_BEDROCK_API_KEY:-}"
+    printf 'aws_env_names=%s\n' "$(env | sed -n 's/^\(AWS_[^=]*\)=.*/\1/p' | sort | tr '\n' ' ')"
+    if printf 'mutated\n' 2>/dev/null >/etc/routectl-aws/credential; then
+        printf 'aws_credential_write=SUCCEEDED\n'
+    else
+        printf 'aws_credential_write=refused\n'
+    fi
     # The documented residual: PID 1 (the runner) shares this uid, so its
     # environment is readable here and still holds what was forwarded.
     printf 'pid1_cmdline=%s\n' "$(tr '\0' ' ' </proc/1/cmdline 2>/dev/null)"
@@ -850,10 +862,16 @@ fi
 # fails if a seat is mounted anywhere at all.
 
 MOUNT_FLAGS="$(grep -cE '^ +-v "' "$WRAPPER")"
-check "the wrapper passes exactly three mounts" "3" "$MOUNT_FLAGS"
+check "the wrapper spells exactly five mounts (three fixed, two AWS)" "5" "$MOUNT_FLAGS"
 
 RO_MOUNTS="$(grep -cE '^ +-v ".*:ro" \\$' "$WRAPPER")"
-check "two of the three mounts are read-only" "2" "$RO_MOUNTS"
+check "two of the three fixed mounts are read-only" "2" "$RO_MOUNTS"
+
+# The two AWS mounts live in an array (they exist only for a bedrock run),
+# so they are matched on their own shape: each a single file, read-only, at
+# its fixed in-cell path.
+AWS_RO_MOUNTS="$(grep -cE '^ +-v "[$](AWS_STAGE/config:[$]CELL_AWS_CONFIG|aws_credential_abs:[$]CELL_AWS_CREDENTIAL):ro"$' "$WRAPPER")"
+check "both AWS mounts are read-only single files at their fixed cell paths" "2" "$AWS_RO_MOUNTS"
 
 if grep -E '^ +-v "' "$WRAPPER" | grep -qiE 'seat|credentials'; then
     fail "a mount in the wrapper names a seat or a credentials file"
@@ -966,6 +984,23 @@ case "${1:-}" in
         if [ -n "${FAKE_DOCKER_ARGV:-}" ]; then
             printf '%s\n' "$@" >"$FAKE_DOCKER_ARGV"
         fi
+        # The wrapper removes its staged AWS config on exit, so the bytes a
+        # real container would see are copied out here, while they exist.
+        if [ -n "${FAKE_DOCKER_MOUNT_DUMP:-}" ]; then
+            prev=""
+            for arg in "$@"; do
+                if [ "$prev" = "-v" ]; then
+                    case "$arg" in
+                        *:/etc/routectl-aws/*:ro)
+                            dst="${arg%:ro}"
+                            dst="${dst##*:}"
+                            cp -- "${arg%%:*}" "$FAKE_DOCKER_MOUNT_DUMP/${dst##*/}"
+                            ;;
+                    esac
+                fi
+                prev="$arg"
+            done
+        fi
         exit "${FAKE_DOCKER_RUN_EXIT:-0}"
         ;;
     *) exit 0 ;;
@@ -1075,13 +1110,15 @@ check "a run without --name passes no --name to docker" "0" \
     "$(grep -cx -- '--name' "$NO_NAME_ROOT.argv" || true)"
 
 # ---------------------------------------------------------------------
-# Part 5c: bedrock and ollama are env-passthrough providers
+# Part 5c: ollama is an env-passthrough provider; bedrock is an AWS profile
 # ---------------------------------------------------------------------
 #
-# Neither has a seat entry, so each key arrives only from the operator's
+# ollama has no seat entry, so its key arrives only from the operator's
 # environment and crosses BY NAME. The value must appear in no argv word
-# and in nothing the wrapper prints.
+# and in nothing the wrapper prints. bedrock's legs (an AWS profile, never a
+# forwarded key) are in run_capture_aws.test.sh.
 FAKE_BEDROCK_KEY="$(fake_key 'stub-bedrock-' "${FAKE_RUN}BDRK6789")"
+export FAKE_BEDROCK_KEY
 FAKE_OLLAMA_KEY="$(fake_key 'stub-ollama-' "${FAKE_RUN}OLMA6789")"
 
 passthrough_provider() {
@@ -1113,8 +1150,10 @@ passthrough_provider() {
     check_refusal "the $provider no-credential refusal names the variable" \
         "\$$var is unset or empty" "$root.log"
 }
-passthrough_provider bedrock ROUTECTL_DRIVER_BEDROCK_API_KEY "$FAKE_BEDROCK_KEY"
 passthrough_provider ollama ROUTECTL_DRIVER_OLLAMA_API_KEY "$FAKE_OLLAMA_KEY"
+
+# shellcheck source=scripts/container/run_capture_aws.test.sh
+. "$HERE/run_capture_aws.test.sh"
 
 # ---------------------------------------------------------------------
 # Part 6: the container legs
@@ -1271,29 +1310,33 @@ run_container_legs() {
         fail "the env-sourced openai leg's driver never ran (log: $root.log)"
     fi
 
-    # --- bedrock: env passthrough to the daemon, not the client's env -
+    # --- bedrock: an AWS profile for the daemon, nothing for the client -
     root="$(new_scratch healthy)"
     rc=0
     provider_run "$root" \
-        "ROUTECTL_DRIVER_BEDROCK_API_KEY=$FAKE_BEDROCK_KEY" -- \
-        --scratch "$root/land" --provider bedrock -- \
+        "AWS_PROFILE=$AWS_FIX_PROFILE" "AWS_CONFIG_FILE=$AWS_GOOD_CONFIG" -- \
+        --scratch "$root/land" --provider bedrock \
+        --aws-profile "$AWS_FIX_PROFILE" --aws-config "$AWS_GOOD_CONFIG" \
+        --aws-credential-file "$AWS_CRED" -- \
         --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
         --timeout 20 \
         -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
     check "a run asking for bedrock alone exits 0" "0" "$rc"
     if [ -f "$root/land/$ASSETS_REL/probe.txt" ]; then
-        check "the bedrock key reached the daemon intact" \
-            "$(sha_of "$FAKE_BEDROCK_KEY")" "$(daemon_get "$root/land" bedrock_key_sha)"
-        check "the bedrock key did not reach the driven client" "no" \
-            "$(probe_get "$root/land" bedrock_key_present)"
-        # The strip covers the client's own environment, not the cell: the
-        # runner is PID 1 under the client's uid, so /proc/1/environ still
-        # holds the forwarded key. This is the accepted residual, and the
-        # positive control that the probe above could have seen a key.
+        check "the daemon's AWS_CONFIG_FILE is the mounted one-profile config" \
+            "/etc/routectl-aws/config" "$(daemon_get "$root/land" aws_config_file)"
+        check "the daemon reads no shared-credentials file" \
+            "/dev/null" "$(daemon_get "$root/land" aws_shared_credentials_file)"
+        check "the cell's credential_process prints the credential file, compared by digest" \
+            "$(sha_of "$(cat "$AWS_CRED")")" "$(daemon_get "$root/land" aws_process_output_sha)"
+        check "the driven client holds no AWS_* variable" "" \
+            "$(probe_get "$root/land" aws_env_names)"
+        check "the mounted credential file is read-only in the cell" "refused" \
+            "$(probe_get "$root/land" aws_credential_write)"
+        check "no bedrock key crossed into the cell" "no" \
+            "$(daemon_get "$root/land" bedrock_key_present)"
         check "PID 1 in the cell is the capture runner" "yes" \
             "$(case "$(probe_get "$root/land" pid1_cmdline)" in *capture_driver.sh*) echo yes ;; *) echo no ;; esac)"
-        check "the bedrock key is readable from /proc/1/environ inside the cell" \
-            "$(sha_of "$FAKE_BEDROCK_KEY")" "$(probe_get "$root/land" pid1_bedrock_key_sha)"
     else
         fail "the bedrock leg's driver never ran inside the container (log: $root.log)"
     fi

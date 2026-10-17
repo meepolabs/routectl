@@ -113,7 +113,10 @@ On the Bedrock lanes (`bedrock-invoke`, `bedrock-converse`,
 `[models.<nick>]` entry, listed with its tier and source doc in
 [../wire_watch/models.tsv](../wire_watch/models.tsv).
 [config/lane_configs.test.sh](config/lane_configs.test.sh) welds those
-together and pins each Bedrock lane to its key's region.
+together and pins each Bedrock lane to its region. The Bedrock lanes sign
+with the AWS profile `routectl-cell`, which the capture-cell wrapper
+generates from the operator's own profile (see
+`scripts/container/run_capture.sh`, THE AWS PROFILE).
 
 ## Connection mode is a capture axis
 

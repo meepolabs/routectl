@@ -8880,10 +8880,18 @@ new section or a second doc.
   `--name` / repeatable `--provider` plus a verbatim `--` passthrough of the runner's own
   argv. The one owner of the `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` credential
   convention: per-provider resolution from the seat or the environment, with
-  the chatgpt-oauth account-id variable
+  the chatgpt-oauth account-id variable; `bedrock` instead takes
+  `--aws-profile` / `--aws-config` / `--aws-credential-file` and mounts a
+  generated one-profile config plus the credential file read-only
+- `container/aws_profile.py` -- host-side strict extractor of ONE AWS
+  shared-config profile into the cell's minimal config (`/bin/cat <file>`
+  credential_process only; fails closed, never echoes a value)
 - `container/run_capture.test.sh` -- self-test for that wrapper: its
   per-code argument refusals plus an accept leg against a stub binary, stub
   seat, and stub driver, each refusal paired with its resolvable control
+- `container/run_capture_aws.test.sh` -- sourced by that self-test: the
+  bedrock AWS profile legs (mounted bytes, no foreign profile or file
+  crossing, one refusal row per reader ambiguity)
 - `container/image_scan.test.sh` -- per-layer credential scan of the image,
   driven by the repo's own scrub gate, with a planted positive control
 - `container/isolation.test.sh` -- default-bridge network probe of the image;

@@ -113,6 +113,44 @@ class CommittedRowsTests(MatrixTestCase):
         self.assertEqual({r.driver for r in matrix.load_rows(self.paths)}, drivers)
 
 
+RUN_CAPTURE = os.path.join(REPO, "scripts", "container", "run_capture.sh")
+
+
+class AwsProfileLaneTests(MatrixTestCase):
+    """The Bedrock lanes sign with the AWS profile run_capture.sh writes."""
+
+    def wrapper_profile(self) -> str:
+        with open(RUN_CAPTURE, encoding="utf-8") as handle:
+            found = re.findall(r'^CELL_AWS_PROFILE="([^"]+)"$', handle.read(), re.MULTILINE)
+        self.assertEqual(len(found), 1, "run_capture.sh must spell CELL_AWS_PROFILE exactly once")
+        return found[0]
+
+    def test_every_bedrock_lane_references_the_wrapper_profile_only(self) -> None:
+        want = self.wrapper_profile()
+        lanes = matrix.bedrock_lanes(self.paths)
+        self.assertEqual(lanes, {"bedrock-invoke", "bedrock-converse", "bedrock-mantle"})
+        for lane in sorted(lanes):
+            with self.subTest(lane=lane):
+                with open(os.path.join(self.paths.config_dir, lane + ".toml"), encoding="utf-8") as handle:
+                    text = handle.read()
+                self.assertEqual(matrix.aws_profile_names(text), {want})
+                self.assertNotIn("env://", text, "a Bedrock lane must not also reference a forwarded key")
+
+    def test_the_mantle_lane_carries_one_profile_creds_line_per_vocabulary(self) -> None:
+        with open(os.path.join(self.paths.config_dir, "bedrock-mantle.toml"), encoding="utf-8") as handle:
+            hits = matrix.AWS_PROFILE_CREDS_RE.findall(handle.read())
+        self.assertEqual(len(hits), 3)
+
+    def test_profile_creds_declare_the_bedrock_provider(self) -> None:
+        self.assertEqual(matrix._config_providers('creds = { kind = "profile", name = "x" }\n'), {"bedrock"})
+        self.assertEqual(matrix._config_providers('creds = { kind = "default-chain" }\n'), set())
+
+    def test_every_bedrock_row_uses_no_key_file(self) -> None:
+        rows = [r for r in matrix.load_rows(self.paths) if "bedrock" in r.providers]
+        self.assertEqual(len(rows), 27)
+        self.assertEqual({r.key_file for r in rows}, {None})
+
+
 class RefusalTests(MatrixTestCase):
     def assertRefusedNamingRow(self, needle: str) -> None:
         failures = self.refusals()
@@ -145,6 +183,10 @@ class RefusalTests(MatrixTestCase):
     def test_unknown_connection_mode(self) -> None:
         self.edit_cells(1, connection_mode="direct")
         self.assertRefusedNamingRow("unknown connection_mode 'direct'")
+
+    def test_a_key_file_on_an_aws_profile_lane(self) -> None:
+        self.edit_cells(1, lane="bedrock-invoke", providers="bedrock", key_file="bedrock-key", sweep="-")
+        self.assertRefusedNamingRow("authenticates by AWS profile; its key_file must be '-'")
 
     def test_key_file_with_a_path(self) -> None:
         self.edit_cells(1, lane="openai-compat.ollama", providers="ollama", key_file="../ollama-api-key", sweep="-")
