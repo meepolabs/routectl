@@ -1517,7 +1517,7 @@ What crosses the boundary, and nothing else:
 | this repo | `/workspace` | READ-ONLY |
 | the host routectl binary | `/usr/local/lib/routectl/bin/routectl` | READ-ONLY |
 | `--scratch <dir>` | `/scratch` | writable, the only one |
-| one credential per `--provider` | `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` | forwarded BY NAME |
+| one credential per `--provider` except `bedrock` | `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` | forwarded BY NAME |
 | `--provider bedrock` only: a generated one-profile AWS config | `/etc/routectl-aws/config` | READ-ONLY |
 | `--provider bedrock` only: that profile's credential_process file | `/etc/routectl-aws/credential` | READ-ONLY |
 
@@ -1531,7 +1531,8 @@ ROUTECTL_DRIVER_<PROVIDER>_API_KEY
 ```
 
 with `<PROVIDER>` the upper-cased form of a name in routectl's own provider
-vocabulary -- `anthropic`, `openai`, `gemini`, `bedrock`, `ollama`. Both openai kinds
+vocabulary -- `anthropic`, `openai`, `gemini`, `ollama` (`bedrock` signs with
+an AWS profile instead, below). Both openai kinds
 (`openai-responses` and `openai-compat`) share the ONE `openai` name,
 because routectl's own conventional-env-var table gives them one variable:
 an `openai-responses.toml` lane and an `openai-compat.toml` lane both
@@ -1591,8 +1592,8 @@ provider:
 - **`bedrock` is an AWS profile**, never a forwarded key. The Bedrock lane
   configs use `creds = { kind = "profile", name = "routectl-cell" }`, a
   fixed placeholder. `--provider bedrock` requires `--aws-profile <name>
-  --aws-config <file> --aws-credential-file <file>`: the wrapper reads only
-  that profile's section of the operator's config
+  --aws-config <file> --aws-credential-file <file>`: the wrapper parses the
+  operator's whole config and emits only that profile's allowlisted keys
   (`scripts/container/aws_profile.py`, strict, fails closed on duplicates,
   ambiguity, keys outside `credential_process` / `region` / `output`, or any
   credential_process other than `/bin/cat <absolute path>`), writes

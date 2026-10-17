@@ -78,15 +78,32 @@ aws_mount_sources() {
         "$1.argv" 2>/dev/null
 }
 
-# Whether any planted marker or any line of the credential reached <file>.
+AWS_LEAK_NEEDLES=("$AWS_OTHER_MARKER" "$AWS_DEFAULT_MARKER" "$AWS_SHARED_MARKER"
+    "$AWS_LINE_MARKER" "fake-secret-" "other-synthetic")
+
+# How many planted markers, or lines of the credential, reached <file>.
 aws_leak_count() {
     local n=0 needle
-    for needle in "$AWS_OTHER_MARKER" "$AWS_DEFAULT_MARKER" "$AWS_SHARED_MARKER" \
-        "$AWS_LINE_MARKER" "fake-secret-" "other-synthetic"; do
+    for needle in "${AWS_LEAK_NEEDLES[@]}"; do
         grep -qF -- "$needle" "$1" 2>/dev/null && n=$((n + 1))
     done
     echo "$n"
 }
+
+# Positive control: every "0 leaks" below is evidence only if the helper
+# counts each needle when it IS present, one needle per file so a needle the
+# helper dropped cannot hide behind another one's hit.
+aws_leak_probe="$WORK/aws-fixture/leak-probe.txt"
+for needle in "${AWS_LEAK_NEEDLES[@]}"; do
+    printf 'prefix %s suffix\n' "$needle" >"$aws_leak_probe"
+    check "aws_leak_count detects a planted '$needle'" "1" "$(aws_leak_count "$aws_leak_probe")"
+done
+printf '%s\n' "${AWS_LEAK_NEEDLES[@]}" >"$aws_leak_probe"
+check "aws_leak_count counts every planted needle at once" "${#AWS_LEAK_NEEDLES[@]}" \
+    "$(aws_leak_count "$aws_leak_probe")"
+write_aws_credential "$aws_leak_probe" "probe"
+check "aws_leak_count detects a credential file's content" "1" "$(aws_leak_count "$aws_leak_probe")"
+rm -f "$aws_leak_probe"
 
 # --- the accept leg: one profile, two read-only files ----------------------
 AWS_ROOT="$(new_scratch)"
@@ -128,10 +145,25 @@ check "the runner is told the in-cell config path" "yes" \
     "$(argv_has_pair "$AWS_ROOT" --aws-config /etc/routectl-aws/config)"
 check "no AWS variable is set on the docker command line" "0" \
     "$(grep -cE '^AWS_' "$AWS_ROOT.argv" || true)"
-check "no bedrock key variable is forwarded" "0" \
-    "$(grep -cx -- 'ROUTECTL_DRIVER_BEDROCK_API_KEY' "$AWS_ROOT.argv" || true)"
 check "the wrapper prints no planted value or credential line" "0" \
     "$(aws_leak_count "$AWS_ROOT.log")"
+
+# A bedrock key in the operator's environment is never forwarded: bedrock
+# signs with the profile, so the key-resolution loop must skip it rather
+# than pass the variable through by name.
+AWS_ROOT="$(new_scratch)"
+mkdir -p "$AWS_ROOT.mounts"
+rc=0
+fake_docker_run "$AWS_ROOT" "ROUTECTL_DRIVER_BEDROCK_API_KEY=$FAKE_BEDROCK_KEY" \
+    "FAKE_DOCKER_MOUNT_DUMP=$AWS_ROOT.mounts" -- \
+    --scratch "$AWS_ROOT/land" --provider bedrock \
+    --aws-profile "$AWS_FIX_PROFILE" --aws-config "$AWS_GOOD_CONFIG" --aws-credential-file "$AWS_CRED" -- \
+    "${AWS_RUNNER_ARGS[@]}" -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "a bedrock run with a bedrock key in the environment reaches docker run" "0" "$rc"
+check "a bedrock key in the environment is not forwarded by name" "0" \
+    "$(grep -cx -- 'ROUTECTL_DRIVER_BEDROCK_API_KEY' "$AWS_ROOT.argv" || true)"
+check "a bedrock key in the environment reaches no docker argv word" "0" \
+    "$(grep -cF -- "$FAKE_BEDROCK_KEY" "$AWS_ROOT.argv" || true)"
 
 # A profile with no region gets none in the cell config.
 AWS_NOREGION_CONFIG="$AWS_FIX/config-noregion"
@@ -223,8 +255,13 @@ aws_refusal "a line that is not a key = value pair" "not a key = value pair" \
     "$(printf '%s\n%s' "$AWS_SECTION" "$AWS_LINE_MARKER")"
 aws_refusal "a line before the first header" "before its first section header" \
     "$(printf 'x = %s\n%s' "$AWS_LINE_MARKER" "$AWS_SECTION")"
-aws_refusal "a key outside the allowlist" "keys this cell cannot honor: role_arn" \
+aws_refusal "a key outside the allowlist" "key(s) this cell cannot honor" \
     "$(printf '%s\nrole_arn = %s' "$AWS_SECTION" "$AWS_LINE_MARKER")"
+# A key NAME is config text too (a pasted token followed by `= x` parses as
+# a key), so the refusal must not echo it. The bare-line case is the
+# "not a key = value pair" row above.
+aws_refusal "a planted text used as a key name" "key(s) this cell cannot honor" \
+    "$(printf '%s\n%s = x' "$AWS_SECTION" "$AWS_LINE_MARKER")"
 aws_refusal "a profile without credential_process" "has no credential_process" \
     "$(printf '[profile %s]\nregion = us-west-2' "$AWS_FIX_PROFILE")"
 # configparser would hand a [DEFAULT] section's keys to every section; AWS
@@ -253,6 +290,15 @@ chmod 0640 "$AWS_LOOSE_CRED"
 aws_refusal "a credential file readable by group" "readable or writable by group or other" \
     "$(printf '[profile %s]\ncredential_process = /bin/cat %s' "$AWS_FIX_PROFILE" "$AWS_LOOSE_CRED")" \
     "$AWS_LOOSE_CRED"
+
+# A directory named as the credential file (an operator pointing at the AWS
+# directory by mistake) is refused before anything is mounted.
+AWS_DIR_CRED="$AWS_FIX/credential-dir"
+mkdir -p "$AWS_DIR_CRED"
+chmod 0700 "$AWS_DIR_CRED"
+aws_refusal "a credential file that is a directory" "not a regular file" \
+    "$(printf '[profile %s]\ncredential_process = /bin/cat %s' "$AWS_FIX_PROFILE" "$AWS_DIR_CRED")" \
+    "$AWS_DIR_CRED"
 
 # The staged config is removed by an EXIT trap; the runner's exit code must
 # still come out of the wrapper untouched on a bedrock run.

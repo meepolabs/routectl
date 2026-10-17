@@ -1762,6 +1762,7 @@ fi
 # Paired control for that grep: the same pattern MUST fire on a parser
 # that does accept the flag, or a broken invocation reads as a pass.
 control="$(mktemp)"
+# shellcheck disable=SC2016 # the literal `$2` is the parser line under test
 printf '    --wire-pattern) WIRE_PATTERN="$2"; shift 2 ;;\n' >"$control"
 if grep -qE -- '--wire.pattern\)' "$control"; then
     echo "PASS: the wire-pattern-flag grep fires on a parser that does accept it"

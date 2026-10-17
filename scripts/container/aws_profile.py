@@ -56,8 +56,10 @@ CONFIG_MAX_BYTES = 1024 * 1024
 
 # configparser treats its default section's keys as inherited by every
 # section. AWS has no such inheritance, so the default section is moved to
-# a name no header can spell (headers cannot contain `]`); a literal
-# `[DEFAULT]` or `[default]` is then an ordinary section nothing inherits.
+# a name no real AWS config uses; a literal `[DEFAULT]` or `[default]` is
+# then an ordinary section nothing inherits. The header `[]no-default[]`
+# does still spell it (configparser reads up to the LAST `]`), and its keys
+# would then be inherited.
 NO_DEFAULT_SECTION = "]no-default["
 
 PARSE_ERRORS: Tuple[Tuple[type, str], ...] = (
@@ -137,9 +139,10 @@ def find_section(parser: configparser.RawConfigParser, profile: str) -> str:
 
 def section_values(parser: configparser.RawConfigParser, section: str, profile: str) -> Dict[str, str]:
     values = dict(parser.items(section))
-    unknown = sorted(set(values) - ALLOWED_KEYS)
+    unknown = set(values) - ALLOWED_KEYS
     if unknown:
-        refuse(profile, "the profile sets keys this cell cannot honor: " + ", ".join(unknown))
+        allowed = ", ".join(sorted(ALLOWED_KEYS))
+        refuse(profile, f"the profile sets {len(unknown)} key(s) this cell cannot honor (allowed: {allowed})")
     if "credential_process" not in values:
         refuse(profile, "the profile has no credential_process")
     return values

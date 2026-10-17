@@ -212,8 +212,8 @@
 # `creds = { kind = "profile", name = "routectl-cell" }`: a fixed
 # placeholder, so no operator's profile name is committed and the config
 # bytes (and their sha) are the same for everyone. On the host, this
-# script reads ONLY the --aws-profile section of --aws-config
-# (scripts/container/aws_profile.py, strict, fails closed) and writes a
+# script parses the whole of --aws-config (scripts/container/aws_profile.py,
+# strict, fails closed), takes only the --aws-profile section, and writes a
 # config holding just `[profile routectl-cell]`, its credential_process
 # rewritten to `/bin/cat /etc/routectl-aws/credential`, and its region if
 # set. That file and the credential file are each mounted read-only; the

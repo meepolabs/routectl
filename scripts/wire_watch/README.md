@@ -100,8 +100,10 @@ providers include `bedrock` is `NOT_RUN(credential)`, detail
 `no-aws-profile`, and is never launched. With them, `run_capture.sh` gets
 the three for those cells only and, per cell:
 
-- reads ONLY the named profile's section of the config with a strict
-  parser (`scripts/container/aws_profile.py`). It refuses a missing,
+- parses the whole config with a strict parser
+  (`scripts/container/aws_profile.py`) and emits only the named profile's
+  allowlisted keys. Any parse problem anywhere in the file refuses the
+  cell. It refuses a missing,
   repeated or whitespace-ambiguous profile header, a bare section of the
   same name, repeated keys, keys other than `credential_process`, `region`
   and `output` (`role_arn`, `source_profile`, `sso_*` and the rest change
