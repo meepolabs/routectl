@@ -51,9 +51,9 @@ use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 #[cfg(feature = "bedrock")]
 use crate::mantle::MantleAuth;
 
-/// Provider-kind discriminator string used in tracing fields. Single
-/// source of truth so call sites grep clean (`provider_kind=openai-compat`)
-/// and a typo-on-rename can't silently break operator log filters.
+/// Provider-kind discriminator string used in tracing fields, derived from
+/// the shared core trace vocabulary so call sites grep clean
+/// (`provider_kind=openai-compat`) and a rename cannot drift from the table.
 pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::OPENAI_COMPAT;
 
 /// The lane spelling every `record_translation_drop` /
