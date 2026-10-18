@@ -14,7 +14,7 @@
 //!   full checks or unbounded memory;
 //! - the counters `rc_wire_loss_total{lane,path_class}`,
 //!   `rc_wire_check_total{lane,outcome}` and
-//!   `rc_request_refused_local_total{lane}`, each key holding a count and the
+//!   `rc_request_refused_local_total{lane,reason}`, each key holding a count and the
 //!   unix second it was last bumped. Every label is a closed enum, so the key
 //!   space is bounded by the product of the enums;
 //! - the newest [`FINDINGS_RING_CAPACITY`] findings of each kind (loss and
@@ -33,9 +33,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use routectl_core::is_safe_token;
 use routectl_core::warn_dedup::{CappedWarnSet, WarnDecision};
 use routectl_core::wire_check::{Lane, Leg, PathClass, RejectionProvenance, WirePath};
+use routectl_core::{RefusalReason, is_safe_token};
 
 use crate::config::WireCheckConfig;
 
@@ -175,12 +175,14 @@ pub struct WireCheckCounter {
     pub reading: CounterReading,
 }
 
-/// One `rc_request_refused_local_total{lane}` key.
+/// One `rc_request_refused_local_total{lane,reason}` key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LocalRefusalCounter {
     /// The lane the refusal was counted on.
     pub lane: Lane,
+    /// Why routectl refused the request.
+    pub reason: RefusalReason,
     /// Count and last sighting.
     pub reading: CounterReading,
 }
@@ -233,7 +235,7 @@ struct LaneSampler {
 struct Registry {
     loss: HashMap<(Lane, PathClass), CounterReading>,
     checks: HashMap<(Lane, CheckOutcome), CounterReading>,
-    local_refusals: HashMap<Lane, CounterReading>,
+    local_refusals: HashMap<(Lane, RefusalReason), CounterReading>,
     loss_findings: FindingRing,
     rejection_findings: FindingRing,
     next_seq: u64,
@@ -531,16 +533,16 @@ impl WireCheckState {
     }
 
     test_utils_pub! {
-        /// Count one request routectl refused locally on `lane`.
-        fn record_local_refusal(&self, lane: Lane) {
-            self.record_local_refusal_at(lane, unix_now_secs());
+        /// Count one request routectl refused locally on `lane` for `reason`.
+        fn record_local_refusal(&self, lane: Lane, reason: RefusalReason) {
+            self.record_local_refusal_at(lane, reason, unix_now_secs());
         }
     }
 
-    fn record_local_refusal_at(&self, lane: Lane, now: u64) {
+    fn record_local_refusal_at(&self, lane: Lane, reason: RefusalReason, now: u64) {
         lock(&self.registry)
             .local_refusals
-            .entry(lane)
+            .entry((lane, reason))
             .or_default()
             .bump(now);
     }
@@ -570,13 +572,17 @@ impl WireCheckState {
         let mut local_refusals: Vec<LocalRefusalCounter> = registry
             .local_refusals
             .iter()
-            .map(|(&lane, &reading)| LocalRefusalCounter { lane, reading })
+            .map(|(&(lane, reason), &reading)| LocalRefusalCounter {
+                lane,
+                reason,
+                reading,
+            })
             .collect();
         let findings = registry.findings();
         drop(registry);
         loss.sort_by_key(|c| (c.lane.label(), c.path_class.label()));
         checks.sort_by_key(|c| (c.lane.label(), c.outcome.label()));
-        local_refusals.sort_by_key(|c| c.lane.label());
+        local_refusals.sort_by_key(|c| (c.lane.label(), c.reason.as_str()));
         WireCheckSnapshot {
             window_secs: config.window_secs.get(),
             loss,
@@ -611,12 +617,13 @@ fn should_warn<K: Eq + std::hash::Hash>(
 }
 
 /// Label-only renderings of the three counter families for the metrics log
-/// line: `(lane, label, count)` triples, sorted.
+/// line: `(lane, label, count)` triples, sorted. A local refusal's label is
+/// its reason token.
 #[derive(Debug)]
 pub(crate) struct CounterLog {
     pub(crate) loss: Vec<(&'static str, &'static str, u64)>,
     pub(crate) checks: Vec<(&'static str, &'static str, u64)>,
-    pub(crate) local_refusals: Vec<(&'static str, u64)>,
+    pub(crate) local_refusals: Vec<(&'static str, &'static str, u64)>,
 }
 
 impl WireCheckSnapshot {
@@ -635,7 +642,7 @@ impl WireCheckSnapshot {
             local_refusals: self
                 .local_refusals
                 .iter()
-                .map(|c| (c.lane.label(), c.reading.count))
+                .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
                 .collect(),
         }
     }

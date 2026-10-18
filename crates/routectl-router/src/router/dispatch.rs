@@ -418,7 +418,9 @@ impl Router {
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
                 StripDecision::StrictReject(err) => {
-                    self.count_local_refusal(ingress, target);
+                    if let Some(reason) = err.refusal_reason() {
+                        self.count_local_refusal(ingress, target, reason);
+                    }
                     return Err(err);
                 }
                 StripDecision::RouteAway(err) => {
@@ -1259,7 +1261,9 @@ impl Router {
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
                 StripDecision::StrictReject(err) => {
-                    self.count_local_refusal(ingress, target);
+                    if let Some(reason) = err.refusal_reason() {
+                        self.count_local_refusal(ingress, target, reason);
+                    }
                     return Err(err);
                 }
                 StripDecision::RouteAway(err) => {
@@ -1838,11 +1842,8 @@ impl Router {
         is_forwarded: bool,
         ingress: Option<IngressDialect>,
     ) {
-        if matches!(
-            err,
-            Error::NormalizeRequest(..) | Error::LocalRefusal { .. }
-        ) {
-            self.count_local_refusal(ingress, target);
+        if let Some(reason) = err.refusal_reason() {
+            self.count_local_refusal(ingress, target, reason);
         }
         let facts = upstream_facts(err);
         let model = target.nickname.as_deref().unwrap_or("");

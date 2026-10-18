@@ -26,7 +26,8 @@ pub(super) struct WireCheckRows {
     /// Upstream rejections field repair did not repair, inside the window,
     /// oldest first.
     unrepaired_rejections: Vec<UnrepairedRejectionRow>,
-    /// One row per lane of requests refused locally inside the window.
+    /// One row per (lane, reason) of requests refused locally inside the
+    /// window.
     local_refusals: Vec<LocalRefusalRow>,
 }
 
@@ -68,6 +69,7 @@ struct UnrepairedRejectionRow {
 #[derive(Debug, Clone, Serialize)]
 struct LocalRefusalRow {
     lane: &'static str,
+    reason: &'static str,
     count: u64,
     last_seen_unix_secs: u64,
 }
@@ -141,6 +143,7 @@ pub(super) fn project(snapshot: &WireCheckSnapshot, now_unix_secs: u64) -> WireC
         .filter(|c| current(&c.reading, window, now_unix_secs))
         .map(|c| LocalRefusalRow {
             lane: c.lane.label(),
+            reason: c.reason.as_str(),
             count: c.reading.count,
             last_seen_unix_secs: c.reading.last_seen_unix_secs,
         })

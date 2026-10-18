@@ -166,7 +166,7 @@ fn building_the_panel_changes_neither_the_wire_check_sampler_nor_its_counters() 
             .expect("wire_check config parses");
     let lane = Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi);
     assert!(wire_check.admit(lane, None, &config.wire_check));
-    wire_check.record_local_refusal(lane);
+    wire_check.record_local_refusal(lane, routectl_core::RefusalReason::CloakRelocation);
     let before = router.wire_check_snapshot();
 
     for _ in 0..5 {

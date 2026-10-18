@@ -1,18 +1,21 @@
 //! A request routectl refuses on its own counts once on
-//! `rc_request_refused_local_total` under its lane, whichever router exit it
-//! leaves through; an upstream rejection and a credential refusal do not
-//! count.
+//! `rc_request_refused_local_total` under its lane and reason, whichever
+//! router exit it leaves through; an upstream rejection and a credential
+//! refusal do not count.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::wire_check::{IngressDialect, IngressWire};
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result, ToolDef,
+    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, ContentPart, Error, Message,
+    MessageContent, Provider, RefusalReason, Result, Role, ToolDef,
 };
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use serde_json::{Value, json};
 
 use crate::config::{AliasValue, Config, CredentialSource, ProviderEntry};
@@ -47,6 +50,38 @@ impl Provider for FailingProvider {
     }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         Err((self.error)())
+    }
+}
+
+/// A provider whose `n`th call fails with the `n`th error of `errors`.
+struct SequencedProvider {
+    errors: &'static [fn() -> Error],
+    calls: AtomicUsize,
+}
+
+impl SequencedProvider {
+    fn next_error(&self) -> Error {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        (self.errors[n % self.errors.len()])()
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for SequencedProvider {
+    fn id(&self) -> &'static str {
+        "sequenced"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<Value> {
+        Ok(json!({}))
+    }
+    fn normalize_response(&self, _: Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response("sequenced", "unused"))
+    }
+    async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+        Err(self.next_error())
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        Err(self.next_error())
     }
 }
 
@@ -108,34 +143,39 @@ fn failing_router(error: fn() -> Error) -> Router {
     )
 }
 
-/// A request that arrived through the Anthropic ingress.
-fn anthropic_request() -> ChatRequest {
+/// A request that arrived through `dialect`'s ingress.
+fn request_from(dialect: IngressDialect) -> ChatRequest {
     let mut req = ChatRequest {
         model: ALIAS.into(),
         ..Default::default()
     };
     req.routectl_internal.ingress_wire = Some(IngressWire {
-        dialect: IngressDialect::Anthropic,
+        dialect,
         client_version: None,
         bytes: br#"{"model":"a","messages":[]}"#.as_slice().into(),
     });
     req
 }
 
-/// Expected `(lane, count)` local-refusal keys.
-type Refusals = &'static [(&'static str, u64)];
+/// A request that arrived through the Anthropic ingress.
+fn anthropic_request() -> ChatRequest {
+    request_from(IngressDialect::Anthropic)
+}
+
+/// Expected `(lane, reason, count)` local-refusal keys.
+type Refusals = &'static [(&'static str, &'static str, u64)];
 
 /// One refusal-counting case: its name, the error the provider fails with,
 /// and the keys the dispatch must leave.
 type RefusalCase = (&'static str, fn() -> Error, Refusals);
 
-/// `(lane, count)` for every local-refusal key the router holds.
-fn refusals(router: &Router) -> Vec<(&'static str, u64)> {
+/// `(lane, reason, count)` for every local-refusal key the router holds.
+fn refusals(router: &Router) -> Vec<(&'static str, &'static str, u64)> {
     router
         .wire_check_snapshot()
         .local_refusals
         .iter()
-        .map(|c| (c.lane.label(), c.reading.count))
+        .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
         .collect()
 }
 
@@ -164,7 +204,7 @@ fn egress_normalize_refusal() -> Error {
     Error::normalize_request(
         "failing",
         "request cannot be expressed on this egress",
-        routectl_core::RefusalReason::Unrepresentable,
+        RefusalReason::Unrepresentable,
     )
 }
 
@@ -172,7 +212,7 @@ fn egress_local_refusal() -> Error {
     Error::LocalRefusal {
         provider: "failing".into(),
         detail: "request shape refused before egress".into(),
-        reason: routectl_core::RefusalReason::CloakRelocation,
+        reason: RefusalReason::CloakRelocation,
     }
 }
 
@@ -186,12 +226,12 @@ async fn an_egress_refusal_counts_once_for_its_lane_and_an_upstream_400_does_not
         (
             "normalize_request",
             egress_normalize_refusal,
-            &[(ANTHROPIC_LANE, 1)],
+            &[(ANTHROPIC_LANE, "unrepresentable", 1)],
         ),
         (
             "local_refusal",
             egress_local_refusal,
-            &[(ANTHROPIC_LANE, 1)],
+            &[(ANTHROPIC_LANE, "cloak-relocation", 1)],
         ),
         ("upstream_400", upstream_bad_request, &[]),
     ];
@@ -204,6 +244,91 @@ async fn an_egress_refusal_counts_once_for_its_lane_and_an_upstream_400_does_not
 
             assert_eq!(refusals(&router), expected, "{name} on {surface:?}");
         }
+    }
+}
+
+#[tokio::test]
+async fn two_egress_refusals_with_different_reasons_on_one_lane_are_two_keys() {
+    for surface in SURFACES {
+        let router = router_over(
+            ProviderEntry::anthropic_api("literal:k"),
+            Arc::new(SequencedProvider {
+                errors: &[egress_normalize_refusal, egress_local_refusal],
+                calls: AtomicUsize::new(0),
+            }),
+            false,
+        );
+
+        dispatch_err(&router, surface, anthropic_request()).await;
+        dispatch_err(&router, surface, anthropic_request()).await;
+
+        assert_eq!(
+            refusals(&router),
+            [
+                (ANTHROPIC_LANE, "cloak-relocation", 1),
+                (ANTHROPIC_LANE, "unrepresentable", 1),
+            ],
+            "{surface:?}"
+        );
+    }
+}
+
+/// An openai-compat egress with `strict_translation` on. Its base URL is
+/// never dialed: the strict check refuses before any request is built.
+fn strict_openai_compat() -> OpenAiCompatProvider {
+    OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: PROVIDER.into(),
+        base_url: "https://openai-compat.invalid/v1".into(),
+        api_key: "k".into(),
+        header_extras: vec![],
+        payload_extras: None,
+        reasoning_dialect: Default::default(),
+        history_reasoning: Default::default(),
+        user_agent: None,
+        strict_translation: true,
+        disable_stream_include_usage: false,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
+    })
+}
+
+/// A chat-ingress request carrying a content block the openai-compat wire
+/// has no slot for.
+fn chat_request_with_an_unmodeled_block() -> ChatRequest {
+    let part: ContentPart = serde_json::from_value(json!({"type": "future_widget_block"}))
+        .expect("an unknown block type deserializes");
+    let mut req = request_from(IngressDialect::Chat);
+    req.messages = vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![part]),
+        tool_call_id: None,
+        refusal: None,
+        reasoning: None,
+        reasoning_details: vec![],
+        name: None,
+        tool_calls: None,
+    }]
+    .into();
+    req
+}
+
+#[tokio::test]
+async fn a_provider_raised_strict_validation_counts_once_as_strict_translation() {
+    for surface in SURFACES {
+        let router = router_over(
+            ProviderEntry::openai_compat("https://openai-compat.invalid/v1", "literal:k"),
+            Arc::new(strict_openai_compat()),
+            true,
+        );
+
+        let err = dispatch_err(&router, surface, chat_request_with_an_unmodeled_block()).await;
+
+        assert!(matches!(err, Error::Validation(..)), "{surface:?}: {err:?}");
+        assert_eq!(
+            refusals(&router),
+            [("chat->openai-compat", "strict-translation", 1)],
+            "{surface:?}"
+        );
     }
 }
 
@@ -265,7 +390,11 @@ async fn a_strict_strip_refusal_counts_exactly_once() {
 
         assert!(matches!(err, Error::Validation(..)), "{surface:?}: {err:?}");
         assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
-        assert_eq!(refusals(&router), [(ANTHROPIC_LANE, 1)], "{surface:?}");
+        assert_eq!(
+            refusals(&router),
+            [(ANTHROPIC_LANE, "strict-translation", 1)],
+            "{surface:?}"
+        );
     }
 }
 
@@ -278,9 +407,9 @@ async fn a_tool_pairing_refusal_carries_its_reason() {
             false,
         );
         let mut req = anthropic_request();
-        req.messages = vec![routectl_core::Message {
-            role: routectl_core::Role::Tool,
-            content: routectl_core::MessageContent::Text("r".into()),
+        req.messages = vec![Message {
+            role: Role::Tool,
+            content: MessageContent::Text("r".into()),
             tool_call_id: Some("call_missing".into()),
             refusal: None,
             reasoning: None,
@@ -294,7 +423,7 @@ async fn a_tool_pairing_refusal_carries_its_reason() {
 
         assert_eq!(
             err.refusal_reason(),
-            Some(routectl_core::RefusalReason::ToolPairing),
+            Some(RefusalReason::ToolPairing),
             "{surface:?}: {err:?}"
         );
     }
@@ -318,7 +447,7 @@ async fn a_missing_forwarded_bearer_refusal_is_not_counted() {
         );
         assert_eq!(
             err.refusal_reason(),
-            Some(routectl_core::RefusalReason::ForwardedBearerMissing),
+            Some(RefusalReason::ForwardedBearerMissing),
             "{surface:?}"
         );
         assert!(refusals(&router).is_empty(), "{surface:?}");

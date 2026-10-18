@@ -2172,7 +2172,9 @@ fn wire_check_counters_and_sampler_survive_carry_over_metrics_from() {
     before
         .wire_check
         .record_compared(lane, Leg::Request, [(&lost, PathClass::Missing)], false);
-    before.wire_check.record_local_refusal(lane);
+    before
+        .wire_check
+        .record_local_refusal(lane, routectl_core::RefusalReason::StrictTranslation);
     let mut after = Router::new(config.clone());
 
     after.carry_over_metrics_from(&before);
@@ -2203,9 +2205,10 @@ fn log_snapshot_carries_the_wire_check_counters() {
     router
         .wire_check
         .record_compared(lane, Leg::Request, [(&lost, PathClass::Missing)], false);
-    router
-        .wire_check
-        .record_local_refusal(Lane::of(IngressDialect::Chat, EgressKind::Local));
+    router.wire_check.record_local_refusal(
+        Lane::of(IngressDialect::Chat, EgressKind::Local),
+        routectl_core::RefusalReason::FieldType,
+    );
 
     let events = routectl_testkit::capture_events(|| {
         router.log_metrics_snapshot();
@@ -2225,7 +2228,7 @@ fn log_snapshot_carries_the_wire_check_counters() {
     );
     assert_eq!(
         snapshot.field("rc_request_refused_local_total"),
-        Some(r#"[("chat->local", 1)]"#)
+        Some(r#"[("chat->local", "field-type", 1)]"#)
     );
 }
 

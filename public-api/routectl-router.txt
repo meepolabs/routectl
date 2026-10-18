@@ -5040,6 +5040,8 @@ pub fn routectl_router::router::Router::calibrated_estimate(&self, &str, &str, u
 pub fn routectl_router::router::Router::opening_lane(&self, &str) -> core::option::Option<routectl_router::OpeningLane>
 pub fn routectl_router::router::Router::publication_generation(&self) -> u64
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::clear_all_credential_parks(&self) -> usize
+impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::complete(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
 pub async fn routectl_router::router::Router::complete_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::Dispatched
 pub async fn routectl_router::router::Router::stream(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>
@@ -5069,7 +5071,7 @@ pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usiz
 pub fn routectl_router::router::Router::publish_probe_incarnation_into(&alloc::sync::Arc<Self>, impl core::ops::function::FnOnce(alloc::sync::Arc<Self>)) -> usize
 pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::record_ingress_refusal(&self, routectl_core::wire_check::lane::IngressDialect)
+pub fn routectl_router::router::Router::record_ingress_refusal(&self, routectl_core::wire_check::lane::IngressDialect, routectl_core::refusal_reason::RefusalReason)
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::run_probe_pass(&self) -> routectl_router::router::ProbePassSummary
 impl routectl_router::router::Router
@@ -5238,6 +5240,9 @@ pub fn routectl_router::runtime_state::CircuitPhase::into_shared(self) -> Shared
 pub enum routectl_router::runtime_state::GateDecision
 pub routectl_router::runtime_state::GateDecision::Allow
 pub routectl_router::runtime_state::GateDecision::CircuitOpen
+pub routectl_router::runtime_state::GateDecision::CredentialParked
+pub routectl_router::runtime_state::GateDecision::CredentialParked::reason: routectl_core::upstream_reason::UpstreamReason
+pub routectl_router::runtime_state::GateDecision::CredentialParked::until: std::time::Instant
 pub routectl_router::runtime_state::GateDecision::RateLimited
 impl core::clone::Clone for routectl_router::runtime_state::GateDecision
 pub fn routectl_router::runtime_state::GateDecision::clone(&self) -> routectl_router::runtime_state::GateDecision
@@ -5294,6 +5299,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::runtime_state::GateDecision::into_shared(self) -> Shared
 pub struct routectl_router::runtime_state::CapacitySnapshot
 pub routectl_router::runtime_state::CapacitySnapshot::circuit: routectl_router::runtime_state::CircuitPhase
+pub routectl_router::runtime_state::CapacitySnapshot::credential_blocked: bool
 pub routectl_router::runtime_state::CapacitySnapshot::rpm_available: core::option::Option<f64>
 impl routectl_router::runtime_state::CapacitySnapshot
 pub fn routectl_router::runtime_state::CapacitySnapshot::is_dispatchable(&self) -> bool
@@ -5350,9 +5356,128 @@ impl<T> typenum::type_operators::Same for routectl_router::runtime_state::Capaci
 pub type routectl_router::runtime_state::CapacitySnapshot::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::runtime_state::CapacitySnapshot where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::runtime_state::CapacitySnapshot::into_shared(self) -> Shared
+pub struct routectl_router::runtime_state::CredentialPark
+pub routectl_router::runtime_state::CredentialPark::reason: routectl_core::upstream_reason::UpstreamReason
+pub routectl_router::runtime_state::CredentialPark::until: std::time::Instant
+impl core::clone::Clone for routectl_router::runtime_state::CredentialPark
+pub fn routectl_router::runtime_state::CredentialPark::clone(&self) -> routectl_router::runtime_state::CredentialPark
+impl core::cmp::Eq for routectl_router::runtime_state::CredentialPark
+impl core::cmp::PartialEq for routectl_router::runtime_state::CredentialPark
+pub fn routectl_router::runtime_state::CredentialPark::eq(&self, &routectl_router::runtime_state::CredentialPark) -> bool
+impl core::fmt::Debug for routectl_router::runtime_state::CredentialPark
+pub fn routectl_router::runtime_state::CredentialPark::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::runtime_state::CredentialPark
+impl core::marker::StructuralPartialEq for routectl_router::runtime_state::CredentialPark
+impl core::marker::Freeze for routectl_router::runtime_state::CredentialPark
+impl core::marker::Send for routectl_router::runtime_state::CredentialPark
+impl core::marker::Sync for routectl_router::runtime_state::CredentialPark
+impl core::marker::Unpin for routectl_router::runtime_state::CredentialPark
+impl core::marker::UnsafeUnpin for routectl_router::runtime_state::CredentialPark
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::runtime_state::CredentialPark
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::runtime_state::CredentialPark
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::runtime_state::CredentialPark where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialPark::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::runtime_state::CredentialPark where U: core::convert::From<T>
+pub fn routectl_router::runtime_state::CredentialPark::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::runtime_state::CredentialPark where U: core::convert::Into<T>
+pub type routectl_router::runtime_state::CredentialPark::Error = core::convert::Infallible
+pub fn routectl_router::runtime_state::CredentialPark::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::runtime_state::CredentialPark where U: core::convert::TryFrom<T>
+pub type routectl_router::runtime_state::CredentialPark::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::runtime_state::CredentialPark::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::runtime_state::CredentialPark where T: core::clone::Clone
+pub type routectl_router::runtime_state::CredentialPark::Owned = T
+pub fn routectl_router::runtime_state::CredentialPark::clone_into(&self, &mut T)
+pub fn routectl_router::runtime_state::CredentialPark::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::runtime_state::CredentialPark where T: core::clone::Clone
+pub fn routectl_router::runtime_state::CredentialPark::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::runtime_state::CredentialPark where T: 'static + ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialPark::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::runtime_state::CredentialPark where T: ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialPark::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::runtime_state::CredentialPark where T: ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialPark::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::runtime_state::CredentialPark where T: core::clone::Clone
+pub unsafe fn routectl_router::runtime_state::CredentialPark::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::runtime_state::CredentialPark
+pub fn routectl_router::runtime_state::CredentialPark::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::runtime_state::CredentialPark where T: core::clone::Clone
+pub fn routectl_router::runtime_state::CredentialPark::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::runtime_state::CredentialPark
+impl<T> outref::AsOut<T> for routectl_router::runtime_state::CredentialPark where T: core::marker::Copy
+pub fn routectl_router::runtime_state::CredentialPark::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::runtime_state::CredentialPark where T: ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialPark::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::runtime_state::CredentialPark::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::runtime_state::CredentialPark
+impl<T> tracing::instrument::WithSubscriber for routectl_router::runtime_state::CredentialPark
+impl<T> typenum::type_operators::Same for routectl_router::runtime_state::CredentialPark
+pub type routectl_router::runtime_state::CredentialPark::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::runtime_state::CredentialPark where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::runtime_state::CredentialPark::into_shared(self) -> Shared
+pub struct routectl_router::runtime_state::CredentialParkStatus
+pub routectl_router::runtime_state::CredentialParkStatus::reason: routectl_core::upstream_reason::UpstreamReason
+pub routectl_router::runtime_state::CredentialParkStatus::remaining: core::time::Duration
+impl core::clone::Clone for routectl_router::runtime_state::CredentialParkStatus
+pub fn routectl_router::runtime_state::CredentialParkStatus::clone(&self) -> routectl_router::runtime_state::CredentialParkStatus
+impl core::cmp::Eq for routectl_router::runtime_state::CredentialParkStatus
+impl core::cmp::PartialEq for routectl_router::runtime_state::CredentialParkStatus
+pub fn routectl_router::runtime_state::CredentialParkStatus::eq(&self, &routectl_router::runtime_state::CredentialParkStatus) -> bool
+impl core::fmt::Debug for routectl_router::runtime_state::CredentialParkStatus
+pub fn routectl_router::runtime_state::CredentialParkStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::runtime_state::CredentialParkStatus
+impl core::marker::StructuralPartialEq for routectl_router::runtime_state::CredentialParkStatus
+impl core::marker::Freeze for routectl_router::runtime_state::CredentialParkStatus
+impl core::marker::Send for routectl_router::runtime_state::CredentialParkStatus
+impl core::marker::Sync for routectl_router::runtime_state::CredentialParkStatus
+impl core::marker::Unpin for routectl_router::runtime_state::CredentialParkStatus
+impl core::marker::UnsafeUnpin for routectl_router::runtime_state::CredentialParkStatus
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::runtime_state::CredentialParkStatus
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::runtime_state::CredentialParkStatus
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::runtime_state::CredentialParkStatus where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialParkStatus::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::runtime_state::CredentialParkStatus where U: core::convert::From<T>
+pub fn routectl_router::runtime_state::CredentialParkStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::runtime_state::CredentialParkStatus where U: core::convert::Into<T>
+pub type routectl_router::runtime_state::CredentialParkStatus::Error = core::convert::Infallible
+pub fn routectl_router::runtime_state::CredentialParkStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::runtime_state::CredentialParkStatus where U: core::convert::TryFrom<T>
+pub type routectl_router::runtime_state::CredentialParkStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::runtime_state::CredentialParkStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::runtime_state::CredentialParkStatus where T: core::clone::Clone
+pub type routectl_router::runtime_state::CredentialParkStatus::Owned = T
+pub fn routectl_router::runtime_state::CredentialParkStatus::clone_into(&self, &mut T)
+pub fn routectl_router::runtime_state::CredentialParkStatus::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::runtime_state::CredentialParkStatus where T: core::clone::Clone
+pub fn routectl_router::runtime_state::CredentialParkStatus::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::runtime_state::CredentialParkStatus where T: 'static + ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialParkStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::runtime_state::CredentialParkStatus where T: ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialParkStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::runtime_state::CredentialParkStatus where T: ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialParkStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::runtime_state::CredentialParkStatus where T: core::clone::Clone
+pub unsafe fn routectl_router::runtime_state::CredentialParkStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::runtime_state::CredentialParkStatus
+pub fn routectl_router::runtime_state::CredentialParkStatus::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::runtime_state::CredentialParkStatus where T: core::clone::Clone
+pub fn routectl_router::runtime_state::CredentialParkStatus::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::runtime_state::CredentialParkStatus
+impl<T> outref::AsOut<T> for routectl_router::runtime_state::CredentialParkStatus where T: core::marker::Copy
+pub fn routectl_router::runtime_state::CredentialParkStatus::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::runtime_state::CredentialParkStatus where T: ?core::marker::Sized
+pub fn routectl_router::runtime_state::CredentialParkStatus::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::runtime_state::CredentialParkStatus::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::runtime_state::CredentialParkStatus
+impl<T> tracing::instrument::WithSubscriber for routectl_router::runtime_state::CredentialParkStatus
+impl<T> typenum::type_operators::Same for routectl_router::runtime_state::CredentialParkStatus
+pub type routectl_router::runtime_state::CredentialParkStatus::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::runtime_state::CredentialParkStatus where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::runtime_state::CredentialParkStatus::into_shared(self) -> Shared
 pub struct routectl_router::runtime_state::ProviderGateStatus
 pub routectl_router::runtime_state::ProviderGateStatus::circuit: routectl_router::runtime_state::CircuitPhase
 pub routectl_router::runtime_state::ProviderGateStatus::circuit_open_elapsed: core::option::Option<core::time::Duration>
+pub routectl_router::runtime_state::ProviderGateStatus::credential_park: core::option::Option<routectl_router::runtime_state::CredentialParkStatus>
 pub routectl_router::runtime_state::ProviderGateStatus::half_open_probe_in_flight: bool
 pub routectl_router::runtime_state::ProviderGateStatus::last_outcome: core::option::Option<routectl_core::failure_class::LastOutcome>
 pub routectl_router::runtime_state::ProviderGateStatus::last_outcome_elapsed: core::option::Option<core::time::Duration>
@@ -5413,13 +5538,21 @@ pub fn routectl_router::runtime_state::ProviderGateStatus::into_shared(self) -> 
 pub struct routectl_router::runtime_state::ProviderState
 impl routectl_router::runtime_state::ProviderState
 pub fn routectl_router::runtime_state::ProviderState::capacity_snapshot(&self, std::time::Instant) -> routectl_router::runtime_state::CapacitySnapshot
+pub const fn routectl_router::runtime_state::ProviderState::clear_credential_park(&mut self)
+pub const fn routectl_router::runtime_state::ProviderState::clear_credential_park_in_generation(&mut self, u64) -> bool
+pub const fn routectl_router::runtime_state::ProviderState::credential_generation(&self) -> u64
+pub const fn routectl_router::runtime_state::ProviderState::credential_park(&self) -> core::option::Option<routectl_router::runtime_state::CredentialPark>
 pub const fn routectl_router::runtime_state::ProviderState::force_open(&mut self, std::time::Instant, core::time::Duration)
 pub fn routectl_router::runtime_state::ProviderState::gate_status(&self, std::time::Instant) -> routectl_router::runtime_state::ProviderGateStatus
 pub const fn routectl_router::runtime_state::ProviderState::half_open_probe_in_flight(&self) -> bool
 pub fn routectl_router::runtime_state::ProviderState::new(&routectl_router::ProviderRuntimePolicy) -> Self
+pub fn routectl_router::runtime_state::ProviderState::park_credential(&mut self, std::time::Instant, routectl_core::upstream_reason::UpstreamReason)
+pub fn routectl_router::runtime_state::ProviderState::park_credential_in_generation(&mut self, std::time::Instant, routectl_core::upstream_reason::UpstreamReason, u64) -> bool
+pub const fn routectl_router::runtime_state::ProviderState::park_credential_until(&mut self, routectl_core::upstream_reason::UpstreamReason, std::time::Instant)
 pub const fn routectl_router::runtime_state::ProviderState::record_failure(&mut self, std::time::Instant, routectl_core::failure_class::LastOutcome) -> bool
 pub const fn routectl_router::runtime_state::ProviderState::record_success(&mut self, std::time::Instant)
 pub const fn routectl_router::runtime_state::ProviderState::release_probe_slot(&mut self)
+pub const fn routectl_router::runtime_state::ProviderState::reset_credential_parks(&mut self) -> bool
 pub fn routectl_router::runtime_state::ProviderState::try_dispatch(&mut self, std::time::Instant) -> routectl_router::runtime_state::GateDecision
 impl core::fmt::Debug for routectl_router::runtime_state::ProviderState
 pub fn routectl_router::runtime_state::ProviderState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -5456,6 +5589,7 @@ impl<T> typenum::type_operators::Same for routectl_router::runtime_state::Provid
 pub type routectl_router::runtime_state::ProviderState::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::runtime_state::ProviderState where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::runtime_state::ProviderState::into_shared(self) -> Shared
+pub const routectl_router::runtime_state::CREDENTIAL_PARK_BACKSTOP: core::time::Duration
 pub mod routectl_router::schema_gen
 pub fn routectl_router::schema_gen::render_schema_json() -> alloc::string::String
 pub mod routectl_router::seat_naming
@@ -5965,6 +6099,7 @@ pub fn routectl_router::wire_check_state::CounterReading::into_shared(self) -> S
 #[non_exhaustive] pub struct routectl_router::wire_check_state::LocalRefusalCounter
 pub routectl_router::wire_check_state::LocalRefusalCounter::lane: routectl_core::wire_check::lane::Lane
 pub routectl_router::wire_check_state::LocalRefusalCounter::reading: routectl_router::wire_check_state::CounterReading
+pub routectl_router::wire_check_state::LocalRefusalCounter::reason: routectl_core::refusal_reason::RefusalReason
 impl core::clone::Clone for routectl_router::wire_check_state::LocalRefusalCounter
 pub fn routectl_router::wire_check_state::LocalRefusalCounter::clone(&self) -> routectl_router::wire_check_state::LocalRefusalCounter
 impl core::cmp::Eq for routectl_router::wire_check_state::LocalRefusalCounter
@@ -16015,6 +16150,8 @@ pub fn routectl_router::router::Router::calibrated_estimate(&self, &str, &str, u
 pub fn routectl_router::router::Router::opening_lane(&self, &str) -> core::option::Option<routectl_router::OpeningLane>
 pub fn routectl_router::router::Router::publication_generation(&self) -> u64
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::clear_all_credential_parks(&self) -> usize
+impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::complete(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
 pub async fn routectl_router::router::Router::complete_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::Dispatched
 pub async fn routectl_router::router::Router::stream(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>
@@ -16044,7 +16181,7 @@ pub fn routectl_router::router::Router::publish_probe_incarnation(&self) -> usiz
 pub fn routectl_router::router::Router::publish_probe_incarnation_into(&alloc::sync::Arc<Self>, impl core::ops::function::FnOnce(alloc::sync::Arc<Self>)) -> usize
 pub fn routectl_router::router::Router::shutdown_probe_work(&self) -> usize
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::record_ingress_refusal(&self, routectl_core::wire_check::lane::IngressDialect)
+pub fn routectl_router::router::Router::record_ingress_refusal(&self, routectl_core::wire_check::lane::IngressDialect, routectl_core::refusal_reason::RefusalReason)
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::run_probe_pass(&self) -> routectl_router::router::ProbePassSummary
 impl routectl_router::router::Router

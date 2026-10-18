@@ -127,8 +127,8 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
         // axum `Json` extractor produced before this path owned the parse.
         Err(Error::Json(_)) => return render_malformed_body(envelope),
         Err(e) => {
-            if matches!(e, Error::Validation(..)) {
-                router.record_ingress_refusal(adapter.dialect());
+            if let Some(reason) = e.refusal_reason() {
+                router.record_ingress_refusal(adapter.dialect(), reason);
             }
             return map_error(envelope, e);
         }

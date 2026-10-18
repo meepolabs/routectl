@@ -1,6 +1,7 @@
 //! The wire-check rows show what the router's state holds inside the status
 //! window and nothing older, with every unrepaired rejection's five fields.
 
+use routectl_core::RefusalReason;
 use routectl_core::wire_check::{
     EgressKind, IngressDialect, Lane, Leg, PathClass, RejectionProvenance, WirePath,
 };
@@ -36,7 +37,7 @@ fn a_loss_key_shows_inside_the_window_and_drops_once_last_seen_is_outside_it() {
     let state = WireCheckState::default();
     let path = WirePath::root().child("metadata");
     state.record_compared(lane(), Leg::Request, [(&path, PathClass::Missing)], false);
-    state.record_local_refusal(lane());
+    state.record_local_refusal(lane(), RefusalReason::CloakRelocation);
     let snapshot = snapshot_of(&state);
     let window = snapshot.window_secs;
     let seen = snapshot.loss[0].reading.last_seen_unix_secs;
@@ -66,8 +67,13 @@ fn a_loss_key_shows_inside_the_window_and_drops_once_last_seen_is_outside_it() {
     );
     assert_eq!(inside["checks"][0]["outcome"], json!("loss"));
     assert_eq!(
-        inside["local_refusals"][0]["lane"],
-        json!("anthropic->anthropic-api")
+        inside["local_refusals"],
+        json!([{
+            "lane": "anthropic->anthropic-api",
+            "reason": "cloak-relocation",
+            "count": 1,
+            "last_seen_unix_secs": snapshot.local_refusals[0].reading.last_seen_unix_secs,
+        }])
     );
     for key in ["loss", "loss_findings", "checks", "local_refusals"] {
         assert_eq!(outside[key], json!([]), "{key} past the window");

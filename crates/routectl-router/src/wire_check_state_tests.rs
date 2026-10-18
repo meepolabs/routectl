@@ -333,17 +333,32 @@ fn a_flood_of_rejection_warn_keys_never_silences_a_new_loss() {
 }
 
 #[test]
-fn a_local_refusal_counts_per_lane() {
+fn a_local_refusal_counts_per_lane_and_reason_sorted_by_both() {
+    use routectl_core::RefusalReason;
+
     let state = WireCheckState::default();
     let local = Lane::of(IngressDialect::Responses, EgressKind::Local);
+    let egress = Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi);
 
-    state.record_local_refusal(local);
-    state.record_local_refusal(local);
+    state.record_local_refusal(local, RefusalReason::PreviousResponseId);
+    state.record_local_refusal(local, RefusalReason::PreviousResponseId);
+    state.record_local_refusal(local, RefusalReason::FieldType);
+    state.record_local_refusal(egress, RefusalReason::ToolPairing);
 
-    let refusals = state.snapshot(&WireCheckConfig::default()).local_refusals;
-    assert_eq!(refusals.len(), 1);
-    assert_eq!(refusals[0].lane.label(), "responses->local");
-    assert_eq!(refusals[0].reading.count, 2);
+    let refusals: Vec<_> = state
+        .snapshot(&WireCheckConfig::default())
+        .local_refusals
+        .iter()
+        .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
+        .collect();
+    assert_eq!(
+        refusals,
+        [
+            ("anthropic->anthropic-api", "tool-pairing", 1),
+            ("responses->local", "field-type", 1),
+            ("responses->local", "previous-response-id", 2),
+        ]
+    );
 }
 
 #[test]
