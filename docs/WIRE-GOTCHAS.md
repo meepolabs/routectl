@@ -89,7 +89,9 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   chain moves on. An upstream 400 or 422 on a defective transcript
   (`is_transcript_rejection`) is the client's defect, not the lane's: it is
   not retried, does not walk the chain, is not field-repaired, and teaches
-  no learned capability; it counts once as unlocalized. The anthropic-api
+  no learned capability; it counts once as unlocalized. The one exception:
+  when the rejection names a change routectl itself made to the request,
+  routectl undoes that change and retries the same target once. The anthropic-api
   egress still refuses a tool result turn with no id, wherever it sits
   (`tool-call-id-missing`, `normalize_replay_invariants` in
   `crates/routectl-providers/src/anthropic_api/messages.rs`), the one

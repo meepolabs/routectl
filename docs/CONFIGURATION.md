@@ -443,7 +443,9 @@ result answers, and the chain likewise moves on; when that result also
 follows a tool call turn, the pairing defect is recorded as well. An
 upstream 400 or 422 answering a mispaired transcript is returned as is: it is
 not retried, does not fall back, is not repaired, and teaches no learned
-capability. routectl does not repair a malformed transcript by
+capability. The one exception: when the rejection names a change routectl
+itself made to the request, routectl undoes that change and retries the
+same target once. routectl does not repair a malformed transcript by
 synthesizing or dropping turns.
 
 `GET /v1/models` lists the configured aliases; `GET /health` is the

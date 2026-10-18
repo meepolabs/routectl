@@ -2,8 +2,9 @@
 //! forwarded unchanged on both dispatch surfaces and to the token count.
 //! Only a Gemini target refuses it, locally, and the walk moves on. An
 //! upstream 400 or 422 answering such a transcript neither walks the chain,
-//! nor is repaired, nor teaches any learner; a transient failure routes as it
-//! does for any request.
+//! nor is repaired, nor teaches any learner, unless it names an edit routectl
+//! itself declared, which is undone and the same target retried once; a
+//! transient failure routes as it does for any request.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -797,6 +798,134 @@ async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_walk_unlearn
     for surface in SURFACES {
         for row in rejection_rows() {
             run_rejection_row(&row, surface).await;
+        }
+    }
+}
+
+/// An operator extra under `metadata`, which the client also sent.
+const OPERATOR_EXTRA: &str = "payload_extras = { metadata = { op_key = \"v\" } }\n";
+const OP_KEY: &str = "op_key";
+
+/// The client sent an empty `metadata`, so the operator key under it is a
+/// declared edit at its own path.
+fn carry_client_metadata(req: &mut ChatRequest) {
+    let ingress = req
+        .routectl_internal
+        .ingress_wire
+        .as_mut()
+        .expect("ingress");
+    let mut client: Value = serde_json::from_slice(&ingress.bytes).expect("ingress json");
+    client["metadata"] = json!({});
+    ingress.bytes = serde_json::to_vec(&client).expect("serialize").into();
+    req.provider_extras = Some(json!({"metadata": {}}));
+}
+
+/// The client's body as a fidelity egress sends it: the model the request
+/// names and its extras merged at the top level.
+fn client_with_extras(req: &ChatRequest, mut client: Value) -> Value {
+    client["model"] = json!(req.model);
+    if let Some(extras) = req.provider_extras.as_ref().and_then(Value::as_object) {
+        for (key, value) in extras {
+            client[key] = value.clone();
+        }
+    }
+    client
+}
+
+fn carries_op_key(req: &ChatRequest) -> bool {
+    req.provider_extras
+        .as_ref()
+        .and_then(|extras| extras.get("metadata"))
+        .and_then(|metadata| metadata.get(OP_KEY))
+        .is_some()
+}
+
+fn refuse_op_key_while_carried(req: &ChatRequest) -> Result<()> {
+    if carries_op_key(req) {
+        return Err(anthropic_rejection("metadata.op_key"));
+    }
+    Ok(())
+}
+
+fn refuse_op_key_then_plainly(req: &ChatRequest) -> Result<()> {
+    refuse_op_key_while_carried(req)?;
+    refuse_plainly(req)
+}
+
+#[tokio::test]
+async fn a_rejection_of_a_declared_edit_on_a_defective_transcript_is_undone_and_retried_once() {
+    let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
+    let rows: [(&str, super::Answer, Observed); 2] = [
+        (
+            "the retry is accepted",
+            refuse_op_key_while_carried,
+            Observed {
+                served: true,
+                first_calls: 2,
+                second_calls: 0,
+                field_repairs: 0,
+                learned: vec![],
+                unlocalized: Some(0),
+                drift_signals: 0,
+            },
+        ),
+        (
+            "the retry is rejected too",
+            refuse_op_key_then_plainly,
+            Observed {
+                served: false,
+                first_calls: 2,
+                second_calls: 0,
+                field_repairs: 0,
+                learned: vec![],
+                unlocalized: Some(1),
+                drift_signals: 0,
+            },
+        ),
+    ];
+    for surface in SURFACES {
+        for (name, answer, expected) in &rows {
+            for (transcript, messages) in DEFECTIVE {
+                let first = ScriptedProvider::new(Some(client_with_extras), *answer);
+                let second = ScriptedProvider::new(None, answers);
+                let router = chain_router(
+                    &block,
+                    Arc::clone(&first) as Arc<dyn Provider>,
+                    ANTHROPIC,
+                    Arc::clone(&second) as Arc<dyn Provider>,
+                );
+                let mut req = request_with(messages());
+                carry_client_metadata(&mut req);
+                let before = unlocalized(&router);
+                let drift_before = drift_signals(&router);
+
+                let out = walk(&router, surface, req, RouterOptions::new()).await;
+
+                let observed = Observed {
+                    served: out.result.is_ok(),
+                    first_calls: first.calls(),
+                    second_calls: second.calls(),
+                    field_repairs: out.meta.field_repairs.len(),
+                    learned: out
+                        .meta
+                        .learned_capabilities
+                        .iter()
+                        .map(|event| event.capability_key.clone())
+                        .collect(),
+                    unlocalized: Some(unlocalized(&router) - before),
+                    drift_signals: drift_signals(&router) - drift_before,
+                };
+                assert_eq!(&observed, expected, "{surface:?} {name}: {transcript}");
+                assert!(
+                    out.meta.cleared_capabilities.is_empty(),
+                    "{surface:?} {name}: {transcript}: no verdict is cleared"
+                );
+                assert_eq!(
+                    router.field_verdicts().snapshot_len(),
+                    0,
+                    "{surface:?} {name}: {transcript}: no field verdict"
+                );
+            }
         }
     }
 }

@@ -881,9 +881,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         anthropic_beta: req.anthropic_beta.clone(),
     };
 
-    // No ingress checks breakpoints, since a lane without a breakpoint
-    // surface must not be refused for them; this is the cap / ordering check
-    // for the anthropic-api lane, and its refusal walks the fallback chain.
+    // Validate the assembled breakpoints before serialization.
     validate_breakpoints(&ar)?;
 
     let mut body = serde_json::to_value(&ar)
