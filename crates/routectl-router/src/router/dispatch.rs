@@ -55,7 +55,7 @@ use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
 use super::transcript_defect::{
-    egress_pairing_refusal, is_transcript_rejection, record_transcript_defect, tool_pairing_refusal,
+    egress_pairing_refusal, is_transcript_rejection, record_transcript_defect,
 };
 use super::wire_response::{declare_model_relabel, declare_provider_attribution};
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
@@ -95,22 +95,6 @@ fn carries_responses_reasoning_dialect(req: &ChatRequest) -> bool {
 /// rather than passing silently.
 fn target_drops_responses_reasoning(provider_kind: Option<&str>) -> bool {
     provider_kind != Some(RESPONSES_PROVIDER_KIND)
-}
-
-/// Reject a request whose tool calls and tool results are not correctly
-/// paired, as a local validation error, before chain selection. Only the
-/// token count refuses this way; the complete and stream walks forward the
-/// transcript (see `record_transcript_defect`).
-pub(super) fn validate_request_transcript(req: &ChatRequest) -> Result<()> {
-    routectl_core::validate_tool_pairing(&req.messages).map_err(|e| {
-        tracing::debug!(
-            defect = %e.defect(),
-            message_index = e.message_index(),
-            item_index = ?e.item_index(),
-            "tool call/result pairing rejected before dispatch"
-        );
-        tool_pairing_refusal(&e)
-    })
 }
 
 /// Emit the single aggregated reasoning-replay degradation WARN for a

@@ -45,13 +45,14 @@ use super::dispatch::{
     REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap, class_debits,
     emit_replay_degradation, forwarded_terminal_status, is_capability_error,
     log_forwarded_auth_terminal, missing_forwarded_bearer_error, rate_limit_reset_hint,
-    replay_rejection_body_free, upstream_status_for_remap, validate_request_transcript,
+    replay_rejection_body_free, upstream_status_for_remap,
 };
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
 use super::local_refusal::ingress_dialect_of;
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
+use super::transcript_defect::{is_transcript_rejection, record_transcript_defect};
 use super::{
     CountedTokens, DispatchMeta, DispatchTarget, ReplayDegradation, Router, StripDecision,
     apply_layered_overlays,
@@ -219,11 +220,13 @@ impl Router {
     /// return -- including the terminal 501 path.
     async fn count_tokens_inner(
         &self,
-        req: ChatRequest,
+        mut req: ChatRequest,
         mode: FieldSettlementMode,
         meta: &mut DispatchMeta,
     ) -> Result<TokenCount> {
-        validate_request_transcript(&req)?;
+        // No seat this walk admits is a Gemini egress, so a defect is only
+        // recorded and the transcript forwarded.
+        record_transcript_defect(&mut req);
         let (chain, probe_admissions) =
             self.dispatch_chain_for_request(&req, DispatchSurface::CountTokens)?;
         // A token-count is not a messages-capability test, so a re-probe the
@@ -564,6 +567,10 @@ impl Router {
                     // The carried-artifact signal comes from the plan, so a
                     // proven replay rejection lifts here and nowhere else.
                     let policy = self.policy_for(&req.model);
+                    // Read off the status before any lift or remap: see
+                    // `is_transcript_rejection`.
+                    let transcript_rejection =
+                        is_transcript_rejection(&e, req.routectl_internal.transcript_defect);
                     let native_cf = match replay_plan.as_ref() {
                         Some(plan) => {
                             classify_with_attempt(&e, target.provider_kind, plan.attempt())
@@ -687,7 +694,12 @@ impl Router {
                     // never debit the breaker -- a repairable envelope
                     // rejection is a caller-shaped fault, not this seat's
                     // health signal.
-                    if reactive_repair.is_none()
+                    //
+                    // A rejection laid to a defective transcript is never
+                    // repaired: the defect, not the field, explains it, and
+                    // a repaired success would settle a verdict on that.
+                    if !transcript_rejection
+                        && reactive_repair.is_none()
                         && let Some(plan) = field_plan.as_mut()
                         && let Some(status) = plan.apply(
                             &mut attempt_req,
@@ -707,13 +719,17 @@ impl Router {
                     // The repair arms declined, so a field-eligible rejection
                     // the parser could not localize is counted here: this walk
                     // never reaches the learn path that counts it elsewhere.
-                    self.observe_unlocalized_field_rejection(
-                        &e,
-                        &cf,
-                        remapped,
-                        &target,
-                        &mut learn_dedupe,
-                    );
+                    if transcript_rejection {
+                        self.observe_transcript_rejection(&e, &target, &mut learn_dedupe);
+                    } else {
+                        self.observe_unlocalized_field_rejection(
+                            &e,
+                            &cf,
+                            remapped,
+                            &target,
+                            &mut learn_dedupe,
+                        );
+                    }
                     // The repair arm declined (already repaired this seat, not
                     // a replay rejection, or the request's budget is spent), so
                     // this error can now reach the CALLER. A replay rejection's

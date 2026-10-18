@@ -1,13 +1,12 @@
 //! End-to-end handling of malformed tool call / tool result pairing.
 //!
-//! Chat completions, messages and responses (streaming and not) forward a
-//! malformed transcript to the first target unchanged: exactly ONE upstream
-//! call, carrying the offending item, and the upstream's answer reaches the
-//! client. Messages count_tokens still answers it with a local 400 in the
-//! Anthropic error envelope and makes ZERO upstream calls. Each alias is a
-//! two-target chain on a counting wiremock upstream, so a refused dispatch
-//! or a fallback hop shows up in the received-request count. A paired
-//! control request through the same server proves the counter sees traffic.
+//! Chat completions, messages (streaming and not), messages count_tokens and
+//! responses forward a malformed transcript to the first target unchanged:
+//! exactly ONE upstream call, carrying the offending item, and the
+//! upstream's answer reaches the client. Each alias is a two-target chain on
+//! a counting wiremock upstream, so a refused dispatch or a fallback hop
+//! shows up in the received-request count. A paired control request through
+//! the same server proves the counter sees traffic.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -255,14 +254,6 @@ fn anthropic_trailing_call(stream: bool) -> Value {
     })
 }
 
-fn assert_anthropic_validation_envelope(status: u16, body: &Value, defect: &str) {
-    assert_eq!(status, 400, "{body}");
-    assert_eq!(body["type"], "error", "{body}");
-    assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
-    let message = body["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains(defect), "{body}");
-}
-
 #[tokio::test]
 async fn chat_completions_forward_an_orphan_result_once() {
     for stream in [false, true] {
@@ -288,18 +279,15 @@ async fn messages_forward_a_trailing_call_once() {
 }
 
 #[tokio::test]
-async fn count_tokens_rejects_trailing_call_without_upstream_call() {
-    // Arrange
+async fn count_tokens_forwards_a_trailing_call_once() {
     let h = Harness::start().await;
 
-    // Act
-    let (status, body) = h
-        .post("/v1/messages/count_tokens", &anthropic_trailing_call(false))
-        .await;
-
-    // Assert
-    assert_anthropic_validation_envelope(status, &body, "trailing_pending_calls");
-    assert_eq!(h.upstream_calls().await, 0);
+    h.assert_forwarded_once(
+        "/v1/messages/count_tokens",
+        &anthropic_trailing_call(false),
+        "toolu_1",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -319,7 +307,7 @@ async fn responses_forward_an_orphan_function_call_output_once() {
 
 #[tokio::test]
 async fn paired_transcripts_reach_the_upstream() {
-    // Arrange: the positive control for the count_tokens zero-call assertion.
+    // Arrange: the positive control for the one-call counts above.
     let h = Harness::start().await;
     let chat = json!({
         "model": OPENAI_ALIAS,

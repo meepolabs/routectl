@@ -2695,8 +2695,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the lossy-trim live-cut lands here). Public API:
   `complete`/`complete_with_options` + `stream`/`stream_with_options` and
   their `complete_inner`/`stream_inner` loop bodies, which first record the
-  request's tool pairing defect (`transcript_defect::record_transcript_defect`;
-  `validate_request_transcript` still refuses for `count_tokens`) and then walk the resolved
+  request's tool pairing defect (`transcript_defect::record_transcript_defect`)
+  and then walk the resolved
   chain (from `chain::dispatch_chain_for_request`) attempting each
   `DispatchTarget`, retrying within a provider per `RetryPolicy` with
   exponential backoff (`add_jitter`/`mul_duration`, `INLOOP_RETRY_AFTER_CAP`);
@@ -3334,7 +3334,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   re-stamp and the aggregated degradation WARN), threading both into every
   seat; the bound is `2 * chain.len() + REPAIRS_PER_REQUEST` (single visit
   per seat, plus a per-seat 401 retry, plus the per-REQUEST repair
-  allowance).
+  allowance). A defective tool pairing is recorded
+  (`transcript_defect::record_transcript_defect`) and forwarded, never
+  refused; an upstream 400 on it skips the field repair and counts once as
+  parser-unlocalized.
   TWO public entry points that differ BEHAVIORALLY, not just in return shape:
   `count_tokens_with_meta` -> `CountedTokens` (result + `DispatchMeta`) is
   SETTLING, and the result-only `Router::count_tokens` is NON-SETTLING. Both
@@ -4111,13 +4114,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `apply_sticky_outcome` (stamps the selection_decision token, whose fixed
   vocabulary quota never extends)
 - `src/router/transcript_defect.rs` -- a tool pairing defect as a per-request
-  provenance fact on the complete and stream walks: `record_transcript_defect`
-  (validates once, stores `RoutectlInternal::transcript_defect`, forwards the
-  transcript unchanged), `egress_pairing_refusal` (only a Gemini target refuses
-  locally, `tool-pairing`, and the walk moves on), `is_transcript_rejection`
-  (an upstream `BadRequest` on a defective transcript: `should_fallback` stops
-  the walk and `AttemptLearning` consults no learner),
-  `tool_pairing_refusal` (the refusal text, shared with count_tokens), and
+  provenance fact on the complete, stream and count_tokens walks:
+  `record_transcript_defect` (validates once, stores
+  `RoutectlInternal::transcript_defect`, forwards the transcript unchanged),
+  `egress_pairing_refusal` (only a Gemini target refuses locally,
+  `tool-pairing`, and the walk moves on), `is_transcript_rejection` (an
+  upstream 400 on a defective transcript, read before any lift or remap:
+  `should_fallback` stops the walk, no same-seat retry, `AttemptLearning`
+  consults no learner, and count_tokens skips its field repair), and
   `Router::observe_transcript_rejection` (counts it once per target as
   parser-unlocalized)
 - `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
@@ -8654,7 +8658,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/tool_pairing_ingress.rs` -- malformed tool call / result pairing:
   chat completions, messages and responses (complete and stream) forward it
   unchanged with exactly one call to a two-target chain's upstream;
-  count_tokens returns the dialect's 400 with zero calls; paired control
+  so does count_tokens; paired control
   reaches upstream; every replay fixture transcript passes the validator
 - `tests/tool_choice_egress_e2e.rs` -- chained tool_choice path: a flat
   Responses `{type:function,name:X}` through the `/v1/responses` ingress

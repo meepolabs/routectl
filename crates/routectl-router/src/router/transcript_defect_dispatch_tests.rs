@@ -1,8 +1,9 @@
 //! A transcript whose tool calls and results are not correctly paired is
-//! forwarded unchanged on both dispatch surfaces. Only a Gemini target
-//! refuses it, locally, and the walk moves on. An upstream `BadRequest`
-//! answering such a transcript neither walks the chain nor teaches any
-//! learner; a transient failure routes as it does for any request.
+//! forwarded unchanged on both dispatch surfaces and to the token count.
+//! Only a Gemini target refuses it, locally, and the walk moves on. An
+//! upstream 400 answering such a transcript neither walks the chain, nor is
+//! repaired, nor teaches any learner; a transient failure routes as it does
+//! for any request.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -35,9 +36,15 @@ const FORCED_TOOL_CHOICE_FIXTURE: &str =
 enum Surface {
     Complete,
     Stream,
+    CountTokens,
 }
 
+/// The two messages surfaces, which walk the chain on a health failure.
 const SURFACES: [Surface; 2] = [Surface::Complete, Surface::Stream];
+
+/// Every surface that dispatches a transcript upstream.
+const FORWARDING_SURFACES: [Surface; 3] =
+    [Surface::Complete, Surface::Stream, Surface::CountTokens];
 
 /// What one dispatch returned and the meta it left.
 struct Walk {
@@ -56,6 +63,13 @@ async fn walk(router: &Router, surface: Surface, req: ChatRequest, opts: RouterO
         }
         Surface::Stream => {
             let out = Box::pin(router.stream_with_options(req, opts)).await;
+            Walk {
+                result: out.result.map(drop),
+                meta: out.meta,
+            }
+        }
+        Surface::CountTokens => {
+            let out = Box::pin(router.count_tokens_with_meta(req)).await;
             Walk {
                 result: out.result.map(drop),
                 meta: out.meta,
@@ -237,7 +251,7 @@ fn drift_signals(router: &Router) -> u64 {
 
 #[tokio::test]
 async fn every_pairing_defect_reaches_a_non_gemini_target_unchanged() {
-    for surface in SURFACES {
+    for surface in FORWARDING_SURFACES {
         for (defect, messages) in defective_transcripts() {
             assert_eq!(
                 validate_tool_pairing(&messages).map_err(|e| e.defect()),
@@ -452,6 +466,11 @@ async fn run_rejection_row(row: &RejectionRow, surface: Surface) {
             "{surface:?} {}: {transcript}",
             row.name
         );
+        assert!(
+            out.meta.cleared_capabilities.is_empty(),
+            "{surface:?} {}: {transcript}: no verdict is cleared",
+            row.name
+        );
     }
 }
 
@@ -655,6 +674,66 @@ async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_walk_unlearn
         for row in rejection_rows() {
             run_rejection_row(&row, surface).await;
         }
+    }
+}
+
+/// A field rejection on the token count's first seat: the paired transcript
+/// is repaired and counted on the same seat, the defective one is not.
+fn count_tokens_repair_row(
+    name: &'static str,
+    first_block: &'static str,
+    carry: fn(&mut ChatRequest),
+) -> RejectionRow {
+    RejectionRow {
+        name,
+        first_block,
+        answer: refuse_test_row,
+        carry,
+        defective: Observed {
+            served: false,
+            first_calls: 1,
+            second_calls: 0,
+            field_repairs: 0,
+            learned: vec![],
+            unlocalized: Some(1),
+            drift_signals: 0,
+        },
+        paired: Observed {
+            served: true,
+            first_calls: 2,
+            second_calls: 0,
+            field_repairs: 1,
+            learned: vec![
+                crate::field_capability::field_capability_key(TEST_UNSUPPORTED_PATH)
+                    .expect("the test row has a field key"),
+            ],
+            unlocalized: None,
+            drift_signals: 0,
+        },
+    }
+}
+
+#[tokio::test]
+async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_token_count_unrepaired() {
+    let rows = [
+        count_tokens_repair_row(
+            "a field rejection the count repairs",
+            ANTHROPIC,
+            carry_test_row,
+        ),
+        count_tokens_repair_row(
+            "a field rejection the operator remaps to a server error",
+            ANTHROPIC_400_AS_SERVER_ERROR,
+            carry_test_row,
+        ),
+        count_tokens_repair_row(
+            "a stale defect left on the request's internal state",
+            ANTHROPIC,
+            carry_test_row_and_stale_defect,
+        ),
+    ];
+    for row in rows {
+        run_rejection_row(&row, Surface::CountTokens).await;
     }
 }
 

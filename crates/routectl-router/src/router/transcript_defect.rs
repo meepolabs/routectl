@@ -44,7 +44,7 @@ pub(super) fn record_transcript_defect(req: &mut ChatRequest) -> Option<ToolPair
 }
 
 /// The local refusal a pairing defect becomes where it is refused.
-pub(super) fn tool_pairing_refusal(err: &ToolPairingError) -> Error {
+fn tool_pairing_refusal(err: &ToolPairingError) -> Error {
     Error::Validation(err.to_string(), RefusalReason::ToolPairing)
 }
 
