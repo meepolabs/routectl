@@ -660,10 +660,9 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   `tool_use` block that is not an object (`tool_use_to_tool_call` in
   `crates/routectl-providers/src/openai_compat/wire_lift/tool_use.rs`).
   One slot-holding shape is refused too: on Bedrock Mantle a user file
-  whose only carrier is `file_url` (`translate_file_part`). Mantle requests
-  are signed with the operator's AWS credentials, so a client-chosen url
-  would be dereferenced, if at all, under the operator's access; beside
-  `file_data` or `file_id` the url is left off the wire instead.
+  whose only carrier is `file_url` (`translate_file_part`): the Mantle lane
+  forwards no client-supplied file url, so a file must arrive inline or by
+  file id; beside `file_data` or `file_id` the url is left off the wire.
   Pinned by `an_absent_or_empty_tool_output_id_reaches_the_body_as_an_empty_call_id`,
   `user_image_url_part_with_empty_or_absent_url_forwards_an_empty_image_url`,
   `user_file_with_no_carrier_forwards_as_a_bare_input_file`,

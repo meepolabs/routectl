@@ -1135,10 +1135,8 @@ fn translate_file_part(
         file_url,
         filename,
     } = file_carrier(id, file.as_object())?;
-    // Mantle requests are signed with the operator's AWS credentials, so a
-    // url the client chose would be fetched, if Mantle fetches it at all,
-    // with the operator's access rather than the client's. Refuse rather
-    // than hand an unchecked url to that principal.
+    // The Mantle lane forwards no client-supplied file url: a file must
+    // arrive inline or by file id there.
     if matches!(auth_kind, AuthKind::BedrockMantle)
         && file_url.is_some()
         && file_data.is_none()

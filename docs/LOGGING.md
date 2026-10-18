@@ -1882,7 +1882,7 @@ message:
 |---|---|
 | `applied` | The strip ran and removed the capability surface from the attempt request. |
 | `noop` | The verdict named a capability the request did not carry; nothing to strip. |
-| `strict_rejected` | `strict_translation` is on; the strip would mutate, so the request is rejected before any change. |
+| `strict_rejected` | `strict_translation` is on and the strip would mutate, so this target is not dispatched; on complete and stream the chain moves to the next target, on `count_tokens` the request ends. |
 | `validation_rolled_back` | The strip created a post-strip hazard; the request was restored byte-for-byte and the attempt routes away. |
 | `probe_bypassed` | A strip-eligible feature was admitted for re-probe, so it was intentionally NOT stripped (emitted at the verdict site). |
 
