@@ -3,10 +3,11 @@
 //! Chat completions, messages (streaming and not), messages count_tokens and
 //! responses forward a malformed transcript to the first target unchanged:
 //! exactly ONE upstream call, carrying the offending item, and the
-//! upstream's answer reaches the client. Each alias is a two-target chain on
-//! a counting wiremock upstream, so a refused dispatch or a fallback hop
-//! shows up in the received-request count. A paired control request through
-//! the same server proves the counter sees traffic.
+//! upstream's answer reaches the client. Each alias is a two-target chain
+//! whose entries each have their own counting wiremock upstream, both able
+//! to serve, so a refused dispatch or a fallback hop shows up in the
+//! per-entry received-request counts. A paired control request through the
+//! same servers proves the counters see traffic.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -21,51 +22,84 @@ mod common;
 const OPENAI_ALIAS: &str = "openai-chain";
 const ANTHROPIC_ALIAS: &str = "anthropic-chain";
 
+/// The four upstreams behind the two aliases, one per chain entry, so a
+/// call reaching the fallback instead of the primary shows up per server.
+struct Upstreams {
+    openai_primary: MockServer,
+    openai_fallback: MockServer,
+    anthropic_primary: MockServer,
+    anthropic_fallback: MockServer,
+}
+
 struct Harness {
     base: String,
-    openai_upstream: MockServer,
-    anthropic_upstream: MockServer,
+    upstreams: Upstreams,
+}
+
+/// An openai-compat upstream answering both a streaming and a plain chat
+/// completion.
+async fn openai_upstream() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({"stream": true})))
+        .respond_with(sse(OPENAI_SSE))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_completion()))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// An anthropic upstream answering count_tokens, a streaming and a plain
+/// message.
+async fn anthropic_upstream() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 7})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(body_partial_json(json!({"stream": true})))
+        .respond_with(sse(ANTHROPIC_SSE))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_message()))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Every request body `server` received, parsed.
+async fn bodies(server: &MockServer) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .expect("request recording on")
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).expect("upstream body is JSON"))
+        .collect()
 }
 
 impl Harness {
     async fn start() -> Self {
-        let openai_upstream = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(json!({"stream": true})))
-            .respond_with(sse(OPENAI_SSE))
-            .with_priority(1)
-            .mount(&openai_upstream)
-            .await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(openai_completion()))
-            .mount(&openai_upstream)
-            .await;
-        let anthropic_upstream = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages/count_tokens"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 7})))
-            .with_priority(1)
-            .mount(&anthropic_upstream)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(body_partial_json(json!({"stream": true})))
-            .respond_with(sse(ANTHROPIC_SSE))
-            .with_priority(2)
-            .mount(&anthropic_upstream)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_message()))
-            .mount(&anthropic_upstream)
-            .await;
-        let config = chain_config(&openai_upstream.uri(), &anthropic_upstream.uri());
+        let upstreams = Upstreams {
+            openai_primary: openai_upstream().await,
+            openai_fallback: openai_upstream().await,
+            anthropic_primary: anthropic_upstream().await,
+            anthropic_fallback: anthropic_upstream().await,
+        };
+        let config = chain_config(&upstreams);
         let base = spawn(config).await;
-        Self {
-            base,
-            openai_upstream,
-            anthropic_upstream,
-        }
+        Self { base, upstreams }
     }
 
     async fn post(&self, route: &str, body: &Value) -> (u16, Value) {
@@ -81,41 +115,47 @@ impl Harness {
         (status, parsed)
     }
 
-    async fn upstream_calls(&self) -> usize {
-        self.upstream_bodies().await.len()
+    /// The `(primary, fallback)` upstreams behind `alias`.
+    fn chain_of(&self, alias: &str) -> (&MockServer, &MockServer) {
+        match alias {
+            OPENAI_ALIAS => (
+                &self.upstreams.openai_primary,
+                &self.upstreams.openai_fallback,
+            ),
+            ANTHROPIC_ALIAS => (
+                &self.upstreams.anthropic_primary,
+                &self.upstreams.anthropic_fallback,
+            ),
+            other => panic!("no chain behind alias {other}"),
+        }
     }
 
-    /// Every request body either upstream received, parsed.
-    async fn upstream_bodies(&self) -> Vec<Value> {
-        let mut received = self
-            .openai_upstream
-            .received_requests()
-            .await
-            .expect("request recording on");
-        received.extend(
-            self.anthropic_upstream
-                .received_requests()
-                .await
-                .expect("request recording on"),
-        );
-        received
-            .iter()
-            .map(|r| serde_json::from_slice(&r.body).expect("upstream body is JSON"))
-            .collect()
+    /// `(primary, fallback)` request counts behind `alias`.
+    async fn chain_calls(&self, alias: &str) -> (usize, usize) {
+        let (primary, fallback) = self.chain_of(alias);
+        (bodies(primary).await.len(), bodies(fallback).await.len())
     }
 
     /// Post `body` and require it to be forwarded: a 200 to the client and
-    /// exactly one upstream request, whose `messages` carry `needle`.
+    /// exactly one request, to its alias's primary upstream and none to the
+    /// fallback, whose `messages` carry `needle`.
     async fn assert_forwarded_once(&self, route: &str, body: &Value, needle: &str) {
+        let alias = body["model"].as_str().expect("body names its alias");
+
         let (status, response) = self.post(route, body).await;
 
         assert_eq!(status, 200, "{route}: {response}");
-        let bodies = self.upstream_bodies().await;
-        assert_eq!(bodies.len(), 1, "{route}: one upstream call, no fallback");
+        let (primary, fallback) = self.chain_of(alias);
+        let primary_bodies = bodies(primary).await;
+        assert_eq!(
+            (primary_bodies.len(), bodies(fallback).await.len()),
+            (1, 0),
+            "{route}: (primary, fallback) calls: the primary serves, no fallback hop"
+        );
         assert!(
-            bodies[0]["messages"].to_string().contains(needle),
+            primary_bodies[0]["messages"].to_string().contains(needle),
             "{route}: the upstream received the transcript unchanged: {}",
-            bodies[0]
+            primary_bodies[0]
         );
     }
 }
@@ -172,21 +212,27 @@ async fn spawn(config: Arc<Config>) -> String {
     base
 }
 
-fn chain_config(openai_base: &str, anthropic_base: &str) -> Arc<Config> {
+fn chain_config(upstreams: &Upstreams) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     let mut models = BTreeMap::new();
-    for name in ["oa-primary", "oa-fallback"] {
+    for (name, upstream) in [
+        ("oa-primary", &upstreams.openai_primary),
+        ("oa-fallback", &upstreams.openai_fallback),
+    ] {
         providers.insert(
             name.to_string(),
-            ProviderEntry::openai_compat(openai_base, common::file_ref("test-key")),
+            ProviderEntry::openai_compat(upstream.uri(), common::file_ref("test-key")),
         );
         models.insert(format!("{name}-model"), ModelEntry::new(name, "gpt-4o"));
     }
-    for name in ["an-primary", "an-fallback"] {
+    for (name, upstream) in [
+        ("an-primary", &upstreams.anthropic_primary),
+        ("an-fallback", &upstreams.anthropic_fallback),
+    ] {
         providers.insert(
             name.to_string(),
             ProviderEntry::anthropic_api(common::file_ref("test-key"))
-                .with_base_url(anthropic_base.to_string()),
+                .with_base_url(upstream.uri()),
         );
         models.insert(
             format!("{name}-model"),
@@ -340,7 +386,16 @@ async fn paired_transcripts_reach_the_upstream() {
     // Assert
     assert_eq!(chat_status, 200, "{chat_body}");
     assert_eq!(count_status, 200, "{count_body}");
-    assert_eq!(h.upstream_calls().await, 2);
+    assert_eq!(
+        h.chain_calls(OPENAI_ALIAS).await,
+        (1, 0),
+        "chat (primary, fallback)"
+    );
+    assert_eq!(
+        h.chain_calls(ANTHROPIC_ALIAS).await,
+        (1, 0),
+        "count_tokens (primary, fallback)"
+    );
 }
 
 /// Whether a canonical transcript carries at least one tool call on any

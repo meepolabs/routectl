@@ -1,9 +1,9 @@
 //! A transcript whose tool calls and results are not correctly paired is
 //! forwarded unchanged on both dispatch surfaces and to the token count.
 //! Only a Gemini target refuses it, locally, and the walk moves on. An
-//! upstream 400 answering such a transcript neither walks the chain, nor is
-//! repaired, nor teaches any learner; a transient failure routes as it does
-//! for any request.
+//! upstream 400 or 422 answering such a transcript neither walks the chain,
+//! nor is repaired, nor teaches any learner; a transient failure routes as it
+//! does for any request.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,9 +19,9 @@ use serde_json::{Value, json};
 
 use super::super::super::field_repair::TEST_UNSUPPORTED_PATH;
 use super::{
-    ALIAS, ANTHROPIC, INVOKE, NEVER_SAMPLED, OPENAI_COMPAT, ScriptedProvider, anthropic_message,
-    anthropic_rejection, carries_test_row, carry_test_row, carry_web_search, openai_rejection,
-    request,
+    ALIAS, ANTHROPIC, INVOKE, NEVER_SAMPLED, OPENAI_COMPAT, REFUSED_FIELD, ScriptedProvider,
+    anthropic_message, anthropic_rejection, anthropic_status_message, carries_test_row,
+    carry_test_row, carry_web_search, openai_rejection, request,
 };
 #[cfg(feature = "gemini")]
 use super::{GEMINI, router};
@@ -481,6 +481,18 @@ fn refuse_test_row(req: &ChatRequest) -> Result<()> {
     Ok(())
 }
 
+/// The test row refused as an unprocessable entity rather than a bad
+/// request: the other status the field learner reads as a request fault.
+fn refuse_test_row_unprocessable(req: &ChatRequest) -> Result<()> {
+    if carries_test_row(req) {
+        return Err(anthropic_status_message(
+            422,
+            &format!("{TEST_UNSUPPORTED_PATH}: {REFUSED_FIELD}"),
+        ));
+    }
+    Ok(())
+}
+
 /// An anthropic-api entry whose operator remap routes a 400 as a server
 /// error.
 const ANTHROPIC_400_AS_SERVER_ERROR: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
@@ -564,6 +576,14 @@ fn rejection_rows() -> Vec<RejectionRow> {
             drift_signals: 0,
         },
     }];
+    rows.push(RejectionRow {
+        answer: refuse_test_row_unprocessable,
+        ..field_repair_row(
+            "a 422 field rejection the engine repairs",
+            ANTHROPIC,
+            carry_test_row,
+        )
+    });
     rows.push(RejectionRow {
         name: "a 400 the classifier lifts to an unsupported feature",
         first_block: OPENAI_COMPAT,
@@ -677,9 +697,9 @@ async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_walk_unlearn
     }
 }
 
-/// A field rejection on the token count's first seat: the paired transcript
-/// is repaired and counted on the same seat, the defective one is not.
-fn count_tokens_repair_row(
+/// A field rejection on the first target: the paired transcript is repaired
+/// and served on the same target, the defective one is not.
+fn field_repair_row(
     name: &'static str,
     first_block: &'static str,
     carry: fn(&mut ChatRequest),
@@ -716,21 +736,29 @@ fn count_tokens_repair_row(
 #[tokio::test]
 async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_token_count_unrepaired() {
     let rows = [
-        count_tokens_repair_row(
+        field_repair_row(
             "a field rejection the count repairs",
             ANTHROPIC,
             carry_test_row,
         ),
-        count_tokens_repair_row(
+        field_repair_row(
             "a field rejection the operator remaps to a server error",
             ANTHROPIC_400_AS_SERVER_ERROR,
             carry_test_row,
         ),
-        count_tokens_repair_row(
+        field_repair_row(
             "a stale defect left on the request's internal state",
             ANTHROPIC,
             carry_test_row_and_stale_defect,
         ),
+        RejectionRow {
+            answer: refuse_test_row_unprocessable,
+            ..field_repair_row(
+                "a 422 field rejection the count repairs",
+                ANTHROPIC,
+                carry_test_row,
+            )
+        },
     ];
     for row in rows {
         run_rejection_row(&row, Surface::CountTokens).await;

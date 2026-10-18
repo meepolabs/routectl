@@ -3346,8 +3346,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   per seat, plus a per-seat 401 retry, plus the per-REQUEST repair
   allowance). A defective tool pairing is recorded
   (`transcript_defect::record_transcript_defect`) and forwarded, never
-  refused; an upstream 400 on it skips the field repair and counts once as
-  parser-unlocalized.
+  refused; an upstream 400 or 422 on it skips the field repair and counts
+  once as parser-unlocalized.
   TWO public entry points that differ BEHAVIORALLY, not just in return shape:
   `count_tokens_with_meta` -> `CountedTokens` (result + `DispatchMeta`) is
   SETTLING, and the result-only `Router::count_tokens` is NON-SETTLING. Both
@@ -4129,7 +4129,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `RoutectlInternal::transcript_defect`, forwards the transcript unchanged),
   `egress_pairing_refusal` (only a Gemini target refuses locally,
   `tool-pairing`, and the walk moves on), `is_transcript_rejection` (an
-  upstream 400 on a defective transcript, read before any lift or remap:
+  upstream request-fault rejection on a defective transcript, any status in
+  `rejection_parser::REJECTION_STATUSES` (400, 422), read before any lift or
+  remap:
   `should_fallback` stops the walk, no same-seat retry, `AttemptLearning`
   consults no learner, and count_tokens skips its field repair), and
   `Router::observe_transcript_rejection` (counts it once per target as

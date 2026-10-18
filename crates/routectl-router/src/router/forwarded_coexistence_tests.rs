@@ -367,6 +367,53 @@ async fn complete_mixed_chain_own_first_entry_succeeds_forwarded_missing_bearer_
 }
 
 #[tokio::test]
+async fn a_missing_bearer_on_the_first_target_ends_the_request_before_a_serviceable_own_target() {
+    // A client with no credential for the forwarded target is never served
+    // by a later own-credential target: the refusal does not walk.
+    for surface in ["complete", "stream"] {
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "fwd",
+                provider_name: "fwd-prov",
+                entry: anthropic_entry(true),
+            },
+            Leg {
+                nickname: "own",
+                provider_name: "own-prov",
+                entry: anthropic_entry(false),
+            },
+        ]);
+
+        let err = if surface == "complete" {
+            Box::pin(router.complete(plain_req())).await.unwrap_err()
+        } else {
+            Box::pin(router.stream(plain_req()))
+                .await
+                .err()
+                .expect("refused")
+        };
+
+        assert!(
+            matches!(
+                err,
+                Error::Validation(_, RefusalReason::ForwardedBearerMissing)
+            ),
+            "{surface}: got {err:?}"
+        );
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            0,
+            "{surface}: forwarded"
+        );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            0,
+            "{surface}: the serviceable own-credential target is never reached",
+        );
+    }
+}
+
+#[tokio::test]
 async fn missing_bearer_refuse_client_error_carries_no_token() {
     // The client never captured a bearer in this scenario, so there
     // is nothing to leak -- but pin that the refuse message stays

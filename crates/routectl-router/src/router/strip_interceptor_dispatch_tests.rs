@@ -7,6 +7,7 @@
 use super::*;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
+use crate::router::RouterOptions;
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -576,3 +577,162 @@ async fn count_tokens_clean_passthrough_emits_no_class_event() {
 }
 
 include!("learned_strip_declare_tests.rs");
+
+/// A chain whose first target (`p0`) has an acting advisor negative and
+/// whose second (`p1`) has none, under `strict_translation`, each served
+/// by its own capturing provider.
+fn strict_chain_router(
+    first: Arc<ParkingMutex<Vec<ChatRequest>>>,
+    second: Arc<ParkingMutex<Vec<ChatRequest>>>,
+) -> Router {
+    let toml = "version = 3\n[server]\nstrict_translation = true\n\
+                [capability]\nenabled = true\n\
+                [providers.p0]\nkind = \"anthropic-api\"\n\
+                [providers.p1]\nkind = \"anthropic-api\"\n\
+                [aliases]\nchain = [\"m0\", \"m1\"]\n";
+    let config: Config = toml::from_str(toml).expect("config parses");
+    let mut router = Router::new(Arc::new(config));
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    for (nickname, provider_name, captured, upstream) in
+        [("m0", "p0", first, "u-0"), ("m1", "p1", second, "u-1")]
+    {
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider { captured });
+        models.insert(
+            nickname.into(),
+            Arc::new(ResolvedModel::new(
+                nickname,
+                provider_name,
+                provider,
+                upstream,
+            )),
+        );
+    }
+    router.install_resolved_models(models);
+    router
+        .learned_capabilities
+        .import_entries(vec![acting_advisor_negative("p0#u-0")]);
+    router
+}
+
+/// The advisor request on the chain alias, arriving through the Anthropic
+/// ingress so a local refusal is counted on a lane.
+fn chain_advisor_request() -> ChatRequest {
+    let mut req = ChatRequest {
+        model: "chain".into(),
+        ..advisor_request()
+    };
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
+    req
+}
+
+/// `(lane, reason, count)` for every local-refusal key the router holds.
+fn local_refusals(router: &Router) -> Vec<(&'static str, &'static str, u64)> {
+    router
+        .wire_check_snapshot()
+        .local_refusals
+        .iter()
+        .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StrictSurface {
+    Complete,
+    Stream,
+}
+
+/// What one strict-chain dispatch returned and its target meta.
+struct StrictWalk {
+    result: Result<()>,
+    served_provider: Option<String>,
+    fallback_count: u32,
+}
+
+async fn strict_walk(router: &Router, surface: StrictSurface, opts: RouterOptions) -> StrictWalk {
+    match surface {
+        StrictSurface::Complete => {
+            let out = Box::pin(router.complete_with_options(chain_advisor_request(), opts)).await;
+            StrictWalk {
+                result: out.result.map(drop),
+                served_provider: out.meta.served_provider,
+                fallback_count: out.meta.fallback_count,
+            }
+        }
+        StrictSurface::Stream => {
+            let out = Box::pin(router.stream_with_options(chain_advisor_request(), opts)).await;
+            StrictWalk {
+                result: out.result.map(drop),
+                served_provider: out.meta.served_provider,
+                fallback_count: out.meta.fallback_count,
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_strict_refusal_on_the_first_target_walks_to_the_next_target() {
+    for surface in [StrictSurface::Complete, StrictSurface::Stream] {
+        let first = captured();
+        let second = captured();
+        let router = strict_chain_router(first.clone(), second.clone());
+
+        let out = strict_walk(&router, surface, RouterOptions::new()).await;
+
+        assert!(out.result.is_ok(), "{surface:?}: {:?}", out.result.err());
+        assert_eq!(out.served_provider.as_deref(), Some("p1"), "{surface:?}");
+        assert_eq!(out.fallback_count, 1, "{surface:?}: one fallback hop");
+        assert!(
+            first.lock().is_empty(),
+            "{surface:?}: first never dispatched"
+        );
+        let second = second.lock();
+        assert_eq!(second.len(), 1, "{surface:?}: the next target serves once");
+        assert_eq!(
+            dispatched_tool_types(&second[0]),
+            vec!["advisor".to_string()],
+            "{surface:?}: the next target receives the request unstripped",
+        );
+        assert_eq!(
+            router.metrics.strip_strict_rejected_total(),
+            1,
+            "{surface:?}"
+        );
+        assert_eq!(
+            local_refusals(&router),
+            [("anthropic->anthropic-api", "strict-translation", 1)],
+            "{surface:?}: one strict refusal on the first target's lane",
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_strict_refusal_with_fallbacks_disabled_is_returned() {
+    for surface in [StrictSurface::Complete, StrictSurface::Stream] {
+        let first = captured();
+        let second = captured();
+        let router = strict_chain_router(first.clone(), second.clone());
+        let mut opts = RouterOptions::new();
+        opts.disable_fallbacks = true;
+
+        let out = strict_walk(&router, surface, opts).await;
+
+        let err = out.result.expect_err("the strict refusal ends the request");
+        assert!(
+            matches!(
+                err,
+                Error::Validation(_, routectl_core::RefusalReason::StrictTranslation)
+            ),
+            "{surface:?}: {err:?}"
+        );
+        assert!(
+            first.lock().is_empty(),
+            "{surface:?}: first never dispatched"
+        );
+        assert!(second.lock().is_empty(), "{surface:?}: no fallback hop");
+        assert_eq!(
+            local_refusals(&router),
+            [("anthropic->anthropic-api", "strict-translation", 1)],
+            "{surface:?}",
+        );
+    }
+}

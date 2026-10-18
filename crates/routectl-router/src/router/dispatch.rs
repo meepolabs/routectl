@@ -379,6 +379,9 @@ impl Router {
             // never an ambiguous upstream 401. Per-target (checked here,
             // inside the loop), so a mixed chain that never reaches this
             // target is unaffected.
+            // Terminal on purpose, unlike the walking refusals below: a
+            // client that sent no credential for a forwarded target must not
+            // be served on a later target's own key instead.
             if let Some(err) = missing_forwarded_bearer_error(target, &req) {
                 self.count_refusal_error(ingress, target, &err);
                 return Err(err);
@@ -410,14 +413,19 @@ impl Router {
             // INTERCEPTOR HOOK: strip runs after layered config compose,
             // before auto-cache / context reduction. Any future interceptor
             // over the per-attempt canonical clone goes here, ordered by
-            // data-dependency. A strict-mode refusal returns the 400 for
-            // this attempt; a rolled-back post-strip hazard routes away
-            // (advance the chain as an ordinary route-away would).
+            // data-dependency. A strict-mode refusal leaves this target
+            // unsent and walks on, since the next target may carry the
+            // capability; a rolled-back post-strip hazard routes away the
+            // same way.
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
                 StripDecision::StrictReject(err) => {
                     self.count_refusal_error(ingress, target, &err);
-                    return Err(err);
+                    last_err = Some(err);
+                    if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue;
                 }
                 StripDecision::RouteAway(err) => {
                     self.count_refusal_error(ingress, target, &err);
@@ -1245,7 +1253,8 @@ impl Router {
             meta.mark_target(target, &req.model);
             meta.fallback_count = chain_idx as u32;
 
-            // Missing-bearer terminal guard: see `complete_inner`.
+            // Missing-bearer terminal guard, terminal on purpose: see
+            // `complete_inner`.
             if let Some(err) = missing_forwarded_bearer_error(target, &req) {
                 self.count_refusal_error(ingress, target, &err);
                 return Err(err);
@@ -1270,13 +1279,17 @@ impl Router {
             apply_layered_overlays(&self.config, target, &mut attempt_req);
             // INTERCEPTOR HOOK (see `complete_inner`): strip runs after
             // layered config compose, before auto-cache / context
-            // reduction. Strict refusal returns the 400; a rolled-back
-            // hazard routes away for this attempt.
+            // reduction. A strict refusal and a rolled-back hazard both
+            // walk on to the next target.
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
                 StripDecision::StrictReject(err) => {
                     self.count_refusal_error(ingress, target, &err);
-                    return Err(err);
+                    last_err = Some(err);
+                    if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue;
                 }
                 StripDecision::RouteAway(err) => {
                     self.count_refusal_error(ingress, target, &err);

@@ -278,11 +278,16 @@ fn anthropic_reason(path: &str, reason: &str) -> Error {
 
 /// An anthropic-api 400 carrying `message`.
 fn anthropic_message(message: &str) -> Error {
+    anthropic_status_message(400, message)
+}
+
+/// An anthropic-api rejection on `status` carrying `message`.
+fn anthropic_status_message(status: u16, message: &str) -> Error {
     let body = json!({
         "type": "error",
         "error": {"type": "invalid_request_error", "message": message},
     });
-    Error::upstream("scripted", 400, body.to_string())
+    Error::upstream("scripted", status, body.to_string())
 }
 
 /// A bedrock-runtime 400 whose flat message names `path` as a refused field.

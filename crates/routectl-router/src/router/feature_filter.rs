@@ -65,7 +65,8 @@ pub(super) enum StripDecision {
     /// untouched or with the droppable capability stripped in place).
     Proceed,
     /// `strict_translation` refused a would-be strip. No mutation
-    /// happened; return this 400 for the attempt without dispatching.
+    /// happened; do not dispatch this target. A messages walk moves on to
+    /// the next target; the token count ends on it.
     StrictReject(Error),
     /// The post-strip check found a strip-created hazard; the request was
     /// restored to its pre-strip bytes. Do not dispatch it -- route away

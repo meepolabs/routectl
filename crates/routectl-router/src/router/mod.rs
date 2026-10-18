@@ -571,7 +571,7 @@ struct RouterMetrics {
     /// routed away. Bumped by the strip interceptor hook.
     strip_rollback_total: AtomicU64,
     /// Would-be strips refused because `strict_translation` is on; the
-    /// attempt returned a 400 without dispatching. Bumped by the strip
+    /// target was not dispatched. Bumped by the strip
     /// interceptor hook.
     strip_strict_rejected_total: AtomicU64,
     /// Masked (`force_supported`) capability rejections observed on a
