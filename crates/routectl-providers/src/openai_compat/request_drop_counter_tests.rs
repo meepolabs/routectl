@@ -229,7 +229,7 @@ fn strict_mode_rejects_a_breakpoint_and_counts_nothing() {
     );
 
     // Assert -- nothing was dropped, because nothing was sent.
-    assert!(matches!(result, Err(Error::Validation(_))), "{result:?}");
+    assert!(matches!(result, Err(Error::Validation(..))), "{result:?}");
     assert_eq!(compat_drop_count("cache_control_unsupported"), before);
 }
 

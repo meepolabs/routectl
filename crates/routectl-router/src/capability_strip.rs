@@ -52,7 +52,7 @@ use serde_json::Value;
 
 use routectl_core::capability::{COMPUTER_USE, REASONING_REPLAY, STRUCTURED_OUTPUT, WEB_SEARCH};
 use routectl_core::error::Error;
-use routectl_core::{ChatRequest, ToolDef};
+use routectl_core::{ChatRequest, RefusalReason, ToolDef};
 
 use crate::beta_capability::capability_key_is_beta;
 use crate::feature_keys::strip_date_suffix;
@@ -323,9 +323,10 @@ impl RequestInterceptor for StripInterceptor {
 
         if ctx.strict {
             let named = would_strip.join(", ");
-            return Outcome::Reject(Error::Validation(format!(
-                "strict translation forbids stripping capability: {named}"
-            )));
+            return Outcome::Reject(Error::Validation(
+                format!("strict translation forbids stripping capability: {named}"),
+                RefusalReason::StrictTranslation,
+            ));
         }
 
         // Snapshot only the surfaces the matched plans actually touch.
@@ -418,13 +419,15 @@ fn validate_post_strip(req: &ChatRequest, stripped_tools: bool) -> Result<(), Er
     if let Some(forced) = forced_tool_name(req.tool_choice.as_ref())
         && !tools_contains_name(req, forced)
     {
-        return Err(Error::Validation(format!(
-            "capability strip removed tool `{forced}` still forced by tool_choice"
-        )));
+        return Err(Error::Validation(
+            format!("capability strip removed tool `{forced}` still forced by tool_choice"),
+            RefusalReason::Unrepresentable,
+        ));
     }
     if tool_choice_is_mandatory(req.tool_choice.as_ref()) && tools_are_empty(req) {
         return Err(Error::Validation(
             "capability strip emptied tools while tool_choice mandates a tool".to_string(),
+            RefusalReason::Unrepresentable,
         ));
     }
     Ok(())
@@ -888,7 +891,10 @@ mod tests {
 
         // Assert -- 400 naming the key, tools untouched.
         match outcome {
-            Outcome::Reject(Error::Validation(msg)) => assert!(msg.contains("advisor"), "{msg}"),
+            Outcome::Reject(Error::Validation(msg, reason)) => {
+                assert_eq!(reason, RefusalReason::StrictTranslation);
+                assert!(msg.contains("advisor"), "{msg}");
+            }
             other => panic!("expected Reject(Validation), got {other:?}"),
         }
         assert_eq!(req.tools.as_ref().unwrap().len(), 1);
@@ -910,7 +916,7 @@ mod tests {
         let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
 
         // Assert -- rejected AND the snapshot restored (tool + choice back).
-        assert!(matches!(outcome, Outcome::Reject(Error::Validation(_))));
+        assert!(matches!(outcome, Outcome::Reject(Error::Validation(..))));
         assert_eq!(req.tools.as_ref().unwrap().len(), 1);
         assert_eq!(
             req.tool_choice.as_ref().unwrap(),
@@ -985,7 +991,7 @@ mod tests {
             StripInterceptor.apply(&mut req, &ctx(&["advisor", "context_management"], false));
 
         // Assert -- rejected; tool AND beta token both restored.
-        assert!(matches!(outcome, Outcome::Reject(Error::Validation(_))));
+        assert!(matches!(outcome, Outcome::Reject(Error::Validation(..))));
         assert_eq!(req.tools.as_ref().unwrap().len(), 1);
         assert_eq!(req.anthropic_beta, vec!["context-management-2025-06-27"]);
     }
@@ -1154,7 +1160,7 @@ mod tests {
 
             // Assert -- rejected, and the original Some([...]) restored.
             assert!(
-                matches!(outcome, Outcome::Reject(Error::Validation(_))),
+                matches!(outcome, Outcome::Reject(Error::Validation(..))),
                 "shape {choice} must reject",
             );
             assert_eq!(
@@ -1224,7 +1230,8 @@ mod tests {
             ..Default::default()
         };
         match StripInterceptor.apply(&mut named, &ctx(&["advisor"], false)) {
-            Outcome::Reject(Error::Validation(msg)) => {
+            Outcome::Reject(Error::Validation(msg, reason)) => {
+                assert_eq!(reason, RefusalReason::Unrepresentable);
                 assert!(msg.contains("removed tool `advisor`"), "{msg}");
             }
             other => panic!("expected named-tool rejection, got {other:?}"),
@@ -1240,7 +1247,8 @@ mod tests {
             ..Default::default()
         };
         match StripInterceptor.apply(&mut mandatory, &ctx(&["advisor"], false)) {
-            Outcome::Reject(Error::Validation(msg)) => {
+            Outcome::Reject(Error::Validation(msg, reason)) => {
+                assert_eq!(reason, RefusalReason::Unrepresentable);
                 assert!(msg.contains("emptied tools"), "{msg}");
                 assert!(!msg.contains("removed tool"), "{msg}");
             }

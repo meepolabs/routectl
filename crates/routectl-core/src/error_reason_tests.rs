@@ -4,7 +4,7 @@
 //! renders as its token in `Debug`.
 
 use super::Error;
-use crate::UpstreamReason;
+use crate::{RefusalReason, UpstreamReason};
 
 const REASONS: [UpstreamReason; 2] = [
     UpstreamReason::CredentialExpired,
@@ -53,11 +53,11 @@ fn upstream_reason_is_none_when_unset() {
 
 #[test]
 fn with_upstream_reason_is_a_noop_off_the_upstream_variant() {
-    let err = Error::Validation("bad".to_string())
+    let err = Error::Validation("bad".to_string(), RefusalReason::FieldType)
         .with_upstream_reason(Some(UpstreamReason::CredentialExpired));
 
     assert_eq!(err.upstream_reason(), None);
-    assert_eq!(format!("{err:?}"), "Validation(\"bad\")");
+    assert_eq!(format!("{err:?}"), "Validation(\"bad\", \"field-type\")");
 }
 
 #[test]

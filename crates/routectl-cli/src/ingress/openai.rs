@@ -20,7 +20,7 @@ use axum::http::HeaderMap;
 use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
-    Result, Role, is_canonical_request_key,
+    RefusalReason, Result, Role, is_canonical_request_key,
 };
 use serde_json::{Map, Value};
 
@@ -149,9 +149,10 @@ impl IngressAdapter for OpenAiIngress {
         let extras = sweep_unknown_top_level_fields(&mut body);
 
         let mut req: ChatRequest = serde_json::from_value(body).map_err(|e| {
-            Error::Validation(format!(
-                "openai ingress: invalid /v1/chat/completions body: {e}"
-            ))
+            Error::Validation(
+                format!("openai ingress: invalid /v1/chat/completions body: {e}"),
+                RefusalReason::Unparseable,
+            )
         })?;
         // An assistant turn echoed back by a client may carry its
         // reasoning_details in Anthropic block vocabulary -- notably a
@@ -758,6 +759,7 @@ fn normalize_system_prompt_alias(body: &mut Value) -> Result<()> {
     if !alias.is_string() {
         return Err(Error::Validation(
             "openai ingress: `systemPrompt` must be a string".into(),
+            RefusalReason::FieldType,
         ));
     }
     // Never log the prompt content -- the alias name alone is enough to
@@ -1048,7 +1050,7 @@ mod tests {
             .parse_request_value(&HeaderMap::new(), body)
             .unwrap_err();
 
-        assert!(matches!(err, Error::Validation(_)), "{err:?}");
+        assert!(matches!(err, Error::Validation(..)), "{err:?}");
     }
 
     #[test]
@@ -1102,7 +1104,11 @@ mod tests {
         let err = OpenAiIngress
             .parse_request_value(&HeaderMap::new(), body)
             .unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
+        assert!(matches!(err, Error::Validation(..)));
+        assert_eq!(
+            err.refusal_reason(),
+            Some(routectl_core::RefusalReason::Unparseable)
+        );
     }
 
     #[test]
@@ -1464,8 +1470,12 @@ mod tests {
             .expect_err("an object-valued alias must be rejected");
 
         // Assert
+        assert_eq!(
+            err.refusal_reason(),
+            Some(routectl_core::RefusalReason::FieldType)
+        );
         match err {
-            Error::Validation(msg) => assert!(
+            Error::Validation(msg, _) => assert!(
                 msg.contains("systemPrompt"),
                 "message names the rejected field: {msg}"
             ),
@@ -1488,7 +1498,7 @@ mod tests {
             .expect_err("a number-valued alias must be rejected");
 
         // Assert
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(matches!(err, Error::Validation(..)), "got {err:?}");
     }
 
     /// The rejection path must not be reachable via `provider_extras`
@@ -1508,7 +1518,7 @@ mod tests {
             .expect_err("a non-string alias must be rejected");
 
         // Assert
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(matches!(err, Error::Validation(..)), "got {err:?}");
         let extras = sweep_unknown_top_level_fields(&mut body);
         assert!(
             !extras.contains_key("systemPrompt"),
@@ -1599,7 +1609,7 @@ mod tests {
 
         // Assert
         match err {
-            Error::Validation(msg) => assert!(
+            Error::Validation(msg, _) => assert!(
                 msg.contains("messages"),
                 "message names the missing field: {msg}"
             ),

@@ -22,7 +22,8 @@ use tracing::{debug, warn};
 
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
-    ChatRequest, Error, Message, Result, ToolDef, is_canonical_request_key, sanitize_for_log,
+    ChatRequest, Error, Message, RefusalReason, Result, ToolDef, is_canonical_request_key,
+    sanitize_for_log,
 };
 
 use super::HistoryReasoning;
@@ -686,11 +687,14 @@ fn check_dropped_anthropic_fields(
     }
 
     if strict && !findings.is_empty() {
-        return Err(Error::Validation(format!(
-            "strict_translation: {} canonical-only field(s) cannot be carried by the openai-compat egress: {}",
-            findings.len(),
-            findings.join("; ")
-        )));
+        return Err(Error::Validation(
+            format!(
+                "strict_translation: {} canonical-only field(s) cannot be carried by the openai-compat egress: {}",
+                findings.len(),
+                findings.join("; ")
+            ),
+            RefusalReason::StrictTranslation,
+        ));
     }
     Ok(tally)
 }
@@ -2102,8 +2106,12 @@ mod tests {
         );
 
         // Assert
+        assert_eq!(
+            res.as_ref().err().and_then(Error::refusal_reason),
+            Some(routectl_core::RefusalReason::StrictTranslation)
+        );
         match res {
-            Err(Error::Validation(msg)) => assert!(
+            Err(Error::Validation(msg, _)) => assert!(
                 msg.contains("forward-compat block `future_widget_block` on message 1"),
                 "the rejection must name the unknown block, got: {msg}"
             ),

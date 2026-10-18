@@ -560,6 +560,7 @@ fn naming_local_refusal() -> Error {
     Error::LocalRefusal {
         provider: "p1".into(),
         detail: "tool type 'web_search_20250305' is not supported for this model".into(),
+        reason: routectl_core::RefusalReason::Unrepresentable,
     }
 }
 

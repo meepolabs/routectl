@@ -46,7 +46,7 @@ mod tools;
 use serde_json::Map;
 use tracing::warn;
 
-use routectl_core::{ChatRequest, Error, Result};
+use routectl_core::{ChatRequest, Error, RefusalReason, Result};
 
 /// Reject (strict) or warn-and-drop (lenient) a canonical-only shape
 /// that has no OpenAI-compat wire representation.
@@ -63,10 +63,13 @@ pub fn reject_or_drop_unrepresentable(
     what: &str,
 ) -> Result<()> {
     if strict {
-        return Err(Error::Validation(format!(
-            "strict_translation: {context}: {what} \
+        return Err(Error::Validation(
+            format!(
+                "strict_translation: {context}: {what} \
              cannot be represented on the OpenAI-compat wire"
-        )));
+            ),
+            RefusalReason::StrictTranslation,
+        ));
     }
     warn!(
         provider = id,

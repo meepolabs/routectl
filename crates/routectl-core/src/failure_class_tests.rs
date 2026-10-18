@@ -389,7 +389,7 @@ fn non_upstream_variants_are_unknown_matched_by_variant() {
         Error::UnknownAlias("a".into()),
         Error::Config("bad config".into()),
         Error::Internal("boom".into()),
-        Error::Validation("bad body".into()),
+        Error::Validation("bad body".into(), crate::RefusalReason::FieldType),
         Error::NotImplemented("p".into(), "count_tokens".into()),
         Error::Io(std::io::Error::other("disk")),
         Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),

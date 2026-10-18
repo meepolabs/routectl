@@ -274,7 +274,7 @@ pub(crate) const fn error_class_of(e: &Error) -> &'static str {
     match e {
         Error::Upstream { .. } => "upstream",
         Error::Streaming(_) => "streaming",
-        Error::Validation(_) => "validation",
+        Error::Validation(..) => "validation",
         Error::LocalRefusal { .. } => "local_refusal",
         Error::Auth(_) | Error::Credential { .. } => "auth",
         Error::Config(_) => "config",

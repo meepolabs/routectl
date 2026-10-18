@@ -304,8 +304,31 @@ fn parse_request_rejects_too_many_breakpoints() {
     let err = AnthropicIngress
         .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
-    assert!(matches!(err, Error::Validation(_)));
+    assert!(matches!(err, Error::Validation(..)));
     assert!(err.to_string().contains("exceeds maximum"));
+}
+
+#[test]
+fn parse_request_tags_a_body_it_cannot_read_as_unparseable() {
+    let rows = [
+        ("not an object", json!(["a", "b"])),
+        (
+            "does not deserialize",
+            json!({"model": "claude-opus-4-7", "messages": "hi", "max_tokens": 1024}),
+        ),
+    ];
+    for (name, body) in rows {
+        let err = AnthropicIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Validation(..)), "{name}: {err:?}");
+        assert_eq!(
+            err.refusal_reason(),
+            Some(routectl_core::RefusalReason::Unparseable),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -324,7 +347,7 @@ fn parse_request_rejects_5m_then_1h_ordering() {
     let err = AnthropicIngress
         .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
-    assert!(matches!(err, Error::Validation(_)));
+    assert!(matches!(err, Error::Validation(..)));
     assert!(err.to_string().contains("after a 5m"));
 }
 
@@ -410,7 +433,7 @@ fn beta_flag_cap_counts_body_and_header_flags_together() {
 
     assert_eq!(at_cap.unwrap().anthropic_beta.len(), MAX_CLIENT_BETA_FLAGS);
     assert!(
-        matches!(over_cap, Err(Error::Validation(_))),
+        matches!(over_cap, Err(Error::Validation(..))),
         "{over_cap:?}"
     );
 }

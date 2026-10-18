@@ -66,7 +66,11 @@ fn cap_rejects_one_distinct_flag_over_the_maximum() {
     let err = normalize_client_betas("test", flags.iter().map(String::as_str))
         .expect_err("one over the cap");
 
-    assert!(matches!(err, Error::Validation(_)), "{err:?}");
+    assert!(matches!(err, Error::Validation(..)), "{err:?}");
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::BetaHeaderCap)
+    );
 }
 
 #[test]

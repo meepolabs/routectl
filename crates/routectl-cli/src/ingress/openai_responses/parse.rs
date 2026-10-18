@@ -48,8 +48,8 @@ use serde_json::{Map, Value};
 
 use routectl_core::{
     ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
-    ReasoningConfig, ReasoningDetail, ReasoningDetailKind, ResponsesPassthroughItem, Result, Role,
-    SystemContent, ToolDef,
+    ReasoningConfig, ReasoningDetail, ReasoningDetailKind, RefusalReason, ResponsesPassthroughItem,
+    Result, Role, SystemContent, ToolDef,
 };
 
 use crate::ingress::read_alias_header;
@@ -87,6 +87,7 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         _ => {
             return Err(Error::Validation(
                 "openai-responses ingress: request body is not an object".into(),
+                RefusalReason::Unparseable,
             ));
         }
     };
@@ -266,6 +267,7 @@ fn reject_previous_response_id(obj: &Map<String, Value>) -> Result<()> {
          conversation state (previous_response_id). Configure the client to send the full \
          conversation input each turn (disable store / unset previous_response_id)."
             .into(),
+        RefusalReason::PreviousResponseId,
     ))
 }
 

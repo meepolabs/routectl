@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
-    Result, Role, SystemBlock, SystemContent,
+    RefusalReason, Result, Role, SystemBlock, SystemContent,
 };
 use serde_json::Value;
 
@@ -377,9 +377,12 @@ pub(crate) fn normalize_client_betas<'a>(
         );
     }
     if over_cap {
-        return Err(Error::Validation(format!(
-            "{dialect} ingress: more than {MAX_CLIENT_BETA_FLAGS} distinct anthropic-beta flags"
-        )));
+        return Err(Error::Validation(
+            format!(
+                "{dialect} ingress: more than {MAX_CLIENT_BETA_FLAGS} distinct anthropic-beta flags"
+            ),
+            RefusalReason::BetaHeaderCap,
+        ));
     }
     Ok(flags)
 }

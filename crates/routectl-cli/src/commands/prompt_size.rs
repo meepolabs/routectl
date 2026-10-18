@@ -17,7 +17,7 @@ use std::path::Path;
 use routectl_core::cache_control::compute_frozen_floor;
 use routectl_core::context_reduction::{ReductionOutcome, apply_json_minify};
 use routectl_core::schema::Role;
-use routectl_core::{ChatRequest, Error, Result, scan_volatile};
+use routectl_core::{ChatRequest, Error, RefusalReason, Result, scan_volatile};
 use routectl_router::{
     ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CatalogOverlay,
     Config, EffectiveRow, GateDecision, KeepReason, PrefixReductionCandidate, TrimConfig,
@@ -503,10 +503,13 @@ pub fn run(
         ))
     })?;
     let req: ChatRequest = serde_json::from_str(&text).map_err(|e| {
-        Error::Validation(format!(
-            "request fixture `{}` is not a valid ChatRequest body: {e}",
-            request_path.display()
-        ))
+        Error::Validation(
+            format!(
+                "request fixture `{}` is not a valid ChatRequest body: {e}",
+                request_path.display()
+            ),
+            RefusalReason::Unparseable,
+        )
     })?;
 
     let supports_top_level = resolve_supports_top_level(&config, alias);
@@ -970,6 +973,32 @@ upstream = "gpt-4o"
 fast = "sonnet"
 "#;
         toml::from_str(toml).expect("test config should deserialize")
+    }
+
+    #[test]
+    fn run_tags_a_request_fixture_that_is_not_a_chat_request_as_unparseable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("request.json");
+        std::fs::write(&path, "{\"model\": 7}").expect("write fixture");
+        let projection = ProjectionArgs {
+            hypothetical_d: None,
+            hypothetical_k: None,
+            c_after: None,
+            ttl_tier: "5m",
+            steady_state: false,
+        };
+
+        let err = run(
+            capability_config(),
+            &CatalogOverlay::default(),
+            "fast",
+            &path,
+            projection,
+        )
+        .expect_err("the fixture is not a ChatRequest");
+
+        assert!(err.to_string().contains("not a valid ChatRequest"), "{err}");
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::Unparseable));
     }
 
     #[test]

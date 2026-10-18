@@ -336,7 +336,10 @@ async fn anthropic_envelope_unknown_alias_emits_not_found_error() {
 #[tokio::test]
 async fn anthropic_envelope_validation_error_emits_invalid_request_error() {
     // Arrange
-    let err = Error::Validation("max_tokens must be positive".into());
+    let err = Error::Validation(
+        "max_tokens must be positive".into(),
+        routectl_core::RefusalReason::FieldType,
+    );
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
@@ -367,6 +370,7 @@ async fn anthropic_envelope_forwarded_missing_bearer_refuse_maps_to_400_invalid_
         "forwarded target has no captured client bearer to authenticate this request \
          (reason=missing_forwarded_bearer)"
             .to_string(),
+        routectl_core::RefusalReason::ForwardedBearerMissing,
     );
 
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
@@ -530,7 +534,7 @@ async fn openai_envelope_param_null_when_upstream_omits_it() {
 #[tokio::test]
 async fn openai_envelope_param_null_for_non_upstream_error() {
     // Arrange: a non-upstream error can never carry an upstream param.
-    let err = Error::Validation("bad input".into());
+    let err = Error::Validation("bad input".into(), routectl_core::RefusalReason::FieldType);
 
     // Act
     let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
@@ -4917,7 +4921,10 @@ fn map_error_upstream_logs_once_at_warn_not_error() {
 async fn map_error_validation_preserves_exact_message_after_exhaustive_match() {
     // Regression pin: an unchanged newly-explicit arm must reproduce
     // the prior `e.to_string()` output byte-for-byte.
-    let err = Error::Validation("max_tokens must be positive".into());
+    let err = Error::Validation(
+        "max_tokens must be positive".into(),
+        routectl_core::RefusalReason::FieldType,
+    );
     let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
     let body = body_to_value(resp).await;
     assert_eq!(

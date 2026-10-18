@@ -14,8 +14,8 @@ use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
-    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, FrontSlot, Provider, ReplayScheme,
-    Result,
+    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, FrontSlot, Provider, RefusalReason,
+    ReplayScheme, Result,
     cache_control::{MAX_BREAKPOINTS, system_block_is_wire_eligible, validate_source},
     context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify},
     failure_class::{ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify},
@@ -106,7 +106,7 @@ pub(super) fn validate_request_transcript(req: &ChatRequest) -> Result<()> {
             item_index = ?e.item_index(),
             "tool call/result pairing rejected before dispatch"
         );
-        Error::Validation(e.to_string())
+        Error::Validation(e.to_string(), RefusalReason::ToolPairing)
     })
 }
 
@@ -3162,6 +3162,7 @@ pub(super) fn missing_forwarded_bearer_error(
         "forwarded target has no captured client bearer to authenticate this request \
          (reason=missing_forwarded_bearer)"
             .to_string(),
+        RefusalReason::ForwardedBearerMissing,
     ))
 }
 

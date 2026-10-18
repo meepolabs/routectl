@@ -3,6 +3,7 @@
 //! rendering.
 
 use super::{Error, UpstreamBody};
+use crate::RefusalReason;
 use std::time::Duration;
 
 #[test]
@@ -193,6 +194,7 @@ fn local_refusal_debug_neutralizes_control_chars_in_detail() {
     let err = Error::LocalRefusal {
         provider: "prov".into(),
         detail: "line1\r\nforged: entry\u{1b}[31m".into(),
+        reason: RefusalReason::CloakRelocation,
     };
 
     let rendered = format!("{err:?}");
@@ -295,7 +297,11 @@ fn with_upstream_request_id_keeps_the_parse() {
 
 #[test]
 fn parsed_body_is_none_off_the_upstream_variant() {
-    assert!(Error::Validation("bad".to_string()).parsed_body().is_none());
+    assert!(
+        Error::Validation("bad".to_string(), RefusalReason::FieldType)
+            .parsed_body()
+            .is_none()
+    );
 }
 
 /// The body itself renders (Display raw, Debug as a redacted excerpt),
@@ -319,8 +325,11 @@ fn upstream_debug_and_display_never_render_the_parse() {
 /// Non-`Upstream` variants keep the derived Debug shape (tuple form).
 #[test]
 fn non_upstream_variant_debug_unchanged() {
-    let err = Error::Validation("bad field".to_string());
-    assert_eq!(format!("{err:?}"), "Validation(\"bad field\")");
+    let err = Error::Validation("bad field".to_string(), RefusalReason::FieldType);
+    assert_eq!(
+        format!("{err:?}"),
+        "Validation(\"bad field\", \"field-type\")"
+    );
 }
 
 #[test]
@@ -346,6 +355,7 @@ fn with_upstream_request_id_defaults_none_and_is_noop_off_variant() {
     );
 
     // Act + Assert: chaining on a non-Upstream variant is a no-op.
-    let other = Error::Validation("bad".to_string()).with_upstream_request_id(Some("x".into()));
-    assert_eq!(format!("{other:?}"), "Validation(\"bad\")");
+    let other = Error::Validation("bad".to_string(), RefusalReason::FieldType)
+        .with_upstream_request_id(Some("x".into()));
+    assert_eq!(format!("{other:?}"), "Validation(\"bad\", \"field-type\")");
 }

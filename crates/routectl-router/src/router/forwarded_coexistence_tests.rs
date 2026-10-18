@@ -276,7 +276,7 @@ async fn complete_forwarded_target_missing_bearer_refused_before_dispatch() {
 
     let err = router.complete(plain_req()).await.unwrap_err();
 
-    assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+    assert!(matches!(err, Error::Validation(..)), "got {err:?}");
     assert!(
         err.to_string().contains("missing_forwarded_bearer"),
         "refuse message must carry the reason; got: {err}",
@@ -298,7 +298,7 @@ async fn count_tokens_forwarded_target_missing_bearer_refused_before_dispatch() 
 
     let err = router.count_tokens(plain_req()).await.unwrap_err();
 
-    assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+    assert!(matches!(err, Error::Validation(..)), "got {err:?}");
     assert!(err.to_string().contains("missing_forwarded_bearer"));
     assert_eq!(counters[0].load(Ordering::SeqCst), 0);
 }
@@ -313,7 +313,7 @@ async fn stream_forwarded_target_missing_bearer_refused_before_dispatch() {
 
     let err = router.stream(plain_req()).await.err().expect("refused");
 
-    assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+    assert!(matches!(err, Error::Validation(..)), "got {err:?}");
     assert!(err.to_string().contains("missing_forwarded_bearer"));
     assert_eq!(counters[0].load(Ordering::SeqCst), 0);
 }
@@ -424,7 +424,7 @@ async fn forwarded_target_built_via_real_factory_still_refuses_missing_bearer() 
     // (which would otherwise try to egress with no credential).
     let err = router.complete(plain_req()).await.unwrap_err();
 
-    assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+    assert!(matches!(err, Error::Validation(..)), "got {err:?}");
     assert!(
         err.to_string().contains("missing_forwarded_bearer"),
         "got: {err}",

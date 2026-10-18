@@ -60,6 +60,10 @@ fn assert_local_refusal(err: &Error) {
             if detail.contains("cannot be relocated")),
         "expected the relocation refusal, got {err:?}"
     );
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::CloakRelocation)
+    );
 }
 
 #[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]

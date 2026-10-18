@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::refusal_reason::RefusalReason;
 
 /// Cache breakpoint marker. Currently only `type = "ephemeral"` is defined,
 /// though routectl does not police that vocabulary -- upstream owns it.
@@ -92,23 +93,29 @@ pub enum BreakpointPosition {
 /// walk.
 pub fn validate(breakpoints: &[Breakpoint<'_>]) -> Result<()> {
     if breakpoints.len() > MAX_BREAKPOINTS {
-        return Err(Error::Validation(format!(
-            "cache_control: {} breakpoints exceeds maximum of {}",
-            breakpoints.len(),
-            MAX_BREAKPOINTS
-        )));
+        return Err(Error::Validation(
+            format!(
+                "cache_control: {} breakpoints exceeds maximum of {}",
+                breakpoints.len(),
+                MAX_BREAKPOINTS
+            ),
+            RefusalReason::CacheBreakpointCap,
+        ));
     }
 
     let mut last_ttl_was_5m = false;
     for bp in breakpoints {
         let ttl = bp.control.effective_ttl();
         if last_ttl_was_5m && ttl == "1h" {
-            return Err(Error::Validation(format!(
-                "cache_control: 1h TTL breakpoint at {:?} appears after a 5m \
+            return Err(Error::Validation(
+                format!(
+                    "cache_control: 1h TTL breakpoint at {:?} appears after a 5m \
                  breakpoint; longer TTLs must come before shorter ones in \
                  cache prefix order",
-                bp.position
-            )));
+                    bp.position
+                ),
+                RefusalReason::CacheTtlOrder,
+            ));
         }
         last_ttl_was_5m = ttl == "5m";
     }
@@ -529,6 +536,10 @@ mod tests {
         let err = validate(&bps).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("exceeds maximum"), "got: {msg}");
+        assert_eq!(
+            err.refusal_reason(),
+            Some(RefusalReason::CacheBreakpointCap)
+        );
     }
 
     #[test]
@@ -549,6 +560,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("1h"), "got: {msg}");
         assert!(msg.contains("after a 5m"), "got: {msg}");
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::CacheTtlOrder));
     }
 
     #[test]

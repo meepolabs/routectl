@@ -1335,7 +1335,10 @@ fn observe_error_leaves_resolved_class_null_pre_dispatch() {
     );
 
     // Act
-    cap.observe_error(&Error::Validation("bad body".into()));
+    cap.observe_error(&Error::Validation(
+        "bad body".into(),
+        routectl_core::RefusalReason::FieldType,
+    ));
 
     // Assert: no fake class is stamped; the row reads back "unclassified".
     assert!(

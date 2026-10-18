@@ -711,6 +711,7 @@ pub routectl_core::error::Error::Json(serde_json::error::Error)
 pub routectl_core::error::Error::LocalRefusal
 pub routectl_core::error::Error::LocalRefusal::detail: alloc::string::String
 pub routectl_core::error::Error::LocalRefusal::provider: alloc::string::String
+pub routectl_core::error::Error::LocalRefusal::reason: routectl_core::refusal_reason::RefusalReason
 pub routectl_core::error::Error::NormalizeRequest(alloc::string::String, alloc::string::String)
 pub routectl_core::error::Error::NormalizeResponse(alloc::string::String, alloc::string::String)
 pub routectl_core::error::Error::NotImplemented(alloc::string::String, alloc::string::String)
@@ -725,11 +726,12 @@ pub routectl_core::error::Error::Upstream::retry_after: core::option::Option<cor
 pub routectl_core::error::Error::Upstream::status: u16
 pub routectl_core::error::Error::Upstream::upstream_code: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::error::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
-pub routectl_core::error::Error::Validation(alloc::string::String)
+pub routectl_core::error::Error::Validation(alloc::string::String, routectl_core::refusal_reason::RefusalReason)
 impl routectl_core::error::Error
 pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
+pub const fn routectl_core::error::Error::refusal_reason(&self) -> core::option::Option<routectl_core::refusal_reason::RefusalReason>
 pub fn routectl_core::error::Error::upstream(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_full(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_reason(&self) -> core::option::Option<routectl_core::upstream_reason::UpstreamReason>
@@ -1478,7 +1480,7 @@ pub routectl_core::refusal_reason::RefusalReason::TranslationAccounting
 pub routectl_core::refusal_reason::RefusalReason::Unparseable
 pub routectl_core::refusal_reason::RefusalReason::Unrepresentable
 impl routectl_core::refusal_reason::RefusalReason
-pub const routectl_core::refusal_reason::RefusalReason::ALL: [Self; 16]
+pub const routectl_core::refusal_reason::RefusalReason::ALL: &'static [Self]
 pub const fn routectl_core::refusal_reason::RefusalReason::as_str(self) -> &'static str
 pub const fn routectl_core::refusal_reason::RefusalReason::failure_class(self) -> routectl_core::failure_class::FailureClass
 pub fn routectl_core::refusal_reason::RefusalReason::from_token(&str) -> core::option::Option<Self>
@@ -4521,6 +4523,7 @@ pub routectl_core::Error::Json(serde_json::error::Error)
 pub routectl_core::Error::LocalRefusal
 pub routectl_core::Error::LocalRefusal::detail: alloc::string::String
 pub routectl_core::Error::LocalRefusal::provider: alloc::string::String
+pub routectl_core::Error::LocalRefusal::reason: routectl_core::refusal_reason::RefusalReason
 pub routectl_core::Error::NormalizeRequest(alloc::string::String, alloc::string::String)
 pub routectl_core::Error::NormalizeResponse(alloc::string::String, alloc::string::String)
 pub routectl_core::Error::NotImplemented(alloc::string::String, alloc::string::String)
@@ -4535,11 +4538,12 @@ pub routectl_core::Error::Upstream::retry_after: core::option::Option<core::time
 pub routectl_core::Error::Upstream::status: u16
 pub routectl_core::Error::Upstream::upstream_code: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
-pub routectl_core::Error::Validation(alloc::string::String)
+pub routectl_core::Error::Validation(alloc::string::String, routectl_core::refusal_reason::RefusalReason)
 impl routectl_core::error::Error
 pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
+pub const fn routectl_core::error::Error::refusal_reason(&self) -> core::option::Option<routectl_core::refusal_reason::RefusalReason>
 pub fn routectl_core::error::Error::upstream(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_full(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_reason(&self) -> core::option::Option<routectl_core::upstream_reason::UpstreamReason>
@@ -5138,7 +5142,7 @@ pub routectl_core::RefusalReason::TranslationAccounting
 pub routectl_core::RefusalReason::Unparseable
 pub routectl_core::RefusalReason::Unrepresentable
 impl routectl_core::refusal_reason::RefusalReason
-pub const routectl_core::refusal_reason::RefusalReason::ALL: [Self; 16]
+pub const routectl_core::refusal_reason::RefusalReason::ALL: &'static [Self]
 pub const fn routectl_core::refusal_reason::RefusalReason::as_str(self) -> &'static str
 pub const fn routectl_core::refusal_reason::RefusalReason::failure_class(self) -> routectl_core::failure_class::FailureClass
 pub fn routectl_core::refusal_reason::RefusalReason::from_token(&str) -> core::option::Option<Self>

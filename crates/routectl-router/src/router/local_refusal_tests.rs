@@ -168,6 +168,7 @@ fn egress_local_refusal() -> Error {
     Error::LocalRefusal {
         provider: "failing".into(),
         detail: "request shape refused before egress".into(),
+        reason: routectl_core::RefusalReason::CloakRelocation,
     }
 }
 
@@ -258,9 +259,40 @@ async fn a_strict_strip_refusal_counts_exactly_once() {
 
         let err = dispatch_err(&router, surface, advisor_request()).await;
 
-        assert!(matches!(err, Error::Validation(_)), "{surface:?}: {err:?}");
+        assert!(matches!(err, Error::Validation(..)), "{surface:?}: {err:?}");
         assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
         assert_eq!(refusals(&router), [(ANTHROPIC_LANE, 1)], "{surface:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_tool_pairing_refusal_carries_its_reason() {
+    for surface in SURFACES {
+        let router = router_over(
+            ProviderEntry::anthropic_api("literal:k"),
+            Arc::new(AnsweringProvider),
+            false,
+        );
+        let mut req = anthropic_request();
+        req.messages = vec![routectl_core::Message {
+            role: routectl_core::Role::Tool,
+            content: routectl_core::MessageContent::Text("r".into()),
+            tool_call_id: Some("call_missing".into()),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_calls: None,
+        }]
+        .into();
+
+        let err = dispatch_err(&router, surface, req).await;
+
+        assert_eq!(
+            err.refusal_reason(),
+            Some(routectl_core::RefusalReason::ToolPairing),
+            "{surface:?}: {err:?}"
+        );
     }
 }
 
@@ -279,6 +311,11 @@ async fn a_missing_forwarded_bearer_refusal_is_not_counted() {
         assert!(
             err.to_string().contains("missing_forwarded_bearer"),
             "{surface:?}: {err}"
+        );
+        assert_eq!(
+            err.refusal_reason(),
+            Some(routectl_core::RefusalReason::ForwardedBearerMissing),
+            "{surface:?}"
         );
         assert!(refusals(&router).is_empty(), "{surface:?}");
     }

@@ -127,7 +127,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
         // axum `Json` extractor produced before this path owned the parse.
         Err(Error::Json(_)) => return render_malformed_body(envelope),
         Err(e) => {
-            if matches!(e, Error::Validation(_)) {
+            if matches!(e, Error::Validation(..)) {
                 router.record_ingress_refusal(adapter.dialect());
             }
             return map_error(envelope, e);
@@ -1417,7 +1417,9 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         }
         // The Display string names the internal provider id, so the client
         // reads the refusal without it. `detail` names a shape only.
-        Error::LocalRefusal { provider, detail } => {
+        Error::LocalRefusal {
+            provider, detail, ..
+        } => {
             tracing::warn!(
                 provider = %routectl_core::sanitize_for_log(provider),
                 detail = %routectl_core::sanitize_detail_for_log(detail),
@@ -1429,7 +1431,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         // caller-derived input, so the verbose message stays. Kept as
         // explicit arms (no wildcard) so a new core Error variant fails
         // to compile here and forces a client-exposure decision.
-        Error::UnknownAlias(_) | Error::Validation(_) | Error::Streaming(_) => e.to_string(),
+        Error::UnknownAlias(_) | Error::Validation(..) | Error::Streaming(_) => e.to_string(),
     };
     // Lift the upstream classifier so an SDK that branches on
     // `error.type` / `error.code` keeps the upstream signal instead of
@@ -1571,7 +1573,7 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
         }
         Error::NormalizeRequest(_, _) => (StatusCode::BAD_REQUEST, "bad_request"),
         Error::NormalizeResponse(_, _) => (StatusCode::BAD_GATEWAY, "bad_gateway"),
-        Error::Validation(_) => (StatusCode::BAD_REQUEST, "validation_error"),
+        Error::Validation(..) => (StatusCode::BAD_REQUEST, "validation_error"),
         Error::LocalRefusal { .. } => (StatusCode::BAD_REQUEST, "bad_request"),
         Error::Auth(_) | Error::Credential { .. } => {
             (StatusCode::SERVICE_UNAVAILABLE, "auth_error")

@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use routectl_core::{ChatRequest, Error};
+use routectl_core::{ChatRequest, Error, RefusalReason};
 
 use super::wire_edits;
 
@@ -174,6 +174,7 @@ impl RelocationRefusal {
         Error::LocalRefusal {
             provider: provider_id.to_string(),
             detail: self.detail,
+            reason: RefusalReason::CloakRelocation,
         }
     }
 }

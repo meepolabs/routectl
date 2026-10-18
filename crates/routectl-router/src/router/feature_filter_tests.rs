@@ -1795,7 +1795,7 @@ fn strip_helper_strict_rejects_without_mutation() {
     let decision = decision.expect("interceptor ran");
 
     match decision {
-        StripDecision::StrictReject(Error::Validation(msg)) => {
+        StripDecision::StrictReject(Error::Validation(msg, _)) => {
             assert!(msg.contains("advisor"), "{msg}");
         }
         other => panic!("expected StrictReject(Validation), got {other:?}"),

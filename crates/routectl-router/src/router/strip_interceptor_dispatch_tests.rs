@@ -304,7 +304,7 @@ async fn complete_strict_rejects_without_dispatching() {
         .await
         .expect_err("strict translation rejects the strip");
 
-    assert!(matches!(err, Error::Validation(_)), "{err:?}");
+    assert!(matches!(err, Error::Validation(..)), "{err:?}");
     assert!(
         cap.lock().is_empty(),
         "a strict-rejected attempt never reaches the upstream",
@@ -355,7 +355,7 @@ async fn stream_strict_rejects_without_dispatching() {
         .err()
         .expect("strict translation rejects the strip before the stream opens");
 
-    assert!(matches!(err, Error::Validation(_)), "{err:?}");
+    assert!(matches!(err, Error::Validation(..)), "{err:?}");
     assert!(cap.lock().is_empty(), "no upstream call on strict reject");
     assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
 }
@@ -376,7 +376,7 @@ async fn count_tokens_strict_rejects_without_dispatching() {
         .await
         .expect_err("strict translation rejects the strip");
 
-    assert!(matches!(err, Error::Validation(_)), "{err:?}");
+    assert!(matches!(err, Error::Validation(..)), "{err:?}");
     assert!(
         cap.lock().is_empty(),
         "count_tokens never reaches the upstream on strict reject",

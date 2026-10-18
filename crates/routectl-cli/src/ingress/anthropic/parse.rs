@@ -2,7 +2,9 @@ use axum::http::HeaderMap;
 use serde_json::{Map, Value};
 
 use routectl_core::cache_control;
-use routectl_core::{ChatRequest, Error, ReasoningConfig, Result, sanitize_detail_for_log};
+use routectl_core::{
+    ChatRequest, Error, ReasoningConfig, RefusalReason, Result, sanitize_detail_for_log,
+};
 
 // Referenced only by the inline test module (`parse_tests.rs`) via
 // `use super::*`; test-gated so they do not flag as unused in the
@@ -16,7 +18,10 @@ use crate::ingress::session_key::resolve_session_key;
 
 pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<ChatRequest> {
     let obj = body.as_object_mut().ok_or_else(|| {
-        Error::Validation("anthropic ingress: request body is not an object".into())
+        Error::Validation(
+            "anthropic ingress: request body is not an object".into(),
+            RefusalReason::Unparseable,
+        )
     })?;
 
     // Pull out fields that need explicit translation BEFORE we let
@@ -52,8 +57,12 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
         extras.insert("output_config".into(), oc);
     }
 
-    let mut req: ChatRequest = serde_json::from_value(body)
-        .map_err(|e| Error::Validation(format!("anthropic ingress: invalid body: {e}")))?;
+    let mut req: ChatRequest = serde_json::from_value(body).map_err(|e| {
+        Error::Validation(
+            format!("anthropic ingress: invalid body: {e}"),
+            RefusalReason::Unparseable,
+        )
+    })?;
 
     // Same inbound reasoning-payload normalization the openai ingress
     // runs. Shared so the two dialects cannot drift back apart on which
@@ -506,10 +515,13 @@ fn translate_thinking_display(t: &Value) -> Result<(Option<bool>, Option<String>
         return Ok((None, None));
     };
     let Some(requested) = raw.as_str() else {
-        return Err(Error::Validation(format!(
-            "anthropic ingress: thinking.display must be a string, got {}",
-            value_type_name(raw)
-        )));
+        return Err(Error::Validation(
+            format!(
+                "anthropic ingress: thinking.display must be a string, got {}",
+                value_type_name(raw)
+            ),
+            RefusalReason::FieldType,
+        ));
     };
     let exclude = match requested {
         "omitted" | "updates" => Some(true),

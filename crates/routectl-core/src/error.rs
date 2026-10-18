@@ -9,7 +9,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::{ParsedErrorBody, UpstreamBody, UpstreamReason};
+use crate::{ParsedErrorBody, RefusalReason, UpstreamBody, UpstreamReason};
 
 /// Convenience alias defaulting the error type to [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -139,9 +139,10 @@ pub enum Error {
     /// `routectl-providers` (e.g. an openai-compat wire-lift that hits
     /// an untranslatable canonical-only shape under
     /// `strict_translation`). HTTP handlers surface this as 400 Bad
-    /// Request.
+    /// Request. The [`RefusalReason`] is operator vocabulary and never
+    /// reaches the client text.
     #[error("validation: {0}")]
-    Validation(String),
+    Validation(String, RefusalReason),
 
     /// A provider refused to send a request because this egress has no legal
     /// representation for it, decided locally before any network I/O.
@@ -159,6 +160,8 @@ pub enum Error {
         provider: String,
         /// Why the request has no legal representation on this egress.
         detail: String,
+        /// The typed reason for the refusal; never part of the client text.
+        reason: RefusalReason,
     },
 
     /// A streaming (SSE) transport or framing failure.
@@ -197,7 +200,8 @@ pub enum Error {
 /// the Debug rendering is bounded; consumers that read the `body` FIELD
 /// directly (the capability matcher) still see it in full. From `extras` it
 /// renders the request id and the typed reason (as its stable token), never
-/// the parsed body.
+/// the parsed body. A carried [`RefusalReason`] also renders as its stable
+/// token.
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -247,11 +251,20 @@ impl fmt::Debug for Error {
                 .finish(),
             Self::Config(s) => f.debug_tuple("Config").field(s).finish(),
             Self::Internal(s) => f.debug_tuple("Internal").field(s).finish(),
-            Self::Validation(s) => f.debug_tuple("Validation").field(s).finish(),
-            Self::LocalRefusal { provider, detail } => f
+            Self::Validation(s, reason) => f
+                .debug_tuple("Validation")
+                .field(s)
+                .field(&reason.as_str())
+                .finish(),
+            Self::LocalRefusal {
+                provider,
+                detail,
+                reason,
+            } => f
                 .debug_struct("LocalRefusal")
                 .field("provider", provider)
                 .field("detail", &crate::sanitize_detail_for_log(detail))
+                .field("reason", &reason.as_str())
                 .finish(),
             Self::Streaming(s) => f.debug_tuple("Streaming").field(s).finish(),
             Self::NotImplemented(a, b) => {
@@ -530,6 +543,18 @@ impl Error {
         }
     }
 
+    /// Why routectl refused the request locally: the reason an
+    /// [`Error::Validation`] or [`Error::LocalRefusal`] carries, and
+    /// [`RefusalReason::Unparseable`] for an [`Error::Json`]. `None` on
+    /// every other variant.
+    pub const fn refusal_reason(&self) -> Option<RefusalReason> {
+        match self {
+            Self::Validation(_, reason) | Self::LocalRefusal { reason, .. } => Some(*reason),
+            Self::Json(_) => Some(RefusalReason::Unparseable),
+            _ => None,
+        }
+    }
+
     /// Construct a `NormalizeRequest` error for the named provider.
     pub fn normalize_request(provider: impl Into<String>, msg: impl Into<String>) -> Self {
         Self::NormalizeRequest(provider.into(), msg.into())
@@ -544,6 +569,10 @@ impl Error {
 #[cfg(test)]
 #[path = "error_reason_tests.rs"]
 mod reason_tests;
+
+#[cfg(test)]
+#[path = "error_refusal_tests.rs"]
+mod refusal_tests;
 
 #[cfg(test)]
 #[path = "error_tests.rs"]

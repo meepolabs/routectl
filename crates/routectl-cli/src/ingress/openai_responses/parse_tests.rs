@@ -1784,7 +1784,11 @@ fn non_object_body_returns_validation_error() {
         .unwrap_err();
 
     // Assert
-    assert!(matches!(err, Error::Validation(_)));
+    assert!(matches!(err, Error::Validation(..)));
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::Unparseable)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1805,8 +1809,12 @@ fn previous_response_id_present_returns_400_validation_error() {
 
     // Assert: a stateless proxy must reject server-side state rather than
     // answer with the wrong context. Error::Validation maps to 400.
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::PreviousResponseId)
+    );
     match err {
-        Error::Validation(msg) => {
+        Error::Validation(msg, _) => {
             assert!(
                 msg.contains("previous_response_id"),
                 "message should name the rejected field: {msg}"
@@ -2281,7 +2289,7 @@ fn store_true_with_previous_response_id_returns_400_not_warn() {
         .unwrap_err();
 
     // Assert
-    assert!(matches!(err, Error::Validation(_)));
+    assert!(matches!(err, Error::Validation(..)));
 }
 
 #[test]

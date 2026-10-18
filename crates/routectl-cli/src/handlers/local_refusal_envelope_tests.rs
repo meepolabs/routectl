@@ -15,6 +15,7 @@ fn local() -> Error {
     Error::LocalRefusal {
         provider: "p-internal".into(),
         detail: DETAIL.into(),
+        reason: routectl_core::RefusalReason::CloakRelocation,
     }
 }
 

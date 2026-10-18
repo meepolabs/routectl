@@ -596,7 +596,12 @@ mod tests {
 
         // Assert
         assert!(res.is_err(), "strict mode must reject document blocks");
-        let msg = format!("{}", res.unwrap_err());
+        let err = res.unwrap_err();
+        assert_eq!(
+            err.refusal_reason(),
+            Some(routectl_core::RefusalReason::StrictTranslation)
+        );
+        let msg = format!("{err}");
         assert!(msg.contains("strict_translation"));
         assert!(msg.contains("document"));
     }

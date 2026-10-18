@@ -211,7 +211,7 @@ fn non_string_thinking_display_is_rejected_on_disabled() {
         let err = parse(json!({"type": "disabled", "display": bad}))
             .expect_err("a non-string display must be rejected on the disabled shape too");
 
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(matches!(err, Error::Validation(..)), "got {err:?}");
         assert!(
             err.to_string().contains(&format!("got {type_name}")),
             "message must name the type it got: {err}"
@@ -298,7 +298,11 @@ fn non_string_thinking_display_is_rejected() {
         }))
         .expect_err("a non-string display must be rejected");
 
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(matches!(err, Error::Validation(..)), "got {err:?}");
+        assert_eq!(
+            err.refusal_reason(),
+            Some(routectl_core::RefusalReason::FieldType)
+        );
         assert_eq!(
             err.to_string(),
             format!(
