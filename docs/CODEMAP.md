@@ -2694,9 +2694,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
   `complete`/`complete_with_options` + `stream`/`stream_with_options` and
-  their `complete_inner`/`stream_inner` loop bodies, which first run
-  `validate_request_transcript` (tool pairing -> local `Error::Validation`,
-  shared with `count_tokens`, before chain selection) and then walk the resolved
+  their `complete_inner`/`stream_inner` loop bodies, which first record the
+  request's tool pairing defect (`transcript_defect::record_transcript_defect`;
+  `validate_request_transcript` still refuses for `count_tokens`) and then walk the resolved
   chain (from `chain::dispatch_chain_for_request`) attempting each
   `DispatchTarget`, retrying within a provider per `RetryPolicy` with
   exponential backoff (`add_jitter`/`mul_duration`, `INLOOP_RETRY_AFTER_CAP`);
@@ -4110,6 +4110,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   throttled line, silent on the dormant arm so OFF leaves no trace), and
   `apply_sticky_outcome` (stamps the selection_decision token, whose fixed
   vocabulary quota never extends)
+- `src/router/transcript_defect.rs` -- a tool pairing defect as a per-request
+  provenance fact on the complete and stream walks: `record_transcript_defect`
+  (validates once, stores `RoutectlInternal::transcript_defect`, forwards the
+  transcript unchanged), `egress_pairing_refusal` (only a Gemini target refuses
+  locally, `tool-pairing`, and the walk moves on), `is_transcript_rejection`
+  (an upstream `BadRequest` on a defective transcript: `should_fallback` stops
+  the walk and `AttemptLearning` consults no learner),
+  `tool_pairing_refusal` (the refusal text, shared with count_tokens), and
+  `Router::observe_transcript_rejection` (counts it once per target as
+  parser-unlocalized)
 - `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
   chain filter pass (called from `chain::dispatch_chain_for_request`
   immediately after `filter_chain_by_features`, so the ordering makes "last
@@ -8641,11 +8651,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/responses_ingress.rs` -- `/v1/responses` end-to-end (Responses body
   -> openai-compat upstream -> Responses-shaped completion,
   `previous_response_id` -> 400, `store:true` accepted, listener auth)
-- `tests/tool_pairing_ingress.rs` -- malformed tool call / result pairing
-  on every inference route (chat completions, messages, responses,
-  count_tokens; complete and stream) returns the dialect's 400 with zero
-  calls to a two-target chain's upstream; paired control reaches upstream;
-  every replay fixture transcript passes the validator
+- `tests/tool_pairing_ingress.rs` -- malformed tool call / result pairing:
+  chat completions, messages and responses (complete and stream) forward it
+  unchanged with exactly one call to a two-target chain's upstream;
+  count_tokens returns the dialect's 400 with zero calls; paired control
+  reaches upstream; every replay fixture transcript passes the validator
 - `tests/tool_choice_egress_e2e.rs` -- chained tool_choice path: a flat
   Responses `{type:function,name:X}` through the `/v1/responses` ingress
   reaches the Anthropic egress as `{type:tool,name:X}` and the openai-compat

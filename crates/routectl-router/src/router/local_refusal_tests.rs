@@ -451,14 +451,12 @@ async fn a_strict_strip_refusal_counts_exactly_once() {
     }
 }
 
+#[cfg(feature = "gemini")]
 #[tokio::test]
-async fn a_tool_pairing_refusal_carries_its_reason() {
+async fn a_tool_pairing_refusal_on_gemini_carries_its_reason_and_counts_once() {
     for surface in SURFACES {
-        let router = router_over(
-            ProviderEntry::anthropic_api("literal:k"),
-            Arc::new(AnsweringProvider::default()),
-            false,
-        );
+        let upstream = Arc::new(AnsweringProvider::default());
+        let router = router_over(ProviderEntry::gemini("literal:k"), upstream.clone(), false);
         let mut req = anthropic_request();
         req.messages = vec![Message {
             role: Role::Tool,
@@ -479,6 +477,12 @@ async fn a_tool_pairing_refusal_carries_its_reason() {
             Some(RefusalReason::ToolPairing),
             "{surface:?}: {err:?}"
         );
+        assert_eq!(
+            refusals(&router),
+            [("anthropic->gemini", "tool-pairing", 1)],
+            "{surface:?}"
+        );
+        assert_eq!(upstream.calls(), 0, "{surface:?}");
     }
 }
 

@@ -49,6 +49,7 @@ use super::rejection_parser::{NamedRejection, RawPath, RejectionKind};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::{ReplayCarryPlan, strip_replay_artifacts_recalibrating};
 use super::runtime_gate::LearnedProbeGuard;
+use super::transcript_defect::is_transcript_rejection;
 use super::{DispatchMeta, DispatchTarget, ReplayDegradation, Router};
 
 /// A generic capability attribution: the canonical capability key, the
@@ -291,6 +292,9 @@ pub(super) struct AttemptLearning<'a> {
     pending_capability: Option<ResolvedCapability>,
     /// The revert of a declared routectl edit a rejection named.
     revert: TargetRevert,
+    /// Whether the last rejection was laid to the request's defective
+    /// transcript, which no learner may read.
+    transcript_rejection: bool,
 }
 
 impl<'a> AttemptLearning<'a> {
@@ -319,6 +323,7 @@ impl<'a> AttemptLearning<'a> {
             skip_replay_backoff: false,
             pending_capability: None,
             revert: TargetRevert::default(),
+            transcript_rejection: false,
         }
     }
 
@@ -393,6 +398,12 @@ impl<'a> AttemptLearning<'a> {
     /// rejection's body-free form, so a re-gate refusal cannot surface the
     /// reasoning blob a replay rejection may echo; the field and canary
     /// repairs keep the raw rejection.
+    ///
+    /// A rejection laid to the request's defective transcript (see
+    /// [`is_transcript_rejection`]) proceeds without consulting any proposer,
+    /// after the declared-edit undo, and is held for
+    /// [`Self::observe_generic`] so the generic learner skips it too. It is
+    /// read on the native class, as the proposers would read it.
     pub(super) fn on_rejection(
         &mut self,
         rejection: Rejection<'_>,
@@ -401,8 +412,16 @@ impl<'a> AttemptLearning<'a> {
         budget: &mut RepairBudget,
     ) -> FailureDecision {
         self.pending_capability = None;
+        self.transcript_rejection = is_transcript_rejection(
+            rejection.err,
+            rejection.native_class,
+            rejection.client_req.routectl_internal.transcript_defect,
+        );
         if let Some(decision) = self.answer_declared(&rejection, attempt_req, meta, budget) {
             return decision;
+        }
+        if self.transcript_rejection {
+            return FailureDecision::Proceed;
         }
         self.arbitrate_proposers(rejection, attempt_req, meta, budget)
     }
@@ -603,7 +622,8 @@ impl<'a> AttemptLearning<'a> {
     /// The generic learned-capability observation for a rejection that took
     /// no repair, settling this target's re-probes against it. Applies only
     /// the capability proposal [`Self::on_rejection`] held; it resolves
-    /// nothing itself.
+    /// nothing itself. A rejection laid to the transcript learns nothing and
+    /// counts only as one the field parser did not localize.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_generic(
         &mut self,
@@ -616,6 +636,11 @@ impl<'a> AttemptLearning<'a> {
         dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
     ) {
+        if self.transcript_rejection {
+            self.router
+                .observe_transcript_rejection(err, remapped, target, dedupe);
+            return;
+        }
         self.router.observe_for_learning(
             err,
             cf,

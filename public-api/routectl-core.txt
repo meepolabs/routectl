@@ -2364,6 +2364,7 @@ pub routectl_core::schema::RoutectlInternal::reasoning_dialect: core::option::Op
 pub routectl_core::schema::RoutectlInternal::responses_input_passthrough: alloc::vec::Vec<routectl_core::schema::ResponsesPassthroughItem>
 pub routectl_core::schema::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::supports_adaptive_thinking: bool
+pub routectl_core::schema::RoutectlInternal::transcript_defect: core::option::Option<routectl_core::ToolPairingDefect>
 pub routectl_core::schema::RoutectlInternal::translation_report: core::option::Option<routectl_core::TranslationReport>
 pub routectl_core::schema::RoutectlInternal::wire_tap: core::option::Option<routectl_core::wire_check::WireTap>
 pub routectl_core::schema::RoutectlInternal::withheld_betas: alloc::sync::Arc<[alloc::string::String]>
@@ -7207,6 +7208,7 @@ pub routectl_core::RoutectlInternal::reasoning_dialect: core::option::Option<rou
 pub routectl_core::RoutectlInternal::responses_input_passthrough: alloc::vec::Vec<routectl_core::schema::ResponsesPassthroughItem>
 pub routectl_core::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::supports_adaptive_thinking: bool
+pub routectl_core::RoutectlInternal::transcript_defect: core::option::Option<routectl_core::ToolPairingDefect>
 pub routectl_core::RoutectlInternal::translation_report: core::option::Option<routectl_core::TranslationReport>
 pub routectl_core::RoutectlInternal::wire_tap: core::option::Option<routectl_core::wire_check::WireTap>
 pub routectl_core::RoutectlInternal::withheld_betas: alloc::sync::Arc<[alloc::string::String]>

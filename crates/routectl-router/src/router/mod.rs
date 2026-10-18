@@ -70,6 +70,7 @@ mod runtime_gate;
 mod state_slots;
 mod status;
 mod sticky;
+mod transcript_defect;
 mod window_gate;
 mod wire_check;
 mod wire_rejection;

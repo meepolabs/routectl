@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::stream::{self, BoxStream, StreamExt};
+use parking_lot::Mutex;
 use routectl_core::wire_check::{IngressDialect, IngressWire};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result, ToolDef,
@@ -50,11 +51,12 @@ type Answer = fn(&ChatRequest) -> Result<()>;
 
 /// A provider that, like a real egress, deposits the body it sent into the
 /// attempt's tap (unless it has no `shape`), then answers as told. Counts the
-/// upstream calls it took.
+/// upstream calls it took and keeps the messages each one carried.
 struct ScriptedProvider {
     shape: Option<Shape>,
     answer: Answer,
     calls: AtomicUsize,
+    messages: Mutex<Vec<Value>>,
 }
 
 impl ScriptedProvider {
@@ -63,11 +65,19 @@ impl ScriptedProvider {
             shape,
             answer,
             calls: AtomicUsize::new(0),
+            messages: Mutex::new(Vec::new()),
         })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 
     fn run(&self, req: &ChatRequest) -> Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.messages
+            .lock()
+            .push(serde_json::to_value(&*req.messages).expect("serialize messages"));
         if let (Some(shape), Some(tap), Some(ingress)) = (
             self.shape,
             req.routectl_internal.wire_tap.as_ref(),
@@ -694,3 +704,6 @@ fn absence_counts_only_for_a_reason_that_refuses_what_was_sent() {
 
 #[path = "learn_engine_dispatch_tests.rs"]
 mod learn_engine_dispatch_tests;
+
+#[path = "transcript_defect_dispatch_tests.rs"]
+mod transcript_defect_dispatch_tests;

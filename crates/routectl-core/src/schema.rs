@@ -566,6 +566,14 @@ pub struct RoutectlInternal {
     /// edits it made on this attempt; the router reads it after the call.
     /// `None` means nobody is listening and the egress records nothing.
     pub wire_tap: Option<crate::wire_check::WireTap>,
+
+    /// The first tool call / tool result pairing rule the request's
+    /// transcript breaks, recorded once by the router before the chain walk.
+    /// The transcript itself is forwarded unchanged; this fact says an
+    /// upstream rejection of the request may be about the transcript rather
+    /// than anything a target lacks, so it must not be learned from. `None`
+    /// when the transcript is correctly paired, and for library consumers.
+    pub transcript_defect: Option<crate::tool_pairing::ToolPairingDefect>,
 }
 
 /// Fixed redaction placeholder shared by `ForwardedBearer`'s `Debug` and

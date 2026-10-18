@@ -34,7 +34,7 @@ fn probe_429_does_not_fall_back() {
     let class = class_of(&err);
     let policy = RetryPolicy::default();
     // Act
-    let fall_back = should_fallback(&err, &class, &policy, true);
+    let fall_back = should_fallback(&err, &class, &policy, true, None);
     // Assert
     assert!(
         !fall_back,
@@ -65,7 +65,7 @@ fn probe_529_does_not_fall_back() {
     let err = upstream(529);
     let class = class_of(&err);
     let policy = RetryPolicy::default();
-    assert!(!should_fallback(&err, &class, &policy, true));
+    assert!(!should_fallback(&err, &class, &policy, true, None));
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn probe_400_still_falls_back() {
     let err = upstream(400);
     let class = class_of(&err);
     let policy = RetryPolicy::default();
-    assert!(should_fallback(&err, &class, &policy, true));
+    assert!(should_fallback(&err, &class, &policy, true, None));
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn probe_503_still_falls_back() {
     let err = upstream(503);
     let class = class_of(&err);
     let policy = RetryPolicy::default();
-    assert!(should_fallback(&err, &class, &policy, true));
+    assert!(should_fallback(&err, &class, &policy, true, None));
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn real_request_429_still_retries_and_falls_back() {
     let class = class_of(&err);
     let policy = RetryPolicy::default();
     assert!(
-        should_fallback(&err, &class, &policy, false),
+        should_fallback(&err, &class, &policy, false, None),
         "real-request 429 still falls back",
     );
     assert!(
@@ -152,7 +152,7 @@ fn probe_disabled_when_threshold_zero() {
     let is_probe = is_probe_request(&req, &policy); // false
     let err = upstream(429);
     let class = class_of(&err);
-    assert!(should_fallback(&err, &class, &policy, is_probe));
+    assert!(should_fallback(&err, &class, &policy, is_probe, None));
     assert!(should_retry_same_provider(
         &err, &class, &policy, 0, is_probe
     ));
@@ -182,7 +182,7 @@ fn custom_probe_max_tokens_threshold_is_inclusive() {
     let err = upstream(429);
     let class = class_of(&err);
     assert!(
-        !should_fallback(&err, &class, &policy, is_probe),
+        !should_fallback(&err, &class, &policy, is_probe, None),
         "an at-threshold probe must not fall back on 429 at a custom threshold",
     );
 }

@@ -163,7 +163,7 @@ fn should_fallback_status_zero_is_always_true() {
     let err = Error::upstream("p", 0, "tcp connect refused");
     let class = classify(&err, None).class;
     let policy = RetryPolicy::default();
-    assert!(should_fallback(&err, &class, &policy, false));
+    assert!(should_fallback(&err, &class, &policy, false, None));
 }
 
 // --- Per-class operator overrides route through `resolved_class` ---
@@ -223,9 +223,16 @@ fn retry_override_on_one_class_leaves_the_sibling_5xx_class_untouched() {
         &overloaded_err,
         &overloaded_class,
         &policy,
-        false
+        false,
+        None
     ));
-    assert!(should_fallback(&server_err, &server_class, &policy, false));
+    assert!(should_fallback(
+        &server_err,
+        &server_class,
+        &policy,
+        false,
+        None
+    ));
 }
 
 #[test]
@@ -377,9 +384,16 @@ fn fallback_override_on_bad_request_leaves_auth_untouched() {
         &bad_request_class,
         &policy,
         false,
+        None
     ));
     // ...but a 401 (different class, no overlay entry) still does.
-    assert!(should_fallback(&auth_err, &auth_class, &policy, false));
+    assert!(should_fallback(
+        &auth_err,
+        &auth_class,
+        &policy,
+        false,
+        None
+    ));
 }
 
 #[test]
@@ -408,6 +422,7 @@ fn unknown_provider_falls_back_regardless_of_class_or_override() {
         &FailureClass::BadRequest,
         &policy,
         false,
+        None
     ));
 }
 

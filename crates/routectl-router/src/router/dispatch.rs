@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, FrontSlot, Provider, RefusalReason,
-    ReplayScheme, Result,
+    ReplayScheme, Result, ToolPairingDefect,
     cache_control::{MAX_BREAKPOINTS, system_block_is_wire_eligible, validate_source},
     context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify},
     failure_class::{ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify},
@@ -53,6 +53,9 @@ use super::probe_payload_capture::ProbeFieldCapture;
 use super::repair_budget::RepairBudget;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
+};
+use super::transcript_defect::{
+    egress_pairing_refusal, is_transcript_rejection, record_transcript_defect, tool_pairing_refusal,
 };
 use super::wire_response::{declare_model_relabel, declare_provider_attribution};
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
@@ -95,9 +98,9 @@ fn target_drops_responses_reasoning(provider_kind: Option<&str>) -> bool {
 }
 
 /// Reject a request whose tool calls and tool results are not correctly
-/// paired, as a local validation error. Runs at the top of every dispatch
-/// walk, before chain selection, so a malformed transcript never reaches a
-/// provider, a retry, a fallback, or a health debit.
+/// paired, as a local validation error, before chain selection. Only the
+/// token count refuses this way; the complete and stream walks forward the
+/// transcript (see `record_transcript_defect`).
 pub(super) fn validate_request_transcript(req: &ChatRequest) -> Result<()> {
     routectl_core::validate_tool_pairing(&req.messages).map_err(|e| {
         tracing::debug!(
@@ -106,7 +109,7 @@ pub(super) fn validate_request_transcript(req: &ChatRequest) -> Result<()> {
             item_index = ?e.item_index(),
             "tool call/result pairing rejected before dispatch"
         );
-        Error::Validation(e.to_string(), RefusalReason::ToolPairing)
+        tool_pairing_refusal(&e)
     })
 }
 
@@ -279,11 +282,11 @@ impl Router {
     /// correct at every early return, including the all-failed Err path.
     async fn complete_inner(
         &self,
-        req: ChatRequest,
+        mut req: ChatRequest,
         opts: RouterOptions,
         meta: &mut DispatchMeta,
     ) -> Result<ChatResponse> {
-        validate_request_transcript(&req)?;
+        let pairing = record_transcript_defect(&mut req);
         let (chain, probe_admissions) =
             self.dispatch_chain_for_request(&req, DispatchSurface::Complete)?;
         // Re-probes the chain filter admitted, owned by a request-scoped set
@@ -395,6 +398,16 @@ impl Router {
             if let Some(err) = missing_forwarded_bearer_error(target, &req) {
                 self.count_refusal_error(ingress, target, &err);
                 return Err(err);
+            }
+            // A Gemini egress cannot translate a defective tool pairing; the
+            // next target may forward it.
+            if let Some(err) = egress_pairing_refusal(target, pairing.as_ref()) {
+                self.count_refusal_error(ingress, target, &err);
+                last_err = Some(err);
+                if opts.disable_fallbacks {
+                    break 'chain;
+                }
+                continue;
             }
 
             let mut attempt_req = req.clone();
@@ -877,7 +890,13 @@ impl Router {
                         {
                             e = body_free;
                         }
-                        let do_fallback = should_fallback(&e, &cf.class, &policy, is_probe);
+                        let do_fallback = should_fallback(
+                            &e,
+                            &cf.class,
+                            &policy,
+                            is_probe,
+                            req.routectl_internal.transcript_defect,
+                        );
                         // Probe fast-fail: a probe (max_tokens <=
                         // probe_max_tokens) that hit a rate-limit/overload
                         // (429/529) returns the status immediately via an
@@ -1156,11 +1175,11 @@ impl Router {
     /// before any stream body is consumed).
     async fn stream_inner(
         &self,
-        req: ChatRequest,
+        mut req: ChatRequest,
         opts: RouterOptions,
         meta: &mut DispatchMeta,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        validate_request_transcript(&req)?;
+        let pairing = record_transcript_defect(&mut req);
         let (chain, probe_admissions) =
             self.dispatch_chain_for_request(&req, DispatchSurface::Stream)?;
         // See `complete_inner`: re-probes the filter admitted, owned by a
@@ -1245,6 +1264,15 @@ impl Router {
             if let Some(err) = missing_forwarded_bearer_error(target, &req) {
                 self.count_refusal_error(ingress, target, &err);
                 return Err(err);
+            }
+            // Gemini pairing refusal: see `complete_inner`.
+            if let Some(err) = egress_pairing_refusal(target, pairing.as_ref()) {
+                self.count_refusal_error(ingress, target, &err);
+                last_err = Some(err);
+                if opts.disable_fallbacks {
+                    break 'chain;
+                }
+                continue;
             }
 
             let mut attempt_req = req.clone();
@@ -1658,7 +1686,13 @@ impl Router {
                         {
                             e = body_free;
                         }
-                        let do_fallback = should_fallback(&e, &cf.class, &policy, is_probe);
+                        let do_fallback = should_fallback(
+                            &e,
+                            &cf.class,
+                            &policy,
+                            is_probe,
+                            req.routectl_internal.transcript_defect,
+                        );
                         // Probe fast-fail: a probe that hit a rate-limit/
                         // overload (429/529) returns the status immediately
                         // -- no fallback, no breaker failure debit. The early
@@ -3370,6 +3404,7 @@ pub(super) fn should_fallback(
     class: &FailureClass,
     policy: &RetryPolicy,
     is_probe: bool,
+    transcript_defect: Option<ToolPairingDefect>,
 ) -> bool {
     // Availability-probe fast-fail: a probe (max_tokens <=
     // probe_max_tokens) that hits a rate-limit (429) or overload (529)
@@ -3384,6 +3419,11 @@ pub(super) fn should_fallback(
     // caller routes past: always fallbackable, independent of class.
     if let Error::UnknownProvider(_) = err {
         return true;
+    }
+    // The request's own transcript explains the rejection, and the next
+    // target is sent the same transcript.
+    if is_transcript_rejection(err, class, transcript_defect) {
+        return false;
     }
     policy.resolved_class(class).1
 }

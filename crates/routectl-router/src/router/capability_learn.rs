@@ -1311,8 +1311,23 @@ impl Router {
         target: &DispatchTarget,
         dedupe: &mut HashSet<LearnDedupeKey>,
     ) {
-        if !self.config.capability.enabled || remapped || target.use_forwarded_credential {
+        let Some(provider_kind) = self.field_rejection_provider_kind(err, remapped, target) else {
             return;
+        };
+        self.observe_field_parser_blindness(provider_kind, cf, err, target, dedupe);
+    }
+
+    /// The provider kind of a rejection the field parser could have been
+    /// asked to localize, or `None` when one of the learn path's eligibility
+    /// gates refuses it (see [`Self::observe_unlocalized_field_rejection`]).
+    pub(super) fn field_rejection_provider_kind(
+        &self,
+        err: &Error,
+        remapped: bool,
+        target: &DispatchTarget,
+    ) -> Option<&'static str> {
+        if !self.config.capability.enabled || remapped || target.use_forwarded_credential {
+            return None;
         }
         if !matches!(
             err,
@@ -1321,12 +1336,9 @@ impl Router {
                 ..
             }
         ) {
-            return;
+            return None;
         }
-        let Some(provider_kind) = target.provider_kind else {
-            return;
-        };
-        self.observe_field_parser_blindness(provider_kind, cf, err, target, dedupe);
+        target.provider_kind
     }
 
     /// Blindness observability for the envelope-field rejection parser. When a
@@ -1372,12 +1384,23 @@ impl Router {
         ) {
             return;
         }
-        if !dedupe.insert(LearnDedupeKey::FieldParserUnlocalized {
+        self.count_parser_unlocalized(target, dedupe);
+    }
+
+    /// Count one rejection the field parser did not localize, at most once
+    /// per request per target. Also fed by a rejection laid to a defective
+    /// transcript, which no field verdict may be drawn from whatever path it
+    /// names.
+    pub(super) fn count_parser_unlocalized(
+        &self,
+        target: &DispatchTarget,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+    ) {
+        if dedupe.insert(LearnDedupeKey::FieldParserUnlocalized {
             state_key: target.state_key.clone(),
         }) {
-            return;
+            self.metrics.incr_parser_unlocalized();
         }
-        self.metrics.incr_parser_unlocalized();
     }
 }
 

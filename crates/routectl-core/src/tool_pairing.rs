@@ -1,8 +1,9 @@
 //! Canonical tool call / tool result pairing validation.
 //!
 //! One read-only pass over a request's `messages` that decides whether every
-//! tool call and tool result is correctly paired. It never repairs: a
-//! malformed transcript is rejected, and nothing is synthesized or dropped.
+//! tool call and tool result is correctly paired. It never repairs: it
+//! reports the first defect, and nothing is synthesized or dropped. What a
+//! defect means for the request is the caller's decision.
 //!
 //! Pairing is keyed on the correlation id alone (tool names never decide a
 //! pair) and gathered from every canonical carrier:
