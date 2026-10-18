@@ -1826,5 +1826,9 @@ mod reason_detail_tests;
 mod ingress_refusal_count_tests;
 
 #[cfg(test)]
+#[path = "refusal_reason_matrix_tests.rs"]
+mod refusal_reason_matrix_tests;
+
+#[cfg(test)]
 #[path = "upstream_parse_cap_tests.rs"]
 mod upstream_parse_cap_tests;

@@ -70,6 +70,24 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
 ## Anthropic API surface
 
+- **A mispaired tool transcript is forwarded; only a Gemini target refuses
+  it.** A transcript whose tool calls and tool results do not pair up
+  (a result answering no call, a call left unanswered, a duplicated
+  result) reaches every non-Gemini target unchanged: routectl neither
+  synthesizes nor drops a turn. `record_transcript_defect` in
+  `crates/routectl-router/src/router/transcript_defect.rs` validates the
+  pairing once per request and keeps the defect as a request fact. A
+  Gemini target refuses locally (`tool-pairing`, `egress_pairing_refusal`)
+  because its `functionResponse` must name the call it answers, and the
+  chain moves on. An upstream 400 on a defective transcript
+  (`is_transcript_rejection`) is the client's defect, not the lane's: it is
+  not retried, does not walk the chain, is not field-repaired, and teaches
+  no learned capability; it counts once as unlocalized. The anthropic-api
+  egress still refuses a tool result with no id at all
+  (`tool-call-id-missing`, `normalize_replay_invariants` in
+  `crates/routectl-providers/src/anthropic_api/messages.rs`), the one
+  egress that refuses a missing tool id.
+
 - **A canonical field that duplicates a wire field creates a both-present
   case, and a translation arm written as "already handled elsewhere"
   deletes content when the elsewhere did not run.** `messages[]` accepts a
@@ -457,6 +475,23 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
 ## Bedrock surface
 
+- **Converse forwards what its wire types can hold.** A value the
+  Converse type has a slot for is forwarded even when the upstream may
+  object: an empty or absent image or document media type (an empty
+  `format`), an empty payload, an empty data-URI payload, an empty or
+  absent reasoning signature, and a tool result without a tool id
+  (`toolUseId: ""`). Only a value with no slot is refused locally
+  (`unrepresentable`): a source that is not an object, a source with no
+  type, an image url source (`ConverseImageSource` carries bytes only),
+  and a non-string media type or payload. Handled by
+  `translate_image_source`, `translate_document` and `build_tool_message`
+  in `crates/routectl-providers/src/bedrock/converse/messages.rs`; pinned
+  by `empty_image_media_type_forwards_as_empty_format_on_every_carrier`,
+  `empty_document_media_type_forwards_as_empty_format_on_every_carrier`,
+  `image_url_data_uri_with_empty_payload_forwards_as_empty_bytes`,
+  `thinking_block_signature_forwards_verbatim_when_absent_or_empty` and
+  `tool_message_without_id_forwards_an_empty_tool_use_id`.
+
 - **Bedrock rejects unsupported `anthropic_beta` values + unknown
   body fields.** Bedrock validates each entry of `anthropic_beta`
   independently and 400s the entire request on the first unsupported
@@ -601,6 +636,24 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   of this note.
 
 ## OpenAI Responses surface
+
+- **Responses and openai-compat forward what their wire types can hold.**
+  An empty or absent tool call id reaches the body as `call_id: ""`; an
+  empty or absent image url, or an empty base64 payload, forwards as an
+  empty `image_url` or data URI; a file part naming no carrier forwards as a
+  bare `input_file`; and the openai-compat lift carries `tool_use` and
+  `tool_result` ids and names verbatim. A url-only user file on Bedrock
+  Mantle forwards too. Only a value no slot can hold is refused locally
+  (`unrepresentable`): a non-object `image_url`, a non-string image slot or
+  file carrier (`read_image_url`, `string_slot`, `file_carrier` in
+  `crates/routectl-providers/src/openai_responses/messages.rs`), and a
+  `tool_use` block that is not an object (`tool_use_to_tool_call` in
+  `crates/routectl-providers/src/openai_compat/wire_lift/tool_use.rs`).
+  Pinned by `an_absent_or_empty_tool_output_id_reaches_the_body_as_an_empty_call_id`,
+  `user_image_url_part_with_empty_or_absent_url_forwards_an_empty_image_url`,
+  `user_file_with_no_carrier_forwards_as_a_bare_input_file`,
+  `user_file_url_only_forwards_on_every_lane_including_mantle` and
+  `tool_result_with_absent_or_non_string_tool_use_id_forwards_it_verbatim`.
 
 - **OpenAI Responses chatgpt-oauth endpoint is stream-only.** Sending
   `stream:false` returns HTTP 400 `{"detail":"Stream must be set to true"}`.

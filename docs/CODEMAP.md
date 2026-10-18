@@ -132,7 +132,14 @@ license.
   an absent reason means unclassified
 - `src/refusal_reason.rs` -- `#[non_exhaustive] RefusalReason`: the closed
   register of local-refusal reasons, with `as_str` / `from_token` tokens,
-  `ALL`, and the per-reason `failure_class`
+  `ALL`, and the per-reason `failure_class`; each variant's doc names the
+  sites that raise it, by symbol
+- `src/refusal_reason_census_tests.rs` -- the census weld: walks every
+  shipped crate's module tree from its roots (following `mod` declarations
+  and item-position `include!` a non-test build keeps, pruning `cfg(test)`
+  items by evaluating the predicate with `test` false) and fails when a
+  `RefusalReason` variant has no production reference outside the defining
+  file; planted fixture trees are its positive controls
 - `src/content_part.rs` -- typed `ContentPart` enum
   (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking
   (plus the `Other` catchall)) for `MessageContent::Parts`
@@ -3303,13 +3310,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `LearnedLaneProjection::from_config` (the factory's static resolution
   walk, for doctor and `probe --capabilities`, which hold no router);
   `Router::projection_targets` also feeds `status_targets`
-- `src/router/local_refusal.rs` -- the one counting function behind
-  `rc_request_refused_local_total{lane}`: `Router::count_local_refusal`
-  (attempt ingress dialect x target `EgressKind`, called from
-  `emit_class_observability` for `NormalizeRequest | LocalRefusal` and from
-  both strict-strip refusal returns; no ingress body or unknown egress counts
-  nothing), `Router::record_ingress_refusal` (`<ingress>->local`, for the
-  ingress parse funnel), and `ingress_dialect_of`
+- `src/router/local_refusal.rs` -- the counting functions behind
+  `rc_request_refused_local_total{lane,reason}`: `Router::count_local_refusal`
+  / `count_refusal_error` / `count_egress_refusal` (attempt ingress dialect x
+  target `EgressKind`, keyed by the error's `RefusalReason`; called from
+  `emit_class_observability` for any error carrying a refusal reason, the
+  missing-bearer and Gemini pairing guards, both strip-interceptor returns
+  and the count_tokens terminal exit; no ingress dialect or unknown egress
+  counts nothing), `Router::record_ingress_refusal` (`<ingress>->local`, for
+  the ingress parse funnel), and `ingress_dialect_of` (captured ingress body,
+  else the request's provenance)
 - `src/router/status.rs` -- route-target status facade for the /status
   surface: `RouteTargetStatus` (re-exported from `router` for the crate-root
   path `routectl_router::router::RouteTargetStatus`), `Router::status_targets`
@@ -4208,7 +4218,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`admit`: first `first_n` per (lane, client version), at most 8 versions
   per lane, then 1 in `sample_one_in`), the closed-label counters
   `rc_wire_loss_total{lane,path_class}` / `rc_wire_check_total{lane,outcome}`
-  / `rc_request_refused_local_total{lane}` with last-seen seconds, a
+  / `rc_request_refused_local_total{lane,reason}` with last-seen seconds, a
   content-free findings ring of 128 entries per kind (loss, rejection;
   `WireFinding`, `FieldRepairOutcome`), and the path-only WARN deduped per
   (lane, path) in a separate set per kind; `Router::wire_check_snapshot`
@@ -6371,7 +6381,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   at least 1s) so a client SDK's own 429/503 backoff keeps the upstream hint.
   An `Error::LocalRefusal` renders as a 400 `invalid_request_error` whose
   envelope and stream terminal match an upstream 400 carrying the same
-  refusal (pinned in `local_refusal_envelope_tests.rs`)
+  refusal (pinned in `local_refusal_envelope_tests.rs`). A parse failure
+  counts on `<ingress>->local` with its reason (`render_parse_failure`)
+- `src/handlers/refusal_reason_matrix_tests.rs` -- one request per reachable
+  `RefusalReason` through the real ingress, a built router and its egress
+  against a mock upstream: each row asserts a 400, zero upstream calls and
+  exactly one `(lane, reason)` count; it names the two reasons no request
+  reaches (`translation-accounting`, `schema-depth`) and pins that a
+  too-deep schema is refused as `unparseable` first
 - `src/handlers/ingress_wire.rs` -- `capture_ingress_wire`: right after parse,
   attaches the posted body (refcount), its dialect (from `provenance`) and the
   client version (stable Claude CLI version, else the first safe
@@ -6819,7 +6836,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   by path (lane, leg, path, path_class, ts) from the findings ring, and check
   rows per (lane, outcome) last seen inside the window, unrepaired-rejection rows
   (lane, leg, path, field_repair_outcome, provenance, ts) from the findings ring, and
-  local-refusal rows per lane. Closed labels, sanitized paths and counts only
+  local-refusal rows per (lane, reason). Closed labels, sanitized paths and
+  counts only
 - `src/handlers/status/usage_health.rs` -- `UsageHealthView`, a counters-only
   facade over the usage writer's shared `Arc<UsageCounters>`, with two reads:
   `writer_degraded()` (latching, derived from the monotonic write-error count --

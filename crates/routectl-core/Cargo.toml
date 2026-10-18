@@ -30,6 +30,13 @@ uuid.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 routectl-testkit.workspace = true
+# Real Rust parser for the refusal-reason census, which must follow the module
+# tree and prune `cfg(test)` items the way the compiler does. DEV-only: the
+# shipped library links nothing of it, and every package here is already in
+# the lockfile, so this adds no new package.
+syn = { version = "2", features = ["full", "parsing", "visit"] }
+proc-macro2 = "1"
+tempfile = "3"
 
 [lints]
 workspace = true

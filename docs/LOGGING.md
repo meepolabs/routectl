@@ -471,6 +471,21 @@ example `anthropic->bedrock-invoke`), `leg` is `request` / `response`,
 `client_changed` / `routectl_added` / `unlocalized` / `n_a`, and
 `field_repair_outcome` is `unrepaired` on this line.
 
+Three counters ride the router metrics snapshot (DEBUG, target
+`routectl_router::router::metrics`): `rc_wire_loss_total{lane,path_class}`,
+`rc_wire_check_total{lane,outcome}` and
+`rc_request_refused_local_total{lane,reason}`. The last counts requests
+routectl refused on its own, without an upstream answer, once each: `lane`
+is the ingress feeding the refused target's egress, or `<ingress>->local`
+when the ingress refused the request while parsing it, and `reason` is one
+token of the closed refusal vocabulary (`cache-breakpoint-cap`,
+`cache-ttl-order`, `tool-call-id-missing`, `field-type`,
+`previous-response-id`, `beta-header-cap`, `schema-depth`, `schema-size`,
+`translation-accounting`, `tool-pairing`, `unrepresentable`,
+`strict-translation`, `forwarded-bearer-missing`, `cloak-relocation`,
+`gemini-seed`, `unparseable`). The same rows, with a last-seen time, are
+listed under `wire_check.local_refusals` in `/status/health`.
+
 `path` is a sanitized RFC 6901 pointer, never a body value. An object
 key renders verbatim only when it is a short ASCII identifier outside a
 client-keyed object; any other key, and every key below `metadata`, a
@@ -1954,7 +1969,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_cli::handlers::ingress_handle` | `upstream error sanitized in HTTP response` | The upstream refused the request; its verdict was relayed to the client and recorded on the usage row. If one provider or status repeats, check that provider's credential, quota, or reachability. |
 | WARN | `routectl_cli::handlers::ingress_handle` | `upstream stream error -- emitting terminal error event` | An upstream stream failed after the response head (overload and the like); the client got a terminal error event. If one provider repeats, check its status and capacity. |
 | ERROR | `routectl_cli::handlers::ingress_handle` | `{auth,config,internal,I/O,JSON} error suppressed in HTTP response` | A routectl-side failure was hidden from the client behind a generic error. Auth: re-login or fix the provider credential. Config: fix config.toml per the error. I/O: check the disk or filesystem. Internal or JSON: file a bug with the `request_id`. |
-| ERROR / WARN | `routectl_cli::handlers::ingress_handle` | `request normalization failed; suppressed`, `response normalization failed; suppressed`, `unknown provider suppressed in HTTP response` (ERROR); `capability not implemented; suppressed`, `local refusal before egress sanitized` (WARN) | Normalization failures are translation bugs or an upstream shape routectl does not know: file a bug with `detail`. Unknown provider: routing names an unconfigured provider, fix the config. Capability or local refusal: the request has no legal shape on that egress, route the alias or client to a capable provider. |
+| ERROR / WARN | `routectl_cli::handlers::ingress_handle` | `request normalization failed; suppressed`, `response normalization failed; suppressed`, `unknown provider suppressed in HTTP response` (ERROR); `capability not implemented; suppressed`, `local refusal before egress sanitized` (WARN) | Normalization failures are translation bugs or an upstream shape routectl does not know: file a bug with `detail`. Unknown provider: routing names an unconfigured provider, fix the config. Capability or local refusal: the request has no legal shape on that egress, route the alias or client to a capable provider; `rc_request_refused_local_total{lane,reason}` and the `wire_check.local_refusals` rows in `/status/health` name the refusing lane and reason. |
 | ERROR | `routectl_cli::handlers::ingress_handle` | `ingress chunk render failed` | An ingress renderer bug ended a stream with a terminal error: file a bug. |
 | WARN | `routectl_cli::handlers::control` | `capability purge refused ...`, `capability purge superseded ...`, `capability purge could not persist its clear ...` | The purge did not happen. A non-loopback caller or a foreign authority means the control route is exposed or a browser page reached it: check the listen address and find the caller. Busy, stale registry, shutting down, or superseded: retry. Could not persist: check usage-writer health (`outcome`). |
 | ERROR / WARN | `routectl_cli::handlers::usage_capture` | `capability events carried no registry generation` (ERROR); `cache_auto_outcome` (WARN, thrash) | ERROR: an internal invariant broke and capability learning for that request is lost; file a bug. WARN: an auto-emitted cache breakpoint is written on every request and never read; disable auto-emit for that provider (see the `cache_auto_outcome` section). |

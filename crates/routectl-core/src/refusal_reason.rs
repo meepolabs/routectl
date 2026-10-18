@@ -17,66 +17,104 @@ use crate::failure_class::FailureClass;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefusalReason {
     /// The request carries more cache breakpoints than prompt caching allows,
-    /// and dropping any would change what the caller asked to cache. Scope:
-    /// ingress and egress. Class: `BadRequest`.
+    /// and dropping any would change what the caller asked to cache. Raised
+    /// by `cache_control::validate`, reached through `validate_source` on the
+    /// Anthropic ingress and the anthropic-api and Bedrock Converse egresses.
+    /// Scope: ingress and egress. Class: `BadRequest`.
     CacheBreakpointCap,
     /// A longer-TTL cache breakpoint follows a shorter-TTL one, an order
     /// prompt caching rejects, and reordering would change the cached
-    /// prefixes. Scope: ingress and egress. Class: `BadRequest`.
+    /// prefixes. Raised by `cache_control::validate`, on the same paths as
+    /// [`RefusalReason::CacheBreakpointCap`]. Scope: ingress and egress.
+    /// Class: `BadRequest`.
     CacheTtlOrder,
-    /// A tool call or tool result has no id, so the target dialect has no
-    /// way to pair the result with its call. Scope: egress. Class:
-    /// `BadRequest`.
+    /// A tool result has no id, so the target has no way to pair it with its
+    /// call. Raised only by the anthropic-api egress
+    /// (`normalize_replay_invariants`), where Anthropic requires the id of
+    /// the `tool_use` a result answers. The other egresses leave the
+    /// objection to the upstream: Converse forwards an empty or absent id as
+    /// `toolUseId: ""`, Responses as `call_id: ""`, and the openai-compat
+    /// lift carries the id verbatim. Scope: egress. Class: `BadRequest`.
     ToolCallIdMissing,
-    /// A field routectl must read has the wrong JSON type (for example a
-    /// non-string system prompt or thinking display), so its meaning cannot
-    /// be recovered. Scope: ingress. Class: `Unknown`.
+    /// A field routectl must read has the wrong JSON type, so its meaning
+    /// cannot be recovered: a non-string `systemPrompt` on the OpenAI ingress
+    /// (`normalize_system_prompt_alias`) or a non-string `thinking.display`
+    /// on the Anthropic ingress (`translate_thinking_display`). Scope:
+    /// ingress. Class: `Unknown`.
     FieldType,
     /// The request references a stored previous response, which routectl
-    /// holds no state for and cannot reconstruct. Scope: ingress. Class:
+    /// holds no state for and cannot reconstruct. Raised by the Responses
+    /// ingress (`reject_previous_response_id`). Scope: ingress. Class:
     /// `Unknown`.
     PreviousResponseId,
-    /// The request names more beta features than routectl accepts on one
-    /// request. Scope: ingress. Class: `Unknown`.
+    /// The request names more distinct beta features than routectl accepts
+    /// on one request. Raised by `normalize_client_betas` on the Anthropic
+    /// and OpenAI ingresses. Scope: ingress. Class: `Unknown`.
     BetaHeaderCap,
     /// An output schema nests deeper than routectl's schema repair walk is
-    /// bounded to, so the schema cannot be repaired for the target. Scope:
-    /// egress. Class: `BadRequest`.
+    /// bounded to, so the schema cannot be repaired for the target. Raised
+    /// by `depth_limit_error` in the anthropic-api output schema repair,
+    /// shared by the anthropic-api and Bedrock egresses. Scope: egress.
+    /// Class: `BadRequest`.
     SchemaDepth,
     /// An output schema holds more nodes than routectl's schema repair walk
     /// is bounded to, so the schema cannot be repaired for the target.
-    /// Scope: egress. Class: `BadRequest`.
+    /// Raised by `node_limit_error` on the same walk as
+    /// [`RefusalReason::SchemaDepth`]. Scope: egress. Class: `BadRequest`.
     SchemaSize,
     /// The translated request no longer accounts for every tool turn of the
     /// source request, so forwarding it would silently drop part of the
-    /// transcript. Scope: egress. Class: `BadRequest`.
+    /// transcript. A self-check of the anthropic-api egress translation
+    /// (`MessageLedger::verify`); a well-formed translation never trips it.
+    /// Scope: egress. Class: `BadRequest`.
     TranslationAccounting,
     /// Tool calls and tool results do not pair up, and the target must look
-    /// up each result's call to emit a valid body. Scope: egress. Class:
-    /// `BadRequest`.
+    /// up each result's call to emit a valid body. Raised only for a Gemini
+    /// target (`tool_pairing_refusal` in the router); every other target
+    /// forwards the transcript unchanged. Scope: egress. Class: `BadRequest`.
     ToolPairing,
     /// The target's request type has no slot for a shape the request
-    /// carries, so translation would have to drop it. Scope: egress. Class:
-    /// `BadRequest`.
+    /// carries, so translation would have to drop it. Raised by the Converse
+    /// egress for an image or document source that is not an object, has no
+    /// type, is an image url, or carries a non-string media type or payload
+    /// (`translate_image_source`, `translate_image_url`,
+    /// `translate_document`, `image_source_to_tool_result`,
+    /// `document_to_tool_result`); by the Responses egress for a non-object
+    /// `image_url`, a non-string image slot, or a file part whose only
+    /// carriers are non-strings (`read_image_url`, `string_slot`,
+    /// `file_carrier`); by the openai-compat lift for a `tool_use` block
+    /// that is not an object (`tool_use_to_tool_call`); and by the router's
+    /// post-strip check when stripping a capability removes a tool that
+    /// `tool_choice` still forces, or empties the tools while `tool_choice`
+    /// mandates one (`validate_post_strip`).
+    /// Scope: egress. Class: `BadRequest`.
     Unrepresentable,
     /// The operator enabled the strict loss check and translation to the
-    /// target would lose part of the request. Scope: egress. Class:
+    /// target would lose part of the request: the capability strip
+    /// (`StripInterceptor`), the openai-compat canonical-field check
+    /// (`check_dropped_anthropic_fields`) and the openai-compat lift
+    /// (`reject_or_drop_unrepresentable`). Scope: egress. Class:
     /// `BadRequest`.
     StrictTranslation,
     /// The target forwards the caller's bearer credential and the request
-    /// carries none, so there is nothing to authenticate with. Scope:
-    /// egress. Class: `BadRequest`.
+    /// carries none, so there is nothing to authenticate with. Raised by the
+    /// router (`missing_forwarded_bearer_error`) on complete, stream and
+    /// token count. Scope: egress. Class: `BadRequest`.
     ForwardedBearerMissing,
     /// The request's identity cloak cannot relocate caller content to where
-    /// the target requires it without altering that content. Scope: egress.
-    /// Class: `BadRequest`.
+    /// the target requires it without altering that content. Raised by
+    /// `RelocationRefusal::into_error` on the anthropic-api cloak. Scope:
+    /// egress. Class: `BadRequest`.
     CloakRelocation,
     /// A caller schema exceeds the ceiling routectl cleans it within for a
     /// Gemini target, so it cannot be reduced to a form Gemini accepts.
-    /// Scope: egress. Class: `BadRequest`.
+    /// Raised by `clean_caller_schema` on the Gemini egress. Scope: egress.
+    /// Class: `BadRequest`.
     GeminiSeed,
     /// The body is not JSON, not a JSON object, or does not deserialize into
-    /// a request, so there is nothing to route. Scope: ingress. Class:
+    /// a request, so there is nothing to route. Raised by each ingress's
+    /// request parse, by `Error::Json`, and by the `prompt-size` command for
+    /// a request fixture that is not a chat request. Scope: ingress. Class:
     /// `Unknown`.
     Unparseable,
 }
@@ -289,3 +327,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "refusal_reason_census_tests.rs"]
+mod census_tests;

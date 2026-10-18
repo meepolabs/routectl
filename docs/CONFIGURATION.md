@@ -2577,7 +2577,8 @@ window_secs = 86400
   `rc_wire_check_total{lane,outcome}` (outcome `clean`, `loss`, `budget`
   or `incomplete` -- a check that ran out of budget or had nothing
   complete to compare is never counted clean) and
-  `rc_request_refused_local_total{lane}`. A loss, or an upstream
+  `rc_request_refused_local_total{lane,reason}` (`reason` is the local
+  refusal's token, such as `tool-pairing` or `unparseable`). A loss, or an upstream
   rejection field repair could not fix, logs one WARN per (lane, path,
   kind) at target `routectl_router::wire_check`. Every label and path is
   content-free: paths are sanitized JSON pointers, never body values.
