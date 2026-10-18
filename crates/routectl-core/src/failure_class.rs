@@ -17,6 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ParsedErrorBody;
+use crate::RefusalReason;
 use crate::error::Error;
 
 /// A coarse, stable failure category derived from a canonical [`Error`].
@@ -546,8 +547,10 @@ pub fn classify_with_attempt(
         ),
         Error::Streaming(_) => by_variant(FailureClass::NetworkError),
         Error::Auth(_) | Error::Credential { .. } => by_variant(FailureClass::Auth),
-        Error::LocalRefusal { .. } => by_variant(FailureClass::BadRequest),
-        _ => by_variant(FailureClass::Unknown),
+        _ => by_variant(
+            err.refusal_reason()
+                .map_or(FailureClass::Unknown, RefusalReason::failure_class),
+        ),
     }
 }
 

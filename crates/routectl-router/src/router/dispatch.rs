@@ -3400,9 +3400,9 @@ pub(super) fn should_retry_same_provider(
     if is_probe && probe_fast_fail_status(err).is_some() {
         return false;
     }
-    // A local refusal is decided by the request's shape alone, so the same
-    // seat refuses it again whatever an operator's per-class retry cap says.
-    if matches!(err, Error::LocalRefusal { .. }) {
+    // A refusal is decided by the request's shape alone, so the same seat
+    // refuses it again whatever an operator's per-class retry cap says.
+    if err.refusal_reason().is_some() {
         return false;
     }
     let cap = retry_cap_for(class, policy);
@@ -3532,3 +3532,7 @@ mod opening_usage_fallback_tests;
 #[cfg(test)]
 #[path = "translation_report_learn_tests.rs"]
 mod translation_report_learn_tests;
+
+#[cfg(test)]
+#[path = "refusal_fallback_tests.rs"]
+mod refusal_fallback_tests;

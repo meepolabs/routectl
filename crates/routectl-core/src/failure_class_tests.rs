@@ -380,15 +380,10 @@ fn unknown_provider_is_unknown_matched_by_variant() {
 #[test]
 fn non_upstream_variants_are_unknown_matched_by_variant() {
     // Arrange: one representative of every non-upstream variant that
-    // has no confident classification. `Error::Streaming` (NetworkError)
-    // and `Error::Auth` (Auth) are classified by variant and covered
-    // by their own tests.
+    // has no confident classification. `Error::Streaming` (NetworkError),
+    // `Error::Auth` (Auth) and egress refusals (BadRequest) are classified
+    // by variant and covered by their own tests.
     let errs = [
-        Error::NormalizeRequest(
-            "p".into(),
-            "m".into(),
-            crate::RefusalReason::Unrepresentable,
-        ),
         Error::NormalizeResponse("p".into(), "m".into()),
         Error::UnknownAlias("a".into()),
         Error::Config("bad config".into()),
@@ -409,6 +404,131 @@ fn non_upstream_variants_are_unknown_matched_by_variant() {
             },
             "variant {err:?}"
         );
+    }
+}
+
+#[test]
+fn a_refusal_classifies_by_its_reason_scope() {
+    use crate::RefusalReason as R;
+    let local = |reason| Error::LocalRefusal {
+        provider: "p".into(),
+        detail: "d".into(),
+        reason,
+    };
+    let normalize = |reason| Error::NormalizeRequest("p".into(), "m".into(), reason);
+    let validation = |reason| Error::Validation("v".into(), reason);
+    let rows: [(&str, Error, FailureClass); 20] = [
+        (
+            "cache-breakpoint-cap",
+            validation(R::CacheBreakpointCap),
+            FailureClass::BadRequest,
+        ),
+        (
+            "cache-ttl-order",
+            validation(R::CacheTtlOrder),
+            FailureClass::BadRequest,
+        ),
+        (
+            "tool-call-id-missing",
+            normalize(R::ToolCallIdMissing),
+            FailureClass::BadRequest,
+        ),
+        (
+            "field-type",
+            validation(R::FieldType),
+            FailureClass::Unknown,
+        ),
+        (
+            "previous-response-id",
+            validation(R::PreviousResponseId),
+            FailureClass::Unknown,
+        ),
+        (
+            "beta-header-cap",
+            validation(R::BetaHeaderCap),
+            FailureClass::Unknown,
+        ),
+        (
+            "schema-depth",
+            normalize(R::SchemaDepth),
+            FailureClass::BadRequest,
+        ),
+        (
+            "schema-size",
+            normalize(R::SchemaSize),
+            FailureClass::BadRequest,
+        ),
+        (
+            "translation-accounting",
+            normalize(R::TranslationAccounting),
+            FailureClass::BadRequest,
+        ),
+        (
+            "tool-pairing",
+            local(R::ToolPairing),
+            FailureClass::BadRequest,
+        ),
+        (
+            "unrepresentable",
+            normalize(R::Unrepresentable),
+            FailureClass::BadRequest,
+        ),
+        (
+            "strict-translation",
+            local(R::StrictTranslation),
+            FailureClass::BadRequest,
+        ),
+        (
+            "forwarded-bearer-missing",
+            local(R::ForwardedBearerMissing),
+            FailureClass::BadRequest,
+        ),
+        (
+            "cloak-relocation",
+            local(R::CloakRelocation),
+            FailureClass::BadRequest,
+        ),
+        (
+            "gemini-seed",
+            normalize(R::GeminiSeed),
+            FailureClass::BadRequest,
+        ),
+        (
+            "unparseable",
+            Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+            FailureClass::Unknown,
+        ),
+        (
+            "upstream 400 control",
+            upstream(400, None, None),
+            FailureClass::BadRequest,
+        ),
+        (
+            "upstream 500 control",
+            upstream(500, None, None),
+            FailureClass::ServerError,
+        ),
+        (
+            "internal control",
+            Error::Internal("boom".into()),
+            FailureClass::Unknown,
+        ),
+        (
+            "normalize response control",
+            Error::NormalizeResponse("p".into(), "m".into()),
+            FailureClass::Unknown,
+        ),
+    ];
+    let covered: Vec<R> = rows
+        .iter()
+        .filter_map(|(_, e, _)| e.refusal_reason())
+        .collect();
+    assert_eq!(covered, R::ALL, "one row per reason, in declaration order");
+
+    for (case, err, want) in &rows {
+        let classified = classify(err, None);
+
+        assert_eq!(classified.class, *want, "{case}");
     }
 }
 

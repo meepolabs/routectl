@@ -1325,6 +1325,24 @@ fn observe_error_stamps_kebab_class_when_dispatch_reached() {
 }
 
 #[test]
+fn observe_error_stamps_bad_request_for_an_egress_refusal() {
+    // Arrange: dispatch reached; the provider refused the request for a
+    // shape its target cannot represent.
+    let (mut cap, _w, _dir) = capture();
+    cap.record.provider_kind = Some("openai-compat".to_string());
+
+    // Act
+    cap.observe_error(&Error::normalize_request(
+        "p",
+        "the target has no slot for this content",
+        routectl_core::RefusalReason::Unrepresentable,
+    ));
+
+    // Assert
+    assert_eq!(cap.record.resolved_class, Some("bad-request".to_string()));
+}
+
+#[test]
 fn observe_error_leaves_resolved_class_null_pre_dispatch() {
     // Arrange: a pre-dispatch failure -- provider_kind was never set because
     // no dispatch attempt was reached (validation / local gate).
