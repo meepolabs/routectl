@@ -34,7 +34,7 @@ fn probe_429_does_not_fall_back() {
     let class = class_of(&err);
     let policy = RetryPolicy::default();
     // Act
-    let fall_back = should_fallback(&err, &class, &policy, true, None);
+    let fall_back = should_fallback(&err, &class, &policy, true, false);
     // Assert
     assert!(
         !fall_back,
@@ -50,7 +50,7 @@ fn probe_429_does_not_retry_same_provider() {
     let class = class_of(&err);
     let policy = RetryPolicy::default();
     // Act
-    let retry = should_retry_same_provider(&err, &class, &policy, 0, true);
+    let retry = should_retry_same_provider(&err, &class, &policy, 0, true, false);
     // Assert
     assert!(
         !retry,
@@ -65,7 +65,7 @@ fn probe_529_does_not_fall_back() {
     let err = upstream(529);
     let class = class_of(&err);
     let policy = RetryPolicy::default();
-    assert!(!should_fallback(&err, &class, &policy, true, None));
+    assert!(!should_fallback(&err, &class, &policy, true, false));
 }
 
 #[test]
@@ -74,7 +74,9 @@ fn probe_529_does_not_retry_same_provider() {
     let err = upstream(529);
     let class = class_of(&err);
     let policy = RetryPolicy::default();
-    assert!(!should_retry_same_provider(&err, &class, &policy, 0, true));
+    assert!(!should_retry_same_provider(
+        &err, &class, &policy, 0, true, false
+    ));
 }
 
 #[test]
@@ -84,7 +86,7 @@ fn probe_400_still_falls_back() {
     let err = upstream(400);
     let class = class_of(&err);
     let policy = RetryPolicy::default();
-    assert!(should_fallback(&err, &class, &policy, true, None));
+    assert!(should_fallback(&err, &class, &policy, true, false));
 }
 
 #[test]
@@ -94,7 +96,7 @@ fn probe_503_still_falls_back() {
     let err = upstream(503);
     let class = class_of(&err);
     let policy = RetryPolicy::default();
-    assert!(should_fallback(&err, &class, &policy, true, None));
+    assert!(should_fallback(&err, &class, &policy, true, false));
 }
 
 #[test]
@@ -105,11 +107,11 @@ fn real_request_429_still_retries_and_falls_back() {
     let class = class_of(&err);
     let policy = RetryPolicy::default();
     assert!(
-        should_fallback(&err, &class, &policy, false, None),
+        should_fallback(&err, &class, &policy, false, false),
         "real-request 429 still falls back",
     );
     assert!(
-        should_retry_same_provider(&err, &class, &policy, 0, false),
+        should_retry_same_provider(&err, &class, &policy, 0, false, false),
         "real-request 429 still retries (attempts_made=0 < cap)",
     );
 }
@@ -152,9 +154,9 @@ fn probe_disabled_when_threshold_zero() {
     let is_probe = is_probe_request(&req, &policy); // false
     let err = upstream(429);
     let class = class_of(&err);
-    assert!(should_fallback(&err, &class, &policy, is_probe, None));
+    assert!(should_fallback(&err, &class, &policy, is_probe, false));
     assert!(should_retry_same_provider(
-        &err, &class, &policy, 0, is_probe
+        &err, &class, &policy, 0, is_probe, false
     ));
 }
 
@@ -182,7 +184,7 @@ fn custom_probe_max_tokens_threshold_is_inclusive() {
     let err = upstream(429);
     let class = class_of(&err);
     assert!(
-        !should_fallback(&err, &class, &policy, is_probe, None),
+        !should_fallback(&err, &class, &policy, is_probe, false),
         "an at-threshold probe must not fall back on 429 at a custom threshold",
     );
 }

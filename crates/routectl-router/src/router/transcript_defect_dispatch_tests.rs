@@ -18,8 +18,9 @@ use serde_json::{Value, json};
 
 use super::super::super::field_repair::TEST_UNSUPPORTED_PATH;
 use super::{
-    ALIAS, ANTHROPIC, INVOKE, NEVER_SAMPLED, ScriptedProvider, anthropic_rejection,
-    carries_test_row, carry_test_row, request,
+    ALIAS, ANTHROPIC, INVOKE, NEVER_SAMPLED, OPENAI_COMPAT, ScriptedProvider, anthropic_message,
+    anthropic_rejection, carries_test_row, carry_test_row, carry_web_search, openai_rejection,
+    request,
 };
 #[cfg(feature = "gemini")]
 use super::{GEMINI, router};
@@ -71,9 +72,21 @@ fn chain_router(
     second_block: &str,
     second: Arc<dyn Provider>,
 ) -> Router {
+    chain_router_with_retry("", first_block, first, second_block, second)
+}
+
+/// [`chain_router`] with `retry_tables` (whole `[retry.*]` tables) added to
+/// the retry policy.
+fn chain_router_with_retry(
+    retry_tables: &str,
+    first_block: &str,
+    first: Arc<dyn Provider>,
+    second_block: &str,
+    second: Arc<dyn Provider>,
+) -> Router {
     let toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [wire_check]\n{NEVER_SAMPLED}\n[providers.p0]\n{first_block}\
+         {retry_tables}[wire_check]\n{NEVER_SAMPLED}\n[providers.p0]\n{first_block}\
          [providers.p1]\n{second_block}\
          [aliases]\n{ALIAS} = [\"m0\", \"m1\"]\n"
     );
@@ -449,6 +462,31 @@ fn refuse_test_row(req: &ChatRequest) -> Result<()> {
     Ok(())
 }
 
+/// An anthropic-api entry whose operator remap routes a 400 as a server
+/// error.
+const ANTHROPIC_400_AS_SERVER_ERROR: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
+     [providers.p0.class_overrides]\n400 = \"server-error\"\n";
+
+/// An openai-compat 400 refusing `web_search` as an unsupported parameter,
+/// which the classifier lifts out of `BadRequest`.
+fn refuse_web_search(_: &ChatRequest) -> Result<()> {
+    Err(openai_rejection("web_search"))
+}
+
+/// A 400 naming no field, which no learner can attribute.
+fn refuse_plainly(_: &ChatRequest) -> Result<()> {
+    Err(anthropic_message("invalid request"))
+}
+
+fn carry_nothing(_: &mut ChatRequest) {}
+
+/// The test row, on a request whose internal state still holds a pairing
+/// defect from before this dispatch.
+fn carry_test_row_and_stale_defect(req: &mut ChatRequest) {
+    carry_test_row(req);
+    req.routectl_internal.transcript_defect = Some(ToolPairingDefect::OrphanResult);
+}
+
 /// The captured Bedrock rejection of a forced `tool_choice`, which the
 /// generic learner mints from on first sight.
 fn bedrock_forced_tool_choice_rejection(_: &ChatRequest) -> Result<()> {
@@ -507,6 +545,81 @@ fn rejection_rows() -> Vec<RejectionRow> {
             drift_signals: 0,
         },
     }];
+    rows.push(RejectionRow {
+        name: "a 400 the classifier lifts to an unsupported feature",
+        first_block: OPENAI_COMPAT,
+        answer: refuse_web_search,
+        carry: carry_web_search,
+        defective: Observed {
+            served: false,
+            first_calls: 1,
+            second_calls: 0,
+            field_repairs: 0,
+            learned: vec![],
+            unlocalized: Some(1),
+            drift_signals: 0,
+        },
+        paired: Observed {
+            served: true,
+            first_calls: 1,
+            second_calls: 1,
+            field_repairs: 0,
+            learned: vec!["web_search".into()],
+            unlocalized: None,
+            drift_signals: 0,
+        },
+    });
+    rows.push(RejectionRow {
+        name: "a 400 the operator remaps to a server error",
+        first_block: ANTHROPIC_400_AS_SERVER_ERROR,
+        answer: refuse_plainly,
+        carry: carry_nothing,
+        defective: Observed {
+            served: false,
+            first_calls: 1,
+            second_calls: 0,
+            field_repairs: 0,
+            learned: vec![],
+            unlocalized: Some(1),
+            drift_signals: 0,
+        },
+        paired: Observed {
+            served: true,
+            first_calls: 1,
+            second_calls: 1,
+            field_repairs: 0,
+            learned: vec![],
+            unlocalized: None,
+            drift_signals: 0,
+        },
+    });
+    rows.push(RejectionRow {
+        name: "a stale defect left on the request's internal state",
+        first_block: ANTHROPIC,
+        answer: refuse_test_row,
+        carry: carry_test_row_and_stale_defect,
+        defective: Observed {
+            served: false,
+            first_calls: 1,
+            second_calls: 0,
+            field_repairs: 0,
+            learned: vec![],
+            unlocalized: Some(1),
+            drift_signals: 0,
+        },
+        paired: Observed {
+            served: true,
+            first_calls: 2,
+            second_calls: 0,
+            field_repairs: 1,
+            learned: vec![
+                crate::field_capability::field_capability_key(TEST_UNSUPPORTED_PATH)
+                    .expect("the test row has a field key"),
+            ],
+            unlocalized: None,
+            drift_signals: 0,
+        },
+    });
     if cfg!(feature = "bedrock") {
         rows.push(RejectionRow {
             name: "a capability the generic learner mints",
@@ -582,5 +695,40 @@ async fn a_transient_failure_on_a_defective_transcript_routes_as_for_any_request
             assert_eq!(first.calls(), 1, "{surface:?} {status}: first calls");
             assert_eq!(second.calls(), 1, "{surface:?} {status}: second calls");
         }
+    }
+}
+
+#[tokio::test]
+async fn a_raised_bad_request_retry_cap_does_not_resend_a_defective_transcript() {
+    // `retry = 2` is the smallest cap that resends: the first failure has
+    // already spent one attempt against it.
+    const RAISED_RETRY: &str = "[retry.classes.bad-request]\nretry = 2\n";
+    for (transcript, messages, first_calls, second_calls) in
+        [("defective", defective(), 1, 0), ("paired", paired(), 2, 1)]
+    {
+        let first = ScriptedProvider::new(None, refuse_plainly);
+        let second = ScriptedProvider::new(None, answers);
+        let router = chain_router_with_retry(
+            RAISED_RETRY,
+            ANTHROPIC,
+            Arc::clone(&first) as Arc<dyn Provider>,
+            ANTHROPIC,
+            Arc::clone(&second) as Arc<dyn Provider>,
+        );
+
+        let out = walk(
+            &router,
+            Surface::Complete,
+            request_with(messages),
+            RouterOptions::new(),
+        )
+        .await;
+
+        assert_eq!(
+            (first.calls(), second.calls()),
+            (first_calls, second_calls),
+            "{transcript}: (first, second) calls, result {:?}",
+            out.result
+        );
     }
 }

@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, FrontSlot, Provider, RefusalReason,
-    ReplayScheme, Result, ToolPairingDefect,
+    ReplayScheme, Result,
     cache_control::{MAX_BREAKPOINTS, system_block_is_wire_eligible, validate_source},
     context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify},
     failure_class::{ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify},
@@ -756,6 +756,10 @@ impl Router {
                             &e,
                             meta,
                         );
+                        // Read off the status before any lift or remap: see
+                        // `is_transcript_rejection`.
+                        let transcript_rejection =
+                            is_transcript_rejection(&e, req.routectl_internal.transcript_defect);
                         let native_cf = learning.classify(&e, target.provider_kind);
                         let original_class = native_cf.class.clone();
                         let remap_candidate_status = upstream_status_for_remap(&e);
@@ -870,6 +874,7 @@ impl Router {
                             target,
                             client_req: &req,
                             site: rejection_site,
+                            transcript_rejection,
                         };
                         if let FailureDecision::Retry { last_err_body_free } = learning
                             .on_rejection(rejection, &mut attempt_req, meta, &mut repair_budget)
@@ -890,13 +895,8 @@ impl Router {
                         {
                             e = body_free;
                         }
-                        let do_fallback = should_fallback(
-                            &e,
-                            &cf.class,
-                            &policy,
-                            is_probe,
-                            req.routectl_internal.transcript_defect,
-                        );
+                        let do_fallback =
+                            should_fallback(&e, &cf.class, &policy, is_probe, transcript_rejection);
                         // Probe fast-fail: a probe (max_tokens <=
                         // probe_max_tokens) that hit a rate-limit/overload
                         // (429/529) returns the status immediately via an
@@ -1039,6 +1039,7 @@ impl Router {
                                 &policy,
                                 attempts_made,
                                 is_probe,
+                                transcript_rejection,
                             )
                             && !breaker_parked;
                         let facts = upstream_facts(&e);
@@ -1582,6 +1583,10 @@ impl Router {
                             &e,
                             meta,
                         );
+                        // Read off the status before any lift or remap: see
+                        // `is_transcript_rejection`.
+                        let transcript_rejection =
+                            is_transcript_rejection(&e, req.routectl_internal.transcript_defect);
                         let native_cf = learning.classify(&e, target.provider_kind);
                         let original_class = native_cf.class.clone();
                         let remap_candidate_status = upstream_status_for_remap(&e);
@@ -1668,6 +1673,7 @@ impl Router {
                             target,
                             client_req: &req,
                             site: rejection_site,
+                            transcript_rejection,
                         };
                         if let FailureDecision::Retry { last_err_body_free } = learning
                             .on_rejection(rejection, &mut attempt_req, meta, &mut repair_budget)
@@ -1686,13 +1692,8 @@ impl Router {
                         {
                             e = body_free;
                         }
-                        let do_fallback = should_fallback(
-                            &e,
-                            &cf.class,
-                            &policy,
-                            is_probe,
-                            req.routectl_internal.transcript_defect,
-                        );
+                        let do_fallback =
+                            should_fallback(&e, &cf.class, &policy, is_probe, transcript_rejection);
                         // Probe fast-fail: a probe that hit a rate-limit/
                         // overload (429/529) returns the status immediately
                         // -- no fallback, no breaker failure debit. The early
@@ -3404,7 +3405,7 @@ pub(super) fn should_fallback(
     class: &FailureClass,
     policy: &RetryPolicy,
     is_probe: bool,
-    transcript_defect: Option<ToolPairingDefect>,
+    transcript_rejection: bool,
 ) -> bool {
     // Availability-probe fast-fail: a probe (max_tokens <=
     // probe_max_tokens) that hits a rate-limit (429) or overload (529)
@@ -3422,7 +3423,7 @@ pub(super) fn should_fallback(
     }
     // The request's own transcript explains the rejection, and the next
     // target is sent the same transcript.
-    if is_transcript_rejection(err, class, transcript_defect) {
+    if transcript_rejection {
         return false;
     }
     policy.resolved_class(class).1
@@ -3434,6 +3435,7 @@ pub(super) fn should_retry_same_provider(
     policy: &RetryPolicy,
     attempts_made: u32,
     is_probe: bool,
+    transcript_rejection: bool,
 ) -> bool {
     // Probe fast-fail mirrors `should_fallback`: a probe must not burn
     // retry attempts against a rate-limited/overloaded provider (429 /
@@ -3443,7 +3445,9 @@ pub(super) fn should_retry_same_provider(
     }
     // A refusal is decided by the request's shape alone, so the same seat
     // refuses it again whatever an operator's per-class retry cap says.
-    if err.refusal_reason().is_some() {
+    // So is a rejection laid to the request's defective transcript, which
+    // the seat is sent again unchanged.
+    if transcript_rejection || err.refusal_reason().is_some() {
         return false;
     }
     let cap = retry_cap_for(class, policy);

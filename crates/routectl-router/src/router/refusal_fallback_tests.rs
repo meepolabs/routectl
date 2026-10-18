@@ -222,7 +222,8 @@ fn a_refusal_ignores_a_raised_bad_request_retry_cap_and_an_upstream_400_does_not
     ];
 
     for (case, err, want) in &rows {
-        let retried = should_retry_same_provider(err, &FailureClass::BadRequest, &policy, 0, false);
+        let retried =
+            should_retry_same_provider(err, &FailureClass::BadRequest, &policy, 0, false, false);
 
         assert_eq!(retried, *want, "{case}");
     }

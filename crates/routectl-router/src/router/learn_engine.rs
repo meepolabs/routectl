@@ -49,7 +49,6 @@ use super::rejection_parser::{NamedRejection, RawPath, RejectionKind};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::{ReplayCarryPlan, strip_replay_artifacts_recalibrating};
 use super::runtime_gate::LearnedProbeGuard;
-use super::transcript_defect::is_transcript_rejection;
 use super::{DispatchMeta, DispatchTarget, ReplayDegradation, Router};
 
 /// A generic capability attribution: the canonical capability key, the
@@ -261,6 +260,10 @@ pub(super) struct Rejection<'r> {
     pub(super) client_req: &'r ChatRequest,
     /// What the attempt's settlement read off the wire.
     pub(super) site: Option<RejectionSite>,
+    /// Whether the rejection is laid to the request's defective transcript,
+    /// decided once per attempt by
+    /// [`is_transcript_rejection`](super::transcript_defect::is_transcript_rejection).
+    pub(super) transcript_rejection: bool,
 }
 
 /// The learner state one chain target holds across its attempts.
@@ -400,10 +403,9 @@ impl<'a> AttemptLearning<'a> {
     /// repairs keep the raw rejection.
     ///
     /// A rejection laid to the request's defective transcript (see
-    /// [`is_transcript_rejection`]) proceeds without consulting any proposer,
-    /// after the declared-edit undo, and is held for
-    /// [`Self::observe_generic`] so the generic learner skips it too. It is
-    /// read on the native class, as the proposers would read it.
+    /// [`Rejection::transcript_rejection`]) proceeds without consulting any
+    /// proposer, after the declared-edit undo, and is held for
+    /// [`Self::observe_generic`] so the generic learner skips it too.
     pub(super) fn on_rejection(
         &mut self,
         rejection: Rejection<'_>,
@@ -412,11 +414,7 @@ impl<'a> AttemptLearning<'a> {
         budget: &mut RepairBudget,
     ) -> FailureDecision {
         self.pending_capability = None;
-        self.transcript_rejection = is_transcript_rejection(
-            rejection.err,
-            rejection.native_class,
-            rejection.client_req.routectl_internal.transcript_defect,
-        );
+        self.transcript_rejection = rejection.transcript_rejection;
         if let Some(decision) = self.answer_declared(&rejection, attempt_req, meta, budget) {
             return decision;
         }
@@ -638,7 +636,7 @@ impl<'a> AttemptLearning<'a> {
     ) {
         if self.transcript_rejection {
             self.router
-                .observe_transcript_rejection(err, remapped, target, dedupe);
+                .observe_transcript_rejection(err, target, dedupe);
             return;
         }
         self.router.observe_for_learning(
