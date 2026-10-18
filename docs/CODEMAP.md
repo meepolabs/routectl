@@ -67,7 +67,8 @@ license.
   validation and one-segment `*` matching (index or masked key only, never
   a coarsened path); closed `EditSite` (request- and
   response-side sites), `PathClass`, `RejectionProvenance` label sets
-- `src/wire_check/lane.rs` -- `IngressDialect`, `EgressKind`, `Lane::of`
+- `src/wire_check/lane.rs` -- `IngressDialect` (with `of_provenance`),
+  `EgressKind`, `Lane::of`
   (FIDELITY iff same wire dialect), `LaneClass`, `Leg`; static labels
 - `src/wire_check/diff.rs` -- `diff`: total structural compare of two
   `serde_json::Value` bodies into content-free `Finding`s (`WirePath` +
@@ -132,8 +133,8 @@ license.
   an absent reason means unclassified
 - `src/refusal_reason.rs` -- `#[non_exhaustive] RefusalReason`: the closed
   register of local-refusal reasons, with `as_str` / `from_token` tokens,
-  `ALL`, and the per-reason `failure_class`; each variant's doc names the
-  sites that raise it, by symbol
+  `ALL` (a fixed-size array of every variant), and the per-reason
+  `failure_class`; each variant's doc names the sites that raise it, by symbol
 - `src/refusal_reason_census_tests.rs` -- the census weld: walks every
   shipped crate's module tree from its roots (following `mod` declarations
   and item-position `include!` a non-test build keeps, pruning `cfg(test)`
@@ -152,9 +153,9 @@ license.
 - `src/tool_pairing.rs` -- `validate_tool_pairing`: pure, read-only check
   that every tool call has exactly one result (keyed on correlation id across
   `tool_calls`, typed / passthrough tool parts, and `tool_call_id`;
-  chronological, segment-local); rejects with `ToolPairingError` (a
-  `ToolPairingDefect` class plus bounded message / item indexes, no ids or
-  content)
+  chronological, segment-local); reports the first defect as
+  `ToolPairingError` (a `ToolPairingDefect` class plus bounded message / item
+  indexes, no ids or content) and leaves the consequence to the caller
 - `src/cache_control.rs` -- Anthropic `CacheControl` type, STRUCTURE-ONLY
   breakpoint validator (4-cap, 1h-before-5m TTL ordering; unrecognized `type`
   / `ttl` values forward verbatim -- marker vocabulary is upstream's to
@@ -373,9 +374,11 @@ license.
 - `src/error.rs` -- `Error` enum
   (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Credential/Config/NotImplemented/...)
   and `Result` alias; `Error::Credential{detail, reason, parked_until_ms}` is a local
-  credential-unusable error (terminal OAuth refresh, or every reachable seat parked); `Error::LocalRefusal{provider, detail}` is a provider's
-  pre-egress refusal: classified `BadRequest` by variant, carrying no status so
-  no per-provider remap reaches it, and never retried, debited, or learned; `Error::Upstream` carries a structural `retry_after:
+  credential-unusable error (terminal OAuth refresh, or every reachable seat parked); `Error::LocalRefusal{provider, detail, reason}`,
+  `Error::Validation` and `Error::NormalizeRequest` each carry a
+  `RefusalReason`, read through `Error::refusal_reason()` (which also maps
+  `Error::Json`, built explicitly at an ingress parse, to `Unparseable`);
+  `Error::Upstream` carries a structural `retry_after:
   Option<Duration>` (populated only on a rate-limit/overload reset hint) plus
   `upstream_type`/`upstream_code`/`upstream_request_id` diagnostic fields
   (all `Option<Box<str>>` -- kept small so a `const _` assert holds
@@ -403,8 +406,9 @@ license.
   unrecognized kind) keyed by the config `kind` string; reads only the
   structured `Error::Upstream` fields, zero config / router / provider
   coupling; never returns `Timeout`. Non-`Upstream` variants classify by
-  variant alone (`Streaming` -> `NetworkError`, `Auth` / `Credential` -> `Auth`, every other
-  variant -> `Unknown`). `FailureClass::class_token(&self) -> Option<&'static
+  variant alone (`Streaming` -> `NetworkError`, `Auth` / `Credential` -> `Auth`), a
+  reason-bearing error by `RefusalReason::failure_class`, anything else ->
+  `Unknown`. `FailureClass::class_token(&self) -> Option<&'static
   str>` is THE single kebab-token vocabulary source
   (`rate-limited`/`auth`/`bad-request`/`content-policy`/`context-window`/`server-error`/`timeout`/`network-error`/`overloaded`/`feature-unsupported`;
   `Unknown` -> `None` = "unclassified") shared by the ledger `resolved_class`
@@ -1091,16 +1095,14 @@ license.
   emission); also translates `File` content blocks -> `InputFile` items with
   `file_data`, `file_id` or `file_url` (one carrier helper serves the user
   turn and the tool output; `build_tool_output_body` also forwards a native
-  `input_file` block, except on the Bedrock Mantle lane); runs every emitted
-  `call_id` (both
+  `input_file` block, except on the Bedrock Mantle lane; on Mantle a user
+  file's `file_url` is left off the wire beside `file_data` / `file_id`, and a
+  url-only user file is refused); runs every
+  emitted `call_id` (both
   `function_call` and `function_call_output` sites) through `tool_id` so one
-  logical id keeps one wire id and a tool result still correlates; an empty
-  correlating id fails the request on BOTH output shapes (a tool-role
-  message's `tool_call_id` and a `tool_result` part's `tool_use_id`); content
-  parts split into two classes -- a MALFORMED part (names no bytes: absent or
-  empty image url, empty base64 data, a file part with no carrier) fails
-  the request, while an UNREPRESENTABLE but well-formed part (no Responses slot,
-  forward-compat, unknown image-source kind) drops with a WARN. A
+  logical id keeps one wire id and a tool result still correlates; content
+  parts are forwarded, refused (`unrepresentable`, no wire slot can hold the
+  value) or dropped with a WARN, per the module doc. A
   `ResponsesDropTally` flushed once per request from `build_input` (on the Err
   arm too) counts each deliberate drop class it made
   (`image_source_kind_unrepresentable`, `reasoning_detail_kind_unsupported`,
@@ -2787,7 +2789,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   once-per-client-request `prefix_rewrite::Router::observe_prefix_epoch` call on
   both paths. Forwarded-credential handling:
   `missing_forwarded_bearer_error` refuses a `use_forwarded_credential` target
-  with no client bearer BEFORE egress, `resolve_reported_model` keeps the
+  with no client bearer BEFORE egress and ends the request (the one terminal
+  pre-dispatch refusal: a strict strip refusal, a rolled-back strip hazard and
+  the Gemini pairing refusal leave the target unsent and walk on),
+  `resolve_reported_model` keeps the
   client's requested model verbatim, and `forwarded_terminal_status` +
   `log_forwarded_auth_terminal` surface a 401/403/429 on a forwarded
   credential verbatim (no refresh, no fallback). The class/remap helpers are
@@ -3256,7 +3261,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (error, effective and native class, target, client request) carrying the
   `RejectionSite` `settle_failed_attempt` returned (`provenance`, `in_egress: Option<bool>`,
   `matched_edit`, the unmasked `locator`, the `sent` slot, the `pending`
-  rejection index). A site whose `matched_edit` is not `None` short-circuits
+  rejection index), plus `transcript_rejection`; a rejection laid to a
+  defective transcript returns `Proceed` before any proposer and
+  `observe_generic` hands it to `Router::observe_transcript_rejection`. A site
+  whose `matched_edit` is not `None` short-circuits
   to `learn_revert::answer_declared_edit` (undo or `Proceed`; no proposer
   reads it); otherwise it builds a read-only
   `RejectionInput` and runs `arbitrate`: the ONE precedence, the static
@@ -3532,9 +3540,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/field_canary.rs`), plus `preflight_actions` (requests a pre-flight
   rewrite modified, counted per adopted row at the one adoption site in
   `field_preflight::adopt_row`) and `parser_unlocalized` (the
-  am-I-flying-blind count, bumped once per request per target by
-  `capability_learn::observe_field_parser_blindness` through the shared
-  `Router::rejection_localizes_no_field` predicate). Both alarm halves are
+  am-I-flying-blind count, bumped once per request per target through
+  `capability_learn::count_parser_unlocalized`, by
+  `observe_field_parser_blindness` (via the shared
+  `Router::rejection_localizes_no_field` predicate) and by
+  `transcript_defect::Router::observe_transcript_rejection`). Both alarm halves are
   reported together deliberately: the outstanding count is exposure that MIGHT
   later be disproved and the lifetime total is exposure that WAS, so either
   number alone reads as the other. Both are
@@ -4136,6 +4146,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   consults no learner, and count_tokens skips its field repair), and
   `Router::observe_transcript_rejection` (counts it once per target as
   parser-unlocalized)
+- `src/router/transcript_defect_dispatch_tests.rs` -- child module of
+  `learn_engine_location_tests.rs`: a mispaired transcript on complete,
+  stream and count_tokens (forwarded, Gemini refuses and the walk moves on, an
+  upstream 400 / 422 neither walks, repairs nor learns)
 - `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
   chain filter pass (called from `chain::dispatch_chain_for_request`
   immediately after `filter_chain_by_features`, so the ordering makes "last
@@ -5042,8 +5056,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   under a snapshot -> strict-pre-check -> strip-in-sorted-key-order ->
   narrow-post-strip-check -> rollback discipline over a per-attempt clone: it
   de-dups/sorts `StripContext.keys` so output is order-independent and
-  byte-stable across identical inputs, rejects (400) without mutation under
-  `strict`, normalizes an emptied `tools` list back to `None` after a
+  byte-stable across identical inputs, returns `Outcome::Reject` without
+  mutation under `strict` (a `RefusalReason::StrictTranslation` validation
+  error), normalizes an emptied `tools` list back to `None` after a
   tool-surface strip (never serializing `tools: []`, which Anthropic / Bedrock
   Invoke reject with a 400), and on a strip-created hazard restores the
   touched surfaces and returns `Outcome::Reject` for the caller to route away.
@@ -5056,7 +5071,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   OpenAI `required`/`function`; `tools_are_empty` treats
   `None`-after-normalization or an empty list as empty). `Outcome` =
   `Unchanged`/`Stripped`/`Reject`; the dispatch hook lives in
-  `router.rs::apply_strip_interceptor`
+  `router/feature_filter.rs::apply_strip_interceptor`
 
 ### Tests
 
@@ -6336,8 +6351,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/messages.rs` -- `POST /v1/messages` thin wrapper around
   `ingress_handle` with `AnthropicIngress`
 - `src/handlers/messages_count_tokens.rs` -- `POST /v1/messages/count_tokens`
-  proxy through the FIRST provider in the dispatch chain only (no fallback
-  walk; tokenizer-specific count must match the chosen model)
+  proxy that walks the chain to the first seat able to count in the
+  caller's Anthropic tokenizer (`seat_can_count_tokens`)
 - `src/handlers/responses.rs` -- `POST /v1/responses` thin wrapper around
   `ingress_handle` with `ResponsesIngress`
 - `src/handlers/ingress_handle.rs` -- generic ingress driver: parse + route +
