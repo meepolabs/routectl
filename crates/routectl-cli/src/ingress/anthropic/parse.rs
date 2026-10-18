@@ -1,14 +1,13 @@
 use axum::http::HeaderMap;
 use serde_json::{Map, Value};
 
-use routectl_core::cache_control;
 use routectl_core::{
     ChatRequest, Error, ReasoningConfig, RefusalReason, Result, sanitize_detail_for_log,
 };
 
 // Referenced only by the inline test module (`parse_tests.rs`) via
 // `use super::*`; test-gated so they do not flag as unused in the
-// non-test build now that the breakpoint walk moved to routectl-core.
+// non-test build.
 #[cfg(test)]
 use routectl_core::{ContentPart, MessageContent};
 
@@ -155,10 +154,6 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     if !extras.is_empty() {
         req.provider_extras = Some(Value::Object(extras));
     }
-
-    // Run cache_control validation up front so a malformed request
-    // returns 400 before it touches the egress.
-    validate_request_cache_control(&req)?;
 
     declare_legacy_format_fold(&mut req, fold);
 
@@ -547,16 +542,6 @@ fn translate_thinking_display(t: &Value) -> Result<(Option<bool>, Option<String>
         "anthropic ingress: thinking.display translated to reasoning.exclude"
     );
     Ok((exclude, Some(requested.to_string())))
-}
-
-fn validate_request_cache_control(req: &ChatRequest) -> Result<()> {
-    // The canonical breakpoint walk lives in routectl-core
-    // (`CacheBreakpointSource for ChatRequest`); reuse it so the ingress,
-    // the Anthropic egress, and the Bedrock egress all validate through
-    // one traversal. Owned-control collection (needed for
-    // `ToolDef::Other`'s on-demand parse) is handled inside
-    // `validate_source`.
-    cache_control::validate_source(req)
 }
 
 #[cfg(test)]

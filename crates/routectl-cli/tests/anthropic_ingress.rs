@@ -697,7 +697,7 @@ async fn a_session_across_an_empty_system_turn_survives_without_a_local_refusal(
 }
 
 // ---------------------------------------------------------------------------
-// 4-breakpoint cap and TTL ordering rejected at ingress
+// 4-breakpoint cap refused by the anthropic-api target before dialing
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

@@ -1,7 +1,9 @@
 //! One request per reachable refusal reason, through the real ingress, router
 //! and egress against a mock upstream: the client gets a 400, the upstream is
 //! never called, and `rc_request_refused_local_total` holds exactly one count,
-//! under the refusal's lane and reason.
+//! under the refusal's lane and reason. The cache breakpoint rules are also
+//! driven through a fallback chain, where the refused target's lane counts
+//! once and the next target serves the request.
 //!
 //! Each row builds its own router, so the full counter set after the request
 //! is the delta that request caused.
@@ -25,7 +27,7 @@ use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, ResolvedModel, RetryPolicy, Router,
 };
 use serde_json::{Value, json};
-use wiremock::matchers::method;
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::handlers::ingress_handle::ingress_handle;
@@ -181,7 +183,7 @@ fn rows() -> Vec<Row> {
                 "model": ALIAS, "max_tokens": 16,
                 "messages": [{"role": "user", "content": vec![cached_text("5m"); 5]}]
             })),
-            lane: "anthropic->local",
+            lane: "anthropic->anthropic-api",
         },
         Row {
             reason: "cache-ttl-order",
@@ -192,7 +194,7 @@ fn rows() -> Vec<Row> {
                 "messages": [{"role": "user",
                               "content": [cached_text("5m"), cached_text("1h")]}]
             })),
-            lane: "anthropic->local",
+            lane: "anthropic->anthropic-api",
         },
         Row {
             reason: "tool-call-id-missing",
@@ -440,4 +442,179 @@ async fn a_schema_deeper_than_the_repair_bound_is_refused_as_unparseable_first()
         ),
         "{text}"
     );
+}
+
+/// A chat completion the openai-compat mock answers with.
+fn chat_completion() -> Value {
+    json!({
+        "id": "c1", "object": "chat.completion", "created": 1_700_000_000_i64,
+        "model": UPSTREAM,
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+    })
+}
+
+/// An Anthropic body whose one user turn carries a breakpoint per `ttls`.
+fn cached_body(ttls: &[&str]) -> Value {
+    let content: Vec<Value> = ttls.iter().map(|ttl| cached_text(ttl)).collect();
+    json!({"model": ALIAS, "max_tokens": 16,
+           "messages": [{"role": "user", "content": content}]})
+}
+
+/// Every `cache_control` key anywhere in `value`.
+fn cache_marker_count(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, v)| usize::from(key == "cache_control") + cache_marker_count(v))
+            .sum(),
+        Value::Array(items) => items.iter().map(cache_marker_count).sum(),
+        _ => 0,
+    }
+}
+
+/// A router whose alias walks `chain` in order, one provider and model per
+/// entry, all aimed at `base`.
+async fn chain_router(chain: &[fn(&str) -> ProviderEntry], base: &str) -> Router {
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let mut providers = BTreeMap::new();
+    let mut models = BTreeMap::new();
+    let mut nicknames = Vec::new();
+    for (i, entry) in chain.iter().enumerate() {
+        let provider = format!("p{i}");
+        let nickname = format!("m{i}");
+        providers.insert(provider.clone(), entry(base));
+        models.insert(nickname.clone(), ModelEntry::new(&provider, UPSTREAM));
+        nicknames.push(nickname);
+    }
+    let config = Config {
+        providers,
+        models,
+        aliases: BTreeMap::from([(ALIAS.to_string(), AliasValue::Chain(nicknames))]),
+        retry,
+        ..Default::default()
+    };
+    let secrets: Arc<dyn routectl_auth::SecretStore> = Arc::new(routectl_auth::MemoryStore::new());
+    crate::server::build_router_from_config(Arc::new(config), secrets)
+        .await
+        .expect("build router")
+}
+
+/// What an Anthropic request sent through a chain left behind: the client
+/// status, the bodies each upstream path received, and every local-refusal
+/// key.
+struct ChainOutcome {
+    status: StatusCode,
+    client_body: String,
+    anthropic_bodies: Vec<Value>,
+    compat_bodies: Vec<Value>,
+    refusals: Vec<(&'static str, &'static str, u64)>,
+}
+
+async fn send_through_chain(chain: &[fn(&str) -> ProviderEntry], body: &Value) -> ChainOutcome {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_completion()))
+        .mount(&server)
+        .await;
+    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(
+        chain_router(chain, &server.uri()).await,
+    ));
+    let state = AppState::for_test(Arc::clone(&swap));
+    let resp = Box::pin(ingress_handle(
+        state,
+        headers(),
+        None,
+        Ok(Bytes::from(json_body(body))),
+        AnthropicIngress,
+    ))
+    .await;
+    let status = resp.status();
+    let client_body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    let received = server.received_requests().await.unwrap_or_default();
+    let bodies_at = |wanted: &str| -> Vec<Value> {
+        received
+            .iter()
+            .filter(|r| r.url.path() == wanted)
+            .map(|r| serde_json::from_slice(&r.body).expect("upstream body is JSON"))
+            .collect()
+    };
+    let refusals = swap
+        .load()
+        .wire_check_snapshot()
+        .local_refusals
+        .iter()
+        .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
+        .collect();
+    ChainOutcome {
+        status,
+        anthropic_bodies: bodies_at("/v1/messages"),
+        compat_bodies: bodies_at("/chat/completions"),
+        client_body,
+        refusals,
+    }
+}
+
+/// A request over the breakpoint cap is served by an openai-compat target:
+/// that wire carries no breakpoints, so the cap is not its rule.
+#[tokio::test]
+async fn an_anthropic_request_over_the_breakpoint_cap_is_served_by_an_openai_compat_target() {
+    let body = cached_body(&["5m"; 5]);
+    assert_eq!(cache_marker_count(&body), 5, "fixture shape");
+
+    let out = send_through_chain(&[openai_compat], &body).await;
+
+    assert_eq!(out.status, StatusCode::OK, "{}", out.client_body);
+    assert_eq!(out.compat_bodies.len(), 1, "{}", out.client_body);
+    assert_eq!(
+        cache_marker_count(&out.compat_bodies[0]),
+        0,
+        "no marker reaches the compat wire: {}",
+        out.compat_bodies[0]
+    );
+    assert_eq!(out.refusals, []);
+}
+
+/// An anthropic-api target refuses a request that breaks a breakpoint rule
+/// before dialing, counts it once on its own lane, and the chain's
+/// openai-compat target serves it.
+#[tokio::test]
+async fn a_breakpoint_rule_refused_by_anthropic_api_falls_back_and_counts_once_on_its_lane() {
+    let rows: [(&str, &[&str]); 2] = [
+        ("cache-breakpoint-cap", &["5m"; 5]),
+        ("cache-ttl-order", &["5m", "1h"]),
+    ];
+    for (reason, ttls) in rows {
+        let body = cached_body(ttls);
+
+        let out = send_through_chain(&[anthropic_api, openai_compat], &body).await;
+
+        assert_eq!(out.status, StatusCode::OK, "{reason}: {}", out.client_body);
+        assert_eq!(
+            out.anthropic_bodies.len(),
+            0,
+            "{reason}: refused before dialing"
+        );
+        assert_eq!(
+            out.compat_bodies.len(),
+            1,
+            "{reason}: the fallback serves it"
+        );
+        assert_eq!(
+            out.refusals,
+            [("anthropic->anthropic-api", reason, 1)],
+            "{reason}"
+        );
+    }
 }

@@ -881,10 +881,9 @@ pub(crate) fn normalize_deferring_format_key_warn(
         anthropic_beta: req.anthropic_beta.clone(),
     };
 
-    // Belt-and-braces: validate in release too. The Anthropic ingress
-    // already runs this at parse time; running it again here catches
-    // direct callers (library users without an ingress) and protects
-    // upstream from cap/ordering violations regardless of build mode.
+    // No ingress checks breakpoints, since a lane without a breakpoint
+    // surface must not be refused for them; this is the cap / ordering check
+    // for the anthropic-api lane, and its refusal walks the fallback chain.
     validate_breakpoints(&ar)?;
 
     let mut body = serde_json::to_value(&ar)

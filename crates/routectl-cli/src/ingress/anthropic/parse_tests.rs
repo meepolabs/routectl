@@ -286,29 +286,6 @@ fn parse_request_anthropic_beta_round_trips() {
 }
 
 #[test]
-fn parse_request_rejects_too_many_breakpoints() {
-    let body = json!({
-        "model": "claude-opus-4-7",
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "b", "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "c", "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "d", "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "e", "cache_control": {"type": "ephemeral"}}
-            ]
-        }],
-        "max_tokens": 1024
-    });
-    let err = AnthropicIngress
-        .parse_request_value(&HeaderMap::new(), body)
-        .unwrap_err();
-    assert!(matches!(err, Error::Validation(..)));
-    assert!(err.to_string().contains("exceeds maximum"));
-}
-
-#[test]
 fn parse_request_tags_a_body_it_cannot_read_as_unparseable() {
     let rows = [
         ("not an object", json!(["a", "b"])),
@@ -331,24 +308,38 @@ fn parse_request_tags_a_body_it_cannot_read_as_unparseable() {
     }
 }
 
+/// The breakpoint cap and TTL order are target rules, checked by the egresses
+/// that put breakpoints on the wire; the ingress keeps every marker as sent.
 #[test]
-fn parse_request_rejects_5m_then_1h_ordering() {
-    let body = json!({
-        "model": "claude-opus-4-7",
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "five", "cache_control": {"type": "ephemeral", "ttl": "5m"}},
-                {"type": "text", "text": "one", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
-            ]
-        }],
-        "max_tokens": 1024
-    });
-    let err = AnthropicIngress
-        .parse_request_value(&HeaderMap::new(), body)
-        .unwrap_err();
-    assert!(matches!(err, Error::Validation(..)));
-    assert!(err.to_string().contains("after a 5m"));
+fn parse_request_keeps_breakpoints_a_target_would_refuse() {
+    let rows: [(&str, &[&str]); 2] = [
+        ("five breakpoints", &["5m", "5m", "5m", "5m", "5m"]),
+        ("1h after 5m", &["5m", "1h"]),
+    ];
+    for (name, ttls) in rows {
+        let content: Vec<_> = ttls
+            .iter()
+            .map(|ttl| {
+                json!({"type": "text", "text": "x",
+                       "cache_control": {"type": "ephemeral", "ttl": ttl}})
+            })
+            .collect();
+        let body = json!({
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 1024
+        });
+
+        let req = AnthropicIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap_or_else(|err| panic!("{name}: {err:?}"));
+
+        let kept: Vec<String> = routectl_core::CacheBreakpointSource::cache_breakpoints(&req)
+            .iter()
+            .map(|bp| bp.control.effective_ttl().to_string())
+            .collect();
+        assert_eq!(kept, *ttls, "{name}");
+    }
 }
 
 #[test]

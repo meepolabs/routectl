@@ -18,15 +18,16 @@ use crate::failure_class::FailureClass;
 pub enum RefusalReason {
     /// The request carries more cache breakpoints than prompt caching allows,
     /// and dropping any would change what the caller asked to cache. Raised
-    /// by `cache_control::validate`, reached through `validate_source` on the
-    /// Anthropic ingress and the anthropic-api and Bedrock Converse egresses.
-    /// Scope: ingress and egress. Class: `BadRequest`.
+    /// by `cache_control::validate` on the egresses that put breakpoints on
+    /// the wire: anthropic-api, Bedrock Converse and Bedrock Invoke. No
+    /// ingress raises it, so a request bound for a lane without breakpoints
+    /// is never refused for them. Scope: egress. Class: `BadRequest`.
     CacheBreakpointCap,
     /// A longer-TTL cache breakpoint follows a shorter-TTL one, an order
     /// prompt caching rejects, and reordering would change the cached
     /// prefixes. Raised by `cache_control::validate`, on the same paths as
-    /// [`RefusalReason::CacheBreakpointCap`]. Scope: ingress and egress.
-    /// Class: `BadRequest`.
+    /// [`RefusalReason::CacheBreakpointCap`]. Scope: egress. Class:
+    /// `BadRequest`.
     CacheTtlOrder,
     /// A tool result has no id, so the target has no way to pair it with its
     /// call. Raised only by the anthropic-api egress
