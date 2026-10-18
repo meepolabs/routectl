@@ -6,7 +6,7 @@
 //! count_tokens is the one inference endpoint that does NOT funnel through
 //! `ingress_handle`; it renders its own body-rejection / content-type /
 //! parse-error responses via the shared `render_body_rejection` /
-//! `render_unsupported_media_type` / `render_malformed_body` / `map_error`
+//! `render_unsupported_media_type` / `render_parse_failure` / `map_error`
 //! helpers. The rejection test drives the REAL handler mounted behind the
 //! same `DefaultBodyLimit` layer `server::serve::build_axum_router`
 //! installs, so the `Bytes` extractor and the body-size layer are exercised
@@ -30,11 +30,27 @@ use crate::server::AppState;
 const REJECT_BODY_LIMIT: usize = 1024;
 
 fn test_state() -> Arc<AppState> {
+    test_state_with_router().0
+}
+
+type RouterSwap = Arc<arc_swap::ArcSwap<routectl_router::Router>>;
+
+fn test_state_with_router() -> (Arc<AppState>, RouterSwap) {
     let router = Arc::new(routectl_router::Router::new(Arc::new(
         routectl_router::Config::default(),
     )));
     let swap = Arc::new(arc_swap::ArcSwap::from(router));
-    AppState::for_test(swap)
+    (AppState::for_test(Arc::clone(&swap)), swap)
+}
+
+/// `(lane, reason, count)` for every local-refusal key `swap`'s router holds.
+fn local_refusals(swap: &RouterSwap) -> Vec<(&'static str, &'static str, u64)> {
+    swap.load()
+        .wire_check_snapshot()
+        .local_refusals
+        .iter()
+        .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
+        .collect()
 }
 
 fn app(state: Arc<AppState>) -> axum::Router {
@@ -112,6 +128,31 @@ async fn count_tokens_rejection_contract_pins_status_and_envelope() {
     let state = test_state();
     let (status, body) = drive(state, post_req(Some("application/json"), oversized_body())).await;
     assert_anthropic_reject(status, &body, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn a_count_tokens_body_the_ingress_refuses_counts_under_the_anthropic_local_lane() {
+    let cases: [(&str, &str, &str); 2] = [
+        ("malformed_json", "{ not valid json", "unparseable"),
+        (
+            "non_string_thinking_display",
+            r#"{"model":"m","messages":[],"thinking":{"type":"enabled","budget_tokens":2048,"display":1}}"#,
+            "field-type",
+        ),
+    ];
+
+    for (name, body, reason) in cases {
+        let (state, swap) = test_state_with_router();
+
+        let (status, _) = drive(state, post_req(Some("application/json"), body.to_owned())).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+        assert_eq!(
+            local_refusals(&swap),
+            [("anthropic->local", reason, 1)],
+            "{name}"
+        );
+    }
 }
 
 #[test]

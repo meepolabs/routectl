@@ -49,6 +49,7 @@ use super::dispatch::{
 };
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
+use super::local_refusal::ingress_dialect_of;
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::{
@@ -310,6 +311,7 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Option<Result<TokenCount>> {
         let mut parked: Option<Error> = None;
+        let ingress = ingress_dialect_of(req);
         for candidate in chain {
             if !seat_can_count_tokens(candidate.provider_kind, &candidate.upstream) {
                 tracing::debug!(
@@ -323,12 +325,18 @@ impl Router {
                 continue;
             }
             *saw_capable = true;
+            let egress = candidate.egress_kind;
             match self
                 .count_tokens_try_seat(req, candidate, repair_budget, mode, meta)
                 .await
             {
                 CountSeatOutcome::Count(tc) => return Some(Ok(tc)),
-                CountSeatOutcome::Terminal(e) => return Some(Err(e)),
+                CountSeatOutcome::Terminal(e) => {
+                    if let Some(reason) = e.refusal_reason() {
+                        self.count_egress_refusal(ingress, egress, reason);
+                    }
+                    return Some(Err(e));
+                }
                 CountSeatOutcome::Parked(e) => merge_gate_refusal(&mut parked, e),
                 // Capability error: the seat was admitted as capable but its
                 // upstream cannot count. The slot was already released
@@ -401,7 +409,10 @@ impl Router {
         match self.apply_strip_interceptor(&target, &mut attempt_req) {
             StripDecision::Proceed => {}
             StripDecision::StrictReject(err) => return CountSeatOutcome::Terminal(err),
-            StripDecision::RouteAway(_) => return CountSeatOutcome::Capability,
+            StripDecision::RouteAway(err) => {
+                self.count_refusal_error(ingress_dialect_of(req), &target, &err);
+                return CountSeatOutcome::Capability;
+            }
         }
 
         // Envelope-field pre-flight (see `complete_inner`): same seam,

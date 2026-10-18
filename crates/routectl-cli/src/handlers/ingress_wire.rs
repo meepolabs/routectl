@@ -8,13 +8,13 @@ use axum::http::HeaderMap;
 use axum::http::header::USER_AGENT;
 use routectl_core::identity::anthropic::parse_claude_cli_version;
 use routectl_core::wire_check::{IngressDialect, IngressWire};
-use routectl_core::{ChatRequest, RequestProvenance, is_safe_token};
+use routectl_core::{ChatRequest, is_safe_token};
 
 /// Attach the posted body to `req` as its ingress wire. The body is shared
 /// by refcount, never copied. A request whose provenance names no ingress
 /// dialect is left without one, so it is never checked.
 pub(super) fn capture_ingress_wire(headers: &HeaderMap, raw_body: &Bytes, req: &mut ChatRequest) {
-    let Some(dialect) = dialect_of(req.routectl_internal.provenance) else {
+    let Some(dialect) = IngressDialect::of_provenance(req.routectl_internal.provenance) else {
         return;
     };
     req.routectl_internal.ingress_wire = Some(IngressWire {
@@ -22,15 +22,6 @@ pub(super) fn capture_ingress_wire(headers: &HeaderMap, raw_body: &Bytes, req: &
         client_version: client_version(headers),
         bytes: raw_body.clone(),
     });
-}
-
-const fn dialect_of(provenance: RequestProvenance) -> Option<IngressDialect> {
-    match provenance {
-        RequestProvenance::AnthropicIngress => Some(IngressDialect::Anthropic),
-        RequestProvenance::OpenaiIngress => Some(IngressDialect::Chat),
-        RequestProvenance::ResponsesIngress => Some(IngressDialect::Responses),
-        _ => None,
-    }
 }
 
 /// The client's version: a stable Claude Code CLI version when the

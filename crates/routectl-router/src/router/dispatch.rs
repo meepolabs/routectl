@@ -393,6 +393,7 @@ impl Router {
             // inside the loop), so a mixed chain that never reaches this
             // target is unaffected.
             if let Some(err) = missing_forwarded_bearer_error(target, &req) {
+                self.count_refusal_error(ingress, target, &err);
                 return Err(err);
             }
 
@@ -418,12 +419,11 @@ impl Router {
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
                 StripDecision::StrictReject(err) => {
-                    if let Some(reason) = err.refusal_reason() {
-                        self.count_local_refusal(ingress, target, reason);
-                    }
+                    self.count_refusal_error(ingress, target, &err);
                     return Err(err);
                 }
                 StripDecision::RouteAway(err) => {
+                    self.count_refusal_error(ingress, target, &err);
                     last_err = Some(err);
                     if opts.disable_fallbacks {
                         break 'chain;
@@ -1243,6 +1243,7 @@ impl Router {
 
             // Missing-bearer terminal guard: see `complete_inner`.
             if let Some(err) = missing_forwarded_bearer_error(target, &req) {
+                self.count_refusal_error(ingress, target, &err);
                 return Err(err);
             }
 
@@ -1261,12 +1262,11 @@ impl Router {
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
                 StripDecision::StrictReject(err) => {
-                    if let Some(reason) = err.refusal_reason() {
-                        self.count_local_refusal(ingress, target, reason);
-                    }
+                    self.count_refusal_error(ingress, target, &err);
                     return Err(err);
                 }
                 StripDecision::RouteAway(err) => {
+                    self.count_refusal_error(ingress, target, &err);
                     last_err = Some(err);
                     if opts.disable_fallbacks {
                         break 'chain;

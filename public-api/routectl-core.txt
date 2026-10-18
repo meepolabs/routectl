@@ -3516,6 +3516,7 @@ pub routectl_core::wire_check::IngressDialect::Responses
 impl routectl_core::wire_check::IngressDialect
 pub const routectl_core::wire_check::IngressDialect::ALL: [Self; 3]
 pub const fn routectl_core::wire_check::IngressDialect::label(self) -> &'static str
+pub const fn routectl_core::wire_check::IngressDialect::of_provenance(routectl_core::schema::RequestProvenance) -> core::option::Option<Self>
 impl core::clone::Clone for routectl_core::wire_check::IngressDialect
 pub fn routectl_core::wire_check::IngressDialect::clone(&self) -> routectl_core::wire_check::IngressDialect
 impl core::cmp::Eq for routectl_core::wire_check::IngressDialect

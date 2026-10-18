@@ -33,7 +33,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 
 use crate::handlers::ingress_handle::{
-    is_json_content_type, map_error, render_body_rejection, render_malformed_body,
+    is_json_content_type, map_error, render_body_rejection, render_parse_failure,
     render_unsupported_media_type,
 };
 use crate::handlers::usage_capture::drain_capability_events;
@@ -62,10 +62,15 @@ pub async fn count_tokens(
         return render_unsupported_media_type(envelope);
     }
 
+    // Snapshot the live Router once. Hot-reload-safe: if a swap
+    // happens between the snapshot and `count_tokens`, the request
+    // still uses the snapshot's routing surface, not a half-applied
+    // mix.
+    let router = state.router.load_full();
+
     let req = match adapter.parse_request(&headers, raw_body.as_ref()) {
         Ok(r) => r,
-        Err(routectl_core::Error::Json(_)) => return render_malformed_body(envelope),
-        Err(e) => return map_error(envelope, e),
+        Err(e) => return render_parse_failure(&router, adapter.dialect(), envelope, e),
     };
 
     // Compiled-pin drift observation, after a successful parse and before
@@ -73,12 +78,6 @@ pub async fn count_tokens(
     // funnel through `ingress_handle`, so without this call a base-url
     // client sizing its context window would produce no drift signal.
     state.cc_pin_drift.observe_headers(&headers);
-
-    // Snapshot the live Router once. Hot-reload-safe: if a swap
-    // happens between the snapshot and `count_tokens`, the request
-    // still uses the snapshot's routing surface, not a half-applied
-    // mix.
-    let router = state.router.load_full();
     // `count_tokens_with_meta`, not `count_tokens`: this walk can settle an
     // envelope-field verdict, and a settlement's event row has to reach the
     // capability-event ledger. Dropping the meta would leave the shared

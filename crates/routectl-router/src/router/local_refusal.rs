@@ -4,17 +4,19 @@
 //! refusal is counted once whichever exit it leaves through.
 
 use routectl_core::wire_check::{EgressKind, IngressDialect, Lane};
-use routectl_core::{ChatRequest, RefusalReason};
+use routectl_core::{ChatRequest, Error, RefusalReason};
 
 use super::{DispatchTarget, Router};
 
-/// The dialect the client's request arrived in, from its captured ingress
-/// body. A request built without an ingress has none.
+/// The dialect the client's request arrived in: from its captured ingress
+/// body, else from the ingress that parsed it (a token count carries no
+/// ingress body). A request built without an ingress has none.
 pub(super) fn ingress_dialect_of(req: &ChatRequest) -> Option<IngressDialect> {
     req.routectl_internal
         .ingress_wire
         .as_ref()
         .map(|wire| wire.dialect)
+        .or_else(|| IngressDialect::of_provenance(req.routectl_internal.provenance))
 }
 
 impl Router {
@@ -35,7 +37,31 @@ impl Router {
         target: &DispatchTarget,
         reason: RefusalReason,
     ) {
-        if let (Some(ingress), Some(egress)) = (ingress, target.egress_kind) {
+        self.count_egress_refusal(ingress, target.egress_kind, reason);
+    }
+
+    /// Count `err` on the lane of `ingress` feeding `target`'s egress when
+    /// it is a local refusal; any other error is not counted.
+    pub(super) fn count_refusal_error(
+        &self,
+        ingress: Option<IngressDialect>,
+        target: &DispatchTarget,
+        err: &Error,
+    ) {
+        if let Some(reason) = err.refusal_reason() {
+            self.count_local_refusal(ingress, target, reason);
+        }
+    }
+
+    /// Count one local refusal for `reason` on the lane of `ingress` feeding
+    /// `egress`; nothing without both.
+    pub(super) fn count_egress_refusal(
+        &self,
+        ingress: Option<IngressDialect>,
+        egress: Option<EgressKind>,
+        reason: RefusalReason,
+    ) {
+        if let (Some(ingress), Some(egress)) = (ingress, egress) {
             self.wire_check
                 .record_local_refusal(Lane::of(ingress, egress), reason);
         }

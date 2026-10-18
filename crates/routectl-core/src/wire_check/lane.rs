@@ -1,5 +1,7 @@
 //! Lanes: which ingress dialect fed an attempt and which egress carried it.
 
+use crate::RequestProvenance;
+
 /// The HTTP ingress dialect a request arrived in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IngressDialect {
@@ -21,6 +23,17 @@ impl IngressDialect {
             Self::Anthropic => "anthropic",
             Self::Chat => "chat",
             Self::Responses => "responses",
+        }
+    }
+
+    /// The dialect of the ingress that parsed a request of `provenance`;
+    /// none for a request built without an ingress.
+    pub const fn of_provenance(provenance: RequestProvenance) -> Option<Self> {
+        match provenance {
+            RequestProvenance::AnthropicIngress => Some(Self::Anthropic),
+            RequestProvenance::OpenaiIngress => Some(Self::Chat),
+            RequestProvenance::ResponsesIngress => Some(Self::Responses),
+            RequestProvenance::Library => None,
         }
     }
 }

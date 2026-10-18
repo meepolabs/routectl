@@ -21,8 +21,8 @@ use futures::StreamExt;
 use routectl_core::Error;
 use routectl_core::ForwardedBearer;
 use routectl_core::ParsedErrorBody;
-use routectl_core::wire_check::StreamExit;
-use routectl_router::{DispatchedStream, ResponseCheck, RouterOptions};
+use routectl_core::wire_check::{IngressDialect, StreamExit};
+use routectl_router::{DispatchedStream, ResponseCheck, Router, RouterOptions};
 use routectl_usage::{Outcome, UsageHandle, UsageRecord};
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -122,16 +122,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
 
     let mut req = match adapter.parse_request(&headers, raw_body.as_ref()) {
         Ok(r) => r,
-        // A top-level JSON syntax failure inside the adapter maps to
-        // `Error::Json`; render it as the 400 malformed-body envelope the
-        // axum `Json` extractor produced before this path owned the parse.
-        Err(Error::Json(_)) => return render_malformed_body(envelope),
-        Err(e) => {
-            if let Some(reason) = e.refusal_reason() {
-                router.record_ingress_refusal(adapter.dialect(), reason);
-            }
-            return map_error(envelope, e);
-        }
+        Err(e) => return render_parse_failure(&router, adapter.dialect(), envelope, e),
     };
     capture_ingress_wire(&headers, &raw_body, &mut req);
 
@@ -441,6 +432,25 @@ pub(crate) fn render_malformed_body(shape: ErrorEnvelopeShape) -> Response {
         None,
         None,
     )
+}
+
+/// Count a request the `dialect` ingress failed to parse as a refusal on
+/// `<dialect>->local` and render its 400. A top-level JSON syntax failure
+/// (`Error::Json`) renders as the malformed-body envelope the axum `Json`
+/// extractor produced before the adapter owned the parse.
+pub(crate) fn render_parse_failure(
+    router: &Router,
+    dialect: IngressDialect,
+    shape: ErrorEnvelopeShape,
+    e: Error,
+) -> Response {
+    if let Some(reason) = e.refusal_reason() {
+        router.record_ingress_refusal(dialect, reason);
+    }
+    match e {
+        Error::Json(_) => render_malformed_body(shape),
+        e => map_error(shape, e),
+    }
 }
 
 /// Render a `Bytes`-extractor rejection into the dialect error envelope.

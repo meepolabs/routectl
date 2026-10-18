@@ -1,7 +1,7 @@
 //! A request routectl refuses on its own counts once on
 //! `rc_request_refused_local_total` under its lane and reason, whichever
-//! router exit it leaves through; an upstream rejection and a credential
-//! refusal do not count.
+//! router exit it leaves through, a missing forwarded bearer included; an
+//! upstream rejection does not count.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::wire_check::{IngressDialect, IngressWire};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, ContentPart, Error, Message,
-    MessageContent, Provider, RefusalReason, Result, Role, ToolDef,
+    MessageContent, Provider, RefusalReason, RequestProvenance, Result, Role, TokenCount, ToolDef,
 };
 use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use serde_json::{Value, json};
@@ -85,8 +85,17 @@ impl Provider for SequencedProvider {
     }
 }
 
-/// A provider that answers every call successfully.
-struct AnsweringProvider;
+/// A provider that answers every call successfully, counting the calls.
+#[derive(Default)]
+struct AnsweringProvider {
+    calls: AtomicUsize,
+}
+
+impl AnsweringProvider {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
 
 #[async_trait::async_trait]
 impl Provider for AnsweringProvider {
@@ -100,9 +109,18 @@ impl Provider for AnsweringProvider {
         Err(Error::normalize_response("answering", "unused"))
     }
     async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ChatResponse::default())
     }
+    async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(TokenCount {
+            input_tokens: 1,
+            extras: serde_json::Map::new(),
+        })
+    }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let chunk = ChatChunk {
             choices: vec![ChunkChoice {
                 index: 0,
@@ -183,9 +201,12 @@ fn refusals(router: &Router) -> Vec<(&'static str, &'static str, u64)> {
 enum Surface {
     Complete,
     Stream,
+    CountTokens,
 }
 
 const SURFACES: [Surface; 2] = [Surface::Complete, Surface::Stream];
+
+const ALL_SURFACES: [Surface; 3] = [Surface::Complete, Surface::Stream, Surface::CountTokens];
 
 /// Dispatch `req` on `surface` and return the error the client receives.
 async fn dispatch_err(router: &Router, surface: Surface, req: ChatRequest) -> Error {
@@ -197,6 +218,36 @@ async fn dispatch_err(router: &Router, surface: Surface, req: ChatRequest) -> Er
             .await
             .err()
             .expect("the stream fails to open"),
+        Surface::CountTokens => Box::pin(router.count_tokens(req))
+            .await
+            .expect_err("the token count fails"),
+    }
+}
+
+/// Dispatch `req` on `surface` and require it to succeed.
+async fn dispatch_ok(router: &Router, surface: Surface, req: ChatRequest) {
+    let outcome = match surface {
+        Surface::Complete => Box::pin(router.complete(req)).await.map(drop),
+        Surface::Stream => Box::pin(router.stream(req)).await.map(drop),
+        Surface::CountTokens => Box::pin(router.count_tokens(req)).await.map(drop),
+    };
+    outcome.unwrap_or_else(|err| panic!("{surface:?} succeeds: {err:?}"));
+}
+
+/// A request that arrived through the Anthropic ingress as `surface` sees
+/// it: a token count is parsed by that ingress but carries no captured
+/// ingress body, so only its provenance names the dialect.
+fn anthropic_request_on(surface: Surface) -> ChatRequest {
+    match surface {
+        Surface::Complete | Surface::Stream => anthropic_request(),
+        Surface::CountTokens => {
+            let mut req = ChatRequest {
+                model: ALIAS.into(),
+                ..Default::default()
+            };
+            req.routectl_internal.provenance = RequestProvenance::AnthropicIngress;
+            req
+        }
     }
 }
 
@@ -345,11 +396,13 @@ async fn an_egress_refusal_without_an_ingress_body_has_no_lane_and_is_not_counte
     assert!(refusals(&router).is_empty());
 }
 
-fn acting_advisor_negative() -> ExportedEntry {
+/// An acting learned negative for the advisor tool on `provider`'s
+/// `upstream` seat.
+fn acting_advisor_negative(provider: &str, upstream: &str) -> ExportedEntry {
     let base = Instant::now();
     ExportedEntry {
         provider_kind: "anthropic-api".into(),
-        state_key: format!("{PROVIDER}#{UPSTREAM}"),
+        state_key: format!("{provider}#{upstream}"),
         feature_key: "advisor".into(),
         verdict: EntryVerdict::Negative,
         signal: SignalTier::SelfIdentifying,
@@ -379,12 +432,12 @@ async fn a_strict_strip_refusal_counts_exactly_once() {
     for surface in SURFACES {
         let router = router_over(
             ProviderEntry::anthropic_api("literal:k"),
-            Arc::new(AnsweringProvider),
+            Arc::new(AnsweringProvider::default()),
             true,
         );
         router
             .learned_capabilities
-            .import_entries(vec![acting_advisor_negative()]);
+            .import_entries(vec![acting_advisor_negative(PROVIDER, UPSTREAM)]);
 
         let err = dispatch_err(&router, surface, advisor_request()).await;
 
@@ -403,7 +456,7 @@ async fn a_tool_pairing_refusal_carries_its_reason() {
     for surface in SURFACES {
         let router = router_over(
             ProviderEntry::anthropic_api("literal:k"),
-            Arc::new(AnsweringProvider),
+            Arc::new(AnsweringProvider::default()),
             false,
         );
         let mut req = anthropic_request();
@@ -429,27 +482,212 @@ async fn a_tool_pairing_refusal_carries_its_reason() {
     }
 }
 
+const SECOND_NICKNAME: &str = "m2";
+const SECOND_PROVIDER: &str = "p2";
+const SECOND_UPSTREAM: &str = "upstream2";
+
+/// A router whose alias chains the anthropic-api model served by `first`
+/// (configured as `first_entry`) ahead of an own-credential anthropic-api
+/// model served by `second`, with no retries.
+fn chain_router(
+    first_entry: ProviderEntry,
+    first: Arc<dyn Provider>,
+    second: Arc<dyn Provider>,
+) -> Router {
+    let mut config = Config::default();
+    config.retry.max_attempts = 1;
+    config.providers.insert(PROVIDER.into(), first_entry);
+    config.providers.insert(
+        SECOND_PROVIDER.into(),
+        ProviderEntry::anthropic_api("literal:k"),
+    );
+    config.aliases.insert(
+        ALIAS.into(),
+        AliasValue::Chain(vec![NICKNAME.into(), SECOND_NICKNAME.into()]),
+    );
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(BTreeMap::from([
+        (
+            NICKNAME.to_string(),
+            Arc::new(ResolvedModel::new(NICKNAME, PROVIDER, first, UPSTREAM)),
+        ),
+        (
+            SECOND_NICKNAME.to_string(),
+            Arc::new(ResolvedModel::new(
+                SECOND_NICKNAME,
+                SECOND_PROVIDER,
+                second,
+                SECOND_UPSTREAM,
+            )),
+        ),
+    ]));
+    router
+}
+
+fn forwarded_anthropic_api() -> ProviderEntry {
+    ProviderEntry::anthropic_api("literal:k").with_credential_source(CredentialSource::Forwarded)
+}
+
+/// An advisor request whose `tool_choice` forces the advisor, so stripping
+/// it on a target with an acting negative is a hazard the strip rolls back.
+fn forcing_advisor_request_on(surface: Surface) -> ChatRequest {
+    ChatRequest {
+        tools: Some(vec![ToolDef::Other(
+            json!({"type": "advisor", "name": "advisor"}),
+        )]),
+        tool_choice: Some(json!({"type": "tool", "name": "advisor"})),
+        ..anthropic_request_on(surface)
+    }
+}
+
+/// One row of a per-surface outcome table: the surface, the local-refusal
+/// keys its dispatch left, and how many calls reached the second target.
+type SurfaceRow = (&'static str, Vec<(&'static str, &'static str, u64)>, usize);
+
+const fn surface_label(surface: Surface) -> &'static str {
+    match surface {
+        Surface::Complete => "complete",
+        Surface::Stream => "stream",
+        Surface::CountTokens => "count_tokens",
+    }
+}
+
 #[tokio::test]
-async fn a_missing_forwarded_bearer_refusal_is_not_counted() {
-    for surface in SURFACES {
-        let router = router_over(
-            ProviderEntry::anthropic_api("literal:k")
-                .with_credential_source(CredentialSource::Forwarded),
-            Arc::new(AnsweringProvider),
-            false,
-        );
+async fn a_missing_forwarded_bearer_counts_once_and_never_reaches_the_upstream() {
+    let mut observed = Vec::new();
+    for surface in ALL_SURFACES {
+        let upstream = Arc::new(AnsweringProvider::default());
+        let router = router_over(forwarded_anthropic_api(), upstream.clone(), false);
 
-        let err = dispatch_err(&router, surface, anthropic_request()).await;
+        let err = dispatch_err(&router, surface, anthropic_request_on(surface)).await;
 
-        assert!(
-            err.to_string().contains("missing_forwarded_bearer"),
-            "{surface:?}: {err}"
-        );
         assert_eq!(
             err.refusal_reason(),
             Some(RefusalReason::ForwardedBearerMissing),
-            "{surface:?}"
+            "{surface:?}: {err:?}"
         );
-        assert!(refusals(&router).is_empty(), "{surface:?}");
+        observed.push((surface_label(surface), refusals(&router), upstream.calls()));
     }
+
+    let expected: Vec<SurfaceRow> = ALL_SURFACES
+        .iter()
+        .map(|&s| {
+            let keys = vec![(ANTHROPIC_LANE, "forwarded-bearer-missing", 1)];
+            (surface_label(s), keys, 0)
+        })
+        .collect();
+    assert_eq!(observed, expected);
+}
+
+#[tokio::test]
+async fn a_terminal_refusal_on_the_first_target_counts_once_and_stops_the_chain() {
+    let mut observed = Vec::new();
+    for surface in ALL_SURFACES {
+        let second = Arc::new(AnsweringProvider::default());
+        let router = chain_router(
+            forwarded_anthropic_api(),
+            Arc::new(AnsweringProvider::default()),
+            second.clone(),
+        );
+
+        dispatch_err(&router, surface, anthropic_request_on(surface)).await;
+
+        observed.push((surface_label(surface), refusals(&router), second.calls()));
+    }
+
+    let expected: Vec<SurfaceRow> = ALL_SURFACES
+        .iter()
+        .map(|&s| {
+            let keys = vec![(ANTHROPIC_LANE, "forwarded-bearer-missing", 1)];
+            (surface_label(s), keys, 0)
+        })
+        .collect();
+    assert_eq!(observed, expected);
+}
+
+#[tokio::test]
+async fn a_rolled_back_strip_on_the_first_target_counts_once_when_the_second_succeeds() {
+    let mut observed = Vec::new();
+    for surface in ALL_SURFACES {
+        let second = Arc::new(AnsweringProvider::default());
+        let router = chain_router(
+            ProviderEntry::anthropic_api("literal:k"),
+            Arc::new(AnsweringProvider::default()),
+            second.clone(),
+        );
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative(PROVIDER, UPSTREAM)]);
+
+        dispatch_ok(&router, surface, forcing_advisor_request_on(surface)).await;
+
+        observed.push((surface_label(surface), refusals(&router), second.calls()));
+    }
+
+    let expected: Vec<SurfaceRow> = ALL_SURFACES
+        .iter()
+        .map(|&s| {
+            let keys = vec![(ANTHROPIC_LANE, "unrepresentable", 1)];
+            (surface_label(s), keys, 1)
+        })
+        .collect();
+    assert_eq!(observed, expected);
+}
+
+#[tokio::test]
+async fn a_rolled_back_strip_that_exhausts_the_chain_counts_once_per_target() {
+    let mut observed = Vec::new();
+    for surface in ALL_SURFACES {
+        let second = Arc::new(AnsweringProvider::default());
+        let router = chain_router(
+            ProviderEntry::anthropic_api("literal:k"),
+            Arc::new(AnsweringProvider::default()),
+            second.clone(),
+        );
+        router.learned_capabilities.import_entries(vec![
+            acting_advisor_negative(PROVIDER, UPSTREAM),
+            acting_advisor_negative(SECOND_PROVIDER, SECOND_UPSTREAM),
+        ]);
+
+        dispatch_err(&router, surface, forcing_advisor_request_on(surface)).await;
+
+        observed.push((surface_label(surface), refusals(&router), second.calls()));
+    }
+
+    let expected: Vec<SurfaceRow> = ALL_SURFACES
+        .iter()
+        .map(|&s| {
+            let keys = vec![(ANTHROPIC_LANE, "unrepresentable", 2)];
+            (surface_label(s), keys, 0)
+        })
+        .collect();
+    assert_eq!(observed, expected);
+}
+
+#[tokio::test]
+async fn a_provider_raised_refusal_on_the_first_target_counts_once_when_the_second_succeeds() {
+    let mut observed = Vec::new();
+    for surface in SURFACES {
+        let second = Arc::new(AnsweringProvider::default());
+        let router = chain_router(
+            ProviderEntry::anthropic_api("literal:k"),
+            Arc::new(FailingProvider {
+                error: egress_local_refusal,
+            }),
+            second.clone(),
+        );
+
+        dispatch_ok(&router, surface, anthropic_request()).await;
+
+        observed.push((surface_label(surface), refusals(&router), second.calls()));
+    }
+
+    let expected: Vec<SurfaceRow> = SURFACES
+        .iter()
+        .map(|&s| {
+            let keys = vec![(ANTHROPIC_LANE, "cloak-relocation", 1)];
+            (surface_label(s), keys, 1)
+        })
+        .collect();
+    assert_eq!(observed, expected);
 }
