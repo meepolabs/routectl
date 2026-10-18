@@ -29,6 +29,11 @@ pub const fn tap(req: &ChatRequest) -> Option<&WireTap> {
 /// Serialize the outgoing body once and record those exact bytes in the
 /// tap. The returned bytes are what the caller sends: the tap holds a
 /// refcount on the same buffer, never a second serialization.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
 pub fn serialize_and_deposit(
     req: &ChatRequest,
     body: &serde_json::Value,
@@ -43,6 +48,11 @@ pub fn serialize_and_deposit(
 /// Record the complete upstream response body when the attempt checks its
 /// response, and hand the same buffer back for parsing: the tap holds a
 /// refcount on it, never a copy.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock"
+))]
 pub fn deposit_response(req: &ChatRequest, body: Vec<u8>) -> Bytes {
     let body = Bytes::from(body);
     if let Some(tap) = tap(req).filter(|tap| tap.checks_response()) {
@@ -54,6 +64,12 @@ pub fn deposit_response(req: &ChatRequest, body: Vec<u8>) -> Bytes {
 /// A handle on the tap for a stream reader to fold upstream frames into,
 /// present only when the attempt folds its response. A stream nobody
 /// folds gets `None` and pays one `Option` test per frame.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "anthropic-api",
+    feature = "bedrock"
+))]
 pub fn response_tap(req: &ChatRequest) -> Option<WireTap> {
     tap(req).filter(|tap| tap.folds_response()).cloned()
 }

@@ -2196,8 +2196,8 @@ if [ -f "$work/client.txt" ]; then
         "yes" "$(grep -qE 'argv=.*--model gpt-5\.6-sol( |$)' "$work/client.txt" && echo yes || echo no)"
     check "codex: the lane config routes the fixture alias to the same tier" \
         "gpt-5.6-sol" \
-        "$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["models"]["fixture-codex"]["upstream"])' \
-            "$DRIVERS/config/openai-responses.toml" 2>&1)"
+        "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import lane_configs as lc; print(lc.string_value(lc.read_config(sys.argv[2])["models.fixture-codex"]["upstream"]))' \
+            "$DRIVERS/config" "$DRIVERS/config/openai-responses.toml" 2>&1)"
     check "codex: the throwaway cwd was seeded for the case" \
         "yes" "$(client_get "$work" notes_alpha | head -1)"
     check_ne "codex: the client ran outside the invoking HOME" \
