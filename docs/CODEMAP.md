@@ -155,7 +155,9 @@ license.
   `tool_calls`, typed / passthrough tool parts, and `tool_call_id`;
   chronological, segment-local); reports the first defect as
   `ToolPairingError` (a `ToolPairingDefect` class plus bounded message / item
-  indexes, no ids or content) and leaves the consequence to the caller
+  indexes, no ids or content) and leaves the consequence to the caller. An
+  empty or absent id names nothing: such a call awaits no result, and such a
+  result inside an open call segment is `EmptyResultId`
 - `src/cache_control.rs` -- Anthropic `CacheControl` type, STRUCTURE-ONLY
   breakpoint validator (4-cap, 1h-before-5m TTL ordering; unrecognized `type`
   / `ttl` values forward verbatim -- marker vocabulary is upstream's to
@@ -515,7 +517,8 @@ license.
   pattern is dropped at DEBUG, never sent), `member_pointer` and
   `declare_stream_flag`; response side `deposit_response`, `response_tap`,
   `push_frame` and `declare_response`; every entry point is a no-op when the
-  request carries no tap
+  request carries no tap, and each is cfg-gated to the egress features that
+  call it
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin,
   User-Agent override, and the host-keyed proxy policy (every builder takes
   the client's base URL; a loopback host gets `no_proxy()`); tests in
@@ -652,7 +655,9 @@ license.
   `aws_stream_exception_status` (in-stream exception member -> HTTP status)
 - `src/translation_drop_metrics.rs` -- process-wide `(lane, class)` translation
   drop and policy-action counters with their snapshot readers, plus the
-  crate-internal `ClientFingerprintStripTally`
+  crate-internal `ClientFingerprintStripTally`; under `cfg(test)` the registry
+  is per-thread, so this crate's unit tests assert counters without serial
+  guards (integration tests share the process-global one)
 - `src/hosted_mcp_tool_egress_tests.rs` -- cross-lane guard: a Responses
   hosted-MCP tool's credentials reach no anthropic-api, Bedrock Invoke, or
   Converse body, still ship unchanged to a Responses upstream, and count one
@@ -803,8 +808,7 @@ license.
 - `src/anthropic_api/request_drop_counter_tests.rs` -- the lane's telemetry
   pinning set: the denominator counts a failed assembly as well as a clean
   one, and one single-source test per fingerprint-strip site (plus the
-  collapsed-system, strip-then-fail, and no-strip controls) under
-  `serial_test` guards
+  collapsed-system, strip-then-fail, and no-strip controls)
 - `src/anthropic_api/system.rs` -- system-prompt translation:
   `translate_system` (typed `SystemContent` -> wire) + `lift_legacy_system`
   (Role::System fallback for direct callers, the `req.system`-absent path
@@ -1217,7 +1221,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `request.rs`'s `tests` module: the three-assertion pinning set per counted
   drop (warn/debug captured via `capture_events`, field absent from the
   EMITTED WIRE VALUE, representable sibling survives) plus the per-class
-  counter deltas under `serial_test` guards, and the lane's policy-action
+  counter deltas, and the lane's policy-action
   pinning set for `merge_payload_extras`'s managed-key override refusal
 - `src/gemini/request_fingerprint_tests.rs` -- `include!`d into
   `request.rs`'s `tests` module: system-surface fingerprint withhold pins
@@ -4149,7 +4153,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/transcript_defect_dispatch_tests.rs` -- child module of
   `learn_engine_location_tests.rs`: a mispaired transcript on complete,
   stream and count_tokens (forwarded, Gemini refuses and the walk moves on, an
-  upstream 400 / 422 neither walks, repairs nor learns)
+  upstream 400 / 422 neither walks, repairs nor learns unless it names an edit
+  routectl declared, which is undone and the same target retried once)
 - `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
   chain filter pass (called from `chain::dispatch_chain_for_request`
   immediately after `filter_chain_by_features`, so the ordering makes "last
@@ -6405,7 +6410,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   against a mock upstream: each row asserts a 400, zero upstream calls and
   exactly one `(lane, reason)` count; it names the two reasons no request
   reaches (`translation-accounting`, `schema-depth`) and pins that a
-  too-deep schema is refused as `unparseable` first
+  too-deep schema is refused as `unparseable` first. Two chain tests drive
+  the cache breakpoint rules through a fallback: an openai-compat target
+  serves an over-cap request, and an anthropic-api refusal counts once on its
+  lane before the next target answers 200
 - `src/handlers/ingress_wire.rs` -- `capture_ingress_wire`: right after parse,
   attaches the posted body (refcount), its dialect (from `provenance`) and the
   client version (stable Claude CLI version, else the first safe
