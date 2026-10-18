@@ -337,6 +337,49 @@ async fn count_tokens_forwards_a_trailing_call_once() {
 }
 
 #[tokio::test]
+async fn count_tokens_forwards_an_id_less_tool_result_part_once() {
+    let rows = [
+        (
+            "empty id",
+            json!({"type": "tool_result", "tool_use_id": "", "content": "r"}),
+        ),
+        ("absent id", json!({"type": "tool_result", "content": "r"})),
+    ];
+    for (name, block) in rows {
+        // Arrange
+        let h = Harness::start().await;
+        let body = json!({
+            "model": ANTHROPIC_ALIAS,
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}
+                ]},
+                {"role": "user", "content": [block]}
+            ]
+        });
+
+        // Act
+        let (status, response) = h.post("/v1/messages/count_tokens", &body).await;
+
+        // Assert
+        assert_eq!(status, 200, "{name}: {response}");
+        let (primary, fallback) = h.chain_of(ANTHROPIC_ALIAS);
+        let sent = bodies(primary).await;
+        assert_eq!(
+            (sent.len(), bodies(fallback).await.len()),
+            (1, 0),
+            "{name}: (primary, fallback) calls: the primary serves, no local refusal"
+        );
+        assert_eq!(
+            sent[0]["messages"][2]["content"],
+            json!([block]),
+            "{name}: the upstream received the client's tool_result block unchanged"
+        );
+    }
+}
+
+#[tokio::test]
 async fn responses_forward_an_orphan_function_call_output_once() {
     let h = Harness::start().await;
     let body = json!({

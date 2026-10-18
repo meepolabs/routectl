@@ -31,9 +31,11 @@ pub enum RefusalReason {
     CacheTtlOrder,
     /// A tool result has no id, so the target has no way to pair it with its
     /// call. Raised only by the anthropic-api egress
-    /// (`normalize_replay_invariants`), where Anthropic requires the id of
-    /// the `tool_use` a result answers. The other egresses leave the
-    /// objection to the upstream: Converse forwards an empty or absent id as
+    /// (`normalize_replay_invariants`), and only on a `Role::Tool` turn, whose
+    /// wire `tool_result` block that egress builds from `tool_call_id`. A
+    /// client-authored `tool_result` content part is relayed verbatim, so an
+    /// empty or absent `tool_use_id` there is forwarded. The other egresses
+    /// leave the objection to the upstream: Converse forwards an empty or absent id as
     /// `toolUseId: ""`, Responses as `call_id: ""`, and the openai-compat
     /// lift carries the id verbatim. Scope: egress. Class: `BadRequest`.
     ToolCallIdMissing,

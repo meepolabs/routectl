@@ -719,9 +719,10 @@ pub(crate) fn normalize_deferring_format_key_warn(
         SystemTurnPolicy::Lift
     };
 
-    // Anthropic's wire requires every tool_result carry the
-    // `tool_use_id` of the tool_use it answers; missing ids are
-    // rejected upfront (always, independent of history_reasoning).
+    // A `Role::Tool` turn with no tool_call_id is rejected upfront
+    // (always, independent of history_reasoning): the egress builds its
+    // tool_result block from that id. A client-authored tool_result part
+    // is relayed with its id as sent.
     //
     // Thinking blocks must carry a `signature` for multi-turn replay on
     // real Anthropic. Cross-provider fallback (e.g. deepseek ->

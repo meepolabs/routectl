@@ -473,6 +473,105 @@ fn tool_message_without_tool_call_id_is_rejected() {
     );
 }
 
+fn tool_use_turn() -> Message {
+    Message {
+        content: MessageContent::Parts(vec![
+            serde_json::from_value(
+                json!({"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}),
+            )
+            .expect("tool_use part parses"),
+        ]),
+        ..assistant_msg("", None)
+    }
+}
+
+/// A `user` turn carrying `block` as its one canonical part, asserting the
+/// canonical carrier the block parses to.
+fn result_part_turn(block: &Value, parses_as_known: bool) -> Message {
+    let part: routectl_core::ContentPart =
+        serde_json::from_value(block.clone()).expect("result block parses");
+    assert_eq!(
+        matches!(part, routectl_core::ContentPart::Known(_)),
+        parses_as_known,
+        "premise: {block} parses to the expected canonical carrier"
+    );
+    Message {
+        content: MessageContent::Parts(vec![part]),
+        ..user_msg("")
+    }
+}
+
+/// The egress builds a `Role::Tool` turn's tool_result block from
+/// `tool_call_id`, so it refuses one with no id; a client-authored result
+/// part it only relays, so the upstream judges its id.
+#[test]
+fn empty_tool_result_id_is_refused_only_where_the_egress_builds_the_block() {
+    let typed_empty = json!({"type": "tool_result", "tool_use_id": "", "content": "r"});
+    let absent = json!({"type": "tool_result", "content": "r"});
+    let passthrough = json!({"type": "mcp_tool_result", "tool_use_id": "", "content": "r"});
+    let role_tool_empty = Message {
+        role: Role::Tool,
+        tool_call_id: Some(String::new()),
+        ..user_msg("r")
+    };
+    // `Some(block)`: the block reaches the wire unchanged. `None`: refused.
+    let rows = [
+        (
+            "typed tool_result part with an empty id",
+            result_part_turn(&typed_empty, true),
+            Some(&typed_empty),
+        ),
+        (
+            "tool_result part with no id",
+            result_part_turn(&absent, false),
+            Some(&absent),
+        ),
+        (
+            "unknown-typed result part with an empty id",
+            result_part_turn(&passthrough, false),
+            Some(&passthrough),
+        ),
+        (
+            "Role::Tool turn with an empty tool_call_id",
+            role_tool_empty,
+            None,
+        ),
+    ];
+    for (name, result, forwarded) in rows {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_msg("q"), tool_use_turn(), result].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let out = normalize("test-anthropic", &req, false, false, None, false, true);
+
+        // Assert
+        if let Some(block) = forwarded {
+            let body = out.unwrap_or_else(|e| panic!("{name}: must forward, got {e}"));
+            let last = body["messages"]
+                .as_array()
+                .and_then(|m| m.last())
+                .unwrap_or_else(|| panic!("{name}: no messages in {body}"));
+            assert_eq!(last["role"], "user", "{name}");
+            assert_eq!(
+                last["content"],
+                json!([block]),
+                "{name}: the client's block reaches the wire unchanged"
+            );
+        } else {
+            let err = out.expect_err(name);
+            assert_eq!(
+                err.refusal_reason(),
+                Some(routectl_core::RefusalReason::ToolCallIdMissing),
+                "{name}: {err}"
+            );
+        }
+    }
+}
+
 #[test]
 fn unsigned_thinking_block_is_stripped_not_rejected() {
     // Regression: prior behavior was a HTTP 400

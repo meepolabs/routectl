@@ -93,10 +93,15 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   on complete and stream only: when the rejection names one declared
   routectl edit (an operator payload extra or an auto-placed cache marker),
   routectl undoes it and retries the same target once. The anthropic-api
-  egress still refuses a tool result turn with no id, wherever it sits
-  (`tool-call-id-missing`, `normalize_replay_invariants` in
+  egress still refuses a `Role::Tool` result turn with no id, wherever it
+  sits (`tool-call-id-missing`, `normalize_replay_invariants` in
   `crates/routectl-providers/src/anthropic_api/messages.rs`), the one
-  egress that refuses a missing tool id.
+  egress that refuses a missing tool id: it builds that turn's
+  `tool_result` block from the id. A client-authored `tool_result` content
+  part is relayed verbatim, so an empty or absent `tool_use_id` there is
+  forwarded for the upstream to judge. On the Anthropic ingress tool
+  results arrive only as content parts, so the refusal fires only for a
+  request from a translating ingress (chat completions, responses).
 
 - **A local egress refusal walks the fallback chain, except a missing
   forwarded bearer.** A refusal raised while translating for one target

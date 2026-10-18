@@ -437,10 +437,14 @@ other target remains the client gets a **local HTTP 400**
 (`invalid_request_error` on the Anthropic envelope, `validation_error` on
 the OpenAI one) naming the defect class and the offending message index,
 never a tool id or tool content. Separately, the `anthropic-api` egress
-refuses any tool result turn with a missing or empty tool-call id locally
-(`tool-call-id-missing`), since Anthropic requires the id of the tool use a
-result answers, and the chain likewise moves on; when that result also
-follows a tool call turn, the pairing defect is recorded as well. An
+refuses a tool result turn from a translating ingress (an OpenAI
+`role: tool` message or a Responses `function_call_output`) whose tool-call
+id is missing or empty locally (`tool-call-id-missing`), since it builds
+that result's block from the id, and the chain likewise moves on. A
+`tool_result` block a client sends on `/v1/messages` is relayed as is, so
+an empty or absent `tool_use_id` there reaches the upstream. Either way,
+when the id-less result follows a tool call turn, the pairing defect is
+recorded as well. An
 upstream 400 or 422 answering a mispaired transcript is returned as is: it is
 not retried, does not fall back, is not repaired, and teaches no learned
 capability. The one exception, on completions and streams only: when the

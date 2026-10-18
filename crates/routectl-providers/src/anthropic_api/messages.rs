@@ -13,7 +13,7 @@
 //! block per turn.
 //!
 //! `normalize_replay_invariants` applies two outgoing invariants before
-//! translation: a hard reject for tool_result messages missing a
+//! translation: a hard reject for `Role::Tool` turns missing a
 //! tool_call_id, and (gated on `history_reasoning`) a strip of unsigned
 //! Thinking blocks that real Anthropic would 400 on replay. That strip
 //! can empty a turn; a turn left with nothing the wire can serialize is
@@ -86,12 +86,15 @@ fn render_skipped_format(format: Option<&str>, redact: bool) -> String {
 /// replay invariants. `history_reasoning` gates ONLY the second
 /// (unsigned-thinking strip); the tool_call_id reject is unconditional.
 ///
-/// - Hard-reject (Err) any tool_result message (`Role::Tool`) that
-///   lacks a `tool_call_id`. This runs REGARDLESS of `history_reasoning`
-///   -- it is a separate correctness invariant, not part of the
-///   thinking-strip. Anthropic 400s on such a body and the upstream
-///   error doesn't name the bad message; surfacing it locally gives
-///   operators a precise field to fix.
+/// - Hard-reject (Err) any `Role::Tool` turn that lacks a non-empty
+///   `tool_call_id`. This runs REGARDLESS of `history_reasoning` -- it
+///   is a separate correctness invariant, not part of the
+///   thinking-strip. The egress builds that turn's wire tool_result
+///   block itself from `tool_call_id` (sanitized to match its
+///   tool_use), so it has no id to build or correlate. A client-authored
+///   `tool_result` content part (typed or passthrough) is NOT checked:
+///   the egress relays it verbatim and never reads its `tool_use_id`,
+///   so an empty or absent id is forwarded for the upstream to judge.
 /// - STRIP any `Thinking` content block whose `signature` is missing,
 ///   empty, or not Claude-shaped (a foreign signature minted by another
 ///   provider on a cross-provider turn) from each message's `Parts`
