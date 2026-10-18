@@ -80,7 +80,7 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   pairing once per request and keeps the defect as a request fact. A
   Gemini target refuses locally (`tool-pairing`, `egress_pairing_refusal`)
   because its `functionResponse` must name the call it answers, and the
-  chain moves on. An upstream 400 on a defective transcript
+  chain moves on. An upstream 400 or 422 on a defective transcript
   (`is_transcript_rejection`) is the client's defect, not the lane's: it is
   not retried, does not walk the chain, is not field-repaired, and teaches
   no learned capability; it counts once as unlocalized. The anthropic-api

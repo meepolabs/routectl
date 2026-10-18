@@ -438,7 +438,7 @@ never a tool id or tool content. A tool result with a missing or empty
 tool-call id is a different defect: the `anthropic-api` egress refuses it
 locally (`tool-call-id-missing`), since Anthropic requires the id of the
 tool use a result answers, and the chain likewise moves on. An
-upstream 400 answering a mispaired transcript is returned as is: it is
+upstream 400 or 422 answering a mispaired transcript is returned as is: it is
 not retried, does not fall back, is not repaired, and teaches no learned
 capability. routectl does not repair a malformed transcript by
 synthesizing or dropping turns.
