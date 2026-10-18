@@ -80,7 +80,7 @@ impl IngressAdapter for OpenAiIngress {
         // so this dialect stays Value-based -- neutral vs the prior
         // extractor-owned parse. A top-level syntax error surfaces as
         // `Error::Json` (the handler renders it as a 400 malformed body).
-        let mut body: Value = serde_json::from_slice(body)?;
+        let mut body: Value = serde_json::from_slice(body).map_err(Error::Json)?;
         // Trace-level ingress body for triage. Inherits the
         // parent span's `request_id` so a `grep request_id=<id>`
         // shows ingress -> outgoing -> upstream -> egress in one

@@ -194,7 +194,7 @@ impl IngressAdapter for ResponsesIngress {
         // pre-deserialization mutations are load-bearing forward-compat
         // surface) -- neutral vs the prior extractor-owned parse. A
         // top-level syntax error surfaces as `Error::Json`.
-        let body: Value = serde_json::from_slice(body)?;
+        let body: Value = serde_json::from_slice(body).map_err(routectl_core::Error::Json)?;
         // Trace-level ingress body for triage; inherits the parent
         // span's request_id and honors ROUTECTL_LOG_REDACT_PROMPTS=1.
         // Mirrors the openai / anthropic ingress.

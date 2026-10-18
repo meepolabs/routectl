@@ -567,8 +567,9 @@ fn ledger_verify_rejects_an_unaccounted_shortfall() {
 /// the `serde_json::from_value` into `ChatRequest`), so those land here as
 /// `Parts(vec![])`, `Text("")`, and a blank text part at `messages[1]`.
 /// Each such turn is dropped from the outgoing body rather than refused:
-/// Anthropic rejects an empty system turn, and it carries nothing the model
-/// would read.
+/// it carries nothing the model would read, so the drop is lossless.
+/// Whether Anthropic would accept the empty turn as sent is not grounded by
+/// any recorded capture.
 #[test]
 fn empty_forwarded_system_turn_after_compaction_is_dropped() {
     let cases: [(&str, MessageContent); 5] = [

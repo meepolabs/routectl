@@ -185,9 +185,11 @@ pub enum Error {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A JSON serialization or deserialization failure.
+    /// A request body that does not parse as JSON. Built explicitly at an
+    /// ingress parse; a failure to serialize a value routectl built is a
+    /// routectl bug and is an [`Error::Internal`] instead.
     #[error("json: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(serde_json::Error),
 }
 
 /// Hand-written `Debug` for [`enum@Error`]. Identical to the derived form

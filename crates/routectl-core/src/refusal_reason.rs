@@ -121,7 +121,7 @@ pub enum RefusalReason {
 
 impl RefusalReason {
     /// Every reason, in declaration order.
-    pub const ALL: &'static [Self] = &[
+    pub const ALL: [Self; 16] = [
         Self::CacheBreakpointCap,
         Self::CacheTtlOrder,
         Self::ToolCallIdMissing,
@@ -296,7 +296,7 @@ mod tests {
             (RefusalReason::GeminiSeed, FailureClass::BadRequest),
             (RefusalReason::Unparseable, FailureClass::Unknown),
         ];
-        for &reason in RefusalReason::ALL {
+        for reason in RefusalReason::ALL {
             let Some((_, expected)) = rows.iter().find(|(row, _)| *row == reason) else {
                 panic!("no expected class for {reason:?}");
             };
@@ -320,9 +320,9 @@ mod tests {
         let reasons: HashSet<RefusalReason> = RefusalReason::ALL.iter().copied().collect();
         let tokens: HashSet<&str> = RefusalReason::ALL.iter().map(|r| r.as_str()).collect();
 
-        assert_eq!(reasons.len(), RefusalReason::ALL.len());
-        assert_eq!(tokens.len(), RefusalReason::ALL.len());
-        for &reason in RefusalReason::ALL {
+        assert_eq!(reasons.len(), 16);
+        assert_eq!(tokens.len(), 16);
+        for reason in RefusalReason::ALL {
             assert!(is_kebab_case(reason.as_str()), "{reason:?}");
         }
     }

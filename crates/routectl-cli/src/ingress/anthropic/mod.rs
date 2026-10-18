@@ -327,7 +327,7 @@ impl IngressAdapter for AnthropicIngress {
         // Materialize the wire body once from the raw request bytes. A
         // top-level syntax error surfaces as `Error::Json` (the handler
         // renders it as a 400 malformed body).
-        let body: Value = serde_json::from_slice(body)?;
+        let body: Value = serde_json::from_slice(body).map_err(routectl_core::Error::Json)?;
         // Trace-level ingress body for triage. Same gating +
         // sensitivity story as the openai ingress. Honors
         // ROUTECTL_LOG_REDACT_PROMPTS=1.

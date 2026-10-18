@@ -25,6 +25,8 @@
 //! - REFUSED (`unrepresentable`): no slot can hold the value -- an
 //!   `image_url` that is not an object, an image `data` / `url` that is
 //!   not a string, or a file part whose only carriers are not strings.
+//!   A user file whose only carrier is `file_url` is refused on Bedrock
+//!   Mantle too, though the slot exists (see `translate_file_part`).
 //!   The request FAILS with a `normalize_request` error that names the
 //!   offending field and content location, and never echoes a
 //!   caller-controlled type tag or any raw content value.
@@ -1105,10 +1107,9 @@ fn file_carrier(id: &str, fields: Option<&serde_json::Map<String, Value>>) -> Re
 const FILE_CARRIER_KEYS: [&str; 3] = ["file_data", "file_id", "file_url"];
 
 /// Whether this lane leaves a user-turn file's `file_url` off the wire.
-/// Bedrock Mantle does, but only beside a non-empty `file_data` or
-/// `file_id`: the part still names its bytes without the url. A part whose
-/// only carrier is the url forwards it, and the upstream decides.
-// Bedrock Mantle has no evidence that it fetches an `input_file` by url.
+/// Bedrock Mantle does, beside a non-empty `file_data` or `file_id`: the
+/// part still names its bytes without the url. A Mantle part whose only
+/// carrier is the url is refused instead (see `translate_file_part`).
 pub(super) fn withholds_user_file_url(auth_kind: AuthKind, file: &Value) -> bool {
     let non_empty = |key: &str| {
         file.get(key)
@@ -1121,7 +1122,8 @@ pub(super) fn withholds_user_file_url(auth_kind: AuthKind, file: &Value) -> bool
 }
 
 /// Translate an OpenAI-shape `File` part's nested `file` object into a
-/// `ResponsesContentItem::InputFile`.
+/// `ResponsesContentItem::InputFile`. On Bedrock Mantle a part whose only
+/// carrier is `file_url` fails the request.
 fn translate_file_part(
     id: &str,
     auth_kind: AuthKind,
@@ -1133,6 +1135,22 @@ fn translate_file_part(
         file_url,
         filename,
     } = file_carrier(id, file.as_object())?;
+    // Mantle requests are signed with the operator's AWS credentials, so a
+    // url the client chose would be fetched, if Mantle fetches it at all,
+    // with the operator's access rather than the client's. Refuse rather
+    // than hand an unchecked url to that principal.
+    if matches!(auth_kind, AuthKind::BedrockMantle)
+        && file_url.is_some()
+        && file_data.is_none()
+        && file_id.is_none()
+    {
+        return Err(Error::normalize_request(
+            id,
+            "file content part on a user message carries only file_url, which \
+             bedrock-mantle does not forward: send file_data or file_id",
+            RefusalReason::Unrepresentable,
+        ));
+    }
     let file_url = file_url.filter(|_| !withholds_user_file_url(auth_kind, file));
     Ok(ResponsesContentItem::InputFile {
         file_data,

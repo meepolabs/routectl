@@ -161,27 +161,19 @@ fn user_file_url_only_forwards_on_the_api_key_and_chatgpt_oauth_lanes() {
 }
 
 #[test]
-fn user_file_url_only_forwards_on_every_lane_including_mantle() {
-    // Arrange: the url is the part's only carrier, so leaving it off would
-    // ship a file part naming nothing.
+fn user_file_url_only_is_refused_on_the_mantle_lane() {
+    // Arrange: the url is the part's only carrier.
     let url = "https://example.test/a.pdf";
     let req = req_with(vec![user_file(json!({"file_url": url}))]);
 
-    for (name, lane) in [
-        ("mantle", cfg_bedrock_mantle()),
-        ("chatgpt-oauth", cfg()),
-        ("api-key", cfg_api_key()),
-    ] {
-        // Act
-        let v = translate_to_json(&lane, &req);
+    // Act
+    let err = translate(&cfg_bedrock_mantle(), &req).expect_err("mantle refuses a url-only file");
 
-        // Assert
-        assert_eq!(
-            v["input"][0]["content"],
-            json!([{"type": "input_file", "file_url": url}]),
-            "{name}"
-        );
-    }
+    // Assert: the refusal is counted under its reason and never echoes the url.
+    assert_eq!(err.refusal_reason(), Some(RefusalReason::Unrepresentable));
+    let msg = err.to_string();
+    assert!(msg.contains("only file_url"), "message was: {msg}");
+    assert!(!msg.contains("example.test"), "echoes the url: {msg}");
 }
 
 #[test]

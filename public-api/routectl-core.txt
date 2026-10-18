@@ -742,8 +742,6 @@ pub fn routectl_core::error::Error::with_upstream_reason(self, core::option::Opt
 pub fn routectl_core::error::Error::with_upstream_request_id(self, core::option::Option<alloc::string::String>) -> Self
 impl core::convert::From<core::io::error::Error> for routectl_core::error::Error
 pub fn routectl_core::error::Error::from(core::io::error::Error) -> Self
-impl core::convert::From<serde_json::error::Error> for routectl_core::error::Error
-pub fn routectl_core::error::Error::from(serde_json::error::Error) -> Self
 impl core::error::Error for routectl_core::error::Error
 pub fn routectl_core::error::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for routectl_core::error::Error
@@ -1480,7 +1478,7 @@ pub routectl_core::refusal_reason::RefusalReason::TranslationAccounting
 pub routectl_core::refusal_reason::RefusalReason::Unparseable
 pub routectl_core::refusal_reason::RefusalReason::Unrepresentable
 impl routectl_core::refusal_reason::RefusalReason
-pub const routectl_core::refusal_reason::RefusalReason::ALL: &'static [Self]
+pub const routectl_core::refusal_reason::RefusalReason::ALL: [Self; 16]
 pub const fn routectl_core::refusal_reason::RefusalReason::as_str(self) -> &'static str
 pub const fn routectl_core::refusal_reason::RefusalReason::failure_class(self) -> routectl_core::failure_class::FailureClass
 pub fn routectl_core::refusal_reason::RefusalReason::from_token(&str) -> core::option::Option<Self>
@@ -4556,8 +4554,6 @@ pub fn routectl_core::error::Error::with_upstream_reason(self, core::option::Opt
 pub fn routectl_core::error::Error::with_upstream_request_id(self, core::option::Option<alloc::string::String>) -> Self
 impl core::convert::From<core::io::error::Error> for routectl_core::error::Error
 pub fn routectl_core::error::Error::from(core::io::error::Error) -> Self
-impl core::convert::From<serde_json::error::Error> for routectl_core::error::Error
-pub fn routectl_core::error::Error::from(serde_json::error::Error) -> Self
 impl core::error::Error for routectl_core::error::Error
 pub fn routectl_core::error::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for routectl_core::error::Error
@@ -5144,7 +5140,7 @@ pub routectl_core::RefusalReason::TranslationAccounting
 pub routectl_core::RefusalReason::Unparseable
 pub routectl_core::RefusalReason::Unrepresentable
 impl routectl_core::refusal_reason::RefusalReason
-pub const routectl_core::refusal_reason::RefusalReason::ALL: &'static [Self]
+pub const routectl_core::refusal_reason::RefusalReason::ALL: [Self; 16]
 pub const fn routectl_core::refusal_reason::RefusalReason::as_str(self) -> &'static str
 pub const fn routectl_core::refusal_reason::RefusalReason::failure_class(self) -> routectl_core::failure_class::FailureClass
 pub fn routectl_core::refusal_reason::RefusalReason::from_token(&str) -> core::option::Option<Self>

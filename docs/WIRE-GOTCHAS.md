@@ -70,10 +70,11 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
 ## Anthropic API surface
 
-- **A mispaired tool transcript is forwarded; only a Gemini target refuses
-  it.** A transcript whose tool calls and tool results do not pair up
-  (a result answering no call, a call left unanswered, a duplicated
-  result) reaches every non-Gemini target unchanged: routectl neither
+- **A mispaired tool transcript is forwarded; of its pairing defects only
+  a Gemini target refuses one.** A transcript whose tool calls and tool
+  results carry ids but do not pair up (a result answering no call, a call
+  left unanswered, a duplicated result) reaches every non-Gemini target
+  unchanged: routectl neither
   synthesizes nor drops a turn. `record_transcript_defect` in
   `crates/routectl-router/src/router/transcript_defect.rs` validates the
   pairing once per request and keeps the defect as a request fact. A
@@ -87,6 +88,15 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   (`tool-call-id-missing`, `normalize_replay_invariants` in
   `crates/routectl-providers/src/anthropic_api/messages.rs`), the one
   egress that refuses a missing tool id.
+
+- **A local egress refusal walks the fallback chain, except a missing
+  forwarded bearer.** A refusal raised while translating for one target
+  (`tool-pairing`, `tool-call-id-missing`, `unrepresentable`,
+  `strict-translation` and the other egress reasons) moves the request to
+  the next target in the chain, since that target may hold the shape. A
+  request bound for a forwarded-credential target that carries no bearer
+  (`forwarded-bearer-missing`) ends instead: it is never retried on
+  another target.
 
 - **A canonical field that duplicates a wire field creates a both-present
   case, and a translation arm written as "already handled elsewhere"
@@ -642,17 +652,23 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   empty or absent image url, or an empty base64 payload, forwards as an
   empty `image_url` or data URI; a file part naming no carrier forwards as a
   bare `input_file`; and the openai-compat lift carries `tool_use` and
-  `tool_result` ids and names verbatim. A url-only user file on Bedrock
-  Mantle forwards too. Only a value no slot can hold is refused locally
-  (`unrepresentable`): a non-object `image_url`, a non-string image slot or
-  file carrier (`read_image_url`, `string_slot`, `file_carrier` in
+  `tool_result` ids and names verbatim. Only a value no slot can hold is
+  refused locally (`unrepresentable`): a non-object `image_url`, a
+  non-string image slot or file carrier (`read_image_url`, `string_slot`,
+  `file_carrier` in
   `crates/routectl-providers/src/openai_responses/messages.rs`), and a
   `tool_use` block that is not an object (`tool_use_to_tool_call` in
   `crates/routectl-providers/src/openai_compat/wire_lift/tool_use.rs`).
+  One slot-holding shape is refused too: on Bedrock Mantle a user file
+  whose only carrier is `file_url` (`translate_file_part`). Mantle requests
+  are signed with the operator's AWS credentials, so a client-chosen url
+  would be dereferenced, if at all, under the operator's access; beside
+  `file_data` or `file_id` the url is left off the wire instead.
   Pinned by `an_absent_or_empty_tool_output_id_reaches_the_body_as_an_empty_call_id`,
   `user_image_url_part_with_empty_or_absent_url_forwards_an_empty_image_url`,
   `user_file_with_no_carrier_forwards_as_a_bare_input_file`,
-  `user_file_url_only_forwards_on_every_lane_including_mantle` and
+  `user_file_url_only_forwards_on_the_api_key_and_chatgpt_oauth_lanes`,
+  `user_file_url_only_is_refused_on_the_mantle_lane` and
   `tool_result_with_absent_or_non_string_tool_use_id_forwards_it_verbatim`.
 
 - **OpenAI Responses chatgpt-oauth endpoint is stream-only.** Sending
