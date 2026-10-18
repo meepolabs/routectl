@@ -615,42 +615,51 @@ fn tool_message_with_id_emits_user_role_with_tool_result() {
     assert_eq!(tool_result["content"][0]["text"], "4");
 }
 
+/// A `Role::Tool` turn with no usable id forwards `toolUseId: ""`: no
+/// routectl step after translation reads the id (coalescing, the dummy
+/// toolConfig backfill and the cache point are id-blind), so only the
+/// upstream can object to it.
 #[test]
-fn tool_message_without_id_returns_err() {
-    // Arrange: Role::Tool with `tool_call_id: None` MUST surface
-    // as a NormalizeRequest error rather than emit
-    // `toolResult.toolUseId == ""` upstream (AWS 400).
-    let cfg = fake_cfg();
-    let req = ChatRequest {
-        model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![
-            user_msg("calc 2+2"),
-            Message {
-                refusal: None,
-                role: Role::Tool,
-                content: MessageContent::Text("result".into()),
-                reasoning: None,
-                reasoning_details: vec![],
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-        ]
-        .into(),
-        ..Default::default()
-    };
+fn tool_message_without_id_forwards_an_empty_tool_use_id() {
+    for (row, tool_call_id) in [("absent", None), ("empty", Some(String::new()))] {
+        // Arrange
+        let cfg = fake_cfg();
+        let req = ChatRequest {
+            model: "anthropic.claude-haiku-4-5".into(),
+            messages: vec![
+                user_msg("calc 2+2"),
+                Message {
+                    refusal: None,
+                    role: Role::Tool,
+                    content: MessageContent::Text("result".into()),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id,
+                    tool_calls: None,
+                },
+            ]
+            .into(),
+            ..Default::default()
+        };
 
-    let err = normalize_request(&cfg, &req).unwrap_err();
+        // Act
+        let body = normalize_request(&cfg, &req)
+            .unwrap_or_else(|e| panic!("{row} tool_call_id must forward, got: {e}"));
 
-    let msg = err.to_string();
-    assert!(
-        msg.contains("tool_call_id"),
-        "error must mention tool_call_id; got: {msg}"
-    );
-    assert_eq!(
-        err.refusal_reason(),
-        Some(routectl_core::RefusalReason::ToolCallIdMissing)
-    );
+        // Assert
+        let tool_result = body["messages"][0]["content"]
+            .as_array()
+            .expect("content array")
+            .iter()
+            .find_map(|b| b.get("toolResult"))
+            .unwrap_or_else(|| panic!("{row}: toolResult block in {body}"));
+        assert_eq!(tool_result["toolUseId"], "", "{row} tool_call_id");
+        assert_eq!(
+            tool_result["content"][0]["text"], "result",
+            "{row} tool_call_id"
+        );
+    }
 }
 
 #[test]

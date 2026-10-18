@@ -31,24 +31,10 @@ fn assistant_turn(details: Vec<ReasoningDetail>) -> Message {
     }
 }
 
-/// An assistant turn whose `content` carries a `Thinking` PART with no
-/// signature. This is the reachable hard-error shape: the content-part
-/// translator rejects it rather than skipping it, so `build_messages`
-/// returns `Err` from a later turn.
-fn assistant_turn_with_unsigned_thinking_part() -> Message {
-    Message {
-        refusal: None,
-        role: Role::Assistant,
-        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Thinking {
-            thinking: "unsigned".into(),
-            signature: None,
-        })]),
-        reasoning: None,
-        reasoning_details: vec![],
-        name: None,
-        tool_call_id: None,
-        tool_calls: None,
-    }
+/// A user turn this translator refuses (an image source that is not an
+/// object), so `build_messages` returns `Err` from a later turn.
+fn refused_user_turn() -> Message {
+    user_turn(vec![image_part(json!("not-an-object"))])
 }
 
 const UNSIGNED_WARN_NEEDLE: &str =
@@ -197,8 +183,8 @@ fn signed_reasoning_details_emit_no_unsigned_warn() {
 }
 
 /// The aggregate is flushed on BOTH arms. A first turn records an unsigned
-/// skip, then a later turn carries an unsigned `Thinking` content part,
-/// which the content-part translator rejects with a hard error. Without a
+/// skip, then a later turn carries a content part the translator refuses.
+/// Without a
 /// flush on the error arm the recorded skip is silently swallowed and the
 /// operator sees only the translation failure.
 #[test]
@@ -207,7 +193,7 @@ fn unsigned_reasoning_warn_survives_a_later_turns_translation_error() {
     // Arrange
     let messages = vec![
         assistant_turn(vec![unsigned_detail(Some(0))]),
-        assistant_turn_with_unsigned_thinking_part(),
+        refused_user_turn(),
     ];
 
     // Act
@@ -219,7 +205,7 @@ fn unsigned_reasoning_warn_survives_a_later_turns_translation_error() {
     // Assert
     assert!(
         result_is_err,
-        "an unsigned Thinking content part must fail translation"
+        "a refused content part must fail translation"
     );
     let warn = find_unsigned_warn(&events);
     assert_eq!(warn.field("skipped_count"), Some("1"));

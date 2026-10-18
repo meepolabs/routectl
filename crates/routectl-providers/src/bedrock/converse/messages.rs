@@ -28,40 +28,37 @@
 //! Single enforcement points, so a document cannot behave differently
 //! depending on which carrier it arrived in.
 //!
-//! Image AND document parts follow the two-class policy the Responses
-//! egress also implements, on the malformed-vs-unrepresentable axis:
+//! Image AND document parts are classified by whether a Converse wire
+//! member can hold what the caller sent:
 //!
-//! - MALFORMED: the caller asked to send content bytes and named none -- an
-//!   absent, empty, or non-string `source.data`, `source.media_type`,
-//!   `source.type`, `source.url`, or `image_url.url`. There is no valid
-//!   interpretation at any egress, so the request FAILS with a
-//!   `normalize_request` error naming the field. Required-field structure
-//!   is checked BEFORE representability, so a part that is both broken and
-//!   unrepresentable reports the break. The error never echoes a
-//!   caller-controlled value: it reaches the client as a redacted 400 and
-//!   the detail stays server-side.
-//! - UNREPRESENTABLE: the content is well-formed but this JSON wire has no
-//!   slot for it -- a nonempty url ref, an unmapped media type, an
-//!   unrecognized-but-nonempty source kind. The part drops with a WARN and
-//!   the rest of the turn ships. An ambiguous shape defaults HERE, never to
-//!   malformed: an unknown source kind may be a valid vendor extension a
-//!   later build learns, and erroring on it would 400 working traffic the
-//!   day one ships.
+//! - FORWARDED: the value fits a wire slot, even if the upstream may reject
+//!   it. An absent or empty `source.data` / `source.media_type`, or a
+//!   `data:` URI with an empty payload, ships as `bytes: ""` /
+//!   `format: ""`; the upstream decides, and its rejection is learnable.
+//! - REFUSED (`unrepresentable`): no wire slot can hold the value -- a
+//!   non-object source, an absent, empty, or non-string `source.type` (the
+//!   kind selects the wire member, and there is none to select), a
+//!   non-string `data` / `media_type` (the slots are strings), or an empty
+//!   url ref (`ConverseImageSource` has no url member). The error names
+//!   the field and never echoes a caller-controlled value: it reaches the
+//!   client as a redacted 400 and the detail stays server-side.
+//! - DROPPED: a well-formed part this JSON wire cannot carry -- a nonempty
+//!   url ref, a nonempty unmapped media type, an unrecognized-but-nonempty
+//!   source kind. The part drops with a WARN and the rest of the turn
+//!   ships: an unknown source kind may be a valid vendor extension a later
+//!   build learns, and erroring on it would 400 working traffic the day one
+//!   ships.
 //!
-//! Normalization is fail-fast, so a malformed part anywhere fails the
-//! whole request and nothing dispatches upstream -- returning 200 after
-//! silently dropping content is the failure mode this policy replaces.
+//! Normalization is fail-fast, so a refused part anywhere fails the whole
+//! request and nothing dispatches upstream.
 //!
-//! The malformed class above is scoped to the plain image, `image_url`, and
+//! The refused class above is scoped to the plain image, `image_url`, and
 //! plain document carriers, which have no way to preserve a source they
-//! cannot read. The tool-result carriers classify more narrowly on purpose:
-//! an unreadable source there takes the JSON fallback, so the model still
-//! receives the payload rather than the caller receiving a 400. Only a
-//! source that names a wire-carryable kind and then names no bytes or no
-//! format -- an absent, empty, or non-string `data` or `media_type` -- is
-//! malformed on those paths, because the JSON wrap of such a source would
-//! deliver no content either way. See `image_source_to_tool_result` and
-//! `document_to_tool_result`.
+//! cannot read. The tool-result carriers refuse more narrowly: an
+//! unreadable source there takes the JSON fallback, so the model still
+//! receives the payload. Only a non-string `data` or `media_type` on a
+//! wire-carryable kind is refused on those paths. See
+//! `image_source_to_tool_result` and `document_to_tool_result`.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
@@ -84,9 +81,8 @@ use super::types::{
 };
 
 /// Translate every message in `req.messages` into a `ConverseMessage`,
-/// dropping Role::System (handled by the top-level `system` array) and
-/// rejecting Role::Tool messages without a `tool_call_id` (AWS rejects
-/// empty `toolUseId` with a 400). Messages whose translated content
+/// dropping Role::System (handled by the top-level `system` array).
+/// Messages whose translated content
 /// vec is empty (canonical Null content, or every typed Part dropped
 /// during translation) are skipped entirely -- AWS Converse rejects
 /// `content: []` with "Member must have at least 1 element."
@@ -704,9 +700,9 @@ fn content_blocks_from_parts(
 
 /// Translate one canonical ContentPart -> Converse content block.
 /// Returns Ok(None) when the block has no Converse equivalent and is
-/// dropped (with a tracing diagnostic). Returns Err only on hard
-/// translation failures (e.g. thinking block without a signature, which
-/// would 400 AWS on multi-turn replay).
+/// dropped (with a tracing diagnostic). Returns Err only when no wire
+/// slot can hold the part's value (e.g. an image source that is not an
+/// object).
 fn translate_content_part(
     id: &str,
     p: &ContentPart,
@@ -821,29 +817,14 @@ fn translate_known_part(
             thinking,
             signature,
         } => {
-            // Multi-turn replay against thinking-enabled Claude on
-            // Converse REQUIRES the signature -- AWS validates that
-            // each `reasoningText` block carries the upstream-supplied
-            // signature, and 400s with a confusing
-            // "validation: invalid reasoning content" otherwise.
-            // Surface the missing signature locally so the operator
-            // sees the precise field to fix instead of a vague AWS
-            // error on the second turn.
-            let Some(sig) = signature.as_ref().filter(|s| !s.is_empty()).cloned() else {
-                return Err(Error::normalize_request(
-                    id,
-                    "thinking block on Converse egress missing signature; \
-                     cannot replay (Anthropic/Bedrock requires the \
-                     upstream-supplied signature on every reasoningContent \
-                     block in a multi-turn request)",
-                    RefusalReason::Unrepresentable,
-                ));
-            };
+            // The signature rides verbatim, absent or empty included: the
+            // wire member is optional, so whether an unsigned replay is
+            // acceptable is the upstream's call, not this translator's.
             Ok(Some(ConverseContentBlock::ReasoningContent {
                 reasoning_content: ConverseRequestReasoningBlock::ReasoningText {
                     reasoning_text: ConverseRequestReasoningText {
                         text: thinking.clone(),
-                        signature: Some(sig),
+                        signature: signature.clone(),
                     },
                 },
             }))
@@ -864,18 +845,14 @@ fn translate_known_part(
 /// Convert a canonical Anthropic-shape image `source` (`{type: "base64",
 /// media_type, data}`) into a `ConverseContentBlock::Image`.
 ///
-/// Two classes, on the malformed-vs-unrepresentable axis. A source that
-/// asked to send bytes and named none -- a non-object source, an absent or
-/// empty `type`, an absent or empty base64 `data` or `media_type`, an empty
-/// url -- is MALFORMED at every egress and fails the request naming the
-/// field. A well-formed source this JSON wire cannot carry (a nonempty url
-/// ref, an unmapped media type, an unrecognized source kind) is
-/// UNREPRESENTABLE: it yields `Ok(None)` and a WARN, and the rest of the
-/// turn still ships.
-///
-/// Required-field structure is checked BEFORE representability, so an
-/// empty-`data` part whose `media_type` is also unmapped reports the broken
-/// field rather than hiding behind the unsupported-media drop.
+/// Three classes (see the module doc). An absent or empty base64 `data`
+/// or `media_type` forwards verbatim as `bytes` / `format`. A source no
+/// wire slot can hold -- a non-object source, an absent, empty, or
+/// non-string `type`, a non-string `data` or `media_type`, an empty url --
+/// fails the request naming the field. A well-formed source this JSON wire
+/// cannot carry (a nonempty url ref, a nonempty unmapped media type, an
+/// unrecognized source kind) yields `Ok(None)` and a WARN, and the rest of
+/// the turn still ships.
 ///
 /// Both unrepresentable arms are baked seed verdicts per foundations sec
 /// 14: deletion stays blocked until this lane's own wire evidence
@@ -906,8 +883,8 @@ fn translate_image_source(
         ));
     };
     if kind == "url" {
-        // Structure first: an empty url names no location, which is broken
-        // regardless of the wire's inability to carry a nonempty one.
+        // `ConverseImageSource` has no url member, so an empty url has no
+        // slot to forward into; a nonempty one takes the drop below.
         if obj
             .get("url")
             .and_then(|v| v.as_str())
@@ -934,31 +911,25 @@ fn translate_image_source(
         );
         return Ok(None);
     }
-    let Some(media_type) = obj
-        .get("media_type")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
+    // A non-string member has no `String` slot to ride in; an absent or
+    // empty one forwards as `""` and the upstream judges it.
+    let Some(media_type) = forwardable_str(obj, "media_type") else {
         return Err(Error::normalize_request(
             id,
-            "image content part on a Converse message names no image format: \
-             source.media_type is absent, empty, or not a string",
+            "image content part on a Converse message has an unusable image format: \
+             source.media_type is not a string",
             RefusalReason::Unrepresentable,
         ));
     };
-    let Some(data) = obj
-        .get("data")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(data) = forwardable_str(obj, "data") else {
         return Err(Error::normalize_request(
             id,
-            "image content part on a Converse message has an empty base64 payload: \
-             source.data is absent, empty, or not a string",
+            "image content part on a Converse message has an unusable base64 payload: \
+             source.data is not a string",
             RefusalReason::Unrepresentable,
         ));
     };
-    let Some(format) = media_type_to_image_format(media_type) else {
+    let Some(format) = forwarded_image_format(media_type) else {
         // AWS's image format table is bounded and the caller did nothing
         // wrong; the bytes simply have no `image.format` value to ride.
         // TRANSLATION-DROP: lane=bedrock-converse class=image_media_type_unsupported test=unmapped_image_media_type_bumps_the_drop_counter_once
@@ -983,11 +954,12 @@ fn translate_image_source(
 /// Convert an OpenAI-shape `image_url.url` data URI into a Converse
 /// Image block.
 ///
-/// An absent or empty `url` names no image and fails the request. A
-/// well-formed non-data-URI ref (`https://...`) cannot ride the JSON
-/// Converse wire, so it drops with a WARN. A `data:` URI declaring base64
-/// with an empty payload is the same "asked to send bytes, named none"
-/// shape as an empty `source.data` and fails alongside it.
+/// An absent, empty, or non-string `url` fails the request: the image
+/// source is bytes-only, so there is no member a url could forward into.
+/// A `data:` URI declaring base64 with a mapped media type forwards its
+/// payload verbatim, an empty one included. Any other ref (`https://...`,
+/// an unmapped media type) cannot ride the JSON Converse wire, so it drops
+/// with a WARN.
 ///
 /// The warn-drop is a baked seed verdict per foundations sec 14: deletion
 /// stays blocked until this lane's own wire evidence contradicts it.
@@ -1010,25 +982,16 @@ fn translate_image_url(
     };
     if let Some(rest) = url.strip_prefix("data:")
         && let Some((mt, b64)) = rest.split_once(";base64,")
+        && let Some(format) = media_type_to_image_format(mt)
     {
-        if b64.is_empty() {
-            return Err(Error::normalize_request(
-                id,
-                "image_url content part on a Converse message has an empty base64 payload: \
-                 image_url.url declares base64 and carries no bytes",
-                RefusalReason::Unrepresentable,
-            ));
-        }
-        if let Some(format) = media_type_to_image_format(mt) {
-            return Ok(Some(ConverseContentBlock::Image {
-                image: ConverseImage {
-                    format,
-                    source: ConverseImageSource {
-                        bytes: b64.to_string(),
-                    },
+        return Ok(Some(ConverseContentBlock::Image {
+            image: ConverseImage {
+                format,
+                source: ConverseImageSource {
+                    bytes: b64.to_string(),
                 },
-            }));
-        }
+            },
+        }));
     }
     // A well-formed reference this JSON wire cannot dereference: Converse
     // carries inline bytes only, so there is no `image.source` member a URL
@@ -1081,6 +1044,34 @@ fn file_data_to_document_source(file: &Value) -> Option<(Value, Option<String>)>
     Some((source, title))
 }
 
+/// Read a source member that rides a `String` wire slot. An absent member
+/// reads as `""` and a string reads verbatim; `None` means the member holds
+/// another JSON type, which no `String` slot can carry.
+fn forwardable_str<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
+    match obj.get(key) {
+        None => Some(""),
+        Some(value) => value.as_str(),
+    }
+}
+
+/// The `image.format` for a source `media_type`. An empty media type
+/// forwards as an empty format; a nonempty unmapped one has no format value
+/// to ride and returns `None`.
+fn forwarded_image_format(media_type: &str) -> Option<String> {
+    if media_type.is_empty() {
+        return Some(String::new());
+    }
+    media_type_to_image_format(media_type)
+}
+
+/// Document counterpart of `forwarded_image_format`.
+fn forwarded_document_format(media_type: &str) -> Option<String> {
+    if media_type.is_empty() {
+        return Some(String::new());
+    }
+    media_type_to_document_format(media_type)
+}
+
 fn media_type_to_image_format(mt: &str) -> Option<String> {
     match mt.to_ascii_lowercase().as_str() {
         "image/png" => Some("png".to_string()),
@@ -1098,21 +1089,17 @@ fn media_type_to_image_format(mt: &str) -> Option<String> {
 ///     text body; AWS doesn't require base64 for text formats but we
 ///     normalize to base64 for one-shape simplicity).
 ///
-/// Two classes, the same malformed-vs-unrepresentable axis the image
-/// carriers use. A source that asked to send a document and named none --
-/// a non-object source, an absent or empty `type`, `media_type`, or
-/// `data` -- is MALFORMED at every egress and fails the request naming the
-/// field. A well-formed source this JSON wire cannot carry (an
-/// unrecognized source kind such as a URL ref, or a media type outside
-/// AWS's format table) is UNREPRESENTABLE: `Ok(None)` plus a WARN, and
-/// the rest of the turn still ships.
+/// The same three classes the image carriers use. An absent or empty
+/// `media_type` or `data` forwards verbatim as `format` / the source
+/// member. A source no wire slot can hold -- a non-object source, an
+/// absent, empty, or non-string `type`, a non-string `media_type` or
+/// `data` -- fails the request naming the field. A well-formed source this
+/// JSON wire cannot carry (an unrecognized source kind such as a URL ref,
+/// or a nonempty media type outside AWS's format table) yields `Ok(None)`
+/// plus a WARN, and the rest of the turn still ships.
 ///
-/// The source KIND is classified before its required fields, because an
+/// The source KIND is classified before its fields, because an
 /// unrecognized kind gives no basis for saying which fields it requires.
-/// Within a recognized kind, required-field structure is checked BEFORE
-/// representability, so an empty-`data` document whose `media_type` is
-/// also unmapped reports the broken field rather than hiding behind the
-/// unsupported-media drop.
 ///
 /// Both unrepresentable arms are baked seed verdicts per foundations sec
 /// 14: deletion stays blocked until this lane's own wire evidence
@@ -1159,34 +1146,23 @@ fn translate_document(
         );
         return Ok(None);
     };
-    let Some(media_type) = obj
-        .get("media_type")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(media_type) = forwardable_str(obj, "media_type") else {
         return Err(Error::normalize_request(
             id,
-            "document content part on a Converse message names no document format: \
-             source.media_type is absent, empty, or not a string",
+            "document content part on a Converse message has an unusable document format: \
+             source.media_type is not a string",
             RefusalReason::Unrepresentable,
         ));
     };
-    // Empty `data` is malformed for BOTH recognized kinds: a base64 source
-    // names no bytes, and an empty text body base64-encodes to an equally
-    // empty payload. Either way the model receives no document.
-    let Some(raw_data) = obj
-        .get("data")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(raw_data) = forwardable_str(obj, "data") else {
         return Err(Error::normalize_request(
             id,
-            "document content part on a Converse message has an empty payload: \
-             source.data is absent, empty, or not a string",
+            "document content part on a Converse message has an unusable payload: \
+             source.data is not a string",
             RefusalReason::Unrepresentable,
         ));
     };
-    let Some(format) = media_type_to_document_format(media_type) else {
+    let Some(format) = forwarded_document_format(media_type) else {
         // AWS's document format table is bounded and the caller did nothing
         // wrong; the body simply has no `document.format` value to ride.
         // TRANSLATION-DROP: lane=bedrock-converse class=document_media_type_unsupported test=unmapped_document_media_type_bumps_the_drop_counter_once
@@ -1399,9 +1375,7 @@ fn document_source_kind(kind: &str) -> Option<DocumentSourceKind> {
 /// in that case. A `base64` source always passes through as
 /// `source.bytes` and is never decoded back to text.
 ///
-/// `data` is expected to be nonempty: every caller rejects or drops an
-/// empty payload before reaching here, because both kinds would otherwise
-/// ship a document carrying nothing.
+/// An empty `data` forwards as an empty member of the chosen kind.
 fn document_source(
     kind: DocumentSourceKind,
     data: &str,
@@ -1509,9 +1483,7 @@ fn translate_tool_result_array_element(
 }
 
 /// Build a synthetic user-role message from a canonical `Role::Tool`
-/// turn. Returns an error when `tool_call_id` is missing -- AWS rejects
-/// `toolResult.toolUseId == ""` and the silent fallback that produced
-/// an empty string upstream-failed with a vague 400.
+/// turn. An absent or empty `tool_call_id` forwards as `toolUseId: ""`.
 ///
 /// `cache_control` markers on the turn's parts are carried as ONE sibling
 /// `cachePoint` right after the `toolResult` block (see
@@ -1521,19 +1493,13 @@ fn build_tool_message(
     msg: &Message,
     tally: &mut CitationsDropTally<'_>,
 ) -> Result<ConverseMessage> {
-    let Some(tool_use_id) = msg.tool_call_id.as_ref().filter(|s| !s.is_empty()).cloned() else {
-        return Err(routectl_core::Error::NormalizeRequest(
-            "bedrock-converse".to_string(),
-            "tool message missing tool_call_id (Role::Tool requires \
-             non-empty toolUseId for AWS Converse)"
-                .to_string(),
-            RefusalReason::ToolCallIdMissing,
-        ));
-    };
     // Sanitize to the charset the toolUse emit uses (via
     // `normalize_tool_calls`) so a result for an OpenAI-origin id still
-    // correlates after both map to the same `[a-zA-Z0-9_-]+` value.
-    let tool_use_id = crate::tool_id::sanitize_tool_id(&tool_use_id).into_owned();
+    // correlates after both map to the same `[a-zA-Z0-9_-]+` value. An
+    // absent id forwards as `""`: nothing downstream of this point reads
+    // the id, so only the upstream can object to it.
+    let tool_use_id =
+        crate::tool_id::sanitize_tool_id(msg.tool_call_id.as_deref().unwrap_or("")).into_owned();
     let mut content = match &msg.content {
         MessageContent::Text(t) => vec![ConverseToolResultContent::Text { text: t.clone() }],
         MessageContent::Parts(parts) => parts
@@ -1612,10 +1578,10 @@ fn ttl_rank(ttl: &str) -> u8 {
 /// gets the canonical schema instead of the AWS image/document block.
 ///
 /// For IMAGE and DOCUMENT parts: a source that names a kind this wire
-/// carries and then names no bytes -- an absent, empty, or non-string
-/// `data` or `media_type` -- fails the request; every other source this
-/// egress cannot represent takes the JSON fallback, which still delivers
-/// the payload to the model.
+/// carries and then holds a non-string `data` or `media_type` fails the
+/// request; an absent or empty one forwards verbatim; every other source
+/// this egress cannot represent takes the JSON fallback, which still
+/// delivers the payload to the model.
 fn translate_part_for_tool_result(
     id: &str,
     p: &ContentPart,
@@ -1669,10 +1635,9 @@ fn content_part_to_json_fallback(p: &ContentPart) -> ConverseToolResultContent {
 /// This carrier classifies DIFFERENTLY from `translate_image_source`, and
 /// deliberately so: every caller of this helper wraps an `Ok(None)` as a
 /// `ConverseToolResultContent::Json`, so the model still receives the
-/// payload. The plain image path has no such fallback, which is why a
-/// source naming no bytes must fail the request there. Here, only a source
-/// that positively declares base64 and then names no bytes -- an absent,
-/// empty, or non-string `data` or `media_type` -- is malformed; anything
+/// payload. Here, only a source that positively declares base64 and then
+/// holds a non-string `data` or `media_type` is refused (the wire slots
+/// are strings); an absent or empty one forwards verbatim, and anything
 /// else takes the JSON fallback rather than converting a working request
 /// into a 400.
 fn image_source_to_tool_result(
@@ -1695,32 +1660,24 @@ fn image_source_to_tool_result(
     if kind != "base64" {
         return Ok(None);
     }
-    let Some(media_type) = obj
-        .get("media_type")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(media_type) = forwardable_str(obj, "media_type") else {
         return Err(Error::normalize_request(
             id,
-            "image block in a Converse tool result names no image format: \
-             source.media_type is absent, empty, or not a string",
+            "image block in a Converse tool result has an unusable image format: \
+             source.media_type is not a string",
             RefusalReason::Unrepresentable,
         ));
     };
-    let Some(data) = obj
-        .get("data")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(data) = forwardable_str(obj, "data") else {
         return Err(Error::normalize_request(
             id,
-            "image block in a Converse tool result has an empty base64 payload: \
-             source.data is absent, empty, or not a string",
+            "image block in a Converse tool result has an unusable base64 payload: \
+             source.data is not a string",
             RefusalReason::Unrepresentable,
         ));
     };
     // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
-    let Some(format) = media_type_to_image_format(media_type) else {
+    let Some(format) = forwarded_image_format(media_type) else {
         return Ok(None);
     };
     Ok(Some(ConverseToolResultContent::Image {
@@ -1742,13 +1699,11 @@ fn image_source_to_tool_result(
 /// This carrier classifies DIFFERENTLY from `translate_document`, and
 /// deliberately so: every caller of this helper wraps an `Ok(None)` as a
 /// `ConverseToolResultContent::Json`, so the model still receives the
-/// payload. The plain document path has no such fallback, which is why a
-/// source naming no document must fail the request there. Here, only a
-/// source that names a kind this wire carries and THEN names no bytes or no
-/// format -- an absent, empty, or non-string `data` or `media_type` -- is
-/// malformed; a JSON wrap of such a source would deliver a document with no
-/// content either way. Anything else takes the fallback rather than
-/// converting a working request into a 400.
+/// payload. Here, only a source that names a kind this wire carries and
+/// THEN holds a non-string `data` or `media_type` is refused (the wire
+/// slots are strings); an absent or empty one forwards verbatim. Anything
+/// else takes the fallback rather than converting a working request into a
+/// 400.
 fn document_to_tool_result(
     id: &str,
     source: &Value,
@@ -1768,32 +1723,24 @@ fn document_to_tool_result(
     else {
         return Ok(None);
     };
-    let Some(media_type) = obj
-        .get("media_type")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(media_type) = forwardable_str(obj, "media_type") else {
         return Err(Error::normalize_request(
             id,
-            "document block in a Converse tool result names no document format: \
-             source.media_type is absent, empty, or not a string",
+            "document block in a Converse tool result has an unusable document format: \
+             source.media_type is not a string",
             RefusalReason::Unrepresentable,
         ));
     };
-    let Some(data) = obj
-        .get("data")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(data) = forwardable_str(obj, "data") else {
         return Err(Error::normalize_request(
             id,
-            "document block in a Converse tool result has an empty payload: \
-             source.data is absent, empty, or not a string",
+            "document block in a Converse tool result has an unusable payload: \
+             source.data is not a string",
             RefusalReason::Unrepresentable,
         ));
     };
     // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
-    let Some(format) = media_type_to_document_format(media_type) else {
+    let Some(format) = forwarded_document_format(media_type) else {
         return Ok(None);
     };
     Ok(Some(ConverseToolResultContent::Document {
@@ -3728,17 +3675,20 @@ mod tests {
 
     /// The aggregate WARN is the only operator-facing record of the loss, so
     /// it must survive a later translation failure: a recorded drop followed
-    /// by a `Role::Tool` turn missing its `tool_call_id` still emits exactly
-    /// one WARN carrying the count observed before the error.
+    /// by a turn carrying a refused image source still emits exactly one
+    /// WARN carrying the count observed before the error.
     #[test]
     fn recorded_drop_still_warns_when_a_later_message_fails_to_translate() {
         // Arrange
         let messages = vec![
             document_message(Some(json!("yes"))),
             Message {
-                role: Role::Tool,
-                tool_call_id: None,
-                content: MessageContent::Text("result".into()),
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    routectl_core::KnownContentPart::Image {
+                        source: json!("not-an-object"),
+                        cache_control: None,
+                    },
+                )]),
                 ..user_msg()
             },
         ];
@@ -3746,7 +3696,7 @@ mod tests {
         // Act
         let events = routectl_testkit::capture_events(|| {
             build_messages(TEST_ID, &messages)
-                .expect_err("a tool message without tool_call_id must fail translation");
+                .expect_err("a refused image source must fail translation");
         });
 
         // Assert

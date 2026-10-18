@@ -1,8 +1,9 @@
-// The two-class content policy applied to every image-carrying path on the
-// Converse egress: MALFORMED (the caller asked to send image bytes and named
-// none) fails the request; UNREPRESENTABLE (a well-formed image this JSON
-// wire cannot carry) keeps its warn-drop. Imports live in the host
-// `messages_tests.rs` -- do not add `use` lines here.
+// The content policy applied to every image-carrying path on the Converse
+// egress: a value a wire slot can hold FORWARDS verbatim (the upstream
+// judges it); a value no wire slot can hold is REFUSED as unrepresentable;
+// a well-formed image this JSON wire cannot carry keeps its warn-drop.
+// Imports live in the host `messages_tests.rs` -- do not add `use` lines
+// here.
 
 /// A user turn carrying the given parts, plus nothing else.
 fn user_turn(parts: Vec<ContentPart>) -> Message {
@@ -75,17 +76,71 @@ fn text_part(text: &str) -> ContentPart {
     })
 }
 
-/// The normalize-request detail for a translation expected to fail.
+/// The normalize-request detail for a translation expected to be refused.
+/// Every refusal on this path has no wire slot to forward into, so the
+/// reason is asserted here for each caller.
 fn normalize_error_detail(messages: &[Message]) -> String {
     match build_messages(TEST_ID, messages) {
-        Err(Error::NormalizeRequest(_, detail, _)) => detail,
+        Err(err @ Error::NormalizeRequest(..)) => {
+            assert_eq!(
+                err.refusal_reason(),
+                Some(RefusalReason::Unrepresentable),
+                "a refused content part must carry the unrepresentable reason"
+            );
+            let Error::NormalizeRequest(_, detail, _) = err else {
+                unreachable!("matched above")
+            };
+            detail
+        }
         Err(other) => panic!("expected a NormalizeRequest error, got {other:?}"),
-        Ok(blocks) => panic!("expected a malformed-image failure, got Ok({blocks:?})"),
+        Ok(blocks) => panic!("expected a refused translation, got Ok({blocks:?})"),
     }
 }
 
+/// The full Converse request body built for `messages`.
+fn built_body(messages: Vec<Message>) -> Value {
+    let cfg = crate::bedrock::BedrockConfig {
+        id: TEST_ID.into(),
+        region: "us-west-2".into(),
+        model_id: "anthropic.claude-haiku-4-5".into(),
+        api_shape: crate::bedrock::BedrockApiShape::Converse,
+        creds: crate::bedrock::BedrockCreds::BearerKey { key: "test".into() },
+        user_agent: None,
+        header_extras: Vec::new(),
+        anthropic_beta: Vec::new(),
+        additional_model_request_fields: None,
+        adaptive_thinking: None,
+    };
+    let req = routectl_core::ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: messages.into(),
+        ..Default::default()
+    };
+    crate::bedrock::converse::normalize_request(&cfg, &req).expect("the shape must forward")
+}
+
+/// The first content block of the body's first message carrying `key`.
+fn first_block<'a>(body: &'a Value, key: &str) -> &'a Value {
+    body["messages"][0]["content"]
+        .as_array()
+        .expect("message content array")
+        .iter()
+        .find_map(|b| b.get(key))
+        .unwrap_or_else(|| panic!("no `{key}` block in the built body: {body}"))
+}
+
+/// The first `toolResult.content[]` element of the body carrying `key`.
+fn first_tool_result_element<'a>(body: &'a Value, key: &str) -> &'a Value {
+    first_block(body, "toolResult")["content"]
+        .as_array()
+        .expect("toolResult content array")
+        .iter()
+        .find_map(|b| b.get(key))
+        .unwrap_or_else(|| panic!("no `{key}` element in the toolResult: {body}"))
+}
+
 /// Assert that translating `messages` fails and the detail names `field`.
-fn assert_malformed_naming(messages: &[Message], field: &str) {
+fn assert_refused_naming(messages: &[Message], field: &str) {
     let detail = normalize_error_detail(messages);
     assert!(
         detail.contains(field),
@@ -151,44 +206,122 @@ fn assert_tool_result_json_fallback(messages: &[Message]) {
 }
 
 // ---------------------------------------------------------------------------
-// MALFORMED -- the regression probe: an image that names no bytes
+// FORWARDED -- a value the wire slot can hold reaches the body verbatim
 // ---------------------------------------------------------------------------
 
-/// The core defect. A base64 image source whose `data` is present but empty
-/// names no bytes at all, yet the pre-fix egress built
-/// `source: {bytes: ""}` and shipped an EMPTY IMAGE upstream with HTTP 200,
-/// no WARN and no drop: the caller believes the model saw an image, and it
-/// saw nothing. Naming no bytes is malformed at every egress, so the request
-/// must fail instead.
+/// An absent or empty base64 `data` fits `image.source.bytes`; only the
+/// upstream can object to an empty image, so it forwards on every carrier.
 #[test]
-fn image_source_with_empty_data_fails_the_request() {
-    // Arrange
-    let messages = vec![user_turn(vec![image_part(json!({
-        "type": "base64",
-        "media_type": "image/png",
-        "data": "",
-    }))])];
+fn empty_image_data_forwards_as_empty_bytes_on_every_carrier() {
+    let base64 = |data: Option<&str>| {
+        let mut source = json!({"type": "base64", "media_type": "image/png"});
+        if let Some(data) = data {
+            source["data"] = json!(data);
+        }
+        source
+    };
+    for (row, data) in [("absent", None), ("empty", Some(""))] {
+        // Arrange
+        let message = built_body(vec![user_turn(vec![image_part(base64(data))])]);
+        let tool = built_body(vec![tool_turn(vec![image_part(base64(data))])]);
+        let raw = built_body(vec![raw_tool_result_turn(json!([
+            {"type": "image", "source": base64(data)},
+        ]))]);
 
-    // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
+        // Act / Assert
+        assert_eq!(
+            first_block(&message, "image"),
+            &json!({"format": "png", "source": {"bytes": ""}}),
+            "message carrier, {row} data"
+        );
+        for (carrier, body) in [("tool turn", &tool), ("raw tool_result", &raw)] {
+            assert_eq!(
+                first_tool_result_element(body, "image"),
+                &json!({"format": "png", "source": {"bytes": ""}}),
+                "{carrier} carrier, {row} data"
+            );
+        }
+    }
 }
 
-/// The same defect through the absent-field door: `data` missing entirely
-/// read as `""` and shipped as an empty image.
+/// An absent or empty `media_type` fits `image.format` as `""`; it must not
+/// fall into the unmapped-media drop, which is for a nonempty type AWS's
+/// table lacks.
 #[test]
-fn image_source_with_absent_data_fails_the_request() {
-    // Arrange
-    let messages = vec![user_turn(vec![image_part(json!({
-        "type": "base64",
-        "media_type": "image/png",
-    }))])];
+fn empty_image_media_type_forwards_as_empty_format_on_every_carrier() {
+    let base64 = |media_type: Option<&str>| {
+        let mut source = json!({"type": "base64", "data": "AAAA"});
+        if let Some(media_type) = media_type {
+            source["media_type"] = json!(media_type);
+        }
+        source
+    };
+    for (row, media_type) in [("absent", None), ("empty", Some(""))] {
+        // Arrange
+        let message = built_body(vec![user_turn(vec![image_part(base64(media_type))])]);
+        let tool = built_body(vec![tool_turn(vec![image_part(base64(media_type))])]);
+        let raw = built_body(vec![raw_tool_result_turn(json!([
+            {"type": "image", "source": base64(media_type)},
+        ]))]);
 
-    // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
+        // Act / Assert
+        assert_eq!(
+            first_block(&message, "image"),
+            &json!({"format": "", "source": {"bytes": "AAAA"}}),
+            "message carrier, {row} media_type"
+        );
+        for (carrier, body) in [("tool turn", &tool), ("raw tool_result", &raw)] {
+            assert_eq!(
+                first_tool_result_element(body, "image"),
+                &json!({"format": "", "source": {"bytes": "AAAA"}}),
+                "{carrier} carrier, {row} media_type"
+            );
+        }
+    }
 }
 
-/// A non-string `data` names no bytes either -- the pre-fix `as_str()` fell
-/// through to the same empty-image emit.
+/// A `data:` URI declaring base64 with no payload names a mapped format and
+/// an empty byte string, both of which the image slot holds.
+#[test]
+fn image_url_data_uri_with_empty_payload_forwards_as_empty_bytes() {
+    // Arrange
+    let messages = vec![user_turn(vec![image_url_part(
+        json!({"url": "data:image/png;base64,"}),
+    )])];
+
+    // Act
+    let body = built_body(messages);
+
+    // Assert
+    assert_eq!(
+        first_block(&body, "image"),
+        &json!({"format": "png", "source": {"bytes": ""}})
+    );
+}
+
+/// A nonempty unmapped media type still takes its drop when the payload is
+/// empty: the empty payload forwards, but there is no format to ride.
+#[test]
+#[serial_test::serial(bedrock_converse_image_media_type_unsupported)]
+fn empty_data_with_an_unmapped_media_type_still_warn_drops() {
+    // Arrange
+    let messages = vec![user_turn(vec![
+        text_part("anchor"),
+        image_part(json!({"type": "base64", "media_type": "image/tiff", "data": ""})),
+    ])];
+
+    // Act / Assert
+    assert_warn_dropped(
+        &messages,
+        "dropping image with unmapped media_type on Converse egress",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// REFUSED -- no wire slot can hold the value
+// ---------------------------------------------------------------------------
+
+/// A non-string `data` has no `String` slot to ride in.
 #[test]
 fn image_source_with_non_string_data_fails_the_request() {
     // Arrange
@@ -199,70 +332,8 @@ fn image_source_with_non_string_data_fails_the_request() {
     }))])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
+    assert_refused_naming(&messages, "source.data");
 }
-
-/// The tool-result carrier of the identical defect: the same empty-`data`
-/// source reached AWS as `{image: {source: {bytes: ""}}}` inside a
-/// toolResult.
-#[test]
-fn tool_result_image_with_empty_data_fails_the_request() {
-    // Arrange
-    let messages = vec![tool_turn(vec![image_part(json!({
-        "type": "base64",
-        "media_type": "image/png",
-        "data": "",
-    }))])];
-
-    // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
-}
-
-/// The tool-result carrier, absent-field door.
-#[test]
-fn tool_result_image_with_absent_data_fails_the_request() {
-    // Arrange
-    let messages = vec![tool_turn(vec![image_part(json!({
-        "type": "base64",
-        "media_type": "image/png",
-    }))])];
-
-    // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
-}
-
-/// The raw Anthropic-shape tool_result content array is a third carrier of
-/// the same source shape, and shipped the same empty image.
-#[test]
-fn raw_tool_result_image_with_empty_data_fails_the_request() {
-    // Arrange
-    let messages = vec![raw_tool_result_turn(json!([{
-        "type": "image",
-        "source": {"type": "base64", "media_type": "image/png", "data": ""},
-    }]))];
-
-    // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
-}
-
-/// An `image_url` data URI declaring base64 with an empty payload is the
-/// same "asked to send bytes, named none" shape reached through the
-/// OpenAI-shape part: the pre-fix parse split cleanly and emitted
-/// `bytes: ""`.
-#[test]
-fn image_url_data_uri_with_empty_payload_fails_the_request() {
-    // Arrange
-    let messages = vec![user_turn(vec![image_url_part(
-        json!({"url": "data:image/png;base64,"}),
-    )])];
-
-    // Act / Assert
-    assert_malformed_naming(&messages, "image_url.url");
-}
-
-// ---------------------------------------------------------------------------
-// MALFORMED -- the remaining structurally provable cases
-// ---------------------------------------------------------------------------
 
 /// A `source` that is not a JSON object carries no field to read.
 #[test]
@@ -271,10 +342,11 @@ fn image_source_that_is_not_an_object_fails_the_request() {
     let messages = vec![user_turn(vec![image_part(json!("not-an-object"))])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "source");
+    assert_refused_naming(&messages, "source");
 }
 
-/// An absent `source.type` leaves the source shape unnamed.
+/// An absent `source.type` leaves the source shape unnamed, and the shape
+/// is what selects the wire member.
 #[test]
 fn image_source_with_absent_type_fails_the_request() {
     // Arrange
@@ -284,7 +356,7 @@ fn image_source_with_absent_type_fails_the_request() {
     }))])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "source.type");
+    assert_refused_naming(&messages, "source.type");
 }
 
 /// An empty `source.type` is the absent case wearing a string.
@@ -298,42 +370,12 @@ fn image_source_with_empty_type_fails_the_request() {
     }))])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "source.type");
+    assert_refused_naming(&messages, "source.type");
 }
 
-/// A base64 source with no `media_type` cannot name an AWS image format,
-/// and the field is required rather than defaultable: guessing a format
-/// ships bytes the model decodes as the wrong thing.
-#[test]
-fn base64_image_source_with_absent_media_type_fails_the_request() {
-    // Arrange
-    let messages = vec![user_turn(vec![image_part(json!({
-        "type": "base64",
-        "data": "AAAA",
-    }))])];
-
-    // Act / Assert
-    assert_malformed_naming(&messages, "source.media_type");
-}
-
-/// An empty `media_type` on a base64 source, same class as absent.
-#[test]
-fn base64_image_source_with_empty_media_type_fails_the_request() {
-    // Arrange
-    let messages = vec![user_turn(vec![image_part(json!({
-        "type": "base64",
-        "media_type": "",
-        "data": "AAAA",
-    }))])];
-
-    // Act / Assert
-    assert_malformed_naming(&messages, "source.media_type");
-}
-
-/// A url-shape source whose `url` is empty names neither bytes nor a
-/// location. It is the direct analogue of the empty `image_url.url` case
-/// and fails for the same reason -- the nonempty url-shape source is the
-/// one that stays a warn-drop.
+/// A url-shape source whose `url` is empty has no slot to forward into:
+/// the Converse image source is bytes-only. The nonempty url-shape source
+/// is the one that stays a warn-drop.
 #[test]
 fn url_shape_image_source_with_empty_url_fails_the_request() {
     // Arrange
@@ -343,17 +385,18 @@ fn url_shape_image_source_with_empty_url_fails_the_request() {
     }))])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "source.url");
+    assert_refused_naming(&messages, "source.url");
 }
 
-/// An `image_url` part with no url at all.
+/// An `image_url` part with no url at all; the image source has no url
+/// member to carry one.
 #[test]
 fn image_url_with_absent_url_fails_the_request() {
     // Arrange
     let messages = vec![user_turn(vec![image_url_part(json!({}))])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "image_url.url");
+    assert_refused_naming(&messages, "image_url.url");
 }
 
 /// An `image_url` part with an empty url.
@@ -363,31 +406,13 @@ fn image_url_with_empty_url_fails_the_request() {
     let messages = vec![user_turn(vec![image_url_part(json!({"url": ""}))])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "image_url.url");
+    assert_refused_naming(&messages, "image_url.url");
 }
 
-/// Required-field STRUCTURE is validated before representability. An
-/// empty-`data` part whose `media_type` is also unmapped must fail as
-/// malformed rather than disappearing into the unsupported-media warn-drop
-/// -- the caller's request is broken, and reporting it as "this route
-/// cannot carry TIFF" would send them fixing the wrong thing.
-#[test]
-fn empty_data_outranks_an_unmapped_media_type() {
-    // Arrange
-    let messages = vec![user_turn(vec![image_part(json!({
-        "type": "base64",
-        "media_type": "image/tiff",
-        "data": "",
-    }))])];
-
-    // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
-}
-
-/// A non-string field is neither absent nor a usable value; the policy
-/// treats it as the absent case, and each malformed carrier must say so by
-/// naming its own field. Table-driven because the classification is one
-/// rule applied across three shapes, not three separate behaviors.
+/// A non-string field fits no `String` wire slot, and each refusing
+/// carrier must say so by naming its own field. Table-driven because the
+/// classification is one rule applied across shapes, not separate
+/// behaviors.
 #[test]
 fn non_string_required_fields_fail_the_request_naming_the_field() {
     // Arrange
@@ -440,7 +465,7 @@ fn non_string_required_fields_fail_the_request_naming_the_field() {
 
     // Act / Assert
     for (messages, field) in cases {
-        assert_malformed_naming(&messages, field);
+        assert_refused_naming(&messages, field);
     }
 }
 
@@ -492,7 +517,7 @@ fn unknown_nonempty_image_source_type_still_warn_drops() {
 }
 
 /// A structurally complete source whose `media_type` AWS does not model is
-/// unrepresentable, not malformed -- AWS's format table is bounded and the
+/// a drop, not a refusal -- AWS's format table is bounded and the
 /// caller did nothing wrong.
 #[test]
 #[serial_test::serial(bedrock_converse_image_media_type_unsupported)]
@@ -573,8 +598,8 @@ fn raw_tool_result_url_shape_image_source_keeps_the_json_fallback() {
 
 /// The tool-result carrier is not the plain image path: an `Ok(None)` here
 /// still delivers the payload to the model as a JSON-wrapped tool result,
-/// so a source this egress cannot read is unrepresentable rather than
-/// malformed. Erroring instead converts a working 200 into a 400. Each
+/// so a source this egress cannot read takes the fallback rather than a
+/// refusal. Erroring instead converts a working 200 into a 400. Each
 /// shape is exercised through BOTH tool-result carriers -- the raw
 /// Anthropic-shape array element and the canonical `Role::Tool` part --
 /// because they translate one source shape and must agree on it.
@@ -605,33 +630,33 @@ fn unreadable_tool_result_image_sources_keep_the_json_fallback() {
 // Atomicity and diagnostics
 // ---------------------------------------------------------------------------
 
-/// A malformed image AFTER a valid one fails the whole normalization.
+/// A refused image AFTER a valid one fails the whole normalization.
 /// Nothing dispatches upstream: shipping the remaining parts and returning
-/// 200 is exactly the silent content loss being fixed.
+/// 200 would silently lose the refused part.
 #[test]
-fn valid_image_then_malformed_image_fails_the_whole_request() {
+fn valid_image_then_refused_image_fails_the_whole_request() {
     // Arrange
     let messages = vec![user_turn(vec![
         image_part(json!({"type": "base64", "media_type": "image/png", "data": "AAAA"})),
-        image_part(json!({"type": "base64", "media_type": "image/png", "data": ""})),
+        image_part(json!({"type": "base64", "media_type": "image/png", "data": 42})),
     ])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
+    assert_refused_naming(&messages, "source.data");
 }
 
 /// The reverse ordering fails identically -- the failure cannot depend on
-/// where in the turn the malformed part sits.
+/// where in the turn the refused part sits.
 #[test]
-fn malformed_image_then_valid_image_fails_the_whole_request() {
+fn refused_image_then_valid_image_fails_the_whole_request() {
     // Arrange
     let messages = vec![user_turn(vec![
-        image_part(json!({"type": "base64", "media_type": "image/png", "data": ""})),
+        image_part(json!({"type": "base64", "media_type": "image/png", "data": 42})),
         image_part(json!({"type": "base64", "media_type": "image/png", "data": "AAAA"})),
     ])];
 
     // Act / Assert
-    assert_malformed_naming(&messages, "source.data");
+    assert_refused_naming(&messages, "source.data");
 }
 
 /// `Error::NormalizeRequest` reaches the ingress as a 400 whose detail is
@@ -639,16 +664,17 @@ fn malformed_image_then_valid_image_fails_the_whole_request() {
 /// never echo a caller-controlled VALUE -- payload bytes, media types and
 /// urls are caller data.
 #[test]
-fn malformed_image_errors_never_echo_a_caller_value() {
+fn refused_image_errors_never_echo_a_caller_value() {
     // Arrange: each case carries a distinctive caller value in a field the
     // error is NOT about, so an echo is unambiguous.
-    let empty_data = vec![user_turn(vec![image_part(json!({
+    let non_string_data = vec![user_turn(vec![image_part(json!({
         "type": "base64",
         "media_type": "image/sentinel-media-type",
-        "data": "",
+        "data": 42,
     }))])];
-    let absent_media_type = vec![user_turn(vec![image_part(json!({
+    let non_string_media_type = vec![user_turn(vec![image_part(json!({
         "type": "base64",
+        "media_type": 7,
         "data": "sentinel-payload-bytes",
     }))])];
     let bad_url = vec![user_turn(vec![image_url_part(json!({
@@ -658,8 +684,8 @@ fn malformed_image_errors_never_echo_a_caller_value() {
 
     // Act / Assert
     for (messages, leak) in [
-        (empty_data, "image/sentinel-media-type"),
-        (absent_media_type, "sentinel-payload-bytes"),
+        (non_string_data, "image/sentinel-media-type"),
+        (non_string_media_type, "sentinel-payload-bytes"),
         (bad_url, "sentinel-detail-value"),
     ] {
         let detail = normalize_error_detail(&messages);
@@ -671,15 +697,15 @@ fn malformed_image_errors_never_echo_a_caller_value() {
 }
 
 /// Both per-request tallies are flushed on the error arm. A citation drop
-/// and an unsigned-reasoning skip recorded BEFORE a malformed image are
+/// and an unsigned-reasoning skip recorded BEFORE a refused image are
 /// aggregate events the operator is owed regardless of how the request
 /// ends; without a flush on the `Err` path both are silently swallowed and
 /// only the translation failure surfaces.
 #[test]
 #[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
-fn tallies_recorded_before_a_malformed_image_still_flush_on_the_error_path() {
+fn tallies_recorded_before_a_refused_image_still_flush_on_the_error_path() {
     // Arrange: turn 0 drops a citations value, turn 1 skips an unsigned
-    // reasoning detail, turn 2 carries the malformed image.
+    // reasoning detail, turn 2 carries the refused image.
     let messages = vec![
         user_turn(vec![ContentPart::Known(KnownContentPart::Document {
             source: json!({"type": "text", "media_type": "text/plain", "data": "notes"}),
@@ -688,11 +714,7 @@ fn tallies_recorded_before_a_malformed_image_still_flush_on_the_error_path() {
             cache_control: None,
         })]),
         assistant_turn(vec![unsigned_detail(Some(0))]),
-        user_turn(vec![image_part(json!({
-            "type": "base64",
-            "media_type": "image/png",
-            "data": "",
-        }))]),
+        user_turn(vec![image_part(json!("not-an-object"))]),
     ];
 
     // Act
@@ -702,7 +724,7 @@ fn tallies_recorded_before_a_malformed_image_still_flush_on_the_error_path() {
     });
 
     // Assert
-    assert!(result_is_err, "the malformed image must fail the request");
+    assert!(result_is_err, "the refused image must fail the request");
     let citations_warn = events
         .iter()
         .any(|e| e.level == tracing::Level::WARN && e.field("dropped_count") == Some("1"));

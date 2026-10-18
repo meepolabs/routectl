@@ -520,90 +520,59 @@ fn thinking_block_with_signature_translates_to_converse_reasoning_text() {
     assert_eq!(content[1]["text"], "answer");
 }
 
+/// `reasoningText.signature` is an optional wire member, so a `Thinking`
+/// part forwards its signature as the caller sent it: absent stays absent
+/// and empty stays empty. Whether an unsigned replay is acceptable is the
+/// upstream's call.
 #[test]
-fn thinking_block_without_signature_returns_err() {
-    // Arrange: missing signature must surface as a NormalizeRequest
-    // error locally rather than producing a body AWS will 400 with a
-    // confusing "invalid reasoning content" error on the second turn.
-    let cfg = fake_cfg();
-    let req = ChatRequest {
-        model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![
-            user_msg("q"),
-            Message {
-                refusal: None,
-                role: Role::Assistant,
-                content: MessageContent::Parts(vec![ContentPart::Known(
-                    KnownContentPart::Thinking {
-                        thinking: "no sig here".into(),
-                        signature: None,
-                    },
-                )]),
-                reasoning: None,
-                reasoning_details: vec![],
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-        ]
-        .into(),
-        ..Default::default()
-    };
+fn thinking_block_signature_forwards_verbatim_when_absent_or_empty() {
+    for (row, signature, expected) in [
+        ("absent", None, None),
+        ("empty", Some(String::new()), Some(json!(""))),
+    ] {
+        // Arrange
+        let cfg = fake_cfg();
+        let req = ChatRequest {
+            model: "anthropic.claude-haiku-4-5".into(),
+            messages: vec![
+                user_msg("q"),
+                Message {
+                    refusal: None,
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![ContentPart::Known(
+                        KnownContentPart::Thinking {
+                            thinking: "unsigned thought".into(),
+                            signature,
+                        },
+                    )]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            ]
+            .into(),
+            ..Default::default()
+        };
 
-    // Act
-    let result = normalize_request(&cfg, &req);
+        // Act
+        let body = normalize_request(&cfg, &req)
+            .unwrap_or_else(|e| panic!("{row} signature must forward, got: {e}"));
 
-    // Assert
-    let err = result.expect_err("expected error on missing signature");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("missing signature") || msg.contains("cannot replay"),
-        "expected normalize_request error about missing signature, got: {msg}"
-    );
-}
-
-#[test]
-fn thinking_block_with_empty_signature_returns_err() {
-    // Arrange: an empty-string signature is logically identical to
-    // a missing signature -- AWS will reject it with a confusing
-    // validation error if we let it through. Surface the same
-    // NormalizeRequest error as the None case so the operator sees
-    // a clear local message instead of a vague AWS 400.
-    let cfg = fake_cfg();
-    let req = ChatRequest {
-        model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![
-            user_msg("q"),
-            Message {
-                refusal: None,
-                role: Role::Assistant,
-                content: MessageContent::Parts(vec![ContentPart::Known(
-                    KnownContentPart::Thinking {
-                        thinking: "empty sig here".into(),
-                        signature: Some(String::new()),
-                    },
-                )]),
-                reasoning: None,
-                reasoning_details: vec![],
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-        ]
-        .into(),
-        ..Default::default()
-    };
-
-    // Act
-    let result = normalize_request(&cfg, &req);
-
-    // Assert
-    let err = result.expect_err("expected error on empty signature");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("missing signature") || msg.contains("cannot replay"),
-        "expected normalize_request error about missing signature, got: {msg}"
-    );
+        // Assert
+        let reasoning_text =
+            &body["messages"][1]["content"][0]["reasoningContent"]["reasoningText"];
+        assert_eq!(
+            reasoning_text["text"], "unsigned thought",
+            "{row} signature"
+        );
+        assert_eq!(
+            reasoning_text.get("signature"),
+            expected.as_ref(),
+            "{row} signature must ride verbatim: {body}"
+        );
+    }
 }
 
 #[test]

@@ -150,9 +150,8 @@ pub enum ConverseContentBlock {
     /// back verbatim. AWS schema mirrors the response side -- a single
     /// `reasoningContent` key wrapping a union of `reasoningText` (text +
     /// optional signature) or `redactedContent` (base64 string). The
-    /// signature is "Required: No" per AWS docs, but Anthropic 400s on
-    /// replay without it; the canonical -> Converse translator surfaces
-    /// the missing signature locally as a clean NormalizeRequest error.
+    /// signature is "Required: No" per AWS docs; the canonical -> Converse
+    /// translator forwards it as the caller sent it, absent included.
     ReasoningContent {
         #[serde(rename = "reasoningContent")]
         reasoning_content: ConverseRequestReasoningBlock,
@@ -183,10 +182,8 @@ pub enum ConverseRequestReasoningBlock {
     },
 }
 
-/// AWS `ReasoningTextBlock`. `text` is required; `signature` is required
-/// in practice for replay even though AWS docs mark it optional, so the
-/// translator errors on absent signature rather than serializing the
-/// field as `null`.
+/// AWS `ReasoningTextBlock`. `text` is required; `signature` is optional
+/// and omitted when absent rather than serialized as `null`.
 #[derive(Debug, Serialize)]
 pub struct ConverseRequestReasoningText {
     pub(crate) text: String,
