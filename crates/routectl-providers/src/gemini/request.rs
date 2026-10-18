@@ -2290,7 +2290,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_schema_keyword_unsupported)]
     fn custom_tool_parameters_are_gemini_cleaned() {
         use routectl_core::{CustomTool, ToolDef};
         // Arrange: a caller schema carrying constructs Gemini rejects raw.
@@ -2349,7 +2348,6 @@ mod tests {
 
     #[traced_test]
     #[test]
-    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn nameless_other_tool_is_skipped_with_warn_not_emitted() {
         use routectl_core::ToolDef;
         // Arrange: a hosted-tool shape carrying no usable function name.
@@ -2370,7 +2368,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn nameless_other_tool_does_not_starve_named_siblings() {
         use routectl_core::{CustomTool, ToolDef};
         // Arrange: a nameless hosted tool alongside a named Other and a Custom.
@@ -2405,7 +2402,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn named_other_tool_still_emits_declaration_unchanged() {
         use routectl_core::ToolDef;
         // Arrange: a native OpenAI function-shape ToolDef::Other.
@@ -2684,7 +2680,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn all_tools_skipped_with_auto_choice_omits_tool_config() {
         let req = nameless_tool_req_with_choice(json!("auto"));
         let body = translate("gemini:test", &req).expect("translate ok");
@@ -2696,7 +2691,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn all_tools_skipped_with_required_choice_omits_tool_config() {
         let req = nameless_tool_req_with_choice(json!("required"));
         let body = translate("gemini:test", &req).expect("translate ok");
@@ -2708,7 +2702,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_tool_def_unnamed)]
     fn all_tools_skipped_with_named_choice_omits_tool_config() {
         let req = nameless_tool_req_with_choice(
             json!({"type": "function", "function": {"name": "web_search"}}),
@@ -3067,7 +3060,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_response_format_unrepresentable)]
     fn response_format_json_schema_maps_to_response_schema() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -3089,7 +3081,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_schema_keyword_unsupported)]
     fn response_format_pydantic_shaped_schema_is_cleaned_on_the_wire() {
         // A pydantic-emitted schema carries additionalProperties, $defs and a
         // $ref to a nested model, plus an allOf wrapper. The keywords must be
@@ -3144,7 +3135,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_schema_keyword_unsupported)]
     fn response_format_zod_shaped_schema_drops_dollar_schema() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -3175,7 +3165,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_response_format_unrepresentable)]
     fn response_format_json_schema_without_schema_emits_mime_only() {
         // The loss is warned at the call site; the wire keeps the JSON mime so
         // the request still asks for JSON rather than failing.
@@ -3194,7 +3183,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_response_format_unrepresentable)]
     fn response_format_json_object_sets_mime_without_schema() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -3211,7 +3199,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_foreign_reasoning_unreplayable)]
     fn gemini_reasoning_details_replayed_as_thought_parts() {
         // One Gemini-origin detail (replayed) + one foreign detail (skipped).
         let assistant = Message {
@@ -3266,7 +3253,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
     fn responses_reasoning_context_mode_dropped() {
         // A Responses-ingress request carrying reasoning context/mode routed
         // to the Gemini egress does NOT emit them. The fidelity WARN for the
@@ -3447,7 +3433,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
     fn payload_extras_drops_canonical_managed_key() {
         // `tools` is a routectl-managed canonical key (and a real Gemini
         // body key) -- payload_extras must not be allowed to clobber it.
@@ -3462,7 +3447,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
     fn payload_extras_cannot_clobber_gemini_structural_keys() {
         // contents / generationConfig are Gemini wire-owned keys (NOT
         // canonical names), but a client can smuggle them via provider_extras
@@ -3502,7 +3486,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
     #[traced_test]
     fn payload_extras_generation_config_topk_never_reaches_wire() {
         // An operator setting `payload_extras.generationConfig.topK` gets a
@@ -3603,7 +3586,6 @@ mod tests {
 
     #[traced_test]
     #[test]
-    #[serial_test::serial(gemini_cache_control_unsupported)]
     fn warn_fires_for_cache_control_bearing_request() {
         // Arrange: a request carrying a top-level cache_control breakpoint.
         let mut req = base_req();
@@ -3621,7 +3603,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_cache_control_unsupported)]
     fn no_warn_for_clean_request() {
         // Arrange: no cache_control -> no diagnostic. The marked control
         // proves the capture would have seen the diagnostic.
@@ -3699,7 +3680,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn data_uri_image_url_maps_to_inline_data() {
         // Arrange: the plain RFC 2397 base64 form.
         let part = image_url_part("data:image/png;base64,iVBORw0KGgo=");
@@ -3714,7 +3694,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn parameterized_data_uri_image_url_maps_to_inline_data() {
         // Arrange: RFC 2397 allows `;<param>` between the media type and the
         // `;base64` flag, and browser tooling emits `;charset=utf-8`. A
@@ -3737,7 +3716,6 @@ mod tests {
     /// legal spelling down the text fall-through and ship the base64 payload
     /// upstream as prose -- the failure the guard exists to prevent.
     #[test]
-    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn mixed_case_data_uri_scheme_maps_to_inline_data() {
         // Arrange
         let part = image_url_part("DATA:image/PNG;base64,iVBORw0KGgo=");
@@ -3754,7 +3732,6 @@ mod tests {
 
     #[test]
     #[traced_test]
-    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn unparseable_data_uri_image_url_drops_with_warn() {
         // Arrange: a data: URI with no `;base64,` separator. Passing this
         // through as text would smuggle the payload upstream as billed prose.
@@ -3770,7 +3747,6 @@ mod tests {
 
     #[test]
     #[traced_test]
-    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn empty_payload_data_uri_image_url_drops_with_warn() {
         // Arrange: truncated upload -- media type present, zero bytes.
         let part = image_url_part("data:image/png;base64,");
@@ -3784,7 +3760,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_image_url_data_uri_unparseable)]
     fn remote_image_url_still_passes_through_as_text() {
         // Arrange: Gemini does not accept arbitrary remote URLs in
         // inlineData; forwarding the URL as text is a deliberate
@@ -3803,7 +3778,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_image_source_no_inline_bytes)]
     fn base64_image_source_maps_to_inline_data() {
         // Arrange: the Anthropic-shape source that genuinely carries bytes.
         let part = image_source_part(json!({
@@ -3823,7 +3797,6 @@ mod tests {
 
     #[test]
     #[traced_test]
-    #[serial_test::serial(gemini_image_source_no_inline_bytes)]
     fn url_image_source_drops_with_warn() {
         // Arrange: a legal Anthropic url-shape source, which the Anthropic
         // ingress accepts verbatim. It has no media_type and no data, so the
@@ -3843,7 +3816,6 @@ mod tests {
 
     #[test]
     #[traced_test]
-    #[serial_test::serial(gemini_image_source_no_inline_bytes)]
     fn base64_image_source_with_empty_data_drops_with_warn() {
         // Arrange: correct source type, truncated payload.
         let part = image_source_part(json!({
@@ -3879,7 +3851,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn openai_file_part_maps_to_inline_data() {
         // Arrange: the base64-upload form an OpenAI client sends.
         let part = file_part(json!({
@@ -3899,7 +3870,6 @@ mod tests {
     /// RFC 2397 allows omitting the media type. Only then does the filename
     /// extension get a say in the mime.
     #[test]
-    #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn file_part_without_uri_media_type_falls_back_to_filename() {
         // Arrange
         let part = file_part(json!({
@@ -3954,7 +3924,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn file_id_only_file_part_drops_with_warn() {
         // Arrange: the previously-uploaded reference form carries no bytes.
         let part = file_part(json!({"file_id": "file-abc123"}));
@@ -3969,7 +3938,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_file_no_inline_bytes)]
     fn non_data_uri_file_data_drops_with_warn() {
         // Arrange: file_data that is not an RFC 2397 base64 URI. Emitting it
         // verbatim would ship unparseable bytes as a document part.
@@ -3988,7 +3956,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn text_document_source_takes_the_text_fast_path() {
         // Arrange
         let part = document_part(json!({"type": "text", "text": "hello doc"}));
@@ -4002,7 +3969,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn base64_document_source_maps_to_inline_data() {
         // Arrange
         let part = document_part(json!({
@@ -4021,7 +3987,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn url_document_source_drops_with_warn() {
         // Arrange: a legal Anthropic url-shape source, which the Anthropic
         // ingress accepts verbatim. It has no bytes, so the old code emitted
@@ -4041,7 +4006,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_document_source_no_inline_bytes)]
     fn base64_document_source_with_empty_data_drops_with_warn() {
         // Arrange: correct source type, truncated payload.
         let part = document_part(json!({
@@ -4071,7 +4035,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_redacted_thinking_unsupported)]
     fn redacted_thinking_part_drops_with_warn() {
         // Arrange: Gemini's Part has no redacted-thinking slot.
         let part = redacted_thinking_part("AAECAwQF");
@@ -4089,7 +4052,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(gemini_redacted_thinking_unsupported)]
     fn ordinary_thinking_part_survives_with_no_warn() {
         // Arrange: the positive control -- an un-redacted thinking part
         // travels the sibling `Thinking` arm, which must stay unaffected.

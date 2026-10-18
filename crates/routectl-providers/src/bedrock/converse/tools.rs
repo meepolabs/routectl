@@ -838,8 +838,6 @@ mod tests {
     // capture here uses `routectl_testkit::capture_events` rather than
     // `logs_contain`: the structured `provider` field is part of what the
     // drop reports, and a substring match on rendered output cannot see it.
-    // Serialized on the drop_class's own guard because the counter registry
-    // is process-global and this crate's runner is threaded.
     // -----------------------------------------------------------------
 
     fn builtin_tool() -> ToolDef {
@@ -869,7 +867,6 @@ mod tests {
     /// so it drops; the counter advances once and the representable sibling
     /// still ships.
     #[test]
-    #[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
     fn anthropic_builtin_tool_drops_and_bumps_the_drop_counter_once() {
         // Arrange
         let before = builtin_drop_count();
@@ -921,7 +918,6 @@ mod tests {
     /// is bumped once per `build_tool_config` call, which is the placement
     /// this assertion pins.
     #[test]
-    #[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
     fn two_builtin_tools_in_one_request_bump_the_drop_counter_once() {
         // Arrange
         let before = builtin_drop_count();
@@ -950,7 +946,6 @@ mod tests {
     /// warns not at all and advances no counter, proving the fixture above
     /// would have surfaced a WARN not actually tied to the builtin.
     #[test]
-    #[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
     fn custom_tools_only_advance_no_builtin_drop_counter() {
         // Arrange
         let before = builtin_drop_count();
@@ -1027,7 +1022,6 @@ mod tests {
     /// union has no member for drops, warns with the sanitized token, and
     /// counts once. Before this the arm warned and counted nothing.
     #[test]
-    #[serial_test::serial(bedrock_converse_tool_choice_shape_unrepresentable)]
     fn converse_unknown_bare_string_tool_choice_drops_and_counts_once() {
         // Arrange
         let before = shape_drop_count();
@@ -1071,7 +1065,6 @@ mod tests {
     /// typed mode spelling drops and counts on the same class -- one lost
     /// tool_choice is one drop event whichever spelling produced it.
     #[test]
-    #[serial_test::serial(bedrock_converse_tool_choice_shape_unrepresentable)]
     fn converse_unknown_tool_choice_object_shape_drops_and_counts_once() {
         // Arrange
         let before = shape_drop_count();
@@ -1105,10 +1098,6 @@ mod tests {
     /// object shape: one lost tool_choice is one drop event, not two on two
     /// classes.
     #[test]
-    #[serial_test::serial(
-        bedrock_converse_tool_choice_name_missing,
-        bedrock_converse_tool_choice_shape_unrepresentable
-    )]
     fn converse_passthrough_tool_choice_without_a_name_drops_and_counts_once() {
         // Arrange
         let before_name = name_drop_count();
@@ -1153,7 +1142,6 @@ mod tests {
 
     /// NEGATIVE CONTROL: the Anthropic spelling of the same loss.
     #[test]
-    #[serial_test::serial(bedrock_converse_tool_choice_name_missing)]
     fn converse_anthropic_tool_choice_without_a_name_drops_and_counts_once() {
         // Arrange
         let before = name_drop_count();
@@ -1177,7 +1165,6 @@ mod tests {
 
     /// NEGATIVE CONTROL: the OpenAI spelling of the same loss.
     #[test]
-    #[serial_test::serial(bedrock_converse_tool_choice_name_missing)]
     fn converse_openai_tool_choice_without_a_name_drops_and_counts_once() {
         // Arrange
         let before = name_drop_count();
@@ -1204,10 +1191,6 @@ mod tests {
     /// and advances NEITHER counter. Without it the absence assertions above
     /// would pass against an egress that dropped every tool_choice.
     #[test]
-    #[serial_test::serial(
-        bedrock_converse_tool_choice_name_missing,
-        bedrock_converse_tool_choice_shape_unrepresentable
-    )]
     fn representable_tool_choices_survive_and_advance_no_counter() {
         for (choice, expected_member) in [
             (json!("auto"), "auto"),
@@ -1252,10 +1235,6 @@ mod tests {
     /// Converse member carries, and counts once per request on the same class
     /// the string and object paths use.
     #[test]
-    #[serial_test::serial(
-        bedrock_converse_tool_choice_name_missing,
-        bedrock_converse_tool_choice_shape_unrepresentable
-    )]
     fn converse_non_object_non_string_tool_choice_counts_once_and_null_counts_nothing() {
         // Arrange
         let before_null = shape_drop_count();
@@ -1311,7 +1290,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(bedrock_converse_tool_choice_shape_unrepresentable)]
     fn an_unrepresentable_tool_choice_counts_even_when_no_tool_def_survives() {
         // The population that reaches build_tool_config's no-tools early returns
         // is precisely the malformed-tool_choice-without-tools case, so counting
@@ -1348,7 +1326,6 @@ mod tests {
         );
     }
     #[test]
-    #[serial_test::serial(bedrock_converse_tool_choice_name_missing)]
     fn an_ambiguous_tool_choice_still_reaches_the_typed_translation() {
         // REGRESSION GUARD. An object carrying BOTH an unusable Converse-shape
         // `tool` entry and a usable typed spelling must still emit the caller's

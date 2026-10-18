@@ -169,7 +169,6 @@ fn assert_deposit_is_the_wire(tap: &WireTap, wire: &[u8]) {
 }
 
 #[tokio::test]
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 async fn complete_deposits_the_resigned_bytes_the_upstream_received() {
     let (server, bodies) = upstream(false).await;
     let provider = cloak_lane_provider(&server);
@@ -181,7 +180,6 @@ async fn complete_deposits_the_resigned_bytes_the_upstream_received() {
 }
 
 #[tokio::test]
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 async fn stream_deposits_the_resigned_bytes_the_upstream_received() {
     let (server, bodies) = upstream(true).await;
     let provider = cloak_lane_provider(&server);
@@ -194,7 +192,6 @@ async fn stream_deposits_the_resigned_bytes_the_upstream_received() {
 }
 
 #[tokio::test]
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 async fn an_untapped_request_sends_the_same_bytes() {
     let (server, bodies) = upstream(false).await;
     let provider = cloak_lane_provider(&server);
@@ -250,7 +247,6 @@ struct DispatchRow {
 /// Each dispatch-site strip, on each path: the edit is declared when it
 /// fires and absent when it does not.
 #[tokio::test]
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 async fn each_dispatch_site_declares_its_edit_only_when_it_fires() {
     let rows = [
         DispatchRow {
@@ -323,7 +319,6 @@ async fn each_dispatch_site_declares_its_edit_only_when_it_fires() {
 }
 
 #[tokio::test]
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 async fn the_stream_sampling_strip_is_declared() {
     let (mut req, tap) = plain_request(None);
     req.top_p = Some(0.5);
@@ -357,7 +352,6 @@ async fn response_seen(tap: WireTap, stream: bool) -> ResponseSeen {
 }
 
 #[tokio::test]
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 async fn a_response_checking_tap_holds_what_the_upstream_answered() {
     let checking =
         || WireTap::checking_response(routectl_core::wire_check::IngressDialect::Anthropic);
@@ -378,7 +372,6 @@ async fn a_response_checking_tap_holds_what_the_upstream_answered() {
 }
 
 #[tokio::test]
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 async fn a_tap_not_checking_the_response_holds_no_response() {
     let rows = [
         ("unadmitted complete", WireTap::default(), false),

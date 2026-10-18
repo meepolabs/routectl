@@ -4,11 +4,6 @@
 // with the Claude Code billing/attribution block withheld. The withhold is
 // counted once per request whichever surface carried it.
 //
-// Every test here drives a strip site, so every one carries
-// `#[serial_test::serial(openai_compat_client_fingerprint_stripped)]`, the
-// guard the counter tests in the enclosing module hold: the registry is
-// process-global and the runner is threaded.
-//
 // `include!`d into the `tests` module of `request.rs`; imports live there.
 
 const COMPAT_FINGERPRINT: &str = "x-anthropic-billing-header: cc_version=9.9.9; cch=c0mpatfp";
@@ -112,7 +107,6 @@ fn roles_and_contents(body: &serde_json::Value) -> Vec<(String, serde_json::Valu
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn a_fingerprint_only_in_a_system_role_message_is_withheld_from_openai_compat_and_counted() {
     // Arrange -- no top-level system at all: the Anthropic-ingress shape that
     // leaves `role: "system"` turns in `messages`.
@@ -144,7 +138,6 @@ fn a_fingerprint_only_in_a_system_role_message_is_withheld_from_openai_compat_an
 }
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn a_fingerprint_only_in_the_top_level_system_is_withheld_from_openai_compat_and_counted() {
     // Arrange
     let req = req_with(
@@ -178,7 +171,6 @@ fn a_fingerprint_only_in_the_top_level_system_is_withheld_from_openai_compat_and
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn a_fingerprint_part_is_withheld_while_its_sibling_parts_keep_their_order() {
     // Arrange -- the fingerprint FOLLOWS legitimate text in the same message,
     // so a predicate run over the joined text would miss it.
@@ -212,7 +204,6 @@ fn a_fingerprint_part_is_withheld_while_its_sibling_parts_keep_their_order() {
 }
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn a_system_message_whose_only_part_is_the_fingerprint_leaves_the_wire_and_still_counts() {
     // Arrange
     let req = req_with(
@@ -236,7 +227,6 @@ fn a_system_message_whose_only_part_is_the_fingerprint_leaves_the_wire_and_still
 }
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn a_blank_top_level_system_still_strips_the_fingerprint_from_system_role_messages() {
     // Arrange -- blank reads as absent, so it lowers nothing and must not
     // suppress the message-site strip either.
@@ -269,7 +259,6 @@ fn a_blank_top_level_system_still_strips_the_fingerprint_from_system_role_messag
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn a_fingerprint_on_both_surfaces_counts_one_policy_action() {
     // Arrange
     let req = req_with(
@@ -309,7 +298,6 @@ fn a_fingerprint_on_both_surfaces_counts_one_policy_action() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn distinct_system_role_messages_survive_beside_a_top_level_system_in_caller_order() {
     // Arrange -- a direct caller supplying both surfaces, one system turn
     // leading and one mid-conversation.
@@ -343,7 +331,6 @@ fn distinct_system_role_messages_survive_beside_a_top_level_system_in_caller_ord
 }
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn a_system_role_message_repeating_the_top_level_text_is_kept_not_deduplicated() {
     // Arrange -- equal content is not provenance; the caller sent both.
     let req = req_with(
@@ -366,7 +353,6 @@ fn a_system_role_message_repeating_the_top_level_text_is_kept_not_deduplicated()
 }
 
 #[test]
-#[serial_test::serial(openai_compat_client_fingerprint_stripped)]
 fn a_mid_string_billing_prefix_in_a_system_role_message_is_kept_and_not_counted() {
     // Arrange
     let text = "intro x-anthropic-billing-header: not at the start";
@@ -390,10 +376,6 @@ fn a_mid_string_billing_prefix_in_a_system_role_message_is_kept_and_not_counted(
 /// The serial key list carries the document-drop key too: the document block
 /// that makes strict mode fail bumps that counter as a side effect.
 #[test]
-#[serial_test::serial(
-    openai_compat_client_fingerprint_stripped,
-    openai_compat_document_block_unrepresentable
-)]
 fn a_request_that_withheld_the_fingerprint_and_then_failed_strict_translation_still_counts() {
     // Arrange
     let mut req = req_dropped_document_with_system_fingerprint();

@@ -9,13 +9,6 @@
 //! hosted-MCP `tool_choice` names the withheld tool, so it is withheld too.
 //! Each lane is checked on its SERIALIZED body, so a credential surviving
 //! under any key is caught.
-//!
-//! SERIAL GUARD: every test here that sends a hosted-MCP tool through the
-//! anthropic-api lane bumps `(anthropic, hosted_mcp_tool_withheld)`, so all of
-//! them carry `anthropic_hosted_mcp_tool_withheld`, including the ones that do
-//! not read the counter. A test that also sends the tool through Bedrock
-//! Converse bumps `(bedrock-converse, builtin_tool_unrepresentable)` and owes
-//! `bedrock_converse_builtin_tool_unrepresentable` as well.
 
 use serde_json::{Value, json};
 
@@ -144,11 +137,6 @@ fn assert_no_mcp_value(lane: &str, body: &str) {
 }
 
 #[test]
-#[serial_test::serial(
-    anthropic_hosted_mcp_tool_withheld,
-    bedrock_converse_builtin_tool_unrepresentable,
-    bedrock_invoke_lane_seen
-)]
 fn a_hosted_mcp_tool_never_reaches_an_anthropic_shaped_body_and_the_function_tool_survives() {
     // Arrange
     let req = mcp_and_function_request();
@@ -171,7 +159,6 @@ fn a_hosted_mcp_tool_never_reaches_an_anthropic_shaped_body_and_the_function_too
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
 fn the_withhold_warns_once_per_request_naming_no_tool_value() {
     // Arrange -- two hosted-MCP tools on one request are one WARN.
     let req = request_with_tools(vec![
@@ -200,7 +187,6 @@ fn the_withhold_warns_once_per_request_naming_no_tool_value() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
 fn an_anthropic_request_carrying_a_hosted_mcp_tool_counts_one_policy_action() {
     // Arrange -- two hosted-MCP tools; the count is per REQUEST.
     let req = request_with_tools(vec![
@@ -222,7 +208,6 @@ fn an_anthropic_request_carrying_a_hosted_mcp_tool_counts_one_policy_action() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld, bedrock_invoke_lane_seen)]
 fn a_bedrock_invoke_withhold_is_not_credited_to_the_anthropic_lane() {
     // Arrange
     let req = mcp_and_function_request();
@@ -238,7 +223,6 @@ fn a_bedrock_invoke_withhold_is_not_credited_to_the_anthropic_lane() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
 fn a_background_probe_carrying_a_hosted_mcp_tool_counts_nothing() {
     // Arrange
     let mut probe = mcp_and_function_request();
@@ -258,7 +242,6 @@ fn a_background_probe_carrying_a_hosted_mcp_tool_counts_nothing() {
 }
 
 #[test]
-#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn an_anthropic_builtin_still_forwards_verbatim() {
     // Arrange -- positive control: an Anthropic server tool rides
     // `ToolDef::Other` exactly like the hosted-MCP tool does.
@@ -331,7 +314,6 @@ fn anthropic_shaped_bodies(req: &ChatRequest) -> [(&'static str, Value); 2] {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld, bedrock_invoke_lane_seen)]
 fn a_hosted_mcp_tool_choice_becomes_auto_and_names_nothing_on_an_anthropic_shaped_body() {
     // Arrange
     let req = with_tool_choice(mcp_and_function_request(), hosted_mcp_tool_choice());
@@ -356,7 +338,6 @@ fn a_hosted_mcp_tool_choice_becomes_auto_and_names_nothing_on_an_anthropic_shape
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld, bedrock_invoke_lane_seen)]
 fn a_hosted_mcp_tool_choice_with_no_tool_left_on_the_wire_is_omitted() {
     // Arrange -- the only tool is the withheld one, so there is nothing for
     // even an `auto` choice to select.
@@ -379,7 +360,6 @@ fn a_hosted_mcp_tool_choice_with_no_tool_left_on_the_wire_is_omitted() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld, bedrock_invoke_lane_seen)]
 fn anthropic_tool_choices_beside_a_withheld_hosted_mcp_tool_are_unchanged() {
     for choice in [
         json!({"type": "tool", "name": FUNCTION_NAME}),
@@ -400,7 +380,6 @@ fn anthropic_tool_choices_beside_a_withheld_hosted_mcp_tool_are_unchanged() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
 fn a_hosted_mcp_tool_choice_alone_counts_one_policy_action_and_warns_without_values() {
     // Arrange -- no hosted-MCP tool, so only the choice site can record.
     let req = with_tool_choice(
@@ -452,7 +431,6 @@ fn web_search_builtin() -> Value {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
 fn an_anthropic_api_hosted_mcp_withhold_is_reported_under_the_mcp_key() {
     for req in [
         mcp_and_function_request(),
@@ -473,7 +451,6 @@ fn an_anthropic_api_hosted_mcp_withhold_is_reported_under_the_mcp_key() {
 }
 
 #[test]
-#[serial_test::serial(bedrock_converse_builtin_tool_unrepresentable)]
 fn a_converse_builtin_drop_is_reported_under_its_canonical_key() {
     // Arrange
     let (req, report) = listening(request_with_tools(vec![
@@ -509,10 +486,6 @@ fn a_request_whose_tools_all_translate_reports_nothing() {
 }
 
 #[test]
-#[serial_test::serial(
-    anthropic_hosted_mcp_tool_withheld,
-    bedrock_converse_builtin_tool_unrepresentable
-)]
 fn a_background_probe_reports_no_translation_reason() {
     // Arrange
     let mut probe = request_with_tools(vec![
@@ -534,10 +507,6 @@ fn a_background_probe_reports_no_translation_reason() {
 }
 
 #[test]
-#[serial_test::serial(
-    anthropic_hosted_mcp_tool_withheld,
-    bedrock_converse_builtin_tool_unrepresentable
-)]
 fn the_translation_report_debug_form_names_no_tool_value() {
     // Arrange
     let (req, report) = listening(with_tool_choice(

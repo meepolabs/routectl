@@ -87,11 +87,7 @@ fn blank_canonical_system_serializes_empty_instructions() {
     }
 }
 
-// Carries the `cache_control_unsupported` serial guard even though it asserts
-// no counter: it translates a marked request, so it bumps that process-global
-// counter incidentally and would race a sibling reading its delta.
 #[test]
-#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn system_content_with_cache_control_warns_and_strips() {
     // Arrange
     let mut req = req_with(vec![user_text("hi")]);

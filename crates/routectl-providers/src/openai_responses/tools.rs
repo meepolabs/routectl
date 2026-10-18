@@ -321,7 +321,6 @@ mod tool_choice_drop_tests {
     /// Responses `tool_choice` field admits drops, warns with the sanitized
     /// token, and counts once. Before this the arm warned and counted nothing.
     #[test]
-    #[serial_test::serial(openai_responses_tool_choice_shape_unrepresentable)]
     fn responses_unknown_bare_string_tool_choice_drops_and_counts_once() {
         // Arrange
         let before = shape_drop_count();
@@ -352,10 +351,6 @@ mod tool_choice_drop_tests {
     /// NEGATIVE CONTROL: an object carrying neither a mode token nor any name
     /// member is an unreadable shape, counted on the shape class.
     #[test]
-    #[serial_test::serial(
-        openai_responses_tool_choice_name_missing,
-        openai_responses_tool_choice_shape_unrepresentable
-    )]
     fn responses_unreadable_tool_choice_object_drops_and_counts_once() {
         // Arrange
         let before_shape = shape_drop_count();
@@ -386,10 +381,6 @@ mod tool_choice_drop_tests {
     /// empty is a forcing request with no target -- counted on the name class,
     /// and NOT also as an unreadable shape.
     #[test]
-    #[serial_test::serial(
-        openai_responses_tool_choice_name_missing,
-        openai_responses_tool_choice_shape_unrepresentable
-    )]
     fn responses_named_tool_choice_without_a_name_drops_and_counts_once() {
         // Arrange
         let before_name = name_drop_count();
@@ -432,10 +423,6 @@ mod tool_choice_drop_tests {
     /// advances NEITHER counter. Without it the absence assertions above would
     /// pass against an egress that dropped every tool_choice.
     #[test]
-    #[serial_test::serial(
-        openai_responses_tool_choice_name_missing,
-        openai_responses_tool_choice_shape_unrepresentable
-    )]
     fn representable_tool_choices_survive_and_advance_no_counter() {
         for (choice, expected) in [
             (json!("auto"), json!("auto")),

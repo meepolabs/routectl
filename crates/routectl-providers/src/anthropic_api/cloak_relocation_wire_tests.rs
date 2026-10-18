@@ -1,10 +1,6 @@
 //! Serialized-wire contract of the client-system relocation: every assertion
 //! reads the bytes `serde_json::to_string` produces for the cloaked body, so a
 //! typed view that looks right while the wire does not cannot pass.
-//!
-//! Every test carries the cloak policy-action guard: the cloak records into the
-//! process-global counter registry, and an unguarded fixture that trips a class
-//! would move a delta another module is asserting.
 
 use super::*;
 
@@ -55,7 +51,6 @@ fn assert_refused_untouched(mut body: Value, needle: &str) {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn assistant_only_history_gains_one_leading_synthetic_user_reminder() {
     let mut body = json!({
         "system": [{"type": "text", "text": "client rules"}],
@@ -82,7 +77,6 @@ fn assistant_only_history_gains_one_leading_synthetic_user_reminder() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn an_empty_conversation_is_refused_before_egress() {
     assert_refused_untouched(
         json!({"system": "client rules", "messages": []}),
@@ -91,7 +85,6 @@ fn an_empty_conversation_is_refused_before_egress() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_conversation_of_only_system_turns_is_refused_before_egress() {
     assert_refused_untouched(
         json!({"messages": [{"role": "system", "content": "only rules"}]}),
@@ -100,13 +93,11 @@ fn a_conversation_of_only_system_turns_is_refused_before_egress() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_missing_message_array_is_refused_before_egress() {
     assert_refused_untouched(json!({"system": "client rules"}), "no message array");
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_malformed_message_array_is_refused_before_egress() {
     assert_refused_untouched(
         json!({"system": "client rules", "messages": {"role": "user", "content": "hi"}}),
@@ -115,7 +106,6 @@ fn a_malformed_message_array_is_refused_before_egress() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_message_entry_without_a_string_role_is_refused_before_egress() {
     // Each malformed entry sits after an assistant turn (which alone would get
     // a synthetic user turn) and ahead of a user turn (which alone would be
@@ -142,7 +132,6 @@ fn a_message_entry_without_a_string_role_is_refused_before_egress() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_lone_malformed_entry_is_refused_rather_than_led_by_a_synthetic_user_turn() {
     assert_refused_untouched(
         json!({"system": "x", "messages": [null]}),
@@ -151,7 +140,6 @@ fn a_lone_malformed_entry_is_refused_rather_than_led_by_a_synthetic_user_turn() 
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn nothing_to_relocate_never_refuses_a_shape() {
     // No client system at all: the relocation lands nothing, so it has no
     // reason to judge the conversation.
@@ -161,7 +149,6 @@ fn nothing_to_relocate_never_refuses_a_shape() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn image_and_document_blocks_ride_after_the_reminder_in_capture_order() {
     let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "IMG1"}});
     let document = json!({"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "DOC1"}});
@@ -187,7 +174,6 @@ fn image_and_document_blocks_ride_after_the_reminder_in_capture_order() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn carried_blocks_are_never_scanned_for_reminder_delimiters() {
     let hostile = format!("x{SYSTEM_REMINDER_CLOSE}y");
     let document = json!({"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": hostile}});
@@ -213,7 +199,6 @@ fn carried_blocks_are_never_scanned_for_reminder_delimiters() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_carried_only_payload_needs_no_reminder() {
     let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "IMG1"}});
     let mut body = json!({
@@ -235,7 +220,6 @@ fn a_carried_only_payload_needs_no_reminder() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn tool_thinking_and_unknown_blocks_never_reach_the_user_role() {
     let mut body = json!({
         "messages": [
@@ -269,7 +253,6 @@ fn tool_thinking_and_unknown_blocks_never_reach_the_user_role() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_carried_breakpoint_within_the_cap_keeps_its_own_marker() {
     let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "I"},
                        "cache_control": {"type": "ephemeral", "ttl": "5m"}});
@@ -293,7 +276,6 @@ fn a_carried_breakpoint_within_the_cap_keeps_its_own_marker() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_carried_breakpoint_over_the_cap_is_refused_before_egress() {
     let marked = |data: &str| {
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data},
@@ -312,7 +294,6 @@ fn a_carried_breakpoint_over_the_cap_is_refused_before_egress() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_carried_breakpoint_that_breaks_ttl_order_is_refused_before_egress() {
     // The synthetic turn leads the history, so its 5m marker lands ahead of
     // the assistant's 1h marker.
@@ -331,7 +312,6 @@ fn a_carried_breakpoint_that_breaks_ttl_order_is_refused_before_egress() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_reminder_breakpoint_landing_after_a_shorter_ttl_is_refused_before_egress() {
     // The first user turn follows a 5m assistant marker, so the reminder's 1h
     // marker lands after it. Text only: no carried block is involved.
@@ -348,7 +328,6 @@ fn a_reminder_breakpoint_landing_after_a_shorter_ttl_is_refused_before_egress() 
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_reminder_breakpoint_in_ttl_order_after_the_history_marker_relocates() {
     // Control for the refusal above: the same landing with equal TTLs is legal,
     // and the two folded markers collapse to the one the reminder carries.
@@ -371,7 +350,6 @@ fn a_reminder_breakpoint_in_ttl_order_after_the_history_marker_relocates() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_billing_block_is_stripped_rather_than_relocated() {
     let mut body = json!({
         "system": [
@@ -396,7 +374,6 @@ fn the_billing_block_is_stripped_rather_than_relocated() {
 /// Byte identity of the successful text-only shape, pinned as a literal so any
 /// drift in the reminder framing, the block order, or key layout is red.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_text_only_relocation_keeps_its_exact_wire_bytes() {
     let mut body = json!({
         "system": [{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}],
@@ -416,7 +393,6 @@ fn a_text_only_relocation_keeps_its_exact_wire_bytes() {
 /// per-provider status remap can reach it; it classifies as `BadRequest` for
 /// the fallback walk.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_refusal_is_a_status_free_local_refusal_classified_as_bad_request() {
     use routectl_core::failure_class::{FailureClass, MatchedBy, classify};
 
@@ -439,7 +415,6 @@ fn the_refusal_is_a_status_free_local_refusal_classified_as_bad_request() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn strict_mode_never_refuses_and_drops_the_client_system() {
     let cfg = CloakConfig {
         strict_mode: true,

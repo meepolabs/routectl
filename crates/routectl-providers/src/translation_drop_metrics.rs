@@ -85,24 +85,27 @@
 //!
 //! # Testing against this registry
 //!
-//! The registry is PROCESS-GLOBAL and the test runner is multi-threaded, so
-//! any test asserting an exact counter value or delta races every other test
-//! that touches the same key. Guard all of them with the same
-//! `#[serial_test::serial(<lane>_<class>)]` name -- including tests that
-//! only trigger the loss incidentally, not just the one reading the counter
-//! back. A guard whose name no sibling shares excludes nothing. The rule is
-//! IDENTICAL for both vocabularies: a policy-action arm owes its guard on
-//! exactly the same terms as a drop arm.
+//! The registry is PROCESS-GLOBAL in every build except this crate's own
+//! unit tests, where each thread gets its own (see the `cfg(test)`
+//! `with_registry_mut`). A unit test therefore needs no serial guard to
+//! assert a counter: it sees only what its own thread recorded. The one
+//! obligation that buys is that the code under test must record on the
+//! test's thread; work moved onto another thread or a multi-threaded
+//! runtime records into a registry the test never reads.
 //!
-//! This is not hypothetical: a delta assertion added without covering its
-//! already-existing sibling failed three times in six runs at 32 threads,
-//! and passed every single-threaded run before that.
+//! Integration tests under `tests/` and other crates' tests link the
+//! non-test build and share the process-global registry. There, a test
+//! asserting a counter must either use a `(lane, class)` key no other test
+//! in its binary can reach, or share one `#[serial_test::serial(..)]` name
+//! with every test in that binary that reaches the key, including tests
+//! that only trigger the loss incidentally.
 //!
 //! Prefer a delta (read before, act, read after) over an absolute value.
 //! Counters accumulate across the whole test binary, so an absolute
 //! expectation is wrong the moment a second test touches the key.
 
 use std::collections::BTreeMap;
+#[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
 /// `(lane, drop_class)` label pair identifying one counted drop kind. Both
@@ -125,6 +128,7 @@ struct Registry {
     lane_seen: BTreeMap<&'static str, u64>,
 }
 
+#[cfg(not(test))]
 fn registry() -> &'static Mutex<Registry> {
     static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(Registry::default()))
@@ -134,6 +138,7 @@ fn registry() -> &'static Mutex<Registry> {
 /// propagating the panic: only reachable if a prior holder panicked while
 /// holding the lock, which nothing in this module does, and a counter
 /// registry is never itself a source of correctness a panic should protect.
+#[cfg(not(test))]
 fn with_registry_mut<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
     match registry().lock() {
         Ok(mut guard) => f(&mut guard),
@@ -351,6 +356,21 @@ impl ClientFingerprintStripTally {
     pub(crate) const fn stripped(&self) -> bool {
         self.stripped
     }
+}
+
+/// The unit-test build keeps one registry PER THREAD instead of one per
+/// process. libtest runs each test on its own thread and the translate/build
+/// paths record synchronously on the caller's thread, so a test reads back
+/// exactly the increments it caused, with no cross-test guard to keep in
+/// sync. Integration tests and dependent crates link the non-test build and
+/// see the process-global registry.
+#[cfg(test)]
+fn with_registry_mut<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
+    thread_local! {
+        static REGISTRY: std::cell::RefCell<Registry> =
+            std::cell::RefCell::new(Registry::default());
+    }
+    REGISTRY.with_borrow_mut(f)
 }
 
 #[cfg(test)]

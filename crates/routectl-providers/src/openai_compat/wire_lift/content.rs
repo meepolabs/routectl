@@ -325,7 +325,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn document_block_warn_drops_in_default_mode() {
         // Arrange
         let messages = json!([{
@@ -369,7 +368,6 @@ mod tests {
     /// gone from the EMITTED WIRE BODY -- not merely absent from a typed
     /// view of the parts array.
     #[test]
-    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn document_block_drops_and_warns() {
         // Arrange -- a document alongside a representable text sibling.
         let messages = json!([{
@@ -466,11 +464,6 @@ mod tests {
     /// dropped, warns with its own structured `what`, and its payload does
     /// not reach the emitted body.
     #[test]
-    // Sole holder of this guard name today: exactly one fixture in the crate
-    // reaches this arm, so the guard excludes nothing yet. It is here so the
-    // NEXT test that constructs this shape shares a name rather than silently
-    // making the delta below flaky.
-    #[serial_test::serial(openai_compat_image_source_unrepresentable)]
     fn unsupported_image_source_drops_and_warns() {
         // Arrange -- an unrepresentable source alongside a representable
         // image sibling, so the positive control rides in the same body.
@@ -528,7 +521,6 @@ mod tests {
     /// Counting per block would make the operator-facing rate report
     /// block volume rather than affected-request volume.
     #[test]
-    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn two_dropped_documents_count_as_one_request_drop() {
         // Arrange
         let messages = json!([{
@@ -553,7 +545,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn a_drop_before_a_translation_error_is_still_counted() {
         // The drop happens, THEN strict mode rejects a later block in the same
         // request. The counter must still move: `request::normalize` bumps this
@@ -581,7 +572,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn document_block_strict_returns_err() {
         // Arrange
         let messages = json!([{

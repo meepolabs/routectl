@@ -3,11 +3,6 @@
 // serialized wire body, legitimate system content kept in its existing order,
 // and the withhold counted once per request as a policy action.
 //
-// Every test here drives a strip site, so every one carries
-// `#[serial_test::serial(gemini_client_fingerprint_stripped)]`: the counter is
-// process-global and the runner is threaded, and a guard name no sibling
-// shares excludes nothing.
-//
 // `include!`d into the `tests` module of `request.rs`; imports live there.
 
 const FINGERPRINT: &str = "x-anthropic-billing-header: cc_version=9.9.9; cch=f1ng3r";
@@ -81,7 +76,6 @@ fn wire_and_strip_delta(req: &ChatRequest) -> (Value, u64) {
 /// rides ONLY a system-role message, beside a clean top-level system, so the
 /// canonical-system site is live but withholds nothing.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn a_fingerprint_only_in_a_system_role_message_is_withheld_from_gemini_and_counted() {
     // Arrange
     let req = ChatRequest {
@@ -119,7 +113,6 @@ fn a_fingerprint_only_in_a_system_role_message_is_withheld_from_gemini_and_count
 /// Single-source pin for the top-level `system` strip site: the fingerprint
 /// rides ONLY `req.system`, beside a clean system-role message.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn a_fingerprint_only_in_the_top_level_system_is_withheld_from_gemini_and_counted() {
     // Arrange
     let req = ChatRequest {
@@ -153,7 +146,6 @@ fn a_fingerprint_only_in_the_top_level_system_is_withheld_from_gemini_and_counte
 /// surviving parts keep the order the egress has always emitted: system-role
 /// messages first, then the top-level system.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn a_fingerprint_on_both_system_sources_is_withheld_and_counted_once() {
     // Arrange
     let req = ChatRequest {
@@ -196,7 +188,6 @@ fn a_fingerprint_on_both_system_sources_is_withheld_and_counted_once() {
 /// The part-level strip: a system-role message carrying the fingerprint as one
 /// text part among others keeps its legitimate parts.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn a_fingerprint_part_inside_a_multi_part_system_message_is_withheld_alone() {
     // Arrange
     let req = ChatRequest {
@@ -225,7 +216,6 @@ fn a_fingerprint_part_inside_a_multi_part_system_message_is_withheld_alone() {
 /// `systemInstruction` at all, and is still counted: the flush sits outside the
 /// assembly, so collapsing to nothing cannot skip it.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn an_all_fingerprint_system_omits_the_system_instruction_and_still_counts() {
     // Arrange
     let req = ChatRequest {
@@ -252,7 +242,6 @@ fn an_all_fingerprint_system_omits_the_system_instruction_and_still_counts() {
 /// cannot pass on a counter that bumps for every request or a filter that
 /// strips everything.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn clean_system_content_on_both_sources_is_kept_and_not_counted() {
     // Arrange
     let req = ChatRequest {
@@ -276,7 +265,6 @@ fn clean_system_content_on_both_sources_is_kept_and_not_counted() {
 /// The predicate is leading-position only: a prompt that merely MENTIONS the
 /// header name mid-text is legitimate content and ships.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn a_mid_text_mention_of_the_header_name_is_not_withheld() {
     // Arrange
     let mention = "explain what x-anthropic-billing-header: means";
@@ -300,7 +288,6 @@ fn a_mid_text_mention_of_the_header_name_is_not_withheld() {
 
 /// Each withhold site reports itself once at DEBUG, without echoing the withheld text.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn each_withhold_site_warns_without_echoing_the_fingerprint() {
     // Arrange
     let req = ChatRequest {
@@ -338,7 +325,6 @@ fn each_withhold_site_warns_without_echoing_the_fingerprint() {
 /// request, so a fallback attempt onto another lane receives the original
 /// system content and applies that lane's own policy.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn translating_leaves_the_callers_request_unmodified() {
     // Arrange
     let req = ChatRequest {
@@ -388,7 +374,6 @@ fn provider_body_and_strip_delta(req: &ChatRequest) -> (Value, u64) {
 /// Single-source pin for the metadata strip site: no system content at all,
 /// so neither system site can set the tally.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn ingress_metadata_is_withheld_from_the_gemini_body_and_counted() {
     // Arrange
     let req = req_with_ingress_metadata();
@@ -409,7 +394,6 @@ fn ingress_metadata_is_withheld_from_the_gemini_body_and_counted() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn operator_metadata_survives_while_the_ingress_contribution_is_withheld() {
     // Arrange: the dispatch layer deep-merged the operator's metadata over
     // the ingress one, so `provider_extras` holds both sets of keys.
@@ -431,7 +415,6 @@ fn operator_metadata_survives_while_the_ingress_contribution_is_withheld() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn operator_only_metadata_reaches_the_wire_and_is_not_counted() {
     // Arrange
     let mut req = req_with_ingress_metadata();
@@ -449,7 +432,6 @@ fn operator_only_metadata_reaches_the_wire_and_is_not_counted() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn metadata_and_both_system_fingerprints_count_one_policy_action() {
     // Arrange
     let mut req = req_with_ingress_metadata();
@@ -467,7 +449,6 @@ fn metadata_and_both_system_fingerprints_count_one_policy_action() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped)]
 fn the_metadata_withhold_never_logs_metadata_values() {
     // Arrange
     let req = req_with_ingress_metadata();

@@ -1932,15 +1932,7 @@ mod tests {
     /// stays scoped to the produced-block shape. Paired with the
     /// Encrypted-detail test above (which DOES produce a block on the
     /// same code path) as the positive control.
-    ///
-    /// Serialized against the counter-delta tests in
-    /// `messages_reasoning_warn_tests.rs`: this test also drives a
-    /// no-wire-shape drop through the same process-global
-    /// `bedrock-converse` / `reasoning_summary_unsupported` counter, and
-    /// an unmarked concurrent run could land its increment inside another
-    /// test's before/after snapshot window.
     #[test]
-    #[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
     fn summary_and_unrecognized_reasoning_details_are_both_dropped() {
         // Arrange
         let summary = ReasoningDetail {
@@ -1994,7 +1986,6 @@ mod tests {
 
     /// Non-anthropic-claude-v1 format reasoning details must be ignored.
     #[test]
-    #[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
     fn non_anthropic_format_reasoning_detail_is_skipped() {
         // Arrange
         let detail = ReasoningDetail {
@@ -2193,7 +2184,6 @@ mod tests {
     /// can carry, so it is dropped with a diagnostic. A sibling Text block
     /// confirms only the file part was dropped.
     #[test]
-    #[serial_test::serial(bedrock_converse_file_part_unrepresentable)]
     fn file_id_only_part_is_dropped_on_converse() {
         // Arrange
         use routectl_core::KnownContentPart;
@@ -2242,7 +2232,6 @@ mod tests {
     /// egress helper. A sibling Text block confirms only the file part was
     /// dropped, not the whole message.
     #[test]
-    #[serial_test::serial(bedrock_converse_file_part_unrepresentable)]
     fn non_pdf_file_part_is_dropped_on_converse() {
         // Arrange
         use routectl_core::KnownContentPart;
@@ -2293,7 +2282,6 @@ mod tests {
     /// dropped (the caller-contract promises a tracing diagnostic on every
     /// drop). A sibling Text block confirms only the image was dropped.
     #[test]
-    #[serial_test::serial(bedrock_converse_image_media_type_unsupported)]
     fn image_with_unmapped_media_type_is_dropped() {
         // Arrange
         use routectl_core::KnownContentPart;
@@ -3891,19 +3879,7 @@ mod tests {
     /// validation, so a raw `\n` would forge a whole log line and a raw ANSI
     /// CSI sequence would scroll an operator's terminal. Every one must emit
     /// through `sanitize_for_log`.
-    ///
-    /// Guarded on the image drop classes it reaches INCIDENTALLY: this test
-    /// is about log sanitizing, not counters, but its fixture drives both an
-    /// unrepresentable source shape and an unmapped media type through the
-    /// process-global registry, so an unguarded run lands inside another
-    /// test's before/after window.
     #[test]
-    #[serial_test::serial(
-        bedrock_converse_image_source_unrepresentable,
-        bedrock_converse_image_media_type_unsupported,
-        bedrock_converse_document_source_unrepresentable,
-        bedrock_converse_document_media_type_unsupported
-    )]
     fn converse_warn_drop_fields_carry_no_raw_control_characters() {
         // Arrange: one hostile string reused for every field, carrying a
         // newline, a carriage return, and an ANSI erase-display sequence.

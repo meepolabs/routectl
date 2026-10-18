@@ -68,7 +68,6 @@ fn a_flag_in_both_floor_and_client_ships_once_in_floor_position() {
 }
 
 #[test]
-#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn a_client_repeat_with_no_floor_ships_once() {
     // Arrange
     let cfg = cfg_with_floor(&[]);
@@ -82,7 +81,6 @@ fn a_client_repeat_with_no_floor_ships_once() {
 }
 
 #[test]
-#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn distinct_flags_keep_floor_order_then_client_order() {
     // Arrange
     let cfg = cfg_with_floor(&[CLAUDE_CODE, CONTEXT_1M]);

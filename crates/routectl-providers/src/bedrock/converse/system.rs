@@ -547,12 +547,6 @@ mod tests {
 
     /// The `(bedrock-converse, client_fingerprint_stripped)` policy-action
     /// counter, read through the public snapshot. Zero before its first bump.
-    ///
-    /// SERIAL GUARDS: this key is process-global and the runner is threaded, so
-    /// every test that drives any of this lane's three strip sites carries
-    /// `bedrock_converse_client_fingerprint_stripped` -- the ones asserting a
-    /// delta AND the ones that only bump it incidentally. A guard name no
-    /// sibling shares excludes nothing.
     fn fingerprint_strip_count() -> u64 {
         crate::translation_drop_metrics::translation_policy_action_snapshot()
             .into_iter()
@@ -589,7 +583,6 @@ mod tests {
     /// because the shared tally is flushed there -- the unit under test is the
     /// per-request contract, not one function.
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn a_fingerprint_on_both_system_sources_counts_one_policy_action() {
         // Arrange -- a fingerprint on each source, plus real content on each
         // so the merge path is genuinely live.
@@ -640,7 +633,6 @@ mod tests {
     /// so the sibling site is live but records nothing -- fails when this site
     /// stops recording.
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn a_fingerprint_only_in_the_top_level_system_counts_the_policy_action() {
         // Arrange -- the message array is clean, so the only strip is the
         // top-level one.
@@ -679,7 +671,6 @@ mod tests {
     /// ALONE -- with a clean top-level system present -- fails when the lift
     /// site stops recording.
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn a_fingerprint_only_in_a_system_role_message_counts_the_policy_action() {
         // Arrange -- the top-level system is clean, so the only strip is the
         // lift's.
@@ -722,7 +713,6 @@ mod tests {
     /// is still one action -- the adjudication above is a property of the
     /// class on this lane, not of the two system sites alone.
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn a_fingerprint_in_the_extras_bag_and_the_system_counts_one_policy_action() {
         // Arrange
         let req = ChatRequest {
@@ -766,7 +756,6 @@ mod tests {
     /// placed on the Ok arm alone would read the action rate low for exactly
     /// the requests that failed after stripping.
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn a_translation_that_fails_after_the_strip_still_counts_the_policy_action() {
         // Arrange -- the strip fires, then the breakpoint cap rejects the
         // request. Five message-level markers exceed the four-breakpoint cap.
@@ -820,7 +809,6 @@ mod tests {
     /// delta assertions above cannot pass on a counter that bumps for every
     /// request.
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn a_request_with_no_fingerprint_records_no_policy_action() {
         // Arrange
         let req = ChatRequest {

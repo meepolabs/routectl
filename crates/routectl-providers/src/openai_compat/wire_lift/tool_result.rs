@@ -753,7 +753,6 @@ mod tests {
     /// dropped in lenient mode -- the raw Anthropic image must not reach
     /// the wire.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
     fn inner_image_unknown_source_dropped_lenient() {
         // Arrange -- image with an unsupported source type, plus a real
         // image so the array form is preserved.
@@ -779,7 +778,6 @@ mod tests {
 
     /// The url-source-missing-url image is dropped in lenient mode.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
     fn inner_image_url_missing_url_dropped_lenient() {
         // Arrange
         let messages = json!([
@@ -804,7 +802,6 @@ mod tests {
 
     /// Strict mode rejects the unrepresentable inner image.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
     fn inner_image_unknown_source_strict_errors() {
         // Arrange
         let messages = json!([
@@ -833,7 +830,6 @@ mod tests {
     /// A nested document block inside a tool_result is dropped
     /// in lenient mode -- it must not reach the wire.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_document_unrepresentable)]
     fn inner_document_block_dropped_lenient() {
         // Arrange -- document block plus an image so the array survives.
         let messages = json!([
@@ -860,7 +856,6 @@ mod tests {
 
     /// Strict mode rejects a nested document block.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_document_unrepresentable)]
     fn inner_document_block_strict_errors() {
         // Arrange
         let messages = json!([
@@ -1046,7 +1041,6 @@ mod tests {
 
     /// NEGATIVE CONTROL: a nested document block.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_document_unrepresentable)]
     fn inner_document_block_drops_and_warns() {
         assert_inner_drop(
             json!({"type": "document", "source": {
@@ -1061,7 +1055,6 @@ mod tests {
 
     /// NEGATIVE CONTROL: a nested image block with an unrecognized source.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
     fn inner_image_unknown_source_drops_and_warns() {
         assert_inner_drop(
             json!({"type": "image", "source": {
@@ -1076,7 +1069,6 @@ mod tests {
     /// NEGATIVE CONTROL: a nested image block claiming the url source form
     /// but carrying no `url`.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_image_source_unrepresentable)]
     fn inner_image_url_missing_url_drops_and_warns() {
         assert_inner_drop(
             json!({"type": "image", "source": {
@@ -1115,7 +1107,6 @@ mod tests {
     /// Two dropped nested documents in ONE request are ONE counted drop
     /// event, even when they sit in different tool results.
     #[test]
-    #[serial_test::serial(openai_compat_tool_result_document_unrepresentable)]
     fn two_dropped_inner_documents_count_as_one_request_drop() {
         // Arrange
         let doc = json!({"type": "document", "source": {

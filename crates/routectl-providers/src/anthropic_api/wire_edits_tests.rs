@@ -298,10 +298,6 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
 ];
 
 #[test]
-#[serial_test::serial(
-    anthropic_api_client_fingerprint_stripped,
-    anthropic_hosted_mcp_tool_withheld
-)]
 fn each_assembly_site_declares_its_edit_only_when_it_fires() {
     for row in ASSEMBLY_ROWS {
         let (_, fired) = assemble((row.firing)());
@@ -318,7 +314,6 @@ fn each_assembly_site_declares_its_edit_only_when_it_fires() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_hosted_mcp_tool_withheld)]
 fn the_hosted_tool_withhold_never_declares_the_tools_container() {
     let req = base(json!({"tools": [
         {"type": "mcp", "server_label": "a", "server_url": "https://example.com"},
@@ -378,7 +373,6 @@ fn owned(rows: &[(EditKind, &str)]) -> Vec<(EditKind, String)> {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_cloak_billing_strip_declares_the_concrete_block() {
     let firing = json!({
         "system": [{"type": "text", "text": "x-anthropic-billing-header: v=1;"}, {"type": "text", "text": "r"}],
@@ -394,7 +388,6 @@ fn the_cloak_billing_strip_declares_the_concrete_block() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_cloak_relocation_declares_the_system_swap_and_the_landing() {
     let body = json!({
         "system": [{"type": "text", "text": "rules"}],
@@ -415,7 +408,6 @@ fn the_cloak_relocation_declares_the_system_swap_and_the_landing() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_cloak_relocation_is_silent_for_a_genuine_client() {
     let body = json!({
         "system": [{"type": "text", "text": "rules"}],
@@ -426,7 +418,6 @@ fn the_cloak_relocation_is_silent_for_a_genuine_client() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_cloak_user_id_mint_declares_only_a_minted_value() {
     let fresh = json!({"metadata": {}, "messages": [user_turn()]});
     let set = json!({"metadata": {"user_id": "caller"}, "messages": [user_turn()]});
@@ -439,7 +430,6 @@ fn the_cloak_user_id_mint_declares_only_a_minted_value() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_cloak_tool_rename_declares_each_renamed_name() {
     let firing = json!({
         "tools": [{"name": "mcp__kept"}, {"name": "renamed"}],
@@ -468,7 +458,6 @@ fn the_cloak_tool_rename_declares_each_renamed_name() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_operator_tool_rename_declares_its_rename() {
     let config = CloakConfig {
         tool_rename: vec![ToolRename {
@@ -488,7 +477,6 @@ fn the_operator_tool_rename_declares_its_rename() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_cloak_obfuscation_declares_the_rewritten_surfaces() {
     let config = CloakConfig {
         sensitive_words: vec!["secret".into()],
@@ -508,7 +496,6 @@ fn the_cloak_obfuscation_declares_the_rewritten_surfaces() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_cloak_tool_sort_declares_each_moved_position() {
     let firing = json!({
         "tools": [{"name": "mcp__b"}, {"name": "mcp__a"}, {"name": "mcp__c"}],
@@ -540,7 +527,6 @@ fn the_cloak_tool_sort_declares_each_moved_position() {
 }
 
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn an_untapped_cloak_declares_nothing_and_changes_nothing_extra() {
     let body = json!({
         "system": [{"type": "text", "text": "rules"}],

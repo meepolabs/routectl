@@ -1,14 +1,6 @@
 //! Translation telemetry of the Invoke lane: the request-volume denominator,
 //! and the unrecognized `response_format` drop counted under this lane rather
 //! than the anthropic lane whose assembly builds the body.
-//!
-//! SERIAL GUARDS: the registry is process-global and the runner is threaded.
-//! Every test reaching `(bedrock-invoke, response_format_unrepresentable)`
-//! carries `bedrock_invoke_response_format_unrepresentable`; the one reading
-//! the anthropic counter back also carries that lane's guard. Every lib test
-//! that normalizes an Invoke request bumps this lane's denominator, so every
-//! one of them carries `bedrock_invoke_lane_seen`, which is what lets the
-//! denominator test below assert an exact delta.
 
 use serde_json::json;
 
@@ -64,7 +56,6 @@ fn drop_count(lane: &str) -> u64 {
 /// Every Invoke request counts toward this lane's denominator exactly once,
 /// including one that fails assembly.
 #[test]
-#[serial_test::serial(bedrock_invoke_lane_seen)]
 fn every_invoke_request_counts_toward_the_lane_denominator() {
     // Arrange: one clean request and one the replay invariant rejects.
     let clean = user_req();
@@ -94,11 +85,6 @@ fn every_invoke_request_counts_toward_the_lane_denominator() {
 /// SINGLE-SOURCE pin for this lane: the directive is absent from the body
 /// that ships, counted once here, and credited to no other lane.
 #[test]
-#[serial_test::serial(
-    bedrock_invoke_response_format_unrepresentable,
-    anthropic_response_format_unrepresentable,
-    bedrock_invoke_lane_seen
-)]
 fn an_unrecognized_response_format_is_absent_from_the_invoke_body_and_counted() {
     // Arrange
     let mut req = user_req();
@@ -123,10 +109,6 @@ fn an_unrecognized_response_format_is_absent_from_the_invoke_body_and_counted() 
 /// The flush runs on the Err arm of the shared assembly too: the directive is
 /// dropped by the converter, then the schema repair rejects the request.
 #[test]
-#[serial_test::serial(
-    bedrock_invoke_response_format_unrepresentable,
-    bedrock_invoke_lane_seen
-)]
 fn an_unrecognized_response_format_still_counts_when_invoke_assembly_fails() {
     // Arrange
     let mut req = user_req();
@@ -145,10 +127,6 @@ fn an_unrecognized_response_format_still_counts_when_invoke_assembly_fails() {
 
 /// POSITIVE CONTROL: a mapped directive leaves the counter untouched.
 #[test]
-#[serial_test::serial(
-    bedrock_invoke_response_format_unrepresentable,
-    bedrock_invoke_lane_seen
-)]
 fn a_mapped_response_format_counts_no_invoke_drop() {
     // Arrange
     let mut req = user_req();

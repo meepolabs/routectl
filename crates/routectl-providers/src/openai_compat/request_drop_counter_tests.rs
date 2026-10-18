@@ -4,11 +4,6 @@
 // that site's record reds exactly the case its marker names. Every case also
 // asserts the claimed drop is absent from the serialized body.
 //
-// SERIAL GUARDS: the registry is process-global and the runner is threaded.
-// Every test here that reaches a counted class carries that class's
-// `openai_compat_<class>` guard, as does every sibling test that reaches it
-// incidentally.
-//
 // `include!`d into the `tests` module of `request.rs`; imports live there.
 
 fn compat_drop_count(class: &str) -> u64 {
@@ -66,7 +61,6 @@ fn user_parts_message(parts: Vec<ContentPart>) -> Message {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_compat_cache_control_unsupported)]
 fn a_top_level_cache_control_is_absent_from_the_openai_compat_wire_and_counted() {
     // Arrange
     let mut req = simple_req("m");
@@ -83,7 +77,6 @@ fn a_top_level_cache_control_is_absent_from_the_openai_compat_wire_and_counted()
 }
 
 #[test]
-#[serial_test::serial(openai_compat_cache_control_unsupported)]
 fn a_system_block_cache_control_is_absent_from_the_openai_compat_wire_and_counted() {
     // Arrange
     let mut req = simple_req("m");
@@ -104,7 +97,6 @@ fn a_system_block_cache_control_is_absent_from_the_openai_compat_wire_and_counte
 }
 
 #[test]
-#[serial_test::serial(openai_compat_cache_control_unsupported)]
 fn a_tool_cache_control_is_absent_from_the_openai_compat_wire_and_counted() {
     // Arrange
     let mut req = simple_req("m");
@@ -122,7 +114,6 @@ fn a_tool_cache_control_is_absent_from_the_openai_compat_wire_and_counted() {
 }
 
 #[test]
-#[serial_test::serial(openai_compat_cache_control_unsupported)]
 fn a_message_part_cache_control_is_absent_from_the_openai_compat_wire_and_counted() {
     // Arrange
     let mut req = simple_req("m");
@@ -146,7 +137,6 @@ fn a_message_part_cache_control_is_absent_from_the_openai_compat_wire_and_counte
 }
 
 #[test]
-#[serial_test::serial(openai_compat_cache_control_unsupported)]
 fn breakpoints_on_every_surface_of_one_request_count_one_drop() {
     // Arrange -- all four surfaces at once: one request, one drop event.
     let mut req = simple_req("m");
@@ -265,7 +255,6 @@ fn tool_result_blocks_with_absent_or_non_string_id_reach_the_openai_compat_body(
 }
 
 #[test]
-#[serial_test::serial(openai_compat_cache_control_unsupported)]
 fn strict_mode_rejects_a_breakpoint_and_counts_nothing() {
     // Arrange
     let mut req = simple_req("m");
@@ -292,7 +281,6 @@ fn strict_mode_rejects_a_breakpoint_and_counts_nothing() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_compat_anthropic_beta_unsupported)]
 fn anthropic_beta_flags_are_absent_from_the_openai_compat_wire_and_counted() {
     // Arrange -- two flags, one request, one drop event.
     let mut req = simple_req("m");
@@ -310,7 +298,6 @@ fn anthropic_beta_flags_are_absent_from_the_openai_compat_wire_and_counted() {
 }
 
 #[test]
-#[serial_test::serial(openai_compat_metadata_unsupported)]
 fn an_ingress_metadata_object_is_absent_from_the_openai_compat_wire_and_counted() {
     // Arrange
     let mut req = simple_req("m");
@@ -326,7 +313,6 @@ fn an_ingress_metadata_object_is_absent_from_the_openai_compat_wire_and_counted(
 }
 
 #[test]
-#[serial_test::serial(openai_compat_forward_compat_extra_unrepresentable)]
 fn a_forward_compat_extra_is_absent_from_the_openai_compat_wire_and_counted() {
     // Arrange -- two swept fields, one request, one drop event; a long-tail
     // extra beside them still forwards.
@@ -350,7 +336,6 @@ fn a_forward_compat_extra_is_absent_from_the_openai_compat_wire_and_counted() {
 }
 
 #[test]
-#[serial_test::serial(openai_compat_provider_extra_managed_key_conflict)]
 fn a_provider_extra_naming_a_canonical_key_is_refused_and_counted() {
     // Arrange
     let mut req = simple_req("m");
@@ -371,7 +356,6 @@ fn a_provider_extra_naming_a_canonical_key_is_refused_and_counted() {
 }
 
 #[test]
-#[serial_test::serial(openai_compat_operator_extra_managed_key_conflict)]
 fn an_operator_extra_naming_a_managed_key_is_refused_and_counted() {
     // Arrange -- two refused keys from the operator: one action.
     let req = simple_req("m");
@@ -388,10 +372,6 @@ fn an_operator_extra_naming_a_managed_key_is_refused_and_counted() {
 }
 
 #[test]
-#[serial_test::serial(
-    openai_compat_forward_compat_extra_unrepresentable,
-    openai_compat_provider_extra_managed_key_conflict
-)]
 fn a_swept_output_config_is_withheld_without_a_second_count() {
     // Arrange -- a json_object format the lift maps, so nothing is lost; the
     // leftover object is withheld and counts on neither extras class.

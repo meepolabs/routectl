@@ -16,12 +16,6 @@
 //
 // `include!`d into `request_tests.rs`; all top-level imports live there, so
 // do not add `use` lines here.
-//
-// SERIAL GUARDS: the drop registry is process-global and the runner is
-// threaded, so every test below that reads a counter delta carries the
-// `openai_responses_<class>` guard for its class -- and so does every OTHER
-// test in this crate that constructs a request reaching the same arm, even
-// incidentally. A guard name no sibling shares excludes nothing.
 
 // ---------------------------------------------------------------------------
 // shared helpers
@@ -120,7 +114,6 @@ fn wire_reasoning_signatures(wire: &Value) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_responses_reasoning_format_foreign)]
 fn foreign_format_detail_drops_from_the_wire_and_counts() {
     // Arrange: a foreign-tagged detail carrying a signature, beside a
     // codex-tagged sibling that must replay.
@@ -182,7 +175,6 @@ fn foreign_format_detail_drops_from_the_wire_and_counts() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_reasoning_format_foreign)]
 fn a_request_of_only_responses_family_details_records_no_foreign_format_drop() {
     // Arrange: the positive control as a whole request -- nothing foreign.
     let req = req_with(turn_with_reasoning_details(vec![replayable_detail()]));
@@ -210,7 +202,6 @@ fn a_request_of_only_responses_family_details_records_no_foreign_format_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_responses_reasoning_scheme_incompatible)]
 fn scheme_incompatible_detail_drops_from_the_wire_and_counts() {
     // Arrange: a mantle-scheme artifact aimed at the id-validating codex
     // lane (a PROVEN-incompatible pair), beside a codex-scheme sibling.
@@ -265,7 +256,6 @@ fn scheme_incompatible_detail_drops_from_the_wire_and_counts() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_reasoning_scheme_incompatible)]
 fn a_same_scheme_request_records_no_scheme_incompatible_drop() {
     // Arrange: a codex-scheme artifact on the codex lane -- a proven-
     // COMPATIBLE pair, which must not strip.
@@ -297,7 +287,6 @@ fn a_same_scheme_request_records_no_scheme_incompatible_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_responses_reasoning_detail_kind_unsupported)]
 fn unrecognized_detail_kind_drops_from_the_wire_and_counts() {
     // Arrange: an unrecognized-kind detail whose payload carries a marker
     // string, beside a recognized Encrypted sibling on the same item id.
@@ -361,7 +350,6 @@ fn unrecognized_detail_kind_drops_from_the_wire_and_counts() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_reasoning_detail_kind_unsupported)]
 fn a_recognized_kind_detail_records_no_unsupported_kind_drop() {
     // Arrange: only recognized kinds -- Summary and Text alongside the
     // signature, all of which have a slot.
@@ -422,7 +410,6 @@ fn sole_wire_reasoning_item(wire: &Value) -> &Value {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_reasoning_text_unsigned)]
 fn unsigned_reasoning_text_drops_from_the_wire_and_counts() {
     // Arrange: a signature-less group carrying a summary and reasoning text.
     const UNSIGNED_TEXT: &str = "REASONING_TEXT_WITH_NO_SIGNATURE";
@@ -476,7 +463,6 @@ fn unsigned_reasoning_text_drops_from_the_wire_and_counts() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_reasoning_text_unsigned)]
 fn signed_reasoning_text_records_no_unsigned_text_drop() {
     // Arrange: the same text on a group that carries a signature.
     let req = req_with(turn_with_reasoning_details(vec![
@@ -509,7 +495,6 @@ fn signed_reasoning_text_records_no_unsigned_text_drop() {
 /// A summary-only group ships as the shape the upstream accepts: the
 /// summary, and neither the unreplayable id nor an empty signature.
 #[test]
-#[serial_test::serial(openai_responses_reasoning_text_unsigned)]
 fn unsigned_summary_ships_without_an_id_or_a_signature() {
     // Arrange: `responses_detail` stamps the upstream id `rs_1`.
     let req = req_with(turn_with_reasoning_details(vec![responses_detail(
@@ -546,7 +531,6 @@ fn unsigned_summary_ships_without_an_id_or_a_signature() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_responses_image_source_kind_unrepresentable)]
 fn unknown_user_image_source_kind_drops_from_the_wire_and_counts() {
     // Arrange: an unrepresentable source kind naming a bucket + key, beside
     // a representable url-source sibling on the same user turn.
@@ -600,7 +584,6 @@ fn unknown_user_image_source_kind_drops_from_the_wire_and_counts() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_image_source_kind_unrepresentable)]
 fn unknown_tool_result_image_source_kind_drops_from_the_wire_and_counts() {
     // Arrange: the same unrepresentable kind nested in a tool result, where
     // a separate translate path handles it, beside a representable sibling.
@@ -658,7 +641,6 @@ fn unknown_tool_result_image_source_kind_drops_from_the_wire_and_counts() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_image_source_kind_unrepresentable)]
 fn two_unrepresentable_sources_in_one_request_count_once() {
     // Arrange: one request, two dropped sources across BOTH translate paths.
     // The counter is per-REQUEST, so this must still register a single event.
@@ -687,7 +669,6 @@ fn two_unrepresentable_sources_in_one_request_count_once() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_image_source_kind_unrepresentable)]
 fn representable_image_sources_record_no_source_kind_drop() {
     // Arrange: both representable source shapes and nothing else.
     let req = req_with(vec![user_parts(vec![
@@ -729,7 +710,6 @@ fn representable_image_sources_record_no_source_kind_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn cache_control_marker_drops_from_the_wire_and_counts() {
     // Arrange: a marked text part beside an unmarked one, so the marker's
     // removal is separable from the part's translation.
@@ -788,7 +768,6 @@ fn cache_control_marker_drops_from_the_wire_and_counts() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn a_tools_position_cache_marker_leaves_the_wire_and_the_tool_survives() {
     // A tools-position marker is a counted cache breakpoint, and the forwarding
     // path for a non-custom tool clones the caller's value verbatim -- so this
@@ -834,7 +813,6 @@ fn a_tools_position_cache_marker_leaves_the_wire_and_the_tool_survives() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn a_system_only_cache_marker_still_counts_though_the_warn_defers_to_system_rs() {
     // Arrange: the ONLY marker sits on a system block. `system.rs` owns that
     // surface's DEBUG record, so the request-level WARN deliberately excludes
@@ -887,7 +865,6 @@ fn a_system_only_cache_marker_still_counts_though_the_warn_defers_to_system_rs()
 }
 
 #[test]
-#[serial_test::serial(openai_responses_cache_control_unsupported)]
 fn an_unmarked_request_records_no_cache_control_drop() {
     // Arrange: the positive control as a whole request -- no marker anywhere.
     let req = req_with(vec![user_text("hi")]);
@@ -921,14 +898,9 @@ fn an_unmarked_request_records_no_cache_control_drop() {
 /// translate path processed, drop or not, Ok or Err. Without that, every
 /// `drop_rate()` on this lane reads 0.0 no matter how many drops fired.
 ///
-/// The assertion is a LOWER BOUND, not an equality, and deliberately so: the
-/// lane denominator is one shared key that every `translate` call in this
-/// crate's suite bumps, so no serial guard short of one shared by ~100 tests
-/// could make an exact delta stable. A lower bound is race-immune in the only
-/// direction the registry moves (up) while still failing loudly on the defect
-/// it exists to catch -- an unwired or mis-placed site leaves the delta at 0.
-/// That `translate` is the SOLE site is a grep property, welded by the census
-/// rather than assertable from inside one test.
+/// The delta is exact: a site counted twice per request would make every
+/// rate on the lane read low. That `translate` is the SOLE site is a grep
+/// property, welded by the census rather than assertable from inside one test.
 #[test]
 fn every_translated_request_counts_toward_the_lane_denominator() {
     // Arrange: one clean request and one that FAILS translation. Both are
@@ -945,11 +917,11 @@ fn every_translated_request_counts_toward_the_lane_denominator() {
     let after = responses_lane_seen_count();
 
     // Assert
-    assert!(
-        after - before >= 2,
-        "both requests must count toward the denominator (a rejected request is \
-         still a request the lane processed); delta was {}",
-        after - before
+    assert_eq!(
+        after - before,
+        2,
+        "both requests must count toward the denominator once each (a rejected \
+         request is still a request the lane processed)"
     );
 }
 

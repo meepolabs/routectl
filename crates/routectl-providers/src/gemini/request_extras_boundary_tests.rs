@@ -99,7 +99,6 @@ fn assert_no_event_contains(events: &[routectl_testkit::CapturedEvent], tell: &s
 /// Single-source pin for the ingress-extras withhold: one credential-bearing
 /// key, no metadata, no system content.
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn anthropic_ingress_mcp_servers_never_reach_the_gemini_body_and_count_one_withhold() {
     // Arrange
     let req = dispatched(
@@ -125,7 +124,6 @@ fn anthropic_ingress_mcp_servers_never_reach_the_gemini_body_and_count_one_withh
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn openai_ingress_future_and_identity_keys_are_withheld_beside_operator_safety_settings() {
     // Arrange
     let operator = json!({"safetySettings": operator_safety_settings()});
@@ -162,7 +160,6 @@ fn openai_ingress_future_and_identity_keys_are_withheld_beside_operator_safety_s
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn a_key_both_layers_set_forwards_only_the_operator_value_and_counts_the_client_part() {
     // Arrange: the dispatch layer deep-merged the operator's object over the
     // client's, so the union holds the client's sub-key too.
@@ -187,7 +184,6 @@ fn a_key_both_layers_set_forwards_only_the_operator_value_and_counts_the_client_
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn operator_only_extras_on_an_ingress_request_reach_the_wire_and_count_nothing() {
     // Arrange
     let operator = json!({"safetySettings": operator_safety_settings()});
@@ -208,7 +204,6 @@ fn operator_only_extras_on_an_ingress_request_reach_the_wire_and_count_nothing()
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn an_ingress_request_with_no_extras_counts_nothing() {
     // Arrange
     let mut req = dispatched(RequestProvenance::AnthropicIngress, json!({}), None);
@@ -225,7 +220,6 @@ fn an_ingress_request_with_no_extras_counts_nothing() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn ingress_metadata_counts_on_the_fingerprint_tally_not_the_extras_withhold() {
     // Arrange
     let req = dispatched(
@@ -252,7 +246,6 @@ fn ingress_metadata_counts_on_the_fingerprint_tally_not_the_extras_withhold() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn operator_metadata_is_restored_on_an_ingress_request_while_the_client_part_is_withheld() {
     // Arrange
     let req = dispatched(
@@ -283,11 +276,6 @@ fn operator_metadata_is_restored_on_an_ingress_request_while_the_client_part_is_
 }
 
 #[test]
-#[serial_test::serial(
-    gemini_client_fingerprint_stripped,
-    gemini_ingress_extra_withheld,
-    gemini_provider_extra_managed_key_conflict
-)]
 fn an_operator_managed_key_on_an_ingress_request_is_still_refused_and_counted() {
     // Arrange
     let operator = json!({"generationConfig": {"topK": 40}, "safetySettings": []});
@@ -314,7 +302,6 @@ fn an_operator_managed_key_on_an_ingress_request_is_still_refused_and_counted() 
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn an_operator_key_removed_from_the_dispatched_union_is_not_reintroduced() {
     // Arrange: a dispatch-time strip removed the operator's key from the
     // attempt's union after the operator layer was recorded.
@@ -338,7 +325,6 @@ fn an_operator_key_removed_from_the_dispatched_union_is_not_reintroduced() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn withheld_key_names_are_sanitized_before_they_are_logged() {
     // Arrange
     let req = dispatched(
@@ -364,7 +350,6 @@ fn withheld_key_names_are_sanitized_before_they_are_logged() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn the_boundary_leaves_the_callers_request_unmodified_across_attempts() {
     // Arrange
     let req = dispatched(
@@ -393,7 +378,6 @@ fn the_boundary_leaves_the_callers_request_unmodified_across_attempts() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn library_callers_forward_arbitrary_extras_and_count_no_withhold() {
     // Arrange
     let req = dispatched(
@@ -419,7 +403,6 @@ fn library_callers_forward_arbitrary_extras_and_count_no_withhold() {
 }
 
 #[test]
-#[serial_test::serial(gemini_client_fingerprint_stripped, gemini_ingress_extra_withheld)]
 fn library_metadata_is_still_withheld_and_counted() {
     // Arrange
     let req = dispatched(

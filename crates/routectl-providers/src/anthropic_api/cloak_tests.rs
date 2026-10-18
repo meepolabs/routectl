@@ -1839,7 +1839,6 @@ fn knob_off_leaves_tool_order_untouched() {
 // Shares the counter group's guard because this fixture trips the tool-sort
 // stand-down key while asserting something else; a guard only the asserting
 // test carries excludes nothing.
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn non_cc_opaque_tool_stands_down_sort() {
     // A builtin (Other-shaped) tool present stands the whole sort down; the
     // non-builtin names still normalize but keep verbatim order.

@@ -4,10 +4,6 @@
 // `request_drop_policy_tests.rs`, whose `responses_drop_count` and
 // `translate_capturing` helpers these tests read; all top-level imports live
 // in `request_tests.rs`, so do not add `use` lines here.
-//
-// SERIAL GUARDS: every test here that reaches the
-// `tool_result_part_unsupported` arm, or reads that counter's delta, holds
-// `openai_responses_tool_result_part_unsupported`.
 
 fn file_part(file: Value) -> ContentPart {
     ContentPart::Known(KnownContentPart::File {
@@ -30,7 +26,6 @@ fn native_input_file_part(fields: Value) -> ContentPart {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_tool_result_part_unsupported)]
 fn tool_result_file_data_ships_as_input_file_in_part_order() {
     // Arrange: a file between two text parts, so order is observable.
     let parts = vec![
@@ -158,7 +153,6 @@ fn tool_result_native_input_file_is_forwarded_from_its_extras() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_tool_result_part_unsupported)]
 fn tool_result_unsupported_parts_drop_from_the_wire_and_count_once() {
     // Arrange: one text part beside three parts with no tool-output slot.
     let parts = vec![
@@ -212,7 +206,6 @@ fn tool_result_unsupported_parts_drop_from_the_wire_and_count_once() {
 }
 
 #[test]
-#[serial_test::serial(openai_responses_tool_result_part_unsupported)]
 fn tool_result_file_on_the_mantle_lane_drops_and_counts() {
     // Arrange: a file beside text, bound for the mantle lane.
     let parts = vec![

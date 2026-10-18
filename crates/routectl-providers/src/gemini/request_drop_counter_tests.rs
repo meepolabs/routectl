@@ -5,13 +5,6 @@
 // inside an opaque payload while the typed view looks clean), and a
 // similar-but-representable sibling SURVIVES in that same emitted value.
 //
-// Every test reading a counter delta carries
-// `#[serial_test::serial(gemini_<class>)]` with the SAME name as every other
-// test in this crate that reaches the same arm, incidentally or not: the
-// registry is process-global and the runner is threaded, so a guard name no
-// sibling shares excludes nothing. Deltas, never absolute values -- counters
-// accumulate across the whole test binary.
-//
 // `include!`d into the `tests` module of `request.rs`; imports live there.
 
 /// The `(gemini, <class>)` counter's current value, read back through the
@@ -78,14 +71,10 @@ fn rendered(body: &Value) -> String {
 /// The denominator must count a CLEAN request too -- a lane-seen count that
 /// only moves on drops makes `drop_rate()` report 1.0 forever.
 ///
-/// Asserts MOVEMENT rather than a delta of exactly one, deliberately: unlike a
-/// drop class, `lane_seen` is bumped by every gemini test in this binary, so an
-/// exact delta would need the same serial guard on all of them -- and a guard
-/// that broad serializes most of the crate for no gain. The "at most one call
-/// site per lane" half of the property is a grep-level fact, welded by the
-/// census rather than reachable from inside one test.
+/// The delta is exactly one, so a second site on the lane fails here too. The
+/// "at most one call site per lane" half of the property is a grep-level fact,
+/// welded by the census rather than reachable from inside one test.
 #[test]
-#[serial_test::serial(gemini_image_source_no_inline_bytes)]
 fn a_clean_request_moves_the_lane_denominator() {
     // Arrange -- the snapshot exposes a lane's denominator only through one of
     // that lane's drop entries, so a request that DOES drop runs first to
@@ -103,15 +92,15 @@ fn a_clean_request_moves_the_lane_denominator() {
     let after = gemini_lane_seen_count();
 
     // Assert
-    assert!(
-        after > before,
-        "a clean request must still tick the lane denominator ({before} -> {after})"
+    assert_eq!(
+        after - before,
+        1,
+        "a clean request must tick the lane denominator exactly once"
     );
 }
 
 /// A request with several dropped blocks of ONE class is one drop EVENT.
 #[test]
-#[serial_test::serial(gemini_image_source_no_inline_bytes)]
 fn three_dropped_blocks_of_one_class_count_as_one_drop() {
     // Arrange -- three url-shape image sources in one turn.
     let url_image = || {
@@ -144,7 +133,6 @@ fn three_dropped_blocks_of_one_class_count_as_one_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_image_source_no_inline_bytes)]
 fn image_source_drop_bumps_the_counter_once_per_request() {
     // Arrange -- a url-shape Anthropic image source carries no bytes, beside a
     // representable text sibling.
@@ -180,7 +168,6 @@ fn image_source_drop_bumps_the_counter_once_per_request() {
 /// POSITIVE CONTROL: a base64 image source -- the representable sibling shape
 /// of the arm above -- reaches the wire as `inlineData` and counts nothing.
 #[test]
-#[serial_test::serial(gemini_image_source_no_inline_bytes)]
 fn base64_image_source_survives_and_counts_no_drop() {
     // Arrange
     let part = ContentPart::Known(KnownContentPart::Image {
@@ -213,7 +200,6 @@ fn base64_image_source_survives_and_counts_no_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_image_url_data_uri_unparseable)]
 fn image_url_data_uri_drop_bumps_the_counter_once_per_request() {
     // Arrange -- a data: URI with no `;base64,` separator. Shipping it as text
     // would bill the caller for the payload as prose.
@@ -245,7 +231,6 @@ fn image_url_data_uri_drop_bumps_the_counter_once_per_request() {
 /// POSITIVE CONTROL: a parseable base64 data URI -- the representable sibling
 /// of the arm above -- becomes `inlineData` and counts nothing.
 #[test]
-#[serial_test::serial(gemini_image_url_data_uri_unparseable)]
 fn parseable_data_uri_image_url_survives_and_counts_no_drop() {
     // Arrange
     let req = req_with_single_part(image_url_part("data:image/png;base64,iVBORw0KGgo="));
@@ -271,7 +256,6 @@ fn parseable_data_uri_image_url_survives_and_counts_no_drop() {
 /// The `file_id` reference form names an upload in the OpenAI Files namespace
 /// that Gemini cannot resolve, and `Part` has no reference-by-id member.
 #[test]
-#[serial_test::serial(gemini_file_no_inline_bytes)]
 fn file_no_inline_bytes_drop_bumps_the_counter_once_per_request() {
     // Arrange
     let req = req_with_part_beside_text(file_part(json!({"file_id": "file-abc123"})), "summarize");
@@ -301,7 +285,6 @@ fn file_no_inline_bytes_drop_bumps_the_counter_once_per_request() {
 
 /// A non-data-URI `file_data` loses the same way and counts the same class.
 #[test]
-#[serial_test::serial(gemini_file_no_inline_bytes)]
 fn non_data_uri_file_data_drop_bumps_the_same_counter() {
     // Arrange
     let req = req_with_part_beside_text(
@@ -335,7 +318,6 @@ fn non_data_uri_file_data_drop_bumps_the_same_counter() {
 /// POSITIVE CONTROL: the base64-upload form -- the representable sibling of
 /// the two arms above -- reaches the wire as `inlineData` and counts nothing.
 #[test]
-#[serial_test::serial(gemini_file_no_inline_bytes)]
 fn base64_file_data_survives_and_counts_no_drop() {
     // Arrange
     let req = req_with_single_part(file_part(json!({
@@ -367,7 +349,6 @@ fn base64_file_data_survives_and_counts_no_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_document_source_no_inline_bytes)]
 fn document_source_drop_bumps_the_counter_once_per_request() {
     // Arrange -- a url-shape Anthropic document source has no bytes.
     let req = req_with_part_beside_text(
@@ -394,7 +375,6 @@ fn document_source_drop_bumps_the_counter_once_per_request() {
 
 /// An empty-payload base64 document loses the same way, same class.
 #[test]
-#[serial_test::serial(gemini_document_source_no_inline_bytes)]
 fn empty_base64_document_drop_bumps_the_same_counter() {
     // Arrange
     let req = req_with_part_beside_text(
@@ -423,7 +403,6 @@ fn empty_base64_document_drop_bumps_the_same_counter() {
 
 /// POSITIVE CONTROL: a base64 document source survives and counts nothing.
 #[test]
-#[serial_test::serial(gemini_document_source_no_inline_bytes)]
 fn base64_document_source_survives_and_counts_no_drop() {
     // Arrange
     let req = req_with_single_part(document_part(json!({
@@ -450,7 +429,6 @@ fn base64_document_source_survives_and_counts_no_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_redacted_thinking_unsupported)]
 fn redacted_thinking_drop_bumps_the_counter_once_per_request() {
     // Arrange -- the opaque payload has no Gemini `Part` slot, beside an
     // ordinary thinking part that DOES.
@@ -487,7 +465,6 @@ fn redacted_thinking_drop_bumps_the_counter_once_per_request() {
 /// POSITIVE CONTROL: an ordinary thinking part alone travels the sibling
 /// `Thinking` arm, survives, and counts nothing.
 #[test]
-#[serial_test::serial(gemini_redacted_thinking_unsupported)]
 fn ordinary_thinking_part_survives_and_counts_no_drop() {
     // Arrange
     let req = req_with_single_part(thinking_part("reasoning about the answer"));
@@ -551,7 +528,6 @@ fn assistant_with_reasoning(details: Vec<routectl_core::ReasoningDetail>) -> Cha
 }
 
 #[test]
-#[serial_test::serial(gemini_foreign_reasoning_unreplayable)]
 fn foreign_reasoning_drop_bumps_the_counter_once_per_request() {
     // Arrange -- one foreign detail (unreplayable) beside one Gemini-origin
     // detail (replayable).
@@ -596,7 +572,6 @@ fn foreign_reasoning_drop_bumps_the_counter_once_per_request() {
 /// POSITIVE CONTROL: an all-native reasoning array replays whole and counts
 /// nothing, proving the assertion above is tied to the foreign tag.
 #[test]
-#[serial_test::serial(gemini_foreign_reasoning_unreplayable)]
 fn native_reasoning_only_replays_and_counts_no_drop() {
     // Arrange
     let req = assistant_with_reasoning(vec![routectl_core::ReasoningDetail {
@@ -629,7 +604,6 @@ fn native_reasoning_only_replays_and_counts_no_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_unknown_content_block_unrepresentable)]
 fn unknown_content_block_drop_bumps_the_counter_once_per_request() {
     // Arrange -- a block whose `type` tag the canonical schema does not model.
     let unknown: ContentPart = serde_json::from_value(json!({
@@ -667,7 +641,6 @@ fn unknown_content_block_drop_bumps_the_counter_once_per_request() {
 /// POSITIVE CONTROL: a MODELED block type in the same position survives and
 /// counts nothing, proving the assertion above exercises the unknown-tag arm.
 #[test]
-#[serial_test::serial(gemini_unknown_content_block_unrepresentable)]
 fn modeled_content_block_survives_and_counts_no_drop() {
     // Arrange
     let known: ContentPart = serde_json::from_value(json!({
@@ -718,7 +691,6 @@ fn assistant_with_raw_tool_calls(tool_calls: Vec<Value>) -> ChatRequest {
 }
 
 #[test]
-#[serial_test::serial(gemini_tool_call_no_function_object)]
 fn tool_call_without_function_drop_bumps_the_counter_once_per_request() {
     // Arrange -- one entry with no `function` object (no name to correlate on)
     // beside a well-formed one.
@@ -757,7 +729,6 @@ fn tool_call_without_function_drop_bumps_the_counter_once_per_request() {
 
 /// POSITIVE CONTROL: an all-well-formed `tool_calls` array counts nothing.
 #[test]
-#[serial_test::serial(gemini_tool_call_no_function_object)]
 fn well_formed_tool_calls_survive_and_count_no_drop() {
     // Arrange
     let req = assistant_with_raw_tool_calls(vec![json!({
@@ -781,7 +752,6 @@ fn well_formed_tool_calls_survive_and_count_no_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_tool_def_unnamed)]
 fn unnamed_tool_def_drop_bumps_the_counter_once_per_request() {
     // Arrange -- a hosted-tool shape with no function name, beside a named
     // function tool that IS representable.
@@ -822,7 +792,6 @@ fn unnamed_tool_def_drop_bumps_the_counter_once_per_request() {
 /// The dependent `tool_choice` drop is a CONSEQUENCE of the declaration drop
 /// above and must not be counted a second time -- one lost intent, one count.
 #[test]
-#[serial_test::serial(gemini_tool_def_unnamed)]
 fn tool_choice_dropped_with_its_declarations_counts_only_the_declaration_drop() {
     // Arrange -- the only tool def is nameless AND a tool_choice forces it.
     use routectl_core::ToolDef;
@@ -859,7 +828,6 @@ fn tool_choice_dropped_with_its_declarations_counts_only_the_declaration_drop() 
 
 /// POSITIVE CONTROL: an all-named tool array survives and counts nothing.
 #[test]
-#[serial_test::serial(gemini_tool_def_unnamed)]
 fn named_tool_defs_survive_and_count_no_drop() {
     // Arrange
     use routectl_core::ToolDef;
@@ -888,7 +856,6 @@ fn named_tool_defs_survive_and_count_no_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_response_format_unrepresentable)]
 fn unrecognized_response_format_drop_bumps_the_counter_once_per_request() {
     // Arrange -- an unmodeled structured-output mode, with a max_tokens knob
     // so the body still carries a generationConfig for the sibling assertion.
@@ -921,7 +888,6 @@ fn unrecognized_response_format_drop_bumps_the_counter_once_per_request() {
 /// POSITIVE CONTROL: `json_object` -- the representable sibling shape -- maps
 /// onto `responseMimeType` and counts nothing.
 #[test]
-#[serial_test::serial(gemini_response_format_unrepresentable)]
 fn json_object_response_format_survives_and_counts_no_drop() {
     // Arrange
     let req = ChatRequest {
@@ -948,7 +914,6 @@ fn json_object_response_format_survives_and_counts_no_drop() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn schema_keyword_drop_bumps_the_counter_once_per_request() {
     // Arrange -- a pydantic-shaped tool schema whose `additionalProperties` is
     // a constraint Gemini's Schema proto cannot carry, beside a `type`,
@@ -1000,7 +965,6 @@ fn schema_keyword_drop_bumps_the_counter_once_per_request() {
 /// reaches the wire whole, warns nothing, and counts nothing -- proving the
 /// assertion above is tied to the unsupported keywords, not to any schema.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn gemini_subset_schema_survives_and_counts_no_drop() {
     // Arrange
     use routectl_core::{CustomTool, ToolDef};
@@ -1049,7 +1013,6 @@ fn gemini_subset_schema_survives_and_counts_no_drop() {
 /// An unsupported `format` is a constraint loss on the same class -- the
 /// counter must not be blind to it just because no keyword was stripped.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn unsupported_format_reports_a_drop() {
     // Arrange
     let (cleaned, dropped) =
@@ -1066,7 +1029,6 @@ fn unsupported_format_reports_a_drop() {
 
 /// A supported `format` is renormalized, not lost, so it must NOT report.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn supported_format_reports_no_drop() {
     // Arrange
     let (cleaned, dropped) = crate::gemini::schema::clean_schema_alone(
@@ -1081,7 +1043,6 @@ fn supported_format_reports_no_drop() {
 
 /// Each constraint keyword the proto rejects reports, individually.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn unsupported_keywords_report_a_drop() {
     for keyword in ["additionalProperties", "not", "const", "patternProperties"] {
         // Arrange
@@ -1102,7 +1063,6 @@ fn unsupported_keywords_report_a_drop() {
 /// loses nothing and must NOT report -- the paired positive control proving
 /// the assertion above is not just "any strip reports".
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn structural_keyword_strips_report_no_drop() {
     // Arrange -- a resolvable ref, so the def's shape survives inlined.
     let schema = json!({
@@ -1132,7 +1092,6 @@ fn structural_keyword_strips_report_no_drop() {
 /// An UNRESOLVABLE ref degrades to an unconstrained schema -- the caller's
 /// shape is genuinely gone, so this one does report.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn unresolvable_ref_reports_a_drop() {
     // Arrange -- no `$defs` backs the pointer.
     let schema = json!({"type": "object", "properties": {"a": {"$ref": "#/$defs/Missing"}}});
@@ -1152,7 +1111,6 @@ fn unresolvable_ref_reports_a_drop() {
 /// An `allOf` whose branches disagree cannot be merged into one Gemini schema,
 /// so its contents are dropped and the loss is counted, once per request.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn all_of_conflict_reports_a_drop() {
     // Arrange
     let (cleaned, dropped) = crate::gemini::schema::clean_schema_alone(&json!({
@@ -1175,7 +1133,6 @@ fn all_of_conflict_reports_a_drop() {
 
 /// POSITIVE CONTROL: an `allOf` that merges cleanly loses nothing.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn mergeable_all_of_reports_no_drop() {
     // Arrange
     let (cleaned, dropped) = crate::gemini::schema::clean_schema_alone(&json!({
@@ -1194,7 +1151,6 @@ fn mergeable_all_of_reports_no_drop() {
 /// A `required` entry naming no declared property cannot reach Gemini; removing
 /// it means the model is no longer told the field is mandatory.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn required_naming_a_missing_property_reports_a_drop() {
     // Arrange
     let req = tool_request(json!({
@@ -1320,7 +1276,6 @@ fn assert_ceiling_refusal(
 }
 
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn over_depth_tool_schema_refuses_the_request_and_still_flushes_the_tally() {
     // Arrange -- a first tool that drops a keyword (raising the tally flag),
     // then a second whose schema is over the depth ceiling.
@@ -1371,7 +1326,6 @@ fn over_depth_tool_schema_refuses_the_request_and_still_flushes_the_tally() {
 }
 
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn over_node_response_format_schema_refuses_the_request() {
     // Arrange
     let req = ChatRequest {
@@ -1399,7 +1353,6 @@ fn over_node_response_format_schema_refuses_the_request() {
 }
 
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn over_byte_tool_schema_refuses_the_request_without_logging_schema_text() {
     // Arrange -- 5 x 2 MiB emitted from one def, against an 8 MiB ceiling.
     let req = tool_request(shared_literal_schema(2 * 1024 * 1024, 5));
@@ -1419,7 +1372,6 @@ fn over_byte_tool_schema_refuses_the_request_without_logging_schema_text() {
 }
 
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn shared_literal_schema_under_the_byte_ceiling_is_not_refused() {
     // Arrange -- same shape as the refusal above, 3 sites instead of 5.
     let req = tool_request(shared_literal_schema(2 * 1024 * 1024, 3));
@@ -1463,7 +1415,6 @@ fn described_schema(len: usize) -> Value {
 }
 
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn many_tools_each_under_the_ceiling_are_refused_as_a_request_on_nodes() {
     // Arrange -- 3,500 nodes per tool: each is far under 10,000, three are not.
     let schema = json!({
@@ -1496,7 +1447,6 @@ fn many_tools_each_under_the_ceiling_are_refused_as_a_request_on_nodes() {
 }
 
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn many_tools_each_under_the_ceiling_are_refused_as_a_request_on_bytes() {
     // Arrange -- 3 MiB per tool against an 8 MiB request budget.
     let schema = described_schema(3 * 1024 * 1024);
@@ -1524,7 +1474,6 @@ fn many_tools_each_under_the_ceiling_are_refused_as_a_request_on_bytes() {
 }
 
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn response_format_and_tools_draw_on_one_budget() {
     // Arrange -- a 5 MiB tool schema, then a 4 MiB response schema.
     let with_response = |tool_len: usize, response_len: usize| ChatRequest {
@@ -1561,7 +1510,6 @@ fn response_format_and_tools_draw_on_one_budget() {
 /// refused, so the refusals above are tied to the ceiling and not to any
 /// large schema.
 #[test]
-#[serial_test::serial(gemini_schema_keyword_unsupported)]
 fn schema_at_the_ceilings_is_not_refused() {
     // Arrange
     let mut at_depth = over_depth_schema();
@@ -1592,7 +1540,6 @@ fn schema_at_the_ceilings_is_not_refused() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(gemini_cache_control_unsupported)]
 fn cache_control_drop_bumps_the_counter_once_per_request() {
     // Arrange -- a marked text part beside an unmarked one.
     let marked = ContentPart::Known(KnownContentPart::Text {
@@ -1625,7 +1572,6 @@ fn cache_control_drop_bumps_the_counter_once_per_request() {
 /// POSITIVE CONTROL: an unmarked request warns nothing and counts nothing,
 /// proving the warning above is tied to the marker.
 #[test]
-#[serial_test::serial(gemini_cache_control_unsupported)]
 fn unmarked_request_counts_no_cache_control_drop() {
     // Arrange
     let req = base_req();
@@ -1665,7 +1611,6 @@ fn req_with_effort(effort: &str) -> ChatRequest {
 }
 
 #[test]
-#[serial_test::serial(gemini_reasoning_effort_unrecognized)]
 fn unrecognized_reasoning_effort_drop_bumps_the_counter_once() {
     // Arrange: a token outside the canonical effort vocabulary.
     let req = req_with_effort("turbo");
@@ -1695,7 +1640,6 @@ fn unrecognized_reasoning_effort_drop_bumps_the_counter_once() {
 }
 
 #[test]
-#[serial_test::serial(gemini_reasoning_effort_unrecognized)]
 fn a_recognized_reasoning_effort_maps_to_a_level_and_counts_no_drop() {
     // The paired positive control for the test above: a token IN the
     // vocabulary must reach the wire as a level and count nothing.
@@ -1736,7 +1680,6 @@ fn gemini_policy_action_count(class: &str) -> u64 {
 }
 
 #[test]
-#[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
 fn payload_extras_managed_key_override_bumps_the_policy_action_counter_once() {
     // Arrange -- two managed keys in one request, so the ONCE-per-request
     // contract is what the delta proves rather than a coincidence of one key.
@@ -1788,7 +1731,6 @@ fn payload_extras_managed_key_override_bumps_the_policy_action_counter_once() {
 }
 
 #[test]
-#[serial_test::serial(gemini_provider_extra_managed_key_conflict)]
 fn payload_extras_with_no_managed_key_counts_no_policy_action() {
     // The paired positive control: without a collision the guard must not
     // fire, so the counter above measures the refusal and not the merge.

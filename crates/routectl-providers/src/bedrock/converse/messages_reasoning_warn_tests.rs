@@ -69,7 +69,6 @@ fn find_unsigned_warn(events: &[CapturedEvent]) -> &CapturedEvent {
 /// overflow the cap after the second turn, so the sample is the first
 /// eight locations -- the counts, not the sample, carry the magnitude.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn unsigned_reasoning_warn_aggregates_every_turn_and_caps_the_location_sample() {
     // Arrange: 3 assistant turns at message indices 0, 1, 2; 4 unsigned
     // details each, so 12 skips against a sample capped at 8.
@@ -120,7 +119,6 @@ fn unsigned_reasoning_warn_aggregates_every_turn_and_caps_the_location_sample() 
 /// upstream never supplied stays `None` rather than being flattened to a
 /// plausible 0.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn unsigned_reasoning_warn_names_every_turn_and_keeps_a_missing_detail_index() {
     // Arrange: 3 assistant turns at message indices 0, 1, 2 with 2
     // unsigned details each -- 6 skips, under the cap. The first detail
@@ -188,7 +186,6 @@ fn signed_reasoning_details_emit_no_unsigned_warn() {
 /// flush on the error arm the recorded skip is silently swallowed and the
 /// operator sees only the translation failure.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn unsigned_reasoning_warn_survives_a_later_turns_translation_error() {
     // Arrange
     let messages = vec![
@@ -221,11 +218,7 @@ fn unsigned_reasoning_warn_survives_a_later_turns_translation_error() {
 // No-wire-shape reasoning kinds (Summary, an unrecognized kind): the
 // aggregated event plus the per-request `bedrock-converse` /
 // `reasoning_summary_unsupported` translation-drop counter this category
-// feeds. Serialized against each other and against the no-wire-shape test
-// in the host `messages.rs` inline `mod tests` (which shares this
-// drop_class): the counter is a process-global registry, so an unmarked
-// concurrent test asserting an exact delta on the same key would be flaky
-// against this crate's default multi-threaded test runner.
+// feeds.
 // ---------------------------------------------------------------------------
 
 const SUMMARY_WARN_NEEDLE: &str = "skipping reasoning details on Converse egress: kind has no Converse reasoningContent wire shape";
@@ -264,7 +257,6 @@ fn reasoning_summary_drop_count() -> u64 {
 /// aggregated event names the category, and the per-request drop counter
 /// advances by exactly one.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
 fn summary_reasoning_detail_warns_and_bumps_the_drop_counter_once() {
     // Arrange
     let before = reasoning_summary_drop_count();
@@ -301,7 +293,6 @@ fn summary_reasoning_detail_warns_and_bumps_the_drop_counter_once() {
 /// wired from the tally's `flush()`, which runs once per `build_messages`
 /// call -- this is the assertion that pins that placement.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
 fn multiple_no_wire_shape_details_in_one_request_bump_the_drop_counter_once() {
     // Arrange
     let before = reasoning_summary_drop_count();
@@ -347,7 +338,6 @@ fn multiple_no_wire_shape_details_in_one_request_bump_the_drop_counter_once() {
 /// details (both of which DO have a Converse wire shape) survives with no
 /// no-wire-shape event and no drop-counter increment.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_summary_drop)]
 fn wire_representable_reasoning_details_emit_no_summary_warn_or_drop() {
     // Arrange
     let before = reasoning_summary_drop_count();
@@ -389,9 +379,7 @@ fn wire_representable_reasoning_details_emit_no_summary_warn_or_drop() {
 // The two remaining reasoning drop classes and their per-request counters:
 // a detail whose `format` tag is not the one this egress replays, and a
 // Text detail whose signature is missing or empty. Both were already
-// skipped; neither was counted. Serialized on their own drop_class names,
-// which must also cover every test elsewhere in the crate that reaches the
-// same arm -- the unsigned tests above included.
+// skipped; neither was counted.
 // ---------------------------------------------------------------------------
 
 const FOREIGN_FORMAT_WARN_NEEDLE: &str = "detail format is not the one this egress replays";
@@ -429,7 +417,6 @@ fn foreign_format_detail(kind: ReasoningDetailKind, payload: Value) -> Reasoning
 /// All three assertions run here -- the event, the absence from the EMITTED
 /// WIRE VALUE, and the surviving sibling.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
 fn foreign_format_reasoning_detail_warns_and_bumps_the_drop_counter_once() {
     // Arrange
     let before = reasoning_drop_count("reasoning_foreign_format_unsupported");
@@ -488,7 +475,6 @@ fn foreign_format_reasoning_detail_warns_and_bumps_the_drop_counter_once() {
 /// category, so a request mixing both arms is still ONE drop event. Pins
 /// that the two guards were not instrumented as two separate classes.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
 fn foreign_format_details_across_both_arms_bump_the_drop_counter_once() {
     // Arrange
     let before = reasoning_drop_count("reasoning_foreign_format_unsupported");
@@ -539,7 +525,6 @@ fn foreign_format_details_across_both_arms_bump_the_drop_counter_once() {
 /// foreign-format counter -- proving the guard keys on the format tag and
 /// not on something incidental to the fixture above.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_foreign_format_drop)]
 fn replayed_format_reasoning_detail_emits_no_foreign_format_drop() {
     // Arrange
     let before = reasoning_drop_count("reasoning_foreign_format_unsupported");
@@ -580,7 +565,6 @@ fn replayed_format_reasoning_detail_emits_no_foreign_format_drop() {
 /// already cover, and asserts the unsigned thought is absent from the
 /// EMITTED WIRE VALUE rather than merely from the typed block vec.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn unsigned_reasoning_skip_bumps_the_drop_counter_once() {
     // Arrange -- two unsigned details across two turns: still one event.
     let before = reasoning_drop_count("reasoning_signature_missing");
@@ -626,7 +610,6 @@ fn unsigned_reasoning_skip_bumps_the_drop_counter_once() {
 /// POSITIVE CONTROL for the signature class: a signed detail in the
 /// replayed format produces its block and advances no counter.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn signed_reasoning_detail_emits_no_signature_missing_drop() {
     // Arrange
     let before = reasoning_drop_count("reasoning_signature_missing");

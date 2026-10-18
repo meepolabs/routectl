@@ -797,7 +797,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn body_includes_bedrock_anthropic_version_and_beta_flags() {
         let cfg = fake_cfg();
         let req = user_req();
@@ -872,7 +871,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn additional_model_request_fields_cannot_override_managed_keys() {
         // A misconfigured
         // `additional_model_request_fields = { "messages" = [...] }`
@@ -956,7 +954,6 @@ mod tests {
     /// last block carries no cache_control: the marker lowers onto that
     /// last block, and the top-level key is gone.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn top_level_cache_control_lowers_to_last_unmarked_block() {
         use routectl_core::{
             KnownContentPart, cache_control::CacheControl, content_part::ContentPart,
@@ -990,7 +987,6 @@ mod tests {
     /// string converts to a one-element text-block array carrying the 5m
     /// marker; the top-level key is gone.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn top_level_cache_control_lowers_onto_stringified_content() {
         use routectl_core::cache_control::CacheControl;
 
@@ -1059,7 +1055,6 @@ mod tests {
     /// block: the body is unchanged -- the per-block marker survives and
     /// no top-level key is introduced.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn no_top_level_cache_control_leaves_per_block_marker_untouched() {
         use routectl_core::{
             SystemBlock, cache_control::CacheControl, system_content::SystemContent,
@@ -1091,7 +1086,6 @@ mod tests {
     /// Determinism: lowering is a pure function of the input body, so two
     /// identical requests must serialize to byte-identical bodies.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn lowering_is_deterministic_across_identical_requests() {
         use routectl_core::{
             KnownContentPart, SystemBlock, cache_control::CacheControl, content_part::ContentPart,
@@ -1277,7 +1271,6 @@ mod tests {
     /// without touching the shared anthropic_api normalizer's
     /// signature beyond the `bool` flag.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn adaptive_thinking_propagates_from_bedrock_cfg() {
         use routectl_core::ReasoningConfig;
         let mut cfg = fake_cfg();
@@ -1312,7 +1305,6 @@ mod tests {
     /// Claude is pure Anthropic-shape passthrough; structured output
     /// (output_config.format) needs no extra translation on this seam.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn structured_output_format_passes_through_to_bedrock_invoke_body() {
         let cfg = fake_cfg();
         let mut req = user_req();
@@ -1348,7 +1340,6 @@ mod tests {
     /// so the union runs AFTER the withhold -- running it earlier lets the
     /// withhold drop the flag and ship the gated field ungated.
     #[test]
-    #[serial_test::serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
     fn structured_outputs_beta_survives_a_withheld_entry_naming_it() {
         let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
         let cfg = fake_cfg();
@@ -1386,7 +1377,6 @@ mod tests {
     /// Client flags that no operator list or withheld set names reach the
     /// Invoke body verbatim and in order, after the operator floor.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn client_betas_outside_every_list_reach_the_invoke_body_verbatim() {
         // Arrange
         let cfg = fake_cfg();
@@ -1417,7 +1407,6 @@ mod tests {
     /// AWS is a third-party upstream and must not receive the fingerprint.
     /// A normal sibling block survives.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn billing_block_dropped_from_invoke_body_keeps_normal_block() {
         use routectl_core::{SystemBlock, SystemContent};
         // Arrange
@@ -1481,7 +1470,6 @@ mod tests {
     /// inside `anthropic_api::request::normalize`, and is then stripped
     /// unconditionally on the Bedrock-Invoke seam.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn client_metadata_fingerprint_stripped_from_invoke_body() {
         use serde_json::json;
         // Arrange: client supplies a metadata fingerprint via
@@ -1557,7 +1545,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn response_format_inherited_from_anthropic_normalize_reaches_invoke_body() {
         // Bedrock Invoke delegates body construction to the Anthropic-API
         // normalizer, so honoring req.response_format there means the
@@ -1645,7 +1632,6 @@ mod tests {
     /// normalizer, so the shared sampling leak-guard fires here too --
     /// attributed to the Bedrock provider id.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn sampling_fields_emit_one_debug_event_naming_dropped_fields() {
         use crate::sampling_drop_guard::test_support::sole_sampling_drop;
 
@@ -1670,7 +1656,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn no_sampling_warn_when_no_sampling_field_set() {
         use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_drop};
 
@@ -1703,7 +1688,6 @@ mod tests {
     /// WARN -- emitting at both sites would report a single request twice, and
     /// an operator counting these lines would double-count every such request.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     #[tracing_test::traced_test]
     fn dropped_format_keys_warn_once_across_both_write_paths() {
         let mut cfg = fake_cfg();
@@ -1758,7 +1742,6 @@ mod tests {
     /// object schema omitting the key, so the re-run is what makes the
     /// operator's schema shippable.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn operator_supplied_output_schema_is_repaired_on_the_invoke_body() {
         // Arrange
         let mut cfg = fake_cfg();
@@ -1802,7 +1785,6 @@ mod tests {
     /// passes must still yield ONE WARN. An operator counting these lines
     /// would otherwise double-count every such request.
     #[test]
-    #[serial_test::serial(bedrock_invoke_lane_seen)]
     fn additional_properties_forward_warns_once_across_both_repair_passes() {
         // Arrange
         let mut cfg = fake_cfg();

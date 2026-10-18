@@ -11,11 +11,6 @@
 // request body, not merely the typed block vec -- a value can survive
 // inside an opaque payload while the typed view looks clean), and a
 // representable sibling SURVIVES in that same emitted value.
-//
-// Every test here is guarded with the drop_class's own serial name because
-// the counter registry is process-global and this crate's runner is
-// threaded; the guard must also cover any test that reaches the same arm
-// incidentally.
 
 /// The current `(bedrock-converse, class)` drop count, read through the
 /// same snapshot surface the router's doctor path reads.
@@ -131,7 +126,6 @@ fn assert_content_drop(
 /// A url-shape image source is well-formed and unrepresentable on this JSON
 /// wire, so the part drops while the anchor text ships.
 #[test]
-#[serial_test::serial(bedrock_converse_image_source_unrepresentable)]
 fn unrepresentable_image_source_bumps_the_drop_counter_once() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -153,7 +147,6 @@ fn unrepresentable_image_source_bumps_the_drop_counter_once() {
 /// two: the counter is flushed once per `build_messages` call, which is the
 /// placement this assertion pins.
 #[test]
-#[serial_test::serial(bedrock_converse_image_source_unrepresentable)]
 fn two_unrepresentable_image_sources_bump_the_drop_counter_once() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -178,7 +171,6 @@ fn two_unrepresentable_image_sources_bump_the_drop_counter_once() {
 /// A structurally complete image whose media_type is outside AWS's format
 /// table drops on representability, distinctly from the source-shape class.
 #[test]
-#[serial_test::serial(bedrock_converse_image_media_type_unsupported)]
 fn unmapped_image_media_type_bumps_the_drop_counter_once() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -203,7 +195,6 @@ fn unmapped_image_media_type_bumps_the_drop_counter_once() {
 /// A non-data-URI `image_url` is a location this JSON wire cannot
 /// dereference.
 #[test]
-#[serial_test::serial(bedrock_converse_image_url_unrepresentable)]
 fn unrepresentable_image_url_bumps_the_drop_counter_once() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -224,7 +215,6 @@ fn unrepresentable_image_url_bumps_the_drop_counter_once() {
 /// An unrecognized document source kind is unrepresentable rather than
 /// malformed: the kind may be a vendor shape a later build learns.
 #[test]
-#[serial_test::serial(bedrock_converse_document_source_unrepresentable)]
 fn unrepresentable_document_source_bumps_the_drop_counter_once() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -249,7 +239,6 @@ fn unrepresentable_document_source_bumps_the_drop_counter_once() {
 /// A document whose media_type is outside AWS's format table drops on
 /// representability.
 #[test]
-#[serial_test::serial(bedrock_converse_document_media_type_unsupported)]
 fn unmapped_document_media_type_bumps_the_drop_counter_once() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -275,7 +264,6 @@ fn unmapped_document_media_type_bumps_the_drop_counter_once() {
 /// Converse carrier -- the JSON wire cannot hold a raw file block, so
 /// passthrough is not available the way it is for `ContentPart::Other`.
 #[test]
-#[serial_test::serial(bedrock_converse_file_part_unrepresentable)]
 fn untranslatable_file_part_bumps_the_drop_counter_once() {
     // Arrange -- a file_id-only reference names bytes that live upstream.
     let messages = vec![user_turn(vec![
@@ -298,21 +286,7 @@ fn untranslatable_file_part_bumps_the_drop_counter_once() {
 /// PDF document, a base64 PDF file part -- advances NO content-drop counter
 /// and emits no drop WARN. Without this, every assertion above could pass
 /// against an implementation that counted unconditionally.
-///
-/// Guarded on ALL SIX class names in one `serial` call, not one name per
-/// attribute: this test reads every counter in the group back, so a
-/// concurrent test bumping any of them lands inside this before/after
-/// window. Stacked single-key attributes would leave five of the six
-/// unguarded, and the resulting failure is invisible single-threaded.
 #[test]
-#[serial_test::serial(
-    bedrock_converse_image_source_unrepresentable,
-    bedrock_converse_image_media_type_unsupported,
-    bedrock_converse_image_url_unrepresentable,
-    bedrock_converse_document_source_unrepresentable,
-    bedrock_converse_document_media_type_unsupported,
-    bedrock_converse_file_part_unrepresentable
-)]
 fn representable_content_parts_advance_no_content_drop_counter() {
     // Arrange
     let classes = [

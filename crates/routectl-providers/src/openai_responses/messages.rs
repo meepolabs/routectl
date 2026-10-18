@@ -1449,8 +1449,7 @@ mod messages_tests {
 
     /// Drive the lift with a throwaway tally that is never flushed, so a
     /// test exercising the lift in isolation asserts its OUTPUT and its LOG
-    /// records without touching the process-global drop registry -- which is
-    /// what keeps these tests free of a serial guard. The counter-delta
+    /// records without touching the drop registry. The counter-delta
     /// assertions live in the drop-policy fragment, which drives the lift
     /// through `build_input` (the site that does flush) instead.
     fn lift(details: &[ReasoningDetail], lane: AuthKind, out: &mut Vec<ResponseInputItem>) {

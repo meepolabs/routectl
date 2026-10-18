@@ -699,7 +699,6 @@ mod response_format_drop_tests {
     /// NEGATIVE CONTROL: a non-object directive drops, warns, and counts once
     /// on the shape class.
     #[test]
-    #[serial_test::serial(openai_responses_response_format_shape_unrepresentable)]
     fn responses_non_object_response_format_drops_and_counts_once() {
         // Arrange
         let before = shape_count();
@@ -724,7 +723,6 @@ mod response_format_drop_tests {
     /// member -- the same class as the non-object arm, so ONE request hitting
     /// it is one drop event on that class.
     #[test]
-    #[serial_test::serial(openai_responses_response_format_shape_unrepresentable)]
     fn responses_response_format_without_a_type_token_drops_and_counts_once() {
         // Arrange
         let before = shape_count();
@@ -749,10 +747,6 @@ mod response_format_drop_tests {
     /// sibling keys included, with no warning and no counted drop: the tag is
     /// the upstream's to judge, not this lane's to censor.
     #[test]
-    #[serial_test::serial(
-        openai_responses_response_format_schema_missing,
-        openai_responses_response_format_shape_unrepresentable
-    )]
     fn responses_unrecognized_response_format_type_survives_verbatim() {
         // Arrange
         let directive = json!({
@@ -788,7 +782,6 @@ mod response_format_drop_tests {
     /// NEGATIVE CONTROL: a `json_schema` directive with no `json_schema`
     /// member drops and counts on the schema class.
     #[test]
-    #[serial_test::serial(openai_responses_response_format_schema_missing)]
     fn responses_json_schema_without_a_schema_drops_and_counts_once() {
         // Arrange
         let before = schema_count();
@@ -812,7 +805,6 @@ mod response_format_drop_tests {
     /// NEGATIVE CONTROL: the member is present but carries no `schema` -- the
     /// same class, so this request is one drop event on it too.
     #[test]
-    #[serial_test::serial(openai_responses_response_format_schema_missing)]
     fn responses_json_schema_member_without_a_schema_drops_and_counts_once() {
         // Arrange
         let before = schema_count();
@@ -845,10 +837,6 @@ mod response_format_drop_tests {
     /// advances NONE of the counters. Without it the absence assertions
     /// would pass against an egress that dropped every directive.
     #[test]
-    #[serial_test::serial(
-        openai_responses_response_format_schema_missing,
-        openai_responses_response_format_shape_unrepresentable
-    )]
     fn representable_response_formats_survive_and_advance_no_counter() {
         for directive in [
             json!({"type": "json_object"}),

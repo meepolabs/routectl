@@ -1,12 +1,6 @@
 //! Telemetry contract of the anthropic-api request-assembly path: the lane's
 //! request-volume denominator, and the per-request policy action recorded when
 //! the Claude Code client fingerprint is withheld.
-//!
-//! SERIAL GUARDS: the registry is process-global and the runner is threaded,
-//! so every test here that drives the strip carries
-//! `anthropic_api_client_fingerprint_stripped` -- the ones asserting a delta
-//! AND the ones that only bump the key incidentally while asserting something
-//! else. A guard name no sibling shares excludes nothing.
 
 use super::request::normalize;
 use routectl_core::{ChatRequest, Message, MessageContent, Role, SystemBlock, SystemContent};
@@ -82,13 +76,9 @@ fn assemble(req: &ChatRequest) -> serde_json::Value {
 /// one that FAILS assembly: a rate whose denominator omitted the failures
 /// would read low for exactly the requests that went worst.
 ///
-/// The assertion is a LOWER BOUND, and deliberately so: this is one shared key
-/// that every `normalize` call in the crate's suite bumps, so no serial guard
-/// short of one shared by every such test could make an exact delta stable. A
-/// lower bound is race-immune in the only direction the registry moves (up)
-/// while still failing on the defect it exists to catch -- an unwired or
-/// mis-placed site leaves the delta at 0. That `normalize` is the SOLE site is
-/// a grep property, welded by the census rather than assertable from here.
+/// The delta is exact: a site counted twice per request would make every
+/// rate on the lane read low. That `normalize` is the SOLE site is a grep
+/// property, welded by the census rather than assertable from here.
 #[test]
 fn every_assembled_request_counts_toward_the_lane_denominator() {
     // Arrange: one clean request and one that fails the replay invariant (a
@@ -116,11 +106,11 @@ fn every_assembled_request_counts_toward_the_lane_denominator() {
     let after = lane_seen_count();
 
     // Assert
-    assert!(
-        after - before >= 2,
-        "both requests must count toward the denominator (a rejected request is still a \
-         request the lane processed); delta was {}",
-        after - before
+    assert_eq!(
+        after - before,
+        2,
+        "both requests must count toward the denominator once each (a rejected request is \
+         still a request the lane processed)"
     );
 }
 
@@ -134,7 +124,6 @@ fn every_assembled_request_counts_toward_the_lane_denominator() {
 /// site must red THIS test, which a both-sources fixture could not do -- the
 /// sibling site would set the shared tally and leave it green.
 #[test]
-#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn the_canonical_system_billing_strip_counts_one_policy_action() {
     // Arrange -- TWO billing blocks in one canonical system. The count is per
     // REQUEST, so two stripped blocks are still one action; a per-occurrence
@@ -168,7 +157,6 @@ fn the_canonical_system_billing_strip_counts_one_policy_action() {
 /// at all, so the canonical site cannot fire and only the lift strips --
 /// deleting the record inside the lift branch must red THIS test.
 #[test]
-#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn the_legacy_lift_billing_strip_counts_one_policy_action() {
     // Arrange -- req.system stays None, forcing the lift fallback.
     let mut req = base_req();
@@ -211,7 +199,6 @@ fn the_legacy_lift_billing_strip_counts_one_policy_action() {
 /// for it: that one sets the shared tally from its own site, leaving this
 /// record deletable with the suite green.
 #[test]
-#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn the_forwarded_system_turn_billing_strip_counts_one_policy_action() {
     // Arrange -- a CLEAN canonical system (so Forward policy is selected and
     // the canonical site records nothing), with the fingerprint only in a
@@ -248,7 +235,6 @@ fn the_forwarded_system_turn_billing_strip_counts_one_policy_action() {
 /// exactly the requests that withhold the most while the denominator counted
 /// them.
 #[test]
-#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn an_all_billing_system_still_counts_the_policy_action() {
     // Arrange
     let mut req = base_req();
@@ -278,7 +264,6 @@ fn an_all_billing_system_still_counts_the_policy_action() {
 /// Without that, the numerator would miss precisely the requests that went
 /// worst while the denominator counted them.
 #[test]
-#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn a_request_that_strips_then_fails_assembly_still_counts_the_policy_action() {
     // Arrange -- billing block in the canonical system, and a Role::Tool turn
     // with no tool_call_id, which the replay-invariant walk rejects AFTER the
@@ -318,7 +303,6 @@ fn a_request_that_strips_then_fails_assembly_still_counts_the_policy_action() {
 /// assertions above cannot be passing against a counter that bumps for every
 /// request.
 #[test]
-#[serial_test::serial(anthropic_api_client_fingerprint_stripped)]
 fn a_request_with_no_billing_block_records_no_policy_action() {
     // Arrange
     let mut req = base_req();
@@ -357,7 +341,6 @@ fn with_response_format(format: serde_json::Value) -> ChatRequest {
 
 /// SINGLE-SOURCE pin: the request's only loss is the unrecognized tag.
 #[test]
-#[serial_test::serial(anthropic_response_format_unrepresentable)]
 fn an_unrecognized_response_format_is_absent_from_the_anthropic_body_and_counted() {
     // Arrange
     let req = with_response_format(serde_json::json!({"type": "zz_grammar_mode"}));
@@ -388,7 +371,6 @@ pub fn schema_past_the_repair_depth_bound() -> serde_json::Value {
 /// The flush runs on the Err arm too: the directive is dropped by the
 /// converter, then the schema repair rejects the request.
 #[test]
-#[serial_test::serial(anthropic_response_format_unrepresentable)]
 fn an_unrecognized_response_format_still_counts_when_assembly_fails() {
     // Arrange
     let mut req = with_response_format(serde_json::json!({"type": "zz_grammar_mode"}));
@@ -407,7 +389,6 @@ fn an_unrecognized_response_format_still_counts_when_assembly_fails() {
 /// Each row leaves the counter untouched: a mapped format, the default
 /// plain-text mode, and a background probe carrying the unrecognized tag.
 #[test]
-#[serial_test::serial(anthropic_response_format_unrepresentable)]
 fn response_formats_that_lose_nothing_or_are_not_client_traffic_count_nothing() {
     let mut probe = with_response_format(serde_json::json!({"type": "zz_grammar_mode"}));
     probe.routectl_internal.background_probe = true;

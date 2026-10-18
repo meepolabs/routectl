@@ -404,7 +404,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_tool_choice_shape_unrepresentable)]
     fn unknown_shape_is_dropped() {
         // Arrange -- a shape routectl has never seen.
         let tc = json!({"type": "custom_unknown_shape"});
@@ -486,7 +485,6 @@ mod tests {
 
     /// NEGATIVE CONTROL: a tagged-but-unknown selector shape.
     #[test]
-    #[serial_test::serial(openai_compat_tool_choice_shape_unrepresentable)]
     fn unknown_tool_choice_shape_drops_and_warns() {
         assert_shape_drop(
             json!({"type": "marker_unknown_selector_tag"}),
@@ -497,7 +495,6 @@ mod tests {
     /// NEGATIVE CONTROL: a selector that is neither a string nor an object.
     /// This arm was a bare `?`-on-`Option` before, dropping with no log.
     #[test]
-    #[serial_test::serial(openai_compat_tool_choice_shape_unrepresentable)]
     fn untagged_tool_choice_drops_and_warns() {
         assert_shape_drop(
             json!([{"marker": "marker_array_selector"}]),
@@ -508,7 +505,6 @@ mod tests {
     /// NEGATIVE CONTROL: an object selector with no `type` discriminant.
     /// Also previously a bare `?`-on-`Option` with no log.
     #[test]
-    #[serial_test::serial(openai_compat_tool_choice_shape_unrepresentable)]
     fn tool_choice_object_without_type_drops_and_warns() {
         assert_shape_drop(
             json!({"tool": "marker_typeless_selector"}),
@@ -518,7 +514,6 @@ mod tests {
 
     /// NEGATIVE CONTROL: an Anthropic named-tool selector with no `name`.
     #[test]
-    #[serial_test::serial(openai_compat_tool_choice_shape_unrepresentable)]
     fn named_tool_choice_missing_name_drops_and_warns() {
         // Arrange -- `name` present but not a string, so the arm's
         // "missing or invalid" path fires with a token to look for.
@@ -554,7 +549,6 @@ mod tests {
     /// warns, and leaves no selector on the emitted body -- while the
     /// unrelated keys of that body survive.
     #[test]
-    #[serial_test::serial(openai_compat_forcing_tool_choice_without_tools)]
     fn forcing_tool_choice_without_tools_drops_and_warns() {
         // Arrange -- empty wire tools (the state `tools::lift` leaves when
         // every tool was itself unrepresentable) plus a forcing selector.
@@ -630,7 +624,6 @@ mod tests {
     /// A forcing tool_choice ({type:"any"} -> "required") with
     /// no tools on the wire is unrepresentable; lenient mode drops it.
     #[test]
-    #[serial_test::serial(openai_compat_forcing_tool_choice_without_tools)]
     fn forcing_tool_choice_without_tools_dropped_lenient() {
         // Arrange -- empty wire tools + a forcing Anthropic `any` choice.
         let req = make_req(Some(json!({"type": "any"})));
@@ -649,7 +642,6 @@ mod tests {
 
     /// The same forcing-without-tools case errors under strict.
     #[test]
-    #[serial_test::serial(openai_compat_forcing_tool_choice_without_tools)]
     fn forcing_tool_choice_without_tools_strict_errors() {
         // Act
         let res = run_strict_empty_tools(Some(json!({"type": "any"})));

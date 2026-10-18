@@ -1226,7 +1226,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_provider_extra_managed_key_conflict)]
     fn responses_reasoning_remainder_dropped() {
         // A Responses-ingress request carrying reasoning summary/context/mode
         // routed to an openai-compat egress must NOT emit those keys on the
@@ -1253,7 +1252,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_provider_extra_managed_key_conflict)]
     fn responses_reasoning_summary_only_remainder_dropped() {
         let mut req = simple_req("gpt-4o");
         req.provider_extras = Some(json!({"reasoning": {"summary": "concise"}}));
@@ -1270,7 +1268,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_provider_extra_managed_key_conflict)]
     fn provider_extras_cannot_override_routectl_managed_keys() {
         // Stray routectl-managed keys in
         // `provider_extras = {"messages": [...], "model": "..."}`
@@ -1333,7 +1330,6 @@ mod tests {
     /// the same body shape (the WARN vs DEBUG choice is reviewable in
     /// source; the drop is asserted here).
     #[test]
-    #[serial_test::serial(openai_compat_operator_extra_managed_key_conflict)]
     fn default_extras_cannot_override_routectl_managed_keys() {
         let mut req = simple_req("gpt-4o");
         req.seed = Some(7);
@@ -1371,7 +1367,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_metadata_unsupported)]
     fn anthropic_metadata_is_dropped_from_openai_compat_body() {
         // The Anthropic ingress sweeps the inbound `metadata` object into
         // provider_extras. Strict openai-compat hosts (NIM, vLLM-strict,
@@ -1400,10 +1395,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(
-        openai_compat_operator_extra_managed_key_conflict,
-        openai_compat_provider_extra_managed_key_conflict
-    )]
     fn extras_cannot_re_inject_top_level_system() {
         // Regression: the `system` lowering above strips the top-level
         // `system` key. If extras (default or provider) could
@@ -1678,7 +1669,6 @@ mod tests {
     /// before the openai-compat egress lowers `system` to a role:system
     /// message; a normal sibling block must survive and reach the wire.
     #[test]
-    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
     fn openai_compat_drops_billing_block_keeps_normal_block() {
         use routectl_core::{SystemBlock, SystemContent};
         let mut req = simple_req("gpt-4o");
@@ -1745,7 +1735,6 @@ mod tests {
     /// Leading whitespace before the billing prefix still matches and the
     /// block is dropped (mirrors the reference trim-then-prefix check).
     #[test]
-    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
     fn openai_compat_drops_billing_block_with_leading_whitespace() {
         use routectl_core::{SystemBlock, SystemContent};
         let mut req = simple_req("gpt-4o");
@@ -1788,12 +1777,6 @@ mod tests {
 
     /// The `(openai-compat, client_fingerprint_stripped)` policy-action
     /// counter, read through the public snapshot. Zero before its first bump.
-    ///
-    /// SERIAL GUARDS: this key is process-global and the runner is threaded, so
-    /// every test that drives the strip carries
-    /// `openai_compat_client_fingerprint_stripped` -- the ones asserting a
-    /// delta AND the ones that only bump it incidentally while asserting
-    /// something else. A guard name no sibling shares excludes nothing.
     fn fingerprint_strip_count() -> u64 {
         crate::translation_drop_metrics::translation_policy_action_snapshot()
             .into_iter()
@@ -1836,7 +1819,6 @@ mod tests {
     /// it stripped, and the withheld text is absent from the lowered message
     /// while its unmarked sibling survives.
     #[test]
-    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
     fn the_billing_strip_counts_one_openai_compat_policy_action_for_the_request() {
         // Arrange -- TWO billing blocks in one request. The count is per
         // REQUEST, so two stripped blocks are still one action; a
@@ -1873,7 +1855,6 @@ mod tests {
     /// most while the lane denominator counted them, reading the action rate
     /// low for the case that withholds most often.
     #[test]
-    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
     fn an_all_billing_system_still_counts_the_openai_compat_policy_action() {
         // Arrange
         let req = req_with_system_blocks(&["x-anthropic-billing-header: v=1; fp=secret"]);
@@ -1900,7 +1881,6 @@ mod tests {
     /// leaves the key untouched, so the delta assertions above cannot pass on a
     /// counter that bumps for every request.
     #[test]
-    #[serial_test::serial(openai_compat_client_fingerprint_stripped)]
     fn a_system_with_no_billing_block_records_no_openai_compat_policy_action() {
         // Arrange
         let req = req_with_system_blocks(&["you are helpful"]);
@@ -1951,22 +1931,9 @@ mod tests {
     /// `normalize` bumps this lane's request-volume denominator on BOTH the
     /// Ok and the Err arm. Without the Err arm, strict-rejected requests
     /// vanish from the denominator and every drop rate on the lane reads
-    /// high. The assertion is monotonic rather than an exact delta on
-    /// purpose: the denominator is lane-global and every other `normalize`
-    /// caller in this test binary bumps the same counter, so only "it moved"
-    /// is a sound claim here. The at-most-one-call-site half is welded by the
-    /// census test.
-    ///
-    /// The serial guard is NOT about this test's own monotonic assertion, which
-    /// no sibling could break. It is about the DROP counter this test bumps as a
-    /// side effect: the fixture carries an unrepresentable document block, so
-    /// each `normalize` here increments
-    /// `(openai-compat, document_block_unrepresentable)` twice, which the exact
-    /// delta assertions in `wire_lift::content::tests` read back. Sharing their
-    /// guard name is what keeps those deltas sound -- a test that only triggers
-    /// a counted drop incidentally still has to hold the key's guard.
+    /// high. Each arm must count exactly once; the at-most-one-call-site half
+    /// is welded by the census test.
     #[test]
-    #[serial_test::serial(openai_compat_document_block_unrepresentable)]
     fn normalize_counts_the_request_on_both_arms() {
         // Arrange
         let req = req_with_dropped_document();
@@ -1982,9 +1949,10 @@ mod tests {
             false,
         )
         .expect("lenient normalize must succeed");
-        assert!(
-            lane_seen_count() > before,
-            "the Ok arm must count the request in the lane denominator"
+        assert_eq!(
+            lane_seen_count() - before,
+            1,
+            "the Ok arm must count the request in the lane denominator once"
         );
 
         // Act + Assert -- the strict arm returns Err and is still counted.
@@ -2001,9 +1969,10 @@ mod tests {
             res.is_err(),
             "strict mode must reject the unrepresentable document block"
         );
-        assert!(
-            lane_seen_count() > before,
-            "the Err arm must count the request in the lane denominator too"
+        assert_eq!(
+            lane_seen_count() - before,
+            1,
+            "the Err arm must count the request in the lane denominator once too"
         );
     }
 

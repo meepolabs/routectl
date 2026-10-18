@@ -19,13 +19,6 @@
 //! suppresses the other two. A fixture tripping two classes could not pin
 //! either one -- deleting one record would leave the other's assertion green.
 //!
-//! SERIAL GUARDS: the registry is process-global and the runner is threaded,
-//! so every test that can bump ANY of the three keys carries
-//! `anthropic_api_cloak_policy_actions` -- the ones asserting a delta AND the
-//! ones that trip a class incidentally while asserting something else, wherever
-//! they live. One guard name for the group because each assertion here reads all
-//! three keys, so a per-class name would exclude nothing.
-//!
 //! DELTAS ONLY, never a rate: these tests call the cloak directly, which is
 //! downstream of the lane denominator, so any rate computed here divides by a
 //! count this fixture never bumped.
@@ -180,7 +173,6 @@ fn assert_not_logged(events: &[CapturedEvent], needle: &str) {
 /// Assistant-only history no longer loses the prompt: it lands in one
 /// synthetic leading user turn, and nothing is counted or logged as a loss.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn assistant_only_history_relocates_the_prompt_and_counts_nothing() {
     // Arrange
     let mut body = json!({
@@ -205,7 +197,6 @@ fn assistant_only_history_relocates_the_prompt_and_counts_nothing() {
 /// counts no policy action: the request never reaches the wire. It WARNs once,
 /// carrying the shape and no content, and leaves the body untouched.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_refused_relocation_counts_nothing_and_warns_once_without_content() {
     for mut body in [
         json!({"system": SENTINEL_PROMPT}),
@@ -259,7 +250,6 @@ fn a_refused_relocation_counts_nothing_and_warns_once_without_content() {
 /// discard), every block is text (no non-text drop), and there is no `tools`
 /// array (no stand-down).
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn two_client_cache_breakpoints_count_one_collapse() {
     // Arrange
     let mut body = json!({
@@ -298,7 +288,6 @@ fn two_client_cache_breakpoints_count_one_collapse() {
 /// so this fixture legitimately trips TWO classes and is therefore not a pin for
 /// either -- it pins the INTERACTION, which no single-source fixture can.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_breakpoint_on_an_unrepresentable_block_still_counts_the_collapse() {
     // Arrange -- one breakpoint on a thinking block, one on retained text.
     let mut body = json!({
@@ -342,7 +331,6 @@ fn a_breakpoint_on_an_unrepresentable_block_still_counts_the_collapse() {
 /// A carried image keeps its OWN breakpoint, so a text breakpoint beside it is
 /// not a collapse: two boundaries asked for, two on the wire.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_carried_block_s_breakpoint_is_not_a_collapse() {
     // Arrange
     let mut body = json!({
@@ -384,7 +372,6 @@ fn a_carried_block_s_breakpoint_is_not_a_collapse() {
 /// block carries a cache_control (no collapse), and there is no `tools` array
 /// (no stand-down).
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_forwarded_system_turn_with_unrepresentable_blocks_counts_one_drop() {
     // Arrange
     let mut body = json!({
@@ -429,7 +416,6 @@ fn a_forwarded_system_turn_with_unrepresentable_blocks_counts_one_drop() {
 /// passes are folded together, so a fold that OVERWRITES rather than
 /// accumulates would let the later clean turn erase the earlier turn's loss.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_clean_later_system_turn_does_not_erase_an_earlier_turn_s_dropped_block() {
     // Arrange
     let mut body = json!({
@@ -484,7 +470,6 @@ fn a_clean_later_system_turn_does_not_erase_an_earlier_turn_s_dropped_block() {
 /// forwarded system turn, so nothing is captured and neither relocation class
 /// can fire.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn duplicate_tool_names_count_one_tool_sort_stand_down() {
     // Arrange
     let mut body = json!({
@@ -523,7 +508,6 @@ fn duplicate_tool_names_count_one_tool_sort_stand_down() {
 /// Same transforms as those fixtures -- relocation into a user message, one
 /// breakpoint, two unique named custom tools -- and nothing lost.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_lossless_cloaked_request_counts_no_policy_action() {
     // Arrange
     let mut body = json!({
@@ -562,7 +546,6 @@ fn a_lossless_cloaked_request_counts_no_policy_action() {
 /// body that WOULD trip two classes on the non-CC branch counts nothing here.
 /// Pins the gate the four records sit behind.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn a_genuine_cc_request_counts_no_cloak_policy_action() {
     // Arrange -- no user message to relocate into AND duplicate tool names.
     let mut body = json!({
@@ -598,7 +581,6 @@ fn a_genuine_cc_request_counts_no_cloak_policy_action() {
 /// Whether configured discards deserve telemetry of their own is a separate
 /// product question; this test pins only that they do not ride these classes.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn strict_mode_counts_no_relocation_policy_action() {
     // Arrange -- two breakpoints, an unrepresentable block, and no user
     // message.
@@ -654,7 +636,6 @@ fn strict_mode_counts_no_relocation_policy_action() {
 /// rather than a stand-down routectl took. Counterpart to the strict-mode
 /// control, on the other operator switch.
 #[test]
-#[serial_test::serial(anthropic_api_cloak_policy_actions)]
 fn the_tool_sort_kill_switch_counts_no_stand_down() {
     // Arrange -- duplicate names, which WOULD stand the sort down if it ran.
     let id = test_identity();

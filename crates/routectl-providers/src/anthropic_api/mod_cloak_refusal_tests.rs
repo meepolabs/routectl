@@ -66,7 +66,6 @@ fn assert_local_refusal(err: &Error) {
     );
 }
 
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 #[tokio::test]
 async fn complete_stream_and_count_tokens_share_the_refusal_before_any_network_step() {
     let auth = Arc::new(CountingTokenSource::default());
@@ -87,7 +86,6 @@ async fn complete_stream_and_count_tokens_share_the_refusal_before_any_network_s
     );
 }
 
-#[serial_test::serial(anthropic_api_cloak_split, anthropic_api_cloak_policy_actions)]
 #[tokio::test]
 async fn an_assistant_only_history_proceeds_past_the_cloak_on_every_path() {
     // Positive control for the zero above: the same provider DOES reach token

@@ -235,7 +235,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_non_custom_tool_unrepresentable)]
     fn other_with_anthropic_builtin_warns_and_drops_non_strict() {
         // Arrange -- Anthropic builtin tool, not representable on OpenAI wire.
         let tool = ToolDef::Other(json!({"type": "web_search_20250305", "name": "web_search"}));
@@ -274,7 +273,6 @@ mod tests {
     /// body -- while a representable custom sibling declared in the same
     /// request rides through in that same body.
     #[test]
-    #[serial_test::serial(openai_compat_non_custom_tool_unrepresentable)]
     fn anthropic_builtin_tool_drops_and_warns() {
         // Arrange -- one builtin plus one representable custom tool.
         let builtin = ToolDef::Other(json!({
@@ -356,7 +354,6 @@ mod tests {
 
     /// Two dropped builtins in ONE request are ONE counted drop event.
     #[test]
-    #[serial_test::serial(openai_compat_non_custom_tool_unrepresentable)]
     fn two_dropped_builtins_count_as_one_request_drop() {
         // Arrange
         let tools = vec![
@@ -379,7 +376,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_compat_non_custom_tool_unrepresentable)]
     fn other_with_anthropic_builtin_strict_returns_err() {
         // Arrange
         let tool = ToolDef::Other(json!({"type": "web_search_20250305", "name": "web_search"}));

@@ -302,7 +302,6 @@ fn image_url_data_uri_with_empty_payload_forwards_as_empty_bytes() {
 /// A nonempty unmapped media type still takes its drop when the payload is
 /// empty: the empty payload forwards, but there is no format to ride.
 #[test]
-#[serial_test::serial(bedrock_converse_image_media_type_unsupported)]
 fn empty_data_with_an_unmapped_media_type_still_warn_drops() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -477,7 +476,6 @@ fn non_string_required_fields_fail_the_request_naming_the_field() {
 /// wire simply cannot carry. It keeps its warn-drop: the request is
 /// legitimate and the rest of the turn still ships.
 #[test]
-#[serial_test::serial(bedrock_converse_image_source_unrepresentable)]
 fn nonempty_url_shape_image_source_still_warn_drops() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -497,7 +495,6 @@ fn nonempty_url_shape_image_source_still_warn_drops() {
 /// traffic the day a vendor ships one, so the forward-compat default is
 /// pinned here: it must stay a warn-drop.
 #[test]
-#[serial_test::serial(bedrock_converse_image_source_unrepresentable)]
 fn unknown_nonempty_image_source_type_still_warn_drops() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -520,7 +517,6 @@ fn unknown_nonempty_image_source_type_still_warn_drops() {
 /// a drop, not a refusal -- AWS's format table is bounded and the
 /// caller did nothing wrong.
 #[test]
-#[serial_test::serial(bedrock_converse_image_media_type_unsupported)]
 fn structurally_complete_unmapped_media_type_still_warn_drops() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -542,7 +538,6 @@ fn structurally_complete_unmapped_media_type_still_warn_drops() {
 /// A well-formed non-data-URI image reference is a location this JSON wire
 /// cannot dereference. Unchanged warn-drop.
 #[test]
-#[serial_test::serial(bedrock_converse_image_url_unrepresentable)]
 fn non_data_uri_image_url_still_warn_drops() {
     // Arrange
     let messages = vec![user_turn(vec![
@@ -702,7 +697,6 @@ fn refused_image_errors_never_echo_a_caller_value() {
 /// ends; without a flush on the `Err` path both are silently swallowed and
 /// only the translation failure surfaces.
 #[test]
-#[serial_test::serial(bedrock_converse_reasoning_signature_missing_drop)]
 fn tallies_recorded_before_a_refused_image_still_flush_on_the_error_path() {
     // Arrange: turn 0 drops a citations value, turn 1 skips an unsigned
     // reasoning detail, turn 2 carries the refused image.

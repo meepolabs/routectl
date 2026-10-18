@@ -176,12 +176,6 @@ mod tests {
 
     /// The `(openai-responses, client_fingerprint_stripped)` policy-action
     /// counter, read through the public snapshot. Zero before its first bump.
-    ///
-    /// SERIAL GUARDS: this key is process-global and the runner is threaded, so
-    /// every test below that drives the strip carries
-    /// `openai_responses_client_fingerprint_stripped` -- the ones asserting a
-    /// delta AND the ones that only bump it incidentally while asserting
-    /// something else. A guard name no sibling shares excludes nothing.
     fn fingerprint_strip_count() -> u64 {
         crate::translation_drop_metrics::translation_policy_action_snapshot()
             .into_iter()
@@ -217,7 +211,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_responses_client_fingerprint_stripped)]
     fn strips_billing_block_before_flattening_blocks() {
         // Arrange: a billing/attribution block (carrying the client
         // fingerprint) sits alongside a real prompt block. OpenAI is a
@@ -239,7 +232,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_responses_client_fingerprint_stripped)]
     fn pure_billing_blocks_collapse_to_none() {
         // Arrange: the only system content is the billing block.
         let req = req_with_system(SystemContent::Blocks(vec![block(
@@ -257,7 +249,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(openai_responses_client_fingerprint_stripped)]
     fn pure_billing_text_system_collapses_to_none() {
         // Arrange: a Text-variant system that is itself the billing block.
         let req = req_with_system(SystemContent::Text(
@@ -276,7 +267,6 @@ mod tests {
 
     #[traced_test]
     #[test]
-    #[serial_test::serial(openai_responses_client_fingerprint_stripped)]
     fn pure_billing_fires_dropped_warn_even_when_collapsing_to_none() {
         // Arrange: the only system content is the billing block, so the
         // function collapses to None. The billing-dropped warn must still
@@ -342,7 +332,6 @@ mod tests {
     /// text is absent from what reaches `instructions` while its unmarked
     /// sibling survives.
     #[test]
-    #[serial_test::serial(openai_responses_client_fingerprint_stripped)]
     fn the_billing_strip_counts_one_policy_action_for_the_request() {
         // Arrange: TWO billing blocks in one request. The count is per
         // REQUEST, so two stripped blocks are still one action -- a
@@ -377,7 +366,6 @@ mod tests {
     /// would miss exactly these requests while the lane denominator counted
     /// them, reading the action rate low for the case that strips the most.
     #[test]
-    #[serial_test::serial(openai_responses_client_fingerprint_stripped)]
     fn a_system_collapsing_to_none_still_counts_the_policy_action() {
         // Arrange
         let req = req_with_system(SystemContent::Blocks(vec![block(
@@ -405,7 +393,6 @@ mod tests {
     /// leaves the key untouched, so the delta assertions above cannot pass on
     /// a counter that bumps for every request.
     #[test]
-    #[serial_test::serial(openai_responses_client_fingerprint_stripped)]
     fn a_system_with_no_billing_block_records_no_policy_action() {
         // Arrange
         let req = req_with_system(SystemContent::Blocks(vec![block("you are helpful")]));

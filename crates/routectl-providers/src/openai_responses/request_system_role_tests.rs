@@ -4,11 +4,6 @@
 // billing/attribution block is withheld from either surface and counted once
 // per request.
 //
-// Every test that drives a strip site carries
-// `#[serial_test::serial(openai_responses_client_fingerprint_stripped)]`, the
-// same guard name `system.rs`'s own counter tests hold: the registry is
-// process-global and the runner is threaded.
-//
 // `include!`d into `request_tests.rs`; all top-level imports live there.
 
 const RESPONSES_FINGERPRINT: &str = "x-anthropic-billing-header: cc_version=9.9.9; cch=f1ng3r";
@@ -67,7 +62,6 @@ fn wire_with_strip_delta(req: &ChatRequest) -> (Value, u64) {
 /// must not lose it: with no top-level `system`, the Role::System text is the
 /// whole `instructions` string.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn a_system_role_message_reaches_instructions_when_no_top_level_system_exists() {
     // Arrange
     let req = req_with(vec![system_text("be helpful"), user_text("hi")]);
@@ -89,7 +83,6 @@ fn a_system_role_message_reaches_instructions_when_no_top_level_system_exists() 
 /// surviving system-role message in message order -- including one that sits
 /// after a user turn -- joined by the lane's block separator.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn top_level_system_precedes_system_role_messages_in_message_order() {
     // Arrange
     let mut req = req_with(vec![
@@ -116,7 +109,6 @@ fn top_level_system_precedes_system_role_messages_in_message_order() {
 /// Positive control on `req.system`: with no Role::System messages, the
 /// top-level handling is byte-identical to before.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn a_top_level_system_alone_is_unchanged() {
     // Arrange
     let mut req = req_with(vec![user_text("hi")]);
@@ -132,7 +124,6 @@ fn a_top_level_system_alone_is_unchanged() {
 
 /// A blank top-level system never suppresses legitimate message-system text.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn a_blank_top_level_system_does_not_suppress_system_role_messages() {
     // Arrange
     let mut req = req_with(vec![system_text("from messages"), user_text("hi")]);
@@ -148,7 +139,6 @@ fn a_blank_top_level_system_does_not_suppress_system_role_messages() {
 /// Single-source pin for the Role::System strip site: the fingerprint rides
 /// ONLY a system-role message, beside a clean top-level system.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn a_fingerprint_only_in_a_system_role_message_is_withheld_and_counted() {
     // Arrange
     let mut req = req_with(vec![
@@ -180,7 +170,6 @@ fn a_fingerprint_only_in_a_system_role_message_is_withheld_and_counted() {
 /// A fingerprint on both surfaces is one action for the request; both
 /// legitimate sources survive in order.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn a_fingerprint_on_both_system_sources_is_withheld_and_counted_once() {
     // Arrange
     let mut req = req_with(vec![
@@ -211,7 +200,6 @@ fn a_fingerprint_on_both_system_sources_is_withheld_and_counted_once() {
 /// legitimate message-system content: an empty top-level result never
 /// suppresses the other source.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn an_all_fingerprint_top_level_system_still_delivers_message_system_text() {
     // Arrange
     let mut req = req_with(vec![system_text("message prompt"), user_text("hi")]);
@@ -228,7 +216,6 @@ fn an_all_fingerprint_top_level_system_still_delivers_message_system_text() {
 /// Everything withheld: `instructions` is the empty string the lane always
 /// serializes, and the request still counts.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn an_all_fingerprint_system_on_both_sources_empties_instructions_and_counts() {
     // Arrange
     let mut req = req_with(vec![system_text(RESPONSES_FINGERPRINT), user_text("hi")]);
@@ -246,7 +233,6 @@ fn an_all_fingerprint_system_on_both_sources_empties_instructions_and_counts() {
 /// A request that withholds a fingerprint and THEN fails translation still
 /// counts: the flush sits outside the fallible input build.
 #[test]
-#[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn a_request_that_fails_after_the_message_strip_still_counts() {
     // Arrange -- an image_url that is not an object is a hard error in the
     // input build, which runs after the system surfaces are assembled.

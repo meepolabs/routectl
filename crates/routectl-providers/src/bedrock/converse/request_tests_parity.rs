@@ -207,7 +207,6 @@ fn response_format_maps_to_output_config_format_bag() {
 /// narrower than the Invoke seam's, where `output_config` is NOT a managed
 /// key.
 #[test]
-#[serial_test::serial(bedrock_converse_operator_extra_managed_key_conflict)]
 fn operator_supplied_output_config_never_reaches_the_bag() {
     let mut cfg = fake_cfg();
     cfg.additional_model_request_fields = Some(json!({
@@ -442,7 +441,6 @@ fn auto_tool_choice_keeps_thinking_and_clamps_sampling() {
 }
 
 #[test]
-#[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
 fn response_format_survives_malformed_provider_extras_output_config() {
     // Arrange: a malformed forward-compat sweep leaves output_config as a
     // non-object (null) in provider_extras, while the caller also asks for

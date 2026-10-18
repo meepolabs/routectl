@@ -556,9 +556,6 @@ mod tests {
     /// `additionalModelRequestFields`. (Operator-set metadata via config
     /// flows through `insert_operator_extras`, which is NOT gated here.)
     #[test]
-    // No serial guard: this test drives the helper in isolation and never
-    // flushes, so it touches no counter key. A guard here would tell the next
-    // reader it mutates one.
     fn client_metadata_fingerprint_skipped_from_converse_bag() {
         use serde_json::{Map, json};
         // Arrange: client supplies a metadata fingerprint via
@@ -574,7 +571,7 @@ mod tests {
         // targets the client path in isolation.
         let mut bag: Map<String, serde_json::Value> = Map::new();
         // Drives the helper in isolation and never flushes, so the tally is
-        // deliberately discarded and no serial guard is owed.
+        // deliberately discarded.
         let _ = super::insert_provider_extras(
             &cfg,
             &req,
@@ -697,7 +694,7 @@ mod tests {
 
         let mut bag: Map<String, serde_json::Value> = Map::new();
         // Drives the helper in isolation and never flushes, so the tally is
-        // deliberately discarded and no serial guard is owed.
+        // deliberately discarded.
         let _ = super::insert_operator_extras(&cfg, &mut bag);
 
         assert_eq!(
@@ -968,7 +965,6 @@ mod tests {
     /// withhold -- parallel to the Bedrock-Invoke test
     /// `structured_outputs_beta_survives_a_withheld_entry_naming_it`.
     #[test]
-    #[serial_test::serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
     fn structured_outputs_beta_survives_a_converse_withheld_entry_naming_it() {
         use serde_json::json;
 
@@ -1219,7 +1215,6 @@ mod tests {
     /// shipped bag rather than opted into by the client, so a withheld entry
     /// naming it cannot drop it.
     #[test]
-    #[serial_test::serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
     fn updates_display_unions_its_beta_past_a_withheld_entry_naming_it() {
         for adaptive in [false, true] {
             // Arrange
@@ -1316,10 +1311,7 @@ mod tests {
     // them, so they count on the policy-action counter and never on the drop
     // counter. Log capture uses `routectl_testkit::capture_events` because
     // the withheld KEY rides as a structured field, which a substring match
-    // on rendered output cannot assert. Each test is serialized on its own
-    // class guard -- the registry is process-global and this crate's runner
-    // is threaded -- and the same guard is applied to every other test in
-    // the crate that reaches the same arm incidentally.
+    // on rendered output cannot assert.
     // -----------------------------------------------------------------
 
     fn bag_policy_action_count(class: &str) -> u64 {
@@ -1358,7 +1350,6 @@ mod tests {
     /// routectl-managed field cannot be forwarded (one slot per key), so it
     /// is withheld at DEBUG and the counter advances once for the request.
     #[test]
-    #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
     fn provider_extra_managed_key_conflict_bumps_the_policy_action_counter_once() {
         // Arrange -- `thinking` is managed; `top_k` is representable.
         let before = bag_policy_action_count("provider_extra_managed_key_conflict");
@@ -1419,7 +1410,6 @@ mod tests {
 
     /// Two colliding keys in ONE request is one policy-action EVENT, not two.
     #[test]
-    #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
     fn two_provider_extra_conflicts_bump_the_policy_action_counter_once() {
         // Arrange
         let before = bag_policy_action_count("provider_extra_managed_key_conflict");
@@ -1445,7 +1435,6 @@ mod tests {
     /// POSITIVE CONTROL: extras that collide with nothing advance no
     /// conflict counter and log no conflict at all.
     #[test]
-    #[serial_test::serial(bedrock_converse_provider_extra_managed_key_conflict)]
     fn non_colliding_provider_extras_advance_no_conflict_counter() {
         // Arrange
         let before = bag_policy_action_count("provider_extra_managed_key_conflict");
@@ -1477,7 +1466,6 @@ mod tests {
     /// the block fine, and routectl declines to send it -- so it counts as a
     /// policy action, never as a translation drop.
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn client_fingerprint_strip_bumps_the_policy_action_counter_once() {
         // Arrange
         let before = bag_policy_action_count("client_fingerprint_stripped");
@@ -1540,7 +1528,6 @@ mod tests {
     /// POSITIVE CONTROL: extras carrying no fingerprint block advance no
     /// strip counter.
     #[test]
-    #[serial_test::serial(bedrock_converse_client_fingerprint_stripped)]
     fn extras_without_a_fingerprint_advance_no_strip_counter() {
         // Arrange
         let before = bag_policy_action_count("client_fingerprint_stripped");
@@ -1561,7 +1548,6 @@ mod tests {
     /// constraint, at WARN rather than DEBUG because this path IS a
     /// misconfiguration rather than a forward-compat sweep.
     #[test]
-    #[serial_test::serial(bedrock_converse_operator_extra_managed_key_conflict)]
     fn operator_extra_managed_key_conflict_bumps_the_policy_action_counter_once() {
         // Arrange
         let before = bag_policy_action_count("operator_extra_managed_key_conflict");
@@ -1619,7 +1605,6 @@ mod tests {
     /// POSITIVE CONTROL: operator extras that collide with nothing advance
     /// no counter and emit no conflict WARN.
     #[test]
-    #[serial_test::serial(bedrock_converse_operator_extra_managed_key_conflict)]
     fn non_colliding_operator_extras_advance_no_conflict_counter() {
         // Arrange
         let before = bag_policy_action_count("operator_extra_managed_key_conflict");
@@ -1649,7 +1634,6 @@ mod tests {
     /// absent from the emitted bag, counted once, and a mapped directive
     /// beside it as the positive control.
     #[test]
-    #[serial_test::serial(bedrock_converse_response_format_unrepresentable)]
     fn an_unrecognized_response_format_is_absent_from_the_converse_bag_and_counted() {
         // Arrange
         let cfg = fake_cfg();
