@@ -24,9 +24,14 @@
 //! the result-bearing messages (a `Role::Tool` turn, or any turn carrying a
 //! tool-result block) that follow before the next message that carries no
 //! result, or before the end of the request. Results for parallel calls may
-//! arrive in any order. An empty or absent id is neither a call nor a result
-//! here: it proves no pair and demands none, leaving id normalization to the
-//! egress.
+//! arrive in any order.
+//!
+//! An empty, absent or non-string id names nothing. A call carrying one still opens a
+//! segment but demands no result, since no result could name it; it is never
+//! a duplicate. A result carrying one inside an open segment is a defect: it
+//! cannot say which call it answers, and pairing it by position could match
+//! the wrong call. Outside any segment there is no call it could answer, so
+//! it is left to the egress.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -55,6 +60,9 @@ pub enum ToolPairingDefect {
     InterruptedCalls,
     /// A call left without a result at the end of the request.
     TrailingPendingCalls,
+    /// A tool result with an empty or absent id inside a call segment: it
+    /// cannot name the call it answers, so no call can be paired with it.
+    EmptyResultId,
 }
 
 impl ToolPairingDefect {
@@ -67,6 +75,7 @@ impl ToolPairingDefect {
             Self::DuplicateCallId => "duplicate_call_id",
             Self::InterruptedCalls => "interrupted_calls",
             Self::TrailingPendingCalls => "trailing_pending_calls",
+            Self::EmptyResultId => "empty_result_id",
         }
     }
 
@@ -81,6 +90,7 @@ impl ToolPairingDefect {
             Self::DuplicateCallId => "tool call id is already used by another tool call",
             Self::InterruptedCalls => "tool call has no result before the next non-result turn",
             Self::TrailingPendingCalls => "tool call has no result before the end of the request",
+            Self::EmptyResultId => "tool result has no id to name the tool call it answers",
         }
     }
 }
@@ -175,7 +185,11 @@ pub fn validate_tool_pairing(messages: &[Message]) -> Result<(), ToolPairingErro
         let calls = message_calls(m, msg);
         if !calls.is_empty() {
             close(&mut open, &mut closed, ToolPairingDefect::InterruptedCalls)?;
-            if let Some(reused) = calls.iter().find(|c| !called.insert(c.id)) {
+            if let Some(reused) = calls
+                .iter()
+                .filter(|c| !c.id.is_empty())
+                .find(|c| !called.insert(c.id))
+            {
                 return Err(reused.error(ToolPairingDefect::DuplicateCallId));
             }
             open = Some(Segment::new(calls));
@@ -215,7 +229,9 @@ struct Segment<'a> {
 }
 
 impl<'a> Segment<'a> {
+    /// Only calls with an id are tracked: an empty-id call awaits nothing.
     fn new(calls: Vec<Located<'a>>) -> Self {
+        let calls: Vec<Located<'a>> = calls.into_iter().filter(|c| !c.id.is_empty()).collect();
         let by_id = calls.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
         Self {
             calls: calls.into_iter().map(|c| (c, false)).collect(),
@@ -254,6 +270,11 @@ fn resolve(
     messages: &[Message],
     result: &Located<'_>,
 ) -> Result<(), ToolPairingError> {
+    if result.id.is_empty() {
+        return open.map_or(Ok(()), |_| {
+            Err(result.error(ToolPairingDefect::EmptyResultId))
+        });
+    }
     if let Some(segment) = open
         && let Some(&slot) = segment.by_id.get(result.id)
     {
@@ -295,7 +316,8 @@ fn message_calls(m: usize, msg: &Message) -> Vec<Located<'_>> {
 
 /// The message's results, one entry per logical result, or `None` when the
 /// message is not result-bearing (a semantic turn). A `Role::Tool` turn is
-/// always result-bearing, even with an empty id. A repeat on one carrier is
+/// always result-bearing: with no result part, an empty or absent
+/// `tool_call_id` is itself an empty-id result. A repeat on one carrier is
 /// kept, so resolution sees it as a duplicate result.
 fn message_results(m: usize, msg: &Message) -> Option<Vec<Located<'_>>> {
     let is_tool_turn = matches!(msg.role, Role::Tool);
@@ -303,10 +325,9 @@ fn message_results(m: usize, msg: &Message) -> Option<Vec<Located<'_>>> {
         return None;
     }
     let from_parts = locate(m, Carrier::Content, part_result_ids(msg));
-    let from_field: Vec<Located<'_>> = msg
-        .tool_call_id
-        .as_deref()
-        .filter(|id| is_tool_turn && !id.is_empty())
+    let field_id = msg.tool_call_id.as_deref().unwrap_or_default();
+    let from_field: Vec<Located<'_>> = Some(field_id)
+        .filter(|id| is_tool_turn && (!id.is_empty() || from_parts.is_empty()))
         .map(|id| Located {
             id,
             message: m,
@@ -354,10 +375,10 @@ fn part_call_ids(msg: &Message) -> impl Iterator<Item = (usize, &str)> {
             ContentPart::Known(KnownContentPart::ToolUse { id, .. }) => Some(id.as_str()),
             ContentPart::Other {
                 type_tag, extras, ..
-            } if type_tag == "tool_use" => str_field(extras.get("id")),
+            } if type_tag == "tool_use" => Some(str_field(extras.get("id")).unwrap_or_default()),
             ContentPart::Known(_) | ContentPart::Other { .. } => None,
         };
-        non_empty(id).map(|id| (i, id))
+        id.map(|id| (i, id))
     })
 }
 
@@ -369,10 +390,12 @@ fn part_result_ids(msg: &Message) -> impl Iterator<Item = (usize, &str)> {
             }
             ContentPart::Other {
                 type_tag, extras, ..
-            } if type_tag == "tool_result" => str_field(extras.get("tool_use_id")),
+            } if type_tag == "tool_result" => {
+                Some(str_field(extras.get("tool_use_id")).unwrap_or_default())
+            }
             ContentPart::Known(_) | ContentPart::Other { .. } => None,
         };
-        non_empty(id).map(|id| (i, id))
+        id.map(|id| (i, id))
     })
 }
 
@@ -390,15 +413,11 @@ fn tool_calls_ids(msg: &Message) -> impl Iterator<Item = (usize, &str)> {
         .unwrap_or_default()
         .iter()
         .enumerate()
-        .filter_map(|(i, call)| non_empty(str_field(call.get("id"))).map(|id| (i, id)))
+        .map(|(i, call)| (i, str_field(call.get("id")).unwrap_or_default()))
 }
 
 fn str_field(value: Option<&Value>) -> Option<&str> {
     value.and_then(Value::as_str)
-}
-
-fn non_empty(id: Option<&str>) -> Option<&str> {
-    id.filter(|id| !id.is_empty())
 }
 
 #[cfg(test)]

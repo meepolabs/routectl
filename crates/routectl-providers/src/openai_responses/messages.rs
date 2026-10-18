@@ -2646,11 +2646,11 @@ mod empty_tool_id_policy_tests {
 
     /// A call missing its id on the `tool_calls` field gets a synthesized
     /// `call_<index>` id, while its empty-id result forwards as `""`: the
-    /// two no longer match on the wire. Pinned so the asymmetry is a
-    /// visible choice, not an accident: neither side is paired here, and
-    /// the upstream decides.
+    /// two do not match on the wire. The egress repairs neither side; the
+    /// pairing check names the transcript defective, so the router lays an
+    /// upstream rejection of it to the transcript rather than to the lane.
     #[test]
-    fn an_empty_id_result_beside_a_synthesized_call_id_forwards_unpaired() {
+    fn an_empty_id_result_beside_a_synthesized_call_id_is_a_pairing_defect_forwarded_unrepaired() {
         // Arrange
         let messages = vec![
             user_text("hi"),
@@ -2668,6 +2668,11 @@ mod empty_tool_id_policy_tests {
             },
             tool_role_message(Some("")),
         ];
+        assert_eq!(
+            routectl_core::validate_tool_pairing(&messages).map_err(|e| e.defect()),
+            Err(routectl_core::ToolPairingDefect::EmptyResultId),
+            "premise: the pairing check flags the transcript"
+        );
 
         // Act
         let out = build_input("test", AuthKind::ChatgptOauth, &messages)

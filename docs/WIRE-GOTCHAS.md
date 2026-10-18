@@ -75,7 +75,13 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   results carry ids but do not pair up (a result answering no call, a call
   left unanswered, a duplicated result) reaches every non-Gemini target
   unchanged: routectl neither
-  synthesizes nor drops a turn. `record_transcript_defect` in
+  synthesizes nor drops a turn. A tool result with an empty or absent id
+  that follows a tool call turn is such a defect too
+  (`empty_result_id`): it cannot name the call it answers, and the
+  Converse and Responses egresses give an id-less call a synthesized
+  `call_<index>` id (`normalize_tool_calls`) while forwarding the result's
+  id empty, so the two never match upstream. A call with an empty id and no result is
+  not a defect. `record_transcript_defect` in
   `crates/routectl-router/src/router/transcript_defect.rs` validates the
   pairing once per request and keeps the defect as a request fact. A
   Gemini target refuses locally (`tool-pairing`, `egress_pairing_refusal`)
@@ -84,7 +90,7 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   (`is_transcript_rejection`) is the client's defect, not the lane's: it is
   not retried, does not walk the chain, is not field-repaired, and teaches
   no learned capability; it counts once as unlocalized. The anthropic-api
-  egress still refuses a tool result with no id at all
+  egress still refuses a tool result turn with no id, wherever it sits
   (`tool-call-id-missing`, `normalize_replay_invariants` in
   `crates/routectl-providers/src/anthropic_api/messages.rs`), the one
   egress that refuses a missing tool id.

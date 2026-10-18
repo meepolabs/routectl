@@ -19,9 +19,10 @@ use serde_json::{Value, json};
 
 use super::super::super::field_repair::TEST_UNSUPPORTED_PATH;
 use super::{
-    ALIAS, ANTHROPIC, INVOKE, NEVER_SAMPLED, OPENAI_COMPAT, REFUSED_FIELD, ScriptedProvider,
-    anthropic_message, anthropic_rejection, anthropic_status_message, carries_test_row,
-    carry_test_row, carry_web_search, openai_rejection, request,
+    ALIAS, ANTHROPIC, CONVERSE, INVOKE, NEVER_SAMPLED, OPENAI_COMPAT, OPENAI_RESPONSES,
+    REFUSED_FIELD, ScriptedProvider, anthropic_message, anthropic_rejection,
+    anthropic_status_message, bedrock_rejection, carries_test_row, carry_test_row,
+    carry_web_search, openai_rejection, request,
 };
 #[cfg(feature = "gemini")]
 use super::{GEMINI, router};
@@ -106,14 +107,21 @@ fn chain_router_with_retry(
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
     let mut router = Router::new(Arc::new(config));
+    // Anthropic-family upstream ids, so a Bedrock seat is admitted to count
+    // tokens.
     router.install_resolved_models(BTreeMap::from([
         (
             "m0".to_string(),
-            Arc::new(ResolvedModel::new("m0", "p0", first, "upstream0")),
+            Arc::new(ResolvedModel::new("m0", "p0", first, "anthropic.upstream0")),
         ),
         (
             "m1".to_string(),
-            Arc::new(ResolvedModel::new("m1", "p1", second, "upstream1")),
+            Arc::new(ResolvedModel::new(
+                "m1",
+                "p1",
+                second,
+                "anthropic.upstream1",
+            )),
         ),
     ]));
     router
@@ -167,7 +175,7 @@ fn result(id: &str) -> Message {
 }
 
 /// One transcript per pairing rule.
-fn defective_transcripts() -> [(ToolPairingDefect, Vec<Message>); 7] {
+fn defective_transcripts() -> [(ToolPairingDefect, Vec<Message>); 8] {
     [
         (
             ToolPairingDefect::OrphanResult,
@@ -211,12 +219,30 @@ fn defective_transcripts() -> [(ToolPairingDefect, Vec<Message>); 7] {
             ToolPairingDefect::TrailingPendingCalls,
             vec![user("q"), calls(&["a"])],
         ),
+        (ToolPairingDefect::EmptyResultId, empty_id_result()),
     ]
 }
 
 fn defective() -> Vec<Message> {
     vec![user("q"), result("x")]
 }
+
+/// A call and its result that both carry an empty id: the egresses that
+/// require a call id synthesize one for the call and forward the result's
+/// empty id, so the pair cannot match upstream; one that forwards both
+/// verbatim still sends a result that names no call.
+fn empty_id_result() -> Vec<Message> {
+    vec![user("q"), calls(&[""]), result("")]
+}
+
+/// A named transcript builder.
+type Transcript = (&'static str, fn() -> Vec<Message>);
+
+/// Every defective transcript a rejection row is dispatched on.
+const DEFECTIVE: [Transcript; 2] = [
+    ("defective: orphan result", defective),
+    ("defective: empty-id result", empty_id_result),
+];
 
 fn paired() -> Vec<Message> {
     vec![user("q"), calls(&["a"]), result("a")]
@@ -307,10 +333,17 @@ type GeminiChainRow = (&'static str, fn() -> Vec<Message>, usize, usize, Refusal
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn a_gemini_target_refuses_a_defective_transcript_and_the_next_target_serves_it() {
-    let rows: [GeminiChainRow; 2] = [
+    let rows: [GeminiChainRow; 3] = [
         (
             "defective: refused on gemini, served by the next target",
             defective,
+            0,
+            1,
+            &[("anthropic->gemini", "tool-pairing", 1)],
+        ),
+        (
+            "empty-id result: refused on gemini, served by the next target",
+            empty_id_result,
             0,
             1,
             &[("anthropic->gemini", "tool-pairing", 1)],
@@ -428,10 +461,11 @@ struct RejectionRow {
 }
 
 async fn run_rejection_row(row: &RejectionRow, surface: Surface) {
-    for (transcript, messages, expected) in [
-        ("defective", defective(), &row.defective),
-        ("paired", paired(), &row.paired),
-    ] {
+    let transcripts = DEFECTIVE
+        .map(|(name, messages)| (name, messages(), &row.defective))
+        .into_iter()
+        .chain([("paired", paired(), &row.paired)]);
+    for (transcript, messages, expected) in transcripts {
         let first = ScriptedProvider::new(None, row.answer);
         let second = ScriptedProvider::new(None, answers);
         let router = chain_router(
@@ -659,6 +693,7 @@ fn rejection_rows() -> Vec<RejectionRow> {
             drift_signals: 0,
         },
     });
+    rows.extend(lane_rejection_rows());
     if cfg!(feature = "bedrock") {
         rows.push(RejectionRow {
             name: "a capability the generic learner mints",
@@ -686,6 +721,75 @@ fn rejection_rows() -> Vec<RejectionRow> {
         });
     }
     rows
+}
+
+/// A 422 naming no field, which no learner can attribute.
+fn refuse_plainly_unprocessable(_: &ChatRequest) -> Result<()> {
+    Err(anthropic_status_message(422, "invalid request"))
+}
+
+/// A plain 400 and a plain 422 on each lane that forwards an empty tool id
+/// rather than refusing it: on a paired transcript the walk moves to the
+/// next target, on a defective one it ends on the first.
+fn lane_rejection_rows() -> Vec<RejectionRow> {
+    let mut lanes = vec![(
+        [
+            "a plain 400 on openai-compat",
+            "a plain 422 on openai-compat",
+        ],
+        OPENAI_COMPAT,
+    )];
+    if cfg!(feature = "bedrock") {
+        lanes.push((
+            [
+                "a plain 400 on bedrock converse",
+                "a plain 422 on bedrock converse",
+            ],
+            CONVERSE,
+        ));
+    }
+    if cfg!(feature = "openai-responses") {
+        lanes.push((
+            [
+                "a plain 400 on openai-responses",
+                "a plain 422 on openai-responses",
+            ],
+            OPENAI_RESPONSES,
+        ));
+    }
+    let answers: [super::Answer; 2] = [refuse_plainly, refuse_plainly_unprocessable];
+    lanes
+        .into_iter()
+        .flat_map(|(names, first_block)| {
+            names
+                .into_iter()
+                .zip(answers)
+                .map(move |(name, answer)| RejectionRow {
+                    name,
+                    first_block,
+                    answer,
+                    carry: carry_nothing,
+                    defective: Observed {
+                        served: false,
+                        first_calls: 1,
+                        second_calls: 0,
+                        field_repairs: 0,
+                        learned: vec![],
+                        unlocalized: Some(1),
+                        drift_signals: 0,
+                    },
+                    paired: Observed {
+                        served: true,
+                        first_calls: 1,
+                        second_calls: 1,
+                        field_repairs: 0,
+                        learned: vec![],
+                        unlocalized: None,
+                        drift_signals: 0,
+                    },
+                })
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -733,6 +837,47 @@ fn field_repair_row(
     }
 }
 
+fn refuse_test_row_on_bedrock(req: &ChatRequest) -> Result<()> {
+    if carries_test_row(req) {
+        return Err(bedrock_rejection(TEST_UNSUPPORTED_PATH));
+    }
+    Ok(())
+}
+
+fn refuse_test_row_on_bedrock_unprocessable(req: &ChatRequest) -> Result<()> {
+    if carries_test_row(req) {
+        let body = json!({"message": format!("{TEST_UNSUPPORTED_PATH}: {REFUSED_FIELD}")});
+        return Err(Error::upstream("scripted", 422, body.to_string()));
+    }
+    Ok(())
+}
+
+/// A field rejection on a Bedrock Converse seat: of the lanes that forward
+/// an empty tool id, the only one that counts tokens.
+fn converse_count_rows() -> Vec<RejectionRow> {
+    if !cfg!(feature = "bedrock") {
+        return Vec::new();
+    }
+    vec![
+        RejectionRow {
+            answer: refuse_test_row_on_bedrock,
+            ..field_repair_row(
+                "a 400 field rejection on converse the count repairs",
+                CONVERSE,
+                carry_test_row,
+            )
+        },
+        RejectionRow {
+            answer: refuse_test_row_on_bedrock_unprocessable,
+            ..field_repair_row(
+                "a 422 field rejection on converse the count repairs",
+                CONVERSE,
+                carry_test_row,
+            )
+        },
+    ]
+}
+
 #[tokio::test]
 async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_token_count_unrepaired() {
     let rows = [
@@ -760,6 +905,7 @@ async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_token_count_
             )
         },
     ];
+    let rows = rows.into_iter().chain(converse_count_rows());
     for row in rows {
         run_rejection_row(&row, Surface::CountTokens).await;
     }

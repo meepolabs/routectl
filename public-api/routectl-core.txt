@@ -5513,6 +5513,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::tool_def::ToolDef
 pub routectl_core::ToolPairingDefect::CrossSegmentResult
 pub routectl_core::ToolPairingDefect::DuplicateCallId
 pub routectl_core::ToolPairingDefect::DuplicateResult
+pub routectl_core::ToolPairingDefect::EmptyResultId
 pub routectl_core::ToolPairingDefect::InterruptedCalls
 pub routectl_core::ToolPairingDefect::OrphanResult
 pub routectl_core::ToolPairingDefect::ResultBeforeCall

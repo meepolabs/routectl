@@ -241,18 +241,211 @@ fn accepts_consecutive_tool_segments() {
     assert_eq!(validate_tool_pairing(&messages), Ok(()));
 }
 
-#[test]
-fn empty_ids_neither_prove_nor_demand_a_pair() {
-    // Arrange: an empty call id and an empty result id are left to the
-    // egress id normalization; neither is matched here.
-    let result = Message {
-        tool_call_id: Some(String::new()),
+/// A `Role::Tool` turn whose `tool_call_id` is `id` (`None` = absent).
+fn tool_turn_with(id: Option<&str>) -> Message {
+    Message {
+        tool_call_id: id.map(Into::into),
         ..message(Role::Tool, MessageContent::Text("r".into()))
+    }
+}
+
+/// A `tool_result` passthrough block with no `tool_use_id` key at all.
+fn other_result_without_id() -> ContentPart {
+    ContentPart::Other {
+        type_tag: "tool_result".into(),
+        cache_control: None,
+        extras: Map::new(),
+    }
+}
+
+/// A `tool_result` passthrough block whose `tool_use_id` is `id`.
+fn other_result_with_id(id: Value) -> ContentPart {
+    let mut extras = Map::new();
+    extras.insert("tool_use_id".into(), id);
+    ContentPart::Other {
+        type_tag: "tool_result".into(),
+        cache_control: None,
+        extras,
+    }
+}
+
+/// A `tool_calls` entry with no `id` key at all.
+fn assistant_call_without_id() -> Message {
+    Message {
+        tool_calls: Some(vec![
+            json!({"type": "function", "function": {"name": "lookup", "arguments": "{}"}}),
+        ]),
+        ..message(Role::Assistant, MessageContent::Null)
+    }
+}
+
+#[test]
+fn an_empty_id_call_with_no_result_demands_none() {
+    // An empty-id call has no id a result could name, so leaving it
+    // unanswered breaks no pairing rule; what comes after it still pairs.
+    let rows: [(&str, Vec<Message>); 5] = [
+        ("trailing", vec![user("q"), assistant_tool_calls(&[""])]),
+        (
+            "before a semantic turn",
+            vec![user("q"), assistant_tool_calls(&[""]), user("next")],
+        ),
+        (
+            "an absent id before a semantic turn",
+            vec![user("q"), assistant_call_without_id(), assistant("done")],
+        ),
+        (
+            "beside an answered call",
+            vec![user("q"), assistant_tool_calls(&["", "a"]), tool_turn("a")],
+        ),
+        (
+            "twice in one turn",
+            vec![
+                user("q"),
+                assistant_parts(vec![tool_use_part(""), tool_use_part("")]),
+            ],
+        ),
+    ];
+    for (name, messages) in rows {
+        // Act
+        let result = validate_tool_pairing(&messages);
+
+        // Assert
+        assert_eq!(result, Ok(()), "{name}");
+    }
+}
+
+#[test]
+fn a_tool_turn_with_no_tool_call_id_pairs_on_its_result_part() {
+    // Arrange: the result part names the call; the absent field adds no
+    // second, empty-id result.
+    let result = Message {
+        tool_call_id: None,
+        ..message(
+            Role::Tool,
+            MessageContent::Parts(vec![tool_result_part("a")]),
+        )
     };
-    let messages = [user("q"), assistant_tool_calls(&[""]), result];
+    let messages = [user("q"), assistant_tool_calls(&["a"]), result];
 
     // Act + Assert
     assert_eq!(validate_tool_pairing(&messages), Ok(()));
+}
+
+#[test]
+fn an_empty_id_result_with_no_call_turn_before_it_is_left_to_the_egress() {
+    // Arrange: no call segment is open, so no call awaits this result.
+    let messages = [user("q"), tool_turn_with(Some(""))];
+
+    // Act + Assert
+    assert_eq!(validate_tool_pairing(&messages), Ok(()));
+}
+
+#[test]
+fn rejects_an_empty_id_result_inside_a_call_segment() {
+    // Every result carrier, with the id empty or absent, answering either an
+    // empty-id call or a call that has an id.
+    let rows: [(&str, Vec<Message>, usize, Option<usize>); 9] = [
+        (
+            "tool turn, empty id, answering an empty-id call",
+            vec![
+                user("q"),
+                assistant_tool_calls(&[""]),
+                tool_turn_with(Some("")),
+            ],
+            2,
+            None,
+        ),
+        (
+            "tool turn, absent id, answering an absent-id call",
+            vec![user("q"), assistant_call_without_id(), tool_turn_with(None)],
+            2,
+            None,
+        ),
+        (
+            "tool result part, empty id, answering an empty-id tool_use part",
+            vec![
+                user("q"),
+                assistant_parts(vec![tool_use_part("")]),
+                user_parts(vec![text_part("x"), tool_result_part("")]),
+            ],
+            2,
+            Some(1),
+        ),
+        (
+            "passthrough result, empty id",
+            vec![
+                user("q"),
+                assistant_parts(vec![other_part("tool_use", "id", "")]),
+                user_parts(vec![other_part("tool_result", "tool_use_id", "")]),
+            ],
+            2,
+            Some(0),
+        ),
+        (
+            "passthrough result, absent id",
+            vec![
+                user("q"),
+                assistant_parts(vec![other_part("tool_use", "id", "")]),
+                user_parts(vec![other_result_without_id()]),
+            ],
+            2,
+            Some(0),
+        ),
+        (
+            "passthrough result, non-string id, which names no call",
+            vec![
+                user("q"),
+                assistant_parts(vec![other_part("tool_use", "id", "")]),
+                user_parts(vec![other_result_with_id(json!(7))]),
+            ],
+            2,
+            Some(0),
+        ),
+        (
+            "tool turn, empty id, beside a call that has an id",
+            vec![
+                user("q"),
+                assistant_tool_calls(&["a"]),
+                tool_turn("a"),
+                tool_turn_with(Some("")),
+            ],
+            3,
+            None,
+        ),
+        (
+            "tool turn, empty id, before the answer to a call that has an id",
+            vec![
+                user("q"),
+                assistant_tool_calls(&["a"]),
+                tool_turn_with(Some("")),
+                tool_turn("a"),
+            ],
+            2,
+            None,
+        ),
+        (
+            "tool turn, empty id, in a later segment",
+            vec![
+                user("q"),
+                assistant_tool_calls(&["a"]),
+                tool_turn("a"),
+                assistant("t"),
+                assistant_tool_calls(&[""]),
+                tool_turn_with(Some("")),
+            ],
+            5,
+            None,
+        ),
+    ];
+    for (name, messages, message_index, item_index) in rows {
+        // Act
+        let err = validate_tool_pairing(&messages).expect_err(name);
+
+        // Assert
+        assert_eq!(err.defect(), ToolPairingDefect::EmptyResultId, "{name}");
+        assert_eq!(err.message_index(), message_index, "{name}");
+        assert_eq!(err.item_index(), item_index, "{name}");
+    }
 }
 
 #[test]

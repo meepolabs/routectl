@@ -428,16 +428,19 @@ tool calls and tool results carry ids but are not correctly paired is
 **forwarded unchanged** to the target. Each tool call must be answered by
 exactly one result, matched on its id, in the result turns that follow it
 before the next non-result turn or the end of the request; parallel
-results may arrive in any order. Among the egresses only Gemini, whose
+results may arrive in any order. A tool result with an empty or absent
+id that follows a tool call turn is mispaired the same way, since it
+cannot name the call it answers. Among the egresses only Gemini, whose
 translation needs each result's call, refuses such a pairing defect
 locally (`tool-pairing`) and the chain moves to the next target; when no
 other target remains the client gets a **local HTTP 400**
 (`invalid_request_error` on the Anthropic envelope, `validation_error` on
 the OpenAI one) naming the defect class and the offending message index,
-never a tool id or tool content. A tool result with a missing or empty
-tool-call id is a different defect: the `anthropic-api` egress refuses it
-locally (`tool-call-id-missing`), since Anthropic requires the id of the
-tool use a result answers, and the chain likewise moves on. An
+never a tool id or tool content. Separately, the `anthropic-api` egress
+refuses any tool result turn with a missing or empty tool-call id locally
+(`tool-call-id-missing`), since Anthropic requires the id of the tool use a
+result answers, and the chain likewise moves on; when that result also
+follows a tool call turn, the pairing defect is recorded as well. An
 upstream 400 or 422 answering a mispaired transcript is returned as is: it is
 not retried, does not fall back, is not repaired, and teaches no learned
 capability. routectl does not repair a malformed transcript by
