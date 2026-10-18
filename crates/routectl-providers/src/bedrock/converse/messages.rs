@@ -69,7 +69,7 @@ use serde_json::{Value, json};
 
 use routectl_core::{
     ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Result, Role, sanitize_for_log,
+    ReasoningDetailKind, RefusalReason, Result, Role, sanitize_for_log,
 };
 
 use crate::anthropic_api::parts::strip_text_after_tool_use;
@@ -836,6 +836,7 @@ fn translate_known_part(
                      cannot replay (Anthropic/Bedrock requires the \
                      upstream-supplied signature on every reasoningContent \
                      block in a multi-turn request)",
+                    RefusalReason::Unrepresentable,
                 ));
             };
             Ok(Some(ConverseContentBlock::ReasoningContent {
@@ -889,6 +890,7 @@ fn translate_image_source(
             id,
             "image content part on a Converse message has a malformed source: \
              source is not an object",
+            RefusalReason::Unrepresentable,
         ));
     };
     let Some(kind) = obj
@@ -900,6 +902,7 @@ fn translate_image_source(
             id,
             "image content part on a Converse message names no source shape: \
              source.type is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     if kind == "url" {
@@ -914,6 +917,7 @@ fn translate_image_source(
                 id,
                 "image content part on a Converse message has no usable url: \
                  source.url is absent, empty, or not a string",
+                RefusalReason::Unrepresentable,
             ));
         }
     }
@@ -939,6 +943,7 @@ fn translate_image_source(
             id,
             "image content part on a Converse message names no image format: \
              source.media_type is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     let Some(data) = obj
@@ -950,6 +955,7 @@ fn translate_image_source(
             id,
             "image content part on a Converse message has an empty base64 payload: \
              source.data is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     let Some(format) = media_type_to_image_format(media_type) else {
@@ -999,6 +1005,7 @@ fn translate_image_url(
             id,
             "image_url content part on a Converse message has no usable url: \
              image_url.url is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     if let Some(rest) = url.strip_prefix("data:")
@@ -1009,6 +1016,7 @@ fn translate_image_url(
                 id,
                 "image_url content part on a Converse message has an empty base64 payload: \
                  image_url.url declares base64 and carries no bytes",
+                RefusalReason::Unrepresentable,
             ));
         }
         if let Some(format) = media_type_to_image_format(mt) {
@@ -1122,6 +1130,7 @@ fn translate_document(
             id,
             "document content part on a Converse message has a malformed source: \
              source is not an object",
+            RefusalReason::Unrepresentable,
         ));
     };
     let Some(kind) = obj
@@ -1133,6 +1142,7 @@ fn translate_document(
             id,
             "document content part on a Converse message names no source shape: \
              source.type is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     let Some(kind) = document_source_kind(kind) else {
@@ -1158,6 +1168,7 @@ fn translate_document(
             id,
             "document content part on a Converse message names no document format: \
              source.media_type is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     // Empty `data` is malformed for BOTH recognized kinds: a base64 source
@@ -1172,6 +1183,7 @@ fn translate_document(
             id,
             "document content part on a Converse message has an empty payload: \
              source.data is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     let Some(format) = media_type_to_document_format(media_type) else {
@@ -1515,6 +1527,7 @@ fn build_tool_message(
             "tool message missing tool_call_id (Role::Tool requires \
              non-empty toolUseId for AWS Converse)"
                 .to_string(),
+            RefusalReason::ToolCallIdMissing,
         ));
     };
     // Sanitize to the charset the toolUse emit uses (via
@@ -1691,6 +1704,7 @@ fn image_source_to_tool_result(
             id,
             "image block in a Converse tool result names no image format: \
              source.media_type is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     let Some(data) = obj
@@ -1702,6 +1716,7 @@ fn image_source_to_tool_result(
             id,
             "image block in a Converse tool result has an empty base64 payload: \
              source.data is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim
@@ -1762,6 +1777,7 @@ fn document_to_tool_result(
             id,
             "document block in a Converse tool result names no document format: \
              source.media_type is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     let Some(data) = obj
@@ -1773,6 +1789,7 @@ fn document_to_tool_result(
             id,
             "document block in a Converse tool result has an empty payload: \
              source.data is absent, empty, or not a string",
+            RefusalReason::Unrepresentable,
         ));
     };
     // TRANSLATION-DROP: structural -- every caller wraps this None as a ConverseToolResultContent::Json, so the source rides to the model verbatim

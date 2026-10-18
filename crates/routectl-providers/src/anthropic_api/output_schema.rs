@@ -71,7 +71,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
-use routectl_core::{Error, Result, sanitize_for_log};
+use routectl_core::{Error, RefusalReason, Result, sanitize_for_log};
 
 use crate::bounded_diagnostics::BoundedLogSample;
 
@@ -391,6 +391,7 @@ fn depth_limit_error(provider: &str) -> Error {
              {MAX_SCHEMA_DEPTH}-level limit of the additionalProperties repair \
              walk; flatten the schema or split the request"
         ),
+        RefusalReason::SchemaDepth,
     )
 }
 
@@ -402,6 +403,7 @@ fn node_limit_error(provider: &str) -> Error {
              schema nodes, the limit of the additionalProperties repair walk; \
              split the request"
         ),
+        RefusalReason::SchemaSize,
     )
 }
 

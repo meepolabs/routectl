@@ -39,7 +39,8 @@ use serde_json::{Value, json};
 
 use routectl_core::{
     CacheControl, ChatRequest, ContentPart, CoreHistoryReasoning, Error, KnownContentPart, Message,
-    MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role, sanitize_for_log,
+    MessageContent, ReasoningDetail, ReasoningDetailKind, RefusalReason, Result, Role,
+    sanitize_for_log,
 };
 
 use crate::bounded_diagnostics::BoundedLogSample;
@@ -164,6 +165,7 @@ pub(super) fn normalize_replay_invariants<'a>(
                     "messages[{i}] is a tool_result (Role::Tool) without tool_call_id; \
                      Anthropic requires the id of the tool_use this is answering",
                 ),
+                RefusalReason::ToolCallIdMissing,
             ));
         }
     }
@@ -1426,6 +1428,7 @@ impl MessageLedger {
                 self.system_turns_dropped_as_empty,
                 self.merged_across_dropped_system_turn,
             ),
+            RefusalReason::TranslationAccounting,
         ))
     }
 }

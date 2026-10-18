@@ -467,6 +467,10 @@ fn tool_message_without_tool_call_id_is_rejected() {
         err.to_string().contains("tool_call_id"),
         "must mention tool_call_id; got: {err}"
     );
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::ToolCallIdMissing)
+    );
 }
 
 #[test]

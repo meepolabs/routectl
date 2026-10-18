@@ -87,7 +87,7 @@ use super::types::{
 };
 use super::{AuthKind, lane_scheme};
 use crate::translation_drop_metrics::record_translation_drop;
-use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+use routectl_core::{ReasoningDetail, ReasoningDetailKind, RefusalReason};
 
 /// Per-request tally of the deliberate content drops this egress makes
 /// while building `input[]`.
@@ -351,6 +351,7 @@ fn extract_tool_results(
                 "tool_result block has an empty tool_use_id (a ToolResult part \
                  requires a non-empty tool_use_id for the Responses API \
                  function_call_output item)",
+                RefusalReason::ToolCallIdMissing,
             ));
         }
         let output = tool_result_to_output_body(id, content);
@@ -806,6 +807,7 @@ fn translate_tool_message(
             "tool message has no usable tool_call_id: the field is absent or empty \
              (Role::Tool requires a non-empty tool_call_id for the Responses API \
              function_call_output item)",
+            RefusalReason::ToolCallIdMissing,
         ));
     };
     let call_id = crate::tool_id::sanitize_tool_id(raw_call_id).into_owned();
@@ -862,6 +864,7 @@ fn build_user_content(
                                 id,
                                 "image_url content part on a user message has no usable url: \
                                  image_url.url is absent or empty",
+                                RefusalReason::Unrepresentable,
                             ));
                         };
                         let detail = image_url
@@ -1136,6 +1139,7 @@ fn file_carrier(id: &str, fields: Option<&serde_json::Map<String, Value>>) -> Re
             id,
             "file content part has no usable carrier: file_data, file_id and \
              file_url are all absent or empty",
+            RefusalReason::Unrepresentable,
         ));
     }
     Ok(carrier)
@@ -1169,6 +1173,7 @@ fn translate_file_part(
             "file content part on a user message has no carrier this lane accepts: \
              file_data and file_id are both absent or empty, and file_url is not \
              forwarded on bedrock-mantle",
+            RefusalReason::Unrepresentable,
         ));
     }
     Ok(ResponsesContentItem::InputFile {
@@ -1230,6 +1235,7 @@ fn translate_image_source(
                     id,
                     "image content part on a user message has empty base64 payload: \
                      source.data is absent or empty",
+                    RefusalReason::Unrepresentable,
                 ));
             }
             Ok(Some(ResponsesContentItem::InputImage {
@@ -1244,6 +1250,7 @@ fn translate_image_source(
                     id,
                     "image content part on a user message has no usable url: \
                      source.url is absent or empty",
+                    RefusalReason::Unrepresentable,
                 ));
             }
             Ok(Some(ResponsesContentItem::InputImage {
@@ -1367,6 +1374,7 @@ fn translate_tool_image_url(id: &str, image_url: &Value) -> Result<FunctionCallO
             id,
             "image_url content part in a tool result has no usable url: \
              image_url.url is absent or empty",
+            RefusalReason::Unrepresentable,
         ));
     };
     let detail = image_url
@@ -1408,6 +1416,7 @@ fn translate_tool_image_source(
                     id,
                     "image content part in a tool result has empty base64 payload: \
                      source.data is absent or empty",
+                    RefusalReason::Unrepresentable,
                 ));
             }
             Ok(Some(FunctionCallOutputContentItem::InputImage {
@@ -1422,6 +1431,7 @@ fn translate_tool_image_source(
                     id,
                     "image content part in a tool result has no usable url: \
                      source.url is absent or empty",
+                    RefusalReason::Unrepresentable,
                 ));
             }
             Ok(Some(FunctionCallOutputContentItem::InputImage {
@@ -2562,7 +2572,9 @@ mod role_other_field_tests {
 mod empty_tool_id_policy_tests {
     use serde_json::json;
 
-    use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
+    use routectl_core::{
+        ContentPart, KnownContentPart, Message, MessageContent, RefusalReason, Role,
+    };
 
     use super::super::AuthKind;
     use super::super::types::ResponseInputItem;
@@ -2642,6 +2654,7 @@ mod empty_tool_id_policy_tests {
             err.to_string().contains("tool_call_id"),
             "error must name the offending field, got: {err}"
         );
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::ToolCallIdMissing));
     }
 
     #[test]
@@ -2658,6 +2671,7 @@ mod empty_tool_id_policy_tests {
             err.to_string().contains("tool_call_id"),
             "error must name the offending field, got: {err}"
         );
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::ToolCallIdMissing));
     }
 
     #[test]
@@ -2674,6 +2688,7 @@ mod empty_tool_id_policy_tests {
             err.to_string().contains("tool_use_id"),
             "error must name the offending field, got: {err}"
         );
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::ToolCallIdMissing));
     }
 
     #[test]

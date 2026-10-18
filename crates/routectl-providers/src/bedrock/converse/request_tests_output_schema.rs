@@ -272,5 +272,9 @@ fn an_over_bound_schema_fails_locally_with_a_normalize_error() {
         panic!("an over-bound schema must fail request normalization");
     };
     assert!(matches!(err, Error::NormalizeRequest(..)), "got: {err:?}");
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::SchemaDepth)
+    );
     assert!(err.to_string().contains("nests deeper"), "got: {err}");
 }

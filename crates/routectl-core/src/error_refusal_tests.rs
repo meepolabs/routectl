@@ -29,8 +29,8 @@ fn refusal_reason_is_carried_by_local_refusals_only() {
         ("json", json_error(), Some(RefusalReason::Unparseable)),
         (
             "normalize request",
-            Error::NormalizeRequest("p".into(), "m".into()),
-            None,
+            Error::NormalizeRequest("p".into(), "m".into(), RefusalReason::SchemaDepth),
+            Some(RefusalReason::SchemaDepth),
         ),
         (
             "normalize response",
@@ -86,6 +86,15 @@ fn refusal_reason_stays_out_of_the_display_text() {
             },
             "provider `seat`: refused before egress: system prompt cannot be relocated",
         ),
+        (
+            "normalize request",
+            Error::normalize_request(
+                "seat",
+                "tool message has no tool_call_id",
+                RefusalReason::ToolCallIdMissing,
+            ),
+            "provider `seat`: request normalization failed: tool message has no tool_call_id",
+        ),
     ];
 
     for (name, err, expected) in rows {
@@ -105,6 +114,18 @@ fn local_refusal_debug_renders_the_reason_token() {
 
     assert!(
         rendered.contains("reason: \"cloak-relocation\""),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn normalize_request_debug_renders_the_reason_token() {
+    let err = Error::normalize_request("p", "m", RefusalReason::TranslationAccounting);
+
+    let rendered = format!("{err:?}");
+
+    assert!(
+        rendered.contains("\"translation-accounting\""),
         "{rendered}"
     );
 }

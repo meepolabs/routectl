@@ -553,6 +553,7 @@ fn naming_normalize_error() -> Error {
     Error::normalize_request(
         "p1",
         "tool type 'web_search_20250305' is not supported for this model",
+        routectl_core::RefusalReason::Unrepresentable,
     )
 }
 

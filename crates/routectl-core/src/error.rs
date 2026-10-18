@@ -71,9 +71,10 @@ pub enum Error {
     },
 
     /// Request could not be normalized into the canonical shape for the
-    /// named provider.
+    /// named provider. The [`RefusalReason`] names the structural reason;
+    /// it is NOT surfaced in the Display string.
     #[error("provider `{0}`: request normalization failed: {1}")]
-    NormalizeRequest(String, String),
+    NormalizeRequest(String, String, RefusalReason),
 
     /// Upstream response could not be normalized back to canonical shape
     /// for the named provider.
@@ -228,9 +229,12 @@ impl fmt::Debug for Error {
                     &extras.reason().map(UpstreamReason::as_str),
                 )
                 .finish(),
-            Self::NormalizeRequest(a, b) => {
-                f.debug_tuple("NormalizeRequest").field(a).field(b).finish()
-            }
+            Self::NormalizeRequest(a, b, reason) => f
+                .debug_tuple("NormalizeRequest")
+                .field(a)
+                .field(b)
+                .field(&reason.as_str())
+                .finish(),
             Self::NormalizeResponse(a, b) => f
                 .debug_tuple("NormalizeResponse")
                 .field(a)
@@ -544,20 +548,28 @@ impl Error {
     }
 
     /// Why routectl refused the request locally: the reason an
-    /// [`Error::Validation`] or [`Error::LocalRefusal`] carries, and
+    /// [`Error::Validation`], [`Error::LocalRefusal`] or
+    /// [`Error::NormalizeRequest`] carries, and
     /// [`RefusalReason::Unparseable`] for an [`Error::Json`]. `None` on
     /// every other variant.
     pub const fn refusal_reason(&self) -> Option<RefusalReason> {
         match self {
-            Self::Validation(_, reason) | Self::LocalRefusal { reason, .. } => Some(*reason),
+            Self::Validation(_, reason)
+            | Self::LocalRefusal { reason, .. }
+            | Self::NormalizeRequest(_, _, reason) => Some(*reason),
             Self::Json(_) => Some(RefusalReason::Unparseable),
             _ => None,
         }
     }
 
-    /// Construct a `NormalizeRequest` error for the named provider.
-    pub fn normalize_request(provider: impl Into<String>, msg: impl Into<String>) -> Self {
-        Self::NormalizeRequest(provider.into(), msg.into())
+    /// Construct a `NormalizeRequest` error for the named provider,
+    /// refused for `reason`.
+    pub fn normalize_request(
+        provider: impl Into<String>,
+        msg: impl Into<String>,
+        reason: RefusalReason,
+    ) -> Self {
+        Self::NormalizeRequest(provider.into(), msg.into(), reason)
     }
 
     /// Construct a `NormalizeResponse` error for the named provider.

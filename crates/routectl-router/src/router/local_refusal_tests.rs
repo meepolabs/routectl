@@ -161,7 +161,11 @@ async fn dispatch_err(router: &Router, surface: Surface, req: ChatRequest) -> Er
 }
 
 fn egress_normalize_refusal() -> Error {
-    Error::normalize_request("failing", "request cannot be expressed on this egress")
+    Error::normalize_request(
+        "failing",
+        "request cannot be expressed on this egress",
+        routectl_core::RefusalReason::Unrepresentable,
+    )
 }
 
 fn egress_local_refusal() -> Error {

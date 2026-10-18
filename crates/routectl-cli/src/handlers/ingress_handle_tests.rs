@@ -4790,7 +4790,11 @@ async fn assert_body_redacts_leaks(
 #[tokio::test]
 async fn map_error_normalize_request_redacts_provider_and_detail_both_dialects() {
     for shape in [ErrorEnvelopeShape::OpenAi, ErrorEnvelopeShape::Anthropic] {
-        let err = Error::NormalizeRequest(LEAK_PROVIDER.into(), LEAK_DETAIL.into());
+        let err = Error::NormalizeRequest(
+            LEAK_PROVIDER.into(),
+            LEAK_DETAIL.into(),
+            routectl_core::RefusalReason::Unrepresentable,
+        );
         let resp = map_error(shape, err);
         assert_body_redacts_leaks(
             resp,
@@ -4832,7 +4836,11 @@ async fn map_error_not_implemented_redacts_provider_and_detail_both_dialects() {
 #[test]
 fn map_error_normalize_request_logs_full_detail_server_side() {
     let events = routectl_testkit::capture_events(|| {
-        let err = Error::NormalizeRequest(LEAK_PROVIDER.into(), LEAK_DETAIL.into());
+        let err = Error::NormalizeRequest(
+            LEAK_PROVIDER.into(),
+            LEAK_DETAIL.into(),
+            routectl_core::RefusalReason::Unrepresentable,
+        );
         let _resp = map_error(ErrorEnvelopeShape::OpenAi, err);
     });
 
@@ -4874,7 +4882,11 @@ fn map_error_normalize_request_log_caps_long_user_payload_keeps_provider() {
     );
 
     let events = routectl_testkit::capture_events(|| {
-        let err = Error::NormalizeRequest(LEAK_PROVIDER.into(), detail.clone());
+        let err = Error::NormalizeRequest(
+            LEAK_PROVIDER.into(),
+            detail.clone(),
+            routectl_core::RefusalReason::Unrepresentable,
+        );
         let _resp = map_error(ErrorEnvelopeShape::OpenAi, err);
     });
 

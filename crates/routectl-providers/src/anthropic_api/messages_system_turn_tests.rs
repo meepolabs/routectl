@@ -548,6 +548,10 @@ fn ledger_verify_rejects_an_unaccounted_shortfall() {
     let rendered = err.to_string();
     assert!(rendered.contains("emitted 3"), "got: {rendered}");
     assert!(rendered.contains("accounted for 4"), "got: {rendered}");
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::TranslationAccounting)
+    );
 }
 
 /// The shape Claude Code sends after an idle compaction, derived from the

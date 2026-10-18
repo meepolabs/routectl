@@ -384,7 +384,11 @@ fn non_upstream_variants_are_unknown_matched_by_variant() {
     // and `Error::Auth` (Auth) are classified by variant and covered
     // by their own tests.
     let errs = [
-        Error::NormalizeRequest("p".into(), "m".into()),
+        Error::NormalizeRequest(
+            "p".into(),
+            "m".into(),
+            crate::RefusalReason::Unrepresentable,
+        ),
         Error::NormalizeResponse("p".into(), "m".into()),
         Error::UnknownAlias("a".into()),
         Error::Config("bad config".into()),

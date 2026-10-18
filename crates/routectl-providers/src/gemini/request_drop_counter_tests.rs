@@ -1292,8 +1292,15 @@ fn assert_ceiling_refusal(
     max: usize,
 ) {
     assert!(
-        matches!(outcome, Err(routectl_core::Error::NormalizeRequest(provider, _)) if provider == "gemini:test"),
+        matches!(outcome, Err(routectl_core::Error::NormalizeRequest(provider, ..)) if provider == "gemini:test"),
         "an over-ceiling schema must refuse the request, not truncate it: {outcome:?}"
+    );
+    assert_eq!(
+        outcome
+            .as_ref()
+            .err()
+            .and_then(routectl_core::Error::refusal_reason),
+        Some(routectl_core::RefusalReason::GeminiSeed)
     );
     let refusals: Vec<_> = events
         .iter()

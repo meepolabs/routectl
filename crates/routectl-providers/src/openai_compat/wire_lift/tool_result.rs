@@ -28,7 +28,7 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{ChatRequest, Error, Result};
+use routectl_core::{ChatRequest, Error, RefusalReason, Result};
 
 use super::reject_or_drop_unrepresentable;
 
@@ -219,6 +219,7 @@ fn build_tool_message(
                 id,
                 "tool_result block is missing required `tool_use_id`; \
                  cannot construct OpenAI-compat tool message",
+                RefusalReason::ToolCallIdMissing,
             ));
         }
     };
@@ -696,6 +697,7 @@ mod tests {
             msg.contains("tool_use_id"),
             "error message must mention tool_use_id, got: {msg}"
         );
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::ToolCallIdMissing));
     }
 
     #[test]

@@ -578,6 +578,10 @@ fn a_schema_deeper_than_the_depth_limit_errors_without_panic() {
     // Assert
     assert!(matches!(err, Error::NormalizeRequest(..)));
     assert!(err.to_string().contains("nests deeper"));
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::SchemaDepth)
+    );
 }
 
 #[test]
@@ -596,6 +600,10 @@ fn a_schema_wider_than_the_node_limit_errors_without_panic() {
     // Assert
     assert!(matches!(err, Error::NormalizeRequest(..)));
     assert!(err.to_string().contains("schema nodes"));
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::SchemaSize)
+    );
 }
 
 /// A schema right at the limits is served, not rejected: the bound must not
@@ -699,6 +707,10 @@ fn a_wide_fanout_is_rejected_without_interning_the_whole_pending_set() {
     // Assert
     assert!(matches!(err, Error::NormalizeRequest(..)));
     assert!(err.to_string().contains("schema nodes"));
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::SchemaSize)
+    );
     assert!(
         probe::segments() <= MAX_SCHEMA_NODES + MAX_LOGGED_DIAGNOSTIC_ITEMS,
         "the arena must stop growing at the node limit, not at the body size \

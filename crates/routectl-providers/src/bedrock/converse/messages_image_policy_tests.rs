@@ -78,7 +78,7 @@ fn text_part(text: &str) -> ContentPart {
 /// The normalize-request detail for a translation expected to fail.
 fn normalize_error_detail(messages: &[Message]) -> String {
     match build_messages(TEST_ID, messages) {
-        Err(Error::NormalizeRequest(_, detail)) => detail,
+        Err(Error::NormalizeRequest(_, detail, _)) => detail,
         Err(other) => panic!("expected a NormalizeRequest error, got {other:?}"),
         Ok(blocks) => panic!("expected a malformed-image failure, got Ok({blocks:?})"),
     }

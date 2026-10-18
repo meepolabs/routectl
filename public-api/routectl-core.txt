@@ -712,7 +712,7 @@ pub routectl_core::error::Error::LocalRefusal
 pub routectl_core::error::Error::LocalRefusal::detail: alloc::string::String
 pub routectl_core::error::Error::LocalRefusal::provider: alloc::string::String
 pub routectl_core::error::Error::LocalRefusal::reason: routectl_core::refusal_reason::RefusalReason
-pub routectl_core::error::Error::NormalizeRequest(alloc::string::String, alloc::string::String)
+pub routectl_core::error::Error::NormalizeRequest(alloc::string::String, alloc::string::String, routectl_core::refusal_reason::RefusalReason)
 pub routectl_core::error::Error::NormalizeResponse(alloc::string::String, alloc::string::String)
 pub routectl_core::error::Error::NotImplemented(alloc::string::String, alloc::string::String)
 pub routectl_core::error::Error::Streaming(alloc::string::String)
@@ -728,7 +728,7 @@ pub routectl_core::error::Error::Upstream::upstream_code: core::option::Option<a
 pub routectl_core::error::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::error::Error::Validation(alloc::string::String, routectl_core::refusal_reason::RefusalReason)
 impl routectl_core::error::Error
-pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, routectl_core::refusal_reason::RefusalReason) -> Self
 pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
 pub const fn routectl_core::error::Error::refusal_reason(&self) -> core::option::Option<routectl_core::refusal_reason::RefusalReason>
@@ -4524,7 +4524,7 @@ pub routectl_core::Error::LocalRefusal
 pub routectl_core::Error::LocalRefusal::detail: alloc::string::String
 pub routectl_core::Error::LocalRefusal::provider: alloc::string::String
 pub routectl_core::Error::LocalRefusal::reason: routectl_core::refusal_reason::RefusalReason
-pub routectl_core::Error::NormalizeRequest(alloc::string::String, alloc::string::String)
+pub routectl_core::Error::NormalizeRequest(alloc::string::String, alloc::string::String, routectl_core::refusal_reason::RefusalReason)
 pub routectl_core::Error::NormalizeResponse(alloc::string::String, alloc::string::String)
 pub routectl_core::Error::NotImplemented(alloc::string::String, alloc::string::String)
 pub routectl_core::Error::Streaming(alloc::string::String)
@@ -4540,7 +4540,7 @@ pub routectl_core::Error::Upstream::upstream_code: core::option::Option<alloc::b
 pub routectl_core::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::Error::Validation(alloc::string::String, routectl_core::refusal_reason::RefusalReason)
 impl routectl_core::error::Error
-pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, routectl_core::refusal_reason::RefusalReason) -> Self
 pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
 pub const fn routectl_core::error::Error::refusal_reason(&self) -> core::option::Option<routectl_core::refusal_reason::RefusalReason>

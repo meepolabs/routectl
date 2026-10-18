@@ -282,7 +282,7 @@ pub(crate) const fn error_class_of(e: &Error) -> &'static str {
         Error::NotImplemented(_, _) => "not_implemented",
         Error::UnknownAlias(_) => "unknown_alias",
         Error::UnknownProvider(_) => "unknown_provider",
-        Error::NormalizeRequest(_, _) => "normalize_request",
+        Error::NormalizeRequest(..) => "normalize_request",
         Error::NormalizeResponse(_, _) => "normalize_response",
         _ => "other",
     }

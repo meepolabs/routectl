@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
-use routectl_core::{ChatRequest, ReasoningDetail, RequestProvenance, Result, sanitize_for_log};
+use routectl_core::{
+    ChatRequest, ReasoningDetail, RefusalReason, RequestProvenance, Result, sanitize_for_log,
+};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
 use crate::translation_drop_metrics::{
@@ -1215,6 +1217,7 @@ fn clean_caller_schema(
             Err(routectl_core::Error::normalize_request(
                 provider_id,
                 format!("{surface} {too_large}"),
+                RefusalReason::GeminiSeed,
             ))
         }
     }

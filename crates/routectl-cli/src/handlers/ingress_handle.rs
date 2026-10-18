@@ -1350,7 +1350,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         // and raw serialization/translation detail in their Display
         // string. Log the full detail server-side (operators have logs)
         // and return an opaque, status-appropriate message to the client.
-        Error::NormalizeRequest(provider, detail) => {
+        Error::NormalizeRequest(provider, detail, _) => {
             let safe_detail = routectl_core::sanitize_detail_for_log(detail);
             tracing::error!(
                 provider = %routectl_core::sanitize_for_log(provider),
@@ -1571,7 +1571,7 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
             };
             (code, "upstream_error")
         }
-        Error::NormalizeRequest(_, _) => (StatusCode::BAD_REQUEST, "bad_request"),
+        Error::NormalizeRequest(..) => (StatusCode::BAD_REQUEST, "bad_request"),
         Error::NormalizeResponse(_, _) => (StatusCode::BAD_GATEWAY, "bad_gateway"),
         Error::Validation(..) => (StatusCode::BAD_REQUEST, "validation_error"),
         Error::LocalRefusal { .. } => (StatusCode::BAD_REQUEST, "bad_request"),

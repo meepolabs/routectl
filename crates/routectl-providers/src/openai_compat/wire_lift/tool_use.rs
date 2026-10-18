@@ -29,7 +29,7 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{ChatRequest, Error, Result};
+use routectl_core::{ChatRequest, Error, RefusalReason, Result};
 
 pub fn lift(
     id: &str,
@@ -122,17 +122,33 @@ fn is_text_block(part: &Value) -> bool {
 
 fn tool_use_to_tool_call(id: &str, part: &Value) -> Result<Value> {
     let obj = part.as_object().ok_or_else(|| {
-        Error::normalize_request(id, format!("tool_use block is not an object: {part}"))
+        Error::normalize_request(
+            id,
+            format!("tool_use block is not an object: {part}"),
+            RefusalReason::Unrepresentable,
+        )
     })?;
     let tool_id = obj
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::normalize_request(id, "tool_use block missing `id`"))?
+        .ok_or_else(|| {
+            Error::normalize_request(
+                id,
+                "tool_use block missing `id`",
+                RefusalReason::ToolCallIdMissing,
+            )
+        })?
         .to_string();
     let name = obj
         .get("name")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::normalize_request(id, "tool_use block missing `name`"))?
+        .ok_or_else(|| {
+            Error::normalize_request(
+                id,
+                "tool_use block missing `name`",
+                RefusalReason::Unrepresentable,
+            )
+        })?
         .to_string();
     let input = obj
         .get("input")

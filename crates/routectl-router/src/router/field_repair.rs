@@ -2412,6 +2412,7 @@ mod table_tests {
             Error::normalize_request(
                 "p",
                 "thinking.enabled.display: Input should be 'summarized', 'omitted'",
+                routectl_core::RefusalReason::Unrepresentable,
             ),
         ] {
             assert!(
