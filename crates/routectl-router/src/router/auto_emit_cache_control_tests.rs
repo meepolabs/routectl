@@ -2361,12 +2361,42 @@ mod converse_front_only {
         req
     }
 
+    /// Every `cache_control` in a wire body, keyed by its JSON pointer, so
+    /// a stray marker anywhere (tools, system, any message block, top
+    /// level) shows up.
+    fn wire_cache_markers(body: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+        fn walk(v: &serde_json::Value, path: &str, out: &mut Vec<(String, serde_json::Value)>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, child) in map {
+                        let child_path = format!("{path}/{k}");
+                        if k == "cache_control" {
+                            out.push((child_path, child.clone()));
+                        } else {
+                            walk(child, &child_path, out);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (i, child) in items.iter().enumerate() {
+                        walk(child, &format!("{path}/{i}"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(body, "", &mut out);
+        out
+    }
+
     /// routectl's own terminal marker never reaches the Invoke lowering
     /// refusal: a marker on a forward-compat block (the one the lowering
     /// scan skips, so the only way a lone top-level 5m could land ahead of
     /// a 1h) counts as a caller breakpoint, and auto-emit stands down. The
     /// same request without that marker gets the terminal marker, and the
-    /// Invoke egress lowers it without refusing.
+    /// Invoke egress lowers it onto the last eligible block (the text block
+    /// ahead of the forward-compat one).
     #[tokio::test]
     async fn invoke_auto_emit_defers_to_a_marked_forward_compat_block() {
         let invoke_cfg = routectl_providers::bedrock::BedrockConfig {
@@ -2381,21 +2411,30 @@ mod converse_front_only {
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
+        let ttl_marker = |ttl: &str| serde_json::json!({"type": "ephemeral", "ttl": ttl});
         let rows = [
             (
                 "marked forward-compat block",
                 Some(CacheControl::ephemeral_1h()),
                 "caller_supplied",
                 None,
+                vec![(
+                    "/messages/0/content/1/cache_control".to_owned(),
+                    ttl_marker("1h"),
+                )],
             ),
             (
                 "unmarked forward-compat block",
                 None,
                 "auto_emitted",
                 Some(CacheControl::ephemeral_5m()),
+                vec![(
+                    "/messages/0/content/0/cache_control".to_owned(),
+                    ttl_marker("5m"),
+                )],
             ),
         ];
-        for (name, marker, decision, terminal) in rows {
+        for (name, marker, decision, terminal, expected_markers) in rows {
             // Arrange
             let (router, captured) =
                 rig(bedrock_entry(BedrockApiShapeConfig::Invoke, None), true, 0);
@@ -2414,8 +2453,13 @@ mod converse_front_only {
             );
             let up = captured.lock().first().cloned().expect("one dispatch");
             assert_eq!(up.cache_control, terminal, "{name}");
-            routectl_providers::bedrock::invoke::normalize_request(&invoke_cfg, &up)
+            let body = routectl_providers::bedrock::invoke::normalize_request(&invoke_cfg, &up)
                 .unwrap_or_else(|e| panic!("{name}: the Invoke egress refused: {e}"));
+            assert!(
+                body.get("cache_control").is_none(),
+                "{name}: Invoke must not ship a top-level cache_control"
+            );
+            assert_eq!(wire_cache_markers(&body), expected_markers, "{name}");
         }
     }
 

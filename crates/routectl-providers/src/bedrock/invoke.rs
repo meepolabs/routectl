@@ -397,9 +397,9 @@ fn strip_client_metadata(
 }
 
 /// Lower a TOP-LEVEL `cache_control` body field to a PER-BLOCK marker on
-/// the last cache_control-eligible content block. ALWAYS removes the
-/// top-level field first -- that removal alone is what stops the Bedrock
-/// 400; the per-block re-placement preserves the caller's caching intent.
+/// the last cache_control-eligible content block. Bedrock Invoke rejects
+/// a top-level `cache_control` with a 400, so the field never ships; the
+/// per-block re-placement preserves the caller's caching intent.
 ///
 /// The re-placement is computed on a CLONE of the messages array, the
 /// resulting full breakpoint sequence is re-validated against the
@@ -410,19 +410,22 @@ fn strip_client_metadata(
 /// already-marked forward-compat `Other` block the insertion scan skips
 /// -- must be re-checked here before it ships.
 ///
-/// When nothing can host the marker (no messages array, no eligible
-/// block) it is dropped: the top-level form is broken on this wire, so
-/// re-emitting it is never correct. When the lowered arrangement would
-/// break the breakpoint rules, the request is refused with the validator's
-/// error instead of trimming the marker, and `obj` is left as it came in.
-///
-/// Returns what changed in the body: `None` when there was no top-level
-/// marker, otherwise whether and where the marker landed.
+/// Outcomes:
+/// - `Ok(None)`: there was no top-level marker; `obj` is untouched.
+/// - `Ok(Some(Lowered::Placed(_)))`: the top-level marker was removed and
+///   lowered onto a block (or the last eligible block already carried one).
+/// - `Ok(Some(Lowered::Dropped))`: the top-level marker was removed and
+///   nothing could host it (no messages array, no eligible block). The
+///   top-level form is broken on this wire, so re-emitting it is never
+///   correct.
+/// - `Err`: the lowered arrangement breaks a breakpoint rule. The caller's
+///   top-level marker is restored first, so `obj` is left unmutated, and
+///   the validator's error is returned rather than trimming the marker.
 fn lower_top_level_cache_control_to_per_block(
     provider_id: &str,
     obj: &mut serde_json::Map<String, Value>,
 ) -> Result<Option<Lowered>> {
-    // Always remove the top-level marker first; that alone stops the 400.
+    // Removed up front; the refusal path below puts it back.
     let Some(cc) = obj.remove("cache_control") else {
         return Ok(None);
     };
