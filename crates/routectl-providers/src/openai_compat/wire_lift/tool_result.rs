@@ -28,7 +28,7 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{ChatRequest, Error, RefusalReason, Result};
+use routectl_core::{ChatRequest, Result};
 
 use super::reject_or_drop_unrepresentable;
 
@@ -212,17 +212,10 @@ fn build_tool_message(
         Some(o) => o,
         None => return Ok(None),
     };
-    let tool_use_id = match obj.get("tool_use_id").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => {
-            return Err(Error::normalize_request(
-                id,
-                "tool_result block is missing required `tool_use_id`; \
-                 cannot construct OpenAI-compat tool message",
-                RefusalReason::ToolCallIdMissing,
-            ));
-        }
-    };
+    // The id rides verbatim, absent or not a string included: nothing on
+    // this egress pairs a tool message with its call, so only the upstream
+    // can object to it.
+    let tool_use_id = obj.get("tool_use_id").cloned();
     let is_error = obj
         .get("is_error")
         .and_then(serde_json::Value::as_bool)
@@ -237,11 +230,13 @@ fn build_tool_message(
     } else {
         content
     };
-    Ok(Some(serde_json::json!({
-        "role": "tool",
-        "tool_call_id": tool_use_id,
-        "content": content
-    })))
+    let mut tool_msg = Map::new();
+    tool_msg.insert("role".into(), Value::String("tool".into()));
+    if let Some(tool_use_id) = tool_use_id {
+        tool_msg.insert("tool_call_id".into(), tool_use_id);
+    }
+    tool_msg.insert("content".into(), content);
+    Ok(Some(Value::Object(tool_msg)))
 }
 
 /// Prefix a tool_result payload with an `Error:` marker so the upstream
@@ -675,29 +670,31 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_missing_tool_use_id_returns_error() {
-        // Arrange -- malformed tool_result without tool_use_id.
-        let messages = json!([
-            {"role": "user", "content": [
-                {"type": "tool_result", "content": "orphan"}
-            ]}
-        ]);
+    fn tool_result_with_absent_or_non_string_tool_use_id_forwards_it_verbatim() {
+        let cases = [
+            ("absent", None, None),
+            ("empty", Some(json!("")), Some(json!(""))),
+            ("non-string", Some(json!(42)), Some(json!(42))),
+        ];
+        for (name, sent, expected) in cases {
+            // Arrange
+            let mut block = json!({"type": "tool_result", "content": "orphan"});
+            if let Some(sent) = sent {
+                block["tool_use_id"] = sent;
+            }
+            let messages = json!([{"role": "user", "content": [block]}]);
 
-        // Act -- must hard-fail, not silently drop.
-        let result = run_result(messages);
+            // Act
+            let obj = run_result(messages)
+                .unwrap_or_else(|e| panic!("{name}: the tool_result must forward, got {e}"));
 
-        // Assert
-        assert!(
-            result.is_err(),
-            "tool_result missing tool_use_id must return an error, not silently drop"
-        );
-        let err = result.unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("tool_use_id"),
-            "error message must mention tool_use_id, got: {msg}"
-        );
-        assert_eq!(err.refusal_reason(), Some(RefusalReason::ToolCallIdMissing));
+            // Assert
+            let msgs = obj["messages"].as_array().unwrap();
+            assert_eq!(msgs.len(), 1, "{name}");
+            assert_eq!(msgs[0]["role"], "tool", "{name}");
+            assert_eq!(msgs[0]["content"], "orphan", "{name}");
+            assert_eq!(msgs[0].get("tool_call_id").cloned(), expected, "{name}");
+        }
     }
 
     #[test]

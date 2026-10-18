@@ -242,15 +242,15 @@ fn declare_lane_gates(tap: &WireTap, auth_kind: AuthKind, req: &ChatRequest) {
     }
 }
 
-/// True when a user turn carries a file part with a `file_url`, which the
-/// Mantle lane leaves off the wire.
+/// True when a user turn carries a file part whose `file_url` the Mantle
+/// lane leaves off the wire.
 fn carries_user_file_url(req: &ChatRequest) -> bool {
     req.messages.iter().any(|m| {
         matches!(m.role, Role::User)
             && matches!(&m.content, MessageContent::Parts(parts) if parts.iter().any(|p| matches!(
                 p,
                 ContentPart::Known(KnownContentPart::File { file, .. })
-                    if file.get("file_url").and_then(Value::as_str).is_some_and(|u| !u.is_empty())
+                    if super::messages::withholds_user_file_url(AuthKind::BedrockMantle, file)
             )))
     })
 }

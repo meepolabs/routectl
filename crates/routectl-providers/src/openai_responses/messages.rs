@@ -13,29 +13,31 @@
 //! instead of ToolUse content parts) are re-emitted the same way so a
 //! following `function_call_output` is never dangling.
 //!
-//! Content-part policy -- TWO classes, deliberately NOT unified:
+//! Content-part policy, by whether a Responses wire slot can hold what the
+//! caller sent:
 //!
-//! - MALFORMED: the caller asked to send bytes and named none (an
-//!   `image_url` with no url or an empty one, an image source whose
-//!   base64 `data` or `url` is empty, a file part carrying none of
-//!   `file_data`, `file_id`, `file_url`). There is no valid interpretation at any
-//!   egress, so the request FAILS with a `normalize_request` error that
-//!   names the offending field and content location. The error never
-//!   echoes a caller-controlled type tag or any raw content value.
-//! - UNREPRESENTABLE: the part is well-formed but this egress has no slot
-//!   for it (a canonical part kind the Responses API does not model, a
-//!   forward-compat part, an unknown image-source kind, a tool-result part
-//!   with no tool-output slot). The request is legitimate and serviceable, so
-//!   the part DROPS with a WARN and the rest of the turn still ships;
+//! - FORWARDED: the value fits a slot, even if the upstream may reject it.
+//!   An `image_url` whose url is absent or empty, an image source whose
+//!   base64 `data` or `url` is absent or empty, and a file part naming none
+//!   of `file_data`, `file_id`, `file_url` all ship as sent (`image_url: ""`,
+//!   a bare `input_file`). The upstream decides, and its rejection is
+//!   learnable.
+//! - REFUSED (`unrepresentable`): no slot can hold the value -- an
+//!   `image_url` that is not an object, an image `data` / `url` that is
+//!   not a string, or a file part whose only carriers are not strings.
+//!   The request FAILS with a `normalize_request` error that names the
+//!   offending field and content location, and never echoes a
+//!   caller-controlled type tag or any raw content value.
+//! - DROPPED: the part is well-formed but this egress has no slot for it (a
+//!   canonical part kind the Responses API does not model, a forward-compat
+//!   part, an unknown image-source kind, a tool-result part with no
+//!   tool-output slot). The request is legitimate and serviceable, so the
+//!   part DROPS with a WARN and the rest of the turn still ships;
 //!   hard-failing here would turn working cross-dialect routes into 400s
 //!   and make every new canonical part kind a breaking change at every
 //!   egress that cannot emit it. The audience for that WARN is the
 //!   operator, who can act on "this route cannot carry PDFs"; the caller
 //!   is not told, because nothing was wrong with the request.
-//!
-//! The governing axis is malformed-vs-unrepresentable, NOT
-//! recognized-vs-unrecognized: a recognized part with no carrier fails,
-//! and an unrecognized but well-formed part drops.
 //!
 //! Reasoning replay: a reasoning item is emitted when it carries a
 //! non-empty `encrypted_content` this lane can validly replay, or -- from
@@ -255,7 +257,7 @@ fn translate_user_message(
     // `function_call_output` input items keyed by call_id. Without
     // this lift, the upstream 400s with "No tool output found for
     // function call <id>".
-    extract_tool_results(id, &msg.content, out)?;
+    extract_tool_results(id, &msg.content, out);
 
     let content = build_user_content(id, auth_kind, &msg.content, tally)?;
     if content.is_empty() {
@@ -290,7 +292,7 @@ fn translate_other_message(
         role = %sanitize_for_log(tag),
         "responses egress: unrecognized message role forwarded verbatim"
     );
-    extract_tool_results(id, &msg.content, out)?;
+    extract_tool_results(id, &msg.content, out);
 
     let content = build_user_content(id, auth_kind, &msg.content, tally)?;
     if content.is_empty() {
@@ -314,21 +316,13 @@ fn translate_other_message(
 /// them as sibling input items, so we lift them out before
 /// `build_user_content` walks the remaining parts.
 ///
-/// An empty `tool_use_id` fails the request rather than dropping the
-/// block. The Responses API correlates an output to its call BY
-/// `call_id`: an empty id can never name the call it answers, so the
-/// request would either be rejected upstream or answered without the
-/// tool result. A loud local rejection beats a silently degraded answer,
-/// and it is the same policy `translate_tool_message` applies to an
-/// empty `tool_call_id` on the canonical `Role::Tool` shape -- one
-/// defect, one policy, whichever ingress shape it arrived in.
-fn extract_tool_results(
-    id: &str,
-    content: &MessageContent,
-    out: &mut Vec<ResponseInputItem>,
-) -> Result<()> {
+/// An empty `tool_use_id` forwards as an empty `call_id`, exactly as
+/// `translate_tool_message` forwards an absent or empty `tool_call_id` on
+/// the canonical `Role::Tool` shape. Nothing here pairs an output with its
+/// call, so whether the id names one is the upstream's call.
+fn extract_tool_results(id: &str, content: &MessageContent, out: &mut Vec<ResponseInputItem>) {
     let MessageContent::Parts(parts) = content else {
-        return Ok(());
+        return;
     };
     for p in parts {
         // Every non-ToolResult part is skipped by this pass ONLY: the
@@ -345,22 +339,12 @@ fn extract_tool_results(
         else {
             continue;
         };
-        if tool_use_id.is_empty() {
-            return Err(Error::normalize_request(
-                id,
-                "tool_result block has an empty tool_use_id (a ToolResult part \
-                 requires a non-empty tool_use_id for the Responses API \
-                 function_call_output item)",
-                RefusalReason::ToolCallIdMissing,
-            ));
-        }
         let output = tool_result_to_output_body(id, content);
         out.push(ResponseInputItem::FunctionCallOutput {
             call_id: crate::tool_id::sanitize_tool_id(tool_use_id).into_owned(),
             output,
         });
     }
-    Ok(())
 }
 
 /// Translate the Anthropic-shape `tool_result.content` value into a
@@ -788,12 +772,8 @@ struct ReasoningGroup {
 /// Translate a canonical `Role::Tool` message into a
 /// `function_call_output` input item.
 ///
-/// A missing or empty `tool_call_id` fails the request. The Responses API
-/// correlates an output to its call BY `call_id`, so an empty id can
-/// never name the call it answers and the model would answer without the
-/// tool result. `extract_tool_results` applies the same policy to an
-/// empty `tool_use_id` on the Anthropic-shape lane: one defect, one
-/// policy, so the outcome does not depend on the ingress shape.
+/// An absent or empty `tool_call_id` forwards as an empty `call_id`; see
+/// `extract_tool_results` for the same rule on the Anthropic-shape lane.
 fn translate_tool_message(
     id: &str,
     auth_kind: AuthKind,
@@ -801,15 +781,7 @@ fn translate_tool_message(
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
 ) -> Result<()> {
-    let Some(raw_call_id) = msg.tool_call_id.as_deref().filter(|s| !s.is_empty()) else {
-        return Err(Error::normalize_request(
-            id,
-            "tool message has no usable tool_call_id: the field is absent or empty \
-             (Role::Tool requires a non-empty tool_call_id for the Responses API \
-             function_call_output item)",
-            RefusalReason::ToolCallIdMissing,
-        ));
-    };
+    let raw_call_id = msg.tool_call_id.as_deref().unwrap_or("");
     let call_id = crate::tool_id::sanitize_tool_id(raw_call_id).into_owned();
     let output = match &msg.content {
         MessageContent::Text(t) => FunctionCallOutputBody::Text(t.clone()),
@@ -849,32 +821,9 @@ fn build_user_content(
                         }
                     }
                     ContentPart::Known(KnownContentPart::ImageUrl { image_url, .. }) => {
-                        // OpenAI-shape image_url block: extract the url
-                        // field and emit an InputImage. detail, if present
-                        // on the nested object, is forwarded. A url that is
-                        // absent OR present-but-empty is malformed: an
-                        // empty `image_url` names no bytes, so it fails
-                        // rather than shipping upstream.
-                        let Some(url) = image_url
-                            .get("url")
-                            .and_then(|u| u.as_str())
-                            .filter(|s| !s.is_empty())
-                        else {
-                            return Err(Error::normalize_request(
-                                id,
-                                "image_url content part on a user message has no usable url: \
-                                 image_url.url is absent or empty",
-                                RefusalReason::Unrepresentable,
-                            ));
-                        };
-                        let detail = image_url
-                            .get("detail")
-                            .and_then(|d| d.as_str())
-                            .map(str::to_string);
-                        out.push(ResponsesContentItem::InputImage {
-                            image_url: url.to_string(),
-                            detail,
-                        });
+                        let (image_url, detail) =
+                            read_image_url(id, image_url, ImageLocation::UserMessage)?;
+                        out.push(ResponsesContentItem::InputImage { image_url, detail });
                     }
                     ContentPart::Known(KnownContentPart::ToolResult { .. }) => {
                         // Lifted to FunctionCallOutput in
@@ -1104,8 +1053,7 @@ pub(super) fn translate_thinking_part(
 }
 
 /// The carrier fields of a file part, shared by the user-turn `input_file`
-/// and the tool-output `input_file` so both positions read the same fields
-/// and reject the same malformed shape.
+/// and the tool-output `input_file` so both positions read the same fields.
 struct FileCarrier {
     file_data: Option<String>,
     file_id: Option<String>,
@@ -1117,13 +1065,17 @@ struct FileCarrier {
 /// object of an OpenAI-shape `File` part, or the flat fields of a native
 /// Responses `input_file` block. `file_data` is a `data:<mime>;base64,<...>`
 /// URI for an inline upload, `file_id` references a previously-uploaded
-/// file, `file_url` names a fetchable file; `filename` is optional. A part
-/// carrying none of the three carriers names no bytes the upstream can act
-/// on, so it fails the request.
+/// file, `file_url` names a fetchable file; `filename` is optional. A field
+/// that is absent, empty or not a string is left off the wire.
+///
+/// A part naming no carrier still forwards as an `input_file`, and the
+/// upstream decides whether it names enough. A part whose only carriers are
+/// non-strings fails the request instead: the carrier slots are strings,
+/// so what the caller sent has no slot.
 fn file_carrier(id: &str, fields: Option<&serde_json::Map<String, Value>>) -> Result<FileCarrier> {
+    let raw = |key: &str| fields.and_then(|m| m.get(key));
     let field = |key: &str| {
-        fields
-            .and_then(|m| m.get(key))
+        raw(key)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
@@ -1134,27 +1086,42 @@ fn file_carrier(id: &str, fields: Option<&serde_json::Map<String, Value>>) -> Re
         file_url: field("file_url"),
         filename: field("filename"),
     };
-    if carrier.file_data.is_none() && carrier.file_id.is_none() && carrier.file_url.is_none() {
+    let names_no_string_carrier =
+        carrier.file_data.is_none() && carrier.file_id.is_none() && carrier.file_url.is_none();
+    let carries_a_non_string = FILE_CARRIER_KEYS
+        .iter()
+        .any(|key| raw(key).is_some_and(|v| !v.is_string() && !v.is_null()));
+    if names_no_string_carrier && carries_a_non_string {
         return Err(Error::normalize_request(
             id,
-            "file content part has no usable carrier: file_data, file_id and \
-             file_url are all absent or empty",
+            "file content part has no string carrier: file_data, file_id and \
+             file_url are absent, empty or not strings",
             RefusalReason::Unrepresentable,
         ));
     }
     Ok(carrier)
 }
 
-/// Whether this lane forwards a user-turn file's `file_url` carrier.
+const FILE_CARRIER_KEYS: [&str; 3] = ["file_data", "file_id", "file_url"];
+
+/// Whether this lane leaves a user-turn file's `file_url` off the wire.
+/// Bedrock Mantle does, but only beside a non-empty `file_data` or
+/// `file_id`: the part still names its bytes without the url. A part whose
+/// only carrier is the url forwards it, and the upstream decides.
 // Bedrock Mantle has no evidence that it fetches an `input_file` by url.
-const fn forwards_user_file_urls(auth_kind: AuthKind) -> bool {
-    !matches!(auth_kind, AuthKind::BedrockMantle)
+pub(super) fn withholds_user_file_url(auth_kind: AuthKind, file: &Value) -> bool {
+    let non_empty = |key: &str| {
+        file.get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    };
+    matches!(auth_kind, AuthKind::BedrockMantle)
+        && non_empty("file_url")
+        && (non_empty("file_data") || non_empty("file_id"))
 }
 
 /// Translate an OpenAI-shape `File` part's nested `file` object into a
-/// `ResponsesContentItem::InputFile`. On a lane that does not forward
-/// `file_url`, the url is left off the wire and a part carrying only a url
-/// fails the request, since it names no bytes that lane can act on.
+/// `ResponsesContentItem::InputFile`.
 fn translate_file_part(
     id: &str,
     auth_kind: AuthKind,
@@ -1166,16 +1133,7 @@ fn translate_file_part(
         file_url,
         filename,
     } = file_carrier(id, file.as_object())?;
-    let file_url = file_url.filter(|_| forwards_user_file_urls(auth_kind));
-    if file_data.is_none() && file_id.is_none() && file_url.is_none() {
-        return Err(Error::normalize_request(
-            id,
-            "file content part on a user message has no carrier this lane accepts: \
-             file_data and file_id are both absent or empty, and file_url is not \
-             forwarded on bedrock-mantle",
-            RefusalReason::Unrepresentable,
-        ));
-    }
+    let file_url = file_url.filter(|_| !withholds_user_file_url(auth_kind, file));
     Ok(ResponsesContentItem::InputFile {
         file_data,
         file_id,
@@ -1203,12 +1161,69 @@ fn tool_output_file_item(
     })
 }
 
+/// Where an image part sits, for the refusal text.
+#[derive(Clone, Copy)]
+enum ImageLocation {
+    UserMessage,
+    ToolResult,
+}
+
+impl ImageLocation {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UserMessage => "on a user message",
+            Self::ToolResult => "in a tool result",
+        }
+    }
+}
+
+/// Read the string `key` of an image object for the wire's `image_url`
+/// string. An absent, null or empty value forwards as `""`: the slot holds
+/// it and only the upstream can object. A value of any other JSON type has
+/// no string form to carry, so it fails the request.
+fn string_slot(id: &str, obj: &Value, key: &str, at: ImageLocation) -> Result<String> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err(Error::normalize_request(
+            id,
+            format!("image content part {} has a non-string `{key}`", at.label()),
+            RefusalReason::Unrepresentable,
+        )),
+    }
+}
+
+/// Read an OpenAI-shape `image_url` object into the wire's url and
+/// optional `detail`. An absent or empty url forwards as `""`. An
+/// `image_url` that is not an object has no url field to read, so it fails
+/// the request.
+fn read_image_url(
+    id: &str,
+    image_url: &Value,
+    at: ImageLocation,
+) -> Result<(String, Option<String>)> {
+    if !image_url.is_object() {
+        return Err(Error::normalize_request(
+            id,
+            format!("image_url content part {} is not an object", at.label()),
+            RefusalReason::Unrepresentable,
+        ));
+    }
+    let url = string_slot(id, image_url, "url", at)?;
+    let detail = image_url
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .map(str::to_string);
+    Ok((url, detail))
+}
+
 /// Translate a canonical `Image` source block to a
 /// `ResponsesContentItem::InputImage`.
 ///
-/// An empty base64 `data` or an empty `url` is malformed and fails the
-/// request. An unrecognized source shape is a forward-compat extension
-/// this egress cannot represent, so it yields `Ok(None)` and a WARN.
+/// An absent or empty base64 `data` or `url` forwards verbatim into the
+/// `image_url` string; a non-string one fails the request. An unrecognized
+/// source shape is a forward-compat extension this egress cannot
+/// represent, so it yields `Ok(None)` and a WARN.
 ///
 /// The unrecognized-kind drop is CROSS-DIALECT ONLY. The Responses ingress
 /// produces no `KnownContentPart::Image` at all -- an `input_image` block
@@ -1229,32 +1244,16 @@ fn translate_image_source(
                 .get("media_type")
                 .and_then(|m| m.as_str())
                 .unwrap_or("application/octet-stream");
-            let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
-            if data.is_empty() {
-                return Err(Error::normalize_request(
-                    id,
-                    "image content part on a user message has empty base64 payload: \
-                     source.data is absent or empty",
-                    RefusalReason::Unrepresentable,
-                ));
-            }
+            let data = string_slot(id, source, "data", ImageLocation::UserMessage)?;
             Ok(Some(ResponsesContentItem::InputImage {
                 image_url: format!("data:{media_type};base64,{data}"),
                 detail: None,
             }))
         }
         "url" => {
-            let url = source.get("url").and_then(|u| u.as_str()).unwrap_or("");
-            if url.is_empty() {
-                return Err(Error::normalize_request(
-                    id,
-                    "image content part on a user message has no usable url: \
-                     source.url is absent or empty",
-                    RefusalReason::Unrepresentable,
-                ));
-            }
+            let url = string_slot(id, source, "url", ImageLocation::UserMessage)?;
             Ok(Some(ResponsesContentItem::InputImage {
-                image_url: url.to_string(),
+                image_url: url,
                 detail: None,
             }))
         }
@@ -1276,7 +1275,7 @@ fn translate_image_source(
 /// plain text the result collapses to a flat string (codex parity,
 /// most-common path). Otherwise each part becomes a typed item; a body left
 /// with no item after drops collapses to an empty string, as a null content
-/// does. A malformed image or file part fails the request.
+/// does. An image or file part no slot can hold fails the request.
 fn build_tool_output_body(
     id: &str,
     auth_kind: AuthKind,
@@ -1361,37 +1360,18 @@ fn translate_tool_output_part(
     }
 }
 
-/// Translate an OpenAI-shape `image_url` object inside a tool result. A url
-/// that is absent OR present-but-empty names no bytes; failing keeps an
-/// empty `image_url` off the wire.
+/// Translate an OpenAI-shape `image_url` object inside a tool result.
 fn translate_tool_image_url(id: &str, image_url: &Value) -> Result<FunctionCallOutputContentItem> {
-    let Some(url) = image_url
-        .get("url")
-        .and_then(|u| u.as_str())
-        .filter(|s| !s.is_empty())
-    else {
-        return Err(Error::normalize_request(
-            id,
-            "image_url content part in a tool result has no usable url: \
-             image_url.url is absent or empty",
-            RefusalReason::Unrepresentable,
-        ));
-    };
-    let detail = image_url
-        .get("detail")
-        .and_then(|d| d.as_str())
-        .map(str::to_string);
-    Ok(FunctionCallOutputContentItem::InputImage {
-        image_url: url.to_string(),
-        detail,
-    })
+    let (image_url, detail) = read_image_url(id, image_url, ImageLocation::ToolResult)?;
+    Ok(FunctionCallOutputContentItem::InputImage { image_url, detail })
 }
 
 /// Translate an Anthropic-shape image source inside a tool result to a
 /// `FunctionCallOutputContentItem::InputImage`.
 ///
-/// An empty base64 `data` or an empty `url` is malformed and fails the
-/// request; an unrecognized source kind yields `Ok(None)` and a WARN.
+/// An absent or empty base64 `data` or `url` forwards verbatim; a
+/// non-string one fails the request; an unrecognized source kind yields
+/// `Ok(None)` and a WARN.
 ///
 /// Same reachability as [`translate_image_source`]: cross-dialect only.
 /// The Responses ingress models a tool output's content blocks through the
@@ -1410,32 +1390,16 @@ fn translate_tool_image_source(
                 .get("media_type")
                 .and_then(|m| m.as_str())
                 .unwrap_or("application/octet-stream");
-            let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
-            if data.is_empty() {
-                return Err(Error::normalize_request(
-                    id,
-                    "image content part in a tool result has empty base64 payload: \
-                     source.data is absent or empty",
-                    RefusalReason::Unrepresentable,
-                ));
-            }
+            let data = string_slot(id, source, "data", ImageLocation::ToolResult)?;
             Ok(Some(FunctionCallOutputContentItem::InputImage {
                 image_url: format!("data:{media_type};base64,{data}"),
                 detail: None,
             }))
         }
         "url" => {
-            let url = source.get("url").and_then(|u| u.as_str()).unwrap_or("");
-            if url.is_empty() {
-                return Err(Error::normalize_request(
-                    id,
-                    "image content part in a tool result has no usable url: \
-                     source.url is absent or empty",
-                    RefusalReason::Unrepresentable,
-                ));
-            }
+            let url = string_slot(id, source, "url", ImageLocation::ToolResult)?;
             Ok(Some(FunctionCallOutputContentItem::InputImage {
-                image_url: url.to_string(),
+                image_url: url,
                 detail: None,
             }))
         }
@@ -2563,18 +2527,14 @@ mod role_other_field_tests {
     }
 }
 
-/// Both ingress shapes for a tool output must treat an unusable
-/// correlating id the same way: fail the request, never drop the block.
-/// A `call_id` is the only thing that binds an output to its call, so a
-/// dropped output means the model silently answers without the tool
-/// result.
+/// Both ingress shapes for a tool output treat an absent or empty
+/// correlating id the same way: the output forwards with an empty
+/// `call_id`, never dropped and never refused.
 #[cfg(test)]
 mod empty_tool_id_policy_tests {
     use serde_json::json;
 
-    use routectl_core::{
-        ContentPart, KnownContentPart, Message, MessageContent, RefusalReason, Role,
-    };
+    use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
 
     use super::super::AuthKind;
     use super::super::types::ResponseInputItem;
@@ -2641,54 +2601,72 @@ mod empty_tool_id_policy_tests {
     }
 
     #[test]
-    fn empty_tool_call_id_on_tool_role_message_errors() {
-        // Arrange
-        let messages = vec![user_text("hi"), tool_role_message(Some(""))];
+    fn absent_or_empty_tool_call_id_on_tool_role_message_forwards_an_empty_call_id() {
+        for (name, tool_call_id) in [("empty", Some("")), ("absent", None)] {
+            // Arrange
+            let messages = vec![user_text("hi"), tool_role_message(tool_call_id)];
 
-        // Act
-        let result = build_input("test", AuthKind::ChatgptOauth, &messages);
+            // Act
+            let out = build_input("test", AuthKind::ChatgptOauth, &messages)
+                .unwrap_or_else(|e| panic!("{name}: the output must forward, got {e}"));
 
-        // Assert
-        let err = result.expect_err("an empty tool_call_id must fail the request");
-        assert!(
-            err.to_string().contains("tool_call_id"),
-            "error must name the offending field, got: {err}"
-        );
-        assert_eq!(err.refusal_reason(), Some(RefusalReason::ToolCallIdMissing));
+            // Assert
+            assert_eq!(output_call_ids(&out), vec![""], "{name}");
+        }
     }
 
     #[test]
-    fn missing_tool_call_id_on_tool_role_message_errors() {
-        // Arrange
-        let messages = vec![user_text("hi"), tool_role_message(None)];
-
-        // Act
-        let result = build_input("test", AuthKind::ChatgptOauth, &messages);
-
-        // Assert
-        let err = result.expect_err("an absent tool_call_id must fail the request");
-        assert!(
-            err.to_string().contains("tool_call_id"),
-            "error must name the offending field, got: {err}"
-        );
-        assert_eq!(err.refusal_reason(), Some(RefusalReason::ToolCallIdMissing));
-    }
-
-    #[test]
-    fn empty_tool_use_id_on_tool_result_part_errors() {
+    fn empty_tool_use_id_on_tool_result_part_forwards_an_empty_call_id() {
         // Arrange
         let messages = vec![user_text("hi"), tool_result_turn("")];
 
         // Act
-        let result = build_input("test", AuthKind::ChatgptOauth, &messages);
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages)
+            .expect("the output must forward");
 
         // Assert
-        let err = result.expect_err("an empty tool_use_id must fail the request");
-        assert!(
-            err.to_string().contains("tool_use_id"),
-            "error must name the offending field, got: {err}"
-        );
-        assert_eq!(err.refusal_reason(), Some(RefusalReason::ToolCallIdMissing));
+        assert_eq!(output_call_ids(&out), vec![""]);
+    }
+
+    /// A call missing its id on the `tool_calls` field gets a synthesized
+    /// `call_<index>` id, while its empty-id result forwards as `""`: the
+    /// two no longer match on the wire. Pinned so the asymmetry is a
+    /// visible choice, not an accident: neither side is paired here, and
+    /// the upstream decides.
+    #[test]
+    fn an_empty_id_result_beside_a_synthesized_call_id_forwards_unpaired() {
+        // Arrange
+        let messages = vec![
+            user_text("hi"),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "function": {"name": "f", "arguments": "{}"},
+                })]),
+            },
+            tool_role_message(Some("")),
+        ];
+
+        // Act
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages)
+            .expect("the transcript must forward");
+
+        // Assert
+        let call_ids: Vec<&str> = out
+            .iter()
+            .filter_map(|i| match i {
+                ResponseInputItem::FunctionCall { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(call_ids, vec!["call_0"]);
+        assert_eq!(output_call_ids(&out), vec![""]);
     }
 
     #[test]

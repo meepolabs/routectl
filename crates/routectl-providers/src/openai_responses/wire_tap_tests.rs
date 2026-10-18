@@ -458,6 +458,33 @@ fn store_is_declared_as_routectl_written_on_every_lane() {
 }
 
 #[test]
+fn a_url_only_user_file_on_mantle_forwards_its_url_without_a_gate_declaration() {
+    let req = ChatRequest {
+        messages: vec![Message {
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
+                file: json!({"file_url": "https://example.com/a.pdf"}),
+                cache_control: None,
+            })]),
+            ..user("")
+        }]
+        .into(),
+        ..request()
+    };
+
+    let edits = declared(&provider(AuthKind::BedrockMantle), req);
+
+    assert!(
+        !has(
+            &edits,
+            EditSite::AuthSurfaceGate,
+            "/input/*/content/*/file_url",
+            EditKind::Remove
+        ),
+        "{edits:?}"
+    );
+}
+
+#[test]
 fn the_api_key_lane_forwards_max_output_tokens_without_a_gate_declaration() {
     let req = ChatRequest {
         max_tokens: Some(64),

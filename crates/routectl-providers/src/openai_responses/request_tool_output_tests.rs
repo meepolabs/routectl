@@ -87,8 +87,8 @@ fn tool_result_file_id_only_ships_as_input_file_with_file_id() {
 }
 
 #[test]
-fn tool_result_file_with_no_carrier_fails_the_request() {
-    // Arrange: a filename alone names no bytes.
+fn tool_result_file_with_no_carrier_forwards_as_a_bare_input_file() {
+    // Arrange: a filename alone, beside text so the typed body is built.
     let parts = vec![
         text_part("see file"),
         file_part(json!({"filename": "empty.pdf"})),
@@ -99,13 +99,36 @@ fn tool_result_file_with_no_carrier_fails_the_request() {
     ]);
 
     // Act
-    let msg = translate_err(&cfg(), &req);
+    let v = translate_to_json(&cfg(), &req);
 
     // Assert
-    assert!(msg.contains("no usable carrier"), "message was: {msg}");
-    assert!(msg.contains("file_data"), "message was: {msg}");
-    assert!(msg.contains("file_id"), "message was: {msg}");
-    assert!(msg.contains("file_url"), "message was: {msg}");
+    assert_eq!(
+        v["input"][1]["output"],
+        json!([
+            {"type": "input_text", "text": "see file"},
+            {"type": "input_file", "filename": "empty.pdf"}
+        ])
+    );
+}
+
+#[test]
+fn tool_result_file_whose_only_carrier_is_not_a_string_is_refused_as_unrepresentable() {
+    // Arrange
+    let parts = vec![native_input_file_part(json!({"file_url": ["a", "b"]}))];
+    let req = req_with(vec![
+        user_text("read it"),
+        tool_message_parts("call_f5", parts),
+    ]);
+
+    // Act
+    let err = translate(&cfg(), &req).expect_err("a non-string carrier has no slot");
+
+    // Assert
+    assert_eq!(err.refusal_reason(), Some(RefusalReason::Unrepresentable));
+    assert!(
+        err.to_string().contains("no string carrier"),
+        "error was: {err}"
+    );
 }
 
 #[test]
@@ -225,4 +248,38 @@ fn tool_result_with_only_text_parts_still_collapses_to_a_string() {
 
     // Assert
     assert_eq!(v["input"][1]["output"], json!("one\ntwo"));
+}
+
+#[test]
+fn an_absent_or_empty_tool_output_id_reaches_the_body_as_an_empty_call_id() {
+    let tool_result_part = ContentPart::Known(KnownContentPart::ToolResult {
+        tool_use_id: String::new(),
+        content: json!("sunny"),
+        is_error: None,
+        cache_control: None,
+    });
+    let mut absent_id = tool_message("unused", "sunny");
+    absent_id.tool_call_id = None;
+    let rows = [
+        ("tool message, absent id", absent_id),
+        ("tool message, empty id", tool_message("", "sunny")),
+        (
+            "tool_result part, empty id",
+            user_parts(vec![tool_result_part]),
+        ),
+    ];
+    for (name, message) in rows {
+        // Arrange
+        let req = req_with(vec![user_text("weather?"), message]);
+
+        // Act
+        let v = translate_to_json(&cfg(), &req);
+
+        // Assert
+        assert_eq!(
+            v["input"][1],
+            json!({"type": "function_call_output", "call_id": "", "output": "sunny"}),
+            "{name}"
+        );
+    }
 }

@@ -111,17 +111,34 @@ fn user_file_id_only_translates_to_input_file_with_file_id() {
 }
 
 #[test]
-fn user_file_with_no_carrier_fails_the_request() {
-    // Arrange: a file part with neither file_data nor file_id -- it names
-    // no bytes, so it is malformed rather than unrepresentable.
+fn user_file_with_no_carrier_forwards_as_a_bare_input_file() {
+    // Arrange: a file part naming none of file_data, file_id, file_url.
     let req = req_with(vec![user_file(json!({"filename": "empty.pdf"}))]);
 
     // Act
-    let msg = translate_err(&cfg(), &req);
+    let v = translate_to_json(&cfg(), &req);
 
-    // Assert: the error names the missing carriers.
-    assert!(msg.contains("file_data"), "message was: {msg}");
-    assert!(msg.contains("file_id"), "message was: {msg}");
+    // Assert
+    assert_eq!(
+        v["input"][0]["content"],
+        json!([{"type": "input_file", "filename": "empty.pdf"}])
+    );
+}
+
+#[test]
+fn user_file_whose_only_carrier_is_not_a_string_is_refused_as_unrepresentable() {
+    // Arrange
+    let req = req_with(vec![user_file(json!({"file_id": 7, "filename": "a.pdf"}))]);
+
+    // Act
+    let err = translate(&cfg(), &req).expect_err("a non-string carrier has no slot");
+
+    // Assert
+    assert_eq!(err.refusal_reason(), Some(RefusalReason::Unrepresentable));
+    assert!(
+        err.to_string().contains("no string carrier"),
+        "error was: {err}"
+    );
 }
 
 #[test]
@@ -144,22 +161,27 @@ fn user_file_url_only_forwards_on_the_api_key_and_chatgpt_oauth_lanes() {
 }
 
 #[test]
-fn user_file_url_only_fails_on_the_mantle_lane() {
-    // Arrange
-    let req = req_with(vec![user_file(
-        json!({"file_url": "https://example.test/a.pdf"}),
-    )]);
+fn user_file_url_only_forwards_on_every_lane_including_mantle() {
+    // Arrange: the url is the part's only carrier, so leaving it off would
+    // ship a file part naming nothing.
+    let url = "https://example.test/a.pdf";
+    let req = req_with(vec![user_file(json!({"file_url": url}))]);
 
-    // Act
-    let msg = translate_err(&cfg_bedrock_mantle(), &req);
+    for (name, lane) in [
+        ("mantle", cfg_bedrock_mantle()),
+        ("chatgpt-oauth", cfg()),
+        ("api-key", cfg_api_key()),
+    ] {
+        // Act
+        let v = translate_to_json(&lane, &req);
 
-    // Assert: the error names the lane's accepted carriers, never the url.
-    assert!(
-        msg.contains("no carrier this lane accepts"),
-        "message was: {msg}"
-    );
-    assert!(msg.contains("bedrock-mantle"), "message was: {msg}");
-    assert!(!msg.contains("example.test"), "echoes the url: {msg}");
+        // Assert
+        assert_eq!(
+            v["input"][0]["content"],
+            json!([{"type": "input_file", "file_url": url}]),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -213,71 +235,64 @@ fn user_document_anthropic_shape_still_drops() {
 }
 
 // ---------------------------------------------------------------------------
-// malformed parts fail the request (a part that names no bytes)
+// image parts naming no bytes forward verbatim; only a value no slot holds
+// is refused
 // ---------------------------------------------------------------------------
 
 #[test]
-fn user_image_url_part_with_empty_url_fails_the_request() {
-    // Arrange: OpenAI-shape image_url block whose url is present but
-    // empty. This once took the success branch and shipped an empty
-    // image_url upstream with no warning and no drop.
-    let req = req_with(vec![user_parts(vec![image_url_part(json!({"url": ""}))])]);
+fn user_image_url_part_with_empty_or_absent_url_forwards_an_empty_image_url() {
+    for (name, image_url) in [
+        ("empty", json!({"url": "", "detail": "high"})),
+        ("absent", json!({"detail": "high"})),
+    ] {
+        // Arrange
+        let req = req_with(vec![user_parts(vec![
+            text_part("look at this"),
+            image_url_part(image_url),
+        ])]);
 
-    // Act
-    let msg = translate_err(&cfg(), &req);
+        // Act
+        let v = translate_to_json(&cfg(), &req);
 
-    // Assert
-    assert!(msg.contains("image_url.url"), "message was: {msg}");
+        // Assert: the whole turn ships, the image beside its text.
+        assert_eq!(
+            v["input"][0]["content"],
+            json!([
+                {"type": "input_text", "text": "look at this"},
+                {"type": "input_image", "image_url": "", "detail": "high"}
+            ]),
+            "{name}"
+        );
+    }
 }
 
 #[test]
-fn tool_result_image_url_part_with_empty_url_fails_the_request() {
-    // Arrange: the same empty-url shape on the tool-result path.
-    let req = req_with(vec![
-        user_text("shot"),
-        tool_message_parts("call_1", vec![image_url_part(json!({"url": ""}))]),
-    ]);
+fn tool_result_image_url_part_with_empty_or_absent_url_forwards_an_empty_image_url() {
+    for (name, image_url) in [
+        ("empty", json!({"url": ""})),
+        ("absent", json!({"detail": "low"})),
+    ] {
+        // Arrange
+        let req = req_with(vec![
+            user_text("shot"),
+            tool_message_parts("call_1", vec![image_url_part(image_url.clone())]),
+        ]);
 
-    // Act
-    let msg = translate_err(&cfg(), &req);
+        // Act
+        let v = translate_to_json(&cfg(), &req);
 
-    // Assert
-    assert!(msg.contains("tool result"), "message was: {msg}");
-    assert!(msg.contains("image_url.url"), "message was: {msg}");
+        // Assert
+        let mut expected = json!({"type": "input_image", "image_url": ""});
+        if let Some(detail) = image_url.get("detail") {
+            expected["detail"] = detail.clone();
+        }
+        assert_eq!(v["input"][1]["output"], json!([expected]), "{name}");
+    }
 }
 
 #[test]
-fn user_image_url_part_with_missing_url_fails_the_request() {
-    // Arrange: no url field at all.
-    let req = req_with(vec![user_parts(vec![image_url_part(
-        json!({"detail": "high"}),
-    )])]);
-
-    // Act
-    let msg = translate_err(&cfg(), &req);
-
-    // Assert
-    assert!(msg.contains("image_url.url"), "message was: {msg}");
-}
-
-#[test]
-fn tool_result_image_url_part_with_missing_url_fails_the_request() {
+fn user_image_source_with_empty_base64_data_forwards_an_empty_data_uri() {
     // Arrange
-    let req = req_with(vec![
-        user_text("shot"),
-        tool_message_parts("call_1", vec![image_url_part(json!({"detail": "low"}))]),
-    ]);
-
-    // Act
-    let msg = translate_err(&cfg(), &req);
-
-    // Assert
-    assert!(msg.contains("image_url.url"), "message was: {msg}");
-}
-
-#[test]
-fn user_image_source_with_empty_base64_data_fails_the_request() {
-    // Arrange: a base64 source whose data is empty names no bytes.
     let req = req_with(vec![user_parts(vec![image_part(json!({
         "type": "base64",
         "media_type": "image/png",
@@ -285,29 +300,34 @@ fn user_image_source_with_empty_base64_data_fails_the_request() {
     }))])]);
 
     // Act
-    let msg = translate_err(&cfg(), &req);
+    let v = translate_to_json(&cfg(), &req);
 
-    // Assert: the field is named and no raw content value is echoed.
-    assert!(msg.contains("source.data"), "message was: {msg}");
-    assert!(!msg.contains("image/png"), "message was: {msg}");
+    // Assert
+    assert_eq!(
+        v["input"][0]["content"],
+        json!([{"type": "input_image", "image_url": "data:image/png;base64,"}])
+    );
 }
 
 #[test]
-fn user_image_source_with_empty_url_fails_the_request() {
+fn user_image_source_with_empty_url_forwards_an_empty_image_url() {
     // Arrange
     let req = req_with(vec![user_parts(vec![image_part(
         json!({"type": "url", "url": ""}),
     )])]);
 
     // Act
-    let msg = translate_err(&cfg(), &req);
+    let v = translate_to_json(&cfg(), &req);
 
     // Assert
-    assert!(msg.contains("source.url"), "message was: {msg}");
+    assert_eq!(
+        v["input"][0]["content"],
+        json!([{"type": "input_image", "image_url": ""}])
+    );
 }
 
 #[test]
-fn tool_result_image_source_with_empty_base64_data_fails_the_request() {
+fn tool_result_image_source_with_empty_base64_data_forwards_an_empty_data_uri() {
     // Arrange
     let req = req_with(vec![
         user_text("shot"),
@@ -322,15 +342,17 @@ fn tool_result_image_source_with_empty_base64_data_fails_the_request() {
     ]);
 
     // Act
-    let msg = translate_err(&cfg(), &req);
+    let v = translate_to_json(&cfg(), &req);
 
     // Assert
-    assert!(msg.contains("source.data"), "message was: {msg}");
-    assert!(msg.contains("tool result"), "message was: {msg}");
+    assert_eq!(
+        v["input"][1]["output"],
+        json!([{"type": "input_image", "image_url": "data:image/png;base64,"}])
+    );
 }
 
 #[test]
-fn tool_result_image_source_with_empty_url_fails_the_request() {
+fn tool_result_image_source_with_empty_url_forwards_an_empty_image_url() {
     // Arrange
     let req = req_with(vec![
         user_text("shot"),
@@ -341,27 +363,92 @@ fn tool_result_image_source_with_empty_url_fails_the_request() {
     ]);
 
     // Act
-    let msg = translate_err(&cfg(), &req);
+    let v = translate_to_json(&cfg(), &req);
 
     // Assert
-    assert!(msg.contains("source.url"), "message was: {msg}");
-    assert!(msg.contains("tool result"), "message was: {msg}");
+    assert_eq!(
+        v["input"][1]["output"],
+        json!([{"type": "input_image", "image_url": ""}])
+    );
 }
 
 #[test]
-fn valid_content_beside_a_malformed_part_is_never_reached() {
-    // Arrange: valid text ahead of a malformed image part. The whole
-    // request fails rather than shipping a partial turn.
-    let req = req_with(vec![user_parts(vec![
-        text_part("look at this"),
-        image_url_part(json!({"url": ""})),
-    ])]);
+fn image_values_no_string_slot_can_hold_are_refused_as_unrepresentable() {
+    let rows = [
+        (
+            "user image_url not an object",
+            vec![user_parts(vec![image_url_part(json!(
+                "https://x.test/a.png"
+            ))])],
+            "is not an object",
+        ),
+        (
+            "user image_url url not a string",
+            vec![user_parts(vec![image_url_part(json!({"url": 7}))])],
+            "non-string `url`",
+        ),
+        (
+            "user base64 data not a string",
+            vec![user_parts(vec![image_part(
+                json!({"type": "base64", "media_type": "image/png", "data": 7}),
+            )])],
+            "non-string `data`",
+        ),
+        (
+            "user url not a string",
+            vec![user_parts(vec![image_part(
+                json!({"type": "url", "url": []}),
+            )])],
+            "non-string `url`",
+        ),
+        (
+            "tool image_url not an object",
+            vec![
+                user_text("shot"),
+                tool_message_parts("call_1", vec![image_url_part(json!(null))]),
+            ],
+            "in a tool result is not an object",
+        ),
+        (
+            "tool base64 data not a string",
+            vec![
+                user_text("shot"),
+                tool_message_parts(
+                    "call_1",
+                    vec![image_part(json!({"type": "base64", "data": {}}))],
+                ),
+            ],
+            "in a tool result has a non-string `data`",
+        ),
+        (
+            "tool url not a string",
+            vec![
+                user_text("shot"),
+                tool_message_parts(
+                    "call_1",
+                    vec![image_part(json!({"type": "url", "url": true}))],
+                ),
+            ],
+            "in a tool result has a non-string `url`",
+        ),
+    ];
+    for (name, messages, phrase) in rows {
+        // Arrange
+        let req = req_with(messages);
 
-    // Act
-    let msg = translate_err(&cfg(), &req);
+        // Act
+        let err = translate(&cfg(), &req).expect_err(name);
 
-    // Assert
-    assert!(msg.contains("image_url.url"), "message was: {msg}");
+        // Assert
+        assert_eq!(
+            err.refusal_reason(),
+            Some(RefusalReason::Unrepresentable),
+            "{name}"
+        );
+        let text = err.to_string();
+        assert!(text.contains(phrase), "{name}: error was: {text}");
+        assert!(!text.contains("x.test"), "{name}: echoes the value: {text}");
+    }
 }
 
 // ---------------------------------------------------------------------------

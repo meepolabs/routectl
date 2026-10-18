@@ -120,36 +120,20 @@ fn is_text_block(part: &Value) -> bool {
         == Some("text")
 }
 
+/// Build the OpenAI-shape `tool_calls` entry for one `tool_use` block. The
+/// `id` and `name` ride verbatim, absent or not a string included: nothing
+/// on this egress reads them after the lift, so only the upstream can
+/// object to them.
 fn tool_use_to_tool_call(id: &str, part: &Value) -> Result<Value> {
+    // Unreachable through `lift`, whose `part_is_tool_use` filter already
+    // proved the block is an object.
     let obj = part.as_object().ok_or_else(|| {
         Error::normalize_request(
             id,
-            format!("tool_use block is not an object: {part}"),
+            "tool_use block is not an object",
             RefusalReason::Unrepresentable,
         )
     })?;
-    let tool_id = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            Error::normalize_request(
-                id,
-                "tool_use block missing `id`",
-                RefusalReason::ToolCallIdMissing,
-            )
-        })?
-        .to_string();
-    let name = obj
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            Error::normalize_request(
-                id,
-                "tool_use block missing `name`",
-                RefusalReason::Unrepresentable,
-            )
-        })?
-        .to_string();
     let input = obj
         .get("input")
         .cloned()
@@ -159,11 +143,18 @@ fn tool_use_to_tool_call(id: &str, part: &Value) -> Result<Value> {
             "provider `{id}`: failed to encode tool_use input: {e}"
         ))
     })?;
-    Ok(serde_json::json!({
-        "id": tool_id,
-        "type": "function",
-        "function": {"name": name, "arguments": arguments}
-    }))
+    let mut function = Map::new();
+    if let Some(name) = obj.get("name") {
+        function.insert("name".into(), name.clone());
+    }
+    function.insert("arguments".into(), Value::String(arguments));
+    let mut call = Map::new();
+    if let Some(tool_id) = obj.get("id") {
+        call.insert("id".into(), tool_id.clone());
+    }
+    call.insert("type".into(), Value::String("function".into()));
+    call.insert("function".into(), Value::Object(function));
+    Ok(Value::Object(call))
 }
 
 #[cfg(test)]
@@ -322,6 +313,23 @@ mod tests {
         // Assert
         assert_eq!(obj["messages"][0]["content"], "ok");
         assert!(obj["messages"][0].get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn a_tool_use_block_that_is_not_an_object_is_refused_as_unrepresentable() {
+        // Arrange -- `lift` never hands this function a non-object, so the
+        // refusal is reached only by calling it directly.
+        let part = json!("not-an-object");
+
+        // Act
+        let err = tool_use_to_tool_call("test", &part).expect_err("no object, no tool call");
+
+        // Assert
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::Unrepresentable));
+        assert!(
+            !err.to_string().contains("not-an-object"),
+            "echoes the value: {err}"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use serde_json::{Value, from_value, json};
 
 use routectl_core::{
     BEDROCK_MANTLE, CODEX_OAUTH, ChatRequest, ContentPart, CustomTool, KnownContentPart, Message,
-    MessageContent, ReasoningConfig, ReasoningDetail, ReasoningDetailKind,
+    MessageContent, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, RefusalReason,
     ResponsesPassthroughItem, Role, SystemBlock, SystemContent, ToolDef,
     cache_control::CacheControl,
 };

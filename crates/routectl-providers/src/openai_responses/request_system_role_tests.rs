@@ -248,14 +248,12 @@ fn an_all_fingerprint_system_on_both_sources_empties_instructions_and_counts() {
 #[test]
 #[serial_test::serial(openai_responses_client_fingerprint_stripped)]
 fn a_request_that_fails_after_the_message_strip_still_counts() {
-    // Arrange -- an empty tool_use_id on a tool result is a hard error in the
+    // Arrange -- an image_url that is not an object is a hard error in the
     // input build, which runs after the system surfaces are assembled.
     let req = req_with(vec![
         system_text(RESPONSES_FINGERPRINT),
-        user_parts(vec![ContentPart::Known(KnownContentPart::ToolResult {
-            tool_use_id: String::new(),
-            content: json!("x"),
-            is_error: None,
+        user_parts(vec![ContentPart::Known(KnownContentPart::ImageUrl {
+            image_url: json!("not-an-object"),
             cache_control: None,
         })]),
     ]);
@@ -266,7 +264,7 @@ fn a_request_that_fails_after_the_message_strip_still_counts() {
     let after = responses_fingerprint_strip_count();
 
     // Assert
-    assert!(err.contains("tool_use_id"), "unexpected error: {err}");
+    assert!(err.contains("image_url"), "unexpected error: {err}");
     assert_eq!(
         after - before,
         1,

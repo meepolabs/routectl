@@ -192,8 +192,7 @@ pub enum FunctionCallOutputContentItem {
         detail: Option<String>,
     },
     /// File returned by a tool. Same carrier fields as the user-turn
-    /// [`ResponsesContentItem::InputFile`]; at least one of `file_data`,
-    /// `file_id`, `file_url` is present, absent fields are omitted.
+    /// [`ResponsesContentItem::InputFile`]; absent fields are omitted.
     InputFile {
         #[serde(skip_serializing_if = "Option::is_none")]
         file_data: Option<String>,

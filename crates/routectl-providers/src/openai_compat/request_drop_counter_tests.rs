@@ -168,46 +168,100 @@ fn breakpoints_on_every_surface_of_one_request_count_one_drop() {
     assert_eq!(delta, 1, "the count is per request, not per breakpoint");
 }
 
-#[test]
-#[serial_test::serial(openai_compat_cache_control_unsupported)]
-fn a_dropped_breakpoint_still_counts_when_translation_fails_afterwards() {
-    // Arrange -- the breakpoint is dropped first; an assistant `tool_use`
-    // block with no `id` then fails the later tool_use lift.
-    let mut req = simple_req("m");
-    req.cache_control = Some(routectl_core::CacheControl::ephemeral_5m());
-    push_msg(
-        &mut req,
-        Message {
-            role: Role::Assistant,
-            ..user_parts_message(vec![ContentPart::Other {
-                type_tag: "tool_use".into(),
-                cache_control: None,
-                extras: serde_json::Map::new(),
-            }])
-        },
-    );
-    let before = compat_drop_count("cache_control_unsupported");
+fn tool_block(fields: serde_json::Value) -> ContentPart {
+    ContentPart::Other {
+        type_tag: fields["type"].as_str().unwrap().into(),
+        cache_control: None,
+        extras: fields.as_object().unwrap().clone(),
+    }
+}
 
-    // Act
-    let result = normalize(
+fn lenient_messages(req: &ChatRequest, name: &str) -> Vec<serde_json::Value> {
+    let body = normalize(
         "test",
-        &req,
+        req,
         ReasoningDialect::Passthrough,
         HistoryReasoning::Auto,
         None,
         false,
-    );
-    let delta = compat_drop_count("cache_control_unsupported") - before;
+    )
+    .unwrap_or_else(|e| panic!("{name}: the transcript must forward, got {e}"));
+    body["messages"].as_array().unwrap().clone()
+}
 
-    // Assert
-    assert!(
-        result.is_err(),
-        "the fixture must fail translation: {result:?}"
-    );
-    assert_eq!(
-        delta, 1,
-        "a request that dropped and then failed still counts"
-    );
+/// A `tool_use` block's `id` and `name` ride verbatim into the built body,
+/// absent or not a string included: nothing on this egress reads them
+/// after the lift, so only the upstream can object.
+#[test]
+fn tool_use_blocks_with_absent_or_non_string_id_or_name_reach_the_openai_compat_body() {
+    let rows = [
+        (
+            "absent id",
+            json!({"type": "tool_use", "name": "f", "input": {}}),
+            json!({"type": "function", "function": {"name": "f", "arguments": "{}"}}),
+        ),
+        (
+            "non-string id",
+            json!({"type": "tool_use", "id": 7, "name": "f", "input": {}}),
+            json!({"id": 7, "type": "function", "function": {"name": "f", "arguments": "{}"}}),
+        ),
+        (
+            "absent name",
+            json!({"type": "tool_use", "id": "t1", "input": {}}),
+            json!({"id": "t1", "type": "function", "function": {"arguments": "{}"}}),
+        ),
+        (
+            "non-string name",
+            json!({"type": "tool_use", "id": "t1", "name": ["n"], "input": {}}),
+            json!({"id": "t1", "type": "function", "function": {"name": ["n"], "arguments": "{}"}}),
+        ),
+    ];
+    for (name, block, expected) in rows {
+        // Arrange
+        let mut req = simple_req("m");
+        push_msg(
+            &mut req,
+            Message {
+                role: Role::Assistant,
+                ..user_parts_message(vec![tool_block(block)])
+            },
+        );
+
+        // Act
+        let messages = lenient_messages(&req, name);
+
+        // Assert
+        assert_eq!(messages[1]["tool_calls"], json!([expected]), "{name}");
+    }
+}
+
+/// A `tool_result` block's `tool_use_id` rides verbatim as the tool
+/// message's `tool_call_id`, absent or not a string included.
+#[test]
+fn tool_result_blocks_with_absent_or_non_string_id_reach_the_openai_compat_body() {
+    let rows = [
+        (
+            "absent id",
+            json!({"type": "tool_result", "content": "a"}),
+            json!({"role": "tool", "content": "a"}),
+        ),
+        (
+            "non-string id",
+            json!({"type": "tool_result", "tool_use_id": 7, "content": "a"}),
+            json!({"role": "tool", "tool_call_id": 7, "content": "a"}),
+        ),
+    ];
+    for (name, block, expected) in rows {
+        // Arrange
+        let mut req = simple_req("m");
+        push_msg(&mut req, user_parts_message(vec![tool_block(block)]));
+
+        // Act
+        let messages = lenient_messages(&req, name);
+
+        // Assert
+        assert_eq!(messages[1], expected, "{name}");
+    }
 }
 
 #[test]

@@ -934,7 +934,9 @@ fn every_translated_request_counts_toward_the_lane_denominator() {
     // Arrange: one clean request and one that FAILS translation. Both are
     // requests the lane processed, so both belong in the denominator.
     let clean = req_with(vec![user_text("hi")]);
-    let rejected = req_with(vec![user_parts(vec![image_url_part(json!({"url": ""}))])]);
+    let rejected = req_with(vec![user_parts(vec![image_url_part(json!(
+        "not-an-object"
+    ))])]);
 
     // Act
     let before = responses_lane_seen_count();
