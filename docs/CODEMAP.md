@@ -6410,10 +6410,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   against a mock upstream: each row asserts a 400, zero upstream calls and
   exactly one `(lane, reason)` count; it names the two reasons no request
   reaches (`translation-accounting`, `schema-depth`) and pins that a
-  too-deep schema is refused as `unparseable` first. Two chain tests drive
+  too-deep schema is refused as `unparseable` first. Three chain tests drive
   the cache breakpoint rules through a fallback: an openai-compat target
-  serves an over-cap request, and an anthropic-api refusal counts once on its
-  lane before the next target answers 200
+  serves an over-cap request, and an anthropic-api refusal and a Bedrock
+  Invoke top-level-marker lowering refusal each count once on their lane
+  before the next target answers 200
 - `src/handlers/ingress_wire.rs` -- `capture_ingress_wire`: right after parse,
   attaches the posted body (refcount), its dialect (from `provenance`) and the
   client version (stable Claude CLI version, else the first safe
