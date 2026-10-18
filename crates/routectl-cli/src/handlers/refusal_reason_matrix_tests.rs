@@ -3,7 +3,9 @@
 //! never called, and `rc_request_refused_local_total` holds exactly one count,
 //! under the refusal's lane and reason. The cache breakpoint rules are also
 //! driven through a fallback chain, where the refused target's lane counts
-//! once and the next target serves the request.
+//! once and the next target serves the request, on the anthropic-api lane
+//! and on the Bedrock Invoke lane, whose top-level marker lowering re-checks
+//! the rules.
 //!
 //! Each row builds its own router, so the full counter set after the request
 //! is the delta that request caused.
@@ -22,6 +24,12 @@ use axum::body::{Bytes, to_bytes};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use routectl_core::StaticToken;
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
+use routectl_providers::bedrock::{
+    BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth as bedrock_auth,
+};
+use routectl_providers::openai_compat::{
+    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
+};
 use routectl_router::config::CredentialSource;
 use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, ResolvedModel, RetryPolicy, Router,
@@ -617,4 +625,164 @@ async fn a_breakpoint_rule_refused_by_anthropic_api_falls_back_and_counts_once_o
             "{reason}"
         );
     }
+}
+
+const INVOKE_MODEL_ID: &str = "us.anthropic.claude-sonnet-4-5";
+const INVOKE_REGION: &str = "us-east-1";
+
+fn invoke_key() -> String {
+    ["invoke", "refusal", "key"].join("-")
+}
+
+/// A router whose alias walks a Bedrock Invoke target, then an
+/// openai-compat target, both aimed at `base`. Bedrock is installed
+/// directly: the factory aims it at the region's real endpoint.
+async fn invoke_then_compat_router(base: &str) -> Router {
+    let text = format!(
+        "version = {version}\n\n\
+         [providers.p0]\n\
+         kind = \"bedrock\"\n\
+         region = \"{INVOKE_REGION}\"\n\
+         api_shape = \"invoke\"\n\
+         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+         [providers.p1]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"{base}\"\n\
+         api_key_ref = \"{key_ref}\"\n\n\
+         [models.m0]\n\
+         provider = \"p0\"\n\
+         upstream = \"{INVOKE_MODEL_ID}\"\n\n\
+         [models.m1]\n\
+         provider = \"p1\"\n\
+         upstream = \"{UPSTREAM}\"\n\n\
+         [aliases]\n\
+         {ALIAS} = [\"m0\", \"m1\"]\n\n\
+         [retry]\n\
+         max_attempts = 1\n",
+        version = routectl_router::CURRENT_CONFIG_VERSION,
+        key_ref = crate::test_secret::file_ref(&invoke_key()),
+    );
+    let config = routectl_router::parse_config(&text).expect("valid chain config");
+    let creds = BedrockCreds::BearerKey { key: invoke_key() };
+    let invoke_cfg = BedrockConfig {
+        id: "bedrock:p0".into(),
+        region: INVOKE_REGION.into(),
+        model_id: INVOKE_MODEL_ID.into(),
+        api_shape: BedrockApiShape::Invoke,
+        creds: creds.clone(),
+        user_agent: None,
+        header_extras: Vec::new(),
+        anthropic_beta: Vec::new(),
+        additional_model_request_fields: None,
+        adaptive_thinking: None,
+    };
+    let resolved = bedrock_auth::resolve(&creds, INVOKE_REGION)
+        .await
+        .expect("bearer creds resolve");
+    let invoke = BedrockProvider::new(invoke_cfg, resolved)
+        .expect("canonical region")
+        .with_runtime_origin_for_tests(base);
+    let compat = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "openai-compat:p1".into(),
+        base_url: base.to_string(),
+        api_key: "k".into(),
+        header_extras: Vec::new(),
+        payload_extras: None,
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: HistoryReasoning::Auto,
+        user_agent: None,
+        strict_translation: false,
+        disable_stream_include_usage: false,
+        mantle: None,
+    });
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(BTreeMap::from([
+        (
+            "m0".to_string(),
+            Arc::new(ResolvedModel::new(
+                "m0",
+                "p0",
+                Arc::new(invoke),
+                INVOKE_MODEL_ID,
+            )),
+        ),
+        (
+            "m1".to_string(),
+            Arc::new(ResolvedModel::new("m1", "p1", Arc::new(compat), UPSTREAM)),
+        ),
+    ]));
+    router
+}
+
+/// A Bedrock Invoke target refuses a request whose top-level marker,
+/// lowered onto a content block, would land a 5m breakpoint ahead of a 1h
+/// one. It never dials, counts once on its own lane, and the chain's
+/// openai-compat target serves the request.
+#[tokio::test]
+async fn an_invoke_lowering_that_breaks_the_ttl_order_falls_back_and_counts_once_on_its_lane() {
+    // Arrange
+    let body = json!({
+        "model": ALIAS, "max_tokens": 16,
+        "cache_control": {"type": "ephemeral", "ttl": "5m"},
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "hi"},
+            {"type": "some_future_block",
+             "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+        ]}]
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_completion()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(
+        invoke_then_compat_router(&server.uri()).await,
+    ));
+    let state = AppState::for_test(Arc::clone(&swap));
+
+    // Act
+    let resp = Box::pin(ingress_handle(
+        state,
+        headers(),
+        None,
+        Ok(Bytes::from(json_body(&body))),
+        AnthropicIngress,
+    ))
+    .await;
+
+    // Assert
+    let status = resp.status();
+    let client_body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "{client_body}");
+    let paths: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert_eq!(
+        paths,
+        ["/chat/completions"],
+        "refused before dialing Bedrock"
+    );
+    let refusals: Vec<_> = swap
+        .load()
+        .wire_check_snapshot()
+        .local_refusals
+        .iter()
+        .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
+        .collect();
+    assert_eq!(
+        refusals,
+        [("anthropic->bedrock-invoke", "cache-ttl-order", 1)]
+    );
 }

@@ -145,3 +145,32 @@ fn an_untapped_invoke_body_matches_a_tapped_one() {
 
     assert_eq!(untapped, tapped);
 }
+
+#[test]
+fn a_lowering_refused_for_a_breakpoint_rule_declares_no_lowering_edit() {
+    let mut req = request(json!({
+        "cache_control": {"type": "ephemeral", "ttl": "5m"},
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "hi"},
+            {"type": "some_future_block", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+        ]}],
+    }));
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+
+    let result = normalize_request(&cfg(), &req);
+
+    let err = result.expect_err("the lowered arrangement breaks the ttl order");
+    assert_eq!(
+        err.refusal_reason(),
+        Some(routectl_core::RefusalReason::CacheTtlOrder)
+    );
+    let lowering: Vec<_> = tap
+        .take_request()
+        .edits(Leg::Request)
+        .iter()
+        .filter(|edit| edit.site() == EditSite::CacheMarkerLowering)
+        .map(|edit| (edit.kind(), edit.path().to_string()))
+        .collect();
+    assert!(lowering.is_empty(), "refused request declared {lowering:?}");
+}

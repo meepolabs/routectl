@@ -287,13 +287,6 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "bedrock/invoke.rs",
-        "lower_top_level_cache_control_to_per_block",
-        "lowering would violate the breakpoint invariants",
-        "uncounted request-side loss: the same breakpoint removal when the lowered arrangement \
-         would break the breakpoint invariants, declared by this WARN only",
-    ),
-    (
-        "bedrock/invoke.rs",
         "normalize_request",
         "additional_model_request_fields attempted to override",
         "uncounted policy action: an operator extra naming a managed key is refused on this \

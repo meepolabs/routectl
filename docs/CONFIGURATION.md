@@ -3264,9 +3264,14 @@ differently:
   `cache_control` onto the last cache-eligible content block -- the
   per-block form Invoke honors -- and re-validates the resulting
   breakpoint sequence before the body ships. When no eligible block
-  exists, or the lowered arrangement would violate the breakpoint
-  invariants, the top-level marker is dropped and the request goes out
-  uncached (logged at WARN) instead of 400ing.
+  exists, the top-level marker is dropped and the request goes out
+  uncached (logged at WARN) instead of 400ing. When the lowered
+  arrangement would break the breakpoint rules (more than four, or a 5m
+  ahead of a 1h), the target refuses the request locally
+  (`cache-breakpoint-cap` / `cache-ttl-order`) and the chain moves to its
+  next target, as anthropic-api does. Only a caller's own top-level marker
+  can reach that refusal: routectl auto-emits its marker only when the
+  request carries no breakpoint at all.
 - `api_shape = "converse"` gets `false/true`: a top-level marker lands
   in `additionalModelRequestFields` and never becomes a `cachePoint`, so
   auto-emit is skipped (`auto_skipped:no_capability`) rather than

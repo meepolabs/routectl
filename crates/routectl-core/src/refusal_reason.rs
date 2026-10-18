@@ -19,14 +19,18 @@ pub enum RefusalReason {
     /// The request carries more cache breakpoints than prompt caching allows,
     /// and dropping any would change what the caller asked to cache. Raised
     /// by `cache_control::validate` on the egresses that put breakpoints on
-    /// the wire: anthropic-api, Bedrock Converse and Bedrock Invoke. No
+    /// the wire: anthropic-api, Bedrock Converse and Bedrock Invoke. Bedrock
+    /// Invoke raises it twice over: in the anthropic-api assembly it reuses,
+    /// and again when `lower_top_level_cache_control_to_per_block` re-checks
+    /// the body after moving a top-level marker onto a content block. No
     /// ingress raises it, so a request bound for a lane without breakpoints
     /// is never refused for them. Scope: egress. Class: `BadRequest`.
     CacheBreakpointCap,
     /// A longer-TTL cache breakpoint follows a shorter-TTL one, an order
     /// prompt caching rejects, and reordering would change the cached
     /// prefixes. Raised by `cache_control::validate`, on the same paths as
-    /// [`RefusalReason::CacheBreakpointCap`]. Scope: egress. Class:
+    /// [`RefusalReason::CacheBreakpointCap`], including the Bedrock Invoke
+    /// re-check after lowering a top-level marker. Scope: egress. Class:
     /// `BadRequest`.
     CacheTtlOrder,
     /// A tool result has no id, so the target has no way to pair it with its

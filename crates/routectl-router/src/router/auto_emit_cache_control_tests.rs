@@ -2342,6 +2342,83 @@ mod converse_front_only {
         }
     }
 
+    /// A user turn of an unmarked text block then a forward-compat block,
+    /// the latter carrying `marker` when given.
+    fn text_then_future_block_req(marker: Option<CacheControl>) -> ChatRequest {
+        let mut req = base_req();
+        std::sync::Arc::make_mut(&mut req.messages)[0].content = MessageContent::Parts(vec![
+            ContentPart::Known(KnownContentPart::Text {
+                text: "hi".into(),
+                citations: None,
+                cache_control: None,
+            }),
+            ContentPart::Other {
+                type_tag: "some_future_block".into(),
+                cache_control: marker,
+                extras: serde_json::Map::new(),
+            },
+        ]);
+        req
+    }
+
+    /// routectl's own terminal marker never reaches the Invoke lowering
+    /// refusal: a marker on a forward-compat block (the one the lowering
+    /// scan skips, so the only way a lone top-level 5m could land ahead of
+    /// a 1h) counts as a caller breakpoint, and auto-emit stands down. The
+    /// same request without that marker gets the terminal marker, and the
+    /// Invoke egress lowers it without refusing.
+    #[tokio::test]
+    async fn invoke_auto_emit_defers_to_a_marked_forward_compat_block() {
+        let invoke_cfg = routectl_providers::bedrock::BedrockConfig {
+            id: "b".into(),
+            region: "us-east-1".into(),
+            model_id: "anthropic.claude-sonnet-4".into(),
+            api_shape: routectl_providers::bedrock::BedrockApiShape::Invoke,
+            creds: routectl_providers::bedrock::BedrockCreds::DefaultChain,
+            user_agent: None,
+            header_extras: Vec::new(),
+            anthropic_beta: Vec::new(),
+            additional_model_request_fields: None,
+            adaptive_thinking: None,
+        };
+        let rows = [
+            (
+                "marked forward-compat block",
+                Some(CacheControl::ephemeral_1h()),
+                "caller_supplied",
+                None,
+            ),
+            (
+                "unmarked forward-compat block",
+                None,
+                "auto_emitted",
+                Some(CacheControl::ephemeral_5m()),
+            ),
+        ];
+        for (name, marker, decision, terminal) in rows {
+            // Arrange
+            let (router, captured) =
+                rig(bedrock_entry(BedrockApiShapeConfig::Invoke, None), true, 0);
+
+            // Act
+            let dispatched = router
+                .complete_with_options(text_then_future_block_req(marker), RouterOptions::new())
+                .await;
+
+            // Assert
+            dispatched.result.expect("ok");
+            assert_eq!(
+                dispatched.meta.cache_terminal_decision,
+                Some(decision),
+                "{name}"
+            );
+            let up = captured.lock().first().cloned().expect("one dispatch");
+            assert_eq!(up.cache_control, terminal, "{name}");
+            routectl_providers::bedrock::invoke::normalize_request(&invoke_cfg, &up)
+                .unwrap_or_else(|e| panic!("{name}: the Invoke egress refused: {e}"));
+        }
+    }
+
     /// Invoke with an EXPLICIT opt-in: the documented-inert knob must stay
     /// inert at the placement seam too. Invoke has no front-marker path
     /// (its egress lowers the TOP-LEVEL marker to per-block itself), so the
