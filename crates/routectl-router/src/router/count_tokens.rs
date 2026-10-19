@@ -58,7 +58,7 @@ use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
-use super::outcome_rule::{BreakerOutcome, breaker_outcome, class_debits, rate_limit_reset_hint};
+use super::outcome_rule::{BreakerOutcome, breaker_outcome, rate_limit_reset_hint};
 use super::repair_budget::RepairBudget;
 use super::runtime_gate::{LearnedProbeGuard, is_probe_request};
 use super::transcript_defect::{is_transcript_rejection, record_transcript_defect};
@@ -662,15 +662,17 @@ impl Router {
                     // breaker DEBIT keys off the failure CLASS, not the
                     // fallback decision. A transient-health class (429 / 5xx
                     // / status-0 / overload) debits or parks by the rule every
-                    // surface shares (`breaker_outcome`); a caller-shaped 4xx
-                    // releases the slot without a debit, so a repeated
+                    // surface shares (`breaker_outcome`); a probe's 429/529
+                    // and a caller-shaped 4xx release the slot without a
+                    // debit, so a repeated
                     // non-retryable 4xx here cannot trip the per-seat breaker
                     // that also gates completions and streams. Either way this
                     // propagates -- health fallback stays reserved for the
                     // messages path, so a 429 here does NOT walk.
                     let reset_hint = rate_limit_reset_hint(&e, &policy);
                     let is_probe = is_probe_request(req, &policy);
-                    let debit = class_debits(&cf.class);
+                    let outcome = breaker_outcome(&e, &cf.class, reset_hint, is_probe);
+                    let debit = outcome != BreakerOutcome::None;
                     // The class/remap/debit decision on the token-count path was
                     // otherwise silent (unlike the messages path, which emits a
                     // class-decision event at every error arm). One INFO event at
@@ -690,12 +692,8 @@ impl Router {
                         debit,
                         "count_tokens seat terminal; resilience class policy applied",
                     );
-                    let outcome = breaker_outcome(&cf.class, reset_hint, is_probe);
                     self.apply_breaker_outcome(&target.state_key, outcome, &cf.class);
-                    match outcome {
-                        BreakerOutcome::None => probe_guard.release(),
-                        BreakerOutcome::Debit | BreakerOutcome::Park(_) => probe_guard.disarm(),
-                    }
+                    probe_guard.settle(outcome);
                     self.park_counted_seat(&target, req, &e, &probe_guard);
                     return CountSeatOutcome::Terminal(e);
                 }

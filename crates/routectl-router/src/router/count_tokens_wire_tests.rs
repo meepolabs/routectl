@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use routectl_auth::{MemoryStore, SecretStore};
-use routectl_core::wire_check::{IngressDialect, IngressWire};
+use routectl_core::wire_check::{IngressDialect, IngressWire, WireTap};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Message, MessageContent, Provider, Result, Role,
     TokenCount,
@@ -331,4 +331,21 @@ async fn a_count_without_ingress_wire_installs_no_tap() {
             "{name}: tap on the one call"
         );
     }
+}
+
+#[test]
+fn a_count_without_ingress_wire_clears_a_tap_it_carried_in() {
+    // Arrange
+    let mut attempt_req = bare_request();
+    attempt_req.routectl_internal.wire_tap = Some(WireTap::default());
+
+    // Act
+    let tap = Router::install_count_wire_tap(&mut attempt_req);
+
+    // Assert
+    assert!(tap.is_none(), "no tap for the router to read");
+    assert!(
+        attempt_req.routectl_internal.wire_tap.is_none(),
+        "no tap left for the egress to deposit into"
+    );
 }

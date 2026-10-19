@@ -301,6 +301,16 @@ impl ProbeSlotGuard {
         self.state = None;
     }
 
+    /// Settle the slot by the breaker outcome just applied: an outcome that
+    /// recorded nothing frees the slot ([`Self::release`]); a debit or park
+    /// already cleared it ([`Self::disarm`]).
+    pub(super) fn settle(&mut self, outcome: BreakerOutcome) {
+        match outcome {
+            BreakerOutcome::None => self.release(),
+            BreakerOutcome::Debit | BreakerOutcome::Park(_) => self.disarm(),
+        }
+    }
+
     /// Settle without recording a breaker outcome (a path the router chose not
     /// to count against the breaker). Frees the half-open slot only if this
     /// guard's admission claimed it, then disarms; an inert guard leaves the

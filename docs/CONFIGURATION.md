@@ -1529,7 +1529,10 @@ probe -- Claude Code sends `max_tokens=1` quota/health checks to
 `/v1/messages`. On a rate-limit or overload (429/529) a probe skips
 retry+fallback and returns the status immediately: every hop of an
 all-Anthropic chain shares the same limit, so walking it is futile and
-the probe's tiny output is never read. Set `probe_max_tokens = 0` to
+the probe's tiny output is never read. That 429/529 is never counted
+against the seat's circuit breaker, on completions, streams and
+`count_tokens` alike: the probe frees any half-open slot it held and
+takes no failure debit or park. Set `probe_max_tokens = 0` to
 disable (no request is ever treated as a probe). Real requests
 (`max_tokens` above the threshold), generic 5xx, network errors, and
 every 4xx (including a capability-rejection 400, which a sibling
@@ -1711,7 +1714,8 @@ seat's breaker, and it is the same on completions, streams and
 - A reset at or below 5 seconds takes the ordinary threshold-gated
   failure debit, exactly as an error without a reset does.
 - A probe request (`max_tokens` at or below `probe_max_tokens`) never
-  parks: whatever its reset, it takes the debit.
+  parks. A probe's 429 or 529 takes no debit at all, whatever its
+  reset; any other failing probe takes the ordinary debit.
 
 Completions additionally fold a reset at or below 5 seconds into the
 next same-provider retry sleep (it never blocks the request thread

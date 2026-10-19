@@ -48,8 +48,8 @@ use super::field_repair::emit_field_repair;
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
 use super::outcome_rule::{
-    SameProvider, breaker_outcome, class_debits, rate_limit_reset_hint, retry_cap_for,
-    same_provider_retry,
+    SameProvider, breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint,
+    retry_cap_for, same_provider_retry,
 };
 use super::overlays::apply_layered_overlays;
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
@@ -891,34 +891,28 @@ impl Router {
                         }
                         let do_fallback =
                             should_fallback(&e, &cf.class, &policy, is_probe, transcript_rejection);
+                        // The honored upstream reset for THIS error (clamped
+                        // to the ceiling), computed once for both the park
+                        // decision below and the in-loop sleep bump in the
+                        // retry branch. `None` for every non-rate-limit error.
+                        let reset_hint = rate_limit_reset_hint(&e, &policy);
+                        let outcome = breaker_outcome(&e, &cf.class, reset_hint, is_probe);
                         // Probe fast-fail: a probe (max_tokens <=
                         // probe_max_tokens) that hit a rate-limit/overload
                         // (429/529) returns the status immediately via an
-                        // explicit early return -- no retry, no fallback,
-                        // no breaker failure debit. The early return below
-                        // precedes the debit site, so a probe 429/529 never
-                        // reaches health accounting at all. It does still
-                        // release the half-open slot it may have claimed at
-                        // the gate (see below).
-                        let probe_fast_failed = if is_probe {
-                            probe_fast_fail_status(&e)
-                        } else {
-                            None
-                        };
-                        if let Some(status) = probe_fast_failed {
+                        // explicit early return -- no retry, no fallback.
+                        // The shared rule gives it no breaker debit, so it
+                        // only frees the half-open slot it may have claimed
+                        // at the gate.
+                        if let Some(status) = probe_fast_fail(&e, is_probe) {
                             log_probe_fast_fail(
                                 provider_name,
                                 target.nickname.as_deref().unwrap_or(""),
                                 status,
                                 req.max_tokens,
                             );
-                            // Release the half-open slot this probe claimed
-                            // at the gate: a 429/529 probe fast-fail is a
-                            // transient upstream condition we deliberately do
-                            // NOT count as a provider fault (that is why
-                            // should_fallback is false here), so the slot
-                            // must be freed without a breaker debit.
-                            probe_guard.release();
+                            self.apply_breaker_outcome(state_key, outcome, &cf.class);
+                            probe_guard.settle(outcome);
                             // A probe fast-fails ACROSS distinct chain targets
                             // (walking an all-Anthropic chain is futile -- every
                             // hop shares the limit), but a rate-limited SEAT does
@@ -936,11 +930,6 @@ impl Router {
                             }
                             return Err(e);
                         }
-                        // The honored upstream reset for THIS error (clamped
-                        // to the ceiling), computed once for both the park
-                        // decision below and the in-loop sleep bump in the
-                        // retry branch. `None` for every non-rate-limit error.
-                        let reset_hint = rate_limit_reset_hint(&e, &policy);
                         // The breaker DEBIT keys off the failure CLASS, not
                         // the chain-hop decision: a seat looks unhealthy when
                         // it emits a transient-health failure (429 / 5xx /
@@ -950,7 +939,6 @@ impl Router {
                         // still falls back releases its slot without a debit
                         // in the fallback branch below.
                         let debits = class_debits(&cf.class);
-                        let outcome = breaker_outcome(&cf.class, reset_hint, is_probe);
                         let (_opened, breaker_effect) =
                             self.apply_breaker_outcome(state_key, outcome, &cf.class);
                         if debits {
@@ -1668,32 +1656,28 @@ impl Router {
                         }
                         let do_fallback =
                             should_fallback(&e, &cf.class, &policy, is_probe, transcript_rejection);
+                        // Stream dispatch never retries the same provider (no
+                        // in-loop sleep), so a reset hint only decides park
+                        // versus debit, by the rule every surface shares
+                        // (`breaker_outcome`).
+                        let reset_hint = rate_limit_reset_hint(&e, &policy);
+                        let outcome = breaker_outcome(&e, &cf.class, reset_hint, is_probe);
                         // Probe fast-fail: a probe that hit a rate-limit/
                         // overload (429/529) returns the status immediately
-                        // -- no fallback, no breaker failure debit. The early
-                        // return below precedes the debit site, so a probe
-                        // 429/529 never reaches health accounting. It does
-                        // release the half-open slot it may have claimed at
-                        // the gate (see below). Streams never retry the same
-                        // provider, so there is no can_retry_here to guard.
-                        let probe_fast_failed = if is_probe {
-                            probe_fast_fail_status(&e)
-                        } else {
-                            None
-                        };
-                        if let Some(status) = probe_fast_failed {
+                        // -- no fallback. The shared rule gives it no breaker
+                        // debit, so it only frees the half-open slot it may
+                        // have claimed at the gate. Streams never retry the
+                        // same provider, so there is no can_retry_here to
+                        // guard.
+                        if let Some(status) = probe_fast_fail(&e, is_probe) {
                             log_probe_fast_fail(
                                 provider_name,
                                 target.nickname.as_deref().unwrap_or(""),
                                 status,
                                 req.max_tokens,
                             );
-                            // Release the half-open slot this probe claimed
-                            // at the gate: a 429/529 probe fast-fail is a
-                            // transient upstream condition we deliberately do
-                            // NOT count as a provider fault, so free the slot
-                            // without a breaker debit.
-                            probe_guard.release();
+                            self.apply_breaker_outcome(state_key, outcome, &cf.class);
+                            probe_guard.settle(outcome);
                             // Fail over to a sibling seat of the SAME pool
                             // before fast-failing (see `complete_inner`): a
                             // rate-limited seat does not mean the pool is out of
@@ -1707,11 +1691,6 @@ impl Router {
                             }
                             return Err(e);
                         }
-                        // Stream dispatch never retries the same provider (no
-                        // in-loop sleep), so a reset hint only decides park
-                        // versus debit, by the rule every surface shares
-                        // (`breaker_outcome`).
-                        let reset_hint = rate_limit_reset_hint(&e, &policy);
                         // The DEBIT keys off the failure CLASS, not the
                         // chain-hop decision (see `complete_inner`): a seat is
                         // unhealthy when it emits a transient-health failure,
@@ -1719,7 +1698,6 @@ impl Router {
                         // still falls back releases its slot without a debit
                         // in the fallback branch below.
                         let debits = class_debits(&cf.class);
-                        let outcome = breaker_outcome(&cf.class, reset_hint, is_probe);
                         self.apply_breaker_outcome(state_key, outcome, &cf.class);
                         if debits {
                             probe_guard.disarm();
@@ -3327,7 +3305,7 @@ pub(super) fn should_fallback(
     // network/status-0, Streaming, and every 4xx including the
     // Bedrock-style max_tokens=1 400 -- falls through to the normal
     // predicate below, so real fallback is untouched.
-    if is_probe && probe_fast_fail_status(err).is_some() {
+    if probe_fast_fail(err, is_probe).is_some() {
         return false;
     }
     // An unknown provider id in the chain is a config-shaped fault the

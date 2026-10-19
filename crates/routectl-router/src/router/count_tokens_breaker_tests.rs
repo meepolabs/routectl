@@ -219,6 +219,63 @@ async fn non_capability_429_debits_and_returns_without_walking() {
 }
 
 #[tokio::test]
+async fn probe_rate_limit_on_half_open_count_releases_slot_without_debiting() {
+    // A probe (max_tokens <= probe_max_tokens) that draws a 429 or 529 is
+    // a transient upstream condition, not a provider fault, on every
+    // surface: the half-open slot is freed and the breaker keeps its
+    // armed zero-cooldown state rather than re-tripping Open. The count
+    // still does not walk to a later capable seat.
+    for status in [429, 529] {
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "anthropic-only",
+                provider_name: "anthropic-prov",
+                entry: anthropic_api_entry_with_breaker(1, 60_000),
+                behavior: CountBehavior::UpstreamError(status),
+                upstream: None,
+            },
+            Leg {
+                nickname: "anthropic-second",
+                provider_name: "anthropic-prov-b",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(42),
+                upstream: None,
+            },
+        ]);
+        assert!(
+            router.force_open_breaker("anthropic-only", Duration::ZERO),
+            "{status}: seat breaker slot must exist to arm half-open",
+        );
+        let req = ChatRequest {
+            max_tokens: Some(1),
+            ..count_req()
+        };
+
+        let err = router.count_tokens(req).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::Upstream { status: s, .. } if s == status),
+            "{status}: the probe's status propagates verbatim; got {err:?}",
+        );
+        assert_eq!(counters[0].load(Ordering::SeqCst), 1, "{status}: one call");
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            0,
+            "{status}: no walk to a later capable seat",
+        );
+        assert!(
+            !half_open_in_flight(&router, "anthropic-only"),
+            "{status}: the probe must free the half-open slot",
+        );
+        assert_eq!(
+            circuit_phase(&router, "anthropic-only"),
+            crate::runtime_state::CircuitPhase::HalfOpenReady,
+            "{status}: a probe's rate limit must NOT debit the breaker",
+        );
+    }
+}
+
+#[tokio::test]
 async fn non_retryable_4xx_leaves_breaker_closed() {
     // A caller-shaped 4xx (BadRequest class) from a capable count_tokens
     // seat must NOT debit the per-seat breaker that also gates
@@ -411,4 +468,83 @@ async fn every_terminal_exit_from_a_half_open_count_frees_the_probe_slot() {
             row.name,
         );
     }
+}
+
+/// A count-capable provider whose call signals `entered`, then never
+/// completes: only cancellation ends it.
+struct PendingCountProvider {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Provider for PendingCountProvider {
+    fn id(&self) -> &'static str {
+        "anthropic-prov"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        unreachable!()
+    }
+    async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+        unreachable!()
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        unreachable!()
+    }
+    async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+        unreachable!("only cancellation ends this call")
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_half_open_count_frees_the_probe_slot() {
+    // A count admitted as the half-open probe and then dropped mid-call
+    // (client disconnect) must not strand the slot, or every later
+    // dispatch to the seat sees CircuitOpen until restart.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let router = Arc::new(build_router_with(
+        vec![Leg {
+            nickname: "anthropic-only",
+            provider_name: "anthropic-prov",
+            entry: anthropic_api_entry_with_breaker(1, 60_000),
+            behavior: CountBehavior::Ok(0),
+            upstream: None,
+        }],
+        |_| {
+            Arc::new(PendingCountProvider {
+                entered: Arc::clone(&entered),
+            })
+        },
+    ));
+    assert!(
+        router.force_open_breaker("anthropic-only", Duration::ZERO),
+        "seat breaker slot must exist to arm half-open",
+    );
+    let worker = tokio::spawn({
+        let router = Arc::clone(&router);
+        async move { router.count_tokens(count_req()).await }
+    });
+    entered.notified().await;
+    assert!(
+        half_open_in_flight(&router, "anthropic-only"),
+        "premise: the count holds the half-open slot while in flight",
+    );
+
+    worker.abort();
+    let _ = worker.await;
+
+    assert!(
+        !half_open_in_flight(&router, "anthropic-only"),
+        "the cancelled count must free the half-open slot",
+    );
+    let (refusal, guard) = router.admit_dispatch("anthropic-only", "anthropic-prov");
+    assert!(
+        refusal.is_none(),
+        "a later request is admitted; got {refusal:?}"
+    );
+    assert!(guard.owns_slot(), "and it claims the freed probe slot");
 }

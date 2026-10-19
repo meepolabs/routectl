@@ -32,22 +32,39 @@ pub(super) enum BreakerOutcome {
     Park(Duration),
 }
 
-/// The breaker outcome for a failure of `class` carrying `reset_hint`.
-/// A non-debiting class leaves the breaker alone. A debiting class parks
-/// the seat only when a non-probe attempt carries a reset LARGER than
+/// The breaker outcome for `err`, classified as `class`, carrying
+/// `reset_hint`. A probe fast-fail ([`probe_fast_fail`]) leaves the
+/// breaker alone whatever its class: a probe's 429/529 is a transient
+/// upstream condition, not a provider fault. Otherwise a non-debiting
+/// class leaves the breaker alone, and a debiting class parks the seat
+/// only when a non-probe attempt carries a reset LARGER than
 /// [`INLOOP_RETRY_AFTER_CAP`]; a smaller (or absent) reset, and every
-/// probe, takes the threshold-gated debit instead.
+/// other probe failure, takes the threshold-gated debit instead.
 pub(super) fn breaker_outcome(
+    err: &Error,
     class: &FailureClass,
     reset_hint: Option<Duration>,
     is_probe: bool,
 ) -> BreakerOutcome {
-    if !class_debits(class) {
+    if probe_fast_fail(err, is_probe).is_some() || !class_debits(class) {
         return BreakerOutcome::None;
     }
     match reset_hint {
         Some(h) if !is_probe && h > INLOOP_RETRY_AFTER_CAP => BreakerOutcome::Park(h),
         _ => BreakerOutcome::Debit,
+    }
+}
+
+/// The upstream status when a probe attempt failed with a
+/// rate-limit/overload ([`probe_fast_fail_status`]), else `None`. Keyed on
+/// the upstream status, not the failure class, so an operator class remap
+/// cannot change it. Such a probe neither retries, falls back across
+/// distinct targets, nor debits the breaker.
+pub(super) const fn probe_fast_fail(err: &Error, is_probe: bool) -> Option<u16> {
+    if is_probe {
+        probe_fast_fail_status(err)
+    } else {
+        None
     }
 }
 
@@ -170,7 +187,7 @@ pub(super) fn should_retry_same_provider(
     // Probe fast-fail mirrors `should_fallback`: a probe must not burn
     // retry attempts against a rate-limited/overloaded provider (429 /
     // 529). All other error classes fall through to the cap below.
-    if is_probe && probe_fast_fail_status(err).is_some() {
+    if probe_fast_fail(err, is_probe).is_some() {
         return false;
     }
     // A refusal is decided by the request's shape alone, so the same seat

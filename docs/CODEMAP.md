@@ -4133,9 +4133,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `None`), `retry_cap_for`, `should_retry_same_provider`, and the
   class-decoupled `class_debits` set (`pub` and re-exported at the crate root,
   so the `/status/config` panel reports each class's `debits_breaker` from
-  this ONE definition); `breaker_outcome(class, reset_hint, is_probe) ->
-  BreakerOutcome { None, Debit, Park }` (park only a non-probe hint above the
-  cap) and `same_provider_retry(surface, ..) -> SameProvider { No, Retry {
+  this ONE definition); `probe_fast_fail(err, is_probe)` (a probe's 429/529,
+  keyed on status: no retry, no cross-target fallback, no breaker outcome);
+  `breaker_outcome(err, class, reset_hint, is_probe) -> BreakerOutcome {
+  None, Debit, Park }` (`None` for a probe fast-fail on every surface; park
+  only a non-probe hint above the cap) and `same_provider_retry(surface, ..) -> SameProvider { No, Retry {
   sleep_floor } }` (streams and token counts never retry the same provider; a
   completion retries under the hard cap and the class predicate unless the
   attempt parked)

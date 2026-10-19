@@ -932,7 +932,7 @@ impl Router {
 
     /// Answer a rejection the CANARY request drew: settle what it proves about
     /// the restored field, then repair the attempt if the request may still pay
-    /// for one -- all or nothing, mirroring the reactive `FieldRepairPlan::apply`.
+    /// for one -- all or nothing, mirroring the reactive `FieldRepairPlan::apply_named`.
     ///
     /// Only a rejection naming the SAME row the canary restored is the canary's
     /// own, compared on the surface rather than the path string: the surface is

@@ -1,6 +1,7 @@
 //! What the count surface changes about the engine, driven through the engine
 //! directly: it mints no generic verdict, counts a rejection the field parser
-//! did not localize, settles a repaired replay carry by drop, and admits its
+//! did not localize without running the generic drift observers, settles a
+//! repaired replay carry by drop, and admits its
 //! field carry in whatever settlement mode its caller names. Each count case
 //! runs beside a complete control on the identical target and rejection, so
 //! the surface is the only input that differs.
@@ -255,6 +256,43 @@ fn count_tokens_engine_counts_an_unlocalized_rejection() {
 }
 
 #[test]
+fn count_tokens_engine_skips_the_generic_drift_observers() {
+    for surface in SURFACES {
+        // Arrange: a feature-carrying request whose anthropic-api rejection
+        // no capability template attributes, the input the feature-naming
+        // drift observer fires on.
+        let router = router(ANTHROPIC, ReplayScheme::Gray);
+        let mut req = request();
+        req.tools = Some(vec![ToolDef::Other(json!({"type": "web_search"}))]);
+        let target = target(&router, &req);
+        let mut learning = AttemptLearning::new(&router, surface, LearnedProbeGuard::inert());
+        let mut meta = DispatchMeta::for_alias(NICKNAME);
+
+        // Act
+        reject_and_observe(
+            &mut learning,
+            &unlocalized_rejection(),
+            &target,
+            &req,
+            &mut meta,
+        );
+
+        // Assert
+        let drift = router.metrics.feature_naming_unmatched_total();
+        assert_eq!(
+            router.field_repair_counters().parser_unlocalized,
+            1,
+            "{surface:?}: the rejection counts as unlocalized"
+        );
+        if surface == DispatchSurface::Complete {
+            assert_eq!(drift, 1, "{surface:?}: the control's drift signal fires");
+        } else {
+            assert_eq!(drift, 0, "{surface:?}: no drift signal");
+        }
+    }
+}
+
+#[test]
 fn count_tokens_engine_drops_a_repaired_replay_carry() {
     for surface in SURFACES {
         // Arrange: a codex artifact carried toward a mantle lane, refused with
@@ -306,7 +344,20 @@ fn count_tokens_engine_drops_a_repaired_replay_carry() {
             &mut meta,
         );
 
-        // Assert
+        // Assert: a second learner on the same lane, while the first is
+        // still alive, reads what the first left in the replay slots.
+        let mut sibling = AttemptLearning::new(&router, surface, LearnedProbeGuard::inert());
+        let mut sibling_req = req.clone();
+        sibling.admit_carries(
+            &target,
+            &mut sibling_req,
+            &mut DispatchMeta::for_alias(NICKNAME),
+            FieldSettlementMode::NonSettling,
+            Instant::now(),
+        );
+        let sibling_carries = sibling.replay_plan.is_some();
+        drop(sibling);
+        drop(learning);
         let degradation = meta
             .replay_degradation
             .as_ref()
@@ -318,10 +369,15 @@ fn count_tokens_engine_drops_a_repaired_replay_carry() {
             assert!(degradation.learned, "{surface:?}: the control learns");
             assert!(committed, "{surface:?}: and commits the negative");
             assert!(resident, "{surface:?}: into the registry");
+            assert!(!sibling_carries, "{surface:?}: the negative now acts");
         } else {
             assert!(!degradation.learned, "{surface:?}: nothing learned");
             assert!(!committed, "{surface:?}: nothing committed");
             assert!(!resident, "{surface:?}: nothing resident");
+            assert!(
+                sibling_carries,
+                "{surface:?}: success released the slot, so a sibling claims it"
+            );
         }
     }
 }

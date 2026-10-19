@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use routectl_core::failure_class::{FailureClass, LastOutcome, classify};
+use routectl_core::failure_class::{FailureClass, classify};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, RefusalReason, Result, TokenCount,
 };
@@ -22,135 +22,249 @@ const CAP: Duration = INLOOP_RETRY_AFTER_CAP;
 const JUST_OVER_CAP: Duration = CAP.saturating_add(Duration::from_millis(1));
 const LARGE: Duration = Duration::from_hours(1);
 
-type BreakerRow = (
-    &'static str,
-    FailureClass,
-    Option<Duration>,
-    bool,
-    BreakerOutcome,
-);
+struct BreakerRow {
+    name: &'static str,
+    status: u16,
+    class: FailureClass,
+    hint: Option<Duration>,
+    is_probe: bool,
+    expected: BreakerOutcome,
+}
+
+const fn row(
+    name: &'static str,
+    status: u16,
+    class: FailureClass,
+    hint: Option<Duration>,
+    is_probe: bool,
+    expected: BreakerOutcome,
+) -> BreakerRow {
+    BreakerRow {
+        name,
+        status,
+        class,
+        hint,
+        is_probe,
+        expected,
+    }
+}
+
+fn breaker_rows() -> Vec<BreakerRow> {
+    use BreakerOutcome::{Debit, None as Untouched, Park};
+    use FailureClass::{BadRequest, Overloaded, RateLimited, ServerError};
+    vec![
+        row(
+            "debiting / no hint / non-probe",
+            503,
+            ServerError,
+            None,
+            false,
+            Debit,
+        ),
+        row(
+            "debiting / no hint / probe",
+            503,
+            ServerError,
+            None,
+            true,
+            Debit,
+        ),
+        row(
+            "debiting / hint == cap / non-probe",
+            503,
+            ServerError,
+            Some(CAP),
+            false,
+            Debit,
+        ),
+        row(
+            "debiting / hint == cap / probe",
+            503,
+            ServerError,
+            Some(CAP),
+            true,
+            Debit,
+        ),
+        row(
+            "debiting / cap + 1ms / non-probe",
+            503,
+            ServerError,
+            Some(JUST_OVER_CAP),
+            false,
+            Park(JUST_OVER_CAP),
+        ),
+        row(
+            "debiting / cap + 1ms / probe",
+            503,
+            ServerError,
+            Some(JUST_OVER_CAP),
+            true,
+            Debit,
+        ),
+        row(
+            "debiting / large hint / non-probe",
+            503,
+            ServerError,
+            Some(LARGE),
+            false,
+            Park(LARGE),
+        ),
+        row(
+            "debiting / large hint / probe",
+            503,
+            ServerError,
+            Some(LARGE),
+            true,
+            Debit,
+        ),
+        row(
+            "non-debiting / no hint / non-probe",
+            400,
+            BadRequest,
+            None,
+            false,
+            Untouched,
+        ),
+        row(
+            "non-debiting / no hint / probe",
+            400,
+            BadRequest,
+            None,
+            true,
+            Untouched,
+        ),
+        row(
+            "non-debiting / hint == cap / non-probe",
+            400,
+            BadRequest,
+            Some(CAP),
+            false,
+            Untouched,
+        ),
+        row(
+            "non-debiting / hint == cap / probe",
+            400,
+            BadRequest,
+            Some(CAP),
+            true,
+            Untouched,
+        ),
+        row(
+            "non-debiting / cap + 1ms / non-probe",
+            400,
+            BadRequest,
+            Some(JUST_OVER_CAP),
+            false,
+            Untouched,
+        ),
+        row(
+            "non-debiting / cap + 1ms / probe",
+            400,
+            BadRequest,
+            Some(JUST_OVER_CAP),
+            true,
+            Untouched,
+        ),
+        row(
+            "non-debiting / large hint / non-probe",
+            400,
+            BadRequest,
+            Some(LARGE),
+            false,
+            Untouched,
+        ),
+        row(
+            "non-debiting / large hint / probe",
+            400,
+            BadRequest,
+            Some(LARGE),
+            true,
+            Untouched,
+        ),
+        row(
+            "429 / no hint / non-probe",
+            429,
+            RateLimited,
+            None,
+            false,
+            Debit,
+        ),
+        row(
+            "429 / large hint / non-probe",
+            429,
+            RateLimited,
+            Some(LARGE),
+            false,
+            Park(LARGE),
+        ),
+        row(
+            "429 / no hint / probe",
+            429,
+            RateLimited,
+            None,
+            true,
+            Untouched,
+        ),
+        row(
+            "429 / large hint / probe",
+            429,
+            RateLimited,
+            Some(LARGE),
+            true,
+            Untouched,
+        ),
+        row(
+            "529 / no hint / non-probe",
+            529,
+            Overloaded,
+            None,
+            false,
+            Debit,
+        ),
+        row(
+            "529 / no hint / probe",
+            529,
+            Overloaded,
+            None,
+            true,
+            Untouched,
+        ),
+        row(
+            "529 / large hint / probe",
+            529,
+            Overloaded,
+            Some(LARGE),
+            true,
+            Untouched,
+        ),
+        row(
+            "429 remapped to a debiting class / probe",
+            429,
+            ServerError,
+            None,
+            true,
+            Untouched,
+        ),
+        row(
+            "503 overload class / probe",
+            503,
+            Overloaded,
+            None,
+            true,
+            Debit,
+        ),
+    ]
+}
 
 #[test]
 fn breaker_outcome_table() {
-    let rows: [BreakerRow; 16] = [
-        (
-            "debiting / no hint / non-probe",
-            FailureClass::RateLimited,
-            None,
-            false,
-            BreakerOutcome::Debit,
-        ),
-        (
-            "debiting / no hint / probe",
-            FailureClass::RateLimited,
-            None,
-            true,
-            BreakerOutcome::Debit,
-        ),
-        (
-            "debiting / hint == cap / non-probe",
-            FailureClass::RateLimited,
-            Some(CAP),
-            false,
-            BreakerOutcome::Debit,
-        ),
-        (
-            "debiting / hint == cap / probe",
-            FailureClass::RateLimited,
-            Some(CAP),
-            true,
-            BreakerOutcome::Debit,
-        ),
-        (
-            "debiting / cap + 1ms / non-probe",
-            FailureClass::RateLimited,
-            Some(JUST_OVER_CAP),
-            false,
-            BreakerOutcome::Park(JUST_OVER_CAP),
-        ),
-        (
-            "debiting / cap + 1ms / probe",
-            FailureClass::RateLimited,
-            Some(JUST_OVER_CAP),
-            true,
-            BreakerOutcome::Debit,
-        ),
-        (
-            "debiting / large hint / non-probe",
-            FailureClass::RateLimited,
-            Some(LARGE),
-            false,
-            BreakerOutcome::Park(LARGE),
-        ),
-        (
-            "debiting / large hint / probe",
-            FailureClass::RateLimited,
-            Some(LARGE),
-            true,
-            BreakerOutcome::Debit,
-        ),
-        (
-            "non-debiting / no hint / non-probe",
-            FailureClass::BadRequest,
-            None,
-            false,
-            BreakerOutcome::None,
-        ),
-        (
-            "non-debiting / no hint / probe",
-            FailureClass::BadRequest,
-            None,
-            true,
-            BreakerOutcome::None,
-        ),
-        (
-            "non-debiting / hint == cap / non-probe",
-            FailureClass::BadRequest,
-            Some(CAP),
-            false,
-            BreakerOutcome::None,
-        ),
-        (
-            "non-debiting / hint == cap / probe",
-            FailureClass::BadRequest,
-            Some(CAP),
-            true,
-            BreakerOutcome::None,
-        ),
-        (
-            "non-debiting / cap + 1ms / non-probe",
-            FailureClass::BadRequest,
-            Some(JUST_OVER_CAP),
-            false,
-            BreakerOutcome::None,
-        ),
-        (
-            "non-debiting / cap + 1ms / probe",
-            FailureClass::BadRequest,
-            Some(JUST_OVER_CAP),
-            true,
-            BreakerOutcome::None,
-        ),
-        (
-            "non-debiting / large hint / non-probe",
-            FailureClass::BadRequest,
-            Some(LARGE),
-            false,
-            BreakerOutcome::None,
-        ),
-        (
-            "non-debiting / large hint / probe",
-            FailureClass::BadRequest,
-            Some(LARGE),
-            true,
-            BreakerOutcome::None,
-        ),
-    ];
-    for (name, class, hint, is_probe, expected) in rows {
+    for row in breaker_rows() {
+        let err = Error::upstream("p", row.status, "body");
         assert_eq!(
-            breaker_outcome(&class, hint, is_probe),
-            expected,
-            "row: {name}"
+            breaker_outcome(&err, &row.class, row.hint, row.is_probe),
+            row.expected,
+            "row: {}",
+            row.name
         );
     }
 }
@@ -391,15 +505,16 @@ async fn an_opened_debit_does_not_suppress_the_complete_retry() {
     );
 }
 
-/// Sole chain-entry provider failing every surface with a 503 carrying
+/// Sole chain-entry provider failing every surface with `status` carrying
 /// `reset` as its upstream reset hint.
 struct ResetHintProvider {
+    status: u16,
     reset: Option<Duration>,
 }
 
 impl ResetHintProvider {
     fn error(&self) -> Error {
-        Error::upstream_with_retry_after("p", 503, "unavailable", self.reset)
+        Error::upstream_with_retry_after("p", self.status, "unavailable", self.reset)
     }
 }
 
@@ -425,10 +540,11 @@ impl Provider for ResetHintProvider {
     }
 }
 
-/// A single count-capable seat behind alias `solo`, with a breaker that
-/// a lone debit cannot trip (threshold 5, 1s cooldown) and one attempt
-/// per request, so every surface settles exactly one failure.
-fn router_failing_with_reset(reset: Option<Duration>) -> Router {
+/// A single count-capable seat behind alias `solo` failing with `status`,
+/// with a breaker that a lone debit cannot trip (threshold 5, 1s cooldown)
+/// and one attempt per request, so every surface settles exactly one
+/// failure.
+fn router_failing_with(status: u16, reset: Option<Duration>) -> Router {
     let mut config = Config {
         retry: RetryPolicy {
             max_attempts: 1,
@@ -450,7 +566,7 @@ fn router_failing_with_reset(reset: Option<Duration>) -> Router {
         }),
     );
     let mut router = Router::new(Arc::new(config));
-    let provider: Arc<dyn Provider> = Arc::new(ResetHintProvider { reset });
+    let provider: Arc<dyn Provider> = Arc::new(ResetHintProvider { status, reset });
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
         "seat".into(),
@@ -464,24 +580,31 @@ fn router_failing_with_reset(reset: Option<Duration>) -> Router {
 enum Settled {
     Parked,
     Debited,
+    Untouched,
 }
 
 /// What the one failed attempt did to the seat's breaker: a park opens
 /// it without stamping an outcome, a sub-threshold debit leaves it
-/// closed and stamps the failure.
+/// closed and stamps the failure, and no outcome leaves it closed and
+/// unstamped.
 fn settled(router: &Router) -> Settled {
+    use crate::runtime_state::CircuitPhase::{Closed, Open};
     let gate = router.gate_status_for_tests("seat");
     match (gate.circuit, gate.last_outcome) {
-        (crate::runtime_state::CircuitPhase::Open, None) => Settled::Parked,
-        (crate::runtime_state::CircuitPhase::Closed, Some(LastOutcome::Http5xx)) => {
-            Settled::Debited
-        }
-        other => panic!("neither a park nor a debit: {other:?}"),
+        (Open, None) => Settled::Parked,
+        (Closed, Some(_)) => Settled::Debited,
+        (Closed, None) => Settled::Untouched,
+        other => panic!("neither a park, a debit, nor untouched: {other:?}"),
     }
 }
 
-async fn settle_on(surface: DispatchSurface, reset: Option<Duration>, req: ChatRequest) -> Settled {
-    let router = router_failing_with_reset(reset);
+async fn settle_on(
+    surface: DispatchSurface,
+    status: u16,
+    reset: Option<Duration>,
+    req: ChatRequest,
+) -> Settled {
+    let router = router_failing_with(status, reset);
     let failed = match surface {
         DispatchSurface::Complete => router.complete(req).await.is_err(),
         DispatchSurface::Stream => router.stream(req).await.is_err(),
@@ -501,35 +624,48 @@ async fn same_reset_hint_same_breaker_outcome_on_every_surface() {
         max_tokens: Some(1),
         ..plain.clone()
     };
-    let rows: [(&str, Option<Duration>, &ChatRequest, Settled); 4] = [
-        ("no hint", None, &plain, Settled::Debited),
+    let rows: [(&str, u16, Option<Duration>, &ChatRequest, Settled); 8] = [
+        ("no hint", 503, None, &plain, Settled::Debited),
         (
             "1ms hint",
+            503,
             Some(Duration::from_millis(1)),
             &plain,
             Settled::Debited,
         ),
         (
             "60s hint",
+            503,
             Some(Duration::from_mins(1)),
             &plain,
             Settled::Parked,
         ),
         (
             "60s hint on a probe",
+            503,
             Some(Duration::from_mins(1)),
             &probe,
             Settled::Debited,
         ),
+        ("429", 429, None, &plain, Settled::Debited),
+        ("429 on a probe", 429, None, &probe, Settled::Untouched),
+        (
+            "429 with a 60s hint on a probe",
+            429,
+            Some(Duration::from_mins(1)),
+            &probe,
+            Settled::Untouched,
+        ),
+        ("529 on a probe", 529, None, &probe, Settled::Untouched),
     ];
     let mut mismatches = Vec::new();
-    for (row, reset, req, expected) in rows {
+    for (row, status, reset, req, expected) in rows {
         for surface in [
             DispatchSurface::Complete,
             DispatchSurface::Stream,
             DispatchSurface::CountTokens,
         ] {
-            let got = settle_on(surface, reset, req.clone()).await;
+            let got = settle_on(surface, status, reset, req.clone()).await;
             if got != expected {
                 mismatches.push(format!(
                     "{} / {row}: expected {expected:?}, got {got:?}",

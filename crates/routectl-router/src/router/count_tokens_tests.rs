@@ -203,22 +203,34 @@ struct Leg {
 /// in order. Returns the router and the per-leg call counters (same
 /// order as `legs`).
 fn build_router(legs: Vec<Leg>) -> (Router, Vec<Arc<AtomicUsize>>) {
-    let mut config = Config::default();
-    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     let mut counters: Vec<Arc<AtomicUsize>> = Vec::with_capacity(legs.len());
-    let mut chain: Vec<String> = Vec::with_capacity(legs.len());
-
-    for leg in legs {
-        config
-            .providers
-            .insert(leg.provider_name.to_string(), leg.entry);
+    let router = build_router_with(legs, |leg| {
         let calls = Arc::new(AtomicUsize::new(0));
         counters.push(calls.clone());
-        let provider: Arc<dyn Provider> = Arc::new(CountingProvider {
+        Arc::new(CountingProvider {
             id: leg.provider_name.to_string(),
             calls,
             behavior: leg.behavior,
-        });
+        })
+    });
+    (router, counters)
+}
+
+/// [`build_router`] with each leg's provider built by `provider_for`, for
+/// a test whose provider needs more than a [`CountBehavior`].
+fn build_router_with(
+    legs: Vec<Leg>,
+    mut provider_for: impl FnMut(&Leg) -> Arc<dyn Provider>,
+) -> Router {
+    let mut config = Config::default();
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    let mut chain: Vec<String> = Vec::with_capacity(legs.len());
+
+    for leg in legs {
+        let provider = provider_for(&leg);
+        config
+            .providers
+            .insert(leg.provider_name.to_string(), leg.entry);
         let upstream = leg
             .upstream
             .map_or_else(|| format!("upstream-{}", leg.nickname), str::to_string);
@@ -239,7 +251,7 @@ fn build_router(legs: Vec<Leg>) -> (Router, Vec<Arc<AtomicUsize>>) {
         .insert("alias".into(), AliasValue::Chain(chain));
     let mut router = Router::new(Arc::new(config));
     router.install_resolved_models(models);
-    (router, counters)
+    router
 }
 
 fn count_req() -> ChatRequest {

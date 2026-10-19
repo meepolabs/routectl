@@ -130,12 +130,16 @@ impl Router {
     /// return the router's handle on it, so a rejection can be read against
     /// the body that went out. The sampler is never consulted and nothing is
     /// charged: a count body is a projection of the client's, so it is never
-    /// compared. A request with no captured ingress body gets no tap.
+    /// compared. A request with no captured ingress body gets no tap, and
+    /// any tap it already carried is cleared.
     ///
     /// Called once per provider call, for the same reason as
     /// [`Self::install_wire_tap`].
     pub(super) fn install_count_wire_tap(attempt_req: &mut ChatRequest) -> Option<WireTap> {
-        attempt_req.routectl_internal.ingress_wire.as_ref()?;
+        if attempt_req.routectl_internal.ingress_wire.is_none() {
+            attempt_req.routectl_internal.wire_tap = None;
+            return None;
+        }
         let tap = WireTap::default();
         attempt_req.routectl_internal.wire_tap = Some(tap.clone());
         Some(tap)
