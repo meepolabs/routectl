@@ -746,10 +746,16 @@ impl Provider for AnthropicApiProvider {
 
         let token = self.resolve_effective_token(&req).await?;
 
-        // On the first-party lane count_tokens is deliberately unsigned
-        // (matches upstream) and posts via `.json()`. On the mantle lane
-        // SigV4 must hash the body, so serialize to bytes and sign the
-        // built request -- the `.json()` unbuffered path cannot be signed.
+        // Serialized once: the wire tap's deposit and, on the mantle lane,
+        // the SigV4 body hash must cover exactly the bytes transmitted.
+        // count_tokens is deliberately unsigned on the first-party lane (no
+        // cch re-sign, matches upstream).
+        let body_bytes = bytes::Bytes::from(
+            serde_json::to_vec(&body)
+                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?,
+        );
+        let tap = wire_edits::tap_of(&req);
+        let sent_copy = tap.map(|_| body_bytes.clone());
         // `body` here is the post-allowlist count_tokens body, which is the
         // shape that actually ships -- so a body-derived capability beta is
         // gated on the reshaped body, not on the pre-allowlist `normalized`.
@@ -759,27 +765,20 @@ impl Provider for AnthropicApiProvider {
             &token,
             Some(&body),
         );
-        let request = if self.is_mantle() {
-            let body_bytes = serde_json::to_vec(&body)
-                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-            #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
-            let mut request = rb
-                .header("content-type", "application/json")
-                .body(body_bytes)
-                .build()
-                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-            #[cfg(feature = "bedrock")]
-            self.sign_mantle(&mut request).await?;
-            request
-        } else {
-            rb.header("content-type", "application/json")
-                .json(&body)
-                .build()
-                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?
-        };
+        #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+        let mut request = rb
+            .header("content-type", "application/json")
+            .body(body_bytes)
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        #[cfg(feature = "bedrock")]
+        self.sign_mantle(&mut request).await?;
         // Dir 2: outgoing request headers (incl. auth) for the
         // count_tokens probe. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        if let (Some(tap), Some(sent)) = (tap, sent_copy) {
+            tap.deposit(sent);
+        }
         let resp = self
             .client
             .execute(request)

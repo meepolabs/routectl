@@ -3381,7 +3381,7 @@ async fn is_mantle_tracks_mantle_presence() {
 
 /// The signed request carries in-memory bytes (SigV4-hashable) and the
 /// bearer path attaches `Authorization: Bearer <key>` post-build -- the
-/// shape count_tokens relies on when it abandons `.json()` for `.body()`.
+/// shape every send site relies on when it posts serialized `.body()` bytes.
 #[cfg(feature = "bedrock")]
 #[tokio::test]
 async fn sign_mantle_attaches_bearer_authorization_over_body_bytes() {

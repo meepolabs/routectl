@@ -1,6 +1,7 @@
 //! The bytes each send site deposits on the attempt's wire tap are exactly
-//! the bytes the upstream received, on both the complete and the stream
-//! path, including the billing checksum re-signed after serialization.
+//! the bytes the upstream received, on the complete, stream and
+//! count_tokens paths, including the billing checksum re-signed after
+//! serialization where the path signs.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -29,9 +30,18 @@ const STREAM_BODY: &str = concat!(
     "data: {\"type\":\"message_stop\"}\n\n",
 );
 
+const COUNT_BODY: &str = r#"{"input_tokens":3}"#;
+
+#[derive(Clone, Copy)]
+enum Reply {
+    Complete,
+    Stream,
+    Count,
+}
+
 struct Capture {
     bodies: Arc<Mutex<Vec<Vec<u8>>>>,
-    stream: bool,
+    reply: Reply,
 }
 
 impl Respond for Capture {
@@ -40,24 +50,39 @@ impl Respond for Capture {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(request.body.clone());
-        if self.stream {
-            ResponseTemplate::new(200)
+        match self.reply {
+            Reply::Stream => ResponseTemplate::new(200)
                 .set_body_string(STREAM_BODY)
-                .append_header("content-type", "text/event-stream")
-        } else {
-            ResponseTemplate::new(200).set_body_raw(COMPLETE_BODY, "application/json")
+                .append_header("content-type", "text/event-stream"),
+            Reply::Complete => {
+                ResponseTemplate::new(200).set_body_raw(COMPLETE_BODY, "application/json")
+            }
+            Reply::Count => ResponseTemplate::new(200).set_body_raw(COUNT_BODY, "application/json"),
         }
     }
 }
 
 async fn upstream(stream: bool) -> (MockServer, Arc<Mutex<Vec<Vec<u8>>>>) {
+    let reply = if stream {
+        Reply::Stream
+    } else {
+        Reply::Complete
+    };
+    mock_at("/v1/messages", reply).await
+}
+
+async fn count_upstream() -> (MockServer, Arc<Mutex<Vec<Vec<u8>>>>) {
+    mock_at("/v1/messages/count_tokens", Reply::Count).await
+}
+
+async fn mock_at(route: &str, reply: Reply) -> (MockServer, Arc<Mutex<Vec<Vec<u8>>>>) {
     let server = MockServer::start().await;
     let bodies = Arc::new(Mutex::new(Vec::new()));
     Mock::given(method("POST"))
-        .and(wm_path("/v1/messages"))
+        .and(wm_path(route))
         .respond_with(Capture {
             bodies: Arc::clone(&bodies),
-            stream,
+            reply,
         })
         .mount(&server)
         .await;
@@ -157,6 +182,9 @@ fn assert_deposit_is_the_wire(tap: &WireTap, wire: &[u8]) {
         wire,
         "deposit differs from the transmitted body"
     );
+}
+
+fn assert_checksum_resigned(wire: &[u8]) {
     let text = String::from_utf8_lossy(wire);
     assert!(
         text.contains("cch="),
@@ -176,7 +204,9 @@ async fn complete_deposits_the_resigned_bytes_the_upstream_received() {
 
     provider.complete(req).await.expect("completes");
 
-    assert_deposit_is_the_wire(&tap, &received(&bodies));
+    let wire = received(&bodies);
+    assert_deposit_is_the_wire(&tap, &wire);
+    assert_checksum_resigned(&wire);
 }
 
 #[tokio::test]
@@ -188,7 +218,9 @@ async fn stream_deposits_the_resigned_bytes_the_upstream_received() {
     let mut stream = provider.stream(req).await.expect("stream opens");
     while futures::StreamExt::next(&mut stream).await.is_some() {}
 
-    assert_deposit_is_the_wire(&tap, &received(&bodies));
+    let wire = received(&bodies);
+    assert_deposit_is_the_wire(&tap, &wire);
+    assert_checksum_resigned(&wire);
 }
 
 #[tokio::test]
@@ -205,6 +237,92 @@ async fn an_untapped_request_sends_the_same_bytes() {
     let bodies = bodies.lock().unwrap_or_else(PoisonError::into_inner);
     assert_eq!(bodies.len(), 2);
     assert_eq!(bodies.first(), bodies.get(1));
+}
+
+/// count_tokens is unsigned, so the marker reaches the wire as the client
+/// sent it: the deposit must still be the transmitted bytes.
+#[tokio::test]
+async fn count_tokens_deposits_the_bytes_the_upstream_received() {
+    let (server, bodies) = count_upstream().await;
+    let provider = cloak_lane_provider(&server);
+    let (req, tap) = billing_request(false);
+
+    provider.count_tokens(req).await.expect("counts");
+
+    let wire = received(&bodies);
+    assert_deposit_is_the_wire(&tap, &wire);
+    assert!(
+        String::from_utf8_lossy(&wire).contains("cch=abcde"),
+        "the count body must carry the unsigned marker"
+    );
+}
+
+#[tokio::test]
+async fn an_untapped_count_sends_the_same_bytes() {
+    let (server, bodies) = count_upstream().await;
+    let provider = cloak_lane_provider(&server);
+    let (tapped, _tap) = billing_request(false);
+    let mut untapped = tapped.clone();
+    untapped.routectl_internal.wire_tap = None;
+
+    provider.count_tokens(tapped).await.expect("counts");
+    provider.count_tokens(untapped).await.expect("counts");
+
+    let bodies = bodies.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies.first(), bodies.get(1));
+}
+
+/// The mantle lane signs the built request; a bearer key keeps the signer
+/// off the AWS credential chain. The mock answers only a signed request.
+#[cfg(feature = "bedrock")]
+async fn mantle_provider(server: &MockServer) -> AnthropicApiProvider {
+    let creds = crate::bedrock::auth::resolve(
+        &crate::bedrock::BedrockCreds::BearerKey {
+            key: "mantle-key".into(),
+        },
+        "us-west-2",
+    )
+    .await
+    .expect("bearer creds resolve");
+    let mut cfg = AnthropicApiConfig::new(PROVIDER_ID, "");
+    cfg.base_url = server.uri();
+    cfg.mantle = Some(MantleAuth {
+        region: "us-west-2".into(),
+        creds,
+    });
+    let mut provider = AnthropicApiProvider::new(cfg);
+    provider.client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .expect("loopback client");
+    provider
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn a_signed_mantle_count_deposits_the_bytes_the_upstream_received() {
+    let server = MockServer::start().await;
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .and(wm_path("/v1/messages/count_tokens"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer mantle-key",
+        ))
+        .respond_with(Capture {
+            bodies: Arc::clone(&bodies),
+            reply: Reply::Count,
+        })
+        .mount(&server)
+        .await;
+    let provider = mantle_provider(&server).await;
+    let (req, tap) = billing_request(false);
+
+    provider.count_tokens(req).await.expect("counts");
+
+    assert_deposit_is_the_wire(&tap, &received(&bodies));
 }
 
 fn site_edits(tap: &WireTap, site: EditSite) -> Vec<(EditKind, String)> {
