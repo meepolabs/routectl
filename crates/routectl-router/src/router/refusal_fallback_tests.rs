@@ -14,7 +14,7 @@ use routectl_core::{
 };
 use serde_json::{Value, json};
 
-use super::should_retry_same_provider;
+use super::super::outcome_rule::should_retry_same_provider;
 use crate::class_policy::{ClassPolicy, ConfigFailureClass};
 use crate::config::{AliasValue, Config, ProviderEntry, RetryPolicy};
 use crate::resolved::ResolvedModel;

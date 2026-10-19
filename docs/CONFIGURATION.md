@@ -1590,7 +1590,7 @@ set, independent of the retry/fallback decision:
 **Breaker debit is not configurable.** The "debits breaker?" column is
 a fixed set (`RateLimited`, `ServerError`, `Timeout`, `NetworkError`,
 `Overloaded`) baked into the router's `class_debits` predicate
-(`crates/routectl-router/src/router.rs`); no `[retry.classes]` leaf,
+(`crates/routectl-router/src/router/outcome_rule.rs`); no `[retry.classes]` leaf,
 and no `[providers.X.class_overrides]` remap, changes whether a class
 counts against a seat's health. Routing (retry cap, fallback) and
 health accounting are deliberately separate concerns.
@@ -1707,8 +1707,9 @@ entry immediately rather than waiting. Recovery after the park still
 flows through the breaker's single half-open probe. The resolution and
 clamp live in `RetryPolicy::max_honored_retry_after` and the router's
 `rate_limit_reset_hint` / `park_provider`
-(`crates/routectl-router/src/config.rs`,
-`crates/routectl-router/src/router.rs`).
+(`crates/routectl-router/src/config/schema.rs`,
+`crates/routectl-router/src/router/outcome_rule.rs`,
+`crates/routectl-router/src/router/runtime_gate.rs`).
 
 
 

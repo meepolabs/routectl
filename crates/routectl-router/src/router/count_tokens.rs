@@ -42,14 +42,15 @@ use super::capability_learn::LearnDedupeKey;
 use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
 use super::credential_park::{log_gate_refusal, merge_gate_refusal};
 use super::dispatch::{
-    REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap, class_debits,
+    REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap,
     emit_replay_degradation, forwarded_terminal_status, is_capability_error,
-    log_forwarded_auth_terminal, missing_forwarded_bearer_error, rate_limit_reset_hint,
-    replay_rejection_body_free, upstream_status_for_remap,
+    log_forwarded_auth_terminal, missing_forwarded_bearer_error, replay_rejection_body_free,
+    upstream_status_for_remap,
 };
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
 use super::local_refusal::ingress_dialect_of;
+use super::outcome_rule::{class_debits, rate_limit_reset_hint};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::transcript_defect::{is_transcript_rejection, record_transcript_defect};

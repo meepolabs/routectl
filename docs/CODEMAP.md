@@ -2702,7 +2702,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `overlays`, `feature_filter`, `capability_learn`, `capability_observe`,
   `capability_cleared`, `cache_plan`, `prefix_rewrite`, `runtime_gate`,
   `sticky`, `count_tokens`, `status`, `replay_repair`, `field_repair`,
-  `field_preflight`, `repair_budget`, `window_gate`
+  `field_preflight`, `repair_budget`, `window_gate`, `outcome_rule`
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
@@ -2712,10 +2712,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and then walk the resolved
   chain (from `chain::dispatch_chain_for_request`) attempting each
   `DispatchTarget`, retrying within a provider per `RetryPolicy` with
-  exponential backoff (`add_jitter`/`mul_duration`, `INLOOP_RETRY_AFTER_CAP`);
-  `rate_limit_reset_hint` clamps an `Error::Upstream.retry_after` to the
-  configured ceiling and folds a small reset into the next sleep (a larger
-  reset parks the provider via the breaker instead). `run_with_timeout`,
+  exponential backoff (`add_jitter`/`mul_duration`); the complete error arm
+  takes its park/debit and same-provider retry decisions from
+  `outcome_rule` (a small honored reset becomes the next sleep's floor; a
+  larger one parks the provider via the breaker instead). `run_with_timeout`,
   `wrap_with_breaker_accounting` (also the STREAMING quota seam: offers each Ok
   chunk to the armed `quota::feed::FirstChunkFeed`), and
   `try_stream_with_first_content` (buffers
@@ -2733,11 +2733,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `routectl_core::failure_class::classify` through every error arm:
   `apply_remap(native, status, overrides)` (status via
   `upstream_status_for_remap`) applies the target's `class_overrides` keeping
-  the native `matched_by`, then `should_fallback` /
-  `should_retry_same_provider` / `retry_cap_for` decide the outcome and the
-  class-decoupled `class_debits` set gates breaker debit (`pub` and re-exported
-  at the crate root, so the `/status/config` panel reports each class's
-  `debits_breaker` from this ONE definition rather than restating the set). Class-decision
+  the native `matched_by`, then `should_fallback` (with
+  `probe_fast_fail_status`, shared with `outcome_rule`) decides the chain hop
+  and `outcome_rule` the breaker and same-provider retry outcome. Class-decision
   observability: `emit_class_observability` emits one `emit_class_decision`
   event per arm (with `ClassDecisionObs` / `DispatchSurface` / `UpstreamFacts`
   / `upstream_facts`, safe structured dimensions only) plus a
@@ -4114,12 +4112,26 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   keeping the first real error and, between parked seats, the earliest deadline;
   `CountSeatOutcome::of_gate_refusal` skips a parked token-count seat and keeps
   a breaker or RPM refusal terminal
+- `src/router/outcome_rule.rs` -- the failure-outcome rule: the moved
+  `INLOOP_RETRY_AFTER_CAP`, `rate_limit_reset_hint` (clamps an
+  `Error::Upstream.retry_after` to the configured ceiling; a zero hint is
+  `None`), `retry_cap_for`, `should_retry_same_provider`, and the
+  class-decoupled `class_debits` set (`pub` and re-exported at the crate root,
+  so the `/status/config` panel reports each class's `debits_breaker` from
+  this ONE definition); `breaker_outcome(class, reset_hint, is_probe) ->
+  BreakerOutcome { None, Debit, Park }` (park only a non-probe hint above the
+  cap) and `same_provider_retry(surface, ..) -> SameProvider { No, Retry {
+  sleep_floor } }` (streams and token counts never retry the same provider; a
+  completion retries under the hard cap and the class predicate unless the
+  attempt parked)
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `admit_dispatch`/`admit_probe_dispatch` (admission returns the
   half-open ownership guard, which also carries the seat's credential
   generation read in the same critical section), the
   `record_failure`/`record_failure_opened`/`park_provider`
-  breaker-accounting methods, `force_open_breaker`/`breaker_open_for`, the
+  breaker-accounting methods, `apply_breaker_outcome` (applies a
+  `BreakerOutcome`, returning whether a debit opened the breaker plus the
+  `breaker_effect` label), `force_open_breaker`/`breaker_open_for`, the
   `ProbeSlotGuard`/`ProbeAdmission`/`LearnedProbeGuard`/`ProbeAdmissionSet`
   RAII guards (`ProbeSlotGuard::release`/`owns_slot` free only an owned
   slot; Drop-settles the probe slot on every outcome incl. cancellation), and

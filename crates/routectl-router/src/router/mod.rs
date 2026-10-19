@@ -52,6 +52,7 @@ mod learn_revert;
 mod learned_lanes;
 mod local_refusal;
 mod opening_lookup;
+mod outcome_rule;
 mod overlays;
 mod precontent;
 mod prefix_rewrite;
@@ -80,7 +81,6 @@ pub use capability_health::CapabilityPersistenceHealth;
 pub use capability_learn::CapabilityLearnEvent;
 pub use capability_observe::CapabilityObserveEvent;
 pub use capability_purge::{PurgeOutcome, ReservedPurge, ReservedSeedLift};
-pub use dispatch::class_debits;
 use dispatch::k_query_key;
 #[cfg(test)]
 use feature_filter::FilterSource;
@@ -107,6 +107,7 @@ pub use field_verdict_observability::{
 };
 pub use learned_lanes::{LearnedLaneProjection, ResolvedLearnedLane};
 pub use opening_lookup::OpeningLane;
+pub use outcome_rule::class_debits;
 use overlays::apply_layered_overlays;
 pub(crate) use overlays::operator_betas;
 pub use overlays::{merge_header_extras, merge_payload_extras};
@@ -3239,11 +3240,11 @@ use chain::{dispatch_target_for_seat, into_one_dispatch_target};
 #[cfg(test)]
 use class_observe::DispatchSurface;
 #[cfg(test)]
-use dispatch::{
-    retry_cap_for, should_fallback, should_retry_same_provider, would_trim_k_floor_for_meta,
-};
+use dispatch::{should_fallback, would_trim_k_floor_for_meta};
 #[cfg(test)]
 use futures::stream::StreamExt;
+#[cfg(test)]
+use outcome_rule::{retry_cap_for, should_retry_same_provider};
 #[cfg(test)]
 use routectl_core::failure_class::classify;
 #[cfg(test)]

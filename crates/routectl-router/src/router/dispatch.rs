@@ -47,6 +47,10 @@ use super::field_preflight::emit_field_preflight;
 use super::field_repair::emit_field_repair;
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
+use super::outcome_rule::{
+    SameProvider, breaker_outcome, class_debits, rate_limit_reset_hint, retry_cap_for,
+    same_provider_retry,
+};
 use super::overlays::apply_layered_overlays;
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
 use super::probe_payload_capture::ProbeFieldCapture;
@@ -158,13 +162,6 @@ pub(super) fn replay_rejection_body_free(
         facts.upstream_code.map(str::to_string),
     ))
 }
-
-/// The largest upstream reset hint we honor as an in-loop, same-provider
-/// retry sleep (blocking the request thread). A reset at or below this
-/// cap is folded into the next backoff sleep; a larger reset parks the
-/// provider via the breaker instead, so the request falls over to a
-/// sibling rather than blocking on a multi-minute (or hostile) hint.
-const INLOOP_RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
 
 /// Bring `meta.calib_estimated_tokens` back in line with `attempt_req` after
 /// a dispatch-path mutation shrank the payload.
@@ -298,7 +295,6 @@ impl Router {
         let ingress = ingress_dialect_of(&req);
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
-        let hard_cap = policy.hard_retry_cap();
         // Availability-probe detection, computed ONCE: `max_tokens` is
         // stable across the chain (overlays never touch it). Claude
         // Code sends max_tokens=1 probes whose output is unread; on a
@@ -948,38 +944,10 @@ impl Router {
                         // still falls back releases its slot without a debit
                         // in the fallback branch below.
                         let debits = class_debits(&cf.class);
-                        // Whether THIS attempt force-opened (parked) the
-                        // breaker. When it did, the next in-loop gate is
-                        // guaranteed CircuitOpen, so a same-provider retry
-                        // would be pure waste -- and is exactly the path that
-                        // used to discard the genuine error and let the
-                        // synthetic status-0 gate error surface in its place.
-                        let mut breaker_parked = false;
-                        let mut breaker_effect = "none";
+                        let outcome = breaker_outcome(&cf.class, reset_hint, is_probe);
+                        let (_opened, breaker_effect) =
+                            self.apply_breaker_outcome(state_key, outcome, &cf.class);
                         if debits {
-                            match reset_hint {
-                                // Non-probe LARGE reset: park the provider for
-                                // the honored duration (force_open) instead of
-                                // a threshold-gated debit, so an exhausted seat
-                                // is skipped until it actually resets. The
-                                // in-loop re-gate then diverts to fallback /
-                                // fail. Probes never park, and a small
-                                // reset is honored as an in-loop sleep (below),
-                                // so only the large non-probe case parks here.
-                                Some(h) if !is_probe && h > INLOOP_RETRY_AFTER_CAP => {
-                                    self.park_provider(state_key, h);
-                                    breaker_parked = true;
-                                    breaker_effect = "parked";
-                                }
-                                _ => {
-                                    if self.record_failure_opened(
-                                        state_key,
-                                        LastOutcome::from_failure_class(&cf.class),
-                                    ) {
-                                        breaker_effect = "opened";
-                                    }
-                                }
-                            }
                             probe_guard.disarm();
                         }
                         // Outside the debit gate: a credential rejection
@@ -1024,16 +992,18 @@ impl Router {
                             probe_guard.release();
                             return Err(e);
                         }
-                        let can_retry_here = attempts_made < hard_cap
-                            && should_retry_same_provider(
-                                &e,
-                                &cf.class,
-                                &policy,
-                                attempts_made,
-                                is_probe,
-                                transcript_rejection,
-                            )
-                            && !breaker_parked;
+                        let retry = same_provider_retry(
+                            DispatchSurface::Complete,
+                            &e,
+                            &cf.class,
+                            &policy,
+                            attempts_made,
+                            is_probe,
+                            transcript_rejection,
+                            outcome,
+                            reset_hint,
+                        );
+                        let can_retry_here = matches!(retry, SameProvider::Retry { .. });
                         let facts = upstream_facts(&e);
                         tracing::debug!(
                             provider = provider_name,
@@ -1066,15 +1036,10 @@ impl Router {
                             // Honor a SMALL non-probe upstream reset as the
                             // next in-loop sleep: bump `backoff` so the
                             // loop-top sleep waits at least the reset before
-                            // re-probing the SAME provider. Only when we were
-                            // already going to retry here (can_retry_here is
-                            // unchanged), only for a reset within the
-                            // in-loop cap (a larger reset parked the provider
-                            // above instead of blocking this thread), and never
-                            // for a probe.
-                            if let Some(h) = reset_hint
-                                && !is_probe
-                                && h <= INLOOP_RETRY_AFTER_CAP
+                            // re-probing the SAME provider.
+                            if let SameProvider::Retry {
+                                sleep_floor: Some(h),
+                            } = retry
                             {
                                 backoff = backoff.max(h);
                             }
@@ -3104,7 +3069,7 @@ async fn try_stream_with_first_content(
 /// the probe's output is unread. A generic 5xx or a capability 4xx
 /// (e.g. Bedrock's `max_tokens=1` 400) returns `None` here so it keeps
 /// walking the chain -- a healthy sibling provider can still answer.
-const fn probe_fast_fail_status(err: &Error) -> Option<u16> {
+pub(super) const fn probe_fast_fail_status(err: &Error) -> Option<u16> {
     match err {
         Error::Upstream {
             status: s @ (429 | 529),
@@ -3199,29 +3164,6 @@ pub(super) fn missing_forwarded_bearer_error(
     ))
 }
 
-/// The honored rate-limit reset for `err`, clamped to the configured
-/// ceiling, or `None` when `err` carries no reset hint. A reset hint is
-/// present ONLY on a rate-limit/overload (429/503/529) where the
-/// upstream told us when it resets (`Retry-After`, or the Codex
-/// `usage_limit_reached` `resets_at` / `resets_in_seconds`), so its
-/// presence is itself the rate-limit signal. The clamp bounds both the
-/// in-loop honored sleep and the breaker park to
-/// `RetryPolicy::max_honored_retry_after` so a hostile or buggy upstream
-/// cannot pin a provider open indefinitely. A zero-duration hint (e.g.
-/// `Retry-After: 0`, a past HTTP-date, or a saturated `resets_at`) yields
-/// `None` so it falls through to the normal threshold-gated debit instead
-/// of a degenerate zero-length park (a `force_open(.., ZERO)` would leave
-/// the breaker stuck half-open without ever tripping).
-pub(super) fn rate_limit_reset_hint(err: &Error, policy: &RetryPolicy) -> Option<Duration> {
-    match err {
-        Error::Upstream {
-            retry_after: Some(d),
-            ..
-        } => Some((*d).min(policy.max_honored_retry_after())).filter(|d| !d.is_zero()),
-        _ => None,
-    }
-}
-
 /// A count_tokens CAPABILITY signal -- the selected target is
 /// count_tokens-capable by kind (`anthropic-api`), but its concrete
 /// upstream cannot actually count. Two shapes carry this:
@@ -3246,16 +3188,6 @@ pub(super) const fn is_capability_error(err: &Error) -> bool {
         err,
         Error::NotImplemented(..) | Error::Upstream { status: 501, .. }
     )
-}
-
-/// The same-provider retry cap for `class` under `policy` -- the value the
-/// retry branch compares `attempts_made` against. Delegates to
-/// [`RetryPolicy::resolved_class`], which layers any operator per-class
-/// `[retry.classes]` override on top of the baked class default. Shared by
-/// [`should_retry_same_provider`] and the class-decision observability so
-/// the logged cap never drifts from the cap actually enforced.
-pub(super) fn retry_cap_for(class: &FailureClass, policy: &RetryPolicy) -> u32 {
-    policy.resolved_class(class).0
 }
 
 /// Safe, structured inputs for the per-arm class-decision observability
@@ -3377,26 +3309,6 @@ pub(super) fn apply_remap(
     }
 }
 
-/// Whether a failure of this class debits the per-seat circuit breaker's
-/// health accounting. True ONLY for the fixed transient-health set --
-/// conditions a fallback or a cooldown can recover from; false for
-/// caller-shaped or capability faults that retrying the same seat would
-/// never fix, and (fail-closed) for any class the classifier gains later.
-///
-/// Deliberately independent of the fallback/retry decision: routing
-/// (whether to advance the chain) and health accounting (whether the seat
-/// looks unhealthy) are separate concerns.
-pub const fn class_debits(class: &FailureClass) -> bool {
-    matches!(
-        class,
-        FailureClass::RateLimited
-            | FailureClass::ServerError
-            | FailureClass::Timeout
-            | FailureClass::NetworkError
-            | FailureClass::Overloaded
-    )
-}
-
 pub(super) fn should_fallback(
     err: &Error,
     class: &FailureClass,
@@ -3424,31 +3336,6 @@ pub(super) fn should_fallback(
         return false;
     }
     policy.resolved_class(class).1
-}
-
-pub(super) fn should_retry_same_provider(
-    err: &Error,
-    class: &FailureClass,
-    policy: &RetryPolicy,
-    attempts_made: u32,
-    is_probe: bool,
-    transcript_rejection: bool,
-) -> bool {
-    // Probe fast-fail mirrors `should_fallback`: a probe must not burn
-    // retry attempts against a rate-limited/overloaded provider (429 /
-    // 529). All other error classes fall through to the cap below.
-    if is_probe && probe_fast_fail_status(err).is_some() {
-        return false;
-    }
-    // A refusal is decided by the request's shape alone, so the same seat
-    // refuses it again whatever an operator's per-class retry cap says.
-    // So is a rejection laid to the request's defective transcript, which
-    // the seat is sent again unchanged.
-    if transcript_rejection || err.refusal_reason().is_some() {
-        return false;
-    }
-    let cap = retry_cap_for(class, policy);
-    attempts_made < cap
 }
 
 fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {

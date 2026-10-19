@@ -6,7 +6,8 @@
 //! unaffected, so real requests and 4xx-capability fallback keep
 //! today's behavior. Each test names the (is_probe, status) shape
 //! it pins.
-use super::super::dispatch::{should_fallback, should_retry_same_provider};
+use super::super::dispatch::should_fallback;
+use super::super::outcome_rule::should_retry_same_provider;
 use super::*;
 use routectl_core::failure_class::{FailureClass, classify};
 

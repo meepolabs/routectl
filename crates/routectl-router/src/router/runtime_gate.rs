@@ -5,12 +5,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use routectl_core::{ChatRequest, Error, failure_class::LastOutcome};
+use routectl_core::{
+    ChatRequest, Error,
+    failure_class::{FailureClass, LastOutcome},
+};
 
 use crate::config::RetryPolicy;
 use crate::runtime_state::{AdmissionKind, GateDecision, ProviderState};
 
 use super::Router;
+use super::outcome_rule::BreakerOutcome;
 
 #[cfg(test)]
 type AdmissionHook = Box<dyn FnOnce()>;
@@ -208,6 +212,30 @@ impl Router {
     pub(super) fn park_provider(&self, state_key: &str, cooldown: Duration) {
         if let Some(state) = self.state.get(state_key) {
             state.lock().force_open(Instant::now(), cooldown);
+        }
+    }
+
+    /// Apply a failed attempt's [`BreakerOutcome`] to the seat's breaker.
+    /// Returns whether a debit opened the breaker, plus the
+    /// `breaker_effect` label (`none` / `opened` / `parked`) the retry
+    /// decision log reports. Probe-slot settlement stays with the caller.
+    pub(super) fn apply_breaker_outcome(
+        &self,
+        state_key: &str,
+        outcome: BreakerOutcome,
+        class: &FailureClass,
+    ) -> (bool, &'static str) {
+        match outcome {
+            BreakerOutcome::None => (false, "none"),
+            BreakerOutcome::Debit => {
+                let opened =
+                    self.record_failure_opened(state_key, LastOutcome::from_failure_class(class));
+                (opened, if opened { "opened" } else { "none" })
+            }
+            BreakerOutcome::Park(cooldown) => {
+                self.park_provider(state_key, cooldown);
+                (false, "parked")
+            }
         }
     }
 }
