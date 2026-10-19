@@ -232,10 +232,10 @@ list with more narrative.
   **Spend note.** Reasoning tokens bill as output, and three legacy-path
   (`supports_adaptive_thinking = false`) thinking budgets track the resolved
   ceiling because they pass through Anthropic's `budget < max_tokens` window
-  clamp: `reasoning.effort = "max"` (ceiling minus one, and ONLY when the
-  model's `[models.X] effort_levels` includes `"max"` -- under the shipped
-  default of `["low", "medium", "high"]` the clamp rewrites `max` to `high`,
-  a flat 24576 the ceiling never enters), `reasoning.enabled = true` with no
+  clamp: `reasoning.effort = "max"` (ceiling minus one whenever the model's
+  `[models.X] effort_levels` admits `"max"`, as the empty pass-through
+  default does; a declared list that stops at `high` rewrites `max` to
+  `high`, a flat 24576 the ceiling never enters), `reasoning.enabled = true` with no
   effort or budget (half the ceiling), and a caller-supplied
   `reasoning.max_tokens` ABOVE the previous ceiling (it was being capped at
   `ceiling - 1` and the higher ceiling admits more of the ask). An operator
@@ -399,6 +399,8 @@ list with more narrative.
 - **A rejection of a routectl edit is answered by undoing the edit.** When an upstream 400/422 on a same-dialect (fidelity) lane names a path that one of routectl's own declared edits put in the body -- an operator `payload_extras` value added inside an object the client sent, or a prompt-cache marker routectl placed -- routectl undoes that one edit (restoring the client's value, or removing what it added) and re-sends the request once, on completions and streaming, drawing from the same per-request repair allowance as other repairs. It applies only when the value sent is the edit's and undoing it leaves exactly what the client sent; two conflicting edits or any other edit site leave the rejection unrepaired, and a target reverts at most once. Nothing is learned or persisted: no field verdict and no capability negative comes from such a rejection. Every rejection laid to routectl logs one deduped `routectl_edit_rejected` WARN with the lane, the masked path and the edit site (`conflict` for several edits, `undeclared` for a path routectl added that no declaration explains, which is then handled as before). Translation lanes neither revert nor warn. The wire check records the rejection `repaired` when the re-sent request succeeds and `unrepaired` otherwise. A `/v1/messages/count_tokens` request rejected because of an operator payload extra is retried once without it and teaches nothing; a token count leaves the wire check's counters unchanged.
 
 ### Changed
+
+- **`[models.X] effort_levels` now defaults to empty (pass-through).** A model entry that omits the key forwards the caller's reasoning effort as sent, `xhigh` and `max` included, on every egress. An explicit list clamps exactly as before, and a caller effort of `none` still turns reasoning off. Behavior change: an entry without `effort_levels` used to clamp to `["low", "medium", "high"]`, so a caller's `max` or `xhigh` reached the upstream as `high`; set `effort_levels = ["low", "medium", "high"]` to keep that. See `effort_levels` in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 - **Streams and token counts park and debit a seat's breaker by the same rule as completions.** A rate-limit or overload carrying an upstream reset longer than 5 seconds parks the seat until the reset (clamped to `max_honored_retry_after_ms`), and a shorter reset takes the ordinary threshold-gated failure debit, on completions, streams and `count_tokens` alike; a probe request (`max_tokens` at or below `probe_max_tokens`) never parks, and a probe's 429 or 529 never debits on any surface, token counts included, nor when it arrives in a stream after content has been delivered. Behavior change: a stream that hit a reset of 5 seconds or less used to park the seat for that reset and now debits it; a `count_tokens` request used to park on any reset, probe or not, and now debits on a short reset; and a `count_tokens` probe that draws a 429 or 529 used to debit or park the seat and now only frees its half-open slot, as completions and streams already did; a probe stream that delivered content and then failed with a 429 or 529 used to debit the seat and now leaves it untouched. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#honoring-upstream-resets-max_honored_retry_after_ms).
 

@@ -605,7 +605,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `upstream`                     | `[models.X]`        | required                                                               |
 | `selectable`                   | `[models.X]`        | default true                                                           |
 | `supports_adaptive_thinking`   | `[models.X]`        | bool, default false; selects adaptive vs legacy thinking wire shape    |
-| `effort_levels`                | `[models.X]`        | array<string>, default ["low","medium","high"]; empty = pass-through   |
+| `effort_levels`                | `[models.X]`        | array<string>, default [] (pass-through); non-empty = clamp            |
 | `max_thinking_budget`          | `[models.X]`        | u32, default 0 (no cap); declared model budget ceiling in tokens; anthropic-api + bedrock-invoke + bedrock-converse only |
 | `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
@@ -2070,7 +2070,7 @@ When `false`, they emit the legacy fixed-budget shape:
 Set `true` only for models that accept the adaptive shape (Anthropic
 Opus 4.7+). Non-adaptive models sent the adaptive shape receive a 400.
 
-#### `effort_levels` (array of strings, default ["low","medium","high"])
+#### `effort_levels` (array of strings, default [])
 
 Ordered list of effort levels the operator declares this model accepts.
 Every element must be one of the full vocabulary:
@@ -2079,19 +2079,22 @@ Every element must be one of the full vocabulary:
 minimal | low | medium | high | xhigh | max
 ```
 
-The validator at config-load rejects tokens outside that set. An empty
-list (`effort_levels = []`) means pass-through: the egress emits whatever
-effort the caller supplied without operator-side filtering. This is the
-correct default for OpenRouter-style providers that perform their own
-effort translation.
+The validator at config-load rejects tokens outside that set. The list is
+an acceptance fact about the model, not a cost cap; declare it only for a
+model that rejects some levels. Three cases:
 
-Clamping applies on ALL egresses when `effort_levels` is non-empty: when a
-caller supplies an effort value not in the model's `effort_levels`, the egress
-clamps to the nearest supported level (rounding toward the most capable
-supported level when the requested level is above the declared maximum, and to
-the least capable when it is below the minimum). When `effort_levels` is empty,
-the egress emits whatever effort the caller supplied without operator-side
-filtering.
+- **Empty (the default, or `effort_levels = []`): pass-through.** The
+  egress emits whatever effort the caller supplied, `xhigh` and `max`
+  included, without operator-side filtering.
+- **Non-empty: clamp.** Clamping applies on ALL egresses: when a caller
+  supplies an effort value not in the model's `effort_levels`, the egress
+  clamps to the nearest supported level (rounding toward the most capable
+  supported level when the requested level is above the declared maximum,
+  and to the least capable when it is below the minimum). An explicit
+  `["low", "medium", "high"]` turns a caller's `max` into `high`.
+- **Caller effort `"none"`: reasoning off.** `reasoning.effort = "none"`
+  is not a level and is never clamped to one, whatever the list holds:
+  the egress omits the effort field or emits its own disable form.
 
 #### `max_thinking_budget` (u32, default 0)
 
@@ -2145,11 +2148,11 @@ ceiling came from the catalog.
 the resolved ceiling because they pass through Anthropic's
 `budget_tokens < max_tokens` window clamp:
 
-1. `reasoning.effort = "max"` -- ceiling minus one, but ONLY when the
-   model's [`effort_levels`](#effort_levels) includes `"max"`. Under the
-   shipped default `["low", "medium", "high"]` the allowlist clamp
-   rewrites `max` to `high`, whose exact table budget (24576) the ceiling
-   never enters.
+1. `reasoning.effort = "max"` -- ceiling minus one, whenever the model's
+   [`effort_levels`](#effort_levels) admits `"max"`: under the empty
+   default (pass-through) it always does. A declared list that stops
+   below `max` (for example `["low", "medium", "high"]`) rewrites `max`
+   to `high`, whose exact table budget (24576) the ceiling never enters.
 2. `reasoning.enabled = true` with no effort or budget -- half the
    ceiling.
 3. A caller-supplied `reasoning.max_tokens` ABOVE the previous ceiling --
@@ -2283,7 +2286,7 @@ stream_first_byte_timeout_ms = 300000         # opus override
 provider = "bedrock"
 upstream = "us.anthropic.claude-haiku-4-5-v1:0"
 # inherits provider's 60s; no per-model override
-# effort_levels defaults to ["low","medium","high"]
+# effort_levels defaults to [] (caller effort passes through unclamped)
 ```
 
 ## history_reasoning (reasoning echo-back)

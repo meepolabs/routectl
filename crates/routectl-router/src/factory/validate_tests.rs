@@ -988,17 +988,6 @@ mod validate_reasoning_defaults_tests {
         );
     }
 
-    /// Default effort_levels (["low","medium","high"]) is valid.
-    #[test]
-    fn accepts_default_effort_levels() {
-        let entry = ModelEntry::new("p", "u");
-        let cfg = config_with_model("m", entry);
-        assert!(
-            validate_reasoning_defaults(&cfg).is_ok(),
-            "default effort_levels must be valid"
-        );
-    }
-
     /// All six valid vocabulary tokens are individually accepted.
     #[test]
     fn accepts_all_six_valid_levels() {

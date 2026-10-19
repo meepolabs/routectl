@@ -926,9 +926,12 @@ pub struct ModelEntry {
     /// vocabulary; individual egresses clamp to their own subset).
     ///
     /// An empty list means pass-through -- the egress emits whatever
-    /// effort the caller supplied without operator-side filtering.
+    /// effort the caller supplied without operator-side filtering. A
+    /// non-empty list clamps the caller's effort to the nearest declared
+    /// level. A caller effort of `none` (reasoning off) is never clamped
+    /// to a positive level.
     ///
-    /// Default: `["low", "medium", "high"]`.
+    /// Default: empty (pass-through).
     #[serde(default = "default_effort_levels")]
     pub effort_levels: Vec<String>,
 
@@ -1158,12 +1161,11 @@ const fn default_true() -> bool {
     true
 }
 
-/// Default effort-level allowlist for a model entry. The three
-/// mid-range values are the safe cross-provider baseline; operators
-/// extend the list to unlock `minimal`, `xhigh`, or `max` for
-/// specific models.
-fn default_effort_levels() -> Vec<String> {
-    vec!["low".into(), "medium".into(), "high".into()]
+/// Default effort-level allowlist for a model entry: empty, so the
+/// caller's effort reaches the upstream unclamped. Operators declare a
+/// list only for a model that rejects some levels.
+const fn default_effort_levels() -> Vec<String> {
+    Vec::new()
 }
 
 /// Value of one entry in the `[aliases]` table. Either a single model

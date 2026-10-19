@@ -3324,6 +3324,10 @@ mod tests;
 mod resolved_models_tests;
 
 #[cfg(test)]
+#[path = "effort_levels_wire_tests.rs"]
+mod effort_levels_wire_tests;
+
+#[cfg(test)]
 #[path = "has_forwarded_provider_tests.rs"]
 mod has_forwarded_provider_tests;
 

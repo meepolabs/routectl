@@ -651,12 +651,8 @@
           "description": "Bedrock Converse `additionalModelRequestFields` -- vendor-\nspecific knobs that don't have a top-level Converse slot. The\nBedrock Invoke egress also reads this map for non-routectl-\nmanaged body fields. Other egresses ignore it."
         },
         "effort_levels": {
-          "default": [
-            "low",
-            "medium",
-            "high"
-          ],
-          "description": "Ordered list of effort levels the operator declares this model\naccepts. Validated at startup: every element must be one of\n`minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the union\nof the Anthropic-shape vocabulary and the OpenAI-shape\nvocabulary; individual egresses clamp to their own subset).\n\nAn empty list means pass-through -- the egress emits whatever\neffort the caller supplied without operator-side filtering.\n\nDefault: `[\"low\", \"medium\", \"high\"]`.",
+          "default": [],
+          "description": "Ordered list of effort levels the operator declares this model\naccepts. Validated at startup: every element must be one of\n`minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the union\nof the Anthropic-shape vocabulary and the OpenAI-shape\nvocabulary; individual egresses clamp to their own subset).\n\nAn empty list means pass-through -- the egress emits whatever\neffort the caller supplied without operator-side filtering. A\nnon-empty list clamps the caller's effort to the nearest declared\nlevel. A caller effort of `none` (reasoning off) is never clamped\nto a positive level.\n\nDefault: empty (pass-through).",
           "items": {
             "type": "string"
           },

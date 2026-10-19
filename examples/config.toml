@@ -179,8 +179,8 @@ effort_levels              = ["low", "medium", "high"]
 max_thinking_budget        = 16000
 
 # Bedrock-hosted Haiku 4.5 -- cost-optimized, no reasoning tier.
-# effort_levels defaults to ["low","medium","high"]; override to empty
-# to pass caller effort through verbatim (OpenRouter-style pass-through).
+# effort_levels defaults to [] (pass-through): caller effort reaches the
+# upstream verbatim. Declare a list only to clamp levels it rejects.
 [models.haiku-bedrock-cheap]
 provider      = "bedrock"
 upstream      = "us.anthropic.claude-haiku-4-5-20251001-v1:0"

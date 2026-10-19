@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 /// A model entry with only the two required fields gets the correct
 /// defaults: supports_adaptive_thinking=false,
-/// effort_levels=["low","medium","high"], max_thinking_budget=0.
+/// effort_levels=[] (pass-through), max_thinking_budget=0.
 #[test]
 fn model_entry_required_fields_only() {
     let toml_text = r#"
@@ -25,10 +25,10 @@ upstream = "claude-haiku-4-5-20251001"
     assert_eq!(m.upstream, "claude-haiku-4-5-20251001");
     assert!(m.selectable, "default selectable = true");
     assert!(!m.supports_adaptive_thinking, "default false");
-    assert_eq!(
-        m.effort_levels,
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()],
-        "default effort_levels"
+    assert!(
+        m.effort_levels.is_empty(),
+        "default effort_levels is empty (pass-through); got {:?}",
+        m.effort_levels
     );
     assert_eq!(m.max_thinking_budget, 0, "default max_thinking_budget");
     assert!(m.reasoning_dialect.is_none());
@@ -316,7 +316,7 @@ selectable = false
 }
 
 /// `ModelEntry::new` defaults match the TOML defaults: selectable=true,
-/// supports_adaptive_thinking=false, effort_levels=["low","medium","high"],
+/// supports_adaptive_thinking=false, effort_levels=[] (pass-through),
 /// max_thinking_budget=0.
 #[test]
 fn model_entry_builder_defaults_match_toml_defaults() {
@@ -325,10 +325,7 @@ fn model_entry_builder_defaults_match_toml_defaults() {
     assert_eq!(m.upstream, "u");
     assert!(m.selectable);
     assert!(!m.supports_adaptive_thinking);
-    assert_eq!(
-        m.effort_levels,
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
-    );
+    assert!(m.effort_levels.is_empty());
     assert_eq!(m.max_thinking_budget, 0);
 }
 

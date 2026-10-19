@@ -12,9 +12,10 @@
 //! `reasoning.max_tokens` above the prior ceiling (clamped to `ceiling - 1`, so
 //! raising the ceiling un-clamps it).
 //!
-//! `effort: "max"` additionally requires the model's `effort_levels` to include
-//! `"max"`: the tests here leave `RoutectlInternal::effort_levels` empty, which
-//! is the pass-through case, whereas the shipped `[models.X]` default of
+//! `effort: "max"` reaches the window clamp only while the model's
+//! `effort_levels` admits it: the tests here leave
+//! `RoutectlInternal::effort_levels` empty, which is the pass-through case and
+//! the shipped `[models.X]` default, whereas an explicit list such as
 //! `["low", "medium", "high"]` clamps `max` down to `high` (24576 flat, no
 //! ceiling coupling at all).
 //!
@@ -37,8 +38,8 @@ const FILLED_CEILING: u32 = 128_000;
 /// `reasoning`, under a router-injected ceiling of `ceiling`. `effort_levels`
 /// is left EMPTY (the pass-through case) so the requested effort reaches
 /// `budget_from_level` unclamped -- see
-/// [`effort_max_under_the_default_effort_levels_is_clamped_to_high`] for what
-/// the shipped default does instead.
+/// [`effort_max_under_an_explicit_allowlist_is_clamped_to_high`] for what an
+/// operator-declared list does instead.
 fn derived_budget(ceiling: u32, reasoning: ReasoningConfig) -> u32 {
     derived_budget_with_levels(ceiling, reasoning, &[])
 }
@@ -98,25 +99,25 @@ fn effort_max_derives_a_budget_that_tracks_the_injected_ceiling() {
 }
 
 #[test]
-fn effort_max_under_the_default_effort_levels_is_clamped_to_high() {
+fn effort_max_under_an_explicit_allowlist_is_clamped_to_high() {
     // The precondition on the effort=max path: `max` only reaches the window
-    // clamp when the model's effort_levels admit it. Under the shipped
-    // `[models.X]` default the clamp rewrites it to `high`, whose exact table
-    // budget is ceiling-independent -- so most configs see no effort=max spend
-    // change from the fill at all, and the spend note has to say so.
-    const DEFAULT_LEVELS: [&str; 3] = ["low", "medium", "high"];
+    // clamp when the model's effort_levels admit it. An operator list that
+    // stops at `high` rewrites it to `high`, whose exact table budget is
+    // ceiling-independent -- so such a model sees no effort=max spend change
+    // from the fill at all, and the spend note has to say so.
+    const CAPPED_AT_HIGH: [&str; 3] = ["low", "medium", "high"];
     let at_max = || ReasoningConfig {
         effort: Some("max".into()),
         ..Default::default()
     };
 
     assert_eq!(
-        derived_budget_with_levels(BASELINE_CEILING, at_max(), &DEFAULT_LEVELS),
+        derived_budget_with_levels(BASELINE_CEILING, at_max(), &CAPPED_AT_HIGH),
         24_576,
-        "the default allowlist clamps max -> high, taking the flat table budget"
+        "an allowlist ending at high clamps max -> high, taking the flat table budget"
     );
     assert_eq!(
-        derived_budget_with_levels(FILLED_CEILING, at_max(), &DEFAULT_LEVELS),
+        derived_budget_with_levels(FILLED_CEILING, at_max(), &CAPPED_AT_HIGH),
         24_576,
         "and that budget does not move with the ceiling"
     );
