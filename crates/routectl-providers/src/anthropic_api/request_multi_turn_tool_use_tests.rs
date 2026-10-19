@@ -2352,10 +2352,9 @@ fn adaptive_reinjects_effort_when_provider_extras_omits_it() {
 }
 
 /// (tool_choice latent) Adaptive thinking + a forcing `tool_choice`
-/// (`type:"tool"`). The late enforcer must observe that thinking was
-/// stripped from the body and drop the now-orphan
-/// `output_config.effort` -- even though the enforcer no longer runs
-/// any effort removal inside `strip_thinking_when_tool_choice_forces_use`.
+/// (`type:"tool"`). No orphan `output_config.effort` survives the strip:
+/// routectl composed it, so the strip drops it, and the late enforcer
+/// reads the stripped body.
 #[test]
 fn adaptive_forced_tool_choice_drops_orphan_effort_via_late_enforcer() {
     use routectl_core::ReasoningConfig;

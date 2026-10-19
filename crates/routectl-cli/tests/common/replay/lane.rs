@@ -1278,20 +1278,28 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 9] = [
         lane: ANTHROPIC_FIDELITY_LANE,
         id: "disabled-thinking-dropped",
         reason: "The ingress sent `thinking: {\"type\": \"disabled\"}` and the wire body \
-                 carries no `thinking` key at all; `max_tokens` is untouched. Confirmed at \
-                 `strip_thinking_when_tool_choice_forces_use` \
-                 (crates/routectl-providers/src/anthropic_api/extras.rs), which removes the \
-                 whole `thinking` key when `tool_choice.type` is `any` or `tool` because \
-                 Anthropic forbids the combination; the context-management cache-miss \
-                 soft-fail in the same assembly drops it wholesale for the same reason. Both \
-                 test only for the key's presence, so a `disabled` config is dropped along \
-                 with an active one. Narrowed to the `disabled` form deliberately: that \
-                 config spends no reasoning budget, so its loss carries no content, whereas \
-                 an ACTIVE thinking config vanishing from the wire is a real fidelity loss \
-                 and must keep surfacing. The divergence path is `thinking`, not \
-                 `thinking.type` -- a wholesale key drop is reported at the key itself.",
-        site_symbol: "strip_thinking_when_tool_choice_forces_use",
-        site_path: "crates/routectl-providers/src/anthropic_api/extras.rs",
+                 carries no `thinking` key at all; `max_tokens` is untouched. The one site \
+                 that still produces this shape is the context-management cache-miss soft-fail \
+                 inside \
+                 `normalize_deferring_format_key_warn` \
+                 (crates/routectl-providers/src/anthropic_api/request.rs), which removes the \
+                 whole `thinking` key whenever a `clear_thinking` cache miss left history \
+                 without the thinking blocks the body would demand. It tests only for the \
+                 key's presence, so a `disabled` config is dropped along with an active one. \
+                 The forced-tool_choice strip no longer produces this shape: it removes only \
+                 `enabled` and `adaptive`. Captures taken before that strip was narrowed may \
+                 show it as the source; the bodies are data, so the entry explains them the \
+                 same way. NOTE the citation is weaker than a single-purpose \
+                 transform: `normalize_deferring_format_key_warn` is the whole body assembly, \
+                 so its symbol surviving proves only that assembly still exists, not that the \
+                 soft-fail does; no narrower symbol names that inline branch. Narrowed to the \
+                 `disabled` form deliberately: that config spends no reasoning budget, so its \
+                 loss carries no content, whereas an ACTIVE thinking config vanishing from the \
+                 wire is a real fidelity loss and must keep surfacing. The divergence path is \
+                 `thinking`, not `thinking.type` -- a wholesale key drop is reported at the \
+                 key itself.",
+        site_symbol: "normalize_deferring_format_key_warn",
+        site_path: "crates/routectl-providers/src/anthropic_api/request.rs",
         path_predicate: |path| path == "thinking",
         applies_to: None,
         max_per_fixture: None,

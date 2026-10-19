@@ -58,8 +58,8 @@ use super::types::{
 
 // Primitives used only by the orchestrator below.
 use super::extras::{
-    is_active_thinking_type, merge_provider_extras, reconcile_output_config_effort,
-    reconcile_sampling_params, resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
+    merge_provider_extras, reconcile_output_config_effort, reconcile_sampling_params,
+    resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
 };
 use super::messages::{SystemTurnPolicy, normalize_replay_invariants, translate_messages};
 use super::tools::{
@@ -76,7 +76,9 @@ use super::tools::{
 // against the canonical translation directly.
 #[cfg(all(test, feature = "bedrock"))]
 pub(crate) use super::extras::build_thinking;
-pub(crate) use super::extras::{build_output_config, compose_thinking};
+#[cfg(feature = "bedrock")]
+pub(crate) use super::extras::client_sent_output_config_effort;
+pub(crate) use super::extras::{build_output_config, compose_thinking, is_active_thinking_type};
 pub(crate) use super::system::translate_system;
 // The billing-aware lift is used by BOTH the anthropic-api orchestrator
 // below and the Bedrock Converse egress, so it is visible crate-wide and
@@ -974,7 +976,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
              (cold-start or TTL eviction)"
         );
     }
-    strip_thinking_when_tool_choice_forces_use(id, &mut body, tap);
+    strip_thinking_when_tool_choice_forces_use(id, req, &mut body, tap);
     // Late enforcer, runs LAST: output_config.effort is present IFF the
     // assembled body carries thinking with type == adaptive. Reads the
     // final body shape, so any earlier pass that stripped thinking

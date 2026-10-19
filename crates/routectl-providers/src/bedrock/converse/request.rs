@@ -122,8 +122,9 @@ fn translate_tallied(
     repair_output_schema(cfg, additional_model_request_fields.as_mut())?;
 
     // The sampling clamp reads the thinking type the final bag carries:
-    // build_additional_fields strips thinking when toolChoice forces tool use,
-    // and the type it ships may be one the canonical reasoning cannot express.
+    // build_additional_fields strips active thinking when toolChoice forces
+    // tool use and keeps an inactive one, and the type it ships may be one
+    // the canonical reasoning cannot express.
     let thinking_type = additional_model_request_fields
         .as_ref()
         .and_then(|bag| bag.pointer("/thinking/type"))

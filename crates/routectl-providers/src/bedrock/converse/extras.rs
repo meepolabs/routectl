@@ -13,8 +13,11 @@ use serde_json::{Map, Value};
 
 use routectl_core::{AnthropicThinking, ChatRequest, is_canonical_request_key, sanitize_for_log};
 
+use routectl_core::wire_check::{EditKind, EditSite};
+
 use crate::anthropic_api::request::{
-    AnthropicFormat, DroppedFormatKeys, build_output_config, compose_thinking,
+    AnthropicFormat, DroppedFormatKeys, build_output_config, client_sent_output_config_effort,
+    compose_thinking, is_active_thinking_type,
 };
 use crate::anthropic_api::types::WireThinking;
 use crate::effort::clamp_effort_to_supported;
@@ -37,11 +40,10 @@ use super::types::ConverseToolChoice;
 ///
 /// The post-translation `tool_choice` reference is consumed solely by
 /// `strip_thinking_when_tool_choice_forces_use` -- when toolChoice
-/// resolves to `{any:{}}` or `{tool:{name}}`, Anthropic's extended-
-/// thinking docs forbid pairing thinking with that tool_choice and
-/// the Converse upstream 400s. The strip removes thinking from the
-/// final bag while leaving toolChoice intact (the caller's intent to
-/// force a tool is preserved).
+/// resolves to `{any:{}}` or `{tool:{name}}`, Anthropic forbids pairing
+/// active thinking with that tool_choice and the Converse upstream 400s.
+/// The strip removes active thinking from the final bag while leaving
+/// toolChoice intact (the caller's intent to force a tool is preserved).
 pub(super) fn build_additional_fields(
     cfg: &BedrockConfig,
     req: &ChatRequest,
@@ -84,14 +86,13 @@ pub(super) fn build_additional_fields(
     // full contract.
     withhold_client_betas(cfg, req, &mut bag);
 
-    // Final pass: Anthropic's extended-thinking docs forbid `thinking`
-    // alongside a `tool_choice` that forces tool use. Strip thinking
-    // from the bag when toolChoice has resolved to `{any:{}}` or
-    // `{tool:{name}}`. Runs last so the check operates on the fully
-    // composed bag (insert_thinking + provider_extras + operator_extras
-    // + filtered for managed keys), matching the wire body the request
-    // will actually carry.
-    strip_thinking_when_tool_choice_forces_use(cfg, &mut bag, tool_choice);
+    // Final pass: Anthropic forbids active `thinking` alongside a
+    // `tool_choice` that forces tool use. Strip it from the bag when
+    // toolChoice has resolved to `{any:{}}` or `{tool:{name}}`. Runs
+    // last so the check operates on the fully composed bag
+    // (insert_thinking + provider_extras + operator_extras + filtered for
+    // managed keys), matching the wire body the request will carry.
+    strip_thinking_when_tool_choice_forces_use(cfg, req, &mut bag, tool_choice);
 
     // Scrub the `output_config.format` keys Anthropic cannot represent from
     // the fully composed bag, so every path that can write the field is
@@ -482,51 +483,57 @@ fn is_converse_managed_key(key: &str) -> bool {
         )
 }
 
-/// Anthropic's extended-thinking docs explicitly forbid pairing
-/// `thinking` with a `tool_choice` value that forces tool use. Anthropic
-/// on Bedrock honors the same constraint -- whether the thinking shape
-/// rides in an Anthropic Messages body (Invoke) or in a Converse
-/// `additionalModelRequestFields` bag, AWS forwards the bag verbatim to
-/// Anthropic which 400s with "Thinking may not be enabled when
-/// tool_choice forces tool use."
+/// The Converse half of the anthropic-api egress's forced-tool rule
+/// (`crate::anthropic_api`'s `strip_thinking_when_tool_choice_forces_use`):
+/// AWS forwards the bag verbatim to Claude, which 400s on active thinking
+/// beside a forcing tool choice. When the post-translation `toolChoice` is
+/// `Any` or `Tool` and the bag's `thinking.type` is `enabled` or `adaptive`,
+/// strip `thinking` (NOT `toolChoice`; the caller's intent to force a tool is
+/// preserved). `disabled`, `between_tools`, and an unknown type ride as sent.
+/// The bag's `output_config.effort` goes with the stripped thinking only when
+/// routectl composed it; the client's own effort stays.
 ///
-/// Strip `thinking` from the bag (NOT `toolChoice`; the caller's intent
-/// to force a tool is preserved) when the post-translation Converse
-/// `toolChoice` resolves to `Any` or `Tool`. `Auto` and absent
-/// `toolChoice` do not trigger the strip.
+/// A baked seed, as on the anthropic-api egress: the rejection names no
+/// field path and no envelope of it is captured.
+///
+/// The declared pointer is relative to the bag, like every Converse thinking
+/// declaration: the bag carries the Anthropic body's fields, and the
+/// rejection parser drops the bag prefix from the paths it names.
 fn strip_thinking_when_tool_choice_forces_use(
     cfg: &BedrockConfig,
+    req: &ChatRequest,
     bag: &mut Map<String, Value>,
     tool_choice: Option<&ConverseToolChoice>,
 ) {
-    let forces_use = matches!(
-        tool_choice,
-        Some(ConverseToolChoice::Any { .. } | ConverseToolChoice::Tool { .. })
-    );
-    if !forces_use {
+    let variant = match tool_choice {
+        Some(ConverseToolChoice::Any { .. }) => "any",
+        Some(ConverseToolChoice::Tool { .. }) => "tool",
+        Some(ConverseToolChoice::Auto { .. }) | None => return,
+    };
+    let is_active = bag
+        .get("thinking")
+        .and_then(|t| t.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(is_active_thinking_type);
+    if !is_active {
         return;
     }
-    if bag.remove("thinking").is_some() {
-        // On the adaptive path, `output_config.effort` is only valid
-        // alongside `thinking:{type:adaptive}`. Stripping thinking without
-        // it leaves an orphan that Anthropic (via Converse) 400s. Drop the
-        // effort sub-key; any orthogonal sibling (e.g. `format`) survives.
+    bag.remove("thinking");
+    crate::anthropic_api::wire_edits::declare(
+        crate::anthropic_api::wire_edits::tap_of(req),
+        EditSite::ThinkingStripForcedToolUse,
+        "/thinking",
+        EditKind::Remove,
+    );
+    if !client_sent_output_config_effort(req) {
         crate::effort::drop_orphaned_output_config_effort(bag);
-        let variant = match tool_choice {
-            Some(ConverseToolChoice::Any { .. }) => "any",
-            Some(ConverseToolChoice::Tool { .. }) => "tool",
-            _ => unreachable!(
-                "forces_use guarantees Any or Tool; update this match \
-                 when adding a new forcing ConverseToolChoice variant"
-            ),
-        };
-        tracing::debug!(
-            provider = %cfg.id,
-            tool_choice_type = %sanitize_for_log(variant),
-            "stripped thinking from Converse additionalModelRequestFields: \
-             toolChoice forces tool use; Anthropic forbids the combo"
-        );
     }
+    tracing::debug!(
+        provider = %cfg.id,
+        tool_choice_type = variant,
+        "stripped active thinking from Converse additionalModelRequestFields: \
+         toolChoice forces tool use; Anthropic forbids the combo"
+    );
 }
 
 #[cfg(test)]
@@ -961,7 +968,7 @@ mod tests {
         };
 
         // Act
-        strip_thinking_when_tool_choice_forces_use(&cfg, &mut bag, Some(&tc));
+        strip_thinking_when_tool_choice_forces_use(&cfg, &req_with_thinking(), &mut bag, Some(&tc));
 
         // Assert: thinking gone, effort gone, format preserved.
         assert!(

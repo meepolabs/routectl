@@ -2,11 +2,13 @@
 //! state: an Anthropic client's own object rides through as sent, changed
 //! only by an explicit operator knob; a client that sent no thinking gets
 //! none unless the adaptive knob synthesizes it; everything else is
-//! translated from canonical reasoning.
+//! translated from canonical reasoning. A forced tool choice strips only
+//! active thinking.
 //!
 //! Requests are built the way the Anthropic ingress builds them (see
 //! `ingress_request`), with the carrier set directly.
 
+use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
 use routectl_core::{
     AnthropicThinking, ChatRequest, Message, MessageContent, ReasoningConfig, Role, ThinkingObject,
 };
@@ -311,4 +313,154 @@ fn bedrock_invoke_body_carries_the_forwarded_thinking() {
 
     // Assert
     assert_verbatim(&thinking, &wire["thinking"], "bedrock invoke");
+}
+
+const CALLER_TEMPERATURE: f64 = 0.3;
+
+fn forcing_tool_use(mut req: ChatRequest) -> ChatRequest {
+    req.tools = Some(vec![routectl_core::ToolDef::Custom(
+        routectl_core::CustomTool {
+            name: "calc".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        },
+    )]);
+    req.tool_choice = Some(json!("required"));
+    req
+}
+
+/// The body and the forced-tool strip declarations it made.
+fn stripped(mut req: ChatRequest) -> (Value, Vec<(EditKind, String)>) {
+    let tap = WireTap::admitted();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    let wire = body(&req, false);
+    let edits = tap
+        .take_request()
+        .edits(Leg::Request)
+        .iter()
+        .filter(|edit| edit.site() == EditSite::ThinkingStripForcedToolUse)
+        .map(|edit| (edit.kind(), edit.path().to_string()))
+        .collect();
+    (wire, edits)
+}
+
+#[test]
+fn forced_tool_use_strips_active_thinking_with_one_declaration() {
+    for thinking in [
+        json!({"type": "adaptive"}),
+        json!({"type": "enabled", "budget_tokens": 4096}),
+    ] {
+        // Arrange
+        let req = forcing_tool_use(ingress_request(
+            Some(thinking.clone()),
+            Some("high"),
+            64_000,
+        ));
+
+        // Act
+        let (wire, edits) = stripped(req);
+
+        // Assert
+        assert!(wire.get("thinking").is_none(), "{thinking}: {wire}");
+        assert_eq!(wire["tool_choice"], json!({"type": "any"}), "{thinking}");
+        assert_eq!(
+            edits,
+            vec![(EditKind::Remove, "/thinking".to_string())],
+            "{thinking}"
+        );
+    }
+}
+
+/// Inactive and unknown thinking types spend no reasoning budget, so they
+/// ride beside a forced tool choice with the caller's sampling, and nothing
+/// is declared.
+#[test]
+fn forced_tool_use_keeps_inactive_thinking_and_the_caller_sampling() {
+    for thinking in [
+        json!({"type": "disabled"}),
+        json!({"type": "between_tools"}),
+        json!({"type": "future_mode", "depth": 3}),
+    ] {
+        // Arrange
+        let mut req = forcing_tool_use(ingress_request(
+            Some(thinking.clone()),
+            Some("high"),
+            64_000,
+        ));
+        req.temperature = Some(CALLER_TEMPERATURE);
+
+        // Act
+        let (wire, edits) = stripped(req);
+
+        // Assert
+        assert_verbatim(&thinking, &wire["thinking"], "forced tool use");
+        assert_eq!(
+            wire["temperature"], CALLER_TEMPERATURE,
+            "{thinking}: {wire}"
+        );
+        assert!(edits.is_empty(), "{thinking}: {edits:?}");
+    }
+}
+
+/// `(row, thinking on the body, client effort, effort left on the body)`.
+type StripEffortRow<'a> = (&'a str, Value, Option<&'a str>, Option<&'a str>);
+
+/// The strip itself, on an assembled body: `output_config.effort` leaves
+/// with stripped thinking only when routectl composed it. Called directly
+/// because the effort reconcile that runs after it in assembly still drops
+/// every effort that is not beside adaptive thinking.
+#[test]
+fn the_forced_tool_strip_drops_only_a_routectl_composed_effort() {
+    let rows: &[StripEffortRow] = &[
+        (
+            "client effort beside stripped adaptive",
+            json!({"type": "adaptive"}),
+            Some("xhigh"),
+            Some("high"),
+        ),
+        (
+            "composed effort beside stripped adaptive",
+            json!({"type": "adaptive"}),
+            None,
+            None,
+        ),
+        (
+            "client effort beside kept disabled",
+            json!({"type": "disabled"}),
+            Some("xhigh"),
+            Some("high"),
+        ),
+        (
+            "composed effort beside kept between_tools",
+            json!({"type": "between_tools"}),
+            None,
+            Some("high"),
+        ),
+    ];
+    for (row, thinking, client_effort, expected) in rows {
+        // Arrange
+        let req = ingress_request(Some(thinking.clone()), *client_effort, 64_000);
+        let mut wire = json!({
+            "thinking": thinking,
+            "tool_choice": {"type": "tool", "name": "calc"},
+            "output_config": {"effort": "high"},
+        });
+
+        // Act
+        crate::anthropic_api::extras::strip_thinking_when_tool_choice_forces_use(
+            "p", &req, &mut wire, None,
+        );
+
+        // Assert
+        assert_eq!(
+            wire.pointer("/output_config/effort")
+                .and_then(Value::as_str),
+            *expected,
+            "{row}: {wire}"
+        );
+    }
 }

@@ -1,7 +1,8 @@
 //! The Converse bag's `thinking` and `output_config.effort`, and the
 //! `inferenceConfig` sampling clamp, for requests an Anthropic client sent:
-//! the client's thinking object and effort ride the bag as sent, and the
-//! clamp keys off the thinking type the final bag ships.
+//! the client's thinking object and effort ride the bag as sent, a forced
+//! tool choice strips only active thinking, and the clamp keys off the
+//! thinking type the final bag ships.
 //!
 //! Requests are built the way the Anthropic ingress builds them, through the
 //! anthropic-api egress's own test builder.
@@ -258,40 +259,135 @@ fn inactive_thinking_types_keep_the_caller_temperature() {
     }
 }
 
-/// Forced tool use strips active thinking from the bag; the caller's
-/// sampling comes back with it.
+fn forcing_tool_use(mut req: routectl_core::ChatRequest) -> routectl_core::ChatRequest {
+    req.tools = Some(vec![ToolDef::Custom(CustomTool {
+        name: "calc".into(),
+        description: None,
+        input_schema: json!({"type": "object"}),
+        cache_control: None,
+        defer_loading: None,
+        strict: None,
+        type_tag: None,
+    })]);
+    req.tool_choice = Some(json!("required"));
+    req
+}
+
+/// Forced tool use strips active thinking from the bag, declares the strip
+/// once, and gives the caller's sampling back.
 #[test]
-fn stripped_thinking_restores_the_caller_sampling() {
+fn forced_tool_use_strips_active_thinking_once_and_restores_the_caller_sampling() {
     for thinking in [
         json!({"type": "adaptive"}),
         json!({"type": "enabled", "budget_tokens": 4096}),
     ] {
         // Arrange
-        let mut req = ingress_request(Some(thinking.clone()), None, 64_000);
+        let mut req = forcing_tool_use(ingress_request(Some(thinking.clone()), None, 64_000));
         req.top_p = Some(0.9);
-        req.tools = Some(vec![ToolDef::Custom(CustomTool {
-            name: "calc".into(),
-            description: None,
-            input_schema: json!({"type": "object"}),
-            cache_control: None,
-            defer_loading: None,
-            strict: None,
-            type_tag: None,
-        })]);
-        req.tool_choice = Some(json!("required"));
 
         // Act
-        let body = converse_body(&req, false);
+        let (body, edits) = declared(req, false, &[EditSite::ThinkingStripForcedToolUse]);
 
         // Assert
         assert!(bag(&body).get("thinking").is_none(), "{thinking}: {body}");
+        assert_eq!(
+            edits,
+            vec![(EditSite::ThinkingStripForcedToolUse, "/thinking".into())],
+            "{thinking}"
+        );
         let inference = &body["inferenceConfig"];
         assert!(inference.get("temperature").is_none(), "{thinking}: {body}");
         assert_eq!(inference["topP"], 0.9, "{thinking}: {body}");
     }
 }
 
-fn declared(req: routectl_core::ChatRequest, adaptive: bool) -> (Value, Vec<(EditSite, String)>) {
+/// Inactive and unknown thinking types spend no reasoning budget, so they
+/// ride beside a forced tool choice with the client's effort and sampling,
+/// and nothing is declared.
+#[test]
+fn forced_tool_use_keeps_inactive_thinking_with_the_client_effort() {
+    for thinking in [
+        json!({"type": "disabled"}),
+        json!({"type": "between_tools"}),
+        json!({"type": "future_mode"}),
+    ] {
+        // Arrange
+        let mut req = forcing_tool_use(ingress_request(
+            Some(thinking.clone()),
+            Some("high"),
+            64_000,
+        ));
+        req.temperature = Some(CALLER_TEMPERATURE);
+
+        // Act
+        let (body, edits) = declared(req, false, &[EditSite::ThinkingStripForcedToolUse]);
+
+        // Assert
+        assert_eq!(bag(&body)["thinking"], thinking, "{body}");
+        assert_eq!(bag_effort(&body), Some("high"), "{thinking}: {body}");
+        assert_eq!(
+            body["inferenceConfig"]["temperature"], CALLER_TEMPERATURE,
+            "{thinking}: {body}"
+        );
+        assert!(edits.is_empty(), "{thinking}: {edits:?}");
+    }
+}
+
+/// `(row, thinking sent, effort sent, adaptive knob, effort on the bag)`.
+type StrippedEffortRow<'a> = (&'a str, Value, Option<&'a str>, bool, Option<&'a str>);
+
+/// The strip takes `output_config.effort` with it only when routectl
+/// composed the effort; the client's own effort stays.
+#[test]
+fn forced_tool_use_drops_only_a_routectl_composed_effort() {
+    let rows: &[StrippedEffortRow] = &[
+        (
+            "client effort beside adaptive",
+            json!({"type": "adaptive"}),
+            Some("xhigh"),
+            false,
+            Some("xhigh"),
+        ),
+        (
+            "client effort beside enabled",
+            json!({"type": "enabled", "budget_tokens": 4096}),
+            Some("low"),
+            false,
+            Some("low"),
+        ),
+        (
+            "effort the adaptive knob inserted",
+            json!({"type": "enabled", "budget_tokens": 4096}),
+            None,
+            true,
+            None,
+        ),
+    ];
+    for (row, thinking, effort, knob, expected) in rows {
+        // Arrange
+        let req = forcing_tool_use(ingress_request(Some(thinking.clone()), *effort, 64_000));
+        if *knob {
+            let unforced = ingress_request(Some(thinking.clone()), *effort, 64_000);
+            assert!(
+                bag_effort(&converse_body(&unforced, true)).is_some(),
+                "{row}: precondition: the knob composes an effort"
+            );
+        }
+
+        // Act
+        let body = converse_body(&req, *knob);
+
+        // Assert
+        assert!(bag(&body).get("thinking").is_none(), "{row}: {body}");
+        assert_eq!(bag_effort(&body), *expected, "{row}: {body}");
+    }
+}
+
+fn declared(
+    req: routectl_core::ChatRequest,
+    adaptive: bool,
+    sites: &[EditSite],
+) -> (Value, Vec<(EditSite, String)>) {
     let mut req = req;
     let tap = WireTap::admitted();
     req.routectl_internal.wire_tap = Some(tap.clone());
@@ -300,12 +396,7 @@ fn declared(req: routectl_core::ChatRequest, adaptive: bool) -> (Value, Vec<(Edi
         .take_request()
         .edits(Leg::Request)
         .iter()
-        .filter(|edit| {
-            matches!(
-                edit.site(),
-                EditSite::AdaptiveThinkingOverride | EditSite::ThinkingBudgetCap
-            )
-        })
+        .filter(|edit| sites.contains(&edit.site()))
         .map(|edit| (edit.site(), edit.path().to_string()))
         .collect();
     (body, edits)
@@ -326,9 +417,13 @@ fn the_forwarded_thinking_overrides_are_declared() {
     let untouched = ingress_request(Some(json!({"type": "adaptive"})), Some("high"), 64_000);
 
     // Act
-    let (converted_body, converted_edits) = declared(converted, true);
-    let (capped_body, capped_edits) = declared(capped, false);
-    let (_, untouched_edits) = declared(untouched, true);
+    let sites = [
+        EditSite::AdaptiveThinkingOverride,
+        EditSite::ThinkingBudgetCap,
+    ];
+    let (converted_body, converted_edits) = declared(converted, true, &sites);
+    let (capped_body, capped_edits) = declared(capped, false, &sites);
+    let (_, untouched_edits) = declared(untouched, true, &sites);
 
     // Assert
     assert_eq!(

@@ -14,8 +14,8 @@
 //! forward-compat extras in while shielding routectl-managed keys
 //! (`is_routectl_managed_key`), `reconcile_output_config_effort`
 //! re-clamps or strips `output_config.effort` per model capability, and
-//! `strip_thinking_when_tool_choice_forces_use` drops `thinking` when
-//! the tool_choice forces tool use (Anthropic forbids the combo).
+//! `strip_thinking_when_tool_choice_forces_use` drops active `thinking`
+//! when the tool_choice forces tool use (Anthropic forbids the combo).
 
 use serde_json::Value;
 
@@ -423,8 +423,22 @@ pub fn emitted_thinking_type(req: &ChatRequest, adaptive: bool) -> Option<String
 
 /// Whether `thinking_type` spends reasoning budget, and so pins sampling
 /// to what Anthropic requires while thinking.
-pub(super) fn is_active_thinking_type(thinking_type: &str) -> bool {
+pub fn is_active_thinking_type(thinking_type: &str) -> bool {
     matches!(thinking_type, "enabled" | "adaptive")
+}
+
+/// Whether the client itself sent `output_config.effort`. The Anthropic
+/// ingress keeps the client's `output_config` in `provider_extras`, so an
+/// effort found there is the client's. Any other effort on the wire was
+/// composed by routectl: derived from canonical reasoning on a request with
+/// no thinking carrier, or inserted beside the adaptive knob's shape on one
+/// with a carrier and no client effort.
+pub fn client_sent_output_config_effort(req: &ChatRequest) -> bool {
+    req.provider_extras
+        .as_ref()
+        .and_then(|extras| extras.get("output_config"))
+        .and_then(|config| config.get("effort"))
+        .is_some()
 }
 
 fn has_positive_effort(req: &ChatRequest) -> bool {
@@ -946,45 +960,40 @@ fn remove_output_config_effort(body: &mut Value) {
     }
 }
 
-/// Anthropic's extended-thinking docs forbid `thinking` paired with
-/// `tool_choice` values that force tool use. The Messages API 400s with
-/// "Thinking may not be enabled when tool_choice forces tool use." when
-/// the body carries `thinking` AND `tool_choice.type` is `"any"` or
-/// `"tool"`. The constraint is identical for adaptive thinking
-/// (`{"type":"adaptive"}`) per the adaptive-thinking docs page.
+/// Anthropic forbids active thinking beside a `tool_choice` that forces
+/// tool use: the Messages API 400s with "Thinking may not be enabled when
+/// tool_choice forces tool use." when `thinking.type` is `enabled` or
+/// `adaptive` and `tool_choice.type` is `"any"` or `"tool"`.
 ///
 /// Real-world trigger: Claude Code's WebSearch tool sub-request fires
 /// `tool_choice: {type:"tool", name:"web_search"}` in tandem with
-/// `thinking: {type:"adaptive"}` (when the operator config sets
-/// `effort: "max"`). routectl emits both because each was set
-/// independently by separate concerns -- the tool_choice translator and
-/// the thinking composer don't talk to each other.
+/// `thinking: {type:"adaptive"}`.
 ///
-/// Strip `thinking` (not `tool_choice`) so the caller's intent to force
-/// the named tool is preserved; the request still completes
-/// successfully, just without thinking. `auto`, `none`, and absent
-/// `tool_choice` do not trigger the strip.
+/// Strip `thinking` (not `tool_choice`) so the caller's intent to force the
+/// named tool is preserved. Only an active type is stripped; `disabled`,
+/// `between_tools`, and a type routectl does not know ride as sent beside
+/// the forced choice, and the upstream judges them. An `output_config.effort`
+/// leaves with the stripped thinking only when routectl composed it
+/// (`client_sent_output_config_effort`); the client's own effort stays.
 ///
-/// This function touches only `thinking`. A now-orphan
-/// `output_config.effort` (valid only alongside adaptive thinking) is
-/// dropped by `reconcile_output_config_effort`, the late enforcer that
-/// runs after this and reads the final body shape.
+/// This is a baked seed rather than a learned repair: the rejection names
+/// no field path, so the rejection parser cannot attribute it to a field,
+/// and no envelope of it is captured to ground a learned row.
 ///
-/// Runs after `merge_provider_extras` so the check operates on the
-/// final wire body, regardless of whether `thinking` was composed by
-/// `build_thinking` or layered in by some future provider-extras path
-/// that bypasses `is_routectl_managed_key`.
+/// Runs after `merge_provider_extras` so the check operates on the final
+/// wire body.
 pub(super) fn strip_thinking_when_tool_choice_forces_use(
     provider_id: &str,
+    req: &ChatRequest,
     body: &mut Value,
     tap: Option<&WireTap>,
 ) {
+    if !body_has_active_thinking(body) {
+        return;
+    }
     let Some(obj) = body.as_object_mut() else {
         return;
     };
-    if !obj.contains_key("thinking") {
-        return;
-    }
     // The `.filter()` short-circuits on non-forcing values (`auto` /
     // `none` / unknown), so the owned `String` is allocated only on the
     // strip path. The Option also lets the immutable borrow on `obj` end
@@ -1006,10 +1015,13 @@ pub(super) fn strip_thinking_when_tool_choice_forces_use(
         "/thinking",
         EditKind::Remove,
     );
+    if !client_sent_output_config_effort(req) {
+        crate::effort::drop_orphaned_output_config_effort(obj);
+    }
     tracing::debug!(
         provider = provider_id,
         tool_choice_type = %sanitize_for_log(&ttype),
-        "stripped thinking from outgoing body: tool_choice forces tool use; \
+        "stripped active thinking from outgoing body: tool_choice forces tool use; \
          Anthropic forbids the combo"
     );
 }
