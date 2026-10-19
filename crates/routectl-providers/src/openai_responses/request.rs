@@ -42,6 +42,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     // omitted the failures would read low for exactly the requests that went
     // worst.
     record_translation_lane_seen(super::LANE);
+    count_unmodeled_thinking_type(req);
     log_dropped_cache_control(req);
     // The canonical sampling knobs have no Responses-API home and are gated
     // out of the provider_extras merge as canonical keys; log once at DEBUG
@@ -329,6 +330,16 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
         }
     }
     surfaces
+}
+
+/// Count the client thinking choice this wire loses when an Anthropic client
+/// sent a `thinking.type` canonical reasoning cannot express: `reasoning` is
+/// built from the canonical config alone, which holds the default for it.
+/// TRANSLATION-DROP: lane=openai-responses class=thinking_type_unrepresentable test=an_unmodeled_thinking_type_counts_one_openai_responses_drop
+fn count_unmodeled_thinking_type(req: &ChatRequest) {
+    if crate::translation_drop_metrics::carries_unmodeled_thinking_type(req) {
+        record_translation_drop(super::LANE, "thinking_type_unrepresentable");
+    }
 }
 
 /// Emit one DEBUG naming every cache-prefix surface carrying a caller

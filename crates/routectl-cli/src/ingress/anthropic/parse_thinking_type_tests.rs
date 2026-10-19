@@ -1,5 +1,6 @@
 //! An unrecognized `thinking.type` parses, collapses to the default
-//! reasoning config, and announces itself with exactly one WARN.
+//! reasoning config, and announces itself with exactly one WARN, which a
+//! cross-dialect egress does not repeat.
 
 use serde_json::json;
 
@@ -54,6 +55,17 @@ fn unknown_thinking_type_parses_and_warns_once() {
         "exactly one WARN must name the unrecognized type: {events:?}"
     );
     assert_eq!(warns[0].level, tracing::Level::WARN);
+    for fragment in [
+        "canonical reasoning cannot represent it",
+        "kept only for Anthropic-shape forwarding",
+        "count the loss separately",
+    ] {
+        assert!(
+            warns[0].message.contains(fragment),
+            "the WARN must say {fragment:?}: {}",
+            warns[0].message
+        );
+    }
     assert_eq!(
         warns[0].field("thinking_type"),
         Some(routectl_core::sanitize_detail_for_log("interleaved").as_str()),
@@ -113,5 +125,40 @@ fn unknown_thinking_type_warn_carries_no_raw_control_characters() {
     assert!(
         !logged.contains('\n') && !logged.contains('\u{1b}'),
         "control characters must not reach the log line: {logged:?}"
+    );
+}
+
+#[test]
+fn a_cross_dialect_egress_adds_no_second_unrecognized_warn() {
+    use routectl_core::Provider;
+    use routectl_providers::openai_compat::{
+        HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
+    };
+
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "openai-compat:test".into(),
+        base_url: "http://127.0.0.1:9".into(),
+        api_key: "k".into(),
+        header_extras: Vec::new(),
+        payload_extras: None,
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: HistoryReasoning::Auto,
+        user_agent: None,
+        strict_translation: false,
+        disable_stream_include_usage: false,
+        mantle: None,
+    });
+
+    let events = routectl_testkit::capture_events(|| {
+        let req = parse(json!({"type": "interleaved"})).expect("parses");
+        provider
+            .normalize_request(&req)
+            .expect("the cross-dialect body builds");
+    });
+
+    assert_eq!(
+        unrecognized_warns(&events).len(),
+        1,
+        "one request, one WARN: {events:?}"
     );
 }

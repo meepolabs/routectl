@@ -97,9 +97,9 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("bedrock/invoke.rs", 1),
     ("gemini/cloudcode.rs", 2),
     ("gemini/mod.rs", 1),
-    ("gemini/request.rs", 19),
+    ("gemini/request.rs", 20),
     ("gemini/schema.rs", 7),
-    ("openai_compat/request.rs", 12),
+    ("openai_compat/request.rs", 13),
     ("openai_compat/wire_lift/content.rs", 6),
     ("openai_compat/wire_lift/response_format.rs", 4),
     ("openai_compat/wire_lift/thinking.rs", 3),
@@ -109,14 +109,14 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("openai_compat/wire_lift/tools.rs", 1),
     ("openai_responses/extras.rs", 5),
     ("openai_responses/messages.rs", 11),
-    ("openai_responses/request.rs", 2),
+    ("openai_responses/request.rs", 3),
     ("openai_responses/system.rs", 3),
     ("openai_responses/tools.rs", 4),
 ];
 
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
-const EXPECTED_LANE_MARKERS: usize = 75;
+const EXPECTED_LANE_MARKERS: usize = 78;
 const EXPECTED_POLICY_ACTION_MARKERS: usize = 19;
 const EXPECTED_STRUCTURAL_MARKERS: usize = 51;
 

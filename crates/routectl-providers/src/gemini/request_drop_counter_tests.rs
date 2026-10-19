@@ -1756,3 +1756,31 @@ fn payload_extras_with_no_managed_key_counts_no_policy_action() {
     );
     assert_eq!(after - before, 0, "no refusal, no policy action");
 }
+
+// ---------------------------------------------------------------------------
+// thinking_type_unrepresentable
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unmodeled_thinking_type_counts_one_gemini_drop() {
+    for (row, carrier, expected) in crate::translation_drop_metrics::thinking_carrier_rows() {
+        // Arrange
+        let mut req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")].into(),
+            ..Default::default()
+        };
+        req.routectl_internal.anthropic_thinking = carrier;
+        let before = gemini_drop_count("thinking_type_unrepresentable");
+
+        // Act
+        let wire = rendered(&wire_body(&req));
+        let after = gemini_drop_count("thinking_type_unrepresentable");
+
+        // Assert
+        let unmodeled = crate::translation_drop_metrics::UNMODELED_THINKING_TYPE;
+        assert!(!wire.contains(unmodeled), "{row}: {wire}");
+        assert!(wire.contains("hi"), "{row}: the turn ships: {wire}");
+        assert_eq!(after - before, expected, "{row}");
+    }
+}

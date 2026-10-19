@@ -313,6 +313,78 @@ pub fn translation_lane_seen(lane: &str) -> u64 {
     with_registry_mut(|reg| reg.lane_seen.get(lane).copied().unwrap_or(0))
 }
 
+/// Whether an Anthropic client sent a `thinking` object whose `type` the
+/// canonical `ReasoningConfig` cannot express (an unrecognized value, or none
+/// at all). The ingress collapses such a type to the default config and keeps
+/// the object only on the native carrier, which a cross-dialect egress never
+/// reads, so the client's thinking choice is lost on that lane.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
+pub(crate) fn carries_unmodeled_thinking_type(req: &routectl_core::ChatRequest) -> bool {
+    match &req.routectl_internal.anthropic_thinking {
+        routectl_core::AnthropicThinking::Sent(object) => !matches!(
+            object.thinking_type(),
+            Some("enabled" | "disabled" | "adaptive")
+        ),
+        routectl_core::AnthropicThinking::SentNone
+        | routectl_core::AnthropicThinking::NotCaptured => false,
+    }
+}
+
+/// The token an unmodeled-thinking-type row sends as `thinking.type`, so a
+/// lane test can assert it never reaches that lane's wire.
+#[cfg(all(
+    test,
+    any(
+        feature = "openai-compat",
+        feature = "openai-responses",
+        feature = "gemini"
+    )
+))]
+pub(crate) const UNMODELED_THINKING_TYPE: &str = "future_mode";
+
+/// `(row, carrier, drops expected)` for the cross-dialect thinking-type
+/// count, shared by each lane's test so the three lanes judge one table.
+#[cfg(all(
+    test,
+    any(
+        feature = "openai-compat",
+        feature = "openai-responses",
+        feature = "gemini"
+    )
+))]
+pub(crate) fn thinking_carrier_rows() -> Vec<(&'static str, routectl_core::AnthropicThinking, u64)>
+{
+    use routectl_core::{AnthropicThinking, ThinkingObject};
+    let sent = |thinking: serde_json::Value| {
+        AnthropicThinking::Sent(ThinkingObject::from_client(thinking).expect("an object"))
+    };
+    vec![
+        (
+            "unknown type",
+            sent(serde_json::json!({"type": UNMODELED_THINKING_TYPE, "depth": 3})),
+            1,
+        ),
+        (
+            "object with no type",
+            sent(serde_json::json!({"budget_tokens": 2048})),
+            1,
+        ),
+        (
+            "enabled",
+            sent(serde_json::json!({"type": "enabled", "budget_tokens": 2048})),
+            0,
+        ),
+        ("adaptive", sent(serde_json::json!({"type": "adaptive"})), 0),
+        ("disabled", sent(serde_json::json!({"type": "disabled"})), 0),
+        ("absent thinking", AnthropicThinking::SentNone, 0),
+        ("not captured", AnthropicThinking::NotCaptured, 0),
+    ]
+}
+
 /// Per-request record that a lane withheld the Claude Code client fingerprint
 /// from its upstream on at least one surface.
 ///

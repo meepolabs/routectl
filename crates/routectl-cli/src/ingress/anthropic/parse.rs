@@ -481,18 +481,19 @@ fn translate_thinking(t: &Value) -> Result<(ReasoningConfig, Option<String>)> {
             ..Default::default()
         },
         _ => {
-            // An unrecognized `type` collapses the WHOLE thinking object:
-            // `thinking` is stripped from the body during parse and is a
-            // managed key in the egress extras merge, so nothing rides
-            // through. Forwarding the object verbatim needs a carrier that
-            // no wire shape justifies yet -- only the three `type` values
-            // matched above exist upstream today. This WARN is the detector
-            // for that: an operator hit means a fourth value shipped and the
-            // carrier is now warranted. Accepting instead of rejecting keeps
-            // a newer vocabulary from earning a local 400.
+            // Canonical reasoning has no value for an unrecognized `type`,
+            // so it collapses to the default config here. The client's
+            // object itself survives on the `anthropic_thinking` carrier the
+            // caller fills, and Anthropic-shape egresses emit it as sent.
+            // Cross-dialect egresses read only the canonical config; each
+            // counts that loss as its own translation drop, so this WARN
+            // does not repeat per attempt. Accepting instead of rejecting
+            // keeps a newer vocabulary from earning a local 400.
             tracing::warn!(
                 thinking_type = %sanitize_detail_for_log(kind),
-                "anthropic ingress: unrecognized thinking.type; thinking object not forwarded"
+                "anthropic ingress: unrecognized thinking.type; canonical reasoning cannot \
+                 represent it, so the native thinking object is kept only for Anthropic-shape \
+                 forwarding and cross-dialect egresses count the loss separately"
             );
             ReasoningConfig::default()
         }
@@ -571,3 +572,7 @@ mod thinking_type_tests;
 #[cfg(test)]
 #[path = "parse_thinking_carrier_tests.rs"]
 mod thinking_carrier_tests;
+
+#[cfg(test)]
+#[path = "parse_thinking_wire_tests.rs"]
+mod thinking_wire_tests;

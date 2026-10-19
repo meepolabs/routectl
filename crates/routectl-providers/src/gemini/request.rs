@@ -333,6 +333,17 @@ fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally) {
     }
 }
 
+/// Count the client thinking choice this wire loses when an Anthropic client
+/// sent a `thinking.type` canonical reasoning cannot express:
+/// `thinkingConfig` is built from the canonical config alone, which holds the
+/// default for it. Runs ahead of every fallible step of the build.
+/// TRANSLATION-DROP: lane=gemini class=thinking_type_unrepresentable test=an_unmodeled_thinking_type_counts_one_gemini_drop
+fn count_unmodeled_thinking_type(req: &ChatRequest) {
+    if crate::translation_drop_metrics::carries_unmodeled_thinking_type(req) {
+        record_translation_drop(LANE, "thinking_type_unrepresentable");
+    }
+}
+
 /// Assemble the wire body. Separated from `translate_counted` only so the tally
 /// flush there runs on the Err arm too, without an early `?` skipping it.
 fn build_body(
@@ -341,6 +352,7 @@ fn build_body(
     tally: &mut GeminiDropTally,
     fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<GenerateContentRequest> {
+    count_unmodeled_thinking_type(req);
     log_dropped_cache_control(provider_id, req, tally);
     // `seed`, `presence_penalty` and `frequency_penalty` are translated onto
     // `generationConfig`; the remaining canonical sampling knobs have no

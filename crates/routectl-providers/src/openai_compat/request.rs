@@ -77,6 +77,7 @@ pub fn normalize(
     // site per lane; a second anywhere would understate the rate for the
     // whole lane.
     crate::translation_drop_metrics::record_translation_lane_seen(super::LANE);
+    count_unmodeled_thinking_type(req);
 
     // The system projection is infallible and runs first, so its tally is
     // flushed before any `?` below: a request that withheld the fingerprint
@@ -332,6 +333,21 @@ impl CanonicalFieldDropTally {
                 "anthropic_beta_unsupported",
             );
         }
+    }
+}
+
+/// Count the client thinking choice this wire loses when an Anthropic client
+/// sent a `thinking.type` canonical reasoning cannot express: the body is
+/// built from the canonical config alone, which holds the default for it.
+/// Runs ahead of every fallible step, so a request that then fails still
+/// counts against the denominator that already counted it.
+/// TRANSLATION-DROP: lane=openai-compat class=thinking_type_unrepresentable test=an_unmodeled_thinking_type_counts_one_openai_compat_drop
+fn count_unmodeled_thinking_type(req: &ChatRequest) {
+    if crate::translation_drop_metrics::carries_unmodeled_thinking_type(req) {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "thinking_type_unrepresentable",
+        );
     }
 }
 

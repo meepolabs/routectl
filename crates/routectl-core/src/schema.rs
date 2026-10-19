@@ -592,8 +592,10 @@ pub struct RoutectlInternal {
 /// reader must tell apart.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AnthropicThinking {
-    /// Nothing was captured: a non-Anthropic ingress, or a library consumer
-    /// that built the request directly. Readers fall back to the canonical
+    /// Nothing was captured: a non-Anthropic ingress, a library consumer
+    /// that built the request directly, or an Anthropic request whose
+    /// `thinking` is not a JSON object (null, a scalar, an array), which has
+    /// no shape to forward. Readers fall back to the canonical
     /// [`ReasoningConfig`].
     #[default]
     NotCaptured,

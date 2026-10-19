@@ -932,3 +932,27 @@ fn every_translated_request_counts_toward_the_lane_denominator() {
 fn responses_lane_seen_count() -> u64 {
     crate::translation_drop_metrics::translation_lane_seen("openai-responses")
 }
+
+// ---------------------------------------------------------------------------
+// thinking_type_unrepresentable
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unmodeled_thinking_type_counts_one_openai_responses_drop() {
+    for (row, carrier, expected) in crate::translation_drop_metrics::thinking_carrier_rows() {
+        // Arrange
+        let mut req = req_with(vec![user_text("hi")]);
+        req.routectl_internal.anthropic_thinking = carrier;
+        let before = responses_drop_count("thinking_type_unrepresentable");
+
+        // Act
+        let wire = translate_to_json(&cfg(), &req).to_string();
+        let after = responses_drop_count("thinking_type_unrepresentable");
+
+        // Assert
+        let unmodeled = crate::translation_drop_metrics::UNMODELED_THINKING_TYPE;
+        assert!(!wire.contains(unmodeled), "{row}: {wire}");
+        assert!(wire.contains("hi"), "{row}: the turn ships: {wire}");
+        assert_eq!(after - before, expected, "{row}");
+    }
+}

@@ -393,3 +393,30 @@ fn a_swept_output_config_is_withheld_without_a_second_count() {
     assert_eq!(drops(), drops_before);
     assert_eq!(actions(), actions_before);
 }
+
+// ---------------------------------------------------------------------------
+// thinking_type_unrepresentable
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unmodeled_thinking_type_counts_one_openai_compat_drop() {
+    for (row, carrier, expected) in crate::translation_drop_metrics::thinking_carrier_rows() {
+        // Arrange
+        let mut req = simple_req("m");
+        req.routectl_internal.anthropic_thinking = carrier;
+
+        // Act
+        let (rendered, delta) = wire_and_delta(&req, None, || {
+            compat_drop_count("thinking_type_unrepresentable")
+        });
+
+        // Assert
+        let unmodeled = crate::translation_drop_metrics::UNMODELED_THINKING_TYPE;
+        assert!(!rendered.contains(unmodeled), "{row}: {rendered}");
+        assert!(
+            rendered.contains("hello"),
+            "{row}: the turn ships: {rendered}"
+        );
+        assert_eq!(delta, expected, "{row}");
+    }
+}
