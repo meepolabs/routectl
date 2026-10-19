@@ -36,8 +36,10 @@ license.
   `RefusalReason`; declares the `provider_kind`, `upstream_reason` and
   `refusal_reason` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
-  `ChatChunk`, `Message`, `ReasoningDetail`, `Usage`, `RequestProvenance`, and
-  the `RoutectlInternal` carrier (resolved per-model knobs plus the
+  `ChatChunk`, `Message`, `ReasoningDetail`, `ReasoningConfig` (`is_off`,
+  `is_off_effort`), `Usage`, `RequestProvenance`, the Anthropic-ingress native
+  `thinking` carrier (`AnthropicThinking`, `ThinkingObject`), and the
+  `RoutectlInternal` carrier (resolved per-model knobs plus the
   transport-internal capture fields, never serialized to the wire -- see the
   struct's own docs for the field-by-field contract)
 - `src/beta_repair_report.rs` -- `BetaRepairReport`: clone-shared slot where a
@@ -539,14 +541,9 @@ license.
   derive the status of an error object inside an HTTP-200 body (only
   `400..=599` trusted, else 502), shared by the gemini and openai-compat
   stream parsers
-- `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller
-  `reasoning.effort` against per-model `effort_levels` (rounds toward
-  most-capable above max, least-capable below min). Returns `Option`: `None`
-  means reasoning-OFF (`effort: "none"`) and the egress MUST omit the effort
-  field (or emit its own disable form) rather than substitute a positive
-  level; an unknown token passes through verbatim rather than clamping down.
-  Single source of truth across openai-compat, anthropic-api, bedrock,
-  openai-responses
+- `src/effort.rs` -- shared effort helpers: `clamp_effort_to_supported`
+  (caller effort against per-model `effort_levels`) and the one
+  effort/budget table (`budget_from_level`, `level_from_budget`)
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every
   egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the
   redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream ->
@@ -655,7 +652,9 @@ license.
   `aws_stream_exception_status` (in-stream exception member -> HTTP status)
 - `src/translation_drop_metrics.rs` -- process-wide `(lane, class)` translation
   drop and policy-action counters with their snapshot readers, plus the
-  crate-internal `ClientFingerprintStripTally`; under `cfg(test)` the registry
+  crate-internal `ClientFingerprintStripTally` and
+  `carries_unmodeled_thinking_type` (the cross-dialect
+  `thinking_type_unrepresentable` predicate); under `cfg(test)` the registry
   is per-thread, so this crate's unit tests assert counters without serial
   guards (integration tests share the process-global one)
 - `src/hosted_mcp_tool_egress_tests.rs` -- cross-lane guard: a Responses
@@ -686,7 +685,8 @@ license.
 - `src/anthropic_api/mod.rs` -- request/response/stream orchestration: `impl
   Provider for AnthropicApiProvider`
   (`normalize_request`/`normalize_response`, `complete`, `stream` + SSE drain,
-  `count_tokens`, `on_auth_failure`, `probe`) plus
+  `count_tokens`, `on_auth_failure`, `probe`), the public
+  `emitted_thinking_type` re-export from `extras.rs`, plus
   `read_anthropic_error` / `anthropic_error_from_read` (the error mapper all
   three HTTP paths share, built from an `upstream_error::UpstreamErrorRead`,
   mantle 403 scrubbed through `aws_error`) and `build_count_tokens_body` (the
@@ -789,9 +789,12 @@ license.
   `SystemTurnPolicy`), the per-request
   `EnvelopeUnwrapTally` (threaded into message translation and cache
   reinjection, flushed once after both), and cache_control
-  breakpoint validation (`validate_breakpoints`); re-exports `build_thinking`,
-  `translate_tool`, `translate_system`,
-  `lift_legacy_system` for the Bedrock egress and `mod.rs`; also owns
+  breakpoint validation (`validate_breakpoints`); re-exports
+  `translate_tool`, `translate_system`, `lift_legacy_system_stripped`,
+  `build_output_config`, `is_active_thinking_type` and (cfg `bedrock`)
+  `compose_thinking`, `reclamp_client_effort`,
+  `client_sent_output_config_effort` for the Bedrock egress and `mod.rs`;
+  also owns
   `drop_unrepresentable_output_format_keys`, the assembled-body scrub of the
   `output_config.format` keys Anthropic rejects (`name`, `strict`) -- that
   scrub is shared by all three Claude seams -- and wires the `output_schema`
@@ -820,7 +823,9 @@ license.
   rewrite) + `translate_tools` (the request's list, withholding OpenAI
   Responses hosted-MCP tools into `HostedMcpToolWithholdTally`) +
   `translate_tool_choice` (OpenAI/Anthropic shape mapping; the
-  `_withholding_hosted_mcp` wrapper turns a hosted-MCP choice into `auto`)
+  `_withholding_hosted_mcp` wrapper turns a hosted-MCP choice into `auto`) +
+  `forced_tool_choice_type` (the forcing type, `any` or `tool`, of the
+  shipped choice)
 - `src/anthropic_api/messages.rs` -- per-role content-block translation:
   `translate_messages`, `build_assistant_content`, `emit_reasoning_blocks`,
   `build_tool_message`, `normalize_replay_invariants`; owns
@@ -830,27 +835,15 @@ license.
   accounted-identity ledger that turns an unaccounted message drop into a
   normalize error. Sidecar `request_body_beta_tests.rs` pins that the shared
   normalizer leaves the body `anthropic_beta` carrier to each egress
-- `src/anthropic_api/extras.rs` -- thinking-budget composition
-  (`build_thinking`, effort clamp, `build_output_config`) + post-merge body
-  reconciliation (`merge_provider_extras`,
-  `drop_redact_beta_for_display`, `reconcile_output_config_effort`,
-  `strip_thinking_when_tool_choice_forces_use`); the sampling strip
-  `normalize_claude_sampling`, which drops `temperature`/`top_p` (keeping
-  `stop_sequences`) as the LAST body mutation on the own-OAuth
-  `api.anthropic.com` lane, called from both `complete` and `stream` and
-  emitting one names-only DEBUG event per affected request; also the two
-  capability-beta unions, each gating its flag on the ASSEMBLED body as a
-  server requirement rather than a client-opted beta: structured-outputs (`body_has_output_config_format` +
-  `union_structured_outputs_beta` for the header carrier; the Bedrock body
-  carriers use `bedrock::betas::union_feature_implied_betas`) keyed on
-  `output_config.format`, and effort (`body_has_output_config_effort` +
-  `union_effort_beta`, own-OAuth lane only) keyed on `output_config.effort`;
-  also `MAX_THINKING_BUDGET_READER_KINDS` +
-  `egress_reads_max_thinking_budget` -- the single source for which provider
-  kinds read the operator budget cap, sited beside the one place that reads
-  it and welded to the reaching lanes by
-  `extras_budget_reader_kinds_tests.rs`, so the router's inert-knob config
-  diagnostic keeps no second list of kinds
+- `src/anthropic_api/extras.rs` -- the one Anthropic-shape `thinking`
+  emission path (`compose_thinking`, `shipped_thinking`, public
+  `emitted_thinking_type`, `is_active_thinking_type`, `build_thinking`),
+  effort (`reclamp_client_effort`, `client_sent_output_config_effort`,
+  `build_output_config`, `reconcile_output_config_effort`), post-merge body
+  passes (`merge_provider_extras`, `drop_redact_beta_for_display`,
+  `normalize_claude_sampling`), the capability-beta unions
+  (`union_structured_outputs_beta`, `union_effort_beta`), and
+  `MAX_THINKING_BUDGET_READER_KINDS` / `egress_reads_max_thinking_budget`
 - `src/anthropic_api/output_schema.rs` -- surgical repair of the ONE field
   Anthropic requires on every object in `output_config.format.schema`:
   `inject_additional_properties_false` walks the ASSEMBLED body (after the
@@ -1081,7 +1074,8 @@ license.
   from `ChatRequest` via system/messages/tools/extras submodules; owns this
   lane's single `record_translation_lane_seen` site (bumped before the first
   fallible step, so a rejected request still counts toward the drop rate) and
-  counts the `cache_control_unsupported` drop once per request
+  counts the `cache_control_unsupported` and `thinking_type_unrepresentable`
+  drops once per request
 - `src/openai_responses/system.rs` -- canonical `system` and `Role::System`
   message text -> Responses `instructions` string
 - `src/openai_responses/request_system_role_tests.rs` -- `include!`d into
@@ -1351,7 +1345,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   when the translated transcript carries a `toolResult` but no tools survive;
   drops non-custom (Anthropic builtin) tools with a counted verdict
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
-  (thinking, anthropic_beta, cache_control, output_config); `thinking.display`
+  (thinking, anthropic_beta, cache_control, output_config); `insert_thinking`
+  composes the bag `thinking` through `anthropic_api`'s `compose_thinking`;
+  `thinking.display`
   rides verbatim, and display `updates` gains its beta through the shared
   `union_feature_implied_betas`; a withheld client beta counts once
   per request as `anthropic_beta_rejected_by_bedrock` on the drop counter;
@@ -2852,8 +2848,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/replay_strip_tests.rs`
 - `src/router/field_repair.rs` -- the reactive L0 envelope-field repair the
   three dispatch arms drive, and the counterpart of `replay_repair` for the
-  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (one
-  grounded row today: `FieldRepairRow { path, surface, transform, class,
+  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (three
+  grounded rows today: the `thinking.enabled.display` Drop and the
+  `thinking.type.enabled` / `thinking.type.disabled` Rewrites over
+  `FieldSurface::AnthropicThinkingType`; `FieldRepairRow { path, surface, transform, class,
   count_tokens_validates }` -- the qualified dotted path a real captured
   rejection named, the private `FieldSurface` enum naming the request-side
   carriers that produce that wire field, the `FieldTransform` (`Drop`, or
@@ -2889,7 +2887,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   A unit-test build appends `TEST_FIELD_REPAIRS` -- one prefix-impacting row whose
   surface is a system prompt matching the EXACT `TEST_PREFIX_SENTINEL` text --
   through `FieldRepairTable::default()`, which is what keeps every branch of those gates
-  reachable while the grounded table ships no content row. The sentinel is what
+  reachable while no grounded row is prefix-impacting. The sentinel is what
   SCOPES it: a broad "has a system prompt" predicate would give every fixture in
   the workspace that sets `system` a closed-table row production cannot produce,
   plus the decisions, feature keys, and reactive candidates that follow from one
@@ -2898,7 +2896,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   answers `true` unconditionally, so a row would make every test request carry
   it; it reaches `apply`'s fail-closed branch through
   `apply_sole_candidate_for_tests` -> `apply_candidate` instead. The grounded
-  table's SIZE and its row's class both stay asserted, so a permanent row remains
+  table's SIZE and each row's class both stay asserted, so a permanent row remains
   a deliberate edit.
   `FieldRepairTable` is THE single row source: a value held by the learned
   registry every Router generation shares (`Router::field_repair_table`), passed
@@ -3374,9 +3372,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   FieldRepairRow, tier: SignalTier, kind: RejectionKind, accepted:
   Option<&'static str> }`. Reads
   the carried parse (never the body text) on 400 / 422 only, for
-  `anthropic-api` (location prefix `<path>: ...` and `"a.b" is not
-  supported ... Use "x.y"` inside an `invalid_request_error`), `bedrock`
-  (the same two shapes on the flat `{"message"}` body after one Converse
+  `anthropic-api` (location prefix `<path>: ...`, `"a.b" is not
+  supported ... Use "x.y"`, and the thinking off-switch template
+  `thinking_off_switch`, inside an `invalid_request_error`), `bedrock`
+  (the same three shapes on the flat `{"message"}` body after one Converse
   errors wrapper is stripped) and `openai-compat` (`error.param`, or the
   exact singular `Unsupported parameter: '<x>' is not supported with this
   model.` template; the plural NIM `Unsupported parameter(s): x` is a
@@ -7315,10 +7314,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   egress to re-emit, while `omitted` / `updates` / `summarized` also
   derive canonical `reasoning.exclude` and any other string leaves it
   unset plus one sanitized DEBUG; only a non-string `display` earns a
-  local 400 naming the type it got. `translate_thinking`'s catch-all arm
-  accepts an unrecognized `thinking.type` (no local 400), collapses it to
-  the default `ReasoningConfig`, and emits one sanitized WARN naming the
-  token -- the detector for whether a raw-forward carrier is ever warranted
+  local 400 naming the type it got. The client's `thinking` object fills
+  `routectl_internal.anthropic_thinking` (`AnthropicThinking`, via
+  `ThinkingObject::from_client`); `translate_thinking` maps it to canonical
+  `ReasoningConfig`, an unrecognized `thinking.type` collapsing to the default
+  with one sanitized WARN
 - `src/ingress/anthropic/render.rs` -- canonical `ChatResponse` -> Anthropic
   Messages response body shape
 - `src/ingress/anthropic/stream_edits.rs` -- response edits the Anthropic
