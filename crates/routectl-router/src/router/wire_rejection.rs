@@ -13,6 +13,9 @@
 //! at all, which the learning engine reads to leave alone a rejection naming
 //! a path routectl never sent.
 //!
+//! A rejected token count is only read for its site: its body is a
+//! projection of the client's, so it is never compared or recorded.
+//!
 //! Reads only. Nothing here changes the request, the error, or the learned
 //! state the repair settles.
 
@@ -113,6 +116,45 @@ impl Router {
             state_key: sanitize_for_log(&target.state_key),
             repairs_before: meta.field_repairs.len(),
         });
+        Some(site)
+    }
+
+    /// Where on the wire a rejected token count points, read from the
+    /// attempt's `tap`, warning when the path is laid to a routectl edit.
+    /// `None` when there is no tap, no lane, no rejection status, or no
+    /// record to read.
+    ///
+    /// Reads the site only. A count body is an allowlist projection of the
+    /// client's, so a fidelity compare would report every field it omits as
+    /// lost: nothing is compared, no counter or sampler slot is touched, and
+    /// no rejection or revert is held on the dispatch meta.
+    ///
+    /// Must run before anything mutates `attempt_req` or drains `tap`.
+    pub(super) fn read_count_rejection_site(
+        &self,
+        target: &DispatchTarget,
+        attempt_req: &ChatRequest,
+        tap: Option<&WireTap>,
+        err: &Error,
+    ) -> Option<RejectionSite> {
+        let (Some(tap), Some(lane)) = (tap, attempt_lane(target, attempt_req)) else {
+            return None;
+        };
+        let status = upstream_facts(err)
+            .status
+            .filter(|status| REJECTION_STATUSES.contains(status))?;
+        let rejected = rejected_wire_path(
+            target.provider_kind.unwrap_or_default(),
+            status,
+            err.parsed_body(),
+        );
+        let site = lend_request_record(attempt_req, tap, |record| {
+            Some(read_site(lane, &record?, rejected.as_ref(), 0))
+        })?;
+        if let Some(attribution) = EditAttribution::of(&site.matched_edit, site.provenance) {
+            let path = rejected.map_or_else(WirePath::root, |named| named.wire);
+            self.warn_edit_rejected(lane, &path, attribution);
+        }
         Some(site)
     }
 

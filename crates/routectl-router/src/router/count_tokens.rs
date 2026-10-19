@@ -29,6 +29,10 @@
 //!   mutated with no record of it -- the state a warm rebuild resurrects a
 //!   verdict from.
 //!
+//! Each provider call carries a bare wire tap when the request holds the
+//! client's body, so a rejection can be laid to a declared routectl edit
+//! and reverted; the tap is never admitted to the wire check.
+//!
 //! A count admits no beta report or untranslated-capability report, and the
 //! filter's re-probe admissions are settled before the walk, so the engine
 //! holds an inert re-probe guard and settles successes against empty
@@ -491,6 +495,7 @@ impl Router {
             // sees counting still activates -- reading the pre-flight
             // capture and the per-target body actually being sent.
             self.on_admitted_request(&target, &probe_fields, &attempt_req);
+            let wire_tap = Self::install_count_wire_tap(&mut attempt_req);
             let result = provider.count_tokens(attempt_req.clone()).await;
             attempts_made += 1;
             match result {
@@ -610,13 +615,19 @@ impl Router {
                     // before the `continue` re-gates, and never debit the
                     // breaker -- a repairable rejection is a caller-shaped
                     // fault, not this seat's health signal.
+                    let site = self.read_count_rejection_site(
+                        &target,
+                        &attempt_req,
+                        wire_tap.as_ref(),
+                        &e,
+                    );
                     let rejection = Rejection {
                         err: &e,
                         class: &cf,
                         native_class: &original_class,
                         target: &target,
                         client_req: req,
-                        site: None,
+                        site,
                         transcript_rejection,
                     };
                     if let FailureDecision::Retry { .. } =
@@ -696,3 +707,7 @@ impl Router {
 #[cfg(test)]
 #[path = "count_tokens_tests.rs"]
 mod count_tokens_tests;
+
+#[cfg(test)]
+#[path = "count_tokens_wire_tests.rs"]
+mod count_tokens_wire_tests;
