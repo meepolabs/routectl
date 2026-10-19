@@ -1,14 +1,15 @@
 //! Tests for the native Anthropic thinking carrier and the reasoning-off
 //! rule on [`ReasoningConfig`].
 
-use std::sync::Arc;
-
 use serde_json::json;
 
 use super::*;
 
 fn sent_enabled() -> AnthropicThinking {
-    AnthropicThinking::Sent(Arc::new(json!({"type": "enabled", "budget_tokens": 1024})))
+    AnthropicThinking::Sent(
+        ThinkingObject::from_client(json!({"type": "enabled", "budget_tokens": 1024}))
+            .expect("object"),
+    )
 }
 
 #[test]
@@ -37,7 +38,7 @@ fn cloning_a_request_shares_the_sent_thinking_allocation() {
     ) else {
         panic!("both requests must carry Sent");
     };
-    assert!(Arc::ptr_eq(original, copy));
+    assert!(original.shares_allocation_with(copy));
 }
 
 #[test]

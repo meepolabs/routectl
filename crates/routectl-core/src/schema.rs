@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::cache_control::CacheControl;
 use crate::content_part::ContentPart;
@@ -599,9 +599,70 @@ pub enum AnthropicThinking {
     NotCaptured,
     /// An Anthropic client sent a request with no `thinking` field.
     SentNone,
-    /// The client's `thinking` object with `display` removed. `Arc` so the
-    /// per-attempt and fallback clones are a refcount bump.
-    Sent(Arc<Value>),
+    /// The client's `thinking` object with `display` removed; the type
+    /// enforces both. Cloning is a refcount bump.
+    Sent(ThinkingObject),
+}
+
+/// Key the client's `display` choice arrives under. It travels separately
+/// (as `RoutectlInternal::anthropic_thinking_display`), so it never lives
+/// inside a [`ThinkingObject`].
+const DISPLAY_KEY: &str = "display";
+
+/// Key holding the thinking mode (`enabled`, `adaptive`, `disabled`, ...).
+const TYPE_KEY: &str = "type";
+
+/// A client's Anthropic `thinking` object minus `display`.
+///
+/// The only constructor, [`ThinkingObject::from_client`], refuses anything
+/// that is not a JSON object and removes `display`, and the only mutator,
+/// [`ThinkingObject::set_thinking_type`], cannot reintroduce it, so a
+/// reader never re-checks either property. Every other key, known or not,
+/// is kept verbatim.
+///
+/// Cloning is a refcount bump; a mutation copies the object only when
+/// another clone still shares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThinkingObject(Arc<Map<String, Value>>);
+
+impl ThinkingObject {
+    /// Build from the client's full `thinking` value.
+    ///
+    /// Returns `None` when the value is not a JSON object (null, a scalar,
+    /// an array). Removes the top-level `display` key; a `display` nested
+    /// inside another key is client data and is kept. An empty object is
+    /// accepted: it is what the client sent, and the upstream judges it.
+    ///
+    /// The removed `display` is discarded, so a caller that needs it reads
+    /// it from `thinking` before handing the value over.
+    pub fn from_client(thinking: Value) -> Option<Self> {
+        let Value::Object(mut object) = thinking else {
+            return None;
+        };
+        object.remove(DISPLAY_KEY);
+        Some(Self(Arc::new(object)))
+    }
+
+    /// The object, for an egress to emit as the wire `thinking`.
+    pub fn as_object(&self) -> &Map<String, Value> {
+        &self.0
+    }
+
+    /// The `type` value, or `None` when it is absent or not a string.
+    pub fn thinking_type(&self) -> Option<&str> {
+        self.0.get(TYPE_KEY).and_then(Value::as_str)
+    }
+
+    /// Replace `type`, inserting it when absent. Other clones keep the
+    /// value they had.
+    pub fn set_thinking_type(&mut self, thinking_type: impl Into<String>) {
+        Arc::make_mut(&mut self.0).insert(TYPE_KEY.to_owned(), Value::String(thinking_type.into()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_allocation_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// Fixed redaction placeholder shared by `ForwardedBearer`'s `Debug` and
@@ -1830,3 +1891,7 @@ mod tests {
 #[cfg(test)]
 #[path = "schema_thinking_tests.rs"]
 mod thinking_tests;
+
+#[cfg(test)]
+#[path = "schema_thinking_object_tests.rs"]
+mod thinking_object_tests;

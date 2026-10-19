@@ -1530,7 +1530,7 @@ pub fn routectl_core::safe_token::is_safe_token(&str) -> bool
 pub mod routectl_core::schema
 pub enum routectl_core::schema::AnthropicThinking
 pub routectl_core::schema::AnthropicThinking::NotCaptured
-pub routectl_core::schema::AnthropicThinking::Sent(alloc::sync::Arc<serde_json::value::Value>)
+pub routectl_core::schema::AnthropicThinking::Sent(routectl_core::schema::ThinkingObject)
 pub routectl_core::schema::AnthropicThinking::SentNone
 impl core::clone::Clone for routectl_core::schema::AnthropicThinking
 pub fn routectl_core::schema::AnthropicThinking::clone(&self) -> routectl_core::schema::AnthropicThinking
@@ -2452,6 +2452,51 @@ impl<T> core::convert::From<T> for routectl_core::schema::RoutectlInternal
 pub fn routectl_core::schema::RoutectlInternal::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::schema::RoutectlInternal
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::RoutectlInternal
+pub struct routectl_core::schema::ThinkingObject(_)
+impl routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::as_object(&self) -> &serde_json::map::Map<alloc::string::String, serde_json::value::Value>
+pub fn routectl_core::schema::ThinkingObject::from_client(serde_json::value::Value) -> core::option::Option<Self>
+pub fn routectl_core::schema::ThinkingObject::set_thinking_type(&mut self, impl core::convert::Into<alloc::string::String>)
+pub fn routectl_core::schema::ThinkingObject::thinking_type(&self) -> core::option::Option<&str>
+impl core::clone::Clone for routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::clone(&self) -> routectl_core::schema::ThinkingObject
+impl core::cmp::Eq for routectl_core::schema::ThinkingObject
+impl core::cmp::PartialEq for routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::eq(&self, &routectl_core::schema::ThinkingObject) -> bool
+impl core::fmt::Debug for routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::schema::ThinkingObject
+impl core::marker::Freeze for routectl_core::schema::ThinkingObject
+impl core::marker::Send for routectl_core::schema::ThinkingObject
+impl core::marker::Sync for routectl_core::schema::ThinkingObject
+impl core::marker::Unpin for routectl_core::schema::ThinkingObject
+impl core::marker::UnsafeUnpin for routectl_core::schema::ThinkingObject
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::schema::ThinkingObject
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::schema::ThinkingObject
+impl<T, U> core::convert::Into<U> for routectl_core::schema::ThinkingObject where U: core::convert::From<T>
+pub fn routectl_core::schema::ThinkingObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::schema::ThinkingObject where U: core::convert::Into<T>
+pub type routectl_core::schema::ThinkingObject::Error = core::convert::Infallible
+pub fn routectl_core::schema::ThinkingObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::schema::ThinkingObject where U: core::convert::TryFrom<T>
+pub type routectl_core::schema::ThinkingObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::schema::ThinkingObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::schema::ThinkingObject where T: core::clone::Clone
+pub type routectl_core::schema::ThinkingObject::Owned = T
+pub fn routectl_core::schema::ThinkingObject::clone_into(&self, &mut T)
+pub fn routectl_core::schema::ThinkingObject::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::schema::ThinkingObject where T: 'static + ?core::marker::Sized
+pub fn routectl_core::schema::ThinkingObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::schema::ThinkingObject where T: ?core::marker::Sized
+pub fn routectl_core::schema::ThinkingObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::schema::ThinkingObject where T: ?core::marker::Sized
+pub fn routectl_core::schema::ThinkingObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::schema::ThinkingObject where T: core::clone::Clone
+pub unsafe fn routectl_core::schema::ThinkingObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::schema::ThinkingObject
+impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ThinkingObject
 pub struct routectl_core::schema::TokenCount
 pub routectl_core::schema::TokenCount::extras: serde_json::map::Map<alloc::string::String, serde_json::value::Value>
 pub routectl_core::schema::TokenCount::input_tokens: u32
@@ -4368,7 +4413,7 @@ pub const routectl_core::wire_check::WILDCARD_SEGMENT: &str
 pub fn routectl_core::wire_check::diff(&serde_json::value::Value, &serde_json::value::Value, routectl_core::wire_check::LaneClass, &[routectl_core::wire_check::DeclaredEdit]) -> routectl_core::wire_check::DiffOutcome
 pub enum routectl_core::AnthropicThinking
 pub routectl_core::AnthropicThinking::NotCaptured
-pub routectl_core::AnthropicThinking::Sent(alloc::sync::Arc<serde_json::value::Value>)
+pub routectl_core::AnthropicThinking::Sent(routectl_core::schema::ThinkingObject)
 pub routectl_core::AnthropicThinking::SentNone
 impl core::clone::Clone for routectl_core::schema::AnthropicThinking
 pub fn routectl_core::schema::AnthropicThinking::clone(&self) -> routectl_core::schema::AnthropicThinking
@@ -7475,6 +7520,51 @@ pub fn routectl_core::system_content::SystemBlock::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::system_content::SystemBlock where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::system_content::SystemBlock
 impl<T> tracing::instrument::WithSubscriber for routectl_core::system_content::SystemBlock
+pub struct routectl_core::ThinkingObject(_)
+impl routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::as_object(&self) -> &serde_json::map::Map<alloc::string::String, serde_json::value::Value>
+pub fn routectl_core::schema::ThinkingObject::from_client(serde_json::value::Value) -> core::option::Option<Self>
+pub fn routectl_core::schema::ThinkingObject::set_thinking_type(&mut self, impl core::convert::Into<alloc::string::String>)
+pub fn routectl_core::schema::ThinkingObject::thinking_type(&self) -> core::option::Option<&str>
+impl core::clone::Clone for routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::clone(&self) -> routectl_core::schema::ThinkingObject
+impl core::cmp::Eq for routectl_core::schema::ThinkingObject
+impl core::cmp::PartialEq for routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::eq(&self, &routectl_core::schema::ThinkingObject) -> bool
+impl core::fmt::Debug for routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::schema::ThinkingObject
+impl core::marker::Freeze for routectl_core::schema::ThinkingObject
+impl core::marker::Send for routectl_core::schema::ThinkingObject
+impl core::marker::Sync for routectl_core::schema::ThinkingObject
+impl core::marker::Unpin for routectl_core::schema::ThinkingObject
+impl core::marker::UnsafeUnpin for routectl_core::schema::ThinkingObject
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::schema::ThinkingObject
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::schema::ThinkingObject
+impl<T, U> core::convert::Into<U> for routectl_core::schema::ThinkingObject where U: core::convert::From<T>
+pub fn routectl_core::schema::ThinkingObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::schema::ThinkingObject where U: core::convert::Into<T>
+pub type routectl_core::schema::ThinkingObject::Error = core::convert::Infallible
+pub fn routectl_core::schema::ThinkingObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::schema::ThinkingObject where U: core::convert::TryFrom<T>
+pub type routectl_core::schema::ThinkingObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::schema::ThinkingObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::schema::ThinkingObject where T: core::clone::Clone
+pub type routectl_core::schema::ThinkingObject::Owned = T
+pub fn routectl_core::schema::ThinkingObject::clone_into(&self, &mut T)
+pub fn routectl_core::schema::ThinkingObject::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::schema::ThinkingObject where T: 'static + ?core::marker::Sized
+pub fn routectl_core::schema::ThinkingObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::schema::ThinkingObject where T: ?core::marker::Sized
+pub fn routectl_core::schema::ThinkingObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::schema::ThinkingObject where T: ?core::marker::Sized
+pub fn routectl_core::schema::ThinkingObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::schema::ThinkingObject where T: core::clone::Clone
+pub unsafe fn routectl_core::schema::ThinkingObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::schema::ThinkingObject
+pub fn routectl_core::schema::ThinkingObject::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::schema::ThinkingObject
+impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ThinkingObject
 pub struct routectl_core::TokenCount
 pub routectl_core::TokenCount::extras: serde_json::map::Map<alloc::string::String, serde_json::value::Value>
 pub routectl_core::TokenCount::input_tokens: u32

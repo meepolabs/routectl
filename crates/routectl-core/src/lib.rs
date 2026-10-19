@@ -95,7 +95,7 @@ pub use schema::{
     AnthropicThinking, CacheCreation, ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice,
     ChunkDelta, ForwardedBearer, Message, MessageContent, Reasoning, ReasoningConfig,
     ReasoningDetail, ReasoningDetailKind, RequestProvenance, ResponsesPassthroughItem, Role,
-    RoutectlInternal, TokenCount, Usage, UsageDelta,
+    RoutectlInternal, ThinkingObject, TokenCount, Usage, UsageDelta,
 };
 pub use schema_opaque::OpaqueSseEvent;
 pub use system_content::{SystemBlock, SystemContent};
