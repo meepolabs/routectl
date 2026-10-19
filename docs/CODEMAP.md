@@ -693,11 +693,11 @@ license.
   count_tokens field allowlist). Re-exports the public construction surface
   (`AnthropicApiProvider`, `AnthropicApiConfig`, `AuthKind`, plus `MantleAuth`
   under cfg `bedrock`, re-exported from `crate::mantle`) from `client.rs` so
-  downstream `anthropic_api::` paths are unchanged. On the mantle lane (cfg
-  `bedrock`) all three HTTP paths (`complete`, `stream`, `count_tokens`)
-  serialize the body to bytes and `sign_mantle` the built request BEFORE the
-  header trace and execute -- `count_tokens` drops its `.json()` unsigned
-  exemption on this lane (SigV4 needs a hashable body) -- and each records the
+  downstream `anthropic_api::` paths are unchanged. All three HTTP paths
+  (`complete`, `stream`, `count_tokens`) serialize the body to bytes once and
+  deposit exactly those bytes on the attempt's wire tap; on the mantle lane
+  (cfg `bedrock`) they `sign_mantle` the built request over the same bytes
+  BEFORE the header trace and execute, and each records the
   lane span fields; `probe` on a mantle provider routes to `mantle::probe`
   (credential-resolve, no inference-host dial) instead of the `x-api-key`
   `/v1/models` GET
@@ -2712,9 +2712,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and then walk the resolved
   chain (from `chain::dispatch_chain_for_request`) attempting each
   `DispatchTarget`, retrying within a provider per `RetryPolicy` with
-  exponential backoff (`add_jitter`/`mul_duration`); the complete error arm
-  takes its park/debit and same-provider retry decisions from
-  `outcome_rule` (a small honored reset becomes the next sleep's floor; a
+  exponential backoff (`add_jitter`/`mul_duration`); both error arms take
+  their park/debit decision from `outcome_rule` (`breaker_outcome`, applied
+  through `apply_breaker_outcome`), and the complete arm also takes its
+  same-provider retry from it (a small honored reset becomes the next sleep's floor; a
   larger one parks the provider via the breaker instead). `run_with_timeout`,
   `wrap_with_breaker_accounting` (settles a post-content error frame once: a
   non-probe stream debits whatever the class, a probe stream applies
@@ -2813,12 +2814,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   per-request degradation WARN. Within `complete_inner` and `stream_inner`
   the per-target learner state and the replay / field / canary / generic
   arbitration live in `learn_engine::AttemptLearning` (one `on_rejection` /
-  `on_success` per walk); `count_tokens_try_seat` still owns its OWN replay
-  and field branches, and the cross-walk tests are what catch drift between
-  the token-count walk and the engine. Both chain loops declare the shared
+  `on_success` per walk), the same engine each `count_tokens_try_seat` seat
+  holds on the `CountTokens` surface. Both chain loops declare the shared
   `repair_budget::RepairBudget` above themselves; every arm's own conditions
   gate first and the CHARGE happens inside the transform
-  (`FieldRepairPlan::apply` for the field kind), so the repair count is bounded
+  (`FieldRepairPlan::apply_named` for the field kind), so the repair count is bounded
   per REQUEST rather than per target and a transform that changed nothing costs
   nothing. Reasoning-dialect fidelity
   guard (moved here from the providers crate so per-egress normalize's
@@ -2944,14 +2944,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   resident verdict while a rejected one commits. It is NOT a pre-flight
   rewrite: an acting verdict refuses the slot and the request dispatches
   unchanged. `rejected_field` (through the learning engine's
-  `FieldRowProposer`; `FieldRepairPlan::apply` on the token-count walk) is
+  `FieldRowProposer`, on all three walks) is
   the arm's repair condition and reads the
   NATIVE failure class, never the operator-remapped one -- a
   `[class_overrides]` entry states how a status is ROUTED, so reading it would
   let an override turn a 429 or 503 into a field repair.
   `Router::rejection_names_field_surface` is its surface-filtered form, kept
   for the probe re-check's `probe_failure_class`.
-  `FieldRepairPlan::apply` owns the whole effect transactionally, ordered
+  `FieldRepairPlan::apply_named` owns the whole effect transactionally, ordered
   select-check-mutate-charge-release: SELECT the admitted candidate the
   rejection names (refusing outright when it names none, and refusing a second
   call outright once one row has been repaired), re-check presence, CHECK the
@@ -3115,7 +3115,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a row on a claim a carry already superseded).
   `Router::canary_repaired_retry(plan, attempt_req, meta, budget, named, err)`
   is the canary's same-field repair, all-or-nothing like the
-  reactive `FieldRepairPlan::apply`, and it draws the request's shared
+  reactive `FieldRepairPlan::apply_named`, and it draws the request's shared
   `RepairBudget` like every other repair (`can_draw` before the drop, `draw`
   after it). Its `named` is
   the field-row proposal the learning engine resolved from the NATIVE failure
@@ -3255,7 +3255,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `first_target_oauth_id`, backing the discovery-time credential check in
   `handlers/models.rs`
 - `src/router/learn_engine.rs` -- per-target learner state for one chain
-  iteration of `complete_inner` / `stream_inner`: `AttemptLearning` owns the
+  iteration of `complete_inner` / `stream_inner`, or one
+  `count_tokens_try_seat` seat: `AttemptLearning` owns the
   replay and envelope-field carry plans, the held `FieldPreflightPlan` (canary
   repair + settlement only on the `Complete` surface), the learned re-probe
   settle guard and each repair branch's repaired-state flags; the learn dedupe
@@ -3352,57 +3353,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   path `routectl_router::router::RouteTargetStatus`), `Router::status_targets`
   (per-target gate + seat snapshot), `Router::seat_count_for`, and the private
   `gate_status_for` gate read
-- `src/router/count_tokens.rs` -- the token-counting dispatch path
-  (`Router::count_tokens` + `count_tokens_walk` + `count_tokens_try_seat`):
-  walks past count_tokens-incapable targets, runs no reducer/cache, so
-  it never touches the would-trim seam. Owns the private
-  `seat_can_count_tokens` (egress kind + upstream model id -> capable; a
-  `bedrock` seat needs an Anthropic-family model id) and the `pub(super)`
-  `CountSeatOutcome` (the per-seat walk outcome). Carries the third
-  reasoning-replay repair position: `plan_replay_carry` above the seat's
-  attempt loop, the strip-repair arm between auth recovery and the
-  capability/health settles (releasing and re-gating the probe slot like the
-  401 recovery, never debiting the breaker), and the body-free rebuild of a
-  classified replay rejection (`replay_rejection_body_free`, shared with the
-  messages walks) once the arm has declined, so no terminal error hands a
-  caller the rejection body. The repaired `attempt_req` is what the loop
-  re-dispatches and counts. The walk owns one request-scoped
-  `repair_budget::RepairBudget` and one `DispatchMeta` (for the calibration
-  re-stamp and the aggregated degradation WARN), threading both into every
-  seat; the bound is `2 * chain.len() + REPAIRS_PER_REQUEST` (single visit
-  per seat, plus a per-seat 401 retry, plus the per-REQUEST repair
-  allowance). A defective tool pairing is recorded
-  (`transcript_defect::record_transcript_defect`) and forwarded, never
-  refused; an upstream 400 or 422 on it skips the field repair and counts
-  once as parser-unlocalized.
-  TWO public entry points that differ BEHAVIORALLY, not just in return shape:
-  `count_tokens_with_meta` -> `CountedTokens` (result + `DispatchMeta`) is
-  SETTLING, and the result-only `Router::count_tokens` is NON-SETTLING. Both
-  share `count_tokens_settling`, which threads a
-  `field_repair::FieldSettlementMode` down to the admission. The returned meta
-  is what carries a settlement row to the capability-event sink, so a caller
-  that keeps none cannot settle: a persisted verdict whose row was dropped is
-  what a warm rebuild resurrects from, and a CLEARED verdict without a row is
-  resurrected by it. A non-settling walk still repairs (its count must describe
-  a body the upstream would accept) but holds no single-flight guard at all --
-  `FieldRepairPlan::guard` is `None`, so both settlements are structurally
-  no-ops rather than a mode flag re-checked at each settlement site.
-  Both repair kinds sit at this one position, and they differ in
-  reachability rather than wiring. The ENVELOPE-FIELD repair is reachable
-  (it acts on `anthropic-api`, exactly the lane `seat_can_count_tokens`
-  admits unconditionally), so it runs the full two-phase settlement and is
-  covered behaviorally in `src/router/field_repair_tests.rs`, including the
-  N-seat shared-ceiling test. The REASONING-REPLAY repair is not:
-  `seat_can_count_tokens` admits `anthropic-api` and Anthropic-family
-  `bedrock`, while the classifier's replay lift is closed over the kinds
-  with a captured envelope (`openai-responses`), and both read the same
-  `DispatchTarget::provider_kind`, so the sets are disjoint. That arm
-  therefore settles its carry by DROPPING the plan (releasing slots,
-  learning nothing) and records `repair_attempted` / `repair_succeeded`
-  without claiming `learned`; the disjointness itself is pinned in
-  `src/router/repair_budget_cross_walk_tests.rs`. Do not align it with the
-  field arm's settlement before making the class reachable -- a behavioral
-  test of an unreachable arm passes with the arm deleted
+- `src/router/count_tokens.rs` -- the token-counting dispatch path:
+  `Router::count_tokens` (result-only, NON-SETTLING) and
+  `count_tokens_with_meta` -> `CountedTokens` (SETTLING), both through
+  `count_tokens_settling`, which threads a `field_repair::FieldSettlementMode`
+  down to the seat's carry admission; `count_tokens_walk` skips seats
+  `seat_can_count_tokens` refuses (egress kind + upstream model id; a
+  `bedrock` seat needs an Anthropic-family id) and `count_tokens_try_seat`
+  returns a `CountSeatOutcome`. Runs no reducer/cache. Each seat holds one
+  `learn_engine::AttemptLearning` on the `CountTokens` surface (repairs,
+  revert and settlement are the engine's), installs a bare per-call tap
+  (`install_count_wire_tap`) that `read_count_rejection_site` reads on a
+  rejection, and settles the breaker through `outcome_rule::breaker_outcome`
+  and `apply_breaker_outcome`. The surface-specific learning rules are in the
+  module `//!` doc; the walk's wire behavior is covered in
+  `src/router/count_tokens_wire_tests.rs`
 - `src/router/rejection_parser.rs` -- the per-dialect rejection parser:
   `parse_rejection(provider_kind, status, Option<&ParsedErrorBody>) ->
   Option<NamedRejection>`, where `NamedRejection { row: &'static
@@ -3485,7 +3450,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   admission also checks the response, and `traced_translation_fold` adds a
   `folding_response` fold to a TRANSLATION-lane stream while the body trace is
   on; the charge is given back on drop unless
-  a successful attempt calls `SampleCharge::keep`), and
+  a successful attempt calls `SampleCharge::keep`), `install_count_wire_tap`
+  (a bare unadmitted tap per token-count provider call: no sampler, no
+  charge, never compared), and
   `Router::check_request_wire` (when the tap `is_admitted`, FIDELITY lanes diff
   the ingress JSON against the deposit, TRANSLATION lanes diff canonical
   `provider_extras`; no deposit records `incomplete`). Reads only; never
@@ -3512,7 +3479,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   revert's outcome from `DispatchMeta.wire_reverts` when one exists, else
   joins the field-repair outcome at dispatch end on the unmasked raw field
   path (never rendered) and records the ring entry (WARN on `unrepaired`,
-  deduped)
+  deduped). `Router::read_count_rejection_site` is the token-count form: it
+  reads only the site off the count's tap (plus the edit-rejected WARN),
+  with no compare, counter, sampler slot or pending rejection
 - `src/router/wire_response.rs` -- the response leg of the live wire check:
   `ResponseCheck` (public, opaque), carried on `DispatchMeta::response_check`
   from the serving attempt; the ingress renderer hands it the client document
@@ -4129,7 +4098,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   keeping the first real error and, between parked seats, the earliest deadline;
   `CountSeatOutcome::of_gate_refusal` skips a parked token-count seat and keeps
   a breaker or RPM refusal terminal
-- `src/router/outcome_rule.rs` -- the failure-outcome rule: the moved
+- `src/router/outcome_rule.rs` -- the failure-outcome rule:
   `INLOOP_RETRY_AFTER_CAP`, `rate_limit_reset_hint` (clamps an
   `Error::Upstream.retry_after` to the configured ceiling; a zero hint is
   `None`), `retry_cap_for`, `should_retry_same_provider`, and the
@@ -4154,7 +4123,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `breaker_effect` label), `force_open_breaker`/`breaker_open_for`, the
   `ProbeSlotGuard`/`ProbeAdmission`/`LearnedProbeGuard`/`ProbeAdmissionSet`
   RAII guards (`ProbeSlotGuard::release`/`owns_slot` free only an owned
-  slot; Drop-settles the probe slot on every outcome incl. cancellation), and
+  slot; `ProbeSlotGuard::settle` picks release or disarm from the applied
+  `BreakerOutcome`; Drop-settles the probe slot on every outcome incl. cancellation), and
   `emit_probe_settlement`/`is_probe_request`/`log_probe_fast_fail`
 - `src/router/state_slots.rs` -- runtime-state slot ownership: `SlotOwner`,
   `claim_state_slot`, `state_slot_refusal`
@@ -4179,7 +4149,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `rejection_parser::REJECTION_STATUSES` (400, 422), read before any lift or
   remap:
   `should_fallback` stops the walk, no same-seat retry, `AttemptLearning`
-  consults no learner, and count_tokens skips its field repair), and
+  consults no learner on any of the three walks), and
   `Router::observe_transcript_rejection` (counts it once per target as
   parser-unlocalized)
 - `src/router/transcript_defect_dispatch_tests.rs` -- child module of
@@ -6389,7 +6359,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ingress_handle` with `AnthropicIngress`
 - `src/handlers/messages_count_tokens.rs` -- `POST /v1/messages/count_tokens`
   proxy that walks the chain to the first seat able to count in the
-  caller's Anthropic tokenizer (`seat_can_count_tokens`)
+  caller's Anthropic tokenizer (`seat_can_count_tokens`); captures the
+  posted body via `capture_ingress_wire` right after parse
 - `src/handlers/responses.rs` -- `POST /v1/responses` thin wrapper around
   `ingress_handle` with `ResponsesIngress`
 - `src/handlers/ingress_handle.rs` -- generic ingress driver: parse + route +
