@@ -58,9 +58,8 @@ use super::types::{
 
 // Primitives used only by the orchestrator below.
 use super::extras::{
-    build_output_config, compose_thinking, is_active_thinking_type, merge_provider_extras,
-    reconcile_output_config_effort, reconcile_sampling_params, resolve_max_tokens,
-    strip_thinking_when_tool_choice_forces_use,
+    is_active_thinking_type, merge_provider_extras, reconcile_output_config_effort,
+    reconcile_sampling_params, resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
 };
 use super::messages::{SystemTurnPolicy, normalize_replay_invariants, translate_messages};
 use super::tools::{
@@ -72,10 +71,12 @@ use super::tools::{
 // the canonical-side Anthropic-shape primitives via
 // `crate::anthropic_api::request::<name>`; keeping these paths stable
 // means those call sites need no edits across the file split.
-// Only the Bedrock Converse egress consumes this re-export; this egress
-// composes its thinking through `compose_thinking`.
-#[cfg(feature = "bedrock")]
+// The Bedrock Converse egress composes its bag `thinking` and adaptive
+// effort through the same two functions this egress uses; its tests compare
+// against the canonical translation directly.
+#[cfg(all(test, feature = "bedrock"))]
 pub(crate) use super::extras::build_thinking;
+pub(crate) use super::extras::{build_output_config, compose_thinking};
 pub(crate) use super::system::translate_system;
 // The billing-aware lift is used by BOTH the anthropic-api orchestrator
 // below and the Bedrock Converse egress, so it is visible crate-wide and
@@ -1106,7 +1107,7 @@ mod thinking_display_carrier_tests;
 // Bedrock Invoke and count_tokens bodies.
 #[cfg(test)]
 #[path = "request_thinking_carrier_tests.rs"]
-mod thinking_carrier_tests;
+pub(crate) mod thinking_carrier_tests;
 
 // The sampling clamp and the public thinking-type read key off the emitted
 // thinking type.

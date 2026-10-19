@@ -3,7 +3,7 @@
 //! Mirrors `crate::anthropic_api::request::normalize` in shape but emits
 //! AWS camelCase + the `additionalModelRequestFields` envelope. Reuses
 //! the Anthropic-shape primitives (`translate_system`, `translate_tool`,
-//! `lift_legacy_system`, `strip_text_after_tool_use`, `build_thinking`)
+//! `lift_legacy_system`, `strip_text_after_tool_use`, `compose_thinking`)
 //! where the canonical-side mapping is identical, then adapts to AWS
 //! naming.
 //!
@@ -41,8 +41,7 @@ use serde_json::Value;
 use routectl_core::cache_control;
 use routectl_core::{ChatRequest, Result};
 
-use crate::anthropic_api::request::{build_thinking, clamp_sampling_for_thinking};
-use crate::anthropic_api::types::ThinkingConfig;
+use crate::anthropic_api::request::clamp_sampling_for_thinking;
 
 use super::super::BedrockConfig;
 use super::extras::build_additional_fields;
@@ -122,17 +121,14 @@ fn translate_tallied(
         build_additional_fields(cfg, req, tool_choice, fingerprint);
     repair_output_schema(cfg, additional_model_request_fields.as_mut())?;
 
-    // The sampling clamp must key off whether thinking ACTUALLY survives on
-    // the wire, not the provisional build_thinking result: build_additional_fields
-    // strips thinking when toolChoice forces tool use. Build the bag first, then
-    // inspect it -- clamping on the provisional value would force
-    // temperature=1.0 / drop top_p for a request that ships no thinking, diverging from the direct Anthropic path which
-    // restores caller sampling after its final thinking strip.
-    let thinking_survived = additional_model_request_fields
+    // The sampling clamp reads the thinking type the final bag carries:
+    // build_additional_fields strips thinking when toolChoice forces tool use,
+    // and the type it ships may be one the canonical reasoning cannot express.
+    let thinking_type = additional_model_request_fields
         .as_ref()
-        .and_then(Value::as_object)
-        .is_some_and(|o| o.contains_key("thinking"));
-    let inference_config = build_inference_config(cfg, req, thinking_survived);
+        .and_then(|bag| bag.pointer("/thinking/type"))
+        .and_then(Value::as_str);
+    let inference_config = build_inference_config(req, thinking_type);
 
     validate_breakpoints(req)?;
 
@@ -165,9 +161,8 @@ fn repair_output_schema(cfg: &BedrockConfig, bag: Option<&mut Value>) -> Result<
 }
 
 fn build_inference_config(
-    cfg: &BedrockConfig,
     req: &ChatRequest,
-    thinking_survived: bool,
+    thinking_type: Option<&str>,
 ) -> Option<InferenceConfig> {
     // Clamp sampling for thinking mode via the shared Anthropic-API helper:
     // Claude requires temperature=1.0 (and no top_p) while thinking, and
@@ -176,18 +171,9 @@ fn build_inference_config(
     // inferenceConfig independently, so it must call the same helper or the
     // clamp drifts.
     //
-    // Only clamp when thinking survived into the final bag. `build_thinking`'s
-    // provisional result may be stripped downstream (toolChoice forces a tool),
-    // and clamping on the provisional value would force
-    // temperature=1.0 / drop top_p even though no thinking ships -- matching
-    // the direct Anthropic path's reconcile_sampling_params, which restores
-    // caller sampling from the source request once no thinking survives.
-    let thinking = if thinking_survived {
-        build_thinking(req, cfg.adaptive_thinking.unwrap_or(false))
-    } else {
-        None
-    };
-    let thinking_type = thinking.as_ref().map(ThinkingConfig::wire_type);
+    // `thinking_type` is the type the final bag ships, `None` when no thinking
+    // survived; a stripped or inactive type restores the caller's sampling,
+    // matching the direct Anthropic path's reconcile_sampling_params.
     let (temperature, top_p) =
         clamp_sampling_for_thinking(thinking_type, req.temperature, req.top_p);
     let cfg_inference = InferenceConfig {
@@ -236,3 +222,7 @@ mod tests_parity;
 #[cfg(test)]
 #[path = "request_tests_output_schema.rs"]
 mod tests_output_schema;
+
+#[cfg(test)]
+#[path = "request_thinking_carrier_tests.rs"]
+mod tests_thinking_carrier;

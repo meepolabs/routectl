@@ -162,6 +162,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "bedrock/converse/request_tests_field_translation.rs",
     "bedrock/converse/request_tests_output_schema.rs",
     "bedrock/converse/request_tests_parity.rs",
+    "bedrock/converse/request_thinking_carrier_tests.rs",
     "bedrock/converse/response_history_compat_tests.rs",
     "gemini/cloud_project_id_tests.rs",
     "gemini/error_read_tests.rs",

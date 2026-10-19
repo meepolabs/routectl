@@ -33,7 +33,7 @@
 //! Helper reuse: this module borrows the canonical -> Anthropic-shape
 //! translation primitives from `crate::anthropic_api::request`
 //! (`translate_system`, `translate_tool`, `translate_custom_tool`,
-//! `build_thinking`) and adapts the result to the AWS Converse shape.
+//! `compose_thinking`) and adapts the result to the AWS Converse shape.
 //! Forward-compat catchalls in `ContentPart::Other` and `ToolDef::Other`
 //! are handled with the same warn-or-error policy as the openai-compat
 //! egress.

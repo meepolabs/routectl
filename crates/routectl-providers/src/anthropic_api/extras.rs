@@ -7,8 +7,9 @@
 //! shape (legacy `Enabled { budget_tokens }` vs Opus 4.7+ `Adaptive`),
 //! clamps the budget into Anthropic's `[1024, max_tokens-1]` window,
 //! applies the operator per-model cap, and pairs `Adaptive` with a
-//! top-level `output_config` via `build_output_config`. `build_thinking`
-//! is `pub(crate)` so the Bedrock Converse egress reuses it. (2) The
+//! top-level `output_config` via `build_output_config`. The Bedrock
+//! Converse egress composes its bag through `compose_thinking` and
+//! `build_output_config` too. (2) The
 //! post-merge body reconciliation: `merge_provider_extras` layers
 //! forward-compat extras in while shielding routectl-managed keys
 //! (`is_routectl_managed_key`), `reconcile_output_config_effort`
@@ -385,7 +386,7 @@ fn clamp_budget_to_legacy_window(budget: u32, max: u32, source: BudgetSource) ->
 /// `adaptive` is the operator's `supports_adaptive_thinking` knob, the same
 /// value `build_thinking` takes. An override applied to a forwarded object
 /// is declared on `tap`.
-pub(super) fn compose_thinking(
+pub fn compose_thinking(
     req: &ChatRequest,
     adaptive: bool,
     tap: Option<&WireTap>,
@@ -506,7 +507,7 @@ fn cap_forwarded_budget(
 /// Pair adaptive thinking with a top-level `output_config`. Returns
 /// `Some(OutputConfig)` only when the emitted thinking type is `adaptive`;
 /// otherwise `None`.
-pub(super) fn build_output_config(
+pub fn build_output_config(
     req: &ChatRequest,
     thinking: Option<&WireThinking>,
 ) -> Option<OutputConfig> {

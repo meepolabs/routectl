@@ -11,11 +11,12 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
+use routectl_core::{AnthropicThinking, ChatRequest, is_canonical_request_key, sanitize_for_log};
 
-use crate::anthropic_api::request::build_thinking;
-use crate::anthropic_api::request::{AnthropicFormat, DroppedFormatKeys};
-use crate::anthropic_api::types::ThinkingConfig;
+use crate::anthropic_api::request::{
+    AnthropicFormat, DroppedFormatKeys, build_output_config, compose_thinking,
+};
+use crate::anthropic_api::types::WireThinking;
 use crate::effort::clamp_effort_to_supported;
 
 use super::super::betas::{operator_floor, union_feature_implied_betas, withhold_betas};
@@ -259,8 +260,8 @@ fn insert_provider_extras(
 /// `output_config.format`, the shape AWS forwards verbatim to Claude. Uses
 /// the same shared converter as the Anthropic-API egress so both Claude
 /// seams emit the identical wire field. Merges into any `output_config`
-/// `insert_thinking` already wrote (adaptive effort), preserving that
-/// sibling; a caller-supplied `output_config.format` is left untouched.
+/// `insert_thinking` already wrote (its effort), preserving that sibling;
+/// a caller-supplied `output_config.format` is left untouched.
 ///
 /// Non-Claude Converse models do not honor `output_config.format`; the
 /// admission-time capability gate (an operator `[capability.overrides]`
@@ -289,43 +290,63 @@ fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) -> Dr
     }
 }
 
-/// Reuse build_thinking from the Anthropic egress so the legacy vs
-/// adaptive shape decision matches there. Adaptive thinking pairs with
-/// `output_config.effort`; Converse exposes it via the same bag.
+/// Compose the bag's `thinking` through the Anthropic egress's own
+/// `compose_thinking`, so Converse emits what that egress emits: an
+/// Anthropic client's object as sent, or a translation of canonical
+/// reasoning. `display` rides verbatim and an absent one stays absent:
+/// Converse accepted and honored the field on `enabled` and `adaptive`
+/// when measured live, and the upstream default is model-dependent.
 fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
-    let Some(thinking) = build_thinking(req, cfg.adaptive_thinking.unwrap_or(false)) else {
-        return;
-    };
-    let is_adaptive = matches!(thinking, ThinkingConfig::Adaptive { .. });
-    // `display` rides verbatim on both shapes and an absent one stays absent:
-    // Converse accepted and honored the field on `enabled` and `adaptive`
-    // when measured live, and the upstream default is model-dependent.
-    if let Ok(v) = serde_json::to_value(&thinking) {
+    let adaptive = cfg.adaptive_thinking.unwrap_or(false);
+    let thinking = compose_thinking(req, adaptive, crate::anthropic_api::wire_edits::tap_of(req));
+    if let Some(v) = thinking.as_ref().and_then(|t| serde_json::to_value(t).ok()) {
         bag.insert("thinking".to_string(), v);
     }
-    if is_adaptive {
-        // Clamp effort against the operator-declared effort_levels cap
-        // before inserting into the bag. Empty effort_levels = pass-through
-        // (current Bedrock Converse default). Mirrors the Anthropic-API
-        // egress behavior in derive_effort. A `None` clamp is reasoning-OFF
-        // (`effort: "none"`); `build_thinking` already returns `Disabled`
-        // for that (never Adaptive), so this branch is not reached with
-        // "none" -- but the guard keeps the wire free of an orphaned
-        // output_config.effort even if that invariant ever shifts.
-        let raw_effort = req
-            .reasoning
-            .as_ref()
-            .and_then(|r| r.effort.clone())
-            .unwrap_or_else(|| "medium".to_string());
-        if let Some(effort) =
-            clamp_effort_to_supported(&raw_effort, &req.routectl_internal.effort_levels)
-        {
-            bag.insert(
-                "output_config".to_string(),
-                serde_json::json!({"effort": effort.into_owned()}),
-            );
-        }
+    if let Some(effort) = output_config_effort(req, thinking.as_ref(), adaptive) {
+        bag.insert(
+            "output_config".to_string(),
+            serde_json::json!({"effort": effort}),
+        );
     }
+}
+
+/// The bag's `output_config.effort`.
+///
+/// Without an Anthropic client's thinking carrier, the Anthropic egress's
+/// `build_output_config` decides it (adaptive thinking only). With one, the
+/// client's effort is forwarded as sent beside whatever thinking type it
+/// sent, including "none"; an explicit non-empty `effort_levels` is the only
+/// thing that re-clamps it. A carrier request with no effort gets one only
+/// from the adaptive knob, which pairs its adaptive shape with one.
+fn output_config_effort(
+    req: &ChatRequest,
+    thinking: Option<&WireThinking>,
+    adaptive: bool,
+) -> Option<String> {
+    if matches!(
+        req.routectl_internal.anthropic_thinking,
+        AnthropicThinking::NotCaptured
+    ) {
+        return build_output_config(req, thinking).map(|oc| oc.effort);
+    }
+    match req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
+        Some(sent) => Some(reclamp_client_effort(
+            sent,
+            &req.routectl_internal.effort_levels,
+        )),
+        None if adaptive => build_output_config(req, thinking).map(|oc| oc.effort),
+        None => None,
+    }
+}
+
+/// `sent` clamped to an explicit `effort_levels`; an empty list, or an
+/// effort the clamp has no level for ("none"), passes through as sent.
+fn reclamp_client_effort(sent: &str, effort_levels: &[String]) -> String {
+    if effort_levels.is_empty() {
+        return sent.to_string();
+    }
+    clamp_effort_to_supported(sent, effort_levels)
+        .map_or_else(|| sent.to_string(), std::borrow::Cow::into_owned)
 }
 
 /// Merge anthropic_beta from canonical (header-lifted by the Anthropic
@@ -434,8 +455,9 @@ fn insert_operator_extras(
 /// the Converse-bag-specific keys that routectl writes from canonical
 /// fields:
 ///
-///   - `thinking`      -- built by `insert_thinking` from `req.reasoning`.
-///   - `output_config` -- written by the adaptive-thinking path.
+///   - `thinking`      -- composed by `insert_thinking` (the client's object
+///     or a translation of `req.reasoning`).
+///   - `output_config` -- its `effort` written by `insert_thinking`.
 ///
 /// Note: `anthropic_beta` and `cache_control` are already covered by
 /// `is_canonical_request_key` (they are `ChatRequest` wire fields) and
@@ -750,7 +772,7 @@ mod tests {
             .into(),
             max_tokens: Some(2048),
             reasoning: Some(ReasoningConfig {
-                effort: Some("medium".into()),
+                effort: Some("high".into()),
                 max_tokens: None,
                 exclude: None,
                 enabled: Some(true),

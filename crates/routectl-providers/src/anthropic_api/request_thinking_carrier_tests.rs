@@ -18,7 +18,7 @@ use super::normalize;
 /// `output_config.effort`: the canonical reasoning it derives per thinking
 /// type, the effort lift (with `output_config` kept in `provider_extras`),
 /// the `display` carrier, and the thinking carrier itself.
-pub(super) fn ingress_request(
+pub fn ingress_request(
     thinking: Option<Value>,
     effort: Option<&str>,
     max_tokens: u32,
