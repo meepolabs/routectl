@@ -793,7 +793,7 @@ license.
   `translate_tool`, `translate_system`, `lift_legacy_system_stripped`,
   `build_output_config`, `is_active_thinking_type` and (cfg `bedrock`)
   `compose_thinking`, `reclamp_client_effort`,
-  `client_sent_output_config_effort` for the Bedrock egress and `mod.rs`;
+  `client_sent_output_config_effort` for the Bedrock egress;
   also owns
   `drop_unrepresentable_output_format_keys`, the assembled-body scrub of the
   `output_config.format` keys Anthropic rejects (`name`, `strict`) -- that
