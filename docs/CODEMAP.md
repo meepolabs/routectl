@@ -2813,8 +2813,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`pub(super)`, also called by the token-count walk) fires the single
   per-request degradation WARN. Within `complete_inner` and `stream_inner`
   the per-target learner state and the replay / field / canary / generic
-  arbitration live in `learn_engine::AttemptLearning` (one `on_rejection` /
-  `on_success` per walk), the same engine each `count_tokens_try_seat` seat
+  arbitration live in `learn_engine::AttemptLearning` (one instance per target,
+  handling each rejection and the eventual success), the same engine each `count_tokens_try_seat` seat
   holds on the `CountTokens` surface. Both chain loops declare the shared
   `repair_budget::RepairBudget` above themselves; every arm's own conditions
   gate first and the CHARGE happens inside the transform
