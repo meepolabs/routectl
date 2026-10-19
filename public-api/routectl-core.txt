@@ -1528,6 +1528,51 @@ pub mod routectl_core::safe_token
 pub const routectl_core::safe_token::MAX_SAFE_TOKEN_LEN: usize
 pub fn routectl_core::safe_token::is_safe_token(&str) -> bool
 pub mod routectl_core::schema
+pub enum routectl_core::schema::AnthropicThinking
+pub routectl_core::schema::AnthropicThinking::NotCaptured
+pub routectl_core::schema::AnthropicThinking::Sent(alloc::sync::Arc<serde_json::value::Value>)
+pub routectl_core::schema::AnthropicThinking::SentNone
+impl core::clone::Clone for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::clone(&self) -> routectl_core::schema::AnthropicThinking
+impl core::cmp::Eq for routectl_core::schema::AnthropicThinking
+impl core::cmp::PartialEq for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::eq(&self, &routectl_core::schema::AnthropicThinking) -> bool
+impl core::default::Default for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::default() -> routectl_core::schema::AnthropicThinking
+impl core::fmt::Debug for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::schema::AnthropicThinking
+impl core::marker::Freeze for routectl_core::schema::AnthropicThinking
+impl core::marker::Send for routectl_core::schema::AnthropicThinking
+impl core::marker::Sync for routectl_core::schema::AnthropicThinking
+impl core::marker::Unpin for routectl_core::schema::AnthropicThinking
+impl core::marker::UnsafeUnpin for routectl_core::schema::AnthropicThinking
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::schema::AnthropicThinking
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::schema::AnthropicThinking
+impl<T, U> core::convert::Into<U> for routectl_core::schema::AnthropicThinking where U: core::convert::From<T>
+pub fn routectl_core::schema::AnthropicThinking::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::schema::AnthropicThinking where U: core::convert::Into<T>
+pub type routectl_core::schema::AnthropicThinking::Error = core::convert::Infallible
+pub fn routectl_core::schema::AnthropicThinking::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::schema::AnthropicThinking where U: core::convert::TryFrom<T>
+pub type routectl_core::schema::AnthropicThinking::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::schema::AnthropicThinking::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::schema::AnthropicThinking where T: core::clone::Clone
+pub type routectl_core::schema::AnthropicThinking::Owned = T
+pub fn routectl_core::schema::AnthropicThinking::clone_into(&self, &mut T)
+pub fn routectl_core::schema::AnthropicThinking::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::schema::AnthropicThinking where T: 'static + ?core::marker::Sized
+pub fn routectl_core::schema::AnthropicThinking::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::schema::AnthropicThinking where T: ?core::marker::Sized
+pub fn routectl_core::schema::AnthropicThinking::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::schema::AnthropicThinking where T: ?core::marker::Sized
+pub fn routectl_core::schema::AnthropicThinking::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::schema::AnthropicThinking where T: core::clone::Clone
+pub unsafe fn routectl_core::schema::AnthropicThinking::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::schema::AnthropicThinking
+impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::AnthropicThinking
 pub enum routectl_core::schema::MessageContent
 pub routectl_core::schema::MessageContent::Null
 pub routectl_core::schema::MessageContent::Parts(alloc::vec::Vec<routectl_core::content_part::ContentPart>)
@@ -2214,6 +2259,9 @@ pub routectl_core::schema::ReasoningConfig::effort: core::option::Option<alloc::
 pub routectl_core::schema::ReasoningConfig::enabled: core::option::Option<bool>
 pub routectl_core::schema::ReasoningConfig::exclude: core::option::Option<bool>
 pub routectl_core::schema::ReasoningConfig::max_tokens: core::option::Option<u32>
+impl routectl_core::schema::ReasoningConfig
+pub fn routectl_core::schema::ReasoningConfig::is_off(&self) -> bool
+pub fn routectl_core::schema::ReasoningConfig::is_off_effort(&str) -> bool
 impl core::clone::Clone for routectl_core::schema::ReasoningConfig
 pub fn routectl_core::schema::ReasoningConfig::clone(&self) -> routectl_core::schema::ReasoningConfig
 impl core::default::Default for routectl_core::schema::ReasoningConfig
@@ -2341,6 +2389,7 @@ pub fn routectl_core::schema::ResponsesPassthroughItem::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::schema::ResponsesPassthroughItem
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ResponsesPassthroughItem
 #[non_exhaustive] pub struct routectl_core::schema::RoutectlInternal
+pub routectl_core::schema::RoutectlInternal::anthropic_thinking: routectl_core::schema::AnthropicThinking
 pub routectl_core::schema::RoutectlInternal::anthropic_thinking_display: core::option::Option<alloc::string::String>
 pub routectl_core::schema::RoutectlInternal::background_probe: bool
 pub routectl_core::schema::RoutectlInternal::beta_repair_report: core::option::Option<routectl_core::BetaRepairReport>
@@ -4317,6 +4366,51 @@ pub const routectl_core::wire_check::MAX_WIRE_PATH_DEPTH: usize
 pub const routectl_core::wire_check::MAX_WIRE_PATH_LEN: usize
 pub const routectl_core::wire_check::WILDCARD_SEGMENT: &str
 pub fn routectl_core::wire_check::diff(&serde_json::value::Value, &serde_json::value::Value, routectl_core::wire_check::LaneClass, &[routectl_core::wire_check::DeclaredEdit]) -> routectl_core::wire_check::DiffOutcome
+pub enum routectl_core::AnthropicThinking
+pub routectl_core::AnthropicThinking::NotCaptured
+pub routectl_core::AnthropicThinking::Sent(alloc::sync::Arc<serde_json::value::Value>)
+pub routectl_core::AnthropicThinking::SentNone
+impl core::clone::Clone for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::clone(&self) -> routectl_core::schema::AnthropicThinking
+impl core::cmp::Eq for routectl_core::schema::AnthropicThinking
+impl core::cmp::PartialEq for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::eq(&self, &routectl_core::schema::AnthropicThinking) -> bool
+impl core::default::Default for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::default() -> routectl_core::schema::AnthropicThinking
+impl core::fmt::Debug for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::schema::AnthropicThinking
+impl core::marker::Freeze for routectl_core::schema::AnthropicThinking
+impl core::marker::Send for routectl_core::schema::AnthropicThinking
+impl core::marker::Sync for routectl_core::schema::AnthropicThinking
+impl core::marker::Unpin for routectl_core::schema::AnthropicThinking
+impl core::marker::UnsafeUnpin for routectl_core::schema::AnthropicThinking
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::schema::AnthropicThinking
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::schema::AnthropicThinking
+impl<T, U> core::convert::Into<U> for routectl_core::schema::AnthropicThinking where U: core::convert::From<T>
+pub fn routectl_core::schema::AnthropicThinking::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::schema::AnthropicThinking where U: core::convert::Into<T>
+pub type routectl_core::schema::AnthropicThinking::Error = core::convert::Infallible
+pub fn routectl_core::schema::AnthropicThinking::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::schema::AnthropicThinking where U: core::convert::TryFrom<T>
+pub type routectl_core::schema::AnthropicThinking::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::schema::AnthropicThinking::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::schema::AnthropicThinking where T: core::clone::Clone
+pub type routectl_core::schema::AnthropicThinking::Owned = T
+pub fn routectl_core::schema::AnthropicThinking::clone_into(&self, &mut T)
+pub fn routectl_core::schema::AnthropicThinking::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::schema::AnthropicThinking where T: 'static + ?core::marker::Sized
+pub fn routectl_core::schema::AnthropicThinking::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::schema::AnthropicThinking where T: ?core::marker::Sized
+pub fn routectl_core::schema::AnthropicThinking::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::schema::AnthropicThinking where T: ?core::marker::Sized
+pub fn routectl_core::schema::AnthropicThinking::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::schema::AnthropicThinking where T: core::clone::Clone
+pub unsafe fn routectl_core::schema::AnthropicThinking::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::schema::AnthropicThinking
+pub fn routectl_core::schema::AnthropicThinking::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::schema::AnthropicThinking
+impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::AnthropicThinking
 pub enum routectl_core::BreakpointPosition
 pub routectl_core::BreakpointPosition::Messages
 pub routectl_core::BreakpointPosition::System
@@ -6965,6 +7059,9 @@ pub routectl_core::ReasoningConfig::effort: core::option::Option<alloc::string::
 pub routectl_core::ReasoningConfig::enabled: core::option::Option<bool>
 pub routectl_core::ReasoningConfig::exclude: core::option::Option<bool>
 pub routectl_core::ReasoningConfig::max_tokens: core::option::Option<u32>
+impl routectl_core::schema::ReasoningConfig
+pub fn routectl_core::schema::ReasoningConfig::is_off(&self) -> bool
+pub fn routectl_core::schema::ReasoningConfig::is_off_effort(&str) -> bool
 impl core::clone::Clone for routectl_core::schema::ReasoningConfig
 pub fn routectl_core::schema::ReasoningConfig::clone(&self) -> routectl_core::schema::ReasoningConfig
 impl core::default::Default for routectl_core::schema::ReasoningConfig
@@ -7184,6 +7281,7 @@ pub fn routectl_core::schema::ResponsesPassthroughItem::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::schema::ResponsesPassthroughItem
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ResponsesPassthroughItem
 #[non_exhaustive] pub struct routectl_core::RoutectlInternal
+pub routectl_core::RoutectlInternal::anthropic_thinking: routectl_core::schema::AnthropicThinking
 pub routectl_core::RoutectlInternal::anthropic_thinking_display: core::option::Option<alloc::string::String>
 pub routectl_core::RoutectlInternal::background_probe: bool
 pub routectl_core::RoutectlInternal::beta_repair_report: core::option::Option<routectl_core::BetaRepairReport>

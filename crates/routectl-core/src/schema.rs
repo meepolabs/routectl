@@ -265,7 +265,8 @@ pub struct ResponsesPassthroughItem {
 /// holds for the resolved-knob fields and equally for the inbound capture
 /// fields (`claude_code_headers`, `stainless_headers`,
 /// `responses_input_passthrough`, `inbound_session_key`,
-/// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`), which
+/// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`,
+/// `anthropic_thinking`), which
 /// egresses read and re-emit deliberately rather than by serialization.
 /// The same holds for the per-request beta-repair fields the router sets
 /// (`withheld_betas`, `beta_repair_report`), the per-attempt
@@ -536,6 +537,17 @@ pub struct RoutectlInternal {
     /// inbound request carried no `thinking.display`.
     pub anthropic_thinking_display: Option<String>,
 
+    /// INBOUND Anthropic `thinking` object as the client sent it, minus
+    /// `display` (which stays in [`Self::anthropic_thinking_display`]).
+    /// Single writer: the Anthropic ingress.
+    ///
+    /// The canonical [`ReasoningConfig`] cannot tell adaptive from enabled
+    /// without a budget, cannot hold unknown thinking types or extra keys,
+    /// and cannot say the client sent no thinking at all. Readers that
+    /// emit or check an Anthropic-shape `thinking` read this carrier rather
+    /// than re-deriving the shape from [`ReasoningConfig`].
+    pub anthropic_thinking: AnthropicThinking,
+
     /// Client-lifted `anthropic-beta` flags the router decided this
     /// provider must not send. A provider removes these from the outbound
     /// beta set before emitting. Empty for library consumers.
@@ -574,6 +586,22 @@ pub struct RoutectlInternal {
     /// than anything a target lacks, so it must not be learned from. `None`
     /// when the transcript is correctly paired, and for library consumers.
     pub transcript_defect: Option<crate::tool_pairing::ToolPairingDefect>,
+}
+
+/// What an Anthropic client sent as `thinking`, in the three states a
+/// reader must tell apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AnthropicThinking {
+    /// Nothing was captured: a non-Anthropic ingress, or a library consumer
+    /// that built the request directly. Readers fall back to the canonical
+    /// [`ReasoningConfig`].
+    #[default]
+    NotCaptured,
+    /// An Anthropic client sent a request with no `thinking` field.
+    SentNone,
+    /// The client's `thinking` object with `display` removed. `Arc` so the
+    /// per-attempt and fallback clones are a refcount bump.
+    Sent(Arc<Value>),
 }
 
 /// Fixed redaction placeholder shared by `ForwardedBearer`'s `Debug` and
@@ -748,11 +776,9 @@ pub enum MessageContent {
 /// - Qwen / vLLM: `enabled` -> `chat_template_kwargs.enable_thinking`
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReasoningConfig {
-    /// "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    /// "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     ///
-    /// `"none"` is NOT an accepted request value: it is a budget-band
-    /// label internal to the effort<->budget bijection, which the clamp
-    /// path deliberately does not model.
+    /// `"none"` turns reasoning off; see [`Self::is_off`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     /// Anthropic/Gemini-style budget. Mutually exclusive with `effort` per OpenRouter.
@@ -764,6 +790,26 @@ pub struct ReasoningConfig {
     /// Enable reasoning with provider defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+}
+
+impl ReasoningConfig {
+    /// Effort token that turns reasoning off.
+    const OFF_EFFORT: &'static str = "none";
+
+    /// Whether this config asks for reasoning to be off: `enabled` is
+    /// `Some(false)` or `effort` is `"none"`. An explicit `"none"` effort
+    /// wins over `enabled: Some(true)`.
+    #[must_use]
+    pub fn is_off(&self) -> bool {
+        self.enabled == Some(false) || self.effort.as_deref().is_some_and(Self::is_off_effort)
+    }
+
+    /// Whether a bare effort token means reasoning off. Exact,
+    /// case-sensitive match on `"none"`.
+    #[must_use]
+    pub fn is_off_effort(token: &str) -> bool {
+        token == Self::OFF_EFFORT
+    }
 }
 
 /// `id`, `model`, and `created` are tolerated as missing on the wire:
@@ -1780,3 +1826,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&role).unwrap(), original);
     }
 }
+
+#[cfg(test)]
+#[path = "schema_thinking_tests.rs"]
+mod thinking_tests;
