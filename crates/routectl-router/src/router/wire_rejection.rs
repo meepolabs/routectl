@@ -26,7 +26,7 @@ use routectl_core::{ChatRequest, Error, sanitize_for_log};
 use serde_json::Value;
 
 use super::class_observe::upstream_facts;
-use super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR;
+use super::field_repair::{FIELD_ACTION_LOSSY_DROP_REPAIR, FIELD_ACTION_REWRITE_REPAIR};
 use super::learn_engine::RejectionSite;
 use super::learn_revert::{
     EditAttribution, MatchedEdit, SentSlot, WireRevert, attributable, revert_outcome,
@@ -364,7 +364,8 @@ const UNION_TAG: &str = "type";
 
 /// What field repair made of `pending`: the first repair on the same target
 /// for the same field recorded at or after the rejection. A repair whose
-/// retry did not succeed left the rejection unrepaired.
+/// retry did not succeed left the rejection unrepaired. A rewrite is lossy:
+/// the request served carried a value the client did not send.
 fn field_repair_outcome(
     pending: &PendingWireRejection,
     repairs: &[FieldRepair],
@@ -381,13 +382,12 @@ fn field_repair_outcome(
                 && repair.field_path.split('.').eq(field.segments())
         });
     match repair {
-        Some(repair) if repair.repair_succeeded => {
-            if repair.action == FIELD_ACTION_LOSSY_DROP_REPAIR {
+        Some(repair) if repair.repair_succeeded => match repair.action {
+            FIELD_ACTION_LOSSY_DROP_REPAIR | FIELD_ACTION_REWRITE_REPAIR => {
                 FieldRepairOutcome::RepairedLossy
-            } else {
-                FieldRepairOutcome::Repaired
             }
-        }
+            _ => FieldRepairOutcome::Repaired,
+        },
         _ => FieldRepairOutcome::Unrepaired,
     }
 }

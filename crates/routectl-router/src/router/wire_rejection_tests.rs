@@ -18,8 +18,8 @@ use routectl_core::{
 use serde_json::{Value, json};
 
 use super::super::field_repair::{
-    FIELD_ACTION_DROP_REPAIR, FIELD_REASON_UPSTREAM_REJECTION, TEST_UNSUPPORTED_PATH,
-    TEST_UNSUPPORTED_SENTINEL,
+    FIELD_ACTION_DROP_REPAIR, FIELD_REASON_UPSTREAM_REJECTION, TEST_REWRITE_ACCEPTED,
+    TEST_REWRITE_KWARG, TEST_REWRITE_PATH, TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL,
 };
 use super::super::rejection_parser::rejected_wire_path;
 use super::PendingWireRejection;
@@ -398,47 +398,129 @@ fn carries_test_row(req: &ChatRequest) -> bool {
     req.user.as_deref() == Some(TEST_UNSUPPORTED_SENTINEL)
 }
 
+/// The value the client sends in the test-only rewrite field: outside the
+/// row's accepted set.
+const CLIENT_REWRITE_VALUE: &str = "routectl-test-client-value";
+
+fn rewrite_value(req: &ChatRequest) -> Option<&str> {
+    req.chat_template_kwargs
+        .as_ref()
+        .and_then(|kwargs| kwargs.get(TEST_REWRITE_KWARG))
+        .and_then(Value::as_str)
+}
+
+/// A request carrying the test-only rewrite row's surface with a value
+/// outside its accepted set.
+fn rewritable_request() -> ChatRequest {
+    let mut req = request(IngressDialect::Anthropic);
+    req.chat_template_kwargs = Some(json!({ TEST_REWRITE_KWARG: CLIENT_REWRITE_VALUE }));
+    req
+}
+
+/// Deposit the rewrite field's value while the request carries one, as an
+/// egress emitting it would.
+fn with_rewrite_field(req: &ChatRequest, mut client: Value) -> Value {
+    if let Some(value) = rewrite_value(req) {
+        client[TEST_REWRITE_PATH] = json!(value);
+    }
+    client
+}
+
+/// Refuse the client's rewrite value, naming exactly one accepted value, and
+/// serve the rewritten retry.
+fn refuse_client_rewrite_value(req: &ChatRequest) -> Result<()> {
+    if rewrite_value(req) == Some(CLIENT_REWRITE_VALUE) {
+        let named = TEST_REWRITE_ACCEPTED[0];
+        return Err(rejection(
+            TEST_REWRITE_PATH,
+            &format!("Input should be '{named}'"),
+        ));
+    }
+    Ok(())
+}
+
+/// One outcome-table row: the request, what the egress deposits, how the
+/// upstream answers, the joined outcome and its label, and how many
+/// unrepaired WARNs fire.
+struct OutcomeRow {
+    name: &'static str,
+    request: fn() -> ChatRequest,
+    shape: Shape,
+    answer: Answer,
+    path: &'static str,
+    expected: FieldRepairOutcome,
+    label: &'static str,
+    warns: usize,
+}
+
 #[tokio::test]
 async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns() {
-    let rows: [(&str, Answer, FieldRepairOutcome, usize); 3] = [
-        (
-            "repaired",
-            |req| {
+    let rows = [
+        OutcomeRow {
+            name: "repaired",
+            request: repairable_request,
+            shape: with_test_row_field,
+            answer: |req| {
                 if carries_test_row(req) {
                     return Err(rejection(TEST_UNSUPPORTED_PATH, REFUSED_FIELD));
                 }
                 Ok(())
             },
-            FieldRepairOutcome::Repaired,
-            0,
-        ),
-        (
-            "repaired lossy",
-            |req| {
+            path: TEST_UNSUPPORTED_PATH,
+            expected: FieldRepairOutcome::Repaired,
+            label: "repaired",
+            warns: 0,
+        },
+        OutcomeRow {
+            name: "repaired lossy",
+            request: repairable_request,
+            shape: with_test_row_field,
+            answer: |req| {
                 if carries_test_row(req) {
                     return Err(rejection(TEST_UNSUPPORTED_PATH, "Input should be 'x'"));
                 }
                 Ok(())
             },
-            FieldRepairOutcome::RepairedLossy,
-            0,
-        ),
-        (
-            "unrepaired",
-            |_| Err(rejection(TEST_UNSUPPORTED_PATH, REFUSED_FIELD)),
-            FieldRepairOutcome::Unrepaired,
-            1,
-        ),
+            path: TEST_UNSUPPORTED_PATH,
+            expected: FieldRepairOutcome::RepairedLossy,
+            label: "repaired_lossy",
+            warns: 0,
+        },
+        OutcomeRow {
+            name: "rewritten",
+            request: rewritable_request,
+            shape: with_rewrite_field,
+            answer: refuse_client_rewrite_value,
+            path: TEST_REWRITE_PATH,
+            expected: FieldRepairOutcome::RepairedLossy,
+            label: "repaired_lossy",
+            warns: 0,
+        },
+        OutcomeRow {
+            name: "unrepaired",
+            request: repairable_request,
+            shape: with_test_row_field,
+            answer: |_| Err(rejection(TEST_UNSUPPORTED_PATH, REFUSED_FIELD)),
+            path: TEST_UNSUPPORTED_PATH,
+            expected: FieldRepairOutcome::Unrepaired,
+            label: "unrepaired",
+            warns: 1,
+        },
     ];
     for surface in SURFACES {
-        for (name, answer, expected, warns) in rows {
-            let provider = ScriptedProvider::boxed(with_test_row_field, answer);
+        for row in &rows {
+            let name = row.name;
+            let provider = ScriptedProvider::boxed(row.shape, row.answer);
             let router = router(NEVER_SAMPLED, vec![provider]);
 
-            let (_, events) =
-                routectl_testkit::with_capture(dispatch(&router, surface, repairable_request()))
-                    .await;
+            let (served, events) =
+                routectl_testkit::with_capture(dispatch(&router, surface, (row.request)())).await;
 
+            assert_eq!(
+                served,
+                row.warns == 0,
+                "{surface:?} {name}: only an unrepaired rejection reaches the client"
+            );
             let found = rejections(&router.wire_check_snapshot());
             let first = found
                 .first()
@@ -446,17 +528,22 @@ async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns(
             assert_eq!(
                 (first.0.as_str(), first.1, first.2),
                 (
-                    format!("/{TEST_UNSUPPORTED_PATH}").as_str(),
+                    format!("/{}", row.path).as_str(),
                     "routectl_added",
-                    expected
+                    row.expected
                 ),
                 "{surface:?} {name}: classified against the pre-repair body"
+            );
+            assert_eq!(
+                first.2.label(),
+                row.label,
+                "{surface:?} {name}: the outcome label the finding carries"
             );
             let warned = events
                 .iter()
                 .filter(|e| e.target == WARN_TARGET && e.message == UNREPAIRED_WARN)
                 .count();
-            assert_eq!(warned, warns, "{surface:?} {name}");
+            assert_eq!(warned, row.warns, "{surface:?} {name}");
         }
     }
 }
