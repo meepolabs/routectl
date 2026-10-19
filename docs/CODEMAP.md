@@ -2716,7 +2716,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   takes its park/debit and same-provider retry decisions from
   `outcome_rule` (a small honored reset becomes the next sleep's floor; a
   larger one parks the provider via the breaker instead). `run_with_timeout`,
-  `wrap_with_breaker_accounting` (also the STREAMING quota seam: offers each Ok
+  `wrap_with_breaker_accounting` (settles a post-content error frame once: a
+  non-probe stream debits whatever the class, a probe stream applies
+  `breaker_outcome`; also the STREAMING quota seam: offers each Ok
   chunk to the armed `quota::feed::FirstChunkFeed`), and
   `try_stream_with_first_content` (buffers
   content-free leading chunks -- a `delta.role` opener, id/model metadata --
@@ -4136,7 +4138,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   this ONE definition); `probe_fast_fail(err, is_probe)` (a probe's 429/529,
   keyed on status: no retry, no cross-target fallback, no breaker outcome);
   `breaker_outcome(err, class, reset_hint, is_probe) -> BreakerOutcome {
-  None, Debit, Park }` (`None` for a probe fast-fail on every surface; park
+  None, Debit, Park }` (`None` for a probe fast-fail on every surface,
+  including a stream's post-content error frame; park
   only a non-probe hint above the cap) and `same_provider_retry(surface, ..) -> SameProvider { No, Retry {
   sleep_floor } }` (streams and token counts never retry the same provider; a
   completion retries under the hard cap and the class predicate unless the

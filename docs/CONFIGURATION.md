@@ -1526,13 +1526,18 @@ probe_max_tokens              = 1             # fast-fail availability probes
 `probe_max_tokens` (default `1`) fast-fails availability probes. A
 request whose `max_tokens` is at or below this value is treated as a
 probe -- Claude Code sends `max_tokens=1` quota/health checks to
-`/v1/messages`. On a rate-limit or overload (429/529) a probe skips
-retry+fallback and returns the status immediately: every hop of an
-all-Anthropic chain shares the same limit, so walking it is futile and
-the probe's tiny output is never read. That 429/529 is never counted
-against the seat's circuit breaker, on completions, streams and
-`count_tokens` alike: the probe frees any half-open slot it held and
-takes no failure debit or park. Set `probe_max_tokens = 0` to
+`/v1/messages`. On a rate-limit or overload (429/529) a probe is not
+retried on the same seat and does not fall back to a distinct chain
+target: every hop of an all-Anthropic chain shares the same limit, so
+walking it is futile and the probe's tiny output is never read. A
+completion or stream probe may still move to a sibling seat of the same
+pool when the next chain entry is one (a rate-limited seat does not
+mean the pool is out of quota); otherwise it returns the status
+immediately. A `count_tokens` probe returns it at once. That 429/529 is
+never counted against the seat's circuit breaker, on completions,
+streams (before or after first content) and `count_tokens` alike: the
+probe frees any half-open slot it held and takes no failure debit or
+park. Set `probe_max_tokens = 0` to
 disable (no request is ever treated as a probe). Real requests
 (`max_tokens` above the threshold), generic 5xx, network errors, and
 every 4xx (including a capability-rejection 400, which a sibling
@@ -1715,7 +1720,14 @@ seat's breaker, and it is the same on completions, streams and
   failure debit, exactly as an error without a reset does.
 - A probe request (`max_tokens` at or below `probe_max_tokens`) never
   parks. A probe's 429 or 529 takes no debit at all, whatever its
-  reset; any other failing probe takes the ordinary debit.
+  reset; a probe failing any other way follows the normal class-based
+  rule (a debiting class takes the ordinary debit, a non-debiting one
+  such as a 400 takes none).
+
+Once a stream has delivered content, an error frame arriving later is
+settled once: a non-probe stream takes the ordinary failure debit
+whatever the error's class, and a probe stream follows the rule above
+(its 429 or 529 leaves the breaker untouched).
 
 Completions additionally fold a reset at or below 5 seconds into the
 next same-provider retry sleep (it never blocks the request thread

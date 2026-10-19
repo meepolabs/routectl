@@ -254,15 +254,17 @@ impl Router {
 /// the slot while leaving `circuit_opened_at` + the cooldown intact; the next
 /// post-cooldown request becomes the probe and the breaker recovers.
 ///
-/// Every synchronous settle site pairs its outcome call with `disarm()`.
-/// `record_failure` / `record_success` / `park_provider` already clear
-/// `half_open_in_flight` internally, so disarm there only suppresses a
-/// redundant (idempotent, harmless) drop-time release. Sites that settle
-/// WITHOUT a breaker outcome call `release()`, which frees the slot only when
-/// this guard's admission claimed it: the flag is shared, so an unconditional
-/// clear from a dispatch admitted through a closed breaker would erase a claim
-/// a different caller took after the breaker tripped. A NEW settle site MUST
-/// call `disarm()` or `release()`, or the guard's drop would free a slot a
+/// A failed attempt settles through `settle()`, which takes the
+/// [`BreakerOutcome`] just applied and picks `disarm()` or `release()` from
+/// it; other sites call those two directly. `record_failure` /
+/// `record_success` / `park_provider` already clear `half_open_in_flight`
+/// internally, so disarm after them only suppresses a redundant (idempotent,
+/// harmless) drop-time release. Sites that settle WITHOUT a breaker outcome
+/// call `release()`, which frees the slot only when this guard's admission
+/// claimed it: the flag is shared, so an unconditional clear from a dispatch
+/// admitted through a closed breaker would erase a claim a different caller
+/// took after the breaker tripped. A NEW settle site MUST call `settle()`,
+/// `disarm()` or `release()`, or the guard's drop would free a slot a
 /// concurrent probe may have re-claimed.
 pub(super) struct ProbeSlotGuard {
     /// `Some` while armed; `None` once an outcome settled the slot or the

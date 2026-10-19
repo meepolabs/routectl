@@ -1734,7 +1734,7 @@ advances to the next capable seat) do NOT emit it. Safe dimensions only
 | `effective_class` | string | The failure class after any operator remap (`rate_limited`, `server_error`, `timeout`, `network_error`, `overloaded`, `bad_request`, `unknown`, ...). |
 | `matched_by` | string | How the native class was decided (`variant`, `status`, `upstream_type`). |
 | `remapped` | bool | `true` when an operator per-provider status remap replaced the native class. |
-| `debit` | bool | `true` when the class touched the seat's circuit breaker: a threshold-gated debit, or a park when a non-probe request carried an upstream reset hint longer than 5 seconds (a shorter hint, or any hint on a probe, debits); `false` when the slot was released without a health debit, which includes a probe's 429 or 529. |
+| `debit` | bool | `true` when the class-based rule debited or parked the seat's circuit breaker: a threshold-gated debit for a debiting class, or a park when a non-probe request carried an upstream reset hint longer than 5 seconds. A probe's 429 or 529 is excluded whatever its hint and logs `false`, as does a non-debiting class; the slot is then released without a health debit. |
 
 ```
 INFO routectl_router::router::count_tokens event=count_tokens state_key=haiku

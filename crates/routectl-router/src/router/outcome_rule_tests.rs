@@ -676,3 +676,113 @@ async fn same_reset_hint_same_breaker_outcome_on_every_surface() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// Sole chain-entry provider whose stream emits one content chunk, then a
+/// frame error with `status`: the failure lands after the stream committed.
+struct ContentThenErrorProvider {
+    status: u16,
+}
+
+#[async_trait]
+impl Provider for ContentThenErrorProvider {
+    fn id(&self) -> &'static str {
+        "p"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response("p", "unused"))
+    }
+    async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+        Err(Error::normalize_response("p", "unused"))
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        let content = ChatChunk {
+            choices: vec![routectl_core::ChunkChoice {
+                index: 0,
+                delta: routectl_core::ChunkDelta {
+                    content: Some("ok".into()),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            ..Default::default()
+        };
+        let frames = vec![
+            Ok(content),
+            Err(Error::upstream("p", self.status, "unavailable")),
+        ];
+        Ok(Box::pin(futures::stream::iter(frames)))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostContent {
+    Debited,
+    Succeeded,
+    Untouched,
+}
+
+/// Drain a stream whose frame error follows first content, drop it, and
+/// read what the wrapper settled. The breaker cannot trip on one failure
+/// and was closed at admission, so first content recorded nothing: a
+/// debit stamps a failure outcome, an unsettled wrapper's drop stamps
+/// success, and a settled no-op leaves no outcome at all.
+async fn settle_after_content(status: u16, req: ChatRequest) -> PostContent {
+    use futures::StreamExt as _;
+    let mut router = router_failing_with(status, None);
+    let provider: Arc<dyn Provider> = Arc::new(ContentThenErrorProvider { status });
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "seat".into(),
+        Arc::new(ResolvedModel::new("seat", "p", provider, "u")),
+    );
+    router.install_resolved_models(models);
+
+    let frames: Vec<Result<ChatChunk>> = router
+        .stream(req)
+        .await
+        .expect("first content commits the stream")
+        .collect()
+        .await;
+    assert!(frames.first().is_some_and(Result::is_ok), "content first");
+    assert!(frames.last().is_some_and(Result::is_err), "error last");
+
+    use crate::runtime_state::CircuitPhase::Closed;
+    let gate = router.gate_status_for_tests("seat");
+    match (gate.circuit, gate.last_outcome) {
+        (Closed, None) => PostContent::Untouched,
+        (Closed, Some(routectl_core::failure_class::LastOutcome::Ok)) => PostContent::Succeeded,
+        (Closed, Some(_)) => PostContent::Debited,
+        other => panic!("unexpected breaker state after one frame error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn post_content_frame_error_settles_by_the_shared_rule_for_probes_only() {
+    let plain = ChatRequest {
+        model: "solo".into(),
+        ..Default::default()
+    };
+    let probe = ChatRequest {
+        max_tokens: Some(1),
+        ..plain.clone()
+    };
+    let rows: [(&str, u16, &ChatRequest, PostContent); 5] = [
+        ("probe 429", 429, &probe, PostContent::Untouched),
+        ("probe 529", 529, &probe, PostContent::Untouched),
+        ("probe 503", 503, &probe, PostContent::Debited),
+        ("non-probe 429", 429, &plain, PostContent::Debited),
+        ("non-probe 400", 400, &plain, PostContent::Debited),
+    ];
+    let mut mismatches = Vec::new();
+    for (row, status, req, expected) in rows {
+        let got = settle_after_content(status, req.clone()).await;
+        if got != expected {
+            mismatches.push(format!("{row}: expected {expected:?}, got {got:?}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
