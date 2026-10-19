@@ -752,7 +752,7 @@ pub(super) struct FieldRepairRow {
 /// -- the table is the whole of what an L0 repair can act on.
 ///
 /// `count_tokens_validates` is false on every row: no captured token count
-/// has rejected either field, so a count accepting it proves nothing. The
+/// has rejected any of these fields, so a count accepting one proves nothing. The
 /// count endpoint also carries no `output_config`, so it cannot validate an
 /// adaptive thinking type and the effort it pairs with.
 const FIELD_REPAIRS: &[FieldRepairRow] = &[
@@ -768,6 +768,15 @@ const FIELD_REPAIRS: &[FieldRepairRow] = &[
         surface: FieldSurface::AnthropicThinkingType("enabled"),
         transform: FieldTransform::Rewrite {
             accepted: &["thinking.type.adaptive"],
+        },
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: "thinking.type.disabled",
+        surface: FieldSurface::AnthropicThinkingType("disabled"),
+        transform: FieldTransform::Rewrite {
+            accepted: &["thinking.type.adaptive", "thinking.type.between_tools"],
         },
         class: TransformClass::Envelope,
         count_tokens_validates: false,
@@ -2223,8 +2232,8 @@ mod table_tests {
         // something a passing suite absorbs silently.
         assert_eq!(
             FIELD_REPAIRS.len(),
-            2,
-            "the closed repair table ships exactly two grounded rows; a new row is a new \
+            3,
+            "the closed repair table ships exactly three grounded rows; a new row is a new \
              permanent commitment and updates this guard deliberately",
         );
         assert_eq!(
@@ -2268,6 +2277,22 @@ mod table_tests {
             "no captured token count rejects a thinking type, and the count endpoint \
              carries no output_config to validate adaptive's effort against",
         );
+        let thinking_off = FIELD_REPAIRS[2];
+        assert_eq!(thinking_off.path, "thinking.type.disabled");
+        assert_eq!(
+            thinking_off.surface,
+            FieldSurface::AnthropicThinkingType("disabled")
+        );
+        assert_eq!(
+            thinking_off.transform,
+            FieldTransform::Rewrite {
+                accepted: &["thinking.type.adaptive", "thinking.type.between_tools"],
+            },
+            "each member is the replacement one committed capture names: adaptive on \
+             anthropic-api, between_tools on bedrock",
+        );
+        assert_eq!(thinking_off.class, TransformClass::Envelope);
+        assert!(!thinking_off.count_tokens_validates);
     }
 
     #[test]

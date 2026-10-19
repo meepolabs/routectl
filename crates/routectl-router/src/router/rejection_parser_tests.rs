@@ -168,11 +168,11 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "anthropic-api/thinking-type-disabled-unsupported",
-            unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+            Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         ),
         (
             "bedrock/thinking-type-disabled-unsupported",
-            unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+            Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         ),
         (
             "bedrock/thinking-type-enabled-unsupported",
@@ -384,7 +384,7 @@ fn each_arm_assigns_its_tier() {
             "thinking off-switch template",
             BEDROCK,
             bedrock_body(THINKING_SWITCH_MESSAGE),
-            unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+            Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         ),
         (
             "structured param",
@@ -413,7 +413,9 @@ fn each_arm_assigns_its_tier() {
             400,
             body.parsed(),
         ) {
-            assert_eq!(named.accepted, None, "{name}");
+            let rewrite =
+                (named.row.path == THINKING_DISABLED_PATH).then_some("thinking.type.between_tools");
+            assert_eq!(named.accepted, rewrite, "{name}");
         }
     }
 }
@@ -514,7 +516,7 @@ fn each_classification_rule_assigns_its_kind() {
             Outcome::Unresolved(path, _, kind) => Some((path, kind, false)),
             Outcome::NotLocalized => None,
         };
-        let has_row = path == DISPLAY_PATH;
+        let has_row = path == DISPLAY_PATH || path == THINKING_DISABLED_PATH;
         assert_eq!(reached, Some((path.to_string(), kind, has_row)), "{name}");
     }
 }
@@ -1000,6 +1002,34 @@ fn the_thinking_enabled_fixture_names_the_adaptive_rewrite() {
     assert_eq!(named.accepted, Some("thinking.type.adaptive"));
 }
 
+/// Mutation check: remove either member from the disabled row's accepted set
+/// -> red on that member's fixture (no accepted member, so nothing rewrites).
+#[test]
+fn each_thinking_disabled_fixture_names_its_rewrite_on_the_disabled_row() {
+    let cases = [
+        (ANTHROPIC, "thinking.type.adaptive"),
+        (BEDROCK, "thinking.type.between_tools"),
+    ];
+
+    for (kind, accepted) in cases {
+        let (status, body) = fixture(kind, "thinking-type-disabled-unsupported");
+        let body = UpstreamBody::new(body);
+
+        let named = parse_rejection(
+            crate::router::FieldRepairTable::grounded_only(),
+            kind,
+            status,
+            body.parsed(),
+        )
+        .unwrap_or_else(|| panic!("{kind}: the captured envelope names the grounded row"));
+
+        assert_eq!(named.row.path, THINKING_DISABLED_PATH, "{kind}");
+        assert_eq!(named.tier, SelfIdentifying, "{kind}");
+        assert_eq!(named.kind, UnsupportedField, "{kind}");
+        assert_eq!(named.accepted, Some(accepted), "{kind}");
+    }
+}
+
 #[test]
 fn each_thinking_disabled_fixture_names_its_one_replacement() {
     let cases = [
@@ -1049,7 +1079,7 @@ fn a_converse_wrapped_thinking_off_switch_localizes_like_the_bare_one() {
     );
     assert_eq!(
         outcome(BEDROCK, 400, &bare),
-        unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         "premise: the bare template localizes",
     );
 
@@ -1129,7 +1159,7 @@ fn thinking_off_switch_near_misses_localize_nothing() {
     ];
     assert_eq!(
         outcome(BEDROCK, 400, &bedrock_body(exact)),
-        unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         "premise: the same harness localizes the exact template",
     );
 

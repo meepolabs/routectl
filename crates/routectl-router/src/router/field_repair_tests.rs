@@ -2323,5 +2323,6 @@ include!("field_repair_parser_tests.rs");
 include!("field_repair_tier_tests.rs");
 include!("field_repair_rewrite_tests.rs");
 include!("field_repair_thinking_type_tests.rs");
+include!("field_repair_thinking_disabled_tests.rs");
 
 include!("field_repair_declare_tests.rs");

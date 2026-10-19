@@ -71,20 +71,29 @@ enum AfterRefusal {
 }
 
 /// A seat that assembles each attempt's body with the real Anthropic egress,
-/// deposits it into the attempt's wire tap, refuses it while it carries
-/// `thinking.type: enabled` (when `refuses`), and otherwise answers
-/// `after`.
+/// deposits it into the attempt's wire tap, refuses it while its
+/// `thinking.type` is one of `refused`, and otherwise answers `after`.
 struct ThinkingTypeSeat {
-    refuses: bool,
+    refused: &'static [&'static str],
     rejection: fn() -> Error,
     after: AfterRefusal,
     seen: Mutex<Vec<(ChatRequest, serde_json::Value)>>,
 }
 
 impl ThinkingTypeSeat {
+    /// A seat refusing `thinking.type: enabled` when `refuses`.
     fn new(refuses: bool, rejection: fn() -> Error, after: AfterRefusal) -> Self {
+        let refused: &'static [&'static str] = if refuses { &["enabled"] } else { &[] };
+        Self::refusing_types(refused, rejection, after)
+    }
+
+    fn refusing_types(
+        refused: &'static [&'static str],
+        rejection: fn() -> Error,
+        after: AfterRefusal,
+    ) -> Self {
         Self {
-            refuses,
+            refused,
             rejection,
             after,
             seen: Mutex::new(Vec::new()),
@@ -118,9 +127,11 @@ impl ThinkingTypeSeat {
         if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
             tap.deposit(serde_json::to_vec(&body).expect("serialize").into());
         }
-        let refused = body["thinking"]["type"] == "enabled";
+        let refused = body["thinking"]["type"]
+            .as_str()
+            .is_some_and(|thinking_type| self.refused.contains(&thinking_type));
         self.seen.lock().push((req.clone(), body));
-        if self.refuses && refused {
+        if refused {
             return Err((self.rejection)());
         }
         match self.after {
