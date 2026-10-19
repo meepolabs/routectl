@@ -95,6 +95,31 @@ pub(super) enum FieldSurface {
     /// reads `enabled` / `max_tokens` / `effort`), so dropping both removes
     /// the rejected field and nothing else.
     AnthropicThinkingDisplay,
+    /// The Anthropic `thinking.type` wire field, PRESENT when the type an
+    /// Anthropic-shape egress would emit is exactly the held refused type.
+    ///
+    /// Presence reads the COMPOSED type
+    /// (`routectl_providers::anthropic_api::emitted_thinking_type`, with the
+    /// operator's `supports_adaptive_thinking` the egress itself is handed), not
+    /// the final body: a later body pass can still strip `thinking` (a forced
+    /// tool choice, a context-management cache miss) or turn it off (an
+    /// `output_config.effort` of "none"). That gap is sound for the uses this
+    /// surface has. A rejection naming `thinking.type.X` is evidence that X was
+    /// on the wire, so a stripped body never draws the rejection a repair acts
+    /// on. The read also stages and verifies the rewrite target, and none of
+    /// the late passes can turn a rewritten type back into the refused one:
+    /// they remove thinking or disable it, never re-enable it.
+    ///
+    /// The rewrite replaces the native carrier with `{type: <target>}`
+    /// (materializing one when the request carried none): an adaptive target
+    /// keeps only `display`, which has no budget field to carry over, and any
+    /// other target is written bare. An adaptive target with no positive effort
+    /// on the request also gets the code-owned companion effort
+    /// [`COMPANION_EFFORT`], written to the canonical effort and to a client
+    /// `output_config.effort` the egress would otherwise re-merge over it.
+    /// Never dropped: a request with no thinking at all thinks at the model's
+    /// default effort.
+    AnthropicThinkingType(&'static str),
     /// Test-only: reports itself PRESENT and removes NOTHING.
     ///
     /// The real surface's presence check and drop read the same two carriers, so
@@ -183,6 +208,13 @@ pub(super) enum FieldSurface {
     /// confined to the tests that opt into it.
     #[cfg(any(test, feature = "test-utils"))]
     RewriteFieldForTests,
+    /// Test-only REWRITE surface whose write never reads back: present while
+    /// the [`TEST_NON_TAKING_KWARG`] key of `chat_template_kwargs` is set, and
+    /// its write lands on a different key. The grounded surfaces always read
+    /// back what they write, so without this the rewrite post-condition is
+    /// unreachable.
+    #[cfg(test)]
+    NonTakingRewriteForTests,
     /// Test-only surface for a CEILING row: `max_tokens` holding exactly
     /// [`TEST_CEILING_SENTINEL`].
     #[cfg(test)]
@@ -210,6 +242,9 @@ impl FieldSurface {
                 req.routectl_internal.anthropic_thinking_display.is_some()
                     || req.reasoning.as_ref().is_some_and(|r| r.exclude.is_some())
             }
+            Self::AnthropicThinkingType(refused) => {
+                emitted_thinking_type(req).as_deref() == Some(*refused)
+            }
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => true,
             #[cfg(test)]
@@ -234,6 +269,10 @@ impl FieldSurface {
                 .chat_template_kwargs
                 .as_ref()
                 .is_some_and(|kwargs| kwargs.get(TEST_REWRITE_KWARG).is_some()),
+            #[cfg(test)]
+            Self::NonTakingRewriteForTests => {
+                Self::test_kwarg(req, TEST_NON_TAKING_KWARG).is_some()
+            }
             #[cfg(test)]
             Self::CeilingFieldForTests => req.max_tokens == Some(TEST_CEILING_SENTINEL),
             #[cfg(any(test, feature = "test-utils"))]
@@ -281,6 +320,8 @@ impl FieldSurface {
                         .and_then(|r| r.exclude)
                         .map(|exclude| if exclude { "omitted" } else { "summarized" }.to_string())
                 }),
+            Self::AnthropicThinkingType(_) => emitted_thinking_type(req)
+                .map(|emitted| format!("{THINKING_TYPE_VALUE_PREFIX}{emitted}")),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => None,
             // No probe payload: the test-only surfaces are never rows of
@@ -295,6 +336,10 @@ impl FieldSurface {
             #[cfg(any(test, feature = "test-utils"))]
             Self::RewriteFieldForTests => {
                 Self::test_kwarg(req, TEST_REWRITE_KWARG).map(str::to_string)
+            }
+            #[cfg(test)]
+            Self::NonTakingRewriteForTests => {
+                Self::test_kwarg(req, TEST_NON_TAKING_KWARG).map(str::to_string)
             }
             #[cfg(any(test, feature = "test-utils"))]
             Self::RecheckFieldForTests => {
@@ -335,6 +380,7 @@ impl FieldSurface {
                     req.max_tokens = Some(PROBE_THINKING_MAX_TOKENS);
                 }
             }
+            Self::AnthropicThinkingType(_) => write_thinking_type(req, value),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => {}
             #[cfg(test)]
@@ -345,6 +391,10 @@ impl FieldSurface {
             | Self::CeilingFieldForTests => {}
             #[cfg(any(test, feature = "test-utils"))]
             Self::RewriteFieldForTests => Self::set_test_kwarg(req, TEST_REWRITE_KWARG, value),
+            #[cfg(test)]
+            Self::NonTakingRewriteForTests => {
+                Self::set_test_kwarg(req, TEST_NON_TAKING_SHADOW_KWARG, value);
+            }
             #[cfg(any(test, feature = "test-utils"))]
             Self::RecheckFieldForTests => Self::set_test_kwarg(req, TEST_RECHECK_KWARG, value),
         }
@@ -372,8 +422,25 @@ impl FieldSurface {
         if self.value_in(&scratch).as_deref() != Some(value) {
             return false;
         }
+        if !self.rewrite_is_complete(&scratch, value) {
+            return false;
+        }
         *req = scratch;
         true
+    }
+
+    /// What a rewrite to `value` needs beyond reading `value` back. An adaptive
+    /// thinking type is only half a shape: without a positive effort the
+    /// upstream either refuses it or thinks at its default, so a rewrite that
+    /// left none would re-send a shape the repair did not mean to send.
+    fn rewrite_is_complete(&self, rewritten: &ChatRequest, value: &str) -> bool {
+        match self {
+            Self::AnthropicThinkingType(_) => {
+                thinking_target(value) != Some(ADAPTIVE_THINKING_TYPE)
+                    || carries_positive_effort(rewritten)
+            }
+            _ => true,
+        }
     }
 
     /// Drop this surface from `req`, returning whether anything was removed.
@@ -392,6 +459,7 @@ impl FieldSurface {
                     .is_some();
                 carrier || derived
             }
+            Self::AnthropicThinkingType(_) => false,
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => false,
             #[cfg(test)]
@@ -430,6 +498,8 @@ impl FieldSurface {
                 .and_then(|object| object.remove(TEST_REWRITE_KWARG))
                 .is_some(),
             #[cfg(test)]
+            Self::NonTakingRewriteForTests => false,
+            #[cfg(test)]
             Self::CeilingFieldForTests => {
                 if !Self::CeilingFieldForTests.present_in(req) {
                     return false;
@@ -444,6 +514,110 @@ impl FieldSurface {
                 .and_then(|object| object.remove(TEST_RECHECK_KWARG))
                 .is_some(),
         }
+    }
+}
+
+/// Prefix of every `thinking.type` row's path and accepted value: the dotted
+/// path an upstream names for one thinking type.
+const THINKING_TYPE_VALUE_PREFIX: &str = "thinking.type.";
+
+/// The thinking type that takes no budget and pairs with an effort.
+const ADAPTIVE_THINKING_TYPE: &str = "adaptive";
+
+/// The effort a `thinking.type` rewrite to adaptive supplies when the request
+/// carries no positive effort. The lowest grounded level that keeps adaptive
+/// thinking accepted; never persisted and never learned, so it is not part of
+/// the verdict.
+pub(super) const COMPANION_EFFORT: &str = "low";
+
+/// The thinking type an Anthropic-shape egress composes for `req`, with the
+/// operator knob that egress is handed.
+fn emitted_thinking_type(req: &ChatRequest) -> Option<String> {
+    routectl_providers::anthropic_api::emitted_thinking_type(
+        req,
+        req.routectl_internal.supports_adaptive_thinking,
+    )
+}
+
+/// The thinking type a `thinking.type.<type>` row value names.
+fn thinking_target(value: &str) -> Option<&str> {
+    value
+        .strip_prefix(THINKING_TYPE_VALUE_PREFIX)
+        .filter(|target| !target.is_empty())
+}
+
+/// The client's `output_config.effort`, as the forward-compat extras carry it.
+fn extras_effort(req: &ChatRequest) -> Option<&serde_json::Value> {
+    req.provider_extras
+        .as_ref()?
+        .get("output_config")?
+        .get("effort")
+}
+
+/// Whether the body `req` composes carries a positive effort. The egress
+/// merges the client's `output_config` over the one it derives from the
+/// canonical effort, so a client `output_config.effort` decides when present
+/// and the canonical effort decides otherwise.
+pub(super) fn carries_positive_effort(req: &ChatRequest) -> bool {
+    let effective = match extras_effort(req) {
+        Some(sent) => sent.as_str(),
+        None => req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
+    };
+    effective.is_some_and(|effort| !routectl_core::ReasoningConfig::is_off_effort(effort))
+}
+
+/// Replace the native thinking carrier with `{type: <target>}` for the row
+/// value `value`; see [`FieldSurface::AnthropicThinkingType`]. A value naming
+/// no type writes nothing, which the caller's read-back refuses.
+fn write_thinking_type(req: &mut ChatRequest, value: &str) {
+    let Some(target) = thinking_target(value) else {
+        return;
+    };
+    let Some(object) = routectl_core::ThinkingObject::from_client(serde_json::json!({
+        "type": target,
+    })) else {
+        return;
+    };
+    if target == ADAPTIVE_THINKING_TYPE {
+        keep_display_on_the_carrier(req);
+        if !carries_positive_effort(req) {
+            write_companion_effort(req);
+        }
+    } else {
+        req.routectl_internal.anthropic_thinking_display = None;
+    }
+    req.routectl_internal.anthropic_thinking = routectl_core::AnthropicThinking::Sent(object);
+}
+
+/// A forwarded carrier emits `display` from its own carrier only, so a
+/// display a translated request expressed through the canonical `exclude`
+/// moves onto that carrier before the carrier replaces the translation.
+fn keep_display_on_the_carrier(req: &mut ChatRequest) {
+    if req.routectl_internal.anthropic_thinking_display.is_some() {
+        return;
+    }
+    let derived = req
+        .reasoning
+        .as_ref()
+        .and_then(|r| r.exclude)
+        .map(|exclude| if exclude { "omitted" } else { "summarized" });
+    req.routectl_internal.anthropic_thinking_display = derived.map(str::to_string);
+}
+
+/// Write [`COMPANION_EFFORT`] to the canonical effort and over a client
+/// `output_config.effort`. Both, because the egress derives the wire effort
+/// from the canonical one and then merges the client's `output_config` over
+/// it, and a client "none" left there turns the adaptive body off.
+fn write_companion_effort(req: &mut ChatRequest) {
+    req.reasoning.get_or_insert_with(Default::default).effort = Some(COMPANION_EFFORT.to_string());
+    if let Some(config) = req
+        .provider_extras
+        .as_mut()
+        .and_then(|extras| extras.get_mut("output_config"))
+        .and_then(serde_json::Value::as_object_mut)
+        && config.contains_key("effort")
+    {
+        config.insert("effort".to_string(), COMPANION_EFFORT.into());
     }
 }
 
@@ -463,7 +637,7 @@ pub(super) enum TransformClass {
     /// verdict degrades every later request on that lane silently.
     ///
     /// Not constructed by a GROUNDED row in this build: the closed table
-    /// ships one envelope row, and the first prefix-impacting row lands with
+    /// ships envelope rows only, and the first prefix-impacting row lands with
     /// the captured evidence that grounds it. The class, its gates, and
     /// their enforcement ship now rather than alongside that row, so the
     /// row's arrival is a table edit rather than a new gate -- the scoped
@@ -528,13 +702,6 @@ pub(super) enum FieldTransform {
     /// Replace the field's value with the ONE member of `accepted` the
     /// rejection names. A rejection naming none, or several, repairs nothing:
     /// the substituted value is always the upstream's own answer.
-    #[cfg_attr(
-        not(any(test, feature = "test-utils")),
-        expect(
-            dead_code,
-            reason = "no grounded row rewrites yet; the test table carries one"
-        )
-    )]
     Rewrite { accepted: &'static [&'static str] },
     /// Clamp a token budget to a learned ceiling. Reserved: no repair applies
     /// it yet, so a row carrying it is never repaired and never applied.
@@ -579,21 +746,33 @@ pub(super) struct FieldRepairRow {
 /// The CLOSED path-to-surface table: one row per qualified dotted path this
 /// build knows how to repair.
 ///
-/// One grounded row today. The path is the one a real captured rejection
-/// envelope named, and its surface is the canonical carrier pair that
-/// produces that wire field. A path outside this table resolves to no row,
-/// so it mutates nothing and repairs nothing -- the table is the whole of
-/// what an L0 repair can act on.
+/// Each path is one a real captured rejection envelope named, and its surface
+/// is the request-side carrier that produces that wire field. A path outside
+/// this table resolves to no row, so it mutates nothing and repairs nothing
+/// -- the table is the whole of what an L0 repair can act on.
 ///
-/// `count_tokens_validates` is false on the display row: no captured token
-/// count has rejected the field, so a count accepting it proves nothing.
-const FIELD_REPAIRS: &[FieldRepairRow] = &[FieldRepairRow {
-    path: "thinking.enabled.display",
-    surface: FieldSurface::AnthropicThinkingDisplay,
-    transform: FieldTransform::Drop,
-    class: TransformClass::Envelope,
-    count_tokens_validates: false,
-}];
+/// `count_tokens_validates` is false on every row: no captured token count
+/// has rejected either field, so a count accepting it proves nothing. The
+/// count endpoint also carries no `output_config`, so it cannot validate an
+/// adaptive thinking type and the effort it pairs with.
+const FIELD_REPAIRS: &[FieldRepairRow] = &[
+    FieldRepairRow {
+        path: "thinking.enabled.display",
+        surface: FieldSurface::AnthropicThinkingDisplay,
+        transform: FieldTransform::Drop,
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: "thinking.type.enabled",
+        surface: FieldSurface::AnthropicThinkingType("enabled"),
+        transform: FieldTransform::Rewrite {
+            accepted: &["thinking.type.adaptive"],
+        },
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+];
 
 /// The qualified dotted path of the test-only prefix-impacting row. Outside
 /// the grounded table, so it can never collide with a real rejection's path.
@@ -639,6 +818,24 @@ pub const TEST_REWRITE_KWARG: &str = "routectl_test_rewrite_kwarg";
 #[doc(hidden)]
 pub const TEST_REWRITE_ACCEPTED: &[&str] =
     &["routectl-test-accepted-a", "routectl-test-accepted-b"];
+
+/// The qualified dotted path of the test-only rewrite row whose write never
+/// reads back.
+#[cfg(test)]
+pub(in crate::router) const TEST_NON_TAKING_PATH: &str = "routectl_test_non_taking";
+
+/// The `chat_template_kwargs` key the non-taking rewrite surface reads.
+#[cfg(test)]
+pub(in crate::router) const TEST_NON_TAKING_KWARG: &str = "routectl_test_non_taking_kwarg";
+
+/// The key the non-taking rewrite surface writes, which its read never sees.
+#[cfg(test)]
+pub(in crate::router) const TEST_NON_TAKING_SHADOW_KWARG: &str =
+    "routectl_test_non_taking_shadow_kwarg";
+
+/// The non-taking rewrite row's closed accepted set.
+#[cfg(test)]
+pub(in crate::router) const TEST_NON_TAKING_ACCEPTED: &[&str] = &["routectl-test-non-taking"];
 
 /// The qualified dotted path of the test-only row a free count validates.
 #[cfg(any(test, feature = "test-utils"))]
@@ -688,6 +885,15 @@ const TEST_FIELD_REPAIRS: &[FieldRepairRow] = &[
         path: TEST_CEILING_PATH,
         surface: FieldSurface::CeilingFieldForTests,
         transform: FieldTransform::Ceiling,
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: TEST_NON_TAKING_PATH,
+        surface: FieldSurface::NonTakingRewriteForTests,
+        transform: FieldTransform::Rewrite {
+            accepted: TEST_NON_TAKING_ACCEPTED,
+        },
         class: TransformClass::Envelope,
         count_tokens_validates: false,
     },
@@ -1223,15 +1429,6 @@ impl FieldEdit {
         }
     }
 
-    /// True when this edit would leave `req` as it is: a rewrite to the value
-    /// the surface already carries.
-    fn repeats_current(self, surface: FieldSurface, req: &ChatRequest) -> bool {
-        match self {
-            Self::Drop => false,
-            Self::Rewrite(value) => surface.carries(req, value),
-        }
-    }
-
     const fn declared_kind(self) -> EditKind {
         match self {
             Self::Drop => EditKind::Remove,
@@ -1381,10 +1578,11 @@ impl FieldRepairPlan<'_> {
             return None;
         }
         if !edit.apply_to(surface, attempt_req) {
-            // FAIL CLOSED. A rewrite to the value already carried is refused
-            // by design. Otherwise `present_in` held immediately above and
-            // nothing between touches the request, so reaching here means the
-            // two have diverged -- a bug in this module. The debug assertion names it in
+            // FAIL CLOSED. A rewrite may refuse by design: the value is
+            // already carried, or the rewritten body failed its read-back. A
+            // drop cannot: `present_in` held immediately above and nothing
+            // between touches the request, so reaching here means the two have
+            // diverged -- a bug in this module. The debug assertion names it in
             // development, but the RELEASE behavior must not depend on that
             // assertion being compiled: absorbing the inconsistency silently
             // would report a repair the wire never saw, charge the allowance for
@@ -1394,8 +1592,8 @@ impl FieldRepairPlan<'_> {
             // answer: it is still pre-mutation, so refusing here leaves the
             // request exactly as the caller handed it over.
             debug_assert!(
-                edit.repeats_current(surface, attempt_req),
-                "a present surface must take the edit; presence and the edit have diverged",
+                edit != FieldEdit::Drop,
+                "a present surface must take a drop; presence and the drop have diverged",
             );
             return None;
         }
@@ -2019,14 +2217,14 @@ mod table_tests {
     }
 
     #[test]
-    fn the_closed_table_carries_the_one_grounded_path_and_nothing_else() {
-        // The table's SIZE is the property: a second row is a second
-        // permanent commitment and must be a deliberate, reviewed edit
-        // rather than something a passing suite absorbs silently.
+    fn the_closed_table_carries_the_grounded_paths_and_nothing_else() {
+        // The table's SIZE is the property: each row is a permanent
+        // commitment and must be a deliberate, reviewed edit rather than
+        // something a passing suite absorbs silently.
         assert_eq!(
             FIELD_REPAIRS.len(),
-            1,
-            "the closed repair table ships exactly one grounded row; a new row is a new \
+            2,
+            "the closed repair table ships exactly two grounded rows; a new row is a new \
              permanent commitment and updates this guard deliberately",
         );
         assert_eq!(
@@ -2050,6 +2248,25 @@ mod table_tests {
         assert!(
             !FIELD_REPAIRS[0].count_tokens_validates,
             "no captured token count rejects the display field",
+        );
+        let thinking_type = FIELD_REPAIRS[1];
+        assert_eq!(thinking_type.path, "thinking.type.enabled");
+        assert_eq!(
+            thinking_type.surface,
+            FieldSurface::AnthropicThinkingType("enabled")
+        );
+        assert_eq!(
+            thinking_type.transform,
+            FieldTransform::Rewrite {
+                accepted: &["thinking.type.adaptive"],
+            },
+            "the captured rejection names exactly one replacement shape",
+        );
+        assert_eq!(thinking_type.class, TransformClass::Envelope);
+        assert!(
+            !thinking_type.count_tokens_validates,
+            "no captured token count rejects a thinking type, and the count endpoint \
+             carries no output_config to validate adaptive's effort against",
         );
     }
 

@@ -237,6 +237,9 @@ pub(super) const fn field_wire_pointer(
         (FieldSurface::AnthropicThinkingDisplay, IngressDialect::Anthropic) => {
             Some("/thinking/display")
         }
+        (FieldSurface::AnthropicThinkingType(_), IngressDialect::Anthropic) => {
+            Some("/thinking/type")
+        }
         _ => None,
     }
 }
@@ -249,9 +252,67 @@ pub(super) fn declare_field_edit(
     surface: FieldSurface,
     kind: EditKind,
 ) {
-    if let Some(pointer) = wire.and_then(|wire| field_wire_pointer(surface, wire)) {
-        declare(req, site, pointer, kind);
+    let Some(pointer) = wire.and_then(|wire| field_wire_pointer(surface, wire)) else {
+        return;
+    };
+    declare(req, site, pointer, kind);
+    if matches!(surface, FieldSurface::AnthropicThinkingType(_)) && kind == EditKind::Rewrite {
+        declare_thinking_type_rewrite(req, site);
     }
+}
+
+/// Declare what a `thinking.type` rewrite changed beyond the type, against
+/// the client's own body: each member of the client's `thinking` the
+/// rewritten object no longer carries, and a client `output_config.effort`
+/// the companion effort replaced. An effort the client did not send is
+/// declared by the egress, which compares the merged `output_config` with
+/// the client's.
+fn declare_thinking_type_rewrite(req: &mut ChatRequest, site: EditSite) {
+    let Some(client) = req
+        .routectl_internal
+        .ingress_wire
+        .as_ref()
+        .and_then(|wire| serde_json::from_slice::<Value>(&wire.bytes).ok())
+    else {
+        return;
+    };
+    let kept = rewritten_thinking_keys(req);
+    let thinking = WirePath::root().child("thinking");
+    let removed: Vec<String> = client
+        .get("thinking")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(Map::keys)
+        .filter(|key| !kept.contains(&key.as_str()))
+        .map(|key| thinking.child(key).as_str().to_owned())
+        .collect();
+    for pointer in removed {
+        declare(req, site, pointer, EditKind::Remove);
+    }
+    let client_effort = client.get("output_config").and_then(|c| c.get("effort"));
+    let sent_effort = req
+        .provider_extras
+        .as_ref()
+        .and_then(|extras| extras.get("output_config"))
+        .and_then(|config| config.get("effort"));
+    if client_effort.is_some() && client_effort != sent_effort {
+        declare(req, site, "/output_config/effort", EditKind::Rewrite);
+    }
+}
+
+/// The `thinking` members the rewritten carrier emits: its own keys, plus
+/// `display` while its own carrier holds one.
+fn rewritten_thinking_keys(req: &ChatRequest) -> Vec<&str> {
+    let mut keys: Vec<&str> = match &req.routectl_internal.anthropic_thinking {
+        routectl_core::AnthropicThinking::Sent(object) => {
+            object.as_object().keys().map(String::as_str).collect()
+        }
+        _ => Vec::new(),
+    };
+    if req.routectl_internal.anthropic_thinking_display.is_some() {
+        keys.push("display");
+    }
+    keys
 }
 
 /// The ids whose every reasoning detail a replay strip is about to remove,

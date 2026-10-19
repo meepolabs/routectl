@@ -312,7 +312,8 @@ fn success_response() -> ChatResponse {
 
 /// A request carrying the rejected field through BOTH canonical carriers,
 /// plus an active thinking request so the drop can be shown to remove the
-/// field WITHOUT disabling the feature.
+/// field WITHOUT disabling the feature. The native carrier names adaptive
+/// thinking, so the display row is the only grounded row it carries.
 fn req_on(alias: &str) -> ChatRequest {
     let mut req = ChatRequest {
         model: alias.into(),
@@ -336,6 +337,10 @@ fn req_on(alias: &str) -> ChatRequest {
         ..Default::default()
     };
     req.routectl_internal.anthropic_thinking_display = Some("updates".into());
+    req.routectl_internal.anthropic_thinking = routectl_core::AnthropicThinking::Sent(
+        routectl_core::ThinkingObject::from_client(json!({"type": "adaptive"}))
+            .expect("an object builds a carrier"),
+    );
     req
 }
 
@@ -2317,5 +2322,6 @@ mod forced_tool_choice_key_tests {
 include!("field_repair_parser_tests.rs");
 include!("field_repair_tier_tests.rs");
 include!("field_repair_rewrite_tests.rs");
+include!("field_repair_thinking_type_tests.rs");
 
 include!("field_repair_declare_tests.rs");

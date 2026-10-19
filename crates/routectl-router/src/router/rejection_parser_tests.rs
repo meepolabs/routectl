@@ -176,7 +176,7 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "bedrock/thinking-type-enabled-unsupported",
-            unresolved("thinking.type.enabled", SelfIdentifying, UnsupportedField),
+            Outcome::Row("thinking.type.enabled", SelfIdentifying, UnsupportedField),
         ),
         (
             "openai-compat/unsupported-parameter-temperature",
@@ -977,6 +977,27 @@ fn a_drop_row_never_carries_an_accepted_value() {
         named.accepted, None,
         "the display envelope quotes values, but its row drops rather than rewrites",
     );
+}
+
+/// Mutation check: drop the quoted arm's `Use "..."` replacement read -> red
+/// (no accepted member, so the rewrite row repairs nothing).
+#[test]
+fn the_thinking_enabled_fixture_names_the_adaptive_rewrite() {
+    let (status, body) = fixture(BEDROCK, "thinking-type-enabled-unsupported");
+    let body = UpstreamBody::new(body);
+
+    let named = parse_rejection(
+        crate::router::FieldRepairTable::grounded_only(),
+        BEDROCK,
+        status,
+        body.parsed(),
+    )
+    .expect("the captured envelope names the grounded row");
+
+    assert_eq!(named.row.path, "thinking.type.enabled");
+    assert_eq!(named.tier, SelfIdentifying);
+    assert_eq!(named.kind, UnsupportedField);
+    assert_eq!(named.accepted, Some("thinking.type.adaptive"));
 }
 
 #[test]
