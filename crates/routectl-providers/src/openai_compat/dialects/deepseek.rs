@@ -7,8 +7,8 @@
 //! When the canonical request has `reasoning.effort` set, it is forwarded
 //! verbatim as `reasoning_effort`. When only `reasoning.max_tokens` is
 //! present, an effort string is derived from the budget:
-//!   max_tokens < BUDGET_HIGH_THRESHOLD -> "medium"
-//!   max_tokens >= BUDGET_HIGH_THRESHOLD -> "high"
+//!   max_tokens <= 8192 (`effort::level_from_budget` medium or below) -> "medium"
+//!   max_tokens > 8192 (high, xhigh or max band) -> "high"
 //! Operator-supplied effort always wins over the derived value.
 
 use serde_json::Value;
@@ -199,10 +199,10 @@ mod tests {
         assert_eq!(body["reasoning_effort"], "medium");
     }
 
-    // max_tokens at the threshold derives "high".
+    // max_tokens at the top of the medium band derives "medium".
     #[test]
-    fn max_tokens_at_threshold_derives_high() {
-        // Arrange: no effort, budget 8192 == BUDGET_HIGH_THRESHOLD.
+    fn max_tokens_at_medium_band_top_derives_medium() {
+        // Arrange: no effort, budget 8192 (highest medium budget).
         let mut req = user_req("deepseek-chat");
         req.reasoning = Some(ReasoningConfig {
             effort: None,
@@ -223,13 +223,13 @@ mod tests {
         .unwrap();
 
         // Assert
-        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["reasoning_effort"], "medium");
     }
 
     // max_tokens above threshold derives "high".
     #[test]
     fn max_tokens_above_threshold_derives_high() {
-        // Arrange: no effort, budget 16000 > 8192.
+        // Arrange: no effort, budget 16000 (high band).
         let mut req = user_req("deepseek-chat");
         req.reasoning = Some(ReasoningConfig {
             effort: None,

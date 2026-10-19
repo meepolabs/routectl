@@ -32,8 +32,8 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::ChatRequest;
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
+use routectl_core::{ChatRequest, ReasoningConfig};
 
 use super::AuthKind;
 use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
@@ -68,7 +68,7 @@ pub(super) fn apply_reasoning(
         .reasoning
         .as_ref()
         .and_then(|r| r.effort.as_deref())
-        .is_some_and(|e| e == "none");
+        .is_some_and(ReasoningConfig::is_off_effort);
     if effort_disabled {
         if let Some(tap) = tap {
             declare(

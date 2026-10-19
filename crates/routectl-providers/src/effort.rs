@@ -83,7 +83,7 @@ pub(crate) fn clamp_effort_to_supported<'a>(
     // Reasoning-OFF: never substitute a positive level. Signal "omit" so the
     // egress drops the effort field (or emits its own disable form). "none" is
     // deliberately absent from RANK_ORDER -- it is not a positive level.
-    if requested == "none" {
+    if routectl_core::ReasoningConfig::is_off_effort(requested) {
         return None;
     }
 
@@ -169,7 +169,11 @@ pub(crate) fn budget_from_level(level: &str) -> Option<u32> {
 ///   8193..=24576 -> high
 ///   24577..=32768 -> xhigh
 ///   32769..     -> max
-#[cfg(any(feature = "gemini", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "gemini",
+    feature = "openai-responses",
+    feature = "openai-compat"
+))]
 pub(crate) const fn level_from_budget(budget: u32) -> &'static str {
     match budget {
         0 => "none",

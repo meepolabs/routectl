@@ -14,11 +14,6 @@ use routectl_core::{ChatRequest, Error, Message, MessageContent, Result};
 
 use crate::openai_compat::util::build_reasoning_detail;
 
-/// Budget threshold (tokens) above which `reasoning.max_tokens`
-/// is mapped to "high" effort; below is "medium". Shared by the
-/// DeepSeek and vLLM dialects, which derive effort identically.
-const BUDGET_HIGH_THRESHOLD: u32 = 8192;
-
 /// Whether reasoning is "on for wire purposes" -- the single predicate that
 /// gates BOTH the vLLM `chat_template_kwargs.enable_thinking` flag and the
 /// `reasoning_effort` emission, so the two can never disagree.
@@ -44,7 +39,7 @@ pub(super) fn reasoning_enabled_for_wire(req: &ChatRequest) -> bool {
     let Some(r) = req.reasoning.as_ref() else {
         return false;
     };
-    if r.enabled == Some(false) || r.effort.as_deref() == Some("none") {
+    if r.is_off() {
         return false;
     }
     r.enabled == Some(true) || r.effort.is_some() || r.max_tokens.is_some()
@@ -101,12 +96,12 @@ pub(super) fn derive_reasoning_effort(req: &ChatRequest) -> Option<String> {
     if let Some(effort) = r.effort.as_deref() {
         return Some(effort.to_string());
     }
-    // Derive from max_tokens when effort is absent.
+    // Derive from max_tokens when effort is absent. These dialects take
+    // only two levels, so the shared budget table collapses onto them.
     if let Some(budget) = r.max_tokens {
-        let effort = if budget >= BUDGET_HIGH_THRESHOLD {
-            "high"
-        } else {
-            "medium"
+        let effort = match crate::effort::level_from_budget(budget) {
+            "high" | "xhigh" | "max" => "high",
+            _ => "medium",
         };
         return Some(effort.to_string());
     }
@@ -677,6 +672,38 @@ mod tests {
             derive_reasoning_effort(&req).is_none(),
             "effort:none must derive no effort"
         );
+    }
+
+    /// A budget-only request maps through the shared budget table onto the
+    /// two levels DeepSeek and vLLM take: the medium band and below derive
+    /// "medium"; the high, xhigh and max bands derive "high".
+    #[test]
+    fn derive_reasoning_effort_maps_budget_to_two_levels() {
+        use routectl_core::{ChatRequest, ReasoningConfig};
+        let cases: [(&str, u32, &str); 6] = [
+            ("zero", 0, "medium"),
+            ("low band top", 1024, "medium"),
+            ("medium band top", 8192, "medium"),
+            ("high band bottom", 8193, "high"),
+            ("xhigh band bottom", 24577, "high"),
+            ("max band", 128_000, "high"),
+        ];
+        for (name, budget, expected) in cases {
+            let req = ChatRequest {
+                reasoning: Some(ReasoningConfig {
+                    effort: None,
+                    max_tokens: Some(budget),
+                    enabled: None,
+                    exclude: None,
+                }),
+                ..Default::default()
+            };
+            assert_eq!(
+                derive_reasoning_effort(&req).as_deref(),
+                Some(expected),
+                "case {name}: budget {budget}"
+            );
+        }
     }
 
     /// The shared wire-enabled predicate: explicit Some(false) wins;
