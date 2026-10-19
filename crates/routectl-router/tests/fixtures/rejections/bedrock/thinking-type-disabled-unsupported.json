@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-10-19, Invoke, us.anthropic.claude-sonnet-5-5): thinking.type disabled sent to a model whose off switch is thinking.type between_tools. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns on InvokeModel, with no Converse model-errors wrapper. lifted_type is the ValidationException discriminator from the x-amzn-ErrorType header, namespace stripped.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"To turn thinking off on this model, send \\\"thinking\\\": {\\\"type\\\": \\\"between_tools\\\"} instead of {\\\"type\\\": \\\"disabled\\\"}. The model does not think before responding. The short updates it writes between tool calls come back as thinking blocks.\"}"
+}

@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-10-19, claude-opus-5-5, OAuth seat): thinking.type disabled sent to a model that only takes adaptive thinking. error.message is verbatim. lifted_type is the error.type routectl lifts from the body. The body is the logged envelope with request_id dropped.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"\\\"thinking.type.disabled\\\" is not supported for this model. Use \\\"thinking.type.adaptive\\\" and \\\"output_config.effort\\\" to control thinking behavior.\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}
