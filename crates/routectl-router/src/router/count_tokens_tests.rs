@@ -36,6 +36,11 @@ enum CountBehavior {
     /// Return `Error::Upstream { status, .. }` (a real upstream
     /// error from a capable provider).
     UpstreamError(u16),
+    /// Return `Error::Upstream { status, .. }` carrying an upstream reset
+    /// hint (`retry_after`).
+    UpstreamErrorWithReset(u16, Duration),
+    /// Return a 401 and fail the auth refresh that follows it.
+    UnauthorizedRefreshFails,
 }
 
 /// Mock provider that records every `count_tokens` call so a test
@@ -81,6 +86,20 @@ impl Provider for CountingProvider {
             CountBehavior::UpstreamError(status) => {
                 Err(Error::upstream(self.id.clone(), status, "boom"))
             }
+            CountBehavior::UpstreamErrorWithReset(status, reset) => Err(
+                Error::upstream_with_retry_after(self.id.clone(), status, "boom", Some(reset)),
+            ),
+            CountBehavior::UnauthorizedRefreshFails => {
+                Err(Error::upstream(self.id.clone(), 401, "unauthorized"))
+            }
+        }
+    }
+    async fn on_auth_failure(&self) -> Result<()> {
+        match self.behavior {
+            CountBehavior::UnauthorizedRefreshFails => {
+                Err(Error::upstream(self.id.clone(), 401, "refresh failed"))
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -514,6 +533,31 @@ fn bedrock_entry_with_breaker(circuit_failures: u32, circuit_cooldown_ms: u64) -
         runtime.circuit_cooldown_ms = Some(circuit_cooldown_ms);
     }
     entry
+}
+
+/// A count-capable entry on a FORWARDED credential (the client's own
+/// bearer), with a configured breaker. Keeps the default Anthropic base
+/// URL so the forwarded-passthrough gate admits the dispatch.
+fn forwarded_anthropic_entry_with_breaker(
+    circuit_failures: u32,
+    circuit_cooldown_ms: u64,
+) -> ProviderEntry {
+    ProviderEntry::anthropic_api("literal:k")
+        .with_credential_source(crate::config::CredentialSource::Forwarded)
+        .with_runtime(ProviderRuntimePolicy {
+            circuit_failures: Some(circuit_failures),
+            circuit_cooldown_ms: Some(circuit_cooldown_ms),
+            ..Default::default()
+        })
+}
+
+/// A count request carrying a captured client bearer for a forwarded seat.
+fn forwarded_count_req() -> ChatRequest {
+    let mut req = count_req();
+    req.routectl_internal.forwarded_bearer = Some(routectl_core::schema::ForwardedBearer::new(
+        "sk-ant-oat01-FORWARDED".into(),
+    ));
+    req
 }
 
 /// Whether the seat keyed by `state_key` currently holds the half-open

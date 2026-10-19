@@ -7,8 +7,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use routectl_core::failure_class::{FailureClass, classify};
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, RefusalReason, Result};
+use routectl_core::failure_class::{FailureClass, LastOutcome, classify};
+use routectl_core::{
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, RefusalReason, Result, TokenCount,
+};
 use routectl_testkit::with_capture;
 
 use super::*;
@@ -387,4 +389,154 @@ async fn an_opened_debit_does_not_suppress_the_complete_retry() {
         Some("true"),
         "an opened debit is log-only: the same provider is still retried"
     );
+}
+
+/// Sole chain-entry provider failing every surface with a 503 carrying
+/// `reset` as its upstream reset hint.
+struct ResetHintProvider {
+    reset: Option<Duration>,
+}
+
+impl ResetHintProvider {
+    fn error(&self) -> Error {
+        Error::upstream_with_retry_after("p", 503, "unavailable", self.reset)
+    }
+}
+
+#[async_trait]
+impl Provider for ResetHintProvider {
+    fn id(&self) -> &'static str {
+        "p"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response("p", "unused"))
+    }
+    async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+        Err(self.error())
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        Err(self.error())
+    }
+    async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+        Err(self.error())
+    }
+}
+
+/// A single count-capable seat behind alias `solo`, with a breaker that
+/// a lone debit cannot trip (threshold 5, 1s cooldown) and one attempt
+/// per request, so every surface settles exactly one failure.
+fn router_failing_with_reset(reset: Option<Duration>) -> Router {
+    let mut config = Config {
+        retry: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            jitter_ms: 0,
+            ..RetryPolicy::default()
+        },
+        ..Config::default()
+    };
+    config
+        .aliases
+        .insert("solo".into(), AliasValue::Chain(vec!["seat".into()]));
+    config.providers.insert(
+        "p".into(),
+        ProviderEntry::anthropic_api("literal:k").with_runtime(ProviderRuntimePolicy {
+            circuit_failures: Some(5),
+            circuit_cooldown_ms: Some(1_000),
+            ..Default::default()
+        }),
+    );
+    let mut router = Router::new(Arc::new(config));
+    let provider: Arc<dyn Provider> = Arc::new(ResetHintProvider { reset });
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "seat".into(),
+        Arc::new(ResolvedModel::new("seat", "p", provider, "u")),
+    );
+    router.install_resolved_models(models);
+    router
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    Parked,
+    Debited,
+}
+
+/// What the one failed attempt did to the seat's breaker: a park opens
+/// it without stamping an outcome, a sub-threshold debit leaves it
+/// closed and stamps the failure.
+fn settled(router: &Router) -> Settled {
+    let gate = router.gate_status_for_tests("seat");
+    match (gate.circuit, gate.last_outcome) {
+        (crate::runtime_state::CircuitPhase::Open, None) => Settled::Parked,
+        (crate::runtime_state::CircuitPhase::Closed, Some(LastOutcome::Http5xx)) => {
+            Settled::Debited
+        }
+        other => panic!("neither a park nor a debit: {other:?}"),
+    }
+}
+
+async fn settle_on(surface: DispatchSurface, reset: Option<Duration>, req: ChatRequest) -> Settled {
+    let router = router_failing_with_reset(reset);
+    let failed = match surface {
+        DispatchSurface::Complete => router.complete(req).await.is_err(),
+        DispatchSurface::Stream => router.stream(req).await.is_err(),
+        DispatchSurface::CountTokens => router.count_tokens(req).await.is_err(),
+    };
+    assert!(failed, "{}: the attempt must fail", surface.as_str());
+    settled(&router)
+}
+
+#[tokio::test]
+async fn same_reset_hint_same_breaker_outcome_on_every_surface() {
+    let plain = ChatRequest {
+        model: "solo".into(),
+        ..Default::default()
+    };
+    let probe = ChatRequest {
+        max_tokens: Some(1),
+        ..plain.clone()
+    };
+    let rows: [(&str, Option<Duration>, &ChatRequest, Settled); 4] = [
+        ("no hint", None, &plain, Settled::Debited),
+        (
+            "1ms hint",
+            Some(Duration::from_millis(1)),
+            &plain,
+            Settled::Debited,
+        ),
+        (
+            "60s hint",
+            Some(Duration::from_mins(1)),
+            &plain,
+            Settled::Parked,
+        ),
+        (
+            "60s hint on a probe",
+            Some(Duration::from_mins(1)),
+            &probe,
+            Settled::Debited,
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (row, reset, req, expected) in rows {
+        for surface in [
+            DispatchSurface::Complete,
+            DispatchSurface::Stream,
+            DispatchSurface::CountTokens,
+        ] {
+            let got = settle_on(surface, reset, req.clone()).await;
+            if got != expected {
+                mismatches.push(format!(
+                    "{} / {row}: expected {expected:?}, got {got:?}",
+                    surface.as_str()
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }

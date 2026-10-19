@@ -4143,7 +4143,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   RAII: `admit_dispatch`/`admit_probe_dispatch` (admission returns the
   half-open ownership guard, which also carries the seat's credential
   generation read in the same critical section), the
-  `record_failure`/`record_failure_opened`/`park_provider`
+  `record_failure_opened`/`park_provider`
   breaker-accounting methods, `apply_breaker_outcome` (applies a
   `BreakerOutcome`, returning whether a debit opened the breaker plus the
   `breaker_effect` label), `force_open_breaker`/`breaker_open_for`, the

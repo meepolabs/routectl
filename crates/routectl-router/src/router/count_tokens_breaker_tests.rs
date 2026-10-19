@@ -330,3 +330,85 @@ async fn walk_reruns_gate_on_next_seat_and_respects_open_breaker() {
         "an open breaker on the walked-to seat must block the dispatch, not be bypassed",
     );
 }
+
+/// One exit a count_tokens dispatch can take from a half-open slot it
+/// claimed, and the leg that drives it there.
+struct HalfOpenExitRow {
+    name: &'static str,
+    entry: ProviderEntry,
+    behavior: CountBehavior,
+    req: ChatRequest,
+}
+
+fn half_open_exit_rows() -> Vec<HalfOpenExitRow> {
+    vec![
+        HalfOpenExitRow {
+            name: "debit (5xx, no reset hint)",
+            entry: anthropic_api_entry_with_breaker(5, 60_000),
+            behavior: CountBehavior::UpstreamError(503),
+            req: count_req(),
+        },
+        HalfOpenExitRow {
+            name: "park (5xx, large reset hint)",
+            entry: anthropic_api_entry_with_breaker(5, 60_000),
+            behavior: CountBehavior::UpstreamErrorWithReset(503, Duration::from_mins(1)),
+            req: count_req(),
+        },
+        HalfOpenExitRow {
+            name: "non-debiting 400",
+            entry: anthropic_api_entry_with_breaker(5, 60_000),
+            behavior: CountBehavior::UpstreamError(400),
+            req: count_req(),
+        },
+        HalfOpenExitRow {
+            name: "forwarded-credential terminal 401",
+            entry: forwarded_anthropic_entry_with_breaker(5, 60_000),
+            behavior: CountBehavior::UpstreamError(401),
+            req: forwarded_count_req(),
+        },
+        HalfOpenExitRow {
+            name: "401 whose auth refresh fails",
+            entry: anthropic_api_entry_with_breaker(5, 60_000),
+            behavior: CountBehavior::UnauthorizedRefreshFails,
+            req: count_req(),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn every_terminal_exit_from_a_half_open_count_frees_the_probe_slot() {
+    // A count_tokens dispatch admitted as the half-open probe must leave
+    // the slot free on every terminal exit, or every later dispatch to
+    // the seat (completions and streams included) sees CircuitOpen until
+    // restart. The capability 501 exit is pinned by
+    // `wire_501_on_half_open_probe_releases_slot_without_debiting_breaker`.
+    for row in half_open_exit_rows() {
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "anthropic-only",
+            provider_name: "anthropic-prov",
+            entry: row.entry,
+            behavior: row.behavior,
+            upstream: None,
+        }]);
+        assert!(
+            router.force_open_breaker("anthropic-only", Duration::ZERO),
+            "{}: seat breaker slot must exist to arm half-open",
+            row.name,
+        );
+
+        let result = router.count_tokens(row.req).await;
+
+        assert!(result.is_err(), "{}: the exit is terminal", row.name);
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            1,
+            "{}: the half-open probe must reach the upstream exactly once",
+            row.name,
+        );
+        assert!(
+            !half_open_in_flight(&router, "anthropic-only"),
+            "{}: the exit must free the half-open probe slot",
+            row.name,
+        );
+    }
+}

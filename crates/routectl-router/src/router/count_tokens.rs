@@ -34,7 +34,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use routectl_core::failure_class::{LastOutcome, classify, classify_with_attempt};
+use routectl_core::failure_class::{classify, classify_with_attempt};
 use routectl_core::provider_kind::config as config_kind;
 use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
@@ -50,9 +50,10 @@ use super::dispatch::{
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
 use super::local_refusal::ingress_dialect_of;
-use super::outcome_rule::{class_debits, rate_limit_reset_hint};
+use super::outcome_rule::{BreakerOutcome, breaker_outcome, class_debits, rate_limit_reset_hint};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::strip_replay_artifacts_recalibrating;
+use super::runtime_gate::is_probe_request;
 use super::transcript_defect::{is_transcript_rejection, record_transcript_defect};
 use super::{
     CountedTokens, DispatchMeta, DispatchTarget, ReplayDegradation, Router, StripDecision,
@@ -775,14 +776,15 @@ impl Router {
                     // Health error. Mirror `complete_with_options`: the
                     // breaker DEBIT keys off the failure CLASS, not the
                     // fallback decision. A transient-health class (429 / 5xx
-                    // / status-0 / overload) debits (an honored reset hint
-                    // parks instead); a caller-shaped 4xx releases the slot
-                    // without a debit, so a repeated non-retryable 4xx here
-                    // cannot trip the per-seat breaker that also gates
-                    // completions and streams. Either way this propagates --
-                    // health fallback stays reserved for the messages path,
-                    // so a 429 here does NOT walk.
+                    // / status-0 / overload) debits or parks by the rule every
+                    // surface shares (`breaker_outcome`); a caller-shaped 4xx
+                    // releases the slot without a debit, so a repeated
+                    // non-retryable 4xx here cannot trip the per-seat breaker
+                    // that also gates completions and streams. Either way this
+                    // propagates -- health fallback stays reserved for the
+                    // messages path, so a 429 here does NOT walk.
                     let reset_hint = rate_limit_reset_hint(&e, &policy);
+                    let is_probe = is_probe_request(req, &policy);
                     let debit = class_debits(&cf.class);
                     // The class/remap/debit decision on the token-count path was
                     // otherwise silent (unlike the messages path, which emits a
@@ -803,17 +805,11 @@ impl Router {
                         debit,
                         "count_tokens seat terminal; resilience class policy applied",
                     );
-                    if debit {
-                        match reset_hint {
-                            Some(h) => self.park_provider(&target.state_key, h),
-                            None => self.record_failure(
-                                &target.state_key,
-                                LastOutcome::from_failure_class(&cf.class),
-                            ),
-                        }
-                        probe_guard.disarm();
-                    } else {
-                        probe_guard.release();
+                    let outcome = breaker_outcome(&cf.class, reset_hint, is_probe);
+                    self.apply_breaker_outcome(&target.state_key, outcome, &cf.class);
+                    match outcome {
+                        BreakerOutcome::None => probe_guard.release(),
+                        BreakerOutcome::Debit | BreakerOutcome::Park(_) => probe_guard.disarm(),
                     }
                     self.park_counted_seat(&target, req, &e, &probe_guard);
                     return CountSeatOutcome::Terminal(e);

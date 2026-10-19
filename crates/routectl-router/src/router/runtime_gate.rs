@@ -186,14 +186,8 @@ impl Router {
         (refusal, guard)
     }
 
-    pub(super) fn record_failure(&self, state_key: &str, outcome: LastOutcome) {
-        self.record_failure_opened(state_key, outcome);
-    }
-
     /// Debit one breaker failure for `state_key`, returning whether this
-    /// debit tripped (opened) the breaker on this call. The `record_failure`
-    /// wrapper discards that signal; a caller that must report the breaker
-    /// effect of the debit uses this directly.
+    /// debit tripped (opened) the breaker on this call.
     pub(super) fn record_failure_opened(&self, state_key: &str, outcome: LastOutcome) -> bool {
         self.state
             .get(state_key)

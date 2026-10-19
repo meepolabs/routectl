@@ -1708,11 +1708,9 @@ impl Router {
                             return Err(e);
                         }
                         // Stream dispatch never retries the same provider (no
-                        // in-loop sleep), so a reset hint only sizes the
-                        // breaker park. A non-probe reset parks the provider
-                        // for the honored, clamped duration; a probe never
-                        // parks and a no-hint error keeps the
-                        // threshold-gated debit.
+                        // in-loop sleep), so a reset hint only decides park
+                        // versus debit, by the rule every surface shares
+                        // (`breaker_outcome`).
                         let reset_hint = rate_limit_reset_hint(&e, &policy);
                         // The DEBIT keys off the failure CLASS, not the
                         // chain-hop decision (see `complete_inner`): a seat is
@@ -1721,14 +1719,9 @@ impl Router {
                         // still falls back releases its slot without a debit
                         // in the fallback branch below.
                         let debits = class_debits(&cf.class);
+                        let outcome = breaker_outcome(&cf.class, reset_hint, is_probe);
+                        self.apply_breaker_outcome(state_key, outcome, &cf.class);
                         if debits {
-                            match reset_hint {
-                                Some(h) if !is_probe => self.park_provider(state_key, h),
-                                _ => self.record_failure(
-                                    state_key,
-                                    LastOutcome::from_failure_class(&cf.class),
-                                ),
-                            }
                             probe_guard.disarm();
                         }
                         // Outside the debit gate: a credential rejection

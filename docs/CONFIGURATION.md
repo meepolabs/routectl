@@ -1699,17 +1699,31 @@ hammering it.
 # max_honored_retry_after_ms  = 1800000
 ```
 
-A reset at or below 5 seconds is honored as the next same-provider
-retry sleep (it never blocks the request thread beyond that). A larger
-reset, clamped to `max_honored_retry_after_ms`, parks the provider via
-the circuit breaker -- the request itself falls over to the next chain
-entry immediately rather than waiting. Recovery after the park still
-flows through the breaker's single half-open probe. The resolution and
-clamp live in `RetryPolicy::max_honored_retry_after` and the router's
-`rate_limit_reset_hint` / `park_provider`
+One rule decides what a failed attempt carrying a reset does to the
+seat's breaker, and it is the same on completions, streams and
+`count_tokens`:
+
+- A reset larger than 5 seconds, clamped to
+  `max_honored_retry_after_ms`, parks the provider via the circuit
+  breaker -- the request itself falls over to the next chain entry
+  immediately rather than waiting (`count_tokens` never falls over on a
+  health error; it returns the error).
+- A reset at or below 5 seconds takes the ordinary threshold-gated
+  failure debit, exactly as an error without a reset does.
+- A probe request (`max_tokens` at or below `probe_max_tokens`) never
+  parks: whatever its reset, it takes the debit.
+
+Completions additionally fold a reset at or below 5 seconds into the
+next same-provider retry sleep (it never blocks the request thread
+beyond that). Streams and `count_tokens` do not retry the same
+provider, so there the reset only decides park versus debit. Recovery
+after a park still flows through the breaker's single half-open probe.
+The resolution and clamp live in `RetryPolicy::max_honored_retry_after`
+and the router's `rate_limit_reset_hint` / `breaker_outcome`
 (`crates/routectl-router/src/config/schema.rs`,
-`crates/routectl-router/src/router/outcome_rule.rs`,
-`crates/routectl-router/src/router/runtime_gate.rs`).
+`crates/routectl-router/src/router/outcome_rule.rs`); the router applies
+the outcome in `apply_breaker_outcome`
+(`crates/routectl-router/src/router/runtime_gate.rs`).
 
 
 
