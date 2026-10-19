@@ -857,3 +857,7 @@ mod tool_use_two_hop_tests;
 #[cfg(test)]
 #[path = "openai_system_lift_tests.rs"]
 mod openai_system_lift_tests;
+
+#[cfg(test)]
+#[path = "thinking_carrier_ingress_tests.rs"]
+mod thinking_carrier_ingress_tests;

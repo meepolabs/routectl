@@ -114,6 +114,11 @@ pub(super) fn apply_layered_overlays(
     // it does model.
     let captured_anthropic_thinking_display =
         req.routectl_internal.anthropic_thinking_display.take();
+    // The client's native `thinking` object (minus `display`) is
+    // inbound-request data for the same reason: without the carry a
+    // fallback attempt would lose the object and the egress would fall
+    // back to the canonical config, which cannot represent every shape.
+    let captured_anthropic_thinking = std::mem::take(&mut req.routectl_internal.anthropic_thinking);
     // Preserve the ORIGIN facts, for the same reason as the captures above: both
     // are properties of where the request came from, not per-model knobs, so the
     // per-attempt rebuild from `Default::default()` must carry them or they
@@ -151,6 +156,7 @@ pub(super) fn apply_layered_overlays(
     internal.stainless_headers = captured_stainless_headers;
     internal.responses_input_passthrough = captured_responses_input_passthrough;
     internal.anthropic_thinking_display = captured_anthropic_thinking_display;
+    internal.anthropic_thinking = captured_anthropic_thinking;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
@@ -486,3 +492,7 @@ mod three_source_anthropic_beta_lift_tests;
 #[cfg(test)]
 #[path = "reasoning_passthrough_tests.rs"]
 mod reasoning_passthrough_tests;
+
+#[cfg(test)]
+#[path = "anthropic_thinking_fallback_tests.rs"]
+mod anthropic_thinking_fallback_tests;

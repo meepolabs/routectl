@@ -2,7 +2,8 @@ use axum::http::HeaderMap;
 use serde_json::{Map, Value};
 
 use routectl_core::{
-    ChatRequest, Error, ReasoningConfig, RefusalReason, Result, sanitize_detail_for_log,
+    AnthropicThinking, ChatRequest, Error, ReasoningConfig, RefusalReason, Result, ThinkingObject,
+    sanitize_detail_for_log,
 };
 
 // Referenced only by the inline test module (`parse_tests.rs`) via
@@ -107,12 +108,23 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
 
     // Translate thinking config. The raw `display` string rides
     // `routectl_internal` so the Anthropic-API egress can re-emit a
-    // vocabulary the canonical boolean does not model.
-    if let Some(t) = thinking {
-        let (reasoning, raw_display) = translate_thinking(&t)?;
-        req.reasoning = Some(reasoning);
-        req.routectl_internal.anthropic_thinking_display = raw_display;
-    }
+    // vocabulary the canonical boolean does not model, and the rest of the
+    // client's object rides `anthropic_thinking` so an Anthropic-shape
+    // egress can emit it verbatim, types the canonical config cannot
+    // represent included.
+    req.routectl_internal.anthropic_thinking = match thinking {
+        None => AnthropicThinking::SentNone,
+        Some(t) => {
+            let (reasoning, raw_display) = translate_thinking(&t)?;
+            req.reasoning = Some(reasoning);
+            req.routectl_internal.anthropic_thinking_display = raw_display;
+            // A non-object `thinking` is no shape to forward, and the client
+            // did not say "no thinking" either: leave it uncaptured so
+            // readers fall back to the canonical config derived above.
+            ThinkingObject::from_client(t)
+                .map_or(AnthropicThinking::NotCaptured, AnthropicThinking::Sent)
+        }
+    };
 
     // Lift output_config.effort into canonical req.reasoning.effort.
     // claude-code 2.1.153+ sends thinking and output_config.effort as
@@ -555,3 +567,7 @@ mod thinking_display_tests;
 #[cfg(test)]
 #[path = "parse_thinking_type_tests.rs"]
 mod thinking_type_tests;
+
+#[cfg(test)]
+#[path = "parse_thinking_carrier_tests.rs"]
+mod thinking_carrier_tests;
