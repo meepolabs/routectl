@@ -22,8 +22,8 @@
 //! For a row that rewrites rather than drops, the parser also reports the
 //! accepted value the envelope names. Candidates come ONLY from the template
 //! position a grounded arm knows to list replacements (the quoted list after
-//! `Input should be `, the quoted token after `Use `), never from a scan of the
-//! whole message: an envelope may also echo the value it refused, and that
+//! `Input should be `, the quoted token after `Use `, the type the thinking
+//! off-switch template says to send), never from a scan of the whole message: an envelope may also echo the value it refused, and that
 //! echo can be a member of the set. A candidate counts only when it equals a
 //! member of the row's closed accepted set, and only exactly ONE named member
 //! fills it; none or several leave it empty, so a rewrite never picks between
@@ -57,6 +57,42 @@ const GROUNDED_VALUE_LIST_PREFIX: &str = "Input should be ";
 const QUOTED_NOT_SUPPORTED: &str = " is not supported";
 /// Ends on the opening quote of the replacement it names.
 const QUOTED_GROUNDED_CONTINUATION: &str = " for this model. Use \"";
+
+/// The thinking off-switch template,
+/// `<lead-in><accepted>"<middle><refused>"<close>`, each type token ended by
+/// its closing quote. Prose after the close is free.
+const THINKING_SWITCH_LEAD_IN: &str =
+    "To turn thinking off on this model, send \"thinking\": {\"type\": \"";
+const THINKING_SWITCH_MIDDLE: &str = "} instead of {\"type\": \"";
+const THINKING_SWITCH_CLOSE: &str = "}.";
+
+/// A `thinking.type` token the off-switch template may name, and the field
+/// path it localizes to.
+struct ThinkingType {
+    token: &'static str,
+    path: &'static str,
+}
+
+/// The closed set of thinking types the off-switch template is read for. A
+/// token outside it localizes nothing.
+static THINKING_TYPES: [ThinkingType; 4] = [
+    ThinkingType {
+        token: "adaptive",
+        path: "thinking.type.adaptive",
+    },
+    ThinkingType {
+        token: "between_tools",
+        path: "thinking.type.between_tools",
+    },
+    ThinkingType {
+        token: "disabled",
+        path: "thinking.type.disabled",
+    },
+    ThinkingType {
+        token: "enabled",
+        path: "thinking.type.enabled",
+    },
+];
 
 /// Separators between members of an `Input should be` list, longest first so
 /// `, or ` is not read as `, ` followed by prose.
@@ -343,7 +379,9 @@ fn bedrock_message(parsed: &ParsedErrorBody) -> Option<&str> {
 }
 
 fn localize_message(message: &str) -> Option<Attribution<'_>> {
-    quoted_not_supported(message).or_else(|| location_prefix(message))
+    quoted_not_supported(message)
+        .or_else(|| thinking_off_switch(message))
+        .or_else(|| location_prefix(message))
 }
 
 /// `"a.b" is not supported for this model. Use "x.y" ...`
@@ -365,6 +403,28 @@ fn quoted_not_supported(message: &str) -> Option<Attribution<'_>> {
         presupposes_presence: replacement.is_some(),
         replacements: replacement.flatten().into_iter().collect(),
     })
+}
+
+/// `To turn thinking off on this model, send "thinking": {"type": "<A>"}
+/// instead of {"type": "<B>"}.` refuses type B and names type A. Both must be
+/// in [`THINKING_TYPES`]; the attribution carries only that table's entries.
+fn thinking_off_switch(message: &str) -> Option<Attribution<'static>> {
+    let rest = message.strip_prefix(THINKING_SWITCH_LEAD_IN)?;
+    let (accepted, rest) = rest.split_once('"')?;
+    let rest = rest.strip_prefix(THINKING_SWITCH_MIDDLE)?;
+    let (refused, rest) = rest.split_once('"')?;
+    rest.strip_prefix(THINKING_SWITCH_CLOSE)?;
+    Some(Attribution {
+        path: thinking_type(refused)?.path,
+        tier: SignalTier::SelfIdentifying,
+        kind: RejectionKind::UnsupportedField,
+        presupposes_presence: true,
+        replacements: vec![thinking_type(accepted)?.path],
+    })
+}
+
+fn thinking_type(token: &str) -> Option<&'static ThinkingType> {
+    THINKING_TYPES.iter().find(|known| known.token == token)
 }
 
 /// `<dotted.path>: <reason>`, the request-validation location prefix.

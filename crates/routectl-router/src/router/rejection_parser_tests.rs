@@ -11,7 +11,9 @@ use routectl_core::{MAX_ERROR_BODY_BYTES, ParsedErrorBody, UpstreamBody};
 use serde_json::{Value, json};
 
 use super::super::field_repair::{closed_table, grounded_table};
-use super::{LocalizedPath, RejectionKind, localize, parse_rejection};
+use super::{
+    LocalizedPath, RejectionKind, THINKING_TYPES, localize, parse_rejection, rejected_wire_path,
+};
 
 const BEDROCK_CAPTURE: &str = include_str!("../../tests/fixtures/bedrock_validation_capture.json");
 const FORCED_TOOL_CHOICE_CAPTURE: &str =
@@ -25,6 +27,11 @@ const OPENAI_RESPONSES: &str = "openai-responses";
 const DISPLAY_PATH: &str = "thinking.enabled.display";
 const DISPLAY_MESSAGE: &str = "thinking.enabled.display: Input should be 'summarized', 'omitted'";
 const CONVERSE_WRAPPER: &str = "The model returned the following errors: ";
+const THINKING_DISABLED_PATH: &str = "thinking.type.disabled";
+/// The off-switch template exactly as the committed Bedrock capture spells it.
+const THINKING_SWITCH_MESSAGE: &str = "To turn thinking off on this model, send \"thinking\": \
+     {\"type\": \"between_tools\"} instead of {\"type\": \"disabled\"}. The model does not \
+     think before responding.";
 
 use RejectionKind::{InvalidValue, UnsupportedField};
 use SignalTier::{Inferred, SelfIdentifying};
@@ -95,6 +102,28 @@ fn rejections_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rejections")
 }
 
+/// The status and body of the committed `rejections/<kind>/<case>.json`.
+fn fixture(kind: &str, case: &str) -> (u16, String) {
+    let file = rejections_dir().join(kind).join(format!("{case}.json"));
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    let status = u16::try_from(fixture["status"].as_u64().unwrap()).unwrap();
+    (status, fixture["body"].as_str().unwrap().to_string())
+}
+
+/// The replacements `localize` reads from `body`, or `None` when it
+/// localizes nothing.
+fn replacements(kind: &str, status: u16, body: &str) -> Option<Vec<String>> {
+    let body = UpstreamBody::new(body);
+    let localized = localize(kind, status, body.parsed()?)?;
+    Some(
+        localized
+            .replacements
+            .iter()
+            .map(|token| (*token).to_string())
+            .collect(),
+    )
+}
+
 /// Every `rejections/<kind>/<case>.json` fixture, keyed `<kind>/<case>`, with
 /// the outcome the parser reaches for it on the lane kind its directory names.
 fn corpus_outcomes() -> BTreeMap<String, Outcome> {
@@ -136,6 +165,14 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         (
             "anthropic-api/thinking-display-enum",
             Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
+        ),
+        (
+            "anthropic-api/thinking-type-disabled-unsupported",
+            unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "bedrock/thinking-type-disabled-unsupported",
+            unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         ),
         (
             "bedrock/thinking-type-enabled-unsupported",
@@ -314,18 +351,19 @@ fn near_miss_messages_resolve_to_no_row() {
 
 #[test]
 fn each_arm_assigns_its_tier() {
+    let display = |tier| Outcome::Row(DISPLAY_PATH, tier, UnsupportedField);
     let cases = [
         (
             "grounded location prefix",
             ANTHROPIC,
             anthropic_body(DISPLAY_MESSAGE),
-            SelfIdentifying,
+            Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "prose location prefix",
             ANTHROPIC,
             anthropic_body("thinking.enabled.display: is not available for this request"),
-            Inferred,
+            Outcome::Row(DISPLAY_PATH, Inferred, InvalidValue),
         ),
         (
             "grounded quoted template",
@@ -334,19 +372,25 @@ fn each_arm_assigns_its_tier() {
                 "{CONVERSE_WRAPPER}\"thinking.enabled.display\" is not supported for this \
                  model. Use \"thinking.type.adaptive\" instead."
             )),
-            SelfIdentifying,
+            display(SelfIdentifying),
         ),
         (
             "prose quoted not-supported",
             ANTHROPIC,
             anthropic_body("\"thinking.enabled.display\" is not supported on this lane"),
-            Inferred,
+            display(Inferred),
+        ),
+        (
+            "thinking off-switch template",
+            BEDROCK,
+            bedrock_body(THINKING_SWITCH_MESSAGE),
+            unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         ),
         (
             "structured param",
             OPENAI_COMPAT,
             openai_body("anything at all", Some(DISPLAY_PATH)),
-            SelfIdentifying,
+            Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "unsupported-parameter template",
@@ -356,22 +400,21 @@ fn each_arm_assigns_its_tier() {
                  model.",
                 None,
             ),
-            SelfIdentifying,
+            display(SelfIdentifying),
         ),
     ];
 
-    for (name, kind, body, tier) in cases {
+    for (name, kind, body, expected) in cases {
+        assert_eq!(outcome(kind, 400, &body), expected, "{name}");
         let body = UpstreamBody::new(body);
-        let named = parse_rejection(
+        if let Some(named) = parse_rejection(
             crate::router::FieldRepairTable::default(),
             kind,
             400,
             body.parsed(),
-        )
-        .unwrap_or_else(|| panic!("{name}: resolves the display row"));
-        assert_eq!(named.row.path, DISPLAY_PATH, "{name}");
-        assert_eq!(named.tier, tier, "{name}");
-        assert_eq!(named.accepted, None, "{name}");
+        ) {
+            assert_eq!(named.accepted, None, "{name}");
+        }
     }
 }
 
@@ -386,13 +429,13 @@ fn each_classification_rule_assigns_its_kind() {
             "location prefix, Input should be (display fixture)",
             ANTHROPIC,
             anthropic_body(DISPLAY_MESSAGE),
-            InvalidValue,
+            (DISPLAY_PATH, InvalidValue),
         ),
         (
             "location prefix, Extra inputs are not permitted",
             BEDROCK,
             bedrock_body(&format!("{DISPLAY_PATH}: Extra inputs are not permitted")),
-            UnsupportedField,
+            (DISPLAY_PATH, UnsupportedField),
         ),
         (
             "location prefix, any other reason",
@@ -400,7 +443,7 @@ fn each_classification_rule_assigns_its_kind() {
             anthropic_body(&format!(
                 "{DISPLAY_PATH}: is not available for this request"
             )),
-            InvalidValue,
+            (DISPLAY_PATH, InvalidValue),
         ),
         (
             "quoted is not supported, grounded continuation",
@@ -409,25 +452,25 @@ fn each_classification_rule_assigns_its_kind() {
                 "{CONVERSE_WRAPPER}\"{DISPLAY_PATH}\" is not supported for this model. Use \
                  \"thinking.type.adaptive\" instead."
             )),
-            UnsupportedField,
+            (DISPLAY_PATH, UnsupportedField),
         ),
         (
             "quoted is not supported, prose continuation",
             ANTHROPIC,
             anthropic_body(&format!("\"{DISPLAY_PATH}\" is not supported on this lane")),
-            UnsupportedField,
+            (DISPLAY_PATH, UnsupportedField),
         ),
         (
             "bare error.param",
             OPENAI_COMPAT,
             openai_body("anything at all", Some(DISPLAY_PATH)),
-            InvalidValue,
+            (DISPLAY_PATH, InvalidValue),
         ),
         (
             "error.param with another code",
             OPENAI_COMPAT,
             openai_coded_body("anything at all", Some(DISPLAY_PATH), "invalid_value"),
-            InvalidValue,
+            (DISPLAY_PATH, InvalidValue),
         ),
         (
             "error.param with code unsupported_parameter",
@@ -437,39 +480,42 @@ fn each_classification_rule_assigns_its_kind() {
                 Some(DISPLAY_PATH),
                 "unsupported_parameter",
             ),
-            UnsupportedField,
+            (DISPLAY_PATH, UnsupportedField),
         ),
         (
             "exact singular template, no param",
             OPENAI_COMPAT,
             openai_body(&template, None),
-            UnsupportedField,
+            (DISPLAY_PATH, UnsupportedField),
         ),
         (
             "exact singular template naming error.param",
             OPENAI_COMPAT,
             openai_body(&template, Some(DISPLAY_PATH)),
-            UnsupportedField,
+            (DISPLAY_PATH, UnsupportedField),
         ),
         (
             "exact singular template naming another parameter",
             OPENAI_COMPAT,
             openai_body(&other_template, Some(DISPLAY_PATH)),
-            InvalidValue,
+            (DISPLAY_PATH, InvalidValue),
+        ),
+        (
+            "thinking off-switch template",
+            BEDROCK,
+            bedrock_body(THINKING_SWITCH_MESSAGE),
+            (THINKING_DISABLED_PATH, UnsupportedField),
         ),
     ];
 
-    for (name, provider_kind, body, kind) in cases {
-        let body = UpstreamBody::new(body);
-        let named = parse_rejection(
-            crate::router::FieldRepairTable::default(),
-            provider_kind,
-            400,
-            body.parsed(),
-        )
-        .unwrap_or_else(|| panic!("{name}: resolves the display row"));
-        assert_eq!(named.row.path, DISPLAY_PATH, "{name}");
-        assert_eq!(named.kind, kind, "{name}");
+    for (name, provider_kind, body, (path, kind)) in cases {
+        let reached = match outcome(provider_kind, 400, &body) {
+            Outcome::Row(path, _, kind) => Some((path.to_string(), kind, true)),
+            Outcome::Unresolved(path, _, kind) => Some((path, kind, false)),
+            Outcome::NotLocalized => None,
+        };
+        let has_row = path == DISPLAY_PATH;
+        assert_eq!(reached, Some((path.to_string(), kind, has_row)), "{name}");
     }
 }
 
@@ -931,4 +977,169 @@ fn a_drop_row_never_carries_an_accepted_value() {
         named.accepted, None,
         "the display envelope quotes values, but its row drops rather than rewrites",
     );
+}
+
+#[test]
+fn each_thinking_disabled_fixture_names_its_one_replacement() {
+    let cases = [
+        (ANTHROPIC, "thinking.type.adaptive"),
+        (BEDROCK, "thinking.type.between_tools"),
+    ];
+
+    for (kind, replacement) in cases {
+        let (status, body) = fixture(kind, "thinking-type-disabled-unsupported");
+
+        assert_eq!(
+            replacements(kind, status, &body),
+            Some(vec![replacement.to_string()]),
+            "{kind}",
+        );
+    }
+}
+
+#[test]
+fn the_thinking_off_switch_presupposes_the_refused_type_was_sent() {
+    let (status, body) = fixture(BEDROCK, "thinking-type-disabled-unsupported");
+    let body = UpstreamBody::new(body);
+
+    let rejected = rejected_wire_path(BEDROCK, status, body.parsed()).expect("localized");
+
+    assert!(rejected.presupposes_presence);
+    assert!(
+        rejected
+            .field
+            .segments()
+            .eq(THINKING_DISABLED_PATH.split('.'))
+    );
+}
+
+#[test]
+fn a_converse_wrapped_thinking_off_switch_localizes_like_the_bare_one() {
+    let bare = bedrock_body(THINKING_SWITCH_MESSAGE);
+    let wrapped = bedrock_body(&format!("{CONVERSE_WRAPPER}{THINKING_SWITCH_MESSAGE}"));
+    let captured: Value =
+        serde_json::from_str(&fixture(BEDROCK, "thinking-type-disabled-unsupported").1).unwrap();
+    assert!(
+        captured["message"]
+            .as_str()
+            .unwrap()
+            .starts_with(THINKING_SWITCH_MESSAGE),
+        "premise: the template constant is the committed capture's message",
+    );
+    assert_eq!(
+        outcome(BEDROCK, 400, &bare),
+        unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        "premise: the bare template localizes",
+    );
+
+    assert_eq!(
+        outcome(BEDROCK, 400, &wrapped),
+        outcome(BEDROCK, 400, &bare)
+    );
+    assert_eq!(
+        replacements(BEDROCK, 400, &wrapped),
+        replacements(BEDROCK, 400, &bare),
+    );
+}
+
+#[test]
+fn thinking_off_switch_near_misses_localize_nothing() {
+    let exact = THINKING_SWITCH_MESSAGE;
+    let swap = |from: &str, to: &str| {
+        assert!(exact.contains(from), "premise: {from:?} is in the template");
+        exact.replacen(from, to, 1)
+    };
+    let cases = [
+        (
+            "altered lead-in",
+            BEDROCK,
+            400,
+            bedrock_body(&swap("turn thinking off", "turn thinking of")),
+        ),
+        (
+            "lead-in not at the start",
+            BEDROCK,
+            400,
+            bedrock_body(&format!("Error. {exact}")),
+        ),
+        (
+            "accepted token outside the closed set",
+            BEDROCK,
+            400,
+            bedrock_body(&swap("between_tools", "between_turns")),
+        ),
+        (
+            "refused token outside the closed set",
+            BEDROCK,
+            400,
+            bedrock_body(&swap("\"disabled\"}", "\"off\"}")),
+        ),
+        (
+            "swapped closing brace and quote",
+            BEDROCK,
+            400,
+            bedrock_body(&swap("\"disabled\"}.", "\"disabled}\".")),
+        ),
+        (
+            "missing close",
+            BEDROCK,
+            400,
+            bedrock_body(&swap("\"disabled\"}.", "\"disabled\"")),
+        ),
+        (
+            "escaped quote inside a token",
+            BEDROCK,
+            400,
+            bedrock_body(&swap("between_tools", "between_tools\\")),
+        ),
+        (
+            "extra whitespace",
+            BEDROCK,
+            400,
+            bedrock_body(&swap("{\"type\": \"between", "{\"type\":  \"between")),
+        ),
+        ("status 500", BEDROCK, 500, bedrock_body(exact)),
+        (
+            "openai-compat kind",
+            OPENAI_COMPAT,
+            400,
+            openai_body(exact, None),
+        ),
+    ];
+    assert_eq!(
+        outcome(BEDROCK, 400, &bedrock_body(exact)),
+        unresolved(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        "premise: the same harness localizes the exact template",
+    );
+
+    for (name, kind, status, body) in cases {
+        assert_eq!(
+            outcome(kind, status, &body),
+            Outcome::NotLocalized,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn the_thinking_off_switch_returns_only_table_entries() {
+    let body = UpstreamBody::new(bedrock_body(THINKING_SWITCH_MESSAGE));
+    let body_bytes = body.text().as_bytes().as_ptr_range();
+    let entry = |token: &str| {
+        THINKING_TYPES
+            .iter()
+            .find(|known| known.token == token)
+            .unwrap()
+    };
+
+    let localized = localize(BEDROCK, 400, body.parsed().unwrap()).expect("localized");
+
+    assert!(std::ptr::eq(localized.raw, entry("disabled").path));
+    let [replacement] = localized.replacements[..] else {
+        panic!("one replacement");
+    };
+    assert!(std::ptr::eq(replacement, entry("between_tools").path));
+    for returned in [localized.raw, replacement] {
+        assert!(!body_bytes.contains(&returned.as_ptr()), "{returned}");
+    }
 }
