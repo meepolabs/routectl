@@ -2,13 +2,15 @@
 //! surfaces: a rejection naming a path the body that went out did not carry
 //! takes no repair and mints no verdict for that path, and the wire check
 //! records it unrepaired; every reading the egress cannot settle proceeds as
-//! it would with no wire record at all.
+//! it would with no wire record at all. A token count drawing a rejection
+//! the generic learner attributes mints nothing from it.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use routectl_core::wire_check::IngressDialect;
-use routectl_core::{ChatRequest, Error, Provider, Result};
+use routectl_core::{ChatRequest, Error, Provider, Result, ToolDef};
+use serde_json::{Value, json};
 
 use super::super::super::field_repair::TEST_UNSUPPORTED_PATH;
 use super::{
@@ -21,10 +23,14 @@ use super::{
 use crate::router::{Router, RouterOptions};
 use crate::wire_check_state::{FieldRepairOutcome, WireCheckSnapshot};
 
-#[derive(Clone, Copy, Debug)]
+const FORCED_TOOL_CHOICE_FIXTURE: &str =
+    include_str!("../../tests/fixtures/forced_tool_choice_capture.json");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Surface {
     Complete,
     Stream,
+    CountTokens,
 }
 
 const SURFACES: [Surface; 2] = [Surface::Complete, Surface::Stream];
@@ -45,6 +51,10 @@ async fn dispatch(router: &Router, surface: Surface, req: ChatRequest) -> Outcom
         }
         Surface::Stream => {
             let out = Box::pin(router.stream_with_options(req, RouterOptions::new())).await;
+            (out.result.is_ok(), out.meta)
+        }
+        Surface::CountTokens => {
+            let out = Box::pin(router.count_tokens_with_meta(req)).await;
             (out.result.is_ok(), out.meta)
         }
     };
@@ -324,5 +334,69 @@ async fn a_capability_named_as_a_param_is_still_learned_when_the_body_lacks_that
             [("unlocalized", FieldRepairOutcome::Unrepaired)],
             "{surface:?}"
         );
+    }
+}
+
+/// The captured anthropic-api rejection of a forced `tool_choice`, which the
+/// generic learner attributes from its message.
+fn anthropic_forced_tool_choice_rejection(_: &ChatRequest) -> Result<()> {
+    let fixture: Value =
+        serde_json::from_str(FORCED_TOOL_CHOICE_FIXTURE).expect("forced tool choice fixture");
+    let rejection = &fixture["anthropic_api"];
+    let status = rejection["status"].as_u64().expect("status");
+    Err(Error::upstream_full(
+        "scripted",
+        u16::try_from(status).expect("u16 status"),
+        rejection["body"].as_str().expect("body").to_string(),
+        None,
+        Some("invalid_request_error".into()),
+        None,
+    ))
+}
+
+fn carry_forced_tool_choice(req: &mut ChatRequest) {
+    req.tools = Some(vec![ToolDef::Other(json!({
+        "type": "function",
+        "function": {"name": "lookup", "parameters": {"type": "object"}}
+    }))]);
+    req.tool_choice = Some(json!({"type": "any"}));
+}
+
+/// A token count validates only what the count endpoint projects, so a
+/// rejection it draws teaches no generic capability verdict, while the same
+/// rejection on a message dispatch to the same target does.
+#[tokio::test]
+async fn a_count_tokens_400_mints_no_generic_verdict() {
+    for surface in [Surface::Complete, Surface::CountTokens] {
+        // Arrange
+        let provider = ScriptedProvider::new(None, anthropic_forced_tool_choice_rejection);
+        let router = router(ANTHROPIC, Arc::clone(&provider) as Arc<dyn Provider>);
+        let mut req = request(IngressDialect::Anthropic);
+        carry_forced_tool_choice(&mut req);
+
+        // Act
+        let outcome = dispatch(&router, surface, req).await;
+
+        // Assert
+        assert!(!outcome.served, "{surface:?}: premise, the 400 is terminal");
+        assert_eq!(provider.calls(), 1, "{surface:?}: no repair re-dispatch");
+        let resident: Vec<String> = router
+            .learned_capability_snapshot()
+            .into_iter()
+            .map(|entry| entry.feature_key)
+            .collect();
+        if surface == Surface::Complete {
+            assert_eq!(
+                resident,
+                ["forced_tool_choice"],
+                "{surface:?}: the control records the capability"
+            );
+        } else {
+            assert!(
+                resident.is_empty() && outcome.learned.is_empty(),
+                "{surface:?}: no verdict: resident {resident:?}, learned {:?}",
+                outcome.learned
+            );
+        }
     }
 }

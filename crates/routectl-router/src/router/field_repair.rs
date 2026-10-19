@@ -1147,7 +1147,7 @@ pub(super) enum FieldSettlementMode {
 /// rejection on its ordinary terminal path, and the repairable field would
 /// never be repaired on that lane. The one-repair-per-attempt ceiling is
 /// unchanged: exactly one candidate can be applied, and applying it RELEASES
-/// every other candidate's guard (see [`Self::apply`]).
+/// every other candidate's guard (see [`Self::apply_named`]).
 ///
 /// Holding this is the PROVISIONAL phase -- nothing is persisted while it
 /// lives. The dispatch arm settles it exactly once: [`Self::commit`] when
@@ -1158,9 +1158,10 @@ pub(super) enum FieldSettlementMode {
 pub(super) struct FieldRepairPlan<'a> {
     /// The table the candidates were admitted from, and so the only rows a
     /// rejection may name for this plan.
+    #[cfg(test)]
     table: FieldRepairTable,
     candidates: Vec<FieldRepairCandidate<'a>>,
-    /// Index into `candidates` of the row a successful [`Self::apply`] dropped.
+    /// Index into `candidates` of the row a successful [`Self::apply_named`] dropped.
     /// `None` until one succeeds, which is what makes the one-repair ceiling a
     /// property of the plan rather than of a caller's flag alone.
     repaired: Option<usize>,
@@ -1247,7 +1248,7 @@ impl FieldEdit {
 }
 
 impl FieldRepairPlan<'_> {
-    /// The closed-table path a successful [`Self::apply`] dropped, or `None`
+    /// The closed-table path a successful [`Self::apply_named`] dropped, or `None`
     /// when this plan has not repaired anything. A code-authored literal,
     /// never upstream text, so it is safe in an operator-facing field.
     pub(super) fn repaired_path(&self) -> Option<&'static str> {
@@ -1300,6 +1301,7 @@ impl FieldRepairPlan<'_> {
     /// re-dispatch and later settle this plan. `None` -- nothing happened: no
     /// mutation, no charge, no guard released, and the caller must NOT mark the
     /// attempt repaired or select the commit settlement.
+    #[cfg(test)]
     pub(super) fn apply(
         &mut self,
         attempt_req: &mut ChatRequest,
@@ -1313,8 +1315,8 @@ impl FieldRepairPlan<'_> {
         self.apply_named(named, attempt_req, meta, budget, rejection)
     }
 
-    /// [`Self::apply`] for a rejection already resolved to its closed-table
-    /// row: repair the admitted candidate whose SURFACE that row names.
+    /// Repair for a rejection already resolved to its closed-table row: the
+    /// admitted candidate whose SURFACE that row names.
     pub(super) fn apply_named(
         &mut self,
         named: NamedRejection,
@@ -1344,7 +1346,7 @@ impl FieldRepairPlan<'_> {
         Some(status)
     }
 
-    /// The EFFECT half of [`Self::apply`], for the candidate at `idx`: the
+    /// The EFFECT half of [`Self::apply_named`], for the candidate at `idx`: the
     /// presence re-check, the allowance check, the edit, the charge, the guard
     /// releases, and the estimate re-stamp.
     ///
@@ -1492,7 +1494,7 @@ impl FieldRepairPlan<'_> {
     ///
     /// Only the repaired row commits. The rejection named that row, and the
     /// retry that succeeded is evidence about that row alone -- every other
-    /// candidate's guard was already released by [`Self::apply`].
+    /// candidate's guard was already released by [`Self::apply_named`].
     ///
     /// And only when the rejection refused the FIELD, or the repair rewrote it
     /// to the one accepted value the rejection named. A refused value repaired
@@ -1566,7 +1568,7 @@ impl Router {
     /// admission holding only the first present row would leave a rejection
     /// naming a later row unrepairable on that lane forever. The
     /// one-repair-per-attempt ceiling is enforced by
-    /// [`FieldRepairPlan::apply`], which applies exactly one candidate and
+    /// [`FieldRepairPlan::apply_named`], which applies exactly one candidate and
     /// releases every other candidate's guard.
     ///
     /// This is NOT a pre-flight rewrite: nothing here reads a resident verdict
@@ -1691,6 +1693,7 @@ impl Router {
             return None;
         }
         Some(FieldRepairPlan {
+            #[cfg(test)]
             table,
             candidates,
             repaired: None,
@@ -1706,7 +1709,7 @@ impl Router {
     /// when it names no such row.
     ///
     /// THE single implementation of "did the upstream name this mutation", shared
-    /// by the reactive plan's own candidate selection ([`FieldRepairPlan::apply`])
+    /// by the reactive plan's own candidate selection ([`FieldRepairPlan::apply_named`])
     /// and the canary's repaired retry (see [`super::field_preflight`]). Two
     /// copies would be two answers to one question, and the one that drifted
     /// would either repair over an unrelated fault or decline a rejection it was

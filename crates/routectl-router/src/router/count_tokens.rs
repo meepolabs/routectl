@@ -1,63 +1,65 @@
 //! Token-counting dispatch path (no reducer/cache; independent of the would-trim seam).
 //!
-//! # The two reactive-repair kinds at this walk's repair position
+//! # Learning on this walk
 //!
-//! This walk carries the third reactive-repair position, wired at the same
-//! seam the two messages walks use and drawing the same per-request ceiling.
-//! The two repair kinds differ in whether a seat here can reach them, and the
-//! difference is structural rather than a gap in wiring:
+//! Each capable seat holds one [`AttemptLearning`] for the count surface, the
+//! same engine the two messages walks hold per target, and every repair and
+//! settlement here is the engine's: the walk only classifies through it, asks
+//! [`AttemptLearning::on_rejection`] after auth recovery whether a repair
+//! re-dispatches the seat, hands a rejection that took none to
+//! [`AttemptLearning::observe_generic`], and settles a count through
+//! [`AttemptLearning::on_success`]. Three things the engine does differently
+//! on this surface, all decided by the surface it was built for:
 //!
-//! - **Envelope-field repair is REACHABLE and behaviorally covered.** It acts
-//!   on the `anthropic-api` lane, which is exactly the lane
-//!   [`seat_can_count_tokens`] admits unconditionally, so a repair genuinely
-//!   fires here. Whether it SETTLES depends on the entry point: through
-//!   [`Router::count_tokens_with_meta`] the walk runs the full two-phase
-//!   settlement and both a committed and a cleared verdict ride out on the
-//!   returned [`DispatchMeta`]; through the result-only
-//!   [`Router::count_tokens`] it repairs for the answer it returns and settles
-//!   nothing, because that caller keeps no meta and a settlement whose event
-//!   row never reached the ledger would leave the shared registry mutated with
-//!   no record of it -- the state a warm rebuild resurrects a verdict from.
-//! - **Reasoning-replay repair is UNREACHABLE from here.** The classifier's
-//!   replay-rejection lift is closed over the provider kinds with a captured
-//!   envelope -- today only `openai-responses` -- and that set is disjoint
-//!   from the kinds this walk admits (both read the same
-//!   `DispatchTarget::provider_kind`). So no seat this walk can dispatch to
-//!   can produce the class its replay arm gates on. That arm therefore
-//!   settles its carry by DROPPING the plan -- releasing the single-flight
-//!   slots, learning nothing -- and the degradation summary stays honest by
-//!   recording that the repair happened without claiming anything was
-//!   learned. Do not "fix" that to match the field arm's settlement without
-//!   first making the class reachable: a behavioral test of an unreachable
-//!   arm passes with the arm deleted.
+//! - **No generic verdict is minted.** A token count validates only what the
+//!   count endpoint projects, which is narrower than what a message dispatch
+//!   sends, so a count rejection only counts as one the field parser did not
+//!   localize; it never teaches a capability negative.
+//! - **The replay carry settles by drop.** A repaired replay carry releases
+//!   its slots and learns nothing, since a count success is not the
+//!   optimistic probe the two-phase learn settles. The degradation summary
+//!   records that the repair served without claiming anything was learned.
+//! - **Field settlement follows the entry point.** Through
+//!   [`Router::count_tokens_with_meta`] the field carry runs the full
+//!   two-phase settlement and both a committed and a cleared verdict ride out
+//!   on the returned [`DispatchMeta`]; through the result-only
+//!   [`Router::count_tokens`] it repairs for the answer it returns and
+//!   settles nothing, because that caller keeps no meta and a settlement
+//!   whose event row never reached the ledger would leave the shared registry
+//!   mutated with no record of it -- the state a warm rebuild resurrects a
+//!   verdict from.
+//!
+//! A count admits no beta report or untranslated-capability report, and the
+//! filter's re-probe admissions are settled before the walk, so the engine
+//! holds an inert re-probe guard and settles successes against empty
+//! reports. A rejection laid to a defective transcript is never repaired:
+//! the engine proceeds without consulting a proposer.
 
 use std::collections::HashSet;
 use std::time::Instant;
 
-use routectl_core::failure_class::{classify, classify_with_attempt};
 use routectl_core::provider_kind::config as config_kind;
-use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
+use routectl_core::{BetaRepairReport, ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
 use super::capability_learn::LearnDedupeKey;
+use super::capability_observe::UntranslatedCapabilities;
 use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
 use super::credential_park::{log_gate_refusal, merge_gate_refusal};
 use super::dispatch::{
-    REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, apply_remap,
-    emit_replay_degradation, forwarded_terminal_status, is_capability_error,
+    apply_remap, emit_replay_degradation, forwarded_terminal_status, is_capability_error,
     log_forwarded_auth_terminal, missing_forwarded_bearer_error, replay_rejection_body_free,
     upstream_status_for_remap,
 };
 use super::field_preflight::emit_field_preflight;
-use super::field_repair::{FieldRepairHandle, FieldSettlementMode, emit_field_repair};
+use super::field_repair::{FieldSettlementMode, emit_field_repair};
+use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
 use super::outcome_rule::{BreakerOutcome, breaker_outcome, class_debits, rate_limit_reset_hint};
 use super::repair_budget::RepairBudget;
-use super::replay_repair::strip_replay_artifacts_recalibrating;
-use super::runtime_gate::is_probe_request;
+use super::runtime_gate::{LearnedProbeGuard, is_probe_request};
 use super::transcript_defect::{is_transcript_rejection, record_transcript_defect};
 use super::{
-    CountedTokens, DispatchMeta, DispatchTarget, ReplayDegradation, Router, StripDecision,
-    apply_layered_overlays,
+    CountedTokens, DispatchMeta, DispatchTarget, Router, StripDecision, apply_layered_overlays,
 };
 use crate::anthropic_family::{AnthropicFamily, anthropic_family};
 
@@ -146,10 +148,10 @@ impl Router {
     /// - A non-fallbackable 4xx -> release the probe slot and propagate.
     ///
     /// The walk is bounded and single-visit: each seat is dispatched to at
-    /// most once, plus at most one 401 auth-retry of that same seat, plus at
-    /// most one reactive repair re-dispatch of that same seat. The auth
-    /// retry is per SEAT, while repairs draw a per-REQUEST ceiling shared
-    /// with the two messages walks, so total upstream calls never exceed
+    /// most once, plus at most one 401 auth-retry of that same seat, plus
+    /// the learning engine's repair re-dispatches of that same seat. The
+    /// auth retry is per SEAT, while every repair draws a per-REQUEST ceiling
+    /// shared with the two messages walks, so total upstream calls never exceed
     /// `2 * chain.len() + REPAIRS_PER_REQUEST` -- the repair term is added
     /// once for the whole walk, not once per seat. When no capable seat
     /// serves a count (none capable, or every capable seat
@@ -426,41 +428,32 @@ impl Router {
         // reactive repair, so it is the same "original for this target"
         // base the messages walks plan from. The returned request REPLACES
         // `attempt_req`, so from here on this seat has exactly one body:
-        // the remote count dispatches it, and every local read of it (the
-        // calibration re-stamp on the replay-strip branch below) measures
-        // that same body rather than an unplanned one.
-        // The plan is held rather than discarded so the modified-request
-        // accounting guard lives for this seat's whole attempt loop; a token
-        // count never claims a canary (the surface is excluded upstream of the
-        // cadence tick), so there is no settlement to owe here.
+        // the remote count dispatches it, and every local read of it
+        // measures that same body rather than an unplanned one.
         // Captured before pre-flight -- see `complete_inner`.
         let probe_fields = super::probe_payload_capture::ProbeFieldCapture::of(
             self.field_repair_table(),
             &attempt_req,
         );
-        let (preflighted_req, preflight_records, _field_preflight_plan) =
+        // The filter's re-probe admissions were settled up front, so the
+        // engine holds no re-probe guard of its own here.
+        let mut learning = AttemptLearning::new(
+            self,
+            DispatchSurface::CountTokens,
+            LearnedProbeGuard::inert(),
+        );
+        let (preflighted_req, preflight_records, field_preflight_plan) =
             self.plan_field_preflight(&attempt_req, &target, DispatchSurface::CountTokens);
         attempt_req = preflighted_req;
         meta.field_preflight.extend(preflight_records);
+        learning.hold_preflight(field_preflight_plan);
 
-        // Reasoning-replay carry admission at the ANALOGOUS position the two
-        // messages walks use: after every request-shaping step and before the
-        // seat's attempt loop, so the gray-artifact count describes the exact
-        // carried bytes. `None` either found nothing to repair or already
-        // stripped `attempt_req` proactively (an acting negative or a peer
-        // probe), in which case the stripped variant is what this seat counts.
-        let now_admit = Instant::now();
-        let mut replay_plan = self.plan_replay_carry(&target, &mut attempt_req, meta, now_admit);
-        let mut replay_repair_attempted = false;
-        // Envelope-field carry admission at the SAME position: the closed
-        // table plus this attempt's own fields decide the identity, so the
-        // guard is claimed before dispatch and both settlements stay reachable
-        // (commit on a repaired success, clear when the field is accepted).
-        // Nothing is mutated here -- an acting verdict simply refuses the slot
-        // and the attempt dispatches unchanged.
-        let mut field_plan = self.plan_field_carry(&target, &attempt_req, mode, now_admit);
-        let mut reactive_repair: Option<FieldRepairHandle> = None;
-        let mut field_reject_status: u16 = 0;
+        // Carry admission at the ANALOGOUS position the two messages walks
+        // use: after every request-shaping step and before the seat's attempt
+        // loop, so the gray-artifact count describes the exact carried bytes.
+        // The replay admission may strip `attempt_req` proactively, in which
+        // case the stripped variant is what this seat counts.
+        learning.admit_carries(&target, &mut attempt_req, meta, mode, Instant::now());
 
         let mut auth_retry_attempted = false;
         let mut attempts_made: u32 = 0;
@@ -504,84 +497,36 @@ impl Router {
                 Ok(tc) => {
                     self.settle_seat_success(&target.state_key, true, &probe_guard);
                     probe_guard.disarm();
-                    // Settle the replay carry WITHOUT persisting or emitting:
-                    // dropping the plan releases every single-flight slot it
-                    // holds and leaves any resident entry exactly as it was.
-                    //
-                    // Deliberately NOT the two-phase settle the messages walks
-                    // run, and the reason is REACHABILITY, not a missing sink: a
-                    // settling caller of this walk does drain its meta (the
-                    // field carry below settles through exactly that path). What
-                    // stops this one is that no seat this walk admits can
-                    // produce the replay-rejection class at all, so the carry
-                    // here is never the optimistic probe the two-phase learn
-                    // exists to settle -- committing off it would persist a
-                    // conclusion nothing tested. The degradation summary stays
-                    // honest by recording that the repair happened and claiming
-                    // nothing was learned.
-                    drop(replay_plan.take());
-                    if replay_repair_attempted && let Some(deg) = meta.replay_degradation.as_mut() {
-                        deg.repair_succeeded = true;
-                    }
-                    // Settle the envelope-field carry through the two-phase
-                    // guard. Unlike the replay carry above, this class IS
-                    // reachable from a capable seat, so the carry really is the
-                    // optimistic probe the two-phase learn settles. Both
-                    // settlements are no-ops unless the plan holds a guard,
-                    // which only a SETTLING entry point admits -- so a
-                    // result-only caller reaches this code and persists nothing,
-                    // while a with-meta caller's row reaches the
-                    // capability-event ledger and a warm rebuild sees the same
-                    // outcome this process reached:
-                    //
-                    // - repaired success -> commit the verdict (the rejection
-                    //   is confirmed as a real field incompatibility);
-                    // - unrepaired success -> the field is ACCEPTED, so clear
-                    //   any resident verdict and ride the clear out, or a warm
-                    //   rebuild would resurrect a verdict this request
-                    //   disproved.
-                    if let Some(plan) = field_plan.take() {
-                        if let Some(repair) = reactive_repair {
-                            let features = super::field_repair::request_feature_keys(
-                                self.field_repair_table(),
-                                req,
-                            );
-                            // The `learned` claim is derived from what the commit
-                            // actually PERSISTED, never asserted alongside it: a
-                            // non-settling plan commits nothing, and a summary that
-                            // claimed otherwise would be a false persistence claim on
-                            // the surface built to make such claims trustworthy.
-                            let learned =
-                                plan.commit(field_reject_status, features, Instant::now());
-                            let persisted = learned.is_some();
-                            meta.learned_capabilities.extend(learned);
-                            self.note_field_repair_succeeded(meta, repair, persisted);
-                        } else {
-                            meta.cleared_capabilities.extend(plan.settle_success());
-                        }
-                    }
+                    // Settle every carry the engine holds against this
+                    // count. Read from the CLIENT request, as the messages
+                    // walks do, so a repaired commit keys on what the caller
+                    // asked for rather than the repaired body.
+                    learning.on_success(
+                        &BetaRepairReport::default(),
+                        &UntranslatedCapabilities::default(),
+                        &target,
+                        req,
+                        &mut learn_dedupe,
+                        meta,
+                    );
                     return CountSeatOutcome::Count(tc);
                 }
                 Err(mut e) => {
                     // Classified ONCE at the top of the arm (as both messages
-                    // walks do), because the repair arm below and the health
-                    // settle further down must read the SAME effective class.
-                    // The carried-artifact signal comes from the plan, so a
-                    // proven replay rejection lifts here and nowhere else.
+                    // walks do), because the engine's repair position below
+                    // and the health settle further down must read the SAME
+                    // effective class. The carried-artifact signal comes from
+                    // the engine's replay carry, so a proven replay rejection
+                    // lifts here and nowhere else.
                     let policy = self.policy_for(&req.model);
                     // Read off the status before any lift or remap: see
                     // `is_transcript_rejection`.
                     let transcript_rejection =
                         is_transcript_rejection(&e, req.routectl_internal.transcript_defect);
-                    let native_cf = match replay_plan.as_ref() {
-                        Some(plan) => {
-                            classify_with_attempt(&e, target.provider_kind, plan.attempt())
-                        }
-                        None => classify(&e, target.provider_kind),
-                    };
-                    // Retained before the remap: the field-repair arm below
-                    // reads what the UPSTREAM said, while routing reads the
-                    // operator's override (see that arm).
+                    let native_cf = learning.classify(&e, target.provider_kind);
+                    // Retained before the remap: the engine's path-keyed
+                    // proposers read what the UPSTREAM said, while routing
+                    // reads the operator's override.
                     let original_class = native_cf.class.clone();
                     let (cf, remapped) = apply_remap(
                         native_cf,
@@ -630,129 +575,12 @@ impl Router {
                         continue;
                     }
 
-                    // Reasoning-replay strip repair, the count_tokens twin of
-                    // the messages arms and placed at the analogous position:
-                    // after auth recovery, before the capability and health
-                    // settles. On the proven replay rejection, switch THIS
-                    // seat's attempt request to the pre-stripped variant and
-                    // re-dispatch it once; `strip_replay_artifacts_recalibrating`
-                    // re-stamps the calibration estimate, and because the loop
-                    // dispatches `attempt_req`, the repaired body is the one
-                    // sent upstream and the one whose count is returned.
-                    //
-                    // Slot handling mirrors the 401 recovery above: release the
-                    // half-open probe slot before the `continue` re-gates, and
-                    // never debit the breaker -- a repairable rejection is not
-                    // this seat's health signal. The per-seat
-                    // `replay_repair_attempted` flag keeps it at most once per
-                    // seat; `repair_budget.draw()` is the LAST condition, so a
-                    // request that never repairs is never charged and an
-                    // exhausted request budget leaves the rejection on the
-                    // ordinary settle path below.
-                    if !replay_repair_attempted
-                        && let Some(plan) = replay_plan.as_ref()
-                        && Self::is_replay_rejection_class(&cf.class)
-                        && repair_budget.draw()
-                    {
-                        replay_repair_attempted = true;
-                        let lane = plan.lane();
-                        meta.replay_degradation = Some(ReplayDegradation {
-                            action: REPLAY_ACTION_STRIP_REPAIR,
-                            target_lane: lane,
-                            state_key: sanitize_for_log(&target.state_key),
-                            source_schemes: plan.source_schemes().to_vec(),
-                            reason: REPLAY_REASON_UPSTREAM_REJECTION,
-                            artifact_count: plan.artifact_count(),
-                            repair_attempted: true,
-                            repair_succeeded: false,
-                            learned: false,
-                        });
-                        strip_replay_artifacts_recalibrating(&mut attempt_req, lane, meta);
-                        probe_guard.release();
-                        continue;
-                    }
-
-                    // Envelope-field L0 repair, at the SAME dispatch position
-                    // the replay repair occupies: after auth recovery, before
-                    // the capability and health settles. On a rejection naming
-                    // the carried field, DROP that field from this seat's
-                    // attempt request and re-dispatch it once. Because the loop
-                    // dispatches `attempt_req`, the repaired body is the one
-                    // sent upstream and the one whose count is returned.
-                    //
-                    // The class read here is the NATIVE one, never the remapped
-                    // `cf.class`: an operator `[class_overrides]` entry says how
-                    // a status should be ROUTED, not what the upstream said, so
-                    // reading it would let an override turn a 429 into a field
-                    // repair. Routing below still reads the override.
-                    //
-                    // `apply` owns the budget draw together with the mutation,
-                    // so a drop that removes nothing charges nothing; every
-                    // repaired-state flag is set only on its `Some`. It also
-                    // selects WHICH admitted row to repair -- the one the
-                    // rejection names -- and releases every other candidate's
-                    // guard. Slot handling mirrors the arm above: release the
-                    // half-open probe slot before the `continue` re-gates, and
-                    // never debit the breaker -- a repairable envelope
-                    // rejection is a caller-shaped fault, not this seat's
-                    // health signal.
-                    //
-                    // A rejection laid to a defective transcript is never
-                    // repaired: the defect, not the field, explains it, and
-                    // a repaired success would settle a verdict on that.
-                    if !transcript_rejection
-                        && reactive_repair.is_none()
-                        && let Some(plan) = field_plan.as_mut()
-                        && let Some(status) = plan.apply(
-                            &mut attempt_req,
-                            meta,
-                            repair_budget,
-                            &original_class,
-                            &e,
-                            target.provider_kind.unwrap_or(""),
-                        )
-                    {
-                        field_reject_status = status;
-                        reactive_repair =
-                            Some(self.note_field_repair(meta, &target.state_key, plan));
-                        probe_guard.release();
-                        continue;
-                    }
-                    // The repair arms declined, so a field-eligible rejection
-                    // the parser could not localize is counted here: this walk
-                    // never reaches the learn path that counts it elsewhere.
-                    if transcript_rejection {
-                        self.observe_transcript_rejection(&e, &target, &mut learn_dedupe);
-                    } else {
-                        self.observe_unlocalized_field_rejection(
-                            &e,
-                            &cf,
-                            remapped,
-                            &target,
-                            &mut learn_dedupe,
-                        );
-                    }
-                    // The repair arm declined (already repaired this seat, not
-                    // a replay rejection, or the request's budget is spent), so
-                    // this error can now reach the CALLER. A replay rejection's
-                    // upstream body echoes the reasoning artifact it objected
-                    // to, so rebuild it body-free first -- the same helper and
-                    // the same position the two messages walks use, before
-                    // their generic logging and their returns. Without it the
-                    // token-count walk is the one surface that hands a client
-                    // the reasoning blob verbatim. A non-replay class is left
-                    // untouched (no clone on the common path).
-                    if let Some(body_free) =
-                        replay_rejection_body_free(&e, &cf.class, provider_name)
-                    {
-                        e = body_free;
-                    }
-
-                    // CAPABILITY error, checked BEFORE should_fallback so a
-                    // wire-501 can never reach record_failure: the seat was
-                    // admitted as capable but its upstream cannot count. Release
-                    // the probe slot WITHOUT debiting the breaker, then let
-                    // the caller walk to the next capable seat.
+                    // CAPABILITY error, checked BEFORE the engine and before
+                    // the health settle so a wire-501 can never reach
+                    // record_failure or a learner: the seat was admitted as
+                    // capable but its upstream cannot count. Release the probe
+                    // slot WITHOUT debiting the breaker, then let the caller
+                    // walk to the next capable seat.
                     if is_capability_error(&e) {
                         if let Error::Upstream { status: 501, .. } = &e {
                             // DEBUG, not WARN: post-fix this is the
@@ -771,6 +599,52 @@ impl Router {
                         }
                         probe_guard.release();
                         return CountSeatOutcome::Capability;
+                    }
+
+                    // The learning engine's repair position, after auth
+                    // recovery and before the health settle, as on the two
+                    // messages walks. A repair edits `attempt_req` in place,
+                    // so the repaired body is the one sent upstream and the
+                    // one whose count is returned. Slot handling mirrors the
+                    // 401 recovery above: release the half-open probe slot
+                    // before the `continue` re-gates, and never debit the
+                    // breaker -- a repairable rejection is a caller-shaped
+                    // fault, not this seat's health signal.
+                    let rejection = Rejection {
+                        err: &e,
+                        class: &cf,
+                        native_class: &original_class,
+                        target: &target,
+                        client_req: req,
+                        site: None,
+                        transcript_rejection,
+                    };
+                    if let FailureDecision::Retry { .. } =
+                        learning.on_rejection(rejection, &mut attempt_req, meta, repair_budget)
+                    {
+                        probe_guard.release();
+                        continue;
+                    }
+                    learning.observe_generic(
+                        &e,
+                        &cf,
+                        remapped,
+                        &target,
+                        req,
+                        &UntranslatedCapabilities::default(),
+                        &mut learn_dedupe,
+                        meta,
+                    );
+                    // No repair took, so this error can now reach the CALLER.
+                    // A replay rejection's upstream body echoes the reasoning
+                    // artifact it objected to, so rebuild it body-free first --
+                    // the same helper and the same position the two messages
+                    // walks use. A non-replay class is left untouched (no
+                    // clone on the common path).
+                    if let Some(body_free) =
+                        replay_rejection_body_free(&e, &cf.class, provider_name)
+                    {
+                        e = body_free;
                     }
 
                     // Health error. Mirror `complete_with_options`: the
