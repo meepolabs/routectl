@@ -3399,6 +3399,7 @@ pub fn routectl_core::wire_check::EditPatternError::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::wire_check::EditPatternError
 impl<T> tracing::instrument::WithSubscriber for routectl_core::wire_check::EditPatternError
 pub enum routectl_core::wire_check::EditSite
+pub routectl_core::wire_check::EditSite::AdaptiveThinkingOverride
 pub routectl_core::wire_check::EditSite::AnthropicBetaStrip
 pub routectl_core::wire_check::EditSite::AnthropicResponseExtrasStrip
 pub routectl_core::wire_check::EditSite::AnthropicStreamUsageFill
@@ -3445,12 +3446,13 @@ pub routectl_core::wire_check::EditSite::StreamOptionsInjection
 pub routectl_core::wire_check::EditSite::StreamStragglerDrop
 pub routectl_core::wire_check::EditSite::StreamStrip
 pub routectl_core::wire_check::EditSite::SystemMessageLift
+pub routectl_core::wire_check::EditSite::ThinkingBudgetCap
 pub routectl_core::wire_check::EditSite::ThinkingSamplingClamp
 pub routectl_core::wire_check::EditSite::ThinkingStripForcedToolUse
 pub routectl_core::wire_check::EditSite::ToolIdSanitize
 pub routectl_core::wire_check::EditSite::UrlFieldRelocate
 impl routectl_core::wire_check::EditSite
-pub const routectl_core::wire_check::EditSite::ALL: [Self; 50]
+pub const routectl_core::wire_check::EditSite::ALL: [Self; 52]
 pub const fn routectl_core::wire_check::EditSite::label(self) -> &'static str
 impl core::clone::Clone for routectl_core::wire_check::EditSite
 pub fn routectl_core::wire_check::EditSite::clone(&self) -> routectl_core::wire_check::EditSite

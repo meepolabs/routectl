@@ -759,7 +759,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
             routectl_core::wire_check::EditKind::Add,
         );
     }
-    let thinking = compose_thinking(req, adaptive);
+    let thinking = compose_thinking(req, adaptive, tap);
     let output_config = build_output_config(req, thinking.as_ref());
 
     let system = filtered_system.as_ref().map(translate_system).or_else(|| {

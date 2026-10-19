@@ -383,10 +383,17 @@ fn clamp_budget_to_legacy_window(budget: u32, max: u32, source: BudgetSource) ->
 ///   `build_thinking`.
 ///
 /// `adaptive` is the operator's `supports_adaptive_thinking` knob, the same
-/// value `build_thinking` takes.
-pub(super) fn compose_thinking(req: &ChatRequest, adaptive: bool) -> Option<WireThinking> {
+/// value `build_thinking` takes. An override applied to a forwarded object
+/// is declared on `tap`.
+pub(super) fn compose_thinking(
+    req: &ChatRequest,
+    adaptive: bool,
+    tap: Option<&WireTap>,
+) -> Option<WireThinking> {
     match &req.routectl_internal.anthropic_thinking {
-        AnthropicThinking::Sent(object) => Some(forward_client_thinking(req, object, adaptive)),
+        AnthropicThinking::Sent(object) => {
+            Some(forward_client_thinking(req, object, adaptive, tap))
+        }
         AnthropicThinking::SentNone if adaptive && has_positive_effort(req) => {
             build_thinking(req, true).map(WireThinking::Translated)
         }
@@ -407,7 +414,7 @@ pub(super) fn compose_thinking(req: &ChatRequest, adaptive: bool) -> Option<Wire
 /// context-management cache miss, an `output_config.effort` of "none").
 #[must_use]
 pub fn emitted_thinking_type(req: &ChatRequest, adaptive: bool) -> Option<String> {
-    compose_thinking(req, adaptive)
+    compose_thinking(req, adaptive, None)
         .as_ref()
         .and_then(WireThinking::thinking_type)
         .map(str::to_string)
@@ -437,12 +444,25 @@ fn forward_client_thinking(
     req: &ChatRequest,
     object: &ThinkingObject,
     adaptive: bool,
+    tap: Option<&WireTap>,
 ) -> WireThinking {
     let mut wire = object.as_object().clone();
     if object.thinking_type() == Some("enabled") {
         if adaptive {
             wire.insert("type".to_string(), Value::String("adaptive".to_string()));
+            super::wire_edits::declare(
+                tap,
+                EditSite::AdaptiveThinkingOverride,
+                "/thinking/type",
+                EditKind::Rewrite,
+            );
             if let Some(budget) = wire.remove("budget_tokens") {
+                super::wire_edits::declare(
+                    tap,
+                    EditSite::AdaptiveThinkingOverride,
+                    "/thinking/budget_tokens",
+                    EditKind::Remove,
+                );
                 tracing::debug!(
                     budget_tokens = %budget,
                     "client thinking.budget_tokens dropped: supports_adaptive_thinking \
@@ -450,7 +470,7 @@ fn forward_client_thinking(
                 );
             }
         } else {
-            cap_forwarded_budget(&mut wire, operator_thinking_cap(req));
+            cap_forwarded_budget(&mut wire, operator_thinking_cap(req), tap);
         }
     }
     if let Some(display) = &req.routectl_internal.anthropic_thinking_display {
@@ -459,12 +479,22 @@ fn forward_client_thinking(
     WireThinking::Forwarded(wire)
 }
 
-fn cap_forwarded_budget(wire: &mut serde_json::Map<String, Value>, operator_cap: u32) {
+fn cap_forwarded_budget(
+    wire: &mut serde_json::Map<String, Value>,
+    operator_cap: u32,
+    tap: Option<&WireTap>,
+) {
     let Some(budget) = wire.get("budget_tokens").and_then(Value::as_u64) else {
         return;
     };
     if operator_cap > 0 && budget > u64::from(operator_cap) {
         wire.insert("budget_tokens".to_string(), Value::from(operator_cap));
+        super::wire_edits::declare(
+            tap,
+            EditSite::ThinkingBudgetCap,
+            "/thinking/budget_tokens",
+            EditKind::Rewrite,
+        );
         tracing::debug!(
             requested_budget = budget,
             capped_to = operator_cap,
