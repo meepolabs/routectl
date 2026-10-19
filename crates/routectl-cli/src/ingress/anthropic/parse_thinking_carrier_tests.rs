@@ -40,11 +40,7 @@ fn every_thinking_type_is_stored_verbatim_minus_display() {
             Some("omitted"),
         ),
         ("disabled", json!({"type": "disabled"}), None),
-        (
-            "between_tools",
-            json!({"type": "adaptive", "between_tools": true}),
-            None,
-        ),
+        ("between_tools", json!({"type": "between_tools"}), None),
         (
             "unknown type with an extra member",
             json!({"type": "future_mode", "knob": {"display": "nested", "n": 3}}),

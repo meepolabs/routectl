@@ -1,6 +1,7 @@
 //! The client's native `thinking` object survives the per-attempt
 //! `routectl_internal` rebuild, so a fallback target sees the same object
-//! (the same allocation, not a copy) the first target saw.
+//! (the same allocation, not a copy) the first target saw, and a repair
+//! one target makes to its copy never reaches the next.
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,10 +22,13 @@ use crate::router::chain::into_one_dispatch_target;
 type Captured = Arc<Mutex<Vec<ChatRequest>>>;
 
 /// Records every request it is handed, then fails with a fallbackable 503
-/// when `fails` is set, or serves a minimal response.
+/// when `fails` is set, or serves a minimal response. With `repairs_type`
+/// set, it first rewrites the `type` of the carrier it received, the way a
+/// per-target repair does.
 struct RecordingProvider {
     captured: Captured,
     fails: bool,
+    repairs_type: Option<&'static str>,
 }
 
 #[async_trait]
@@ -38,7 +42,13 @@ impl Provider for RecordingProvider {
     fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
         Err(Error::normalize_response("recording", "unused"))
     }
-    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+    async fn complete(&self, mut req: ChatRequest) -> Result<ChatResponse> {
+        if let (Some(repaired), AnthropicThinking::Sent(object)) = (
+            self.repairs_type,
+            &mut req.routectl_internal.anthropic_thinking,
+        ) {
+            object.set_thinking_type(repaired);
+        }
         let model = req.model.clone();
         self.captured.lock().push(req);
         if self.fails {
@@ -106,6 +116,7 @@ fn apply_layered_overlays_preserves_anthropic_thinking() {
         Arc::new(RecordingProvider {
             captured: Captured::default(),
             fails: false,
+            repairs_type: None,
         }),
         "claude-x",
     ));
@@ -132,6 +143,7 @@ fn apply_layered_overlays_preserves_sent_none() {
         Arc::new(RecordingProvider {
             captured: Captured::default(),
             fails: false,
+            repairs_type: None,
         }),
         "claude-x",
     ));
@@ -149,8 +161,9 @@ fn apply_layered_overlays_preserves_sent_none() {
     }
 }
 
-/// Two-entry chain: the first entry 503s, the second serves.
-fn two_entry_chain() -> (Router, Captured, Captured) {
+/// Two-entry chain: the first entry applies `first_repair` (when set) and
+/// 503s, the second serves.
+fn two_entry_chain(first_repair: Option<&'static str>) -> (Router, Captured, Captured) {
     let mut config = Config {
         retry: RetryPolicy {
             max_attempts: 1,
@@ -166,10 +179,14 @@ fn two_entry_chain() -> (Router, Captured, Captured) {
     let first = Captured::default();
     let second = Captured::default();
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    for (nick, captured, fails) in [("entry1", &first, true), ("entry2", &second, false)] {
+    for (nick, captured, fails, repairs_type) in [
+        ("entry1", &first, true, first_repair),
+        ("entry2", &second, false, None),
+    ] {
         let provider: Arc<dyn Provider> = Arc::new(RecordingProvider {
             captured: Arc::clone(captured),
             fails,
+            repairs_type,
         });
         models.insert(
             nick.into(),
@@ -183,7 +200,7 @@ fn two_entry_chain() -> (Router, Captured, Captured) {
 
 #[tokio::test]
 async fn fallback_attempt_receives_the_same_thinking_carrier() {
-    let (router, first, second) = two_entry_chain();
+    let (router, first, second) = two_entry_chain(None);
     let original = sent_thinking();
     let mut req = ChatRequest {
         model: "flow".into(),
@@ -206,5 +223,49 @@ async fn fallback_attempt_receives_the_same_thinking_carrier() {
         &second[0].routectl_internal.anthropic_thinking,
         &original,
         "second chain attempt",
+    );
+}
+
+#[tokio::test]
+async fn first_attempt_repair_does_not_reach_the_fallback_attempt() {
+    let (router, first, second) = two_entry_chain(Some("enabled"));
+    let original = sent_thinking();
+    let mut req = ChatRequest {
+        model: "flow".into(),
+        ..Default::default()
+    };
+    req.routectl_internal.anthropic_thinking = AnthropicThinking::Sent(original.clone());
+
+    router.complete(req).await.expect("the second entry serves");
+
+    let first = first.lock();
+    let second = second.lock();
+    assert_eq!(first.len(), 1, "the first entry is tried once");
+    assert_eq!(second.len(), 1, "the chain falls back to the second entry");
+    let AnthropicThinking::Sent(repaired) = &first[0].routectl_internal.anthropic_thinking else {
+        panic!("first chain attempt: carrier must stay Sent");
+    };
+    assert_eq!(
+        repaired.thinking_type(),
+        Some("enabled"),
+        "the first entry's repair must take effect on its own copy",
+    );
+    let AnthropicThinking::Sent(fallback) = &second[0].routectl_internal.anthropic_thinking else {
+        panic!("second chain attempt: carrier must stay Sent");
+    };
+    assert_eq!(
+        fallback.thinking_type(),
+        Some("adaptive"),
+        "the fallback attempt must see the client's original type",
+    );
+    assert_same_carrier(
+        &second[0].routectl_internal.anthropic_thinking,
+        &original,
+        "second chain attempt",
+    );
+    assert_eq!(
+        original.thinking_type(),
+        Some("adaptive"),
+        "the caller's carrier is untouched",
     );
 }
