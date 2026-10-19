@@ -14,7 +14,7 @@ matching per-model section.
 
 | If you're using... | Set on... |
 |---|---|
-| **Claude Opus 4.7+ / Sonnet 4.7+** | `[models.X] supports_adaptive_thinking = true` |
+| **Claude Opus 4.7+ / Sonnet 4.7+** | optional: `[models.X] supports_adaptive_thinking = true` (routectl repairs and learns the `thinking.type.enabled` 400 per lane without it) |
 | **Any thinking model + high-effort latency** | `[providers.X] stream_first_byte_timeout_ms = 300000` (every alias hitting this provider inherits) |
 | **DeepSeek v4 / v4.1 (any host)** | `[models.X] history_reasoning = "preserve"` |
 | **DeepSeek v3 / older vLLM** | (default `history_reasoning = "auto"` strips for you) |
@@ -29,9 +29,16 @@ matching per-model section.
 
 ### Anthropic Opus 4.7+ (and any future adaptive-thinking models)
 
-The 4.7+ generation rejects the legacy `thinking: {type: "enabled", budget_tokens: N}` shape with a `400 thinking.type.enabled is not supported`. Anthropic moved budget control out of the `thinking` block; the model picks budget from `output_config.effort`.
+The 4.7+ generation rejects the legacy `thinking: {type: "enabled", budget_tokens: N}` shape with a `400 thinking.type.enabled is not supported`. Anthropic moved budget control out of the `thinking` block; the model picks budget from `output_config.effort`. Some models also refuse `thinking: {type: "disabled"}` and name their own off switch instead.
 
-**Required:**
+routectl forwards a client's `thinking` object as sent, so these rejections reach it from the upstream, and it repairs both per lane with no config:
+
+- **`thinking.type.enabled` refused:** the request is retried once with `adaptive` thinking (`display` kept, `budget_tokens` removed, effort `"low"` supplied only when the request carries no positive effort), and the lane learns the shape, so later requests go out adaptive with no rejection (`an_enabled_rejection_retries_once_with_adaptive_thinking_and_commits`, `the_captured_bedrock_rejection_repairs_a_bedrock_lane`, `the_committed_rewrite_preflights_the_next_request_with_no_rejection`).
+- **`thinking.type.disabled` refused:** the retry uses the shape the rejection names. Opus 5.5 names `adaptive`, which ships with effort `"low"` when the request carries no positive effort (`a_disabled_rejection_on_anthropic_api_retries_adaptive_and_commits_the_shape`); Sonnet 5.5 on Bedrock names `between_tools`, which ships bare with the client's effort as sent (`a_disabled_rejection_on_bedrock_retries_bare_between_tools_with_the_effort_as_sent`). The repair also applies to a request from another dialect that turned reasoning off, since routectl translates that to `disabled` thinking (the "translated effort none" row of `the_thinking_disabled_surface_is_present_only_when_the_egress_emits_disabled`): on a lane that names `adaptive`, reasoning-off becomes low-effort reasoning. A lane that accepts `disabled` is never repaired (`a_lane_that_accepts_disabled_thinking_is_never_repaired_and_learns_nothing`), and a retry the upstream refuses again commits nothing (`a_refused_between_tools_retry_commits_nothing_and_repairs_once`).
+
+Each repair serves a shape the client did not send, so it is recorded as a lossy repair (the `RepairedLossy` assertions in both `disabled` tests above), and it applies only to the lane that refused: a fallback target receives the client's original `thinking` (`first_attempt_repair_does_not_reach_the_fallback_attempt`).
+
+**Optional:** setting the knob converts `enabled` to `adaptive` up front, so the first request on a lane skips the refused attempt:
 
 ```toml
 [providers.bedrock]
@@ -42,7 +49,7 @@ creds  = { kind = "default-chain" }
 [models.opus47]
 provider          = "bedrock"
 upstream          = "us.anthropic.claude-opus-4-7-v1:0"
-supports_adaptive_thinking = true        # rewrites to {type:"adaptive"} + output_config.effort
+supports_adaptive_thinking = true        # rewrites enabled to {type:"adaptive"} + output_config.effort
 effort_levels     = ["low", "medium", "high", "xhigh", "max"]
 ```
 
@@ -229,8 +236,10 @@ identifier via `header_extras` if they want a static value.
 
 Both `api_shape = "invoke"` (Anthropic Messages body) and
 `api_shape = "converse"` (AWS Converse) are wired for Anthropic
-models on Sonnet/Haiku/Opus. Set `supports_adaptive_thinking = true` on Opus
-4.7+ models regardless of api_shape.
+models on Sonnet/Haiku/Opus. `supports_adaptive_thinking = true` on Opus
+4.7+ models works the same on either api_shape; it is optional, since both
+shapes repair and learn a refused thinking type per lane (see
+[Anthropic Opus 4.7+](#anthropic-opus-47-and-any-future-adaptive-thinking-models)).
 
 **Betas and body fields pass through.** routectl keeps no Bedrock
 allowlist: every client `anthropic_beta` flag and every body field
@@ -815,7 +824,8 @@ routectl logs a `body_excerpt` truncated to 256 chars
 
 | Symptom | Likely cause |
 |---|---|
-| `400 thinking.type.enabled is not supported` | Need `supports_adaptive_thinking = true` on `[models.X]` (Opus 4.7+) |
+| `400 thinking.type.enabled is not supported` | Expected once per lane: routectl retries with `adaptive` thinking and learns that shape for the lane. `supports_adaptive_thinking = true` on `[models.X]` (Opus 4.7+) skips the first rejection |
+| `400 thinking.type.disabled is not supported` or `400 To turn thinking off on this model, send ... between_tools` | Expected once per lane: routectl retries with the shape the rejection names (`adaptive` or `between_tools`) and learns it for the lane; no config needed |
 | `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on `[models.X]` (DeepSeek v4) |
 | `stream first-content timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
 | Empty `content` + non-zero `reasoning_tokens` | Model used full `max_tokens` budget on reasoning. Increase `max_tokens` |

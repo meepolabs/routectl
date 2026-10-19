@@ -152,30 +152,35 @@ creds  = { kind = "default-chain" }
 
 # Adaptive-thinking model on the Anthropic subscription POOL (Opus 4.7+),
 # so dispatch spreads across both seats.
-# supports_adaptive_thinking = true selects the adaptive wire shape:
+# A client's own thinking object is forwarded as sent. The optional
+# supports_adaptive_thinking = true override turns a client's enabled
+# thinking into adaptive, and gives an effort-only request (no thinking
+# object) the adaptive shape:
 #   { "thinking": { "type": "adaptive" }, "output_config": { "effort": "..." } }
-# Declare all effort levels the model accepts so egresses can clamp
-# caller intent to a valid value; empty list = pass-through.
+# Without it, routectl repairs and learns the enabled rejection per lane.
+# Declare effort levels only to clamp caller intent the model rejects;
+# empty list = pass-through.
 [models.opus-direct]
 provider                   = "anthropic"
 upstream                   = "claude-opus-4-7-20260301"
-# Adaptive thinking wire shape (Opus 4.7+ only).
+# Convert enabled thinking to adaptive up front (Opus 4.7+ only).
 supports_adaptive_thinking = true
 # Full vocabulary unlocked: minimal through max.
 effort_levels              = ["minimal", "low", "medium", "high", "xhigh", "max"]
 
 # Bedrock-hosted Sonnet 4.5 (legacy fixed-budget thinking shape).
-# supports_adaptive_thinking defaults to false: egress emits
+# supports_adaptive_thinking defaults to false: a client's thinking object
+# is forwarded as sent, and a request from another dialect is translated to
 #   { "thinking": { "type": "enabled", "budget_tokens": N } }
-# max_thinking_budget caps the budget the egress may allocate.
+# max_thinking_budget caps an enabled budget, translated or forwarded.
 [models.sonnet-bedrock]
 provider                   = "bedrock"
 upstream                   = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-# Legacy thinking shape; adaptive not supported on this model.
+# No adaptive override; adaptive not supported on this model.
 supports_adaptive_thinking = false
 # Mid-range effort levels; xhigh/max not declared for this tier.
 effort_levels              = ["low", "medium", "high"]
-# Hard cap on thinking budget (tokens); 0 = no cap / use egress default.
+# Cap on an enabled thinking budget (tokens); 0 = no cap / use egress default.
 max_thinking_budget        = 16000
 
 # Bedrock-hosted Haiku 4.5 -- cost-optimized, no reasoning tier.

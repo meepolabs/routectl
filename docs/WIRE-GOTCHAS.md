@@ -315,6 +315,90 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   path and the streaming `messageStop` path, gated on
   `stop_reason == "stop_sequence"`.
 
+- **The Anthropic `thinking` object and `output_config.effort` forward
+  as sent; canonical reasoning cannot represent them.** The canonical
+  `ReasoningConfig` has no way to say `adaptive` without a budget,
+  `between_tools`, an unknown `type`, or "the client sent no thinking", so
+  rebuilding the object from it changed what the client asked for. The
+  Anthropic ingress keeps the client's whole `thinking` object (minus
+  `display`, which has its own carrier) on
+  `routectl_internal.anthropic_thinking`, and every Anthropic-shape egress
+  emits it through one function,
+  `anthropic_api/extras.rs::compose_thinking` (Bedrock Converse via
+  `bedrock/converse/extras.rs::insert_thinking`):
+  - **The object ships verbatim, unknown types included.** Any `type`
+    and any member reach anthropic-api, Bedrock Invoke, Bedrock Converse
+    and `count_tokens` unchanged; the upstream judges them
+    (`client_thinking_shapes_forward_verbatim`,
+    `bedrock_invoke_body_carries_the_forwarded_thinking`,
+    `count_tokens_body_carries_the_forwarded_thinking`,
+    `the_client_thinking_object_reaches_the_bag_as_sent`; known types stay
+    byte-identical to the committed driver captures,
+    `committed_driver_captures_reach_the_wire_byte_identical`). Only the
+    operator overrides edit it (`forward_client_thinking`:
+    `supports_adaptive_thinking` and `max_thinking_budget`, see
+    [CONFIGURATION.md](CONFIGURATION.md#supports_adaptive_thinking-bool-default-false)),
+    and each edit is declared
+    (`each_forwarded_thinking_override_declares_only_what_it_changed`).
+    A native `budget_tokens` below Anthropic's 1024 minimum is NOT raised:
+    the upstream judges it, where a budget routectl translates from
+    canonical reasoning is still floored
+    (`a_sub_floor_budget_is_forwarded_on_sent_and_floored_on_translation`).
+    An unknown type cannot cross dialects: openai-compat,
+    openai-responses and gemini build their reasoning from the default and
+    count one `thinking_type_unrepresentable` translation drop per request
+    (`an_unmodeled_thinking_type_counts_one_openai_compat_drop`,
+    `an_unmodeled_thinking_type_counts_one_openai_responses_drop`,
+    `an_unmodeled_thinking_type_counts_one_gemini_drop`).
+  - **Effort ships as sent, beside any thinking type.** A client's
+    `output_config.effort` is not dropped beside `disabled` or `enabled`
+    thinking, and `"none"` is not turned into `disabled` thinking. The
+    committed capture of a real Claude Code turn carries `disabled`
+    thinking beside effort `"high"`, and it ships unchanged
+    (`the_plain_turn_ships_its_effort_with_no_output_config_edit`,
+    `the_plain_turn_ships_its_effort_on_bedrock_invoke`,
+    `the_plain_turn_capture_keeps_its_effort_beside_disabled_thinking`).
+    Only a non-empty `effort_levels` re-clamps it, and routectl supplies
+    an effort only beside adaptive thinking that has none
+    (`the_effort_on_the_wire_per_thinking_shape_and_operator_knob`).
+  - **The sampling clamp reads the shipped type.** Anthropic pins
+    `temperature` while thinking is active, so the clamp keys off the
+    emitted `thinking.type`, never the canonical config: `enabled` and
+    `adaptive` pin it, `disabled`, `between_tools` and an unknown type
+    keep the caller's sampling
+    (`the_clamp_pins_temperature_only_for_active_thinking_types`,
+    `the_body_keeps_caller_sampling_for_inactive_forwarded_types`).
+  - **Forced tool use strips only active thinking, as a seed.** Anthropic
+    400s with "Thinking may not be enabled when tool_choice forces tool
+    use." `anthropic_api/extras.rs::shipped_thinking` (and Converse's
+    `strip_thinking_when_tool_choice_forces_use`) removes `thinking` when
+    its type is `enabled` or `adaptive` (`is_active_thinking_type`) and
+    `tool_choice` forces a tool (`anthropic_api/tools.rs::forced_tool_choice_type`),
+    keeping `tool_choice`; the removal is declared once
+    (`forced_tool_use_strips_active_thinking_with_one_declaration`,
+    `forced_tool_use_strips_active_thinking_once_and_restores_the_caller_sampling`).
+    `disabled`, `between_tools` and unknown types ride beside the forced
+    choice as sent (`forced_tool_use_keeps_inactive_thinking_and_the_caller_sampling`,
+    `forced_tool_use_keeps_inactive_thinking_with_the_client_effort`).
+    A client's own effort survives the strip; only an effort routectl
+    composed for the stripped thinking is dropped
+    (`a_forced_tool_strip_keeps_the_client_effort_and_composes_none`,
+    `forced_tool_use_drops_only_a_routectl_composed_effort`). The strip is
+    baked in rather than learned because the rejection names no field
+    path, so the rejection parser cannot attribute it, and no envelope of
+    it is captured to ground a learned repair. Its Claude Code trigger is
+    the WebSearch sub-request, which forces `web_search` beside adaptive
+    thinking.
+
+  A thinking type the upstream refuses (`thinking.type.enabled` on Opus
+  4.7+, `thinking.type.disabled` on Opus 5.5 and Bedrock Sonnet 5.5) is
+  no longer prevented up front: the router repairs it per lane through
+  `FieldSurface::AnthropicThinkingType` in
+  `crates/routectl-router/src/router/field_repair.rs`, reading the
+  Bedrock off-switch template with `rejection_parser.rs::thinking_off_switch`.
+  See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#anthropic-opus-47-and-any-future-adaptive-thinking-models)
+  for what each repair sends.
+
 - **A thinking-suppressing `thinking.display` returns an EMPTY thinking
   block, not no block.** The `display` vocabulary is beta-extensible:
   `"summarized"` and `"omitted"` are the long-standing values, and the

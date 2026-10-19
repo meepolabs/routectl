@@ -604,7 +604,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `provider`                     | `[models.X]`        | required; refs a `[providers]` key                                     |
 | `upstream`                     | `[models.X]`        | required                                                               |
 | `selectable`                   | `[models.X]`        | default true                                                           |
-| `supports_adaptive_thinking`   | `[models.X]`        | bool, default false; selects adaptive vs legacy thinking wire shape    |
+| `supports_adaptive_thinking`   | `[models.X]`        | bool, default false; true overrides enabled thinking to adaptive       |
 | `effort_levels`                | `[models.X]`        | array<string>, default [] (pass-through); non-empty = clamp            |
 | `max_thinking_budget`          | `[models.X]`        | u32, default 0 (no cap); declared model budget ceiling in tokens; anthropic-api + bedrock-invoke + bedrock-converse only |
 | `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
@@ -2054,21 +2054,77 @@ these fields directly.
 
 #### `supports_adaptive_thinking` (bool, default false)
 
-When `true`, the Anthropic-API and Bedrock egresses emit the adaptive
-thinking wire shape:
+An operator override on the Anthropic-shape egresses (`anthropic-api`,
+`bedrock-invoke`, `bedrock-converse`). What it changes depends on what
+the client sent.
 
-```json
-{ "thinking": { "type": "adaptive" }, "output_config": { "effort": "high" } }
-```
+A client that sends its own `thinking` object (the Anthropic Messages
+ingress) has that object forwarded as sent, `display` included, whatever
+its `type`. With the key `false` or unset, routectl has no opinion on the
+type: an `enabled`, `adaptive`, `disabled`, `between_tools` or unknown type
+is forwarded as sent
+(`client_thinking_shapes_forward_verbatim`,
+`an_unset_knob_forwards_client_adaptive_as_adaptive`; Converse:
+`the_client_thinking_object_reaches_the_bag_as_sent`). An explicit
+`false` behaves exactly like unset. Two edits still apply whatever the
+key says: [`max_thinking_budget`](#max_thinking_budget-u32-default-0)
+lowers a forwarded `enabled` budget, and a `tool_choice` that forces tool
+use removes `enabled` or `adaptive` thinking (see
+[WIRE-GOTCHAS.md](WIRE-GOTCHAS.md#anthropic-api-surface)).
 
-When `false`, they emit the legacy fixed-budget shape:
+With the key `true`:
+
+- A client `enabled` object is rewritten to `adaptive`; its
+  `budget_tokens` is removed (the adaptive shape has no budget field) and
+  its `display` is kept
+  (`the_adaptive_knob_turns_client_enabled_into_adaptive_keeping_display`;
+  Converse: `the_forwarded_thinking_overrides_are_declared`). Other types
+  forward as sent (the "between_tools, knob set" and "disabled, knob set"
+  rows of `client_thinking_shapes_forward_verbatim`).
+- A client that sends a positive effort and NO `thinking` object still
+  gets synthesized adaptive thinking, the effort beside it:
+
+  ```json
+  { "thinking": { "type": "adaptive" }, "output_config": { "effort": "high" } }
+  ```
+
+  (`sent_none_with_the_knob_keeps_the_synthesized_adaptive_shape`).
+  Without the key, or with no effort or effort `"none"`, a request with
+  no `thinking` object ships no thinking
+  (`sent_none_emits_thinking_only_for_the_knob_with_a_positive_effort`).
+- When the shipped thinking is `adaptive` and the request carries no
+  effort, routectl supplies `output_config.effort = "medium"`, whether the
+  client sent `adaptive` itself or the key converted its `enabled` object.
+  With the key unset nothing is supplied (the "client adaptive, no effort"
+  and "knob-converted enabled, no effort" rows of
+  `the_effort_on_the_wire_per_thinking_shape_and_operator_knob`; Converse:
+  `the_adaptive_knob_supplies_an_effort_only_when_the_client_sent_none`).
+
+A client effort is never rewritten to match the thinking shape: an
+`output_config.effort` ships as sent beside whatever thinking ships,
+`disabled` included, and only a non-empty [`effort_levels`](#effort_levels)
+re-clamps it (the "xhigh beside disabled ships as sent" and "explicit
+list clamps xhigh beside disabled" rows of
+`the_effort_on_the_wire_per_thinking_shape_and_operator_knob`; Converse:
+`the_client_effort_reaches_the_bag_as_sent`).
+
+Requests from the other ingresses carry no native `thinking` object, so
+the egress translates canonical reasoning: with the key `true` it emits
+the adaptive shape above, otherwise the legacy fixed-budget shape:
 
 ```json
 { "thinking": { "type": "enabled", "budget_tokens": 16000 } }
 ```
 
-Set `true` only for models that accept the adaptive shape (Anthropic
-Opus 4.7+). Non-adaptive models sent the adaptive shape receive a 400.
+(the "translated adaptive carries its canonical effort" and "translated
+legacy shape carries no effort" rows of the same table).
+
+You do not need the key for a model that refuses `enabled` thinking:
+routectl repairs that 400 and learns the adaptive shape per lane (see
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#anthropic-opus-47-and-any-future-adaptive-thinking-models)).
+Setting it skips the first refused attempt. Set `true` only for models
+that accept the adaptive shape (Anthropic Opus 4.7+): a model that refuses
+adaptive thinking answers it with a 400 that routectl does not repair.
 
 #### `effort_levels` (array of strings, default [])
 
@@ -2102,8 +2158,15 @@ model that rejects some levels. Three cases:
 
 Declares the model's maximum thinking-token budget in tokens. `0` means
 "not a budget-capped model" -- the egress falls back to its own
-inference-time defaults. Non-zero values cap the negotiated budget DOWN
-before the upstream's own budget window clamp runs.
+inference-time defaults. Non-zero values cap an `enabled` thinking budget
+DOWN: a budget routectl translates from canonical reasoning, before the
+upstream's own budget window clamp runs
+(`max_thinking_budget_nonzero_clamps_budget_down`), and a client's own
+forwarded `budget_tokens` above the cap
+(`the_operator_budget_cap_lowers_only_a_larger_forwarded_enabled_budget`).
+A forwarded budget at or below the cap, including one below Anthropic's
+1024 minimum, ships as sent; only a translated budget is raised to the
+minimum (`a_sub_floor_budget_is_forwarded_on_sent_and_floored_on_translation`).
 
 Only consumed by the Anthropic-shape thinking builder: `anthropic-api`,
 `bedrock-invoke` (which delegates body construction to the same
@@ -2115,8 +2178,12 @@ naming the model and its kind is emitted at load time (`routectl config
 check` and every serve boot). Steer those models with `effort_levels`
 and the caller's own budget instead.
 
-Only relevant on the legacy `supports_adaptive_thinking = false` path;
-the adaptive path uses effort strings and has no budget field.
+It is never a cost cap on adaptive thinking: the adaptive shape has no
+budget field, and when `supports_adaptive_thinking = true` converts an
+`enabled` object its budget is removed, not capped (the "enabled on an
+adaptive model" row of
+`each_forwarded_thinking_override_declares_only_what_it_changed`). Steer
+adaptive thinking with `effort_levels`.
 
 #### `max_output_tokens` (Option<u32>, default None)
 
