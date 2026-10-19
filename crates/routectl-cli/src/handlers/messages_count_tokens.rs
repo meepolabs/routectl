@@ -36,6 +36,7 @@ use crate::handlers::ingress_handle::{
     is_json_content_type, map_error, render_body_rejection, render_parse_failure,
     render_unsupported_media_type,
 };
+use crate::handlers::ingress_wire::capture_ingress_wire;
 use crate::handlers::usage_capture::drain_capability_events;
 use crate::ingress::IngressAdapter;
 use crate::ingress::anthropic::AnthropicIngress;
@@ -68,10 +69,11 @@ pub async fn count_tokens(
     // mix.
     let router = state.router.load_full();
 
-    let req = match adapter.parse_request(&headers, raw_body.as_ref()) {
+    let mut req = match adapter.parse_request(&headers, raw_body.as_ref()) {
         Ok(r) => r,
         Err(e) => return render_parse_failure(&router, adapter.dialect(), envelope, e),
     };
+    capture_ingress_wire(&headers, &raw_body, &mut req);
 
     // Compiled-pin drift observation, after a successful parse and before
     // dispatch. count_tokens is the one inference endpoint that does not

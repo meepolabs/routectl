@@ -8608,6 +8608,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   hermetic child process; also boots the shipped example
   config (oauth-backed entries removed) in a cleared env, Bedrock default chain
   included, to a serving `/health` and a clean SIGTERM exit
+- `tests/count_tokens_operator_extra_revert.rs` -- real-binary token-count
+  revert: boots a hermetic child daemon whose anthropic-api provider declares
+  an operator payload extra, against a wiremock upstream that refuses it, and
+  asserts the count is re-sent once without the extra and served
 - `tests/status_poll_log_invariance.rs` -- real-binary log-volume guard: boots
   a hermetic child daemon over a soft-defect catalog overlay and unmappable
   ledger rows, polls `/status` and `/status/doctor` repeatedly, and asserts

@@ -9,8 +9,8 @@ use routectl_core::{ChatRequest, Error, RefusalReason};
 use super::{DispatchTarget, Router};
 
 /// The dialect the client's request arrived in: from its captured ingress
-/// body, else from the ingress that parsed it (a token count carries no
-/// ingress body). A request built without an ingress has none.
+/// body, else from the ingress that parsed it. A request built without an
+/// ingress has none.
 pub(super) fn ingress_dialect_of(req: &ChatRequest) -> Option<IngressDialect> {
     req.routectl_internal
         .ingress_wire

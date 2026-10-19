@@ -13,6 +13,7 @@
 //! exactly as in production. The extras test pins that an unknown
 //! top-level field round-trips into `provider_extras` (Anthropic dialect).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
@@ -20,6 +21,10 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::post;
+use futures::stream::BoxStream;
+use routectl_core::wire_check::{IngressDialect, IngressWire};
+use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, TokenCount};
+use routectl_router::{AliasValue, ProviderEntry, ResolvedModel};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -248,6 +253,79 @@ async fn count_tokens_does_not_observe_when_the_body_never_parsed() {
         state.cc_pin_drift.observe_version(Some(DRIFTED_VERSION)),
         "nothing was observed on a rejected request, so this is the first sighting"
     );
+}
+
+/// Records the ingress wire each count call carries.
+struct WireProbe {
+    wires: std::sync::Mutex<Vec<Option<IngressWire>>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for WireProbe {
+    fn id(&self) -> &'static str {
+        "wire-probe"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<Value> {
+        Ok(json!({}))
+    }
+    fn normalize_response(&self, _: Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response("wire-probe", "unused"))
+    }
+    async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+        Err(Error::normalize_response("wire-probe", "unused"))
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        Err(Error::normalize_response("wire-probe", "unused"))
+    }
+    async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        self.wires
+            .lock()
+            .expect("wires lock")
+            .push(req.routectl_internal.ingress_wire);
+        Ok(TokenCount {
+            input_tokens: 7,
+            extras: Default::default(),
+        })
+    }
+}
+
+fn state_counting_with(probe: &Arc<WireProbe>) -> Arc<AppState> {
+    let config = routectl_router::Config {
+        providers: BTreeMap::from([("p".to_owned(), ProviderEntry::anthropic_api("literal:k"))]),
+        aliases: BTreeMap::from([("a".to_owned(), AliasValue::Single("m".to_owned()))]),
+        ..routectl_router::Config::default()
+    };
+    let mut router = routectl_router::Router::new(Arc::new(config));
+    let provider = Arc::clone(probe) as Arc<dyn Provider>;
+    router.install_resolved_models(BTreeMap::from([(
+        "m".to_owned(),
+        Arc::new(ResolvedModel::new("m", "p", provider, "upstream")),
+    )]));
+    AppState::for_test(Arc::new(arc_swap::ArcSwap::from_pointee(router)))
+}
+
+#[tokio::test]
+async fn count_tokens_captures_the_ingress_wire_after_parse() {
+    let probe = Arc::new(WireProbe {
+        wires: std::sync::Mutex::new(Vec::new()),
+    });
+    let body = r#"{"model":"a","messages":[{"role":"user","content":"hi"}]}"#;
+    let mut req = post_req(Some("application/json"), body);
+    req.headers_mut().insert(
+        axum::http::header::USER_AGENT,
+        DRIFTED_CLIENT_UA.parse().unwrap(),
+    );
+
+    let (status, counted) = drive(state_counting_with(&probe), req).await;
+
+    assert_eq!(status, StatusCode::OK, "{counted}");
+    let wires = probe.wires.lock().expect("wires lock");
+    let [Some(wire)] = wires.as_slice() else {
+        panic!("one count call carrying the ingress wire, got {wires:?}");
+    };
+    assert_eq!(wire.dialect, IngressDialect::Anthropic);
+    assert_eq!(wire.bytes.as_ref(), body.as_bytes(), "the posted bytes");
+    assert_eq!(wire.client_version.as_deref(), Some(DRIFTED_VERSION));
 }
 
 /// A version well clear of anything routectl could mint, so the assertions
