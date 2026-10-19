@@ -12,10 +12,13 @@ use std::time::Instant;
 
 use futures::stream::BoxStream;
 use routectl_core::capability::{FailurePhase, SignalTier};
+#[cfg(feature = "openai-responses")]
 use routectl_core::{
-    BetaRepairReport, CODEX_OAUTH, ChatChunk, ChatRequest, ChatResponse, Error, Message,
-    MessageContent, Provider, ReasoningDetail, ReasoningDetailKind, ReplayScheme, Result, Role,
-    ToolDef,
+    BetaRepairReport, CODEX_OAUTH, Message, MessageContent, ReasoningDetail, ReasoningDetailKind,
+    Role,
+};
+use routectl_core::{
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result, ToolDef,
 };
 use serde_json::json;
 
@@ -36,10 +39,13 @@ const WIRE_LANE: &str = "p1#wire-model";
 const OPENAI_COMPAT: &str = "[providers.p1]\nkind = \"openai-compat\"\n\
     base_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
 const ANTHROPIC: &str = "[providers.p1]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+/// The one provider kind the replay-rejection classifier is fixture-backed for.
+#[cfg(feature = "openai-responses")]
 const OPENAI_RESPONSES: &str = "[providers.p1]\nkind = \"openai-responses\"\n\
     api_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n";
 /// The proven replay-rejection body a mantle lane answers a foreign artifact
 /// with.
+#[cfg(feature = "openai-responses")]
 const REPLAY_REJECT_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
 
 const SURFACES: [DispatchSurface; 2] = [DispatchSurface::Complete, DispatchSurface::CountTokens];
@@ -120,6 +126,7 @@ fn unlocalized_rejection() -> Error {
     Error::upstream("p1", 400, body.to_string())
 }
 
+#[cfg(feature = "openai-responses")]
 fn assistant_with_codex_artifact() -> Message {
     Message {
         role: Role::Assistant,
@@ -292,6 +299,7 @@ fn count_tokens_engine_skips_the_generic_drift_observers() {
     }
 }
 
+#[cfg(feature = "openai-responses")]
 #[test]
 fn count_tokens_engine_drops_a_repaired_replay_carry() {
     for surface in SURFACES {
