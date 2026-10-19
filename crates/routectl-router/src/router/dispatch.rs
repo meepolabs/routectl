@@ -540,7 +540,13 @@ impl Router {
             // clear when the field is accepted). Nothing is mutated by it -- an
             // acting verdict simply refuses the slot and the attempt
             // dispatches unchanged.
-            learning.admit_carries(target, &mut attempt_req, meta, Instant::now());
+            learning.admit_carries(
+                target,
+                &mut attempt_req,
+                meta,
+                super::field_repair::FieldSettlementMode::Settling,
+                Instant::now(),
+            );
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
@@ -1344,7 +1350,13 @@ impl Router {
             // Envelope-field carry admission -- see `complete_inner`. Same
             // pre-dispatch position, same closed-table identity, so the
             // streaming walk is not a second site with its own rules.
-            learning.admit_carries(target, &mut attempt_req, meta, Instant::now());
+            learning.admit_carries(
+                target,
+                &mut attempt_req,
+                meta,
+                super::field_repair::FieldSettlementMode::Settling,
+                Instant::now(),
+            );
             let attempt_policy = self.compose_attempt_policy(
                 &policy,
                 provider_name,

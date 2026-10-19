@@ -31,8 +31,6 @@ use routectl_core::failure_class::{
 use routectl_core::wire_check::RejectionProvenance;
 use routectl_core::{BetaRepairReport, ChatRequest, Error, sanitize_for_log};
 
-use crate::feature_keys::derive_feature_keys;
-
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::UntranslatedCapabilities;
 use super::class_observe::{DispatchSurface, upstream_facts};
@@ -272,6 +270,10 @@ pub(super) struct AttemptLearning<'a> {
     /// Only the complete surface claims a field canary, so only it runs the
     /// canary's repaired retry and settlement.
     canary_enabled: bool,
+    /// The count surface mints no generic verdict and settles its replay
+    /// carry by drop: a token count validates only what its own endpoint
+    /// projects, which is narrower than what a message dispatch sends.
+    count_surface: bool,
     // Fields drop in declaration order. The guard-owning fields below are
     // declared in REVERSE of the order the walk acquires them, so every exit
     // path releases the last-acquired guard first.
@@ -312,6 +314,7 @@ impl<'a> AttemptLearning<'a> {
         Self {
             router,
             canary_enabled: surface == DispatchSurface::Complete,
+            count_surface: surface == DispatchSurface::CountTokens,
             field_plan: None,
             replay_plan: None,
             preflight: FieldPreflightPlan::default(),
@@ -340,19 +343,19 @@ impl<'a> AttemptLearning<'a> {
     /// Claim the reasoning-replay and envelope-field carry slots for this
     /// target. The replay admission may strip `attempt_req` proactively (an
     /// acting negative or a peer probe); the field admission mutates nothing.
+    /// A `NonSettling` field admission claims no single-flight slot.
     pub(super) fn admit_carries(
         &mut self,
         target: &DispatchTarget,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
+        mode: FieldSettlementMode,
         now: Instant,
     ) {
         self.replay_plan = self
             .router
             .plan_replay_carry(target, attempt_req, meta, now);
-        self.field_plan =
-            self.router
-                .plan_field_carry(target, attempt_req, FieldSettlementMode::Settling, now);
+        self.field_plan = self.router.plan_field_carry(target, attempt_req, mode, now);
     }
 
     /// Whether the previous attempt ended in a repair, which re-dispatches
@@ -621,7 +624,8 @@ impl<'a> AttemptLearning<'a> {
     /// no repair, settling this target's re-probes against it. Applies only
     /// the capability proposal [`Self::on_rejection`] held; it resolves
     /// nothing itself. A rejection laid to the transcript learns nothing and
-    /// counts only as one the field parser did not localize.
+    /// counts only as one the field parser did not localize; on the count
+    /// surface no rejection learns, and one only counts when unlocalized.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_generic(
         &mut self,
@@ -637,6 +641,12 @@ impl<'a> AttemptLearning<'a> {
         if self.transcript_rejection {
             self.router
                 .observe_transcript_rejection(err, target, dedupe);
+            return;
+        }
+        if self.count_surface {
+            self.pending_capability = None;
+            self.router
+                .observe_unlocalized_field_rejection(err, cf, remapped, target, dedupe);
             return;
         }
         self.router.observe_for_learning(
@@ -681,85 +691,6 @@ impl<'a> AttemptLearning<'a> {
         self.settle_field_success(req, meta);
         if self.canary_enabled {
             self.settle_canary_success(req, meta);
-        }
-    }
-
-    /// A stripped repair that reached success confirms the negative
-    /// (commit); a carried variant that succeeded outright proves the pair
-    /// works, so any resident (lapsed) negative clears.
-    fn settle_replay_success(&mut self, req: &ChatRequest, meta: &mut DispatchMeta) {
-        let Some(plan) = self.replay_plan.take() else {
-            return;
-        };
-        if self.replay_repair_attempted {
-            let features = derive_feature_keys(
-                req.tools.as_deref().unwrap_or(&[]),
-                req.provider_extras.as_ref(),
-                req.response_format.as_ref(),
-            );
-            meta.learned_capabilities.extend(plan.commit(
-                self.replay_reject_status,
-                &features,
-                Instant::now(),
-            ));
-            if let Some(deg) = meta.replay_degradation.as_mut() {
-                deg.repair_succeeded = true;
-                deg.learned = true;
-            }
-        } else {
-            meta.cleared_capabilities.extend(plan.settle_success());
-        }
-    }
-
-    /// A repaired retry that reached success confirms the verdict (commit);
-    /// an UNREPAIRED success proves the field is accepted, so any resident
-    /// verdict clears.
-    fn settle_field_success(&mut self, req: &ChatRequest, meta: &mut DispatchMeta) {
-        let Some(plan) = self.field_plan.take() else {
-            return;
-        };
-        if let Some(repair) = self.reactive_repair {
-            let features =
-                super::field_repair::request_feature_keys(self.router.field_repair_table(), req);
-            // The `learned` claim is derived from what the commit actually
-            // PERSISTED, never asserted alongside it: a non-settling plan
-            // commits nothing, and a summary that claimed otherwise would be a
-            // false persistence claim.
-            let learned = plan.commit(self.field_reject_status, features, Instant::now());
-            let persisted = learned.is_some();
-            meta.learned_capabilities.extend(learned);
-            self.router
-                .note_field_repair_succeeded(meta, repair, persisted);
-        } else {
-            meta.cleared_capabilities.extend(plan.settle_success());
-        }
-    }
-
-    /// Two canary success shapes mean opposite things: an UNREPAIRED success
-    /// proves the verdict wrong, while a success that arrived only after the
-    /// canary's same-field repaired retry re-confirms it. A refused-VALUE
-    /// rejection already settled the canary as inconclusive in the repair
-    /// branch, so no plan is left here and its lossy repair only reports
-    /// success.
-    fn settle_canary_success(&mut self, req: &ChatRequest, meta: &mut DispatchMeta) {
-        if let Some(repair) = self.canary_lossy_repair {
-            self.router.note_field_repair_succeeded(meta, repair, false);
-        }
-        let Some(plan) = std::mem::take(&mut self.preflight).into_canary() else {
-            return;
-        };
-        if self.canary_repair_attempted {
-            let features =
-                super::field_repair::request_feature_keys(self.router.field_repair_table(), req);
-            meta.learned_capabilities.extend(plan.settle_confirmed(
-                self.router.field_verdicts(),
-                self.canary_reject_status,
-                features,
-                Instant::now(),
-            ));
-        } else {
-            meta.cleared_capabilities
-                .extend(plan.settle_disproved(self.router.field_verdicts()));
         }
     }
 }
@@ -808,6 +739,9 @@ impl RepairSink for EngineSink<'_, '_> {
         )
     }
 }
+
+#[path = "learn_settle.rs"]
+mod learn_settle;
 
 #[cfg(test)]
 #[path = "learn_engine_tests.rs"]

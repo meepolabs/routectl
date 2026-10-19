@@ -3280,12 +3280,27 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Proceed` the capability proposal is held and
   `observe_generic` (still after the class observability) applies only it via
   `observe_for_learning`; `on_success` settles betas, a pending revert,
-  replay, field and canary. Arbitration precedence is pinned in
-  `src/router/learn_engine_tests.rs`; per-dialect egress location (the
+  replay, field and canary (the carry settlements live in
+  `learn_settle.rs`). `admit_carries` takes the caller's
+  `FieldSettlementMode`. On the `CountTokens` surface (derived once in `new`)
+  `observe_generic` never mints: it only feeds
+  `observe_unlocalized_field_rejection` (or the transcript counter).
+  Arbitration precedence is pinned in
+  `src/router/learn_engine_tests.rs`, the count-surface inputs against a
+  complete control in its child module
+  `src/router/learn_engine_surface_tests.rs`; per-dialect egress location (the
   settlement's `in_egress` reading) in
   `src/router/learn_engine_location_tests.rs`, and the dispatch behavior on
   both surfaces (absent-path skip, repair when carried) in its child module
   `src/router/learn_engine_dispatch_tests.rs`
+- `src/router/learn_settle.rs` -- child module of `learn_engine.rs`: how
+  `AttemptLearning` settles each carry on success. Replay: a stripped repair
+  commits the negative, an outright carried success clears it; on the
+  `CountTokens` surface the plan is dropped (slots released, nothing
+  committed or cleared) and the degradation reports `repair_succeeded`
+  without `learned`. Field: a repaired success commits (persisted claim
+  derived from the commit), an unrepaired one clears. Canary: an unrepaired
+  success disproves the verdict, one after its repaired retry re-confirms it
 - `src/router/learn_proposers.rs` -- the three thin `Proposer`s the engine
   arbitrates: `ReplayProposer` (`is_replay_rejection_class` on the remapped
   class, replay carried), `FieldRowProposer` (`rejected_field` on the native

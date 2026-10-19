@@ -182,3 +182,6 @@ fn the_arbitration_order_decides_every_contested_rejection() {
         assert_eq!(decided, row.expected, "{}", row.name);
     }
 }
+
+#[path = "learn_engine_surface_tests.rs"]
+mod learn_engine_surface_tests;
