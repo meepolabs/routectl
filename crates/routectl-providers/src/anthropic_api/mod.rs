@@ -117,6 +117,9 @@ pub use cloak::{
     SensitiveWordsBoundError, ToolRename, validate_sensitive_words,
 };
 pub use context_management::CONTEXT_MANAGEMENT_BETA;
+/// The `thinking.type` this egress composes for a request, for a caller
+/// that must reason about the shape before the body is built.
+pub use extras::emitted_thinking_type;
 /// Which provider kinds read the operator-declared thinking-budget cap.
 /// Re-exported from the module that consumes the field so config
 /// validation can answer "does this model's egress read the knob" without

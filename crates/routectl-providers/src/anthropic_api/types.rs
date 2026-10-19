@@ -27,9 +27,9 @@ pub struct AnthropicRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<AnthropicSystem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) thinking: Option<ThinkingConfig>,
+    pub(crate) thinking: Option<WireThinking>,
     /// Top-level effort knob for the Opus 4.7+ adaptive thinking path.
-    /// Only emitted alongside `ThinkingConfig::Adaptive`. See
+    /// Only emitted alongside an `adaptive` thinking type. See
     /// `OutputConfig` and `ThinkingConfig::Adaptive` for the wire
     /// shape; the request normalizer decides whether to populate this.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,6 +387,39 @@ pub enum ThinkingConfig {
         display: Option<String>,
     },
     Disabled,
+}
+
+impl ThinkingConfig {
+    /// The wire `type` tag this variant serializes under.
+    pub(crate) const fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Enabled { .. } => "enabled",
+            Self::Adaptive { .. } => "adaptive",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+/// The `thinking` value an Anthropic-shape body carries: either composed by
+/// routectl from canonical reasoning, or an Anthropic client's own object
+/// forwarded as sent, whose `type` and other keys may be ones this hub does
+/// not model.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum WireThinking {
+    Translated(ThinkingConfig),
+    Forwarded(Map<String, Value>),
+}
+
+impl WireThinking {
+    /// The `type` value, or `None` when a forwarded object carries no string
+    /// `type`.
+    pub(crate) fn thinking_type(&self) -> Option<&str> {
+        match self {
+            Self::Translated(config) => Some(config.wire_type()),
+            Self::Forwarded(object) => object.get("type").and_then(Value::as_str),
+        }
+    }
 }
 
 /// Top-level `output_config` field on `AnthropicRequest`. Only emitted

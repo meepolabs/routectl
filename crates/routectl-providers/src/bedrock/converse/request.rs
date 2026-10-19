@@ -42,6 +42,7 @@ use routectl_core::cache_control;
 use routectl_core::{ChatRequest, Result};
 
 use crate::anthropic_api::request::{build_thinking, clamp_sampling_for_thinking};
+use crate::anthropic_api::types::ThinkingConfig;
 
 use super::super::BedrockConfig;
 use super::extras::build_additional_fields;
@@ -186,8 +187,9 @@ fn build_inference_config(
     } else {
         None
     };
+    let thinking_type = thinking.as_ref().map(ThinkingConfig::wire_type);
     let (temperature, top_p) =
-        clamp_sampling_for_thinking(thinking.as_ref(), req.temperature, req.top_p);
+        clamp_sampling_for_thinking(thinking_type, req.temperature, req.top_p);
     let cfg_inference = InferenceConfig {
         max_tokens: req.max_tokens,
         temperature,

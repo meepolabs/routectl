@@ -1,7 +1,9 @@
 //! Thinking-budget composition and post-assembly body reconciliation.
 //!
-//! Two concerns live here. (1) The canonical `req.reasoning` ->
-//! Anthropic `thinking` mapping: `build_thinking` selects the wire
+//! Two concerns live here. (1) The emitted `thinking`: `compose_thinking`
+//! forwards an Anthropic client's own object and otherwise falls back to
+//! the canonical `req.reasoning` -> Anthropic `thinking` mapping, where
+//! `build_thinking` selects the wire
 //! shape (legacy `Enabled { budget_tokens }` vs Opus 4.7+ `Adaptive`),
 //! clamps the budget into Anthropic's `[1024, max_tokens-1]` window,
 //! applies the operator per-model cap, and pairs `Adaptive` with a
@@ -18,12 +20,14 @@ use serde_json::Value;
 
 use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
-use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
+use routectl_core::{
+    AnthropicThinking, ChatRequest, ThinkingObject, is_canonical_request_key, sanitize_for_log,
+};
 
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
 
 use super::tools::{PARALLEL_TOOL_CALLS_KEY, TOOL_CHOICE_TYPE_ANY, TOOL_CHOICE_TYPE_TOOL};
-use super::types::{OutputConfig, ThinkingConfig};
+use super::types::{OutputConfig, ThinkingConfig, WireThinking};
 
 /// Hardcoded baseline `max_tokens` value injected on outbound
 /// Anthropic-shape requests when the caller omits the field AND the
@@ -249,7 +253,7 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
     // budget DOWN before Anthropic's own `[1024, max_tokens-1]` window
     // clamp runs. Zero means no operator cap -- Anthropic's clamp is
     // the only guard.
-    let operator_cap = req.routectl_internal.max_thinking_budget;
+    let operator_cap = operator_thinking_cap(req);
 
     if let Some(budget) = r.max_tokens {
         let budget = apply_operator_cap(budget, operator_cap);
@@ -298,12 +302,13 @@ enum BudgetSource {
 
 /// The `kind = "..."` provider tokens whose egress reads
 /// `req.routectl_internal.max_thinking_budget`. THE single source for
-/// that question: the field is read in exactly one place (the
-/// `operator_cap` binding in `build_thinking` above), and every lane
-/// that reaches it does so through this module -- `anthropic-api`
-/// directly, Bedrock on both shapes (Invoke delegates body construction
-/// to `anthropic_api::request::normalize`; Converse calls
-/// `build_thinking` itself). Config validation reads this list so an
+/// that question: the field is read in exactly one place
+/// (`operator_thinking_cap`, consulted by `build_thinking` and by
+/// `compose_thinking`'s forwarded-budget cap), and every lane that reaches
+/// it does so through this module -- `anthropic-api` directly, Bedrock on
+/// both shapes (Invoke delegates body construction to
+/// `anthropic_api::request::normalize`; Converse calls `build_thinking`
+/// itself). Config validation reads this list so an
 /// operator setting the knob on a kind that never consults it gets a
 /// diagnostic instead of silence.
 ///
@@ -323,6 +328,11 @@ pub const MAX_THINKING_BUDGET_READER_KINDS: &[&str] = &[kind::ANTHROPIC_API, kin
 #[must_use]
 pub fn egress_reads_max_thinking_budget(provider_kind: &str) -> bool {
     MAX_THINKING_BUDGET_READER_KINDS.contains(&provider_kind)
+}
+
+/// The operator-declared per-model thinking-budget cap; zero means none.
+const fn operator_thinking_cap(req: &ChatRequest) -> u32 {
+    req.routectl_internal.max_thinking_budget
 }
 
 /// Apply the operator-declared per-model thinking-budget cap. When
@@ -360,14 +370,117 @@ fn clamp_budget_to_legacy_window(budget: u32, max: u32, source: BudgetSource) ->
     clamped
 }
 
-/// Pair `ThinkingConfig::Adaptive` with a top-level `output_config`.
-/// Returns `Some(OutputConfig)` only when the thinking variant is
-/// `Adaptive`; otherwise `None`.
+/// Decide the `thinking` an Anthropic-shape body carries, from the
+/// ingress carrier `req.routectl_internal.anthropic_thinking`:
+///
+/// - `Sent`: the client's object as sent, plus `display` from its own
+///   carrier, changed only by an explicit operator knob (see
+///   `forward_client_thinking`).
+/// - `SentNone`: no thinking, unless `adaptive` is set and the client sent
+///   a positive effort, which keeps the synthesized adaptive shape an
+///   operator who set the knob already gets.
+/// - `NotCaptured`: translated from canonical reasoning by
+///   `build_thinking`.
+///
+/// `adaptive` is the operator's `supports_adaptive_thinking` knob, the same
+/// value `build_thinking` takes.
+pub(super) fn compose_thinking(req: &ChatRequest, adaptive: bool) -> Option<WireThinking> {
+    match &req.routectl_internal.anthropic_thinking {
+        AnthropicThinking::Sent(object) => Some(forward_client_thinking(req, object, adaptive)),
+        AnthropicThinking::SentNone if adaptive && has_positive_effort(req) => {
+            build_thinking(req, true).map(WireThinking::Translated)
+        }
+        AnthropicThinking::SentNone => None,
+        AnthropicThinking::NotCaptured => {
+            build_thinking(req, adaptive).map(WireThinking::Translated)
+        }
+    }
+}
+
+/// The `thinking.type` an Anthropic-shape egress emits for `req` when
+/// `adaptive` is the value it passes for the operator's
+/// `supports_adaptive_thinking` knob; `None` when the body carries no
+/// `thinking`, or a forwarded object carries no string `type`.
+///
+/// Reports the composed value. A later pass in body assembly can still
+/// remove or rewrite `thinking` (a `tool_choice` that forces tool use, a
+/// context-management cache miss, an `output_config.effort` of "none").
+#[must_use]
+pub fn emitted_thinking_type(req: &ChatRequest, adaptive: bool) -> Option<String> {
+    compose_thinking(req, adaptive)
+        .as_ref()
+        .and_then(WireThinking::thinking_type)
+        .map(str::to_string)
+}
+
+/// Whether `thinking_type` spends reasoning budget, and so pins sampling
+/// to what Anthropic requires while thinking.
+pub(super) fn is_active_thinking_type(thinking_type: &str) -> bool {
+    matches!(thinking_type, "enabled" | "adaptive")
+}
+
+fn has_positive_effort(req: &ChatRequest) -> bool {
+    req.reasoning
+        .as_ref()
+        .is_some_and(|r| r.effort.is_some() && !r.is_off())
+}
+
+/// The client's own `thinking` object for the wire. Nothing is clamped
+/// into Anthropic's legacy budget window: the upstream judges what the
+/// client sent. The two operator overrides:
+///
+/// - `adaptive` turns an `enabled` object into `adaptive`, dropping
+///   `budget_tokens` (the adaptive shape has no budget field).
+/// - A nonzero `max_thinking_budget` lowers a forwarded `enabled` budget
+///   above it.
+fn forward_client_thinking(
+    req: &ChatRequest,
+    object: &ThinkingObject,
+    adaptive: bool,
+) -> WireThinking {
+    let mut wire = object.as_object().clone();
+    if object.thinking_type() == Some("enabled") {
+        if adaptive {
+            wire.insert("type".to_string(), Value::String("adaptive".to_string()));
+            if let Some(budget) = wire.remove("budget_tokens") {
+                tracing::debug!(
+                    budget_tokens = %budget,
+                    "client thinking.budget_tokens dropped: supports_adaptive_thinking \
+                     turns enabled thinking into adaptive, which has no budget field"
+                );
+            }
+        } else {
+            cap_forwarded_budget(&mut wire, operator_thinking_cap(req));
+        }
+    }
+    if let Some(display) = &req.routectl_internal.anthropic_thinking_display {
+        wire.insert("display".to_string(), Value::String(display.clone()));
+    }
+    WireThinking::Forwarded(wire)
+}
+
+fn cap_forwarded_budget(wire: &mut serde_json::Map<String, Value>, operator_cap: u32) {
+    let Some(budget) = wire.get("budget_tokens").and_then(Value::as_u64) else {
+        return;
+    };
+    if operator_cap > 0 && budget > u64::from(operator_cap) {
+        wire.insert("budget_tokens".to_string(), Value::from(operator_cap));
+        tracing::debug!(
+            requested_budget = budget,
+            capped_to = operator_cap,
+            "client thinking.budget_tokens lowered to the operator max_thinking_budget"
+        );
+    }
+}
+
+/// Pair adaptive thinking with a top-level `output_config`. Returns
+/// `Some(OutputConfig)` only when the emitted thinking type is `adaptive`;
+/// otherwise `None`.
 pub(super) fn build_output_config(
     req: &ChatRequest,
-    thinking: &Option<ThinkingConfig>,
+    thinking: Option<&WireThinking>,
 ) -> Option<OutputConfig> {
-    if matches!(thinking, Some(ThinkingConfig::Adaptive { .. })) {
+    if thinking.and_then(WireThinking::thinking_type) == Some("adaptive") {
         Some(OutputConfig {
             effort: derive_effort(req),
         })
@@ -417,8 +530,9 @@ pub(super) fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&
 /// shared canonical list and adds Anthropic-API-specific keys that are
 /// not on `ChatRequest` but are written by this egress from canonical
 /// fields:
-/// - `thinking`  -- translated from `req.reasoning` by `build_thinking`;
-///   not a raw ChatRequest field but routectl writes it.
+/// - `thinking`  -- composed by `compose_thinking` (the client's object or
+///   a translation of `req.reasoning`); not a raw ChatRequest field but
+///   routectl writes it.
 ///
 /// `output_config` is intentionally NOT here -- the full object is
 /// allowed through `provider_extras` for legitimate sub-fields like
@@ -437,7 +551,7 @@ pub(super) fn is_routectl_managed_key(key: &str) -> bool {
         || matches!(
             key,
             // Anthropic-API-specific managed keys not on ChatRequest:
-            // `thinking` is built from req.reasoning by this egress.
+            // `thinking` is composed by this egress.
             "thinking" | PARALLEL_TOOL_CALLS_KEY
         )
 }
@@ -522,27 +636,21 @@ fn disable_thinking_for_none_effort(obj: &mut serde_json::Map<String, Value>) {
     );
 }
 
-/// True iff the assembled body carries a `thinking` key at all (legacy
-/// `enabled` OR `adaptive`). Shared final-body predicate: the sampling-params
-/// reconciler restores caller sampling when this is false, and
-/// `body_has_adaptive_thinking` is layered on it, so the two late passes
-/// cannot disagree about whether thinking survived the strip passes.
-fn body_has_thinking(body: &Value) -> bool {
-    body.get("thinking").is_some()
+/// The assembled body's `thinking.type`. Shared final-body read: the
+/// sampling-params and effort reconcilers both key off it, so the two late
+/// passes cannot disagree about what thinking survived the strip passes.
+fn body_thinking_type(body: &Value) -> Option<&str> {
+    body.get("thinking")
+        .and_then(|t| t.get("type"))
+        .and_then(Value::as_str)
 }
 
-/// True iff the body carries a `thinking` block that actually spends reasoning
-/// budget -- i.e. present AND not the explicit `{type: "disabled"}` form.
-/// Anthropic's forced `temperature = 1.0` applies only to active thinking, so
-/// a body whose thinking was reduced to `disabled` must get the caller's
-/// sampling back exactly as a fully-stripped one does.
+/// True iff the body carries a `thinking` block whose type spends reasoning
+/// budget (`is_active_thinking_type`). Anthropic's forced `temperature = 1.0`
+/// applies only to active thinking, so a body whose thinking is `disabled`,
+/// another type, or stripped entirely gets the caller's sampling back.
 fn body_has_active_thinking(body: &Value) -> bool {
-    body_has_thinking(body)
-        && body
-            .get("thinking")
-            .and_then(|t| t.get("type"))
-            .and_then(Value::as_str)
-            != Some("disabled")
+    body_thinking_type(body).is_some_and(is_active_thinking_type)
 }
 
 /// True iff `body.thinking.type == "adaptive"`.
@@ -554,12 +662,7 @@ fn body_has_active_thinking(body: &Value) -> bool {
 /// from that set, provider_extras could forge adaptive here and trigger
 /// spurious effort re-injection -- the two MUST stay in sync.
 fn body_has_adaptive_thinking(body: &Value) -> bool {
-    body_has_thinking(body)
-        && body
-            .get("thinking")
-            .and_then(|t| t.get("type"))
-            .and_then(Value::as_str)
-            == Some("adaptive")
+    body_thinking_type(body) == Some("adaptive")
 }
 
 /// True iff the assembled body carries `output_config.format`, the

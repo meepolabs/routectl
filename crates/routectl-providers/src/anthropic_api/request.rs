@@ -54,13 +54,13 @@ use routectl_core::{MessageContent, ReasoningDetail, ReasoningDetailKind};
 
 use super::types::{
     AnthropicContent, AnthropicRequest, AnthropicSystem, AnthropicTool, ContentBlock,
-    ThinkingConfig,
 };
 
 // Primitives used only by the orchestrator below.
 use super::extras::{
-    build_output_config, merge_provider_extras, reconcile_output_config_effort,
-    reconcile_sampling_params, resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
+    build_output_config, compose_thinking, is_active_thinking_type, merge_provider_extras,
+    reconcile_output_config_effort, reconcile_sampling_params, resolve_max_tokens,
+    strip_thinking_when_tool_choice_forces_use,
 };
 use super::messages::{SystemTurnPolicy, normalize_replay_invariants, translate_messages};
 use super::tools::{
@@ -72,6 +72,9 @@ use super::tools::{
 // the canonical-side Anthropic-shape primitives via
 // `crate::anthropic_api::request::<name>`; keeping these paths stable
 // means those call sites need no edits across the file split.
+// Only the Bedrock Converse egress consumes this re-export; this egress
+// composes its thinking through `compose_thinking`.
+#[cfg(feature = "bedrock")]
 pub(crate) use super::extras::build_thinking;
 pub(crate) use super::system::translate_system;
 // The billing-aware lift is used by BOTH the anthropic-api orchestrator
@@ -183,24 +186,27 @@ fn flush_response_format_tally(tally: &UnrecognizedResponseFormatTally, req: &Ch
 // ---------------------------------------------------------------------------
 
 /// Clamp sampling params for Claude thinking mode. Anthropic requires
-/// `temperature = 1.0` when thinking is enabled (legacy `Enabled` and
-/// `Adaptive` both): no alternative-continuation sampling while spending
-/// reasoning budget. It also rejects a request carrying both `temperature`
-/// and `top_p` (and rejects `top_p` while thinking is active), so `top_p`
-/// survives only when no temperature is in play; temperature wins.
+/// `temperature = 1.0` while thinking spends reasoning budget
+/// (`is_active_thinking_type`: `enabled` and `adaptive`): no
+/// alternative-continuation sampling then. `thinking_type` is the EMITTED
+/// `thinking.type`; any other type, or none, keeps the caller's sampling.
+/// Anthropic also rejects a request carrying both `temperature` and `top_p`
+/// (and rejects `top_p` while thinking is active), so `top_p` survives only
+/// when no temperature is in play; temperature wins.
 ///
 /// Shared by the Anthropic-API egress (`normalize` below, inherited by the
 /// Bedrock-Invoke seam) and the Bedrock-Converse `inferenceConfig` builder so
 /// the clamp cannot drift between the two seams that build sampling
 /// independently. Returns `(temperature, top_p)`.
-pub(crate) const fn clamp_sampling_for_thinking(
-    thinking: Option<&ThinkingConfig>,
+pub(crate) fn clamp_sampling_for_thinking(
+    thinking_type: Option<&str>,
     temperature: Option<f64>,
     top_p: Option<f64>,
 ) -> (Option<f64>, Option<f64>) {
-    let temperature = match thinking {
-        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive { .. }) => Some(1.0f64),
-        _ => temperature,
+    let temperature = if thinking_type.is_some_and(is_active_thinking_type) {
+        Some(1.0f64)
+    } else {
+        temperature
     };
     let top_p = if temperature.is_some() { None } else { top_p };
     (temperature, top_p)
@@ -597,7 +603,7 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 // Top-level normalize
 // ---------------------------------------------------------------------------
 
-/// `adaptive` now controls ONLY the thinking wire shape via `build_thinking`;
+/// `adaptive` now controls ONLY the thinking wire shape via `compose_thinking`;
 /// it no longer drives `output_config.effort` reconciliation, which the late
 /// enforcer `reconcile_output_config_effort` derives from the assembled body.
 ///
@@ -753,8 +759,8 @@ pub(crate) fn normalize_deferring_format_key_warn(
             routectl_core::wire_check::EditKind::Add,
         );
     }
-    let thinking = build_thinking(req, adaptive);
-    let output_config = build_output_config(req, &thinking);
+    let thinking = compose_thinking(req, adaptive);
+    let output_config = build_output_config(req, thinking.as_ref());
 
     let system = filtered_system.as_ref().map(translate_system).or_else(|| {
         // Legacy lift: strip the billing block from the lifted text too.
@@ -838,8 +844,11 @@ pub(crate) fn normalize_deferring_format_key_warn(
             .map(|ts| translate_tools(ts, hosted_mcp, tap))
     };
 
+    let thinking_type = thinking
+        .as_ref()
+        .and_then(super::types::WireThinking::thinking_type);
     let (temperature, top_p) =
-        clamp_sampling_for_thinking(thinking.as_ref(), req.temperature, req.top_p);
+        clamp_sampling_for_thinking(thinking_type, req.temperature, req.top_p);
     super::wire_edits::declare_sampling_clamp(tap, req, temperature, top_p);
 
     // Fold the OpenAI-dialect `parallel_tool_calls` toggle (riding
@@ -1092,6 +1101,18 @@ mod anthropic_effort_clamp_tests;
 #[cfg(test)]
 #[path = "request_thinking_display_carrier_tests.rs"]
 mod thinking_display_carrier_tests;
+
+// The emitted `thinking` per ingress carrier state, on the anthropic-api,
+// Bedrock Invoke and count_tokens bodies.
+#[cfg(test)]
+#[path = "request_thinking_carrier_tests.rs"]
+mod thinking_carrier_tests;
+
+// The sampling clamp and the public thinking-type read key off the emitted
+// thinking type.
+#[cfg(test)]
+#[path = "request_thinking_sampling_tests.rs"]
+mod thinking_sampling_tests;
 
 // effort_ratio parity: every token in VALID_EFFORT_TOKENS must have a
 // non-default arm in effort_ratio, guarding against a new token silently

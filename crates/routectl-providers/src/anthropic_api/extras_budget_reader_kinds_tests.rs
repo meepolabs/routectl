@@ -4,9 +4,9 @@
 //! The const is curated (the reading code is one shared function that
 //! names no provider kind), so nothing in the type system stops it from
 //! going stale when a lane starts or stops routing through
-//! `build_thinking`. These tests close that by re-deriving the reader set
-//! from the source files on disk: the single read site, and the set of
-//! modules that reach it.
+//! `build_thinking` or `compose_thinking`. These tests close that by
+//! re-deriving the reader set from the source files on disk: the single
+//! read site, and the set of modules that reach it.
 //!
 //! The scanned modules are enumerated from the filesystem, never listed
 //! by hand: a new module that reads the field must be either mapped to a
@@ -41,7 +41,7 @@ fn file_name_of(path: &Path) -> String {
         .to_string()
 }
 
-/// Test modules are excluded everywhere: a test calling `build_thinking`
+/// Test modules are excluded everywhere: a test calling a reader function
 /// directly proves nothing about which lane reads the field on a real
 /// request. The convention is a `_tests.rs` suffix.
 fn is_scanned_source(path: &Path) -> bool {
@@ -127,9 +127,13 @@ fn names_symbol(text: &str, symbol: &str) -> bool {
     })
 }
 
-/// The one function that reads the field, and the sole entry point every
-/// reading lane goes through.
-const READER_FN: &str = "build_thinking";
+/// The functions that consult the field's one read site, and the entry
+/// points every reading lane goes through: the canonical translation and
+/// the composer that also caps a client-sent budget.
+const READER_FNS: &[&str] = &["build_thinking", "compose_thinking"];
+
+/// The translation entry point, used where a fixture needs one reader name.
+const READER_FN: &str = READER_FNS[0];
 
 /// `bedrock-invoke` never calls the reader directly -- it delegates whole
 /// body construction to the anthropic-api normalizer, which does. Any
@@ -138,7 +142,7 @@ const READER_FN: &str = "build_thinking";
 /// Matched as a plain substring, not a whole identifier: the Invoke lane
 /// calls the `normalize_deferring_format_key_warn` variant, and every
 /// `normalize*` entry point in that module assembles the body through
-/// [`READER_FN`].
+/// [`READER_FNS`].
 const DELEGATING_CALL: &str = "anthropic_api::request::normalize";
 
 const FIELD_PATH: &str = "routectl_internal.max_thinking_budget";
@@ -159,14 +163,15 @@ fn read_sites(src: &Path) -> Vec<String> {
     sites
 }
 
-/// The module roots whose non-test source reaches [`READER_FN`].
+/// The module roots whose non-test source reaches one of [`READER_FNS`].
 fn reader_roots(src: &Path) -> BTreeSet<String> {
     module_roots(src)
         .into_iter()
         .filter(|root| {
             sources_of_root(src, root).into_iter().any(|(_, text)| {
                 let code = code_only(&text);
-                names_symbol(&code, READER_FN) || code.contains(DELEGATING_CALL)
+                READER_FNS.iter().any(|reader| names_symbol(&code, reader))
+                    || code.contains(DELEGATING_CALL)
             })
         })
         .collect()
@@ -209,7 +214,7 @@ fn every_mapped_module_root_still_exists_on_disk() {
 #[test]
 fn the_field_is_read_in_exactly_one_place() {
     // POSITIVE CONTROL for the derivation below: if the field acquired a
-    // second read site, the `build_thinking`-reachability scan would stop
+    // second read site, the reader-function reachability scan would stop
     // being a complete account of who reads it, and the derived reader set
     // would silently under-report.
     let sites = read_sites(&provider_src_dir());
@@ -218,7 +223,7 @@ fn the_field_is_read_in_exactly_one_place() {
         sites.len(),
         1,
         "the operator budget cap must be read in exactly one place so \
-         `build_thinking` reachability is a complete account of the reader \
+         reader-function reachability is a complete account of the reader \
          set; found: {sites:?}"
     );
     assert!(
@@ -303,7 +308,7 @@ impl Drop for FixtureDir {
 
 /// A synthetic `src`-shaped tree: a directory module that reaches the
 /// reader and reads the field, a directory module that does neither, and
-/// a single-file module that reaches the reader.
+/// a single-file module that reaches the reader through the composer.
 fn synthetic_src_tree(tag: &str) -> FixtureDir {
     let root =
         std::env::temp_dir().join(format!("routectl-budget-weld-{tag}-{}", std::process::id()));
@@ -336,7 +341,10 @@ fn synthetic_src_tree(tag: &str) -> FixtureDir {
     .expect("fixture source must write");
     std::fs::write(
         src.join("flat_future.rs"),
-        format!("pub fn go(req: &Req) {{ let _ = {READER_FN}(req, true); }}\n"),
+        format!(
+            "pub fn go(req: &Req) {{ let _ = {}(req, true); }}\n",
+            READER_FNS[1]
+        ),
     )
     .expect("fixture source must write");
     FixtureDir(root)
