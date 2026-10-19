@@ -135,12 +135,11 @@ fn legacy_clamps_effort_to_operator_cost_cap() {
 /// `output_config: {effort: "max"}` on every request; the Anthropic
 /// ingress preserves the whole `output_config` object verbatim in
 /// `provider_extras` so the orthogonal `output_config.format`
-/// sub-key (structured-output) passes through. derive_effort clamps
-/// "max" -> "high" on the typed struct, but merge_provider_extras
+/// sub-key (structured-output) passes through. build_output_config
+/// clamps "max" -> "high" on the typed struct, but merge_provider_extras
 /// then overwrites the clamped wire value with the raw caller
-/// value. Without a re-clamp on the adaptive branch of
-/// reconcile_output_config_effort, the operator's effort_levels
-/// cap is silently bypassed.
+/// value. Without the re-clamp in reconcile_output_config_effort, the
+/// operator's effort_levels cap is silently bypassed.
 ///
 /// The pre-existing `adaptive_clamps_effort_to_operator_cap` test
 /// leaves `provider_extras=None` so `merge_provider_extras` early-
@@ -284,13 +283,11 @@ fn adaptive_reclamp_preserves_sibling_output_config_keys() {
     assert_eq!(oc["format"]["schema"]["required"][0], "x");
 }
 
-/// An adaptive-thinking request whose provider_extras override the generated
-/// `output_config.effort` with "none" is a reasoning-OFF request. The body
-/// must not ship `thinking: {type: "adaptive"}` alongside an effort of "none":
-/// the effort is omitted and thinking is reconciled to the disabled form, so
-/// the caller is not billed for thinking it declined.
+/// A sent `output_config.effort` of "none" beside adaptive thinking ships as
+/// sent: routectl does not rewrite the pairing into the disabled shape, the
+/// upstream judges it.
 #[test]
-fn adaptive_provider_extras_none_effort_omits_effort_and_disables_thinking() {
+fn adaptive_provider_extras_none_effort_ships_as_sent() {
     use serde_json::json;
 
     // Arrange: canonical effort "max" (adaptive), provider_extras override "none".
@@ -314,17 +311,9 @@ fn adaptive_provider_extras_none_effort_omits_effort_and_disables_thinking() {
     let body =
         normalize("test", &req, true, false, None, false, true).expect("normalize must succeed");
 
-    // Assert: no effort survives, and thinking is the explicit disable form.
-    assert!(
-        body.get("output_config")
-            .and_then(|oc| oc.get("effort"))
-            .is_none(),
-        "output_config.effort=none must be omitted, not shipped; got: {body}"
-    );
-    assert_eq!(
-        body["thinking"]["type"], "disabled",
-        "an effort of none must reconcile thinking to disabled, not leave it adaptive; got: {body}"
-    );
+    // Assert
+    assert_eq!(body["output_config"]["effort"], "none", "{body}");
+    assert_eq!(body["thinking"]["type"], "adaptive", "{body}");
 }
 
 #[test]
@@ -335,4 +324,289 @@ fn output_config_is_not_routectl_managed() {
     // re-clamp at reconcile_output_config_effort relies on output_config
     // surviving merge_provider_extras intact.
     assert!(!is_routectl_managed_key("output_config"));
+}
+
+mod forwarded_effort {
+    use std::sync::Arc;
+
+    use routectl_core::wire_check::{EditSite, Leg, WireTap};
+    use routectl_core::{AnthropicThinking, ChatRequest, ReasoningConfig};
+    use serde_json::{Value, json};
+
+    use super::super::thinking_carrier_tests::{body, ingress_request};
+
+    /// `(row, request, adaptive knob, thinking type, effort on the body)`.
+    type EffortRow = (
+        &'static str,
+        ChatRequest,
+        bool,
+        Option<&'static str>,
+        Option<&'static str>,
+    );
+
+    fn levels(list: &[&str]) -> Arc<[String]> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn with_levels(mut req: ChatRequest, list: &[&str]) -> ChatRequest {
+        req.routectl_internal.effort_levels = levels(list);
+        req
+    }
+
+    fn sent(thinking: Value, effort: Option<&str>) -> ChatRequest {
+        ingress_request(Some(thinking), effort, 64_000)
+    }
+
+    fn translated(effort: &str) -> ChatRequest {
+        let mut req = ingress_request(None, None, 64_000);
+        req.routectl_internal.anthropic_thinking = AnthropicThinking::NotCaptured;
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some(effort.into()),
+            ..Default::default()
+        });
+        req
+    }
+
+    /// The client's adaptive object and a canonical effort, with a sent
+    /// `output_config` holding only `format`: the canonical effort is the one
+    /// routectl inserts beside the adaptive shape.
+    fn adaptive_with_canonical_effort_and_format_only() -> ChatRequest {
+        let mut req = sent(json!({"type": "adaptive"}), None);
+        req.reasoning
+            .get_or_insert_with(ReasoningConfig::default)
+            .effort = Some("xhigh".into());
+        req.provider_extras = Some(json!({
+            "output_config": {"format": {"type": "json_schema", "schema": {"type": "object"}}}
+        }));
+        req
+    }
+
+    #[test]
+    fn the_effort_on_the_wire_per_thinking_shape_and_operator_knob() {
+        let rows: Vec<EffortRow> = vec![
+            (
+                "xhigh beside disabled ships as sent",
+                sent(json!({"type": "disabled"}), Some("xhigh")),
+                false,
+                Some("disabled"),
+                Some("xhigh"),
+            ),
+            (
+                "xhigh beside disabled, knob on",
+                sent(json!({"type": "disabled"}), Some("xhigh")),
+                true,
+                Some("disabled"),
+                Some("xhigh"),
+            ),
+            (
+                "xhigh beside enabled ships as sent",
+                sent(
+                    json!({"type": "enabled", "budget_tokens": 4096}),
+                    Some("xhigh"),
+                ),
+                false,
+                Some("enabled"),
+                Some("xhigh"),
+            ),
+            (
+                "none beside adaptive ships as sent",
+                sent(json!({"type": "adaptive"}), Some("none")),
+                false,
+                Some("adaptive"),
+                Some("none"),
+            ),
+            (
+                "none beside adaptive ships as sent, knob on",
+                sent(json!({"type": "adaptive"}), Some("none")),
+                true,
+                Some("adaptive"),
+                Some("none"),
+            ),
+            (
+                "canonical none without a carrier is disabled",
+                translated("none"),
+                true,
+                Some("disabled"),
+                None,
+            ),
+            (
+                "explicit list clamps xhigh beside adaptive",
+                with_levels(
+                    sent(json!({"type": "adaptive"}), Some("xhigh")),
+                    &["low", "medium", "high"],
+                ),
+                false,
+                Some("adaptive"),
+                Some("high"),
+            ),
+            (
+                "explicit list clamps xhigh beside disabled",
+                with_levels(
+                    sent(json!({"type": "disabled"}), Some("xhigh")),
+                    &["low", "medium", "high"],
+                ),
+                false,
+                Some("disabled"),
+                Some("high"),
+            ),
+            (
+                "explicit list leaves none as sent",
+                with_levels(
+                    sent(json!({"type": "adaptive"}), Some("none")),
+                    &["low", "medium", "high"],
+                ),
+                false,
+                Some("adaptive"),
+                Some("none"),
+            ),
+            (
+                "empty list passes xhigh",
+                with_levels(sent(json!({"type": "adaptive"}), Some("xhigh")), &[]),
+                false,
+                Some("adaptive"),
+                Some("xhigh"),
+            ),
+            (
+                "client adaptive, no effort, knob off: nothing injected",
+                sent(json!({"type": "adaptive"}), None),
+                false,
+                Some("adaptive"),
+                None,
+            ),
+            (
+                "client adaptive, no effort, knob on: medium injected",
+                sent(json!({"type": "adaptive"}), None),
+                true,
+                Some("adaptive"),
+                Some("medium"),
+            ),
+            (
+                "knob-converted enabled, no effort: medium injected",
+                sent(json!({"type": "enabled", "budget_tokens": 4096}), None),
+                true,
+                Some("adaptive"),
+                Some("medium"),
+            ),
+            (
+                "canonical effort inserted beside adaptive with format only",
+                adaptive_with_canonical_effort_and_format_only(),
+                false,
+                Some("adaptive"),
+                Some("xhigh"),
+            ),
+            (
+                "canonical effort inserted and clamped by an explicit list",
+                with_levels(
+                    adaptive_with_canonical_effort_and_format_only(),
+                    &["low", "medium", "high"],
+                ),
+                false,
+                Some("adaptive"),
+                Some("high"),
+            ),
+            (
+                "translated adaptive carries its canonical effort",
+                translated("low"),
+                true,
+                Some("adaptive"),
+                Some("low"),
+            ),
+            (
+                "translated legacy shape carries no effort",
+                translated("low"),
+                false,
+                Some("enabled"),
+                None,
+            ),
+        ];
+        for (row, req, adaptive, thinking_type, effort) in rows {
+            // Act
+            let wire = body(&req, adaptive);
+
+            // Assert
+            assert_eq!(
+                wire.pointer("/thinking/type").and_then(Value::as_str),
+                thinking_type,
+                "{row}: {wire}"
+            );
+            assert_eq!(
+                wire.pointer("/output_config/effort")
+                    .and_then(Value::as_str),
+                effort,
+                "{row}: {wire}"
+            );
+        }
+    }
+
+    fn plain_turn_capture() -> Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01")
+            .join("ingress_request.json");
+        serde_json::from_str(&std::fs::read_to_string(path).expect("fixture reads"))
+            .expect("fixture parses")
+    }
+
+    fn plain_turn_request() -> ChatRequest {
+        let ingress = plain_turn_capture();
+        let effort = ingress
+            .pointer("/output_config/effort")
+            .and_then(Value::as_str);
+        assert_eq!(effort, Some("high"), "precondition: the capture's effort");
+        let max_tokens = ingress["max_tokens"].as_u64().expect("max_tokens") as u32;
+        ingress_request(Some(ingress["thinking"].clone()), effort, max_tokens)
+    }
+
+    /// The committed plain turn ships its thinking and effort as sent, and
+    /// assembly declares no `output_config` edit for it.
+    #[test]
+    fn the_plain_turn_ships_its_effort_with_no_output_config_edit() {
+        // Arrange
+        let ingress = plain_turn_capture();
+        let mut req = plain_turn_request();
+        let tap = WireTap::admitted();
+        req.routectl_internal.wire_tap = Some(tap.clone());
+
+        // Act
+        let wire = body(&req, false);
+
+        // Assert
+        let effort_edits: Vec<String> = tap
+            .take_request()
+            .edits(Leg::Request)
+            .iter()
+            .filter(|edit| edit.site() == EditSite::EffortInjection)
+            .map(|edit| edit.path().to_string())
+            .collect();
+        assert!(effort_edits.is_empty(), "{effort_edits:?}: {wire}");
+        assert_eq!(wire["thinking"], ingress["thinking"], "{wire}");
+        assert_eq!(wire["output_config"], ingress["output_config"], "{wire}");
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn the_plain_turn_ships_its_effort_on_bedrock_invoke() {
+        use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
+
+        // Arrange
+        let cfg = BedrockConfig {
+            id: "bedrock:test".into(),
+            region: "us-west-2".into(),
+            model_id: "anthropic.claude-test".into(),
+            api_shape: BedrockApiShape::Invoke,
+            creds: BedrockCreds::BearerKey { key: "test".into() },
+            user_agent: None,
+            header_extras: Vec::new(),
+            anthropic_beta: Vec::new(),
+            additional_model_request_fields: None,
+            adaptive_thinking: None,
+        };
+        let req = plain_turn_request();
+
+        // Act
+        let wire = crate::bedrock::invoke::normalize_request(&cfg, &req).expect("invoke body");
+
+        // Assert
+        assert_eq!(wire["thinking"], json!({"type": "disabled"}), "{wire}");
+        assert_eq!(wire["output_config"], json!({"effort": "high"}), "{wire}");
+    }
 }

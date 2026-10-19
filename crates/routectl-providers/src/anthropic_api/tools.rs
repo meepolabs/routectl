@@ -213,43 +213,67 @@ fn openai_function_to_custom(v: &Value) -> Option<AnthropicTool> {
 ///   - already-Anthropic shape -> passthrough
 ///   - anything else -> passthrough (let the upstream decide)
 pub(super) fn translate_tool_choice(tc: Option<&Value>, has_tools: bool) -> Option<Value> {
+    log_tool_choice_translation(tc, has_tools);
+    map_tool_choice(tc)
+}
+
+fn log_tool_choice_translation(tc: Option<&Value>, has_tools: bool) {
+    match tc {
+        Some(Value::String(s)) if s == "none" && has_tools => tracing::debug!(
+            "tool_choice=\"none\" with tools present: routectl drops both fields so \
+             Anthropic cannot auto-select (Anthropic has no native equivalent of \
+             OpenAI's \"none\")"
+        ),
+        Some(Value::Object(map))
+            if map.get("type").and_then(Value::as_str) == Some("function")
+                && map
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                    .is_none() =>
+        {
+            tracing::warn!(
+                "tool_choice with type=\"function\" but missing function.name; \
+                 passed through as-is and Anthropic will reject it"
+            );
+        }
+        _ => {}
+    }
+}
+
+/// The mapping [`translate_tool_choice`] applies, without its diagnostics.
+fn map_tool_choice(tc: Option<&Value>) -> Option<Value> {
     let tc = tc?;
     match tc {
         Value::String(s) => match s.as_str() {
-            "auto" => Some(serde_json::json!({"type":"auto"})),
-            "required" => Some(serde_json::json!({"type": TOOL_CHOICE_TYPE_ANY})),
-            "none" => {
-                if has_tools {
-                    tracing::debug!(
-                        "tool_choice=\"none\" with tools present: routectl drops both fields so \
-                         Anthropic cannot auto-select (Anthropic has no native equivalent of \
-                         OpenAI's \"none\")"
-                    );
-                }
-                None
-            }
-            _ => Some(serde_json::json!({"type": TOOL_CHOICE_TYPE_TOOL, "name": s})),
+            "auto" => Some(json!({"type": "auto"})),
+            "required" => Some(json!({"type": TOOL_CHOICE_TYPE_ANY})),
+            "none" => None,
+            _ => Some(json!({"type": TOOL_CHOICE_TYPE_TOOL, "name": s})),
         },
-        Value::Object(map) => match map.get("type").and_then(|v| v.as_str()) {
-            Some("function") => {
-                let name = map
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|n| n.as_str());
-                if let Some(n) = name {
-                    Some(serde_json::json!({"type": TOOL_CHOICE_TYPE_TOOL, "name": n}))
-                } else {
-                    tracing::warn!(
-                        "tool_choice with type=\"function\" but missing function.name; \
-                         passed through as-is and Anthropic will reject it"
-                    );
-                    Some(tc.clone())
-                }
+        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("function") => {
+            match map
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+            {
+                Some(n) => Some(json!({"type": TOOL_CHOICE_TYPE_TOOL, "name": n})),
+                None => Some(tc.clone()),
             }
-            Some("auto" | "any" | "tool" | "none") => Some(tc.clone()),
-            _ => Some(tc.clone()),
-        },
+        }
         _ => Some(tc.clone()),
+    }
+}
+
+/// The forcing type (`any` or `tool`) of the `tool_choice` this egress
+/// ships for the canonical `tc`; `None` when it does not force tool use. A
+/// Responses hosted-MCP choice ships as `auto` or not at all, and
+/// `parallel_tool_calls` only adds a flag, so the mapping alone decides.
+pub(super) fn forced_tool_choice_type(tc: Option<&Value>) -> Option<&'static str> {
+    match map_tool_choice(tc)?.get("type").and_then(Value::as_str)? {
+        TOOL_CHOICE_TYPE_ANY => Some(TOOL_CHOICE_TYPE_ANY),
+        TOOL_CHOICE_TYPE_TOOL => Some(TOOL_CHOICE_TYPE_TOOL),
+        _ => None,
     }
 }
 

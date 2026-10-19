@@ -17,10 +17,9 @@ use routectl_core::wire_check::{EditKind, EditSite};
 
 use crate::anthropic_api::request::{
     AnthropicFormat, DroppedFormatKeys, build_output_config, client_sent_output_config_effort,
-    compose_thinking, is_active_thinking_type,
+    compose_thinking, is_active_thinking_type, reclamp_client_effort,
 };
 use crate::anthropic_api::types::WireThinking;
-use crate::effort::clamp_effort_to_supported;
 
 use super::super::betas::{operator_floor, union_feature_implied_betas, withhold_betas};
 use super::super::{BedrockApiShape, BedrockConfig};
@@ -328,26 +327,16 @@ fn output_config_effort(
         req.routectl_internal.anthropic_thinking,
         AnthropicThinking::NotCaptured
     ) {
-        return build_output_config(req, thinking).map(|oc| oc.effort);
+        return build_output_config(req, thinking, adaptive).map(|oc| oc.effort);
     }
     match req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
         Some(sent) => Some(reclamp_client_effort(
             sent,
             &req.routectl_internal.effort_levels,
         )),
-        None if adaptive => build_output_config(req, thinking).map(|oc| oc.effort),
+        None if adaptive => build_output_config(req, thinking, adaptive).map(|oc| oc.effort),
         None => None,
     }
-}
-
-/// `sent` clamped to an explicit `effort_levels`; an empty list, or an
-/// effort the clamp has no level for ("none"), passes through as sent.
-fn reclamp_client_effort(sent: &str, effort_levels: &[String]) -> String {
-    if effort_levels.is_empty() {
-        return sent.to_string();
-    }
-    clamp_effort_to_supported(sent, effort_levels)
-        .map_or_else(|| sent.to_string(), std::borrow::Cow::into_owned)
 }
 
 /// Merge anthropic_beta from canonical (header-lifted by the Anthropic

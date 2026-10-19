@@ -2094,7 +2094,9 @@ model that rejects some levels. Three cases:
   `["low", "medium", "high"]` turns a caller's `max` into `high`.
 - **Caller effort `"none"`: reasoning off.** `reasoning.effort = "none"`
   is not a level and is never clamped to one, whatever the list holds:
-  the egress omits the effort field or emits its own disable form.
+  the egress omits the effort field or emits its own disable form. An
+  Anthropic client's own `output_config.effort` of `"none"` reaches an
+  Anthropic-shape upstream as sent, beside the thinking it sent.
 
 #### `max_thinking_budget` (u32, default 0)
 

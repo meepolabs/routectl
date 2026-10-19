@@ -406,61 +406,114 @@ fn forced_tool_use_keeps_inactive_thinking_and_the_caller_sampling() {
     }
 }
 
-/// `(row, thinking on the body, client effort, effort left on the body)`.
-type StripEffortRow<'a> = (&'a str, Value, Option<&'a str>, Option<&'a str>);
+/// `(row, request, adaptive knob, thinking type on the body, effort on the body)`.
+type StripEffortRow<'a> = (&'a str, ChatRequest, bool, Option<&'a str>, Option<&'a str>);
 
-/// The strip itself, on an assembled body: `output_config.effort` leaves
-/// with stripped thinking only when routectl composed it. Called directly
-/// because the effort reconcile that runs after it in assembly still drops
-/// every effort that is not beside adaptive thinking.
+/// Through the whole body: under a forced tool choice the client's own
+/// `output_config.effort` ships as sent whatever happens to its thinking,
+/// and an effort routectl would have composed for adaptive thinking never
+/// ships once that thinking is stripped.
 #[test]
-fn the_forced_tool_strip_drops_only_a_routectl_composed_effort() {
-    let rows: &[StripEffortRow] = &[
+fn a_forced_tool_strip_keeps_the_client_effort_and_composes_none() {
+    let mut translated = ingress_request(None, None, 64_000);
+    translated.routectl_internal.anthropic_thinking = AnthropicThinking::NotCaptured;
+    translated.reasoning = Some(ReasoningConfig {
+        effort: Some("high".into()),
+        ..Default::default()
+    });
+    let rows: Vec<StripEffortRow> = vec![
         (
             "client effort beside stripped adaptive",
-            json!({"type": "adaptive"}),
+            ingress_request(Some(json!({"type": "adaptive"})), Some("xhigh"), 64_000),
+            false,
+            None,
             Some("xhigh"),
-            Some("high"),
         ),
         (
-            "composed effort beside stripped adaptive",
-            json!({"type": "adaptive"}),
+            "client effort beside knob-converted, stripped enabled",
+            ingress_request(
+                Some(json!({"type": "enabled", "budget_tokens": 4096})),
+                Some("max"),
+                64_000,
+            ),
+            true,
             None,
-            None,
+            Some("max"),
         ),
         (
             "client effort beside kept disabled",
-            json!({"type": "disabled"}),
+            ingress_request(Some(json!({"type": "disabled"})), Some("xhigh"), 64_000),
+            false,
+            Some("disabled"),
             Some("xhigh"),
-            Some("high"),
         ),
         (
-            "composed effort beside kept between_tools",
-            json!({"type": "between_tools"}),
+            "no client effort beside knob-converted, stripped enabled",
+            ingress_request(
+                Some(json!({"type": "enabled", "budget_tokens": 4096})),
+                None,
+                64_000,
+            ),
+            true,
             None,
-            Some("high"),
+            None,
+        ),
+        (
+            "translated effort beside stripped adaptive",
+            translated,
+            true,
+            None,
+            None,
         ),
     ];
-    for (row, thinking, client_effort, expected) in rows {
+    for (row, req, adaptive, thinking_type, effort) in rows {
         // Arrange
-        let req = ingress_request(Some(thinking.clone()), *client_effort, 64_000);
-        let mut wire = json!({
-            "thinking": thinking,
-            "tool_choice": {"type": "tool", "name": "calc"},
-            "output_config": {"effort": "high"},
-        });
+        let req = forcing_tool_use(req);
 
         // Act
-        crate::anthropic_api::extras::strip_thinking_when_tool_choice_forces_use(
-            "p", &req, &mut wire, None,
-        );
+        let wire = body(&req, adaptive);
 
         // Assert
         assert_eq!(
-            wire.pointer("/output_config/effort")
-                .and_then(Value::as_str),
-            *expected,
+            wire.pointer("/thinking/type").and_then(Value::as_str),
+            thinking_type,
             "{row}: {wire}"
         );
+        assert_eq!(
+            wire.pointer("/output_config/effort")
+                .and_then(Value::as_str),
+            effort,
+            "{row}: {wire}"
+        );
+    }
+}
+
+/// The strip's one DEBUG line names the forcing type the body ships.
+#[test]
+fn the_forced_tool_strip_logs_the_forcing_type_once() {
+    for (tool_choice, expected) in [
+        (json!("required"), "any"),
+        (json!({"type": "tool", "name": "calc"}), "tool"),
+    ] {
+        // Arrange
+        let mut req = forcing_tool_use(ingress_request(
+            Some(json!({"type": "adaptive"})),
+            None,
+            64_000,
+        ));
+        req.tool_choice = Some(tool_choice);
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            body(&req, false);
+        });
+
+        // Assert
+        let strips: Vec<_> = events
+            .iter()
+            .filter(|e| e.message.contains("tool_choice forces tool use"))
+            .collect();
+        assert_eq!(strips.len(), 1, "{expected}: {events:?}");
+        assert_eq!(strips[0].field("tool_choice_type"), Some(expected));
     }
 }

@@ -4208,10 +4208,9 @@ fn provider_extras_effort_body_gains_the_effort_beta_exactly_once() {
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
         max_tokens: Some(4096),
-        // Adaptive thinking is what keeps `output_config.effort` on the
-        // body through the late reconciliation; the extras value below is
-        // deliberately DIFFERENT from this one so a merge that silently
-        // dropped the extras would fail the value assertion.
+        // The composed adaptive effort is deliberately DIFFERENT from the
+        // extras value below, so a merge that silently dropped the extras
+        // would fail the value assertion.
         reasoning: Some(routectl_core::ReasoningConfig {
             effort: Some("low".into()),
             ..Default::default()
@@ -4279,12 +4278,12 @@ fn body_with_format_and_effort_gains_both_capability_betas() {
     }
 }
 
-/// Effort removed by the late thinking reconciliation gains NO beta. A
-/// `tool_choice` that forces tool use strips `thinking`, and
-/// `reconcile_output_config_effort` then drops the orphan effort -- so the
-/// shipped body does not carry the gated field and must not claim the flag.
+/// A body that ships no effort gains NO beta. A `tool_choice` that forces
+/// tool use strips the adaptive `thinking` routectl would have paired an
+/// effort with, so no effort is composed and the shipped body does not carry
+/// the gated field and must not claim the flag.
 #[test]
-fn effort_dropped_by_late_reconciliation_gains_no_effort_beta() {
+fn effort_never_composed_for_stripped_thinking_gains_no_effort_beta() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
@@ -4303,7 +4302,7 @@ fn effort_dropped_by_late_reconciliation_gains_no_effort_beta() {
         body.get("output_config")
             .and_then(|oc| oc.get("effort"))
             .is_none(),
-        "precondition: forced tool_choice must strip thinking and orphan effort; got: {body}"
+        "precondition: forced tool_choice must strip thinking and compose no effort; got: {body}"
     );
 
     let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))

@@ -780,19 +780,11 @@ fixture's outcome is whether anything outside `messages[]` diverges:
   rather than an egress concern and the bare replay path does not perform.
 - **`output_config`** -- captured bodies carrying
   `output_config: {"effort": "xhigh"}` alongside
-  `thinking: {"type": "disabled"}`. Current code cannot emit that pairing
-  from any input: `reconcile_output_config_effort` is a late enforcer that
-  drops `output_config.effort` unless the assembled body carries
-  `thinking.type == "adaptive"`, and it reads the final body rather than
-  any flag. Verified by driving the captured ingress shape through
-  `normalize_request` directly under both `supports_adaptive_thinking`
-  values and with a populated `effort_levels`: `output_config` is dropped
-  in every combination (a sibling `output_config.format` does survive).
-  These fixtures therefore predate the effort invariant and are EVIDENCE
-  of an intentional behavior change, not a replay-path gap -- they must
-  not be normalized away, and the enrichment rebuild cannot fix them.
-  The invariant is authoritative and the captures are stale; reconciling
-  the corpus against it is a provenance question, tracked separately.
+  `thinking: {"type": "disabled"}`. The egress forwards a client's
+  `output_config.effort` as sent beside any thinking type, re-clamping it
+  only against an explicit, non-empty `effort_levels`
+  (`reconcile_output_config_effort`), so it emits that pairing. A replay
+  divergence here is a replay-path or enrichment gap, not an effort rule.
 
 The 115 failures are the fixtures that carry a `model` or `output_config`
 divergence ALONGSIDE their `messages[]` ones. The narrow skip scope is

@@ -546,7 +546,7 @@ impl AnthropicApiProvider {
     /// requirements that depend on what actually lands on the wire (today:
     /// `output_config.format` -> `STRUCTURED_OUTPUTS_BETA`). The canonical
     /// `req` cannot answer that question -- the `provider_extras` merge and
-    /// `reconcile_output_config_effort` add and remove `output_config` after
+    /// `reconcile_output_config_effort` reshape `output_config` after
     /// translation, so `req.response_format` is not the shipped shape. `None`
     /// means "no body-derived betas", used by callers that compose headers
     /// without an assembled body.

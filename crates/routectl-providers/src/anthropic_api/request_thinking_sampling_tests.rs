@@ -2,12 +2,14 @@
 //! EMITTED `thinking.type`, so they agree with the body for every carrier
 //! state.
 //!
-//! The read reports the composed thinking. Three later assembly passes can
-//! still remove or rewrite it, so their inputs stay out of the equality
-//! table: a `tool_choice` that forces tool use, a context-management cache
-//! miss, and an adaptive body whose `output_config.effort` is "none".
+//! The read and body assembly share one computation of the shipped thinking.
+//! Its one input the read cannot see, a context-management cache miss, has
+//! its own row showing the read over-reports there and nowhere else.
 
-use routectl_core::{AnthropicThinking, ChatRequest, ReasoningConfig};
+use std::num::NonZeroUsize;
+use std::sync::RwLock;
+
+use routectl_core::{AnthropicThinking, ChatRequest, ReasoningConfig, ToolDef};
 use serde_json::{Value, json};
 
 use super::clamp_sampling_for_thinking;
@@ -158,6 +160,16 @@ fn the_public_read_equals_the_emitted_thinking_type() {
         ("translated effort", translated(effort("high")), false),
         ("translated effort, knob", translated(effort("high")), true),
         ("translated effort none", translated(effort("none")), true),
+        (
+            "sent adaptive, effort none",
+            sent(json!({"type": "adaptive"}), Some("none")),
+            false,
+        ),
+        (
+            "sent adaptive, effort none, knob",
+            sent(json!({"type": "adaptive"}), Some("none")),
+            true,
+        ),
         ("translated nothing", translated(None), false),
         (
             "translated probe-sized",
@@ -169,6 +181,7 @@ fn the_public_read_equals_the_emitted_thinking_type() {
             false,
         ),
     ];
+    let rows = rows.into_iter().chain(forced_tool_rows());
     let mut emitted_types = std::collections::BTreeSet::new();
     for (row, req, adaptive) in rows {
         let read = emitted_thinking_type(&req, adaptive);
@@ -196,4 +209,133 @@ fn the_public_read_equals_the_emitted_thinking_type() {
             "no row emits {expected:?}"
         );
     }
+}
+
+fn forcing(mut req: ChatRequest, tool_choice: Value) -> ChatRequest {
+    req.tools = Some(vec![ToolDef::Custom(routectl_core::CustomTool {
+        name: "calc".into(),
+        description: None,
+        input_schema: json!({"type": "object"}),
+        cache_control: None,
+        defer_loading: None,
+        strict: None,
+        type_tag: None,
+    })]);
+    req.tool_choice = Some(tool_choice);
+    req
+}
+
+/// Forced and unforced tool choices beside active and inactive thinking
+/// types, for the equality table.
+fn forced_tool_rows() -> Vec<(&'static str, ChatRequest, bool)> {
+    let sent = |t: Value| ingress_request(Some(t), Some("high"), 64_000);
+    vec![
+        (
+            "forced any, sent adaptive",
+            forcing(sent(json!({"type": "adaptive"})), json!("required")),
+            false,
+        ),
+        (
+            "forced tool, sent enabled",
+            forcing(
+                sent(json!({"type": "enabled", "budget_tokens": 4096})),
+                json!({"type": "tool", "name": "calc"}),
+            ),
+            false,
+        ),
+        (
+            "forced function, knob-converted enabled",
+            forcing(
+                sent(json!({"type": "enabled", "budget_tokens": 4096})),
+                json!({"type": "function", "function": {"name": "calc"}}),
+            ),
+            true,
+        ),
+        (
+            "forced bare name, translated effort",
+            forcing(translated(effort("high")), json!("calc")),
+            true,
+        ),
+        (
+            "forced any, sent disabled",
+            forcing(sent(json!({"type": "disabled"})), json!({"type": "any"})),
+            false,
+        ),
+        (
+            "forced any, sent between_tools",
+            forcing(sent(json!({"type": "between_tools"})), json!("required")),
+            false,
+        ),
+        (
+            "forced any, sent unknown",
+            forcing(sent(json!({"type": "future_mode"})), json!("required")),
+            false,
+        ),
+        (
+            "auto, sent adaptive",
+            forcing(sent(json!({"type": "adaptive"})), json!("auto")),
+            false,
+        ),
+    ]
+}
+
+/// The read's one documented residual: a context-management cache miss is
+/// known only while the body is assembled, so the body drops thinking the
+/// read still reports. Only removal is possible there, never a different
+/// type.
+#[test]
+fn a_context_cache_miss_is_the_one_case_the_read_over_reports() {
+    // Arrange
+    let mut req = ingress_request(Some(json!({"type": "adaptive"})), Some("high"), 64_000);
+    req.provider_extras = Some(json!({
+        "output_config": {"effort": "high"},
+        "context_management": {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]},
+    }));
+    req.messages = vec![
+        routectl_core::Message {
+            refusal: None,
+            role: routectl_core::Role::User,
+            content: routectl_core::MessageContent::Text("use calc".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        },
+        routectl_core::Message {
+            refusal: None,
+            role: routectl_core::Role::Assistant,
+            content: routectl_core::MessageContent::Text(String::new()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![json!({
+                "id": "toolu_t1",
+                "type": "function",
+                "function": {"name": "calc", "arguments": "{}"},
+            })]),
+        },
+        routectl_core::Message {
+            refusal: None,
+            role: routectl_core::Role::Tool,
+            content: routectl_core::MessageContent::Text("42".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some("toolu_t1".into()),
+            tool_calls: None,
+        },
+    ]
+    .into();
+    let empty_cache = RwLock::new(lru::LruCache::new(NonZeroUsize::new(8).expect("cap")));
+
+    // Act
+    let read = emitted_thinking_type(&req, false);
+    let wire = super::normalize("p", &req, false, true, Some(&empty_cache), false, true)
+        .expect("normalize");
+
+    // Assert
+    assert_eq!(read.as_deref(), Some("adaptive"));
+    assert!(wire.get("thinking").is_none(), "{wire}");
 }

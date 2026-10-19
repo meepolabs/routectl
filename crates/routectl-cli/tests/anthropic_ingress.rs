@@ -1308,11 +1308,8 @@ async fn output_config_format_passes_through_unchanged() {
 #[tokio::test]
 async fn legacy_output_format_preserves_existing_output_config_effort() {
     // The legacy field must merge into a pre-existing `output_config`
-    // (with `effort`) rather than overwriting it. Note: this test
-    // exercises the INGRESS merge (output_format -> output_config.format)
-    // -- the EGRESS for a non-adaptive provider (haiku here) strips
-    // `output_config.effort` because Anthropic 400s on it. The
-    // structured-output `format` sub-field passes through unchanged.
+    // (with `effort`) rather than overwriting it, and the egress forwards
+    // both sub-fields as sent.
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -1347,16 +1344,55 @@ async fn legacy_output_format_preserves_existing_output_config_effort() {
         "legacy field leaked: {up}"
     );
     let oc = up.get("output_config").expect("output_config present");
-    // `effort` is stripped on non-adaptive providers (haiku) -- the
-    // anthropic-api egress's `reconcile_output_config_effort` keeps
-    // the wire clean of a field Anthropic 400s on. The structured-
-    // output `format` survives because it's orthogonal to the effort
-    // beta and supported across the model family.
-    assert!(
-        oc.get("effort").is_none(),
-        "effort must be stripped for non-adaptive providers: {oc}"
-    );
+    assert_eq!(oc["effort"], "high", "{oc}");
     assert_eq!(oc["format"]["type"], "json_schema");
+}
+
+/// The committed Claude Code plain turn sends `thinking: {type: disabled}`
+/// beside `output_config.effort`; both reach the upstream as sent.
+#[tokio::test]
+async fn plain_turn_capture_ships_disabled_thinking_beside_its_effort() {
+    // Arrange
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/driver/anthropic-api/plain-turn-01/ingress_request.json");
+    let mut body: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture).expect("fixture reads"))
+            .expect("fixture parses");
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "disabled"}),
+        "precondition"
+    );
+    assert_eq!(body["output_config"]["effort"], "high", "precondition");
+    body["stream"] = json!(false);
+    let model = body["model"].as_str().expect("model").to_string();
+    let config = anthropic_proxy_config(
+        &upstream.uri(),
+        None,
+        BTreeMap::from([(model, "haiku".to_string())]),
+    );
+    let base = helpers::spawn(config).await;
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    let received = upstream.received_requests().await.unwrap();
+    let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(up["thinking"], json!({"type": "disabled"}), "{up}");
+    assert_eq!(up["output_config"], json!({"effort": "high"}), "{up}");
 }
 
 #[tokio::test]

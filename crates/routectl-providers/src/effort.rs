@@ -224,7 +224,7 @@ fn lowest_supported(supported: &[String]) -> &str {
 /// This encodes NO business rule about WHEN orphaned effort should be
 /// dropped -- each call site decides that and calls this only when the
 /// strip is warranted.
-#[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
+#[cfg(feature = "bedrock")]
 pub(crate) fn drop_orphaned_output_config_effort(
     obj: &mut serde_json::Map<String, serde_json::Value>,
 ) {
@@ -531,7 +531,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
+#[cfg(feature = "bedrock")]
 mod orphan_effort_tests {
     use super::drop_orphaned_output_config_effort;
     use serde_json::{Value, json};

@@ -633,7 +633,7 @@ pub struct Exception {
     /// The function in the tree that performs the transform. Verified by
     /// SYMBOL, not by line number, and always together with
     /// [`Exception::site_path`] -- a bare symbol is not a unique citation.
-    /// `strip_thinking_when_tool_choice_forces_use` is defined in BOTH the
+    /// `ensure_min_tool_result_content` is defined in BOTH the
     /// anthropic-api and the Bedrock-Converse egress, so a symbol-only check
     /// would keep passing after the cited one was deleted, satisfied by an
     /// unrelated lane's homonym.
@@ -1503,15 +1503,16 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 9] = [
         lane: ANTHROPIC_FIDELITY_LANE,
         id: EFFORT_WITHOUT_ADAPTIVE_THINKING_ID,
         reason: "The ingress `output_config` carries only `effort` and the wire body carries no \
-                 `output_config` at all. Confirmed at `reconcile_output_config_effort` \
-                 (crates/routectl-providers/src/anthropic_api/extras.rs), which removes \
-                 `output_config.effort` -- and the then-empty `output_config` with it -- whenever \
-                 the assembled body does not carry adaptive thinking. Claude Code 2.1.294 sends \
-                 its effort level alongside `thinking: {\"type\": \"disabled\"}`, so on its plain \
-                 turn the client's effort never reaches the upstream. The strip is an encoded \
-                 acceptance rule (effort is only meaningful beside adaptive thinking), not a \
-                 measured upstream rejection, and is expected to be replaced by learned \
-                 verdicts; until then this loss is KNOWN rather than explained away. Scoped as \
+                 `output_config` at all. The capture predates the current \
+                 `reconcile_output_config_effort` \
+                 (crates/routectl-providers/src/anthropic_api/extras.rs): the build that \
+                 recorded it removed `output_config.effort` -- and the then-empty \
+                 `output_config` with it -- whenever the assembled body did not carry adaptive \
+                 thinking. Claude Code 2.1.294 sends its effort level alongside \
+                 `thinking: {\"type\": \"disabled\"}`, so on that plain turn the client's effort \
+                 never reached the upstream. The current egress forwards it as sent, so this \
+                 entry explains only this recorded capture and leaves with a re-capture; until \
+                 then the loss is KNOWN rather than explained away. Scoped as \
                  narrowly as the table allows: the fixture gate admits exactly the recorded \
                  `plain-turn-01` case captured from client 2.1.294, the path is exactly \
                  `output_config`, \
@@ -1756,7 +1757,7 @@ impl std::error::Error for SymbolError {}
 ///
 /// Pinning the file is what makes the check falsifiable against DRIFT. A
 /// search-the-whole-tree-for-the-symbol version passes on a homonym --
-/// `strip_thinking_when_tool_choice_forces_use` is defined in both the
+/// `ensure_min_tool_result_content` is defined in both the
 /// anthropic-api and the Bedrock-Converse egress -- so deleting the cited
 /// one would leave the check green, satisfied by an unrelated lane's
 /// function. It also passes on a symbol that survives only as a test
@@ -2156,14 +2157,14 @@ mod tests {
     #[test]
     fn the_resolver_rejects_a_real_symbol_cited_against_the_wrong_file() {
         // The homonym trap, made concrete:
-        // `strip_thinking_when_tool_choice_forces_use` is defined in BOTH
-        // the anthropic-api and the Bedrock-Converse egress. A
+        // `ensure_min_tool_result_content` is defined in BOTH the
+        // anthropic-api and the Bedrock-Converse egress. A
         // search-the-whole-tree check cannot tell them apart, so deleting
         // the cited one would leave it green. Pinning the path is what
         // makes the citation falsifiable.
-        let symbol = "strip_thinking_when_tool_choice_forces_use";
-        let cited = "crates/routectl-providers/src/anthropic_api/extras.rs";
-        let homonym = "crates/routectl-providers/src/bedrock/converse/extras.rs";
+        let symbol = "ensure_min_tool_result_content";
+        let cited = "crates/routectl-providers/src/anthropic_api/messages.rs";
+        let homonym = "crates/routectl-providers/src/bedrock/converse/messages.rs";
 
         // Positive control: the symbol really is defined in BOTH files, so
         // the rejection below is about the path pin and not about the

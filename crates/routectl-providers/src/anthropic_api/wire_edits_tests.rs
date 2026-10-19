@@ -133,25 +133,6 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
         expected: &[(EditKind::Remove, "/thinking")],
     },
     AssemblyRow {
-        name: "sampling reconcile restores the caller temperature after a thinking strip",
-        site: EditSite::SamplingReconcile,
-        firing: || {
-            base(json!({
-                "temperature": 0.3,
-                "reasoning": {"effort": "high"},
-                "tools": [{"name": "f", "input_schema": {"type": "object"}}],
-                "tool_choice": {"type": "any"},
-            }))
-        },
-        idle: || {
-            base(json!({
-                "temperature": 0.3,
-                "reasoning": {"effort": "high"},
-            }))
-        },
-        expected: &[(EditKind::Rewrite, "/temperature")],
-    },
-    AssemblyRow {
         name: "thinking clamp pins temperature",
         site: EditSite::ThinkingSamplingClamp,
         firing: || base(json!({"temperature": 0.3, "reasoning": {"effort": "high"}})),

@@ -6,16 +6,19 @@
 //! `build_thinking` selects the wire
 //! shape (legacy `Enabled { budget_tokens }` vs Opus 4.7+ `Adaptive`),
 //! clamps the budget into Anthropic's `[1024, max_tokens-1]` window,
-//! applies the operator per-model cap, and pairs `Adaptive` with a
-//! top-level `output_config` via `build_output_config`. The Bedrock
-//! Converse egress composes its bag through `compose_thinking` and
-//! `build_output_config` too. (2) The
-//! post-merge body reconciliation: `merge_provider_extras` layers
-//! forward-compat extras in while shielding routectl-managed keys
-//! (`is_routectl_managed_key`), `reconcile_output_config_effort`
-//! re-clamps or strips `output_config.effort` per model capability, and
-//! `strip_thinking_when_tool_choice_forces_use` drops active `thinking`
-//! when the tool_choice forces tool use (Anthropic forbids the combo).
+//! and applies the operator per-model cap. `shipped_thinking` then
+//! applies the passes that remove composed thinking (a forcing
+//! `tool_choice`, a context-management cache miss), so the body and the
+//! public `emitted_thinking_type` read share one answer, and
+//! `build_output_config` pairs a shipped `Adaptive` with a top-level
+//! `output_config`. The Bedrock Converse egress composes its bag through
+//! `compose_thinking` and `build_output_config` too. (2) The post-merge
+//! body reconciliation: `merge_provider_extras` layers forward-compat
+//! extras in while shielding routectl-managed keys
+//! (`is_routectl_managed_key`), and `reconcile_output_config_effort`
+//! re-clamps a sent `output_config.effort` against an explicit
+//! `effort_levels` and supplies one beside adaptive thinking that has
+//! none.
 
 use serde_json::Value;
 
@@ -27,7 +30,7 @@ use routectl_core::{
 
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
 
-use super::tools::{PARALLEL_TOOL_CALLS_KEY, TOOL_CHOICE_TYPE_ANY, TOOL_CHOICE_TYPE_TOOL};
+use super::tools::{PARALLEL_TOOL_CALLS_KEY, forced_tool_choice_type};
 use super::types::{OutputConfig, ThinkingConfig, WireThinking};
 
 /// Hardcoded baseline `max_tokens` value injected on outbound
@@ -109,25 +112,30 @@ pub(super) fn effort_ratio(effort: &str) -> f64 {
     }
 }
 
-/// Effort string to use for top-level `output_config.effort`. Returns
-/// `req.reasoning.effort` clamped against `req.routectl_internal.effort_levels`
-/// when that slice is non-empty (operator cost cap); falls back to the
-/// raw effort string when effort_levels is empty (Anthropic pass-through
-/// default). Falls back to "medium" when no effort is set (Anthropic
-/// requires the field when adaptive thinking is active and validates
-/// the string).
-fn derive_effort(req: &ChatRequest) -> String {
-    let raw = req
-        .reasoning
-        .as_ref()
-        .and_then(|r| r.effort.clone())
-        .unwrap_or_else(|| "medium".to_string());
-    // `clamp_effort_to_supported` returns `None` only for `effort: "none"`
-    // (reasoning-OFF). `derive_effort` runs solely on the adaptive path,
-    // where `build_thinking` has already mapped "none" -> `Disabled`, so
-    // `raw` is never "none" here; the fallback is a defensive belt.
-    clamp_effort_to_supported(&raw, &req.routectl_internal.effort_levels)
-        .map_or_else(|| "medium".to_string(), std::borrow::Cow::into_owned)
+/// The `output_config.effort` routectl supplies beside adaptive thinking
+/// that carries none: the canonical `req.reasoning.effort`, re-clamped by
+/// [`reclamp_client_effort`]; absent that, "medium" when `adaptive` (the
+/// operator's `supports_adaptive_thinking` override, which converts the
+/// shape and so owes it an effort); absent both, nothing.
+fn adaptive_effort(req: &ChatRequest, adaptive: bool) -> Option<String> {
+    match req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
+        Some(effort) => Some(reclamp_client_effort(
+            effort,
+            &req.routectl_internal.effort_levels,
+        )),
+        None if adaptive => Some("medium".to_string()),
+        None => None,
+    }
+}
+
+/// `sent` clamped to an explicit `effort_levels`; an empty list, or an
+/// effort the clamp has no level for ("none"), passes through as sent.
+pub fn reclamp_client_effort(sent: &str, effort_levels: &[String]) -> String {
+    if effort_levels.is_empty() {
+        return sent.to_string();
+    }
+    clamp_effort_to_supported(sent, effort_levels)
+        .map_or_else(|| sent.to_string(), std::borrow::Cow::into_owned)
 }
 
 /// Decide which `ThinkingConfig` variant (if any) to emit. The
@@ -159,10 +167,7 @@ fn derive_effort(req: &ChatRequest) -> String {
 pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
-    if r.enabled == Some(false) {
-        return Some(ThinkingConfig::Disabled);
-    }
-    if r.effort.as_deref() == Some("none") {
+    if r.is_off() {
         return Some(ThinkingConfig::Disabled);
     }
 
@@ -186,10 +191,8 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         });
 
     // Did the caller actually ask for thinking? Any of: explicit
-    // enabled=true, a budget, an effort string (other than "none").
-    let thinking_active = r.enabled == Some(true)
-        || r.max_tokens.is_some()
-        || r.effort.as_deref().is_some_and(|e| e != "none");
+    // enabled=true, a budget, an effort string ("none" returned above).
+    let thinking_active = r.enabled == Some(true) || r.max_tokens.is_some() || r.effort.is_some();
     if !thinking_active {
         return None;
     }
@@ -264,8 +267,8 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         });
     }
     if let Some(effort) = r.effort.as_deref() {
-        // `effort != "none"` here (the `thinking_active` gate above excludes
-        // it), so the clamp always yields `Some`; fall back to the raw effort
+        // `effort != "none"` here (the `is_off` return above excludes it),
+        // so the clamp always yields `Some`; fall back to the raw effort
         // defensively if that ever changes.
         let clamped = clamp_effort_to_supported(effort, &req.routectl_internal.effort_levels)
             .unwrap_or(std::borrow::Cow::Borrowed(effort));
@@ -405,17 +408,69 @@ pub fn compose_thinking(
     }
 }
 
+/// Why [`shipped_thinking`] removed composed thinking from the body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ThinkingStrip {
+    /// Active thinking beside a `tool_choice` of the named forcing type.
+    ForcedToolUse(&'static str),
+    /// A context-management cache miss left no thinking blocks to replay.
+    ContextCacheMiss,
+}
+
+/// The `thinking` an Anthropic-shape body ships: [`compose_thinking`], then
+/// the passes that remove it. Thinking is removed when the context-management
+/// emulation missed its cache (`context_cache_missed`), or when it is active
+/// (`is_active_thinking_type`) and the request's `tool_choice` forces tool
+/// use: Anthropic 400s with "Thinking may not be enabled when tool_choice
+/// forces tool use." `disabled`, `between_tools`, and an unknown type ride
+/// beside a forced choice as sent, and the upstream judges them.
+///
+/// The forced-tool strip keeps `tool_choice` (the caller's intent to force
+/// the named tool) and is a baked seed rather than a learned repair: the
+/// rejection names no field path, so the rejection parser cannot attribute
+/// it, and no envelope of it is captured to ground a learned row. Its
+/// Claude Code trigger is the WebSearch sub-request, which forces
+/// `web_search` beside adaptive thinking.
+///
+/// The second value names the pass that removed thinking, for the caller
+/// to declare and log; `tap` receives only `compose_thinking`'s overrides.
+pub(super) fn shipped_thinking(
+    req: &ChatRequest,
+    adaptive: bool,
+    context_cache_missed: bool,
+    tap: Option<&WireTap>,
+) -> (Option<WireThinking>, Option<ThinkingStrip>) {
+    let Some(composed) = compose_thinking(req, adaptive, tap) else {
+        return (None, None);
+    };
+    if context_cache_missed {
+        return (None, Some(ThinkingStrip::ContextCacheMiss));
+    }
+    let is_active = composed
+        .thinking_type()
+        .is_some_and(is_active_thinking_type);
+    if is_active && let Some(forced) = forced_tool_choice_type(req.tool_choice.as_ref()) {
+        return (None, Some(ThinkingStrip::ForcedToolUse(forced)));
+    }
+    (Some(composed), None)
+}
+
 /// The `thinking.type` an Anthropic-shape egress emits for `req` when
 /// `adaptive` is the value it passes for the operator's
 /// `supports_adaptive_thinking` knob; `None` when the body carries no
 /// `thinking`, or a forwarded object carries no string `type`.
 ///
-/// Reports the composed value. A later pass in body assembly can still
-/// remove or rewrite `thinking` (a `tool_choice` that forces tool use, a
-/// context-management cache miss, an `output_config.effort` of "none").
+/// Reads `shipped_thinking`, the computation body assembly uses, so a
+/// forcing `tool_choice` is reflected. One input is out of reach: whether
+/// the context-management emulation misses its thinking cache is known only
+/// while assembling the body, so this read assumes it does not. That pass
+/// only ever removes `thinking`, never changes its type, so the read can
+/// over-report a type the body then omits, and cannot report one the body
+/// ships differently.
 #[must_use]
 pub fn emitted_thinking_type(req: &ChatRequest, adaptive: bool) -> Option<String> {
-    compose_thinking(req, adaptive, None)
+    shipped_thinking(req, adaptive, false, None)
+        .0
         .as_ref()
         .and_then(WireThinking::thinking_type)
         .map(str::to_string)
@@ -430,9 +485,8 @@ pub fn is_active_thinking_type(thinking_type: &str) -> bool {
 /// Whether the client itself sent `output_config.effort`. The Anthropic
 /// ingress keeps the client's `output_config` in `provider_extras`, so an
 /// effort found there is the client's. Any other effort on the wire was
-/// composed by routectl: derived from canonical reasoning on a request with
-/// no thinking carrier, or inserted beside the adaptive knob's shape on one
-/// with a carrier and no client effort.
+/// composed by routectl beside adaptive thinking (`adaptive_effort`).
+#[cfg(feature = "bedrock")]
 pub fn client_sent_output_config_effort(req: &ChatRequest) -> bool {
     req.provider_extras
         .as_ref()
@@ -519,19 +573,18 @@ fn cap_forwarded_budget(
 }
 
 /// Pair adaptive thinking with a top-level `output_config`. Returns
-/// `Some(OutputConfig)` only when the emitted thinking type is `adaptive`;
-/// otherwise `None`.
+/// `Some(OutputConfig)` only when the emitted thinking type is `adaptive`
+/// and `adaptive_effort` has an effort for it; otherwise `None`.
+/// `adaptive` is the operator's `supports_adaptive_thinking` knob.
 pub fn build_output_config(
     req: &ChatRequest,
     thinking: Option<&WireThinking>,
+    adaptive: bool,
 ) -> Option<OutputConfig> {
-    if thinking.and_then(WireThinking::thinking_type) == Some("adaptive") {
-        Some(OutputConfig {
-            effort: derive_effort(req),
-        })
-    } else {
-        None
+    if thinking.and_then(WireThinking::thinking_type) != Some("adaptive") {
+        return None;
     }
+    adaptive_effort(req, adaptive).map(|effort| OutputConfig { effort })
 }
 
 // ---------------------------------------------------------------------------
@@ -579,12 +632,10 @@ pub(super) fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&
 ///   a translation of `req.reasoning`); not a raw ChatRequest field but
 ///   routectl writes it.
 ///
-/// `output_config` is intentionally NOT here -- the full object is
-/// allowed through `provider_extras` for legitimate sub-fields like
-/// `output_config.format` (structured-output). The `output_config.effort`
-/// sub-field is reconciled post-merge in `reconcile_output_config_effort`
-/// when the model does not have `supports_adaptive_thinking=true` (Haiku,
-/// Sonnet -- Anthropic 400s on `effort` for them).
+/// `output_config` is intentionally NOT here -- the client's object rides
+/// through `provider_extras` as sent, `effort` and `format` included. The
+/// `output_config.effort` sub-field is reconciled post-merge in
+/// `reconcile_output_config_effort`.
 ///
 /// `parallel_tool_calls` is Anthropic-egress-local: the OpenAI-dialect
 /// toggle is consumed into `disable_parallel_tool_use` on `tool_choice`
@@ -601,89 +652,56 @@ pub(super) fn is_routectl_managed_key(key: &str) -> bool {
         )
 }
 
-/// Late enforcer of the output_config.effort invariant:
-/// `output_config.effort` is present IFF the assembled body carries
-/// `thinking` with `type == "adaptive"`. Reads ground truth from the
-/// BODY, not from a (possibly stale) `adaptive` flag -- earlier passes
-/// (cache-miss soft-fail, tool_choice strip) may have removed `thinking`
-/// after `build_output_config` ran, so the only reliable signal is the
-/// final assembled body. This must run LAST among the body mutations
-/// touching thinking/output_config.
+/// Late pass over `output_config.effort` on the assembled body, after
+/// `merge_provider_extras` has laid the client's `output_config` over the
+/// composed one. The client's effort is forwarded as sent beside whatever
+/// thinking type ships, "none" included; the upstream judges the pairing.
 ///
-/// No adaptive thinking in the body: drop any orphan
-/// `output_config.effort` (preserving a sibling `output_config.format`,
-/// and removing a now-empty `output_config`). Delegates to
-/// `remove_output_config_effort`.
+/// - Effort present: re-clamped only against an explicit, non-empty
+///   `effort_levels` ([`reclamp_client_effort`]).
+/// - Effort absent beside adaptive thinking: supplied by `adaptive_effort`
+///   (a sent `output_config` holding only `format` replaces the composed
+///   object wholesale). Nothing is supplied beside any other type.
 ///
-/// Adaptive thinking present: guarantee `output_config.effort` exists.
-/// Re-inject from `derive_effort(req)` when absent (e.g. provider_extras
-/// supplied an `output_config` with only `format`); when present, re-
-/// clamp against the operator's `effort_levels` exactly as before
-/// (`merge_provider_extras` may have overwritten the pre-merge clamped
-/// value with a raw caller-supplied `effort`). Empty `effort_levels`
-/// skips the re-clamp but still guarantees presence (pass-through).
-///
-/// An assembled `output_config.effort` of "none" is reasoning-OFF and is
-/// honored over the adaptive shape: the effort is dropped and `thinking` is
-/// rewritten to the `disabled` form, so the body never ships
-/// adaptive-thinking paired with a decline.
-pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value) {
-    if !body_has_adaptive_thinking(body) {
-        remove_output_config_effort(body);
-        return;
-    }
+/// `adaptive` is the operator's `supports_adaptive_thinking` knob.
+pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value, adaptive: bool) {
     let effort_levels = &req.routectl_internal.effort_levels;
+    let wants_effort = body_has_adaptive_thinking(body);
     let Some(obj) = body.as_object_mut() else {
         return;
+    };
+    let sent = obj
+        .get("output_config")
+        .and_then(|oc| oc.get("effort"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let effort = match sent {
+        Some(sent) => {
+            let clamped = reclamp_client_effort(&sent, effort_levels);
+            if clamped == sent {
+                return;
+            }
+            clamped
+        }
+        None if wants_effort => {
+            let Some(effort) = adaptive_effort(req, adaptive) else {
+                return;
+            };
+            effort
+        }
+        None => return,
     };
     let oc = obj
         .entry("output_config")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    let Some(oc) = oc.as_object_mut() else {
-        return;
-    };
-    match oc
-        .get("effort")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-    {
-        None => {
-            oc.insert("effort".to_string(), Value::String(derive_effort(req)));
-        }
-        Some(current) if current == "none" => {
-            disable_thinking_for_none_effort(obj);
-        }
-        Some(current) => {
-            if !effort_levels.is_empty()
-                && let Some(clamped) = clamp_effort_to_supported(&current, effort_levels)
-                && clamped.as_ref() != current
-            {
-                oc.insert("effort".to_string(), Value::String(clamped.into_owned()));
-            }
-        }
+    if let Some(oc) = oc.as_object_mut() {
+        oc.insert("effort".to_string(), Value::String(effort));
     }
-}
-
-/// Rewrite an adaptive-thinking body whose `output_config.effort` is "none"
-/// into the explicit reasoning-OFF shape: drop the effort (and a now-empty
-/// `output_config`) and replace `thinking` with `{type: "disabled"}` -- the
-/// same shape `build_thinking` emits for a canonical `effort: "none"`, so the
-/// two paths agree regardless of which one supplied the value.
-fn disable_thinking_for_none_effort(obj: &mut serde_json::Map<String, Value>) {
-    crate::effort::drop_orphaned_output_config_effort(obj);
-    obj.insert(
-        "thinking".to_string(),
-        serde_json::json!({"type": "disabled"}),
-    );
-    tracing::debug!(
-        "output_config.effort=none on an adaptive body: dropped the effort and \
-         disabled thinking (reasoning-OFF beats the adaptive shape)"
-    );
 }
 
 /// The assembled body's `thinking.type`. Shared final-body read: the
 /// sampling-params and effort reconcilers both key off it, so the two late
-/// passes cannot disagree about what thinking survived the strip passes.
+/// passes cannot disagree about what thinking ships.
 fn body_thinking_type(body: &Value) -> Option<&str> {
     body.get("thinking")
         .and_then(|t| t.get("type"))
@@ -705,7 +723,7 @@ fn body_has_active_thinking(body: &Value) -> bool {
 /// routectl-managed and so blocks `provider_extras` from injecting a
 /// forged `thinking: {type: "adaptive"}`. If "thinking" is ever dropped
 /// from that set, provider_extras could forge adaptive here and trigger
-/// spurious effort re-injection -- the two MUST stay in sync.
+/// a spurious effort insert -- the two MUST stay in sync.
 fn body_has_adaptive_thinking(body: &Value) -> bool {
     body_thinking_type(body) == Some("adaptive")
 }
@@ -762,10 +780,9 @@ pub(super) fn union_structured_outputs_beta(body: &Value, betas: &mut Vec<String
 /// adaptive-thinking directive Anthropic gates behind `EFFORT_BETA`.
 ///
 /// Reads the ASSEMBLED body for the same reason `body_has_output_config_format`
-/// does: `reconcile_output_config_effort` injects, re-clamps, or drops
-/// `output_config.effort` after translation (an orphan effort is removed when
-/// no adaptive `thinking` survives), so `req.reasoning` is not a reliable
-/// signal for what ships.
+/// does: `merge_provider_extras` and `reconcile_output_config_effort` add or
+/// re-clamp `output_config.effort` after translation, so `req.reasoning` is
+/// not a reliable signal for what ships.
 pub(super) fn body_has_output_config_effort(body: &Value) -> bool {
     body.get("output_config")
         .and_then(|oc| oc.get("effort"))
@@ -824,16 +841,15 @@ pub(super) fn drop_redact_beta_for_display(
     }
 }
 
-/// Late enforcer of the temperature/top_p invariant, the sampling analogue
-/// of `reconcile_output_config_effort`. Assembly forces `temperature = 1.0`
-/// and drops `top_p` whenever thinking is composed (Anthropic forbids
-/// alternative-continuation sampling while spending reasoning budget). A
-/// later strip pass (cache-miss soft-fail, tool_choice-forces-use) can then
-/// remove `thinking` from the body, leaving the forced sampling behind and
-/// discarding the caller's original values.
+/// Late enforcer of the temperature/top_p invariant on the assembled body.
+/// Assembly forces `temperature = 1.0` and drops `top_p` whenever active
+/// thinking ships (Anthropic forbids alternative-continuation sampling while
+/// spending reasoning budget); a pass that removed `thinking` after that
+/// clamp would leave the forced sampling behind and discard the caller's
+/// original values.
 ///
-/// This recomputes from the FINAL body: when no ACTIVE thinking survives
-/// (stripped entirely, or rewritten to the `disabled` shape), re-apply the
+/// This recomputes from the FINAL body: when no ACTIVE thinking ships
+/// (stripped entirely, or an inactive type such as `disabled`), re-apply the
 /// caller's sampling from the SOURCE request -- `temperature =
 /// req.temperature`, and `top_p` only when temperature is absent (mirrors the
 /// assembly else-branch; Claude 4.x rejects `temperature`+`top_p` together).
@@ -948,82 +964,6 @@ fn set_optional_f64(
     };
     super::wire_edits::declare(tap, EditSite::SamplingReconcile, format!("/{key}"), kind);
     true
-}
-
-/// Remove `output_config.effort` from `body`, preserving any orthogonal
-/// sibling (e.g. structured-output `format`). When `effort` was the only
-/// sub-key, the now-empty `output_config` object is removed entirely so
-/// the wire body stays clean. A no-op when neither key is present.
-fn remove_output_config_effort(body: &mut Value) {
-    if let Some(obj) = body.as_object_mut() {
-        crate::effort::drop_orphaned_output_config_effort(obj);
-    }
-}
-
-/// Anthropic forbids active thinking beside a `tool_choice` that forces
-/// tool use: the Messages API 400s with "Thinking may not be enabled when
-/// tool_choice forces tool use." when `thinking.type` is `enabled` or
-/// `adaptive` and `tool_choice.type` is `"any"` or `"tool"`.
-///
-/// Real-world trigger: Claude Code's WebSearch tool sub-request fires
-/// `tool_choice: {type:"tool", name:"web_search"}` in tandem with
-/// `thinking: {type:"adaptive"}`.
-///
-/// Strip `thinking` (not `tool_choice`) so the caller's intent to force the
-/// named tool is preserved. Only an active type is stripped; `disabled`,
-/// `between_tools`, and a type routectl does not know ride as sent beside
-/// the forced choice, and the upstream judges them. An `output_config.effort`
-/// leaves with the stripped thinking only when routectl composed it
-/// (`client_sent_output_config_effort`); the client's own effort stays.
-///
-/// This is a baked seed rather than a learned repair: the rejection names
-/// no field path, so the rejection parser cannot attribute it to a field,
-/// and no envelope of it is captured to ground a learned row.
-///
-/// Runs after `merge_provider_extras` so the check operates on the final
-/// wire body.
-pub(super) fn strip_thinking_when_tool_choice_forces_use(
-    provider_id: &str,
-    req: &ChatRequest,
-    body: &mut Value,
-    tap: Option<&WireTap>,
-) {
-    if !body_has_active_thinking(body) {
-        return;
-    }
-    let Some(obj) = body.as_object_mut() else {
-        return;
-    };
-    // The `.filter()` short-circuits on non-forcing values (`auto` /
-    // `none` / unknown), so the owned `String` is allocated only on the
-    // strip path. The Option also lets the immutable borrow on `obj` end
-    // at the semicolon -- `obj.remove` below takes the mutable borrow
-    // without conflict.
-    let ttype = obj
-        .get("tool_choice")
-        .and_then(|v| v.get("type"))
-        .and_then(|v| v.as_str())
-        .filter(|&t| t == TOOL_CHOICE_TYPE_ANY || t == TOOL_CHOICE_TYPE_TOOL)
-        .map(str::to_string);
-    let Some(ttype) = ttype else {
-        return;
-    };
-    obj.remove("thinking");
-    super::wire_edits::declare(
-        tap,
-        EditSite::ThinkingStripForcedToolUse,
-        "/thinking",
-        EditKind::Remove,
-    );
-    if !client_sent_output_config_effort(req) {
-        crate::effort::drop_orphaned_output_config_effort(obj);
-    }
-    tracing::debug!(
-        provider = provider_id,
-        tool_choice_type = %sanitize_for_log(&ttype),
-        "stripped active thinking from outgoing body: tool_choice forces tool use; \
-         Anthropic forbids the combo"
-    );
 }
 
 #[cfg(test)]

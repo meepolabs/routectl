@@ -58,8 +58,8 @@ use super::types::{
 
 // Primitives used only by the orchestrator below.
 use super::extras::{
-    merge_provider_extras, reconcile_output_config_effort, reconcile_sampling_params,
-    resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
+    ThinkingStrip, merge_provider_extras, reconcile_output_config_effort,
+    reconcile_sampling_params, resolve_max_tokens, shipped_thinking,
 };
 use super::messages::{SystemTurnPolicy, normalize_replay_invariants, translate_messages};
 use super::tools::{
@@ -76,9 +76,11 @@ use super::tools::{
 // against the canonical translation directly.
 #[cfg(all(test, feature = "bedrock"))]
 pub(crate) use super::extras::build_thinking;
+pub(crate) use super::extras::{build_output_config, is_active_thinking_type};
 #[cfg(feature = "bedrock")]
-pub(crate) use super::extras::client_sent_output_config_effort;
-pub(crate) use super::extras::{build_output_config, compose_thinking, is_active_thinking_type};
+pub(crate) use super::extras::{
+    client_sent_output_config_effort, compose_thinking, reclamp_client_effort,
+};
 pub(crate) use super::system::translate_system;
 // The billing-aware lift is used by BOTH the anthropic-api orchestrator
 // below and the Bedrock Converse egress, so it is visible crate-wide and
@@ -606,9 +608,9 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 // Top-level normalize
 // ---------------------------------------------------------------------------
 
-/// `adaptive` now controls ONLY the thinking wire shape via `compose_thinking`;
-/// it no longer drives `output_config.effort` reconciliation, which the late
-/// enforcer `reconcile_output_config_effort` derives from the assembled body.
+/// `adaptive` is the operator's `supports_adaptive_thinking` knob: it selects
+/// the thinking wire shape (`shipped_thinking`) and whether adaptive thinking
+/// with no effort gets the "medium" default (`reconcile_output_config_effort`).
 ///
 /// `terminal_anthropic_host` states whether this body egresses to the
 /// GENUINE Anthropic host. It is the resolved value of
@@ -762,9 +764,6 @@ pub(crate) fn normalize_deferring_format_key_warn(
             routectl_core::wire_check::EditKind::Add,
         );
     }
-    let thinking = compose_thinking(req, adaptive, tap);
-    let output_config = build_output_config(req, thinking.as_ref());
-
     let system = filtered_system.as_ref().map(translate_system).or_else(|| {
         // Legacy lift: strip the billing block from the lifted text too.
         // lift_legacy_system joins Role::System messages into a single
@@ -828,6 +827,10 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // run, so the tally is complete: one line per request, never one per
     // channel.
     envelopes.flush();
+
+    let (thinking, strip) = shipped_thinking(req, adaptive, !clear_thinking_misses.is_empty(), tap);
+    report_thinking_strip(id, strip, &clear_thinking_misses, tap);
+    let output_config = build_output_config(req, thinking.as_ref(), adaptive);
 
     // tool_choice="none" forbids tool use; Anthropic has no native
     // equivalent for the bare-string OpenAI form, so strip BOTH the
@@ -957,38 +960,12 @@ pub(crate) fn normalize_deferring_format_key_warn(
         obj.remove("context_management");
     }
 
-    // Soft-fail: if cache misses occurred (cold-start or TTL eviction) and
-    // the body still has a `thinking` key, the upstream would receive a
-    // request that demands thinking tokens but no thinking blocks were
-    // injected into history. Non-Anthropic providers 400 on this shape.
-    // Strip `thinking` defensively and emit a structured DEBUG line so
-    // the gap is diagnosable.
-    if !clear_thinking_misses.is_empty()
-        && let Some(obj) = body.as_object_mut()
-        && obj.contains_key("thinking")
-    {
-        obj.remove("thinking");
-        tracing::debug!(
-            provider = id,
-            missed_tool_ids = ?clear_thinking_misses,
-            "context_management: cache miss for tool_use ids; \
-             stripped `thinking` from body to avoid upstream 400 \
-             (cold-start or TTL eviction)"
-        );
-    }
-    strip_thinking_when_tool_choice_forces_use(id, req, &mut body, tap);
-    // Late enforcer, runs LAST: output_config.effort is present IFF the
-    // assembled body carries thinking with type == adaptive. Reads the
-    // final body shape, so any earlier pass that stripped thinking
-    // (cache-miss soft-fail above, tool_choice strip just now) is
-    // correctly reflected -- no stale `adaptive` flag is trusted.
-    reconcile_output_config_effort(req, &mut body);
+    // Runs after the provider_extras merge, which lays the client's
+    // `output_config` over the composed one.
+    reconcile_output_config_effort(req, &mut body, adaptive);
     super::wire_edits::declare_effort_edits(tap, req, &body);
-    // Sampling analogue of the enforcer above, same final-body discipline:
-    // assembly forces temperature=1.0 (dropping top_p) when thinking is
-    // composed, and the strip passes above may then remove thinking. Recompute
-    // the caller's sampling from the source request when no thinking survives,
-    // so a stripped-thinking body never ships the forced 1.0.
+    // Recompute the caller's sampling from the source request when no active
+    // thinking ships, so a body without it never carries the forced 1.0.
     reconcile_sampling_params(id, req, &mut body);
     Ok((
         body,
@@ -997,6 +974,42 @@ pub(crate) fn normalize_deferring_format_key_warn(
             repair,
         },
     ))
+}
+
+/// Declare and log the pass that removed composed `thinking`. A
+/// context-management cache miss (cold-start or TTL eviction) leaves no
+/// thinking blocks in history for a request that demands thinking, a shape
+/// non-Anthropic upstreams 400 on.
+fn report_thinking_strip(
+    id: &str,
+    strip: Option<ThinkingStrip>,
+    missed_tool_ids: &[String],
+    tap: Option<&routectl_core::wire_check::WireTap>,
+) {
+    match strip {
+        Some(ThinkingStrip::ForcedToolUse(tool_choice_type)) => {
+            super::wire_edits::declare(
+                tap,
+                routectl_core::wire_check::EditSite::ThinkingStripForcedToolUse,
+                "/thinking",
+                routectl_core::wire_check::EditKind::Remove,
+            );
+            tracing::debug!(
+                provider = id,
+                tool_choice_type,
+                "stripped active thinking from outgoing body: tool_choice forces tool use; \
+                 Anthropic forbids the combo"
+            );
+        }
+        Some(ThinkingStrip::ContextCacheMiss) => tracing::debug!(
+            provider = id,
+            missed_tool_ids = ?missed_tool_ids,
+            "context_management: cache miss for tool_use ids; \
+             stripped `thinking` from body to avoid upstream 400 \
+             (cold-start or TTL eviction)"
+        ),
+        None => {}
+    }
 }
 
 /// Assemble the Anthropic Messages body and emit the deferred

@@ -663,11 +663,10 @@ fn assistant_tool_call_with_unparseable_arguments_wraps_under_underscore() {
     assert_eq!(tool_use["input"], json!({"_arguments": "this is not json"}));
 }
 
-/// Ordering invariant (tool_choice-forces-use path): thinking is composed
-/// -- forcing `temperature=1.0` and dropping `top_p` -- and then
-/// `strip_thinking_when_tool_choice_forces_use` removes `thinking` because
-/// tool_choice forces tool use. Sampling params must be recomputed from
-/// the SOURCE request: `temperature == req.temperature` (None here, so
+/// Ordering invariant (tool_choice-forces-use path): `shipped_thinking`
+/// removes the composed `thinking` because tool_choice forces tool use,
+/// so the sampling clamp never forces `temperature=1.0`. Sampling params
+/// follow the SOURCE request: `temperature == req.temperature` (None here, so
 /// absent) and `top_p` re-emitted per the else-branch (present because
 /// temperature is None). This is the documented Claude Code WebSearch
 /// production path.
@@ -894,11 +893,9 @@ fn disabled_thinking_unchanged_under_adaptive_flag() {
 }
 
 /// The barefoot adaptive case -- `reasoning.enabled = true`
-/// with no effort and no budget. Adaptive shape applies; effort
-/// defaults to "medium". This is the only path where
-/// `derive_effort` returns the fallback string, so we pin it
-/// explicitly. (Without this test the default would silently
-/// drift if anyone changed `derive_effort`.)
+/// with no effort and no budget, under the adaptive knob. Adaptive
+/// shape applies; effort defaults to "medium", the one path where
+/// routectl supplies the fallback string.
 #[test]
 fn adaptive_defaults_effort_to_medium_when_unset() {
     use routectl_core::ReasoningConfig;
@@ -1372,13 +1369,11 @@ fn structured_output_format_merges_from_provider_extras() {
     assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
 }
 
-/// Review follow-up to Bug K: when the provider is NOT adaptive
-/// (Sonnet, Haiku -- no adaptive capability declared), the
-/// `output_config.effort` field set by cc must be stripped from
-/// the outgoing body. Anthropic 400s with "This model does not
-/// support the effort parameter" otherwise.
+/// A client `output_config.effort` reaches a provider without the adaptive
+/// knob as sent, with no thinking beside it; the upstream judges whether the
+/// model takes an effort.
 #[test]
-fn output_config_effort_stripped_on_non_adaptive_provider() {
+fn output_config_effort_forwarded_on_non_adaptive_provider() {
     let req = ChatRequest {
         model: "claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")].into(),
@@ -1392,21 +1387,14 @@ fn output_config_effort_stripped_on_non_adaptive_provider() {
         "test", &req, /* adaptive= */ false, false, None, false, true,
     )
     .unwrap();
-    // effort stripped; output_config now empty, so the whole
-    // object is removed for wire cleanliness.
-    assert!(
-        body.get("output_config").is_none(),
-        "non-adaptive provider must have output_config removed when effort \
-         was the only sub-key, got body: {body}",
-    );
+    assert_eq!(body["output_config"], json!({"effort": "high"}), "{body}");
+    assert!(body.get("thinking").is_none(), "{body}");
 }
 
-/// Companion to the above: when output_config carries BOTH effort
-/// and a structured-output `format` field, the strip removes only
-/// effort; `format` is preserved (orthogonal to the effort beta
-/// and supported across the model family).
+/// Companion to the above: an effort beside a structured-output `format`
+/// ships with it, both as sent.
 #[test]
-fn output_config_effort_stripped_preserves_sibling_format_on_non_adaptive() {
+fn output_config_effort_and_sibling_format_forwarded_on_non_adaptive() {
     let req = ChatRequest {
         model: "claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")].into(),
@@ -1427,18 +1415,14 @@ fn output_config_effort_stripped_preserves_sibling_format_on_non_adaptive() {
     )
     .unwrap();
     let oc = body.get("output_config").expect("output_config preserved");
-    assert!(oc.get("effort").is_none(), "effort stripped: {oc}");
+    assert_eq!(oc["effort"], "high", "{oc}");
     assert_eq!(oc["format"]["type"], "json_schema");
     assert_eq!(oc["format"]["schema"]["required"][0], "x");
 }
 
 /// Adaptive providers (Opus 4.7 with supports_adaptive_thinking=true)
-/// must preserve `output_config.effort` -- the model accepts it. Pin
-/// this so a future refactor doesn't accidentally strip on the
-/// adaptive path too. The request carries `reasoning` so adaptive
-/// thinking is actually composed: the late enforcer keys off the
-/// assembled body's `thinking.type == adaptive`, so effort is only
-/// valid (and preserved) when thinking is genuinely present.
+/// preserve `output_config.effort` beside the adaptive thinking they
+/// compose from `reasoning`.
 #[test]
 fn output_config_effort_preserved_on_adaptive_provider() {
     use routectl_core::ReasoningConfig;
@@ -1540,11 +1524,10 @@ fn tool_choice_tool_with_thinking_strips_thinking() {
 
 #[test]
 fn adaptive_thinking_forced_tool_choice_strips_thinking_and_output_config_effort() {
-    // Arrange: the adaptive-thinking path emits both `thinking:
-    // {type:adaptive}` AND a top-level `output_config: {effort}`.
-    // A forcing tool_choice must strip BOTH -- `output_config.effort`
-    // is only valid alongside adaptive thinking, so an orphaned
-    // effort 400s.
+    // Arrange: the adaptive-thinking path pairs `thinking:
+    // {type:adaptive}` with a composed `output_config: {effort}`.
+    // A forcing tool_choice strips the thinking, and the effort composed
+    // only for it is never added.
     let req = req_with_thinking_and_tool_choice(Some(json!({"type": "tool", "name": "ws"})));
 
     // Act: adaptive=true so build_output_config emits output_config.effort.
@@ -1553,7 +1536,7 @@ fn adaptive_thinking_forced_tool_choice_strips_thinking_and_output_config_effort
     )
     .unwrap();
 
-    // Assert: thinking dropped AND the orphaned effort dropped.
+    // Assert: thinking dropped AND no composed effort.
     assert!(
         body.get("thinking").is_none(),
         "thinking must be stripped when tool_choice forces tool use, got: {body}"
@@ -1599,8 +1582,8 @@ fn tool_choice_auto_with_thinking_keeps_thinking() {
     // must survive.
     let req = req_with_thinking_and_tool_choice(Some(json!("auto")));
 
-    // translate_tool_choice normalizes bare "auto" -> {"type":"auto"}
-    // before strip_thinking_when_tool_choice_forces_use runs.
+    // translate_tool_choice normalizes bare "auto" -> {"type":"auto"},
+    // which does not force tool use.
     let body = normalize("test", &req, false, false, None, false, true).unwrap();
 
     assert_eq!(body["tool_choice"], json!({"type": "auto"}));
@@ -2294,19 +2277,18 @@ fn drops_top_p_when_thinking_forces_temperature() {
 }
 
 // -----------------------------------------------------------------
-// Late enforcer of the output_config.effort invariant.
+// The late output_config.effort pass.
 //
-// After the reorder, `reconcile_output_config_effort` runs LAST in
-// normalize and reads ground truth from the assembled body, not the
-// stale `adaptive` arg: output_config.effort is present IFF the body
-// carries thinking with type == adaptive.
+// `reconcile_output_config_effort` runs after the provider_extras merge
+// and reads the assembled body: a sent effort is re-clamped only against
+// an explicit effort_levels, and adaptive thinking with no effort gets one.
 // -----------------------------------------------------------------
 
 /// Adaptive model whose `provider_extras` carries an
 /// `output_config: {format: ...}` with NO `effort` sub-key. The
 /// assembled body has `thinking.type == adaptive`, so the late
-/// enforcer must re-inject `output_config.effort` from
-/// `derive_effort` (clamped) while preserving the sibling `format`.
+/// pass must insert the canonical effort (clamped) while preserving the
+/// sibling `format`.
 #[test]
 fn adaptive_reinjects_effort_when_provider_extras_omits_it() {
     use routectl_core::ReasoningConfig;
@@ -2343,7 +2325,7 @@ fn adaptive_reinjects_effort_when_provider_extras_omits_it() {
         .expect("output_config present on adaptive path");
     assert_eq!(
         oc["effort"], "high",
-        "effort must be re-injected from derive_effort when provider_extras omits it; got: {oc}"
+        "the canonical effort must be inserted when provider_extras omits it; got: {oc}"
     );
     assert_eq!(
         oc["format"]["type"], "json_schema",
@@ -2352,11 +2334,10 @@ fn adaptive_reinjects_effort_when_provider_extras_omits_it() {
 }
 
 /// (tool_choice latent) Adaptive thinking + a forcing `tool_choice`
-/// (`type:"tool"`). No orphan `output_config.effort` survives the strip:
-/// routectl composed it, so the strip drops it, and the late enforcer
-/// reads the stripped body.
+/// (`type:"tool"`). The thinking is stripped before `output_config` is
+/// composed, so routectl composes no effort for it.
 #[test]
-fn adaptive_forced_tool_choice_drops_orphan_effort_via_late_enforcer() {
+fn adaptive_forced_tool_choice_composes_no_effort() {
     use routectl_core::ReasoningConfig;
     use serde_json::json;
     let req = ChatRequest {
@@ -2384,15 +2365,15 @@ fn adaptive_forced_tool_choice_drops_orphan_effort_via_late_enforcer() {
         body.get("output_config")
             .and_then(|oc| oc.get("effort"))
             .is_none(),
-        "orphan output_config.effort must be dropped by the late enforcer, got: {body}"
+        "no effort is composed for stripped thinking, got: {body}"
     );
 }
 
 /// (positive regression-pin) A normal adaptive request whose effort
-/// exceeds the operator cap: the late enforcer guarantees presence
-/// AND clamps to the cap.
+/// exceeds the operator cap: the effort is present AND clamped to the
+/// cap.
 #[test]
-fn adaptive_effort_over_cap_clamped_by_late_enforcer() {
+fn adaptive_effort_over_cap_clamped() {
     use routectl_core::ReasoningConfig;
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
