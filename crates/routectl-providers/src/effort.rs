@@ -44,9 +44,12 @@ const RANK_ORDER: &[&str] = &VALID_EFFORT_TOKENS;
 /// Resolve `requested` against the model's declared supported levels.
 ///
 /// Returns `None` when the caller's intent is reasoning-OFF (`requested ==
-/// "none"`): every egress interprets `None` as "omit the effort field" (or
-/// emit its own disable form), so a client that explicitly declined thinking
-/// is never billed for it. Returns `Some(level)` otherwise.
+/// "none"`): every egress that TRANSLATES the canonical effort interprets
+/// `None` as "omit the effort field" (or emit its own disable form), so a
+/// client that explicitly declined thinking is never billed for it. Returns
+/// `Some(level)` otherwise. An effort the client sent on the anthropic-api
+/// `output_config` carrier is not translated: that egress forwards it as sent,
+/// "none" included, and passes "none" through its re-clamp unchanged.
 ///
 /// Rank order for clamping:
 ///
@@ -55,7 +58,7 @@ const RANK_ORDER: &[&str] = &VALID_EFFORT_TOKENS;
 /// Rules:
 ///   - `requested == "none"` -> `None` (reasoning-OFF; omit, never substitute
 ///     a positive level). This is the single place the "none" -> omit
-///     decision lives so all egresses stay consistent.
+///     decision lives so the translating egresses stay consistent.
 ///   - If `supported` is empty, return `Some(requested)` unchanged (passthrough).
 ///   - If `supported` contains `requested`, return `Some(requested)` unchanged.
 ///   - Otherwise, pick the highest supported level that is <= requested

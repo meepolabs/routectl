@@ -102,13 +102,15 @@ pub(super) enum FieldSurface {
     /// (`routectl_providers::anthropic_api::emitted_thinking_type`, with the
     /// operator's `supports_adaptive_thinking` the egress itself is handed), not
     /// the final body: a later body pass can still strip `thinking` (a forced
-    /// tool choice, a context-management cache miss) or turn it off (an
-    /// `output_config.effort` of "none"). That gap is sound for the uses this
-    /// surface has. A rejection naming `thinking.type.X` is evidence that X was
-    /// on the wire, so a stripped body never draws the rejection a repair acts
-    /// on. The read also stages and verifies the rewrite target, and none of
-    /// the late passes can turn a rewritten type back into the refused one:
-    /// they remove thinking or disable it, never re-enable it.
+    /// tool choice, a context-management cache miss). A client
+    /// `output_config.effort` of "none" does not change the type: the egress
+    /// forwards that effort as sent beside whatever type ships. That gap is
+    /// sound for the uses this surface has. A rejection naming
+    /// `thinking.type.X` is evidence that X was on the wire, so a stripped body
+    /// never draws the rejection a repair acts on. The read also stages and
+    /// verifies the rewrite target, and none of the late passes can turn a
+    /// rewritten type back into the refused one: they only remove thinking,
+    /// never re-enable or retype it.
     ///
     /// The rewrite replaces the native carrier with `{type: <target>}`
     /// (materializing one when the request carried none): an adaptive target
@@ -607,7 +609,9 @@ fn keep_display_on_the_carrier(req: &mut ChatRequest) {
 /// Write [`COMPANION_EFFORT`] to the canonical effort and over a client
 /// `output_config.effort`. Both, because the egress derives the wire effort
 /// from the canonical one and then merges the client's `output_config` over
-/// it, and a client "none" left there turns the adaptive body off.
+/// it, forwarding a client "none" as sent: left there, a non-positive effort
+/// would ship beside the repaired adaptive type, a pairing the companion
+/// replaces so the retry is one the upstream accepts.
 fn write_companion_effort(req: &mut ChatRequest) {
     req.reasoning.get_or_insert_with(Default::default).effort = Some(COMPANION_EFFORT.to_string());
     if let Some(config) = req
