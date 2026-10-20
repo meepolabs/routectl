@@ -600,7 +600,7 @@ impl Router {
     ///
     /// A rewrite needs the value recorded for the SAME incarnation the
     /// authorization rests on: a value from any other lifecycle never applies.
-    /// A ceiling is never applied: no repair writes one yet.
+    /// A stored ceiling is not applied pre-flight.
     fn preflight_edit(
         &self,
         planned: &ChatRequest,

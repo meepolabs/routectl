@@ -440,9 +440,45 @@ mod converse_ceiling {
         }
     }
 
+    /// The field verdict key a committed `event` names.
+    fn event_key(
+        event: &crate::router::CapabilityLearnEvent,
+    ) -> crate::field_verdict::FieldVerdictKey {
+        crate::field_verdict::FieldVerdictKey::from_capability_key(
+            crate::state_key::StateKey::parse(&event.state_key).expect("a lane key"),
+            event.capability_key.clone(),
+            event.provider_kind.clone(),
+        )
+    }
+
+    /// The ceiling capture with its named limit, both copies, replaced by `limit`.
+    fn ceiling_rejection_naming(limit: u32) -> Error {
+        let fixture: serde_json::Value =
+            serde_json::from_str(CEILING_FIXTURE).expect("the fixture is JSON");
+        let body = fixture["body"]
+            .as_str()
+            .expect("the fixture carries its body");
+        let named = NAMED_LIMIT.to_string();
+        assert_eq!(
+            body.matches(&named).count(),
+            2,
+            "premise: the limit appears twice"
+        );
+        Error::upstream_with_body(
+            "converse-seat",
+            400,
+            routectl_core::UpstreamBody::new(body.replace(&named, &limit.to_string())),
+            None,
+            None,
+            None,
+        )
+    }
+
     /// Mutation checks: drop the number capture from the Converse ceiling arm
     /// -> red (no value, so no edit and no retry); map the ceiling action to
-    /// `Repaired` in the S8 join -> red on the outcome.
+    /// `Repaired` in the S8 join -> red on the outcome; make `repair_teaches`
+    /// admit only rewrites and refused fields -> red (nothing learned); commit
+    /// a ceiling edit with no value -> red on the persisted value.
     #[tokio::test]
     async fn a_converse_ceiling_refusal_retries_once_at_the_named_limit() {
         for stream in [false, true] {
@@ -468,10 +504,38 @@ mod converse_ceiling {
             assert_eq!(repair.field_path, "max_tokens");
             assert_eq!(repair.action, super::super::FIELD_ACTION_CEILING_REPAIR);
             assert!(
-                meta.learned_capabilities.is_empty(),
-                "stream={stream}: a ceiling repair teaches nothing yet",
+                repair.learned,
+                "stream={stream}: the summary reports the commit"
             );
-            assert_eq!(router.field_verdicts().snapshot_len(), 0, "stream={stream}");
+            assert_eq!(
+                router.field_repair_counters().verdicts_learned,
+                1,
+                "stream={stream}"
+            );
+            assert_eq!(meta.learned_capabilities.len(), 1, "stream={stream}");
+            let event = &meta.learned_capabilities[0];
+            assert_eq!(
+                event.value,
+                Some(crate::VerdictValue::Ceiling(NAMED_LIMIT)),
+                "stream={stream}: the verdict carries the limit it clamped to",
+            );
+            assert_eq!(
+                event
+                    .value
+                    .as_ref()
+                    .map(crate::VerdictValue::encode)
+                    .as_deref(),
+                Some("ceiling:8192"),
+                "stream={stream}",
+            );
+            assert_eq!(
+                router
+                    .field_verdicts()
+                    .verdict_value(&event_key(event), event.incarnation),
+                Some(crate::VerdictValue::Ceiling(NAMED_LIMIT)),
+                "stream={stream}: the registry holds the value for the lane",
+            );
+            assert_eq!(router.field_verdicts().snapshot_len(), 1, "stream={stream}");
             assert_eq!(
                 rejection_outcomes(&router),
                 vec![FieldRepairOutcome::RepairedLossy],
@@ -547,6 +611,231 @@ mod converse_ceiling {
         assert_eq!(meta.served_model.as_deref(), Some("m1"));
         assert!(meta.learned_capabilities.is_empty());
         assert_eq!(router.field_verdicts().snapshot_len(), 0);
+        assert!(router.learned_capability_snapshot().is_empty());
+    }
+
+    /// Mutation check: settle the field carry as a success when a repaired
+    /// retry is rejected (call `settle_field_success` at the top of
+    /// `on_rejection` while a reactive repair is pending) -> red.
+    #[tokio::test]
+    async fn a_failed_clamped_retry_leaves_no_resident_verdict() {
+        let seat = ConverseSeat::new(Seat::CapsThenUnavailable);
+        let router = converse_router(&[&seat]);
+
+        let (meta, served) = dispatch(&router, false, client_req(CLIENT_MAX_TOKENS)).await;
+
+        assert!(!served, "the retry's failure reaches the client");
+        assert_eq!(
+            seat.sent_limits(),
+            vec![json!(CLIENT_MAX_TOKENS), json!(NAMED_LIMIT)],
+            "premise: one refused attempt, one clamped retry",
+        );
+        assert_eq!(meta.field_repairs.len(), 1, "premise: the repair fired");
+        assert!(!meta.field_repairs[0].repair_succeeded);
+        assert!(!meta.field_repairs[0].learned);
+        assert!(meta.learned_capabilities.is_empty(), "nothing committed");
+        assert_eq!(router.field_verdicts().snapshot_len(), 0);
+        assert!(router.learned_capability_snapshot().is_empty());
+        assert_eq!(router.field_repair_counters().verdicts_learned, 0);
+    }
+
+    /// The operator WARN for a committed ceiling repair says it learned.
+    ///
+    /// Mutation check: make `repair_teaches` admit only rewrites and refused
+    /// fields -> red (`learned=false`).
+    #[test]
+    fn a_committed_ceiling_repair_warns_learned() {
+        let seat = ConverseSeat::new(Seat::CapsThenServes);
+        let router = converse_router(&[&seat]);
+
+        let events = routectl_testkit::capture_events(|| {
+            let (_, served) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime with timers")
+                .block_on(dispatch(&router, false, client_req(CLIENT_MAX_TOKENS)));
+            assert!(served, "premise: the clamped retry serves");
+        });
+
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN && e.message == "envelope_field_repaired")
+            .collect();
+        assert_eq!(warns.len(), 1, "one WARN per repaired request: {warns:?}");
+        assert_eq!(
+            warns[0].field("action"),
+            Some(super::super::FIELD_ACTION_CEILING_REPAIR)
+        );
+        assert_eq!(warns[0].field("field_path"), Some("max_tokens"));
+        assert_eq!(warns[0].field("learned"), Some("true"));
+    }
+
+    /// A later commit naming a different limit retires the resident verdict:
+    /// the identity starts a new incarnation at one observation, carrying the
+    /// new value, and the old incarnation's value is never answered again.
+    /// The second repair is admitted past the first verdict's decay, the one
+    /// moment a lane that holds an acting verdict repairs again.
+    ///
+    /// Mutation check: make `retire_on_value_change` return early
+    /// unconditionally -> red (the new limit inherits the observation).
+    #[tokio::test]
+    async fn a_commit_naming_a_lower_limit_retires_the_earlier_incarnation() {
+        const LOWER_LIMIT: u32 = 4096;
+        let seat = ConverseSeat::new(Seat::CapsThenServes);
+        let router = converse_router(&[&seat]);
+        let (meta, served) = dispatch(&router, false, client_req(CLIENT_MAX_TOKENS)).await;
+        assert!(served, "premise: the first repair served");
+        let first = meta.learned_capabilities[0].clone();
+        assert_eq!(
+            first.value,
+            Some(crate::VerdictValue::Ceiling(NAMED_LIMIT)),
+            "premise"
+        );
+        let key = event_key(&first);
+        let past_decay = std::time::Instant::now()
+            + std::time::Duration::from_hours(router.config.capability.decay_hours)
+            + std::time::Duration::from_secs(1);
+        let req = client_req(CLIENT_MAX_TOKENS);
+        let target = router
+            .dispatch_chain_for_request(
+                &req,
+                crate::router::class_observe::DispatchSurface::Complete,
+            )
+            .expect("the fixture chain resolves")
+            .0
+            .into_iter()
+            .next()
+            .expect("one target");
+        let mut plan = router
+            .plan_field_carry(
+                &target,
+                &req,
+                super::super::FieldSettlementMode::Settling,
+                past_decay,
+            )
+            .expect("the lapsed verdict admits one repair");
+        let rejection = ceiling_rejection_naming(LOWER_LIMIT);
+        let class = routectl_core::failure_class::classify(&rejection, Some("bedrock")).class;
+        let mut attempt = req.clone();
+        let applied = plan.apply(
+            &mut attempt,
+            &mut crate::router::DispatchMeta::for_alias(ALIAS),
+            &mut crate::router::repair_budget::RepairBudget::per_request(),
+            &class,
+            &rejection,
+            "bedrock",
+        );
+        assert!(applied.is_some(), "premise: the lower limit repairs");
+        assert_eq!(attempt.max_tokens, Some(LOWER_LIMIT), "premise");
+
+        let second = plan
+            .commit(400, Vec::new(), past_decay)
+            .expect("the repaired success commits");
+
+        assert_eq!(
+            second.value,
+            Some(crate::VerdictValue::Ceiling(LOWER_LIMIT))
+        );
+        assert_eq!(
+            second.observations, 1,
+            "a new limit restarts at one observation"
+        );
+        assert!(
+            second.incarnation > first.incarnation,
+            "and a new incarnation"
+        );
+        assert_eq!(
+            router
+                .field_verdicts()
+                .verdict_value(&key, second.incarnation),
+            Some(crate::VerdictValue::Ceiling(LOWER_LIMIT)),
+        );
+        assert_eq!(
+            router
+                .field_verdicts()
+                .verdict_value(&key, first.incarnation),
+            None,
+            "the retired incarnation's value is gone",
+        );
+        assert_eq!(
+            router.field_verdicts().snapshot_len(),
+            1,
+            "one identity resident"
+        );
+    }
+
+    /// A ledger replaying exactly `rows`, with a tombstone at `router`'s own
+    /// catalog stamps so no row is skipped as stale.
+    struct EventLedger {
+        catalog_version: u32,
+        overlay_revision: u64,
+        rows: Vec<crate::capability_rebuild::CapabilityEventRow>,
+    }
+
+    impl crate::capability_rebuild::CapabilityLedgerReader for EventLedger {
+        fn tombstone(&self) -> Option<crate::capability_rebuild::ReplayTombstone> {
+            Some(crate::capability_rebuild::ReplayTombstone::new(
+                0,
+                self.catalog_version,
+                self.overlay_revision,
+            ))
+        }
+
+        fn read_events(&self) -> Vec<crate::capability_rebuild::CapabilityEventRow> {
+            self.rows.clone()
+        }
+    }
+
+    /// A committed ceiling verdict's ledger row, replayed into a fresh router,
+    /// restores the verdict with its value.
+    ///
+    /// Mutation check: give `FieldTransform::Ceiling` no value slot -> red (the
+    /// replayed verdict carries no value).
+    #[tokio::test]
+    async fn a_warm_rebuild_restores_the_committed_ceiling() {
+        let seat = ConverseSeat::new(Seat::CapsThenServes);
+        let router = converse_router(&[&seat]);
+        let (meta, served) = dispatch(&router, false, client_req(CLIENT_MAX_TOKENS)).await;
+        assert!(served, "premise: the repair served");
+        let event = meta.learned_capabilities[0].clone();
+        let restarted = converse_router(&[&ConverseSeat::new(Seat::ServesAll)]);
+        let row = crate::capability_rebuild::CapabilityEventRow::new(
+            1,
+            std::time::Instant::now(),
+            "broken".to_string(),
+            Some(event.phase.as_str().to_string()),
+            event.source.as_str().to_string(),
+            Some(event.signal_tier.as_str().to_string()),
+            None,
+            event.capability_key.clone(),
+            event.state_key.clone(),
+            event.provider_kind.clone(),
+            restarted.catalog_version(),
+            restarted.overlay_revision(),
+        )
+        .with_vocab_version(Some(crate::capability_vocab::CURRENT_VOCAB_VERSION))
+        .with_upstream_token(event.value.as_ref().map(crate::VerdictValue::encode));
+
+        let summary = restarted.rebuild_learned_from_ledger(&EventLedger {
+            catalog_version: restarted.catalog_version(),
+            overlay_revision: restarted.overlay_revision(),
+            rows: vec![row],
+        });
+
+        assert_eq!(summary.replayed_negative, 1, "premise: the row replayed");
+        assert_eq!(summary.degraded_value, 0, "the token decodes");
+        let key = event_key(&event);
+        let incarnation = restarted
+            .learned_capabilities
+            .resident_incarnation_for_tests(
+                &event.state_key,
+                &event.capability_key,
+                &event.provider_kind,
+            );
+        assert_eq!(
+            restarted.field_verdicts().verdict_value(&key, incarnation),
+            Some(crate::VerdictValue::Ceiling(NAMED_LIMIT)),
+        );
     }
 
     #[tokio::test]

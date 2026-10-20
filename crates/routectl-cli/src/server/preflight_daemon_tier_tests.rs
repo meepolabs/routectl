@@ -133,6 +133,20 @@ async fn a_rewrite_commit_persists_its_shape_in_the_upstream_token() {
     );
 }
 
+/// A ceiling verdict's row carries its limit as `ceiling:<n>`.
+///
+/// Mutation check: write `upstream_token: None` in `capability_ack_drain` -> red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ceiling_commit_persists_its_limit_in_the_upstream_token() {
+    let values = persisted_value_of(Some(routectl_router::VerdictValue::Ceiling(8192))).await;
+
+    assert_eq!(
+        values,
+        vec![Some("ceiling:8192".to_string())],
+        "exactly one row, carrying the encoded ceiling",
+    );
+}
+
 /// A drop verdict's row carries no value: the column is NULL.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_drop_commit_persists_a_null_upstream_token() {

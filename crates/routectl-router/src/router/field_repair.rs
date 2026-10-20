@@ -1569,10 +1569,12 @@ impl FieldEdit {
         }
     }
 
-    const fn rewritten(self) -> Option<&'static str> {
+    /// The value a verdict committed for this edit applies: none for a drop.
+    const fn verdict_value(self) -> Option<VerdictValue> {
         match self {
-            Self::Drop | Self::Ceiling(_) => None,
-            Self::Rewrite(value) => Some(value),
+            Self::Drop => None,
+            Self::Rewrite(value) => Some(VerdictValue::Shape(value)),
+            Self::Ceiling(ceiling) => Some(VerdictValue::Ceiling(ceiling)),
         }
     }
 }
@@ -1596,9 +1598,9 @@ impl FieldRepairPlan<'_> {
         }
     }
 
-    /// The accepted value a rewrite repair wrote, or `None` for any other.
-    fn rewritten(&self) -> Option<&'static str> {
-        self.applied.and_then(FieldEdit::rewritten)
+    /// The value the applied repair wrote, or `None` for a drop.
+    fn written_value(&self) -> Option<VerdictValue> {
+        self.applied.and_then(FieldEdit::verdict_value)
     }
 
     /// The closed-set WARN action token for the repair this plan applied.
@@ -1613,7 +1615,8 @@ impl FieldRepairPlan<'_> {
 
     /// Whether the applied repair may commit a verdict once its retry succeeds.
     fn repair_teaches(&self) -> bool {
-        self.rewritten().is_some() || self.repaired_kind == Some(RejectionKind::UnsupportedField)
+        self.written_value().is_some()
+            || self.repaired_kind == Some(RejectionKind::UnsupportedField)
     }
 
     /// Perform the repair for whichever admitted row `err` names: apply that
@@ -1836,8 +1839,9 @@ impl FieldRepairPlan<'_> {
     /// retry that succeeded is evidence about that row alone -- every other
     /// candidate's guard was already released by [`Self::apply_named`].
     ///
-    /// And only when the rejection refused the FIELD, or the repair rewrote it
-    /// to the one accepted value the rejection named. A refused value repaired
+    /// And only when the rejection refused the FIELD, the repair rewrote it to
+    /// the one accepted value the rejection named, or it lowered a token limit
+    /// to the ceiling the rejection named. A refused value repaired
     /// by a DROP says the lane accepts the field, so a verdict dropping it
     /// would strip every valid value from every later request on the lane;
     /// such a plan releases its guard here and persists nothing.
@@ -1845,8 +1849,8 @@ impl FieldRepairPlan<'_> {
     /// The commit carries the attribution tier of the rejection that drove the
     /// repair: a self-identifying verdict acts at once, an inferred one persists
     /// pending and acts only once a later request corroborates it. A rewrite
-    /// commit also carries the value it wrote, so the persisted verdict names
-    /// what it rewrites to.
+    /// or ceiling commit also carries the value it wrote, so the persisted
+    /// verdict names what it rewrites or clamps to.
     ///
     /// `request_features` is taken BY VALUE: the guard stores it on the event
     /// row, so a borrow here would only be cloned one frame deeper.
@@ -1861,7 +1865,7 @@ impl FieldRepairPlan<'_> {
         if !self.repair_teaches() {
             return None;
         }
-        let value = self.rewritten().map(VerdictValue::Shape);
+        let value = self.written_value();
         self.candidates[idx].guard.take()?.commit(
             tier,
             value,
