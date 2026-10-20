@@ -688,7 +688,8 @@ license.
   Provider for AnthropicApiProvider`
   (`normalize_request`/`normalize_response`, `complete`, `stream` + SSE drain,
   `count_tokens`, `on_auth_failure`, `probe`), the public
-  `emitted_thinking_type` re-export from `extras.rs`, plus
+  `emitted_thinking_type` and `DEFAULT_MAX_OUTPUT_TOKENS` re-exports from
+  `extras.rs`, plus
   `read_anthropic_error` / `anthropic_error_from_read` (the error mapper all
   three HTTP paths share, built from an `upstream_error::UpstreamErrorRead`,
   mantle 403 scrubbed through `aws_error`) and `build_count_tokens_body` (the
@@ -2850,15 +2851,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/replay_strip_tests.rs`
 - `src/router/field_repair.rs` -- the reactive L0 envelope-field repair the
   three dispatch arms drive, and the counterpart of `replay_repair` for the
-  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (three
-  grounded rows today: the `thinking.enabled.display` Drop and the
+  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (eight
+  grounded rows today, all `Envelope`: the `thinking.enabled.display` Drop; the
   `thinking.type.enabled` / `thinking.type.disabled` Rewrites over
-  `FieldSurface::AnthropicThinkingType`; `FieldRepairRow { path, surface, transform, class,
+  `FieldSurface::AnthropicThinkingType`; the `temperature`, `top_p`,
+  `presence_penalty` and `frequency_penalty` Drops over
+  `FieldSurface::SamplingParam` (one canonical request field each); and the
+  `max_tokens` Ceiling over `FieldSurface::MaxTokens`, present when the client
+  sent a limit or the egress fills one (`routectl_internal.fills_max_tokens`,
+  emitting the model ceiling or `anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS`);
+  `FieldRepairRow { path, surface, transform, class,
   count_tokens_validates }` -- the qualified dotted path a real captured
   rejection named, the private `FieldSurface` enum naming the request-side
-  carriers that produce that wire field, the `FieldTransform` (`Drop`, or
-  `Rewrite { accepted }` over a closed accepted set -- `ValueSlot` via
-  `value_slot_for_capability_key`), the `TransformClass` deciding which
+  carriers that produce that wire field, the `FieldTransform` (`Drop`,
+  `Rewrite { accepted }` over a closed accepted set, or `Ceiling`, which only
+  ever lowers a limit; the value slot is `ValueSlot::Shape` / `ValueSlot::Ceiling`
+  via `value_slot_for_capability_key`), the `TransformClass` deciding which
   pre-flight gates an application of that row must clear, and whether a free
   token count can re-check it). The taxonomy is TRANSFORM-KEYED: a row
   STATES its class (`Envelope` / `PrefixImpacting`, plus `required_quorum` and
@@ -2956,9 +2964,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   rejection names (refusing outright when it names none, and refusing a second
   call outright once one row has been repaired), re-check presence, CHECK the
   allowance
-  (`RepairBudget::can_draw`, a read), apply the row's transform -- drop the
-  field (both carriers, or the egress re-derives it), or rewrite it to the one
-  accepted value the rejection named -- then DRAW, RELEASE every other candidate's guard -- this
+  (`RepairBudget::can_draw`, a read), apply the row's transform as the
+  private `FieldEdit` the rejection's `RejectionValue` resolves it to (drop the
+  field from both carriers, since otherwise the egress re-derives it; rewrite it
+  to the one accepted value the rejection named; or clamp the emitted limit to
+  the named ceiling through `FieldSurface::clamp_to`, only when
+  `clamp_lowers` says the ceiling is below the emitted limit), then DRAW,
+  RELEASE every other candidate's guard -- this
   attempt has spent its one repair, so no outcome can settle another row, and
   pinning those slots would starve a sibling request that CAN settle them --
   re-stamp the estimate through
@@ -2975,7 +2987,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   rejection named it and the retry is evidence about it); `settle_success`
   clears EVERY admitted row (an unrepaired success means every carried field was
   accepted) and so returns a `Vec` rather than an `Option`; both are no-ops
-  without a guard, release-by-drop otherwise.
+  without a guard, release-by-drop otherwise. `commit` teaches only a repair
+  that wrote a value (rewrite or ceiling, carried as the verdict's value) or
+  dropped an unsupported field. The WARN action token is closed:
+  `field_drop_repair`, `field_lossy_drop_repair` (a value-refused drop),
+  `field_rewrite_repair`, `field_ceiling_repair` (a client limit lowered,
+  lossy) and `field_ceiling_fill_repair` (a limit routectl filled for a client
+  that sent none, `clamp_writes_fill`; lossless, and it declares no
+  `FieldRepair` edit because the egress already declares that field as its
+  required default).
   `note_field_repair` / `note_field_repair_succeeded` record the
   `DispatchMeta.field_repairs` records and bump the attempted / lossy /
   succeeded / learned counters, and `emit_field_repair` fires one content-free
@@ -3122,8 +3142,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   class, never the operator-remapped one, through the same `rejected_field`
   the reactive `FieldRepairPlan::apply_named` consumes, so "did the
   upstream name this mutation" has one implementation rather than two answers.
-  It applies the transform through `field_repair`'s own `FieldSurface::drop_from`
-  or, for a rewrite verdict, `FieldSurface::rewrite_in` with the verdict's
+  It applies the transform through `field_repair`'s own `FieldSurface::drop_from`,
+  for a rewrite verdict `FieldSurface::rewrite_in`, or for a ceiling verdict
+  `FieldSurface::clamp_to` (only ever lowering the limit), with the verdict's
   stored value (`FieldVerdictRegistry::verdict_value` at the authorized
   incarnation) rather than a second implementation, against a SCRATCH clone adopted only on
   a reported success plus a post-condition re-check, so a transform that
@@ -3134,7 +3155,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `unattributable_target` / `masked_by_override` / `no_identity` /
   `not_eligible` / `below_quorum` / `no_target_opt_in` /
   `ambiguous_mutation` / `no_stored_value` / `value_already_sent` /
-  `canary_restored`); the record carries
+  `within_ceiling` / `canary_restored`); the record carries
   only tokens, a
   code-authored path literal, the row's `transform_class` token, a
   `sanitize_for_log`-sanitized state key (an
@@ -3161,8 +3182,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   DEBUG line rather than the last (`max_by_key` returns the last maximum --
   deterministic, but the wrong end). Equal-impact ties are reachable across
   TARGETS (a two-seat chain acting on one class, pinned by
-  `the_request_warn_names_the_first_seat_when_two_seats_act_on_one_class`) though
-  not within one target, since the closed table holds one row per class. The
+  `the_request_warn_names_the_first_seat_when_two_seats_act_on_one_class`) and
+  within one target too, since every grounded row is `Envelope` and a request
+  can carry several of them. The
   aggregate counts still describe every decision, so naming one hides nothing.
   BOTH tiers additionally carry the AUTHORIZATION PROVENANCE
   (`FieldPreflightAuthorizationRecord`: `phase` / `source` / `confirmations` /
@@ -3181,8 +3203,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   decision that had none. The WARN carries the HEADLINE decision's own provenance
   rather than an aggregate, since the four values describe ONE identity's evidence.
   Field-by-field reference in `docs/LOGGING.md` "Envelope-field pre-flight
-  decision DEBUG + WARN". `action` (`field_preflight_drop` or
-  `field_preflight_rewrite`, the acting decision's own token) is
+  decision DEBUG + WARN". `action` (`field_preflight_drop`,
+  `field_preflight_rewrite` or `field_preflight_ceiling`, the acting decision's
+  own token, from the private `PreflightEdit` it applied) is
   attached only to a record that ACTED -- labelling a fail-open with it would
   name an action the walk did not take.
   Read-only on the verdict: it draws no `RepairBudget` and claims no
@@ -3271,7 +3294,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe_generic` hands it to `Router::observe_transcript_rejection`. A site
   whose `matched_edit` is not `None` short-circuits
   to `learn_revert::answer_declared_edit` (undo or `Proceed`; no proposer
-  reads it); otherwise it builds a read-only
+  reads it, with one exception: a `MatchedEdit::One` at
+  `EditSite::RequiredFieldDefault` that was not undone falls through to the
+  proposers, `RejectionSite::unreverted_reaches_proposers`, since the upstream
+  may refuse routectl's own value and a learned repair can supply another);
+  otherwise it builds a read-only
   `RejectionInput` and runs `arbitrate`: the ONE precedence, the static
   `ARBITRATION_ORDER` of `Proposer`s (no trait objects) over the closed
   `Proposal` enum (`ReplayStrip` / `FieldRow` / `Capability`) -- replay strip
@@ -3320,7 +3347,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   request's `RepairBudget` last, and un-declares exactly one occurrence of
   the undone edit, since sibling leaves under a masked container share its
   pattern), the content-free `WireRevert` state on
-  `DispatchMeta` that `emit_wire_rejections` reads for the outcome, and the
+  `DispatchMeta` that `emit_wire_rejections` reads for the outcome
+  (`revert_outcome`: `Repaired` when the reverted attempt succeeded,
+  `Unrepaired` when it did not, `None` for a declined revert so the
+  field-repair outcome stands), and the
   deduped `routectl_edit_rejected` WARN (lane, masked + sanitized path,
   `edit_site`: the declared site label, `conflict`, or `undeclared` for a
   `routectl_added` path no declaration explains, which then falls through to
@@ -3371,14 +3401,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/rejection_parser.rs` -- the per-dialect rejection parser:
   `parse_rejection(provider_kind, status, Option<&ParsedErrorBody>) ->
   Option<NamedRejection>`, where `NamedRejection { row: &'static
-  FieldRepairRow, tier: SignalTier, kind: RejectionKind, accepted:
-  Option<&'static str> }`. Reads
+  FieldRepairRow, tier: SignalTier, kind: RejectionKind, value:
+  Option<RejectionValue> }` and `RejectionValue::{Shape(&'static str),
+  Ceiling(u32)}`. Reads
   the carried parse (never the body text) on 400 / 422 only, for
   `anthropic-api` (location prefix `<path>: ...`, `"a.b" is not
-  supported ... Use "x.y"`, and the thinking off-switch template
-  `thinking_off_switch`, inside an `invalid_request_error`), `bedrock`
-  (the same three shapes on the flat `{"message"}` body after one Converse
-  errors wrapper is stripped) and `openai-compat` (`error.param`, or the
+  supported ... Use "x.y"`, the thinking off-switch template
+  `thinking_off_switch`, and the Messages ceiling template
+  `max_tokens: SENT > N, which is the maximum allowed number of output tokens
+  for <model>` with N below SENT, inside an `invalid_request_error`), `bedrock`
+  (the same four shapes on the flat `{"message"}` body after one Converse
+  errors wrapper is stripped, the Messages ceiling covering Invoke, plus two
+  exact templates captured on Converse and tried first: the `temperature`
+  field refusal
+  and `The maximum tokens you requested exceeds the model limit of N. Try again
+  with a maximum tokens value that is lower than N.` with both N equal) and
+  `openai-compat` (`error.param`, or the
   exact singular `Unsupported parameter: '<x>' is not supported with this
   model.` template; the plural NIM `Unsupported parameter(s): x` is a
   pinned near-miss). Any other kind, `gemini` and `openai-responses`
@@ -3396,9 +3434,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `UnsupportedField` for the location-prefix reason `Extra inputs are not
   permitted`, the quoted `"a.b" is not supported` form, OpenAI
   `error.code == "unsupported_parameter"` or the exact singular template;
-  every other reason, and a bare `error.param`, is `InvalidValue`. `accepted`
-  is filled only for a rewrite row, and only when the grounded template
-  position names exactly ONE member of the row's closed accepted set.
+  every other reason, and a bare `error.param`, is `InvalidValue`. `value`
+  (`named_value`) follows the row's transform: a `Shape` only for a rewrite
+  row, and only when the grounded template position names exactly ONE member
+  of the row's closed accepted set; a `Ceiling` only for the ceiling row, read
+  as a canonical nonzero `u32` through `field_verdict_value::canonical_ceiling`.
   Consumed by `field_repair::rejected_field`.
   `src/router/rejection_parser_tests.rs` welds it to the
   committed corpus (`tests/fixtures/rejections/**`, the Bedrock validation
@@ -3431,7 +3471,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   never recorded). Owns `lane_calibration_factor`, the one factor lookup +
   `[calibration]` kill switch the window gate also calls
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
-  `apply_layered_overlays`, `operator_betas`, `operator_payload_extras`, the
+  `apply_layered_overlays` (which also stamps `routectl_internal.max_output_tokens`
+  on every egress and `fills_max_tokens` from `wire_check::fills_max_tokens`),
+  `operator_betas`, `operator_payload_extras`, the
   `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
 - `src/router/edit_declare.rs` -- router-side wire-check edit declarations:
   each transform that changes a fidelity-lane body (model rename, operator
@@ -3445,7 +3487,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/wire_check.rs` -- the live request-leg wire check on a successful
   attempt: `egress_kind_of` (provider entry -> `EgressKind`, Bedrock shape and
   Mantle sub-lanes distinct; set once on each `DispatchTarget` at chain
-  expansion), `install_wire_tap` (a fresh `WireTap` per provider call on both
+  expansion), `fills_max_tokens(EgressKind)` (whether the egress sends
+  `max_tokens` when the client sent none: `AnthropicApi`, `AnthropicApiMantle`,
+  `BedrockInvoke`), `install_wire_tap` (a fresh `WireTap` per provider call on both
   surfaces, only when the request carries an ingress body; the sampler decides
   admission here and returns `(Option<WireTap>, SampleCharge)` -- a FIDELITY
   admission also checks the response, and `traced_translation_fold` adds a
@@ -3477,7 +3521,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Provenance labels keep `locate`'s key-first walk. `matched_edit` is
   computed only when `learn_revert::attributable`. Holds a content-free
   `PendingWireRejection` on `DispatchMeta`; `emit_wire_rejections` takes a
-  revert's outcome from `DispatchMeta.wire_reverts` when one exists, else
+  revert's outcome from `DispatchMeta.wire_reverts` when the revert answered
+  the rejection (a declined revert answers nothing), else
   joins the field-repair outcome at dispatch end on the unmasked raw field
   path (never rendered) and records the ring entry (WARN on `unrepaired`,
   deduped). `Router::read_count_rejection_site` is the token-count form: it
@@ -4634,13 +4679,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Ceiling`) -- unknown or mismatched prefix, non-member shape, non-canonical,
   zero or out-of-range ceiling, empty or non-ASCII -> `None` plus a WARN
   (`field_verdict_value_malformed`) and `malformed_total()`. A decoded shape is
-  the row's own `&'static` member, never the stored text. A rewrite commit
-  (`FieldRepairPlan::commit` -> `FieldRepairGuard::commit`) carries
-  `Some(Shape)` on `CapabilityLearnEvent::value`, and
+  the row's own `&'static` member, never the stored text. A rewrite or ceiling
+  commit (`FieldRepairPlan::commit` -> `FieldRepairGuard::commit`) carries
+  `Some(Shape)` / `Some(Ceiling)` on `CapabilityLearnEvent::value`, and
   `routectl-cli`'s `capability_ack_drain` writes it to `upstream_token` (NULL
   for a drop). `FieldValueStore` holds each identity's resident value keyed
   by the incarnation it was recorded at (`value_at`, `latest`, `record`,
-  `forget`): a lookup naming any other lifecycle answers nothing
+  `forget`): a lookup naming any other lifecycle answers nothing.
+  `canonical_ceiling(digits)` exposes the ceiling codec rule to the rejection
+  parser
 - `src/field_canary.rs` -- per-`FieldVerdictKey` canary and confirmation-quorum
   state, shared behind an `Arc` alongside `FieldVerdictRegistry`'s own
   in-flight set. STATE ONLY, one `Mutex<HashMap<FieldVerdictKey, CanaryState>>`
