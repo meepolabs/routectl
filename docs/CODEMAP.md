@@ -2966,7 +2966,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   allowance
   (`RepairBudget::can_draw`, a read), apply the row's transform as the
   private `FieldEdit` the rejection's `RejectionValue` resolves it to (drop the
-  field from both carriers, since otherwise the egress re-derives it; rewrite it
+  row's carriers: both for `AnthropicThinkingDisplay`, since otherwise the
+  egress re-derives it, and the one canonical field for a sampling row; rewrite it
   to the one accepted value the rejection named; or clamp the emitted limit to
   the named ceiling through `FieldSurface::clamp_to`, only when
   `clamp_lowers` says the ceiling is below the emitted limit), then DRAW,
