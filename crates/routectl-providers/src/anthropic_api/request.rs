@@ -58,8 +58,8 @@ use super::types::{
 
 // Primitives used only by the orchestrator below.
 use super::extras::{
-    ThinkingStrip, merge_provider_extras, reconcile_output_config_effort,
-    reconcile_sampling_params, resolve_max_tokens, shipped_thinking,
+    ThinkingStrip, merge_provider_extras, reconcile_output_config_effort, resolve_max_tokens,
+    shipped_thinking,
 };
 use super::messages::{SystemTurnPolicy, normalize_replay_invariants, translate_messages};
 use super::tools::{
@@ -967,9 +967,6 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // `output_config` over the composed one.
     reconcile_output_config_effort(req, &mut body, adaptive);
     super::wire_edits::declare_effort_edits(tap, req, &body);
-    // Recompute the caller's sampling from the source request when no active
-    // thinking ships, so a body without it never carries the forced 1.0.
-    reconcile_sampling_params(id, req, &mut body);
     Ok((
         body,
         DeferredOutputConfigDiagnostics {

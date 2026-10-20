@@ -1207,10 +1207,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  under active thinking. It never ADDS a temperature: a request with no client \
                  temperature ships none, so an ADDED `1.0` is not this transform and stays a \
                  finding. A client `null` is no temperature either, so the client side must be \
-                 numeric. NOT `reconcile_sampling_params`: that function early-returns while \
-                 active thinking survives on the body and so cannot be the source. The \
-                 client's original value is deliberately NOT pinned: the clamp rewrites \
-                 whatever the caller sent. In-place value change, hence a MATCHER.",
+                 numeric. The client's original value is deliberately NOT pinned: the clamp \
+                 rewrites whatever the caller sent. In-place value change, hence a MATCHER.",
         site_symbol: "clamp_sampling_for_thinking",
         site_path: "crates/routectl-providers/src/anthropic_api/request.rs",
         path_predicate: |path| path == "temperature",

@@ -670,21 +670,11 @@ pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value
     }
 }
 
-/// The assembled body's `thinking.type`. Shared final-body read: the
-/// sampling-params and effort reconcilers both key off it, so the two late
-/// passes cannot disagree about what thinking ships.
+/// The assembled body's `thinking.type`.
 fn body_thinking_type(body: &Value) -> Option<&str> {
     body.get("thinking")
         .and_then(|t| t.get("type"))
         .and_then(Value::as_str)
-}
-
-/// True iff the body carries a `thinking` block whose type spends reasoning
-/// budget (`is_active_thinking_type`). The thinking clamp's `temperature = 1.0`
-/// rewrite applies only to active thinking, so a body whose thinking is `disabled`,
-/// another type, or stripped entirely gets the caller's sampling back.
-fn body_has_active_thinking(body: &Value) -> bool {
-    body_thinking_type(body).is_some_and(is_active_thinking_type)
 }
 
 /// True iff `body.thinking.type == "adaptive"`.
@@ -812,46 +802,6 @@ pub(super) fn drop_redact_beta_for_display(
     }
 }
 
-/// Late enforcer of the temperature/top_p invariant on the assembled body.
-/// Assembly rewrites a client `temperature` to 1.0 and drops `top_p` whenever
-/// active thinking ships (Anthropic forbids alternative-continuation sampling while
-/// spending reasoning budget); a pass that removed `thinking` after that
-/// clamp would leave the forced sampling behind and discard the caller's
-/// original values.
-///
-/// This recomputes from the FINAL body: when no ACTIVE thinking ships
-/// (stripped entirely, or an inactive type such as `disabled`), re-apply the
-/// caller's sampling from the SOURCE request -- `temperature =
-/// req.temperature`, and `top_p` only when temperature is absent (mirrors the
-/// assembly else-branch; Claude 4.x rejects `temperature`+`top_p` together).
-/// Computing from the final body rather than restoring saved pre-strip values
-/// means a future strip pass cannot invalidate it. Must run after ALL strip
-/// passes.
-pub(super) fn reconcile_sampling_params(provider_id: &str, req: &ChatRequest, body: &mut Value) {
-    if body_has_active_thinking(body) {
-        return;
-    }
-    let temperature = req.temperature;
-    let top_p = if temperature.is_some() {
-        None
-    } else {
-        req.top_p
-    };
-    let Some(obj) = body.as_object_mut() else {
-        return;
-    };
-    let tap = super::wire_edits::tap_of(req);
-    let temp_changed = set_optional_f64(obj, "temperature", temperature, tap);
-    let top_p_changed = set_optional_f64(obj, "top_p", top_p, tap);
-    if temp_changed || top_p_changed {
-        tracing::debug!(
-            provider = provider_id,
-            "recomputed temperature/top_p after a strip pass removed thinking; \
-             restored caller sampling params"
-        );
-    }
-}
-
 /// Fixed lane label stamped on the sampling-strip event. Names the credential
 /// lane (routectl's own OAuth seat egressing to api.anthropic.com), not the
 /// cloak state -- the strip is lane-deterministic, so a single static value
@@ -903,38 +853,6 @@ pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) -> 
         "stripped sampling params the OAuth seat rejects on api.anthropic.com"
     );
     dropped
-}
-
-/// Set `key` to `value` on `obj`, or remove it when `value` is None
-/// (mirroring the wire's `skip_serializing_if = "Option::is_none"`).
-/// Returns true iff the emitted field actually changed, so the caller only
-/// logs a real correction; a change is declared on `tap`.
-fn set_optional_f64(
-    obj: &mut serde_json::Map<String, Value>,
-    key: &'static str,
-    value: Option<f64>,
-    tap: Option<&WireTap>,
-) -> bool {
-    let kind = match value {
-        Some(v) => {
-            let next = Value::from(v);
-            if obj.get(key) == Some(&next) {
-                return false;
-            }
-            match obj.insert(key.to_string(), next) {
-                Some(_) => EditKind::Rewrite,
-                None => EditKind::Add,
-            }
-        }
-        None => {
-            if obj.remove(key).is_none() {
-                return false;
-            }
-            EditKind::Remove
-        }
-    };
-    super::wire_edits::declare(tap, EditSite::SamplingReconcile, format!("/{key}"), kind);
-    true
 }
 
 #[cfg(test)]

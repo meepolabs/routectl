@@ -174,7 +174,7 @@ fn build_inference_config(
     //
     // `thinking_type` is the type the final bag ships, `None` when no thinking
     // survived; a stripped or inactive type restores the caller's sampling,
-    // matching the direct Anthropic path's reconcile_sampling_params.
+    // matching the direct Anthropic path, which calls the same helper.
     let (temperature, top_p) =
         clamp_sampling_for_thinking(thinking_type, req.temperature, req.top_p);
     let cfg_inference = InferenceConfig {

@@ -15,7 +15,6 @@ use serde_json::{Value, json};
 use super::clamp_sampling_for_thinking;
 use super::thinking_carrier_tests::{body, ingress_request};
 use crate::anthropic_api::emitted_thinking_type;
-use crate::anthropic_api::extras::reconcile_sampling_params;
 
 const CALLER_TEMPERATURE: f64 = 0.5;
 
@@ -182,19 +181,6 @@ fn active_thinking_without_a_client_temperature_ships_no_temperature() {
         assert!(wire.get("temperature").is_none(), "{wire}");
         assert!(wire.get("top_p").is_none(), "{wire}");
     }
-}
-
-#[test]
-fn the_sampling_reconciler_restores_caller_sampling_for_an_inactive_type() {
-    let req = ChatRequest {
-        temperature: Some(CALLER_TEMPERATURE),
-        ..Default::default()
-    };
-    let mut wire = json!({"thinking": {"type": "between_tools"}, "temperature": 1.0});
-
-    reconcile_sampling_params("p", &req, &mut wire);
-
-    assert_eq!(wire["temperature"], CALLER_TEMPERATURE);
 }
 
 fn translated(reasoning: Option<ReasoningConfig>) -> ChatRequest {

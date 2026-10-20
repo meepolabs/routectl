@@ -3843,7 +3843,7 @@ fn off_lane_requests_keep_sampling_byte_unchanged() {
 /// `temperature`), so each path is re-run with a top_p-only request and the
 /// pre-strip assembly is asserted to actually carry the seeded key first.
 /// A body carrying BOTH keys is unreachable through a `ChatRequest` --
-/// `reconcile_sampling_params` emits `top_p` only when `temperature` is
+/// `clamp_sampling_for_thinking` emits `top_p` only when `temperature` is
 /// absent, and `merge_provider_extras` shields both as managed keys -- so
 /// the combined case is covered at the emitter level by
 /// `sampling_strip_emits_one_warn_naming_both_dropped_keys`.
