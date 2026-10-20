@@ -120,6 +120,14 @@ const BEDROCK_CEILING_MIDDLE: &str = ". Try again with a maximum tokens value th
 const BEDROCK_CEILING_CLOSE: &str = ".";
 const MAX_TOKENS_PATH: &str = "max_tokens";
 
+/// The Messages-body refusal of an output token limit above the model's,
+/// exactly as captured on anthropic-api and on Bedrock Invoke:
+/// `<lead-in>SENT<middle>N<close><model id>`. The model id ends the message
+/// and is never read; only a nonempty single token is accepted there.
+const MESSAGES_CEILING_LEAD_IN: &str = "max_tokens: ";
+const MESSAGES_CEILING_MIDDLE: &str = " > ";
+const MESSAGES_CEILING_CLOSE: &str = ", which is the maximum allowed number of output tokens for ";
+
 /// The location-prefix reason that refuses the field itself; every other
 /// reason refuses the value.
 const LOCATION_UNSUPPORTED_FIELD_REASON: &str = "Extra inputs are not permitted";
@@ -458,9 +466,30 @@ fn output_ceiling(message: &str) -> Option<Attribution<'static>> {
     })
 }
 
+/// `max_tokens: SENT > N, which is the maximum allowed number of output
+/// tokens for <model>`, verbatim, both numbers canonical and N below SENT.
+/// Unlike the Converse template this one echoes the value sent, so the
+/// template itself must not contradict the refusal it states.
+fn messages_output_ceiling(message: &str) -> Option<Attribution<'static>> {
+    let rest = message.strip_prefix(MESSAGES_CEILING_LEAD_IN)?;
+    let (sent, rest) = rest.split_once(MESSAGES_CEILING_MIDDLE)?;
+    let (limit, model) = rest.split_once(MESSAGES_CEILING_CLOSE)?;
+    let single_token = !model.is_empty() && !model.contains(char::is_whitespace);
+    let ceiling = canonical_ceiling(limit)?;
+    (single_token && ceiling < canonical_ceiling(sent)?).then(|| Attribution {
+        path: MAX_TOKENS_PATH,
+        tier: SignalTier::SelfIdentifying,
+        kind: RejectionKind::InvalidValue,
+        presupposes_presence: true,
+        replacements: Vec::new(),
+        ceiling: Some(ceiling),
+    })
+}
+
 fn localize_message(message: &str) -> Option<Attribution<'_>> {
     quoted_not_supported(message)
         .or_else(|| thinking_off_switch(message))
+        .or_else(|| messages_output_ceiling(message))
         .or_else(|| location_prefix(message))
 }
 

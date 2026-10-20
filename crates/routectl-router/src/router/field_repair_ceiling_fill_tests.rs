@@ -1,6 +1,6 @@
 // The max_tokens ceiling row against the limit routectl fills for a client
 // that sent none: an anthropic-api seat assembles the real Messages body, so
-// the refused value is the egress default, the rejection matches the egress's
+// the refused value is the operator's fill, the rejection matches the egress's
 // own declaration of that default, and every assertion reads the body an
 // upstream would receive.
 // An `include!`d FRAGMENT of `field_repair_tests.rs`.
@@ -8,18 +8,20 @@
 mod ceiling_fill {
     use super::*;
 
-    use super::super::super::rejection_parser::RejectionValue;
     use crate::wire_check_state::FieldRepairOutcome;
     use routectl_core::wire_check::{EditKind, EditSite, IngressDialect, IngressWire, Leg};
 
     /// The committed Messages capture of a model refusing a `max_tokens` above
-    /// its own limit. Its message names the field through the location prefix
-    /// and carries no ceiling the parser reads, so the test injects the value.
+    /// its own limit, served verbatim: the parser reads [`NAMED_LIMIT`] from
+    /// it.
     const MESSAGES_CEILING_FIXTURE: &str = include_str!(
         "../../tests/fixtures/rejections/anthropic-api/max-tokens-above-model-limit-messages.json"
     );
-    const NAMED_LIMIT: u32 = 32_000;
-    const FILLED: u32 = routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS;
+    /// The limit the capture names.
+    const NAMED_LIMIT: u32 = 128_000;
+    /// The operator's `max_output_tokens`, the value the capture was refused
+    /// for, so the seat refuses the very body the upstream refused.
+    const FILLED: u32 = 1_000_000;
     const TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
          [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
          [providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
@@ -150,12 +152,15 @@ mod ceiling_fill {
         let mut router = Router::new(Arc::new(config));
         router.install_resolved_models(BTreeMap::from([(
             "m0".to_string(),
-            Arc::new(ResolvedModel::new(
-                "m0",
-                "p0",
-                Arc::clone(seat) as Arc<dyn Provider>,
-                "upstream",
-            )),
+            Arc::new(
+                ResolvedModel::new(
+                    "m0",
+                    "p0",
+                    Arc::clone(seat) as Arc<dyn Provider>,
+                    "upstream",
+                )
+                .with_max_output_tokens(FILLED),
+            ),
         )]));
         router.with_capability_writes_assumed_durable_for_tests()
     }
@@ -196,8 +201,6 @@ mod ceiling_fill {
     #[tokio::test]
     async fn a_refused_fill_retries_at_the_named_limit_and_learns_it() {
         for stream in [false, true] {
-            let _injection =
-                provisional::inject_value("max_tokens", RejectionValue::Ceiling(NAMED_LIMIT));
             let seat = FillSeat::new();
             let router = fill_router(&seat);
 
@@ -257,7 +260,7 @@ mod ceiling_fill {
                     .as_ref()
                     .map(crate::VerdictValue::encode)
                     .as_deref(),
-                Some("ceiling:32000"),
+                Some("ceiling:128000"),
                 "stream={stream}",
             );
             assert_eq!(
@@ -273,8 +276,6 @@ mod ceiling_fill {
     /// it still matches one edit.
     #[tokio::test]
     async fn the_clamped_fill_stays_the_egress_declared_default() {
-        let _injection =
-            provisional::inject_value("max_tokens", RejectionValue::Ceiling(NAMED_LIMIT));
         let seat = FillSeat::new();
         let router = fill_router(&seat);
 
@@ -308,13 +309,11 @@ mod ceiling_fill {
     /// budget stays below its `max_tokens`.
     #[tokio::test]
     async fn the_thinking_budget_fits_the_clamped_fill() {
-        let _injection =
-            provisional::inject_value("max_tokens", RejectionValue::Ceiling(NAMED_LIMIT));
         let seat = FillSeat::new();
         let router = fill_router(&seat);
         let reasoning = ReasoningConfig {
             effort: None,
-            max_tokens: Some(48_000),
+            max_tokens: Some(200_000),
             exclude: None,
             enabled: Some(true),
         };
@@ -327,7 +326,7 @@ mod ceiling_fill {
         let bodies = seat.bodies();
         assert_eq!(
             bodies[0]["thinking"]["budget_tokens"],
-            json!(48_000),
+            json!(200_000),
             "premise: under the fill the budget fits as asked",
         );
         assert_eq!(
@@ -347,20 +346,16 @@ mod ceiling_fill {
     async fn the_request_after_a_committed_fill_ceiling_goes_out_at_the_ceiling() {
         let seat = FillSeat::new();
         let router = fill_router(&seat);
-        let event = {
-            let _injection =
-                provisional::inject_value("max_tokens", RejectionValue::Ceiling(NAMED_LIMIT));
-            let first = router
-                .complete_with_options(unlimited_req(None), RouterOptions::new())
-                .await;
-            assert!(first.result.is_ok(), "premise: the clamped retry serves");
-            first
-                .meta
-                .learned_capabilities
-                .first()
-                .expect("premise: the repair committed a ceiling")
-                .clone()
-        };
+        let first = router
+            .complete_with_options(unlimited_req(None), RouterOptions::new())
+            .await;
+        assert!(first.result.is_ok(), "premise: the clamped retry serves");
+        let event = first
+            .meta
+            .learned_capabilities
+            .first()
+            .expect("premise: the repair committed a ceiling")
+            .clone();
         assert!(
             router.acknowledge_durable_field_confirmation(
                 &event.state_key,

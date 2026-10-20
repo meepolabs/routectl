@@ -167,7 +167,7 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
     let expected: BTreeMap<String, Outcome> = [
         (
             "anthropic-api/max-tokens-above-model-limit-messages",
-            Outcome::Row(MAX_TOKENS_PATH, Inferred, InvalidValue),
+            Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "anthropic-api/thinking-display-enum",
@@ -183,7 +183,7 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "bedrock/max-tokens-above-model-limit-invoke",
-            Outcome::Row(MAX_TOKENS_PATH, Inferred, InvalidValue),
+            Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "bedrock/temperature-field-unsupported",
@@ -1354,17 +1354,26 @@ fn named_value(kind: &str, body: &str) -> Option<(&'static str, Option<Rejection
 }
 
 /// Mutation check: drop the number capture from the Converse ceiling arm ->
-/// red (the Converse fixture resolves its row with no value).
+/// red on the Converse fixture; drop the Messages ceiling arm -> red on the
+/// Invoke and Messages fixtures (each resolves its row with no value).
 #[test]
-fn the_committed_max_tokens_fixtures_carry_the_ceiling_only_the_converse_template_names() {
+fn every_committed_max_tokens_fixture_carries_the_ceiling_its_template_names() {
     let cases = [
         (
             BEDROCK,
             "max-tokens-above-model-limit",
             Some(RejectionValue::Ceiling(8192)),
         ),
-        (BEDROCK, "max-tokens-above-model-limit-invoke", None),
-        (ANTHROPIC, "max-tokens-above-model-limit-messages", None),
+        (
+            BEDROCK,
+            "max-tokens-above-model-limit-invoke",
+            Some(RejectionValue::Ceiling(64_000)),
+        ),
+        (
+            ANTHROPIC,
+            "max-tokens-above-model-limit-messages",
+            Some(RejectionValue::Ceiling(128_000)),
+        ),
     ];
 
     for (kind, case, expected) in cases {
@@ -1498,5 +1507,158 @@ fn an_openai_compat_unsupported_max_tokens_resolves_the_row_with_no_value() {
     assert_eq!(
         named_value(OPENAI_COMPAT, &body),
         Some((MAX_TOKENS_PATH, None))
+    );
+}
+
+/// The Messages-body ceiling refusal exactly as the committed anthropic-api
+/// capture spells it.
+const MESSAGES_CEILING_MESSAGE: &str = "max_tokens: 1000000 > 128000, which is the maximum \
+     allowed number of output tokens for claude-haiku-5-5";
+/// The same template as the committed Bedrock Invoke capture spells it.
+const INVOKE_CEILING_MESSAGE: &str = "max_tokens: 1000000 > 64000, which is the maximum \
+     allowed number of output tokens for anthropic.claude-haiku-4-5-20251001-v1:0";
+
+#[test]
+fn the_messages_ceiling_template_names_the_row_on_anthropic_api_and_invoke() {
+    let captured = |kind: &str, case: &str, pointer: &str| {
+        let body: Value = serde_json::from_str(&fixture(kind, case).1).unwrap();
+        body.pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    assert_eq!(
+        captured(
+            ANTHROPIC,
+            "max-tokens-above-model-limit-messages",
+            "/error/message"
+        )
+        .as_deref(),
+        Some(MESSAGES_CEILING_MESSAGE),
+        "premise: the Messages constant is the committed capture's message",
+    );
+    assert_eq!(
+        captured(BEDROCK, "max-tokens-above-model-limit-invoke", "/message").as_deref(),
+        Some(INVOKE_CEILING_MESSAGE),
+        "premise: the Invoke constant is the committed capture's message",
+    );
+    let other_pair = MESSAGES_CEILING_MESSAGE
+        .replace("1000000", "9000")
+        .replace("128000", "8192");
+    let cases = [
+        (
+            "messages",
+            ANTHROPIC,
+            anthropic_body(MESSAGES_CEILING_MESSAGE),
+            128_000,
+        ),
+        (
+            "messages, another pair",
+            ANTHROPIC,
+            anthropic_body(&other_pair),
+            8192,
+        ),
+        (
+            "invoke",
+            BEDROCK,
+            bedrock_body(INVOKE_CEILING_MESSAGE),
+            64_000,
+        ),
+        (
+            "invoke, another pair",
+            BEDROCK,
+            bedrock_body(&other_pair),
+            8192,
+        ),
+        (
+            "one below the value sent",
+            ANTHROPIC,
+            anthropic_body(&MESSAGES_CEILING_MESSAGE.replace("1000000", "128001")),
+            128_000,
+        ),
+    ];
+
+    for (name, kind, body, limit) in cases {
+        assert_eq!(
+            outcome(kind, 400, &body),
+            Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
+            "{name}",
+        );
+        assert_eq!(
+            named_value(kind, &body),
+            Some((MAX_TOKENS_PATH, Some(RejectionValue::Ceiling(limit)))),
+            "{name}",
+        );
+        let parsed = UpstreamBody::new(body);
+        let rejected = rejected_wire_path(kind, 400, parsed.parsed()).expect("localized");
+        assert!(rejected.presupposes_presence, "{name}");
+        assert!(rejected.field.segments().eq([MAX_TOKENS_PATH]), "{name}");
+    }
+}
+
+/// A near-miss of the Messages ceiling template names no ceiling. Its
+/// `max_tokens: ` lead-in still reads as the location prefix, an inferred
+/// value refusal carrying no value, on which the ceiling row makes no edit.
+#[test]
+fn messages_ceiling_near_misses_name_no_ceiling() {
+    let exact = MESSAGES_CEILING_MESSAGE;
+    let sent = |to: &str| exact.replacen("1000000", to, 1);
+    let limit = |to: &str| exact.replacen("128000", to, 1);
+    let cases = [
+        ("limit equal to the value sent", limit("1000000")),
+        ("limit above the value sent", limit("2000000")),
+        ("zero limit", limit("0")),
+        ("leading zero in the limit", limit("0128000")),
+        ("leading zero in the value sent", sent("01000000")),
+        ("plus sign on the limit", limit("+128000")),
+        ("minus sign on the value sent", sent("-1000000")),
+        ("limit overflow", limit("4294967296")),
+        ("value sent overflow", sent("4294967296")),
+        ("non-digit limit", limit("128k")),
+        ("empty limit", limit("")),
+        ("empty value sent", sent("")),
+        ("grouped digits", limit("128,000")),
+        ("other comparison", exact.replace(" > ", " >= ")),
+        (
+            "wrong prose",
+            exact.replace("maximum allowed number", "maximum number"),
+        ),
+        (
+            "empty model",
+            exact.strip_suffix("claude-haiku-5-5").unwrap().to_string(),
+        ),
+        ("trailing prose", format!("{exact}. See the docs.")),
+    ];
+    for kind in [ANTHROPIC, BEDROCK] {
+        let wrap = |message: &str| {
+            if kind == ANTHROPIC {
+                anthropic_body(message)
+            } else {
+                bedrock_body(message)
+            }
+        };
+        assert_eq!(
+            named_value(kind, &wrap(exact)),
+            Some((MAX_TOKENS_PATH, Some(RejectionValue::Ceiling(128_000)))),
+            "premise: {kind} reads the ceiling from the exact template",
+        );
+
+        for (name, message) in &cases {
+            let body = wrap(message);
+            assert_eq!(
+                outcome(kind, 400, &body),
+                Outcome::Row(MAX_TOKENS_PATH, Inferred, InvalidValue),
+                "{kind}: {name}",
+            );
+            assert_eq!(
+                named_value(kind, &body),
+                Some((MAX_TOKENS_PATH, None)),
+                "{kind}: {name}",
+            );
+        }
+    }
+    assert_eq!(
+        outcome(OPENAI_COMPAT, 400, &openai_body(exact, None)),
+        Outcome::NotLocalized,
+        "same message on openai-compat",
     );
 }

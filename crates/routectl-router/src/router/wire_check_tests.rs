@@ -17,7 +17,7 @@ use routectl_core::{
 };
 use serde_json::{Value, json};
 
-use super::egress_kind_of;
+use super::{egress_kind_of, fills_max_tokens};
 use crate::config::{Config, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::Router;
@@ -589,13 +589,18 @@ fn only_entry(body: &str) -> ProviderEntry {
 const MANTLE: &str =
     "bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n";
 
+/// Each row pins the egress kind a provider entry derives and whether that
+/// egress fills `max_tokens` for a client that sent none.
+///
+/// Mutation check: drop any arm of `fills_max_tokens` -> red on its rows.
 #[test]
-fn each_provider_entry_shape_derives_its_egress_kind() {
-    let mut rows: Vec<(&str, String, EgressKind)> = vec![
+fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
+    let mut rows: Vec<(&str, String, EgressKind, bool)> = vec![
         (
             "anthropic-api",
             "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n".into(),
             EgressKind::AnthropicApi,
+            true,
         ),
         (
             "openai-compat",
@@ -603,6 +608,7 @@ fn each_provider_entry_shape_derives_its_egress_kind() {
              api_key_ref = \"literal:k\"\n"
                 .into(),
             EgressKind::OpenaiCompat,
+            false,
         ),
     ];
     if cfg!(feature = "openai-responses") {
@@ -610,6 +616,7 @@ fn each_provider_entry_shape_derives_its_egress_kind() {
             "openai-responses",
             "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n".into(),
             EgressKind::OpenaiResponses,
+            false,
         ));
     }
     if cfg!(feature = "gemini") {
@@ -617,6 +624,7 @@ fn each_provider_entry_shape_derives_its_egress_kind() {
             "gemini",
             "kind = \"gemini\"\napi_key_ref = \"literal:k\"\n".into(),
             EgressKind::Gemini,
+            false,
         ));
     }
     if cfg!(feature = "bedrock") {
@@ -627,26 +635,31 @@ fn each_provider_entry_shape_derives_its_egress_kind() {
                 "bedrock default shape",
                 bedrock.into(),
                 EgressKind::BedrockInvoke,
+                true,
             ),
             (
                 "bedrock invoke",
                 format!("{bedrock}api_shape = \"invoke\"\n"),
                 EgressKind::BedrockInvoke,
+                true,
             ),
             (
                 "bedrock converse",
                 format!("{bedrock}api_shape = \"converse\"\n"),
                 EgressKind::BedrockConverse,
+                false,
             ),
             (
                 "anthropic-api mantle",
                 format!("kind = \"anthropic-api\"\napi_key_ref = \"\"\n{MANTLE}"),
                 EgressKind::AnthropicApiMantle,
+                true,
             ),
             (
                 "openai-compat mantle",
                 format!("kind = \"openai-compat\"\napi_key_ref = \"\"\n{MANTLE}"),
                 EgressKind::OpenaiCompatMantle,
+                false,
             ),
         ]);
         if cfg!(feature = "openai-responses") {
@@ -654,13 +667,21 @@ fn each_provider_entry_shape_derives_its_egress_kind() {
                 "openai-responses mantle",
                 format!("kind = \"openai-responses\"\napi_key_ref = \"\"\n{MANTLE}"),
                 EgressKind::OpenaiResponsesMantle,
+                false,
             ));
         }
     }
 
-    for (name, body, expected) in rows {
-        assert_eq!(egress_kind_of(&only_entry(&body)), expected, "{name}");
+    for (name, body, expected, fills) in rows {
+        let derived = egress_kind_of(&only_entry(&body));
+
+        assert_eq!(derived, expected, "{name}");
+        assert_eq!(fills_max_tokens(derived), fills, "{name}: fills max_tokens");
     }
+    assert!(
+        !fills_max_tokens(EgressKind::Local),
+        "a local answer sends no body to fill",
+    );
 }
 
 #[path = "wire_check_charge_tests.rs"]
