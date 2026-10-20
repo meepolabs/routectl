@@ -190,6 +190,11 @@ pub(super) const FIELD_PREFLIGHT_NO_STORED_VALUE: &str = "no_stored_value";
 /// request already sends exactly that value, so there is nothing to rewrite.
 pub(super) const FIELD_PREFLIGHT_VALUE_ALREADY_SENT: &str = "value_already_sent";
 
+/// Reason token: the verdict is authorized and stores a token ceiling, but the
+/// request's limit is already at or below it. A stored ceiling only ever lowers
+/// a limit, so there is nothing to clamp.
+pub(super) const FIELD_PREFLIGHT_WITHIN_CEILING: &str = "within_ceiling";
+
 /// Reason token: this request is the re-verification canary. The verdict was
 /// eligible and the cadence came due, so the tested field was RESTORED rather
 /// than dropped -- the planner deliberately did not act, and the outcome the
@@ -204,19 +209,25 @@ pub(super) const FIELD_PREFLIGHT_ACTION_DROP: &str = "field_preflight_drop";
 /// the verdict's stored value before first dispatch.
 pub(super) const FIELD_PREFLIGHT_ACTION_REWRITE: &str = "field_preflight_rewrite";
 
+/// Action token: the pre-flight planner lowered the mapped token limit to the
+/// verdict's stored ceiling before first dispatch.
+pub(super) const FIELD_PREFLIGHT_ACTION_CEILING: &str = "field_preflight_ceiling";
+
 /// The edit an authorized verdict makes to its row's surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PreflightEdit {
     Drop,
     /// Rewrite to this member of the row's closed accepted set.
     Rewrite(&'static str),
+    /// Lower the token limit to this stored ceiling.
+    Ceiling(u32),
 }
 
 impl PreflightEdit {
     const fn declared_kind(self) -> EditKind {
         match self {
             Self::Drop => EditKind::Remove,
-            Self::Rewrite(_) => EditKind::Rewrite,
+            Self::Rewrite(_) | Self::Ceiling(_) => EditKind::Rewrite,
         }
     }
 
@@ -224,6 +235,7 @@ impl PreflightEdit {
         match self {
             Self::Drop => FIELD_PREFLIGHT_ACTION_DROP,
             Self::Rewrite(_) => FIELD_PREFLIGHT_ACTION_REWRITE,
+            Self::Ceiling(_) => FIELD_PREFLIGHT_ACTION_CEILING,
         }
     }
 }
@@ -555,9 +567,10 @@ impl Router {
             Err(reason) => return refuse(reason),
         };
         // Only a DROP is canaried. The canary's repaired retry can only drop
-        // the restored field, and a rewrite verdict's canary is always answered
-        // with a refused value, so it could never confirm and would drop a
-        // field the client set; a rewrite verdict re-verifies through decay.
+        // the restored field, and a rewrite or ceiling verdict's canary is
+        // always answered with a refused value, so it could never confirm and
+        // would drop a field the client set; those verdicts re-verify through
+        // decay.
         // A verdict the free count re-check owns is never canaried either: an
         // unrepaired success would clear it, and its only recovery is that
         // re-check, so the repair simply keeps applying.
@@ -598,9 +611,9 @@ impl Router {
     /// The edit `row`'s authorized verdict makes, or the refusal reason when it
     /// makes none.
     ///
-    /// A rewrite needs the value recorded for the SAME incarnation the
-    /// authorization rests on: a value from any other lifecycle never applies.
-    /// A stored ceiling is not applied pre-flight.
+    /// A rewrite or a ceiling needs the value recorded for the SAME incarnation
+    /// the authorization rests on: a value from any other lifecycle never
+    /// applies. A ceiling only lowers a limit above it, never raises one.
     fn preflight_edit(
         &self,
         planned: &ChatRequest,
@@ -610,7 +623,18 @@ impl Router {
     ) -> Result<PreflightEdit, &'static str> {
         match row.transform {
             FieldTransform::Drop => Ok(PreflightEdit::Drop),
-            FieldTransform::Ceiling => Err(FIELD_PREFLIGHT_NO_STORED_VALUE),
+            FieldTransform::Ceiling => {
+                let Some(VerdictValue::Ceiling(ceiling)) = self
+                    .field_verdicts()
+                    .verdict_value(key, authorization.incarnation)
+                else {
+                    return Err(FIELD_PREFLIGHT_NO_STORED_VALUE);
+                };
+                if !row.surface.clamp_lowers(planned, ceiling) {
+                    return Err(FIELD_PREFLIGHT_WITHIN_CEILING);
+                }
+                Ok(PreflightEdit::Ceiling(ceiling))
+            }
             FieldTransform::Rewrite { .. } => {
                 let Some(VerdictValue::Shape(value)) = self
                     .field_verdicts()
@@ -1120,7 +1144,8 @@ include!("field_preflight_provenance.rs");
 /// half-mutated body by reading the wrong half of a result.
 ///
 /// A REWRITE has the same contract through [`FieldSurface::rewrite_in`], whose
-/// own post-condition is that the surface reads back exactly the value.
+/// own post-condition is that the surface reads back exactly the value, and a
+/// CEILING through [`FieldSurface::clamp_to`], which only ever lowers a limit.
 fn apply_transform(
     original_req: &ChatRequest,
     surface: FieldSurface,
@@ -1135,6 +1160,11 @@ fn apply_transform(
         }
         PreflightEdit::Rewrite(value) => {
             if !surface.rewrite_in(&mut scratch, value) {
+                return None;
+            }
+        }
+        PreflightEdit::Ceiling(ceiling) => {
+            if !surface.clamp_to(&mut scratch, ceiling) {
                 return None;
             }
         }

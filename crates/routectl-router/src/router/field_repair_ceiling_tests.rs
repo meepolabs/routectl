@@ -261,6 +261,9 @@ mod converse_ceiling {
         ServesAll,
         /// Stream content, then end on the capture, while above the limit.
         StreamsThenRefuses,
+        /// Refuse a limit above [`NAMED_LIMIT`]; stream content and then end
+        /// on the capture at any other limit.
+        CapsThenStreamsThenRefuses,
     }
 
     struct ConverseSeat {
@@ -319,7 +322,11 @@ mod converse_ceiling {
             let above = self.record(req)?;
             match self.seat {
                 Seat::AlwaysRefuses => Err(ceiling_rejection()),
-                Seat::CapsThenServes | Seat::CapsThenUnavailable if above => {
+                Seat::CapsThenServes
+                | Seat::CapsThenUnavailable
+                | Seat::CapsThenStreamsThenRefuses
+                    if above =>
+                {
                     Err(ceiling_rejection())
                 }
                 Seat::CapsThenUnavailable => Err(Error::upstream(
@@ -327,7 +334,10 @@ mod converse_ceiling {
                     503,
                     r#"{"message":"unavailable"}"#,
                 )),
-                Seat::CapsThenServes | Seat::ServesAll | Seat::StreamsThenRefuses => Ok(()),
+                Seat::CapsThenServes
+                | Seat::ServesAll
+                | Seat::StreamsThenRefuses
+                | Seat::CapsThenStreamsThenRefuses => Ok(()),
             }
         }
     }
@@ -348,6 +358,12 @@ mod converse_ceiling {
         }
         async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
             if self.seat == Seat::StreamsThenRefuses && self.record(&req)? {
+                return Ok(
+                    stream::iter(vec![Ok(content_chunk()), Err(ceiling_rejection())]).boxed(),
+                );
+            }
+            if self.seat == Seat::CapsThenStreamsThenRefuses {
+                self.answer(&req)?;
                 return Ok(
                     stream::iter(vec![Ok(content_chunk()), Err(ceiling_rejection())]).boxed(),
                 );
@@ -872,4 +888,7 @@ mod converse_ceiling {
             "nothing committed"
         );
     }
+
+    // A committed ceiling applied pre-flight on the next request.
+    include!("field_repair_ceiling_preflight_tests.rs");
 }

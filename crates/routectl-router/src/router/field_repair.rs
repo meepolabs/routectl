@@ -544,6 +544,17 @@ impl FieldSurface {
     /// request already meets, so the retry would repeat the rejection, and a
     /// clamp never raises a value.
     pub(super) const fn clamp_to(&self, req: &mut ChatRequest, ceiling: u32) -> bool {
+        if !self.clamp_lowers(req, ceiling) {
+            return false;
+        }
+        req.max_tokens = Some(ceiling);
+        true
+    }
+
+    /// Whether [`Self::clamp_to`] with `ceiling` would lower the token limit
+    /// `req` carries on this surface. The one statement of that rule, so a
+    /// caller deciding ahead of the clamp cannot disagree with it.
+    pub(super) const fn clamp_lowers(&self, req: &ChatRequest, ceiling: u32) -> bool {
         let clampable = match self {
             Self::MaxTokens => true,
             #[cfg(test)]
@@ -551,11 +562,8 @@ impl FieldSurface {
             _ => false,
         };
         match req.max_tokens {
-            Some(emitted) if clampable && 0 < ceiling && ceiling < emitted => {
-                req.max_tokens = Some(ceiling);
-                true
-            }
-            _ => false,
+            Some(emitted) => clampable && 0 < ceiling && ceiling < emitted,
+            None => false,
         }
     }
 }
