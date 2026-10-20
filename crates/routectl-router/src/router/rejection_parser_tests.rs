@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 
 use super::super::field_repair::{closed_table, grounded_table};
 use super::{
-    LocalizedPath, RejectionKind, THINKING_TYPES, localize, parse_rejection, rejected_wire_path,
+    LocalizedPath, RejectionKind, RejectionValue, THINKING_TYPES, localize, parse_rejection,
+    rejected_wire_path,
 };
 
 const BEDROCK_CAPTURE: &str = include_str!("../../tests/fixtures/bedrock_validation_capture.json");
@@ -415,7 +416,7 @@ fn each_arm_assigns_its_tier() {
         ) {
             let rewrite =
                 (named.row.path == THINKING_DISABLED_PATH).then_some("thinking.type.between_tools");
-            assert_eq!(named.accepted, rewrite, "{name}");
+            assert_eq!(named.value, rewrite.map(RejectionValue::Shape), "{name}");
         }
     }
 }
@@ -959,7 +960,7 @@ fn the_accepted_value_fills_only_for_exactly_one_named_member() {
 
         assert_eq!(named.row.path, TEST_REWRITE_PATH, "{name}");
         assert_eq!(named.kind, kind, "{name}");
-        assert_eq!(named.accepted, expected, "{name}");
+        assert_eq!(named.value, expected.map(RejectionValue::Shape), "{name}");
     }
 }
 
@@ -976,7 +977,7 @@ fn a_drop_row_never_carries_an_accepted_value() {
     .expect("display row");
 
     assert_eq!(
-        named.accepted, None,
+        named.value, None,
         "the display envelope quotes values, but its row drops rather than rewrites",
     );
 }
@@ -999,7 +1000,10 @@ fn the_thinking_enabled_fixture_names_the_adaptive_rewrite() {
     assert_eq!(named.row.path, "thinking.type.enabled");
     assert_eq!(named.tier, SelfIdentifying);
     assert_eq!(named.kind, UnsupportedField);
-    assert_eq!(named.accepted, Some("thinking.type.adaptive"));
+    assert_eq!(
+        named.value,
+        Some(RejectionValue::Shape("thinking.type.adaptive"))
+    );
 }
 
 /// Mutation check: remove either member from the disabled row's accepted set
@@ -1026,7 +1030,7 @@ fn each_thinking_disabled_fixture_names_its_rewrite_on_the_disabled_row() {
         assert_eq!(named.row.path, THINKING_DISABLED_PATH, "{kind}");
         assert_eq!(named.tier, SelfIdentifying, "{kind}");
         assert_eq!(named.kind, UnsupportedField, "{kind}");
-        assert_eq!(named.accepted, Some(accepted), "{kind}");
+        assert_eq!(named.value, Some(RejectionValue::Shape(accepted)), "{kind}");
     }
 }
 

@@ -40,7 +40,7 @@ impl Proposer for FieldRowProposer {
             row: named.row,
             kind: named.kind,
             tier: named.tier,
-            accepted: named.accepted,
+            value: named.value,
         })
     }
 }

@@ -116,16 +116,32 @@ pub(super) enum RejectionKind {
     InvalidValue,
 }
 
+/// The value a rejection names for its row's field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RejectionValue {
+    /// A member of the row's closed accepted set.
+    Shape(&'static str),
+    /// A token limit the upstream named for the field.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no grounded template names a token limit yet; tests inject one"
+        )
+    )]
+    Ceiling(u32),
+}
+
 /// A rejection attributed to one closed-table row.
 ///
-/// Holds no upstream bytes: `row` is the table's own entry and `accepted`,
-/// when set, is a member of that row's closed accepted set.
+/// Holds no upstream bytes: `row` is the table's own entry, and a `Shape`
+/// value is a member of that row's closed accepted set.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct NamedRejection {
     pub(super) row: &'static FieldRepairRow,
     pub(super) tier: SignalTier,
     pub(super) kind: RejectionKind,
-    pub(super) accepted: Option<&'static str>,
+    pub(super) value: Option<RejectionValue>,
 }
 
 /// Name the closed-table row a rejection rejected, or `None` when the kind
@@ -148,7 +164,7 @@ pub(super) fn parse_rejection(
         row,
         tier: localized.tier,
         kind: localized.kind,
-        accepted: named_accepted(row, &localized.replacements),
+        value: named_accepted(row, &localized.replacements).map(RejectionValue::Shape),
     })
 }
 

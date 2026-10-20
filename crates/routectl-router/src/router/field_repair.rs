@@ -48,7 +48,7 @@ use crate::field_verdict_value::{ValueSlot, VerdictValue};
 
 use super::edit_declare::{declare_field_edit, fidelity_dialect};
 use super::rejection_parser::{
-    NamedRejection, OPENAI_UNSUPPORTED_CODE, RejectionKind, parse_rejection,
+    NamedRejection, OPENAI_UNSUPPORTED_CODE, RejectionKind, RejectionValue, parse_rejection,
 };
 use super::repair_budget::RepairBudget;
 
@@ -1425,13 +1425,16 @@ enum FieldEdit {
 
 impl FieldEdit {
     /// The edit `transform` makes for `named`, or `None` when it makes none: a
-    /// rewrite whose rejection named no single accepted value, and the
-    /// reserved ceiling transform, which no repair applies yet.
-    fn for_rejection(transform: FieldTransform, named: &NamedRejection) -> Option<Self> {
-        match transform {
-            FieldTransform::Drop => Some(Self::Drop),
-            FieldTransform::Rewrite { .. } => named.accepted.map(Self::Rewrite),
-            FieldTransform::Ceiling => None,
+    /// rewrite whose rejection named no shape (a ceiling value included), and
+    /// the reserved ceiling transform, which no repair applies yet.
+    const fn for_rejection(transform: FieldTransform, named: &NamedRejection) -> Option<Self> {
+        match (transform, named.value) {
+            (FieldTransform::Drop, _) => Some(Self::Drop),
+            (FieldTransform::Rewrite { .. }, Some(RejectionValue::Shape(value))) => {
+                Some(Self::Rewrite(value))
+            }
+            (FieldTransform::Rewrite { .. }, Some(RejectionValue::Ceiling(_)) | None)
+            | (FieldTransform::Ceiling, _) => None,
         }
     }
 
@@ -2098,7 +2101,7 @@ pub(in crate::router) mod provisional {
 
     use routectl_core::capability::SignalTier;
 
-    use super::super::rejection_parser::{NamedRejection, RejectionKind};
+    use super::super::rejection_parser::{NamedRejection, RejectionKind, RejectionValue};
     use super::closed_table;
 
     /// This thread's injection state.
@@ -2132,14 +2135,36 @@ pub(in crate::router) mod provisional {
 
     /// [`inject`], with the attribution tier the resolution carries.
     pub(in crate::router) fn inject_with_tier(path: &str, tier: SignalTier) -> Injection {
+        inject_resolution(path, tier, RejectionKind::UnsupportedField, None)
+    }
+
+    /// Make every field rejection on this thread name `path` as a refused
+    /// VALUE carrying `value`, attributed self-identifyingly, until the
+    /// returned guard drops. The value is injected as given, whatever the
+    /// row's transform: what a mismatched pairing does is the repair's call.
+    pub(in crate::router) fn inject_value(path: &str, value: RejectionValue) -> Injection {
+        inject_resolution(
+            path,
+            SignalTier::SelfIdentifying,
+            RejectionKind::InvalidValue,
+            Some(value),
+        )
+    }
+
+    fn inject_resolution(
+        path: &str,
+        tier: SignalTier,
+        kind: RejectionKind,
+        value: Option<RejectionValue>,
+    ) -> Injection {
         let named = closed_table()
             .iter()
             .find(|row| row.path == path)
             .map(|row| NamedRejection {
                 row,
                 tier,
-                kind: RejectionKind::UnsupportedField,
-                accepted: None,
+                kind,
+                value,
             });
         INJECTED.with(|slot| slot.set(Injected::Resolution(named)));
         Injection
@@ -2321,15 +2346,18 @@ mod table_tests {
                 .find(|row| row.path == path)
                 .expect("a test row")
         };
-        let named = |path: &str, accepted| NamedRejection {
+        let named = |path: &str, value| NamedRejection {
             row: named_row(path),
             tier: SignalTier::SelfIdentifying,
             kind: RejectionKind::InvalidValue,
-            accepted,
+            value,
         };
         let ceiling = named(TEST_CEILING_PATH, None);
         let rewrite = named(TEST_REWRITE_PATH, None);
-        let filled = named(TEST_REWRITE_PATH, Some(TEST_REWRITE_ACCEPTED[0]));
+        let filled = named(
+            TEST_REWRITE_PATH,
+            Some(RejectionValue::Shape(TEST_REWRITE_ACCEPTED[0])),
+        );
 
         assert_eq!(
             FieldEdit::for_rejection(FieldTransform::Ceiling, &ceiling),

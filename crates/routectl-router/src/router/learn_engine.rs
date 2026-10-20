@@ -43,7 +43,7 @@ use super::field_repair::{
 };
 use super::learn_proposers::{CapabilityProposer, FieldRowProposer, ReplayProposer};
 use super::learn_revert::{MatchedEdit, SentSlot, TargetRevert, answer_declared_edit};
-use super::rejection_parser::{NamedRejection, RawPath, RejectionKind};
+use super::rejection_parser::{NamedRejection, RawPath, RejectionKind, RejectionValue};
 use super::repair_budget::RepairBudget;
 use super::replay_repair::{ReplayCarryPlan, strip_replay_artifacts_recalibrating};
 use super::runtime_gate::LearnedProbeGuard;
@@ -117,7 +117,7 @@ pub(super) enum Proposal {
         row: &'static FieldRepairRow,
         kind: RejectionKind,
         tier: SignalTier,
-        accepted: Option<&'static str>,
+        value: Option<RejectionValue>,
     },
     /// Learn a generic capability negative for the attributed capability.
     Capability(ResolvedCapability),
@@ -216,13 +216,13 @@ fn take_proposal(proposal: Proposal, sink: &mut impl RepairSink) -> Option<Arbit
             row,
             kind,
             tier,
-            accepted,
+            value,
         } => {
             let named = NamedRejection {
                 row,
                 tier,
                 kind,
-                accepted,
+                value,
             };
             if sink.repair_field(named) {
                 Some(Arbitration::FieldRepair)
