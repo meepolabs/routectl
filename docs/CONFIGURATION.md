@@ -611,7 +611,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
-| `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> catalog fill, else 64000 baseline); anthropic-api + bedrock-invoke only |
+| `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> catalog fill, else 64000 baseline); the filled `max_tokens` on anthropic-api + bedrock-invoke, the legacy thinking budget there and on bedrock-converse; a learned ceiling lowers the sent `max_tokens`, never raises it |
 | `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
 | `visible_routectl_provider`    | `[models.X]`        | bool, default true; set false to drop the `routectl_provider` field from the client response (opaque proxy) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
@@ -2208,6 +2208,19 @@ Resolution chain at dispatch:
    overlay cell via `routectl catalog set`).
 4. `64000` -- hardcoded baseline.
 
+A learned output ceiling then caps the result. When a lane has learned
+the model's limit from a refusal that named it (see
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#bedrock-any-region)), a value
+above that ceiling is lowered to it before the request is sent, whether
+it came from the client or from this chain. A value at or below the
+ceiling ships unchanged: a learned ceiling never raises a limit, and it
+never replaces a lower value you configured here. The ceiling recovers
+by decay only: it lapses after
+[`decay_hours`](#learned-capability-tempo-capability) and the next
+refusal learns it again. Lowering a client value is recorded as a lossy
+repair; lowering the value routectl filled in is not, since the client
+asked for no particular limit.
+
 `routectl doctor`'s **Model knobs** section names which of these resolved
 for every configured model, and one startup line names the models whose
 ceiling came from the catalog.
@@ -2233,9 +2246,12 @@ an exact effort-to-budget table and is unaffected, as is any caller whose
 own `reasoning.max_tokens` already fit under the previous ceiling. Set
 this key to pin the previous figure.
 
-Only consumed by Anthropic-shape egresses (`anthropic-api` and
-`bedrock-invoke`). The other egresses (`openai-compat`,
-`openai-responses`, `bedrock-converse`) forward a caller-supplied
+Only Anthropic-shape egresses (`anthropic-api` and `bedrock-invoke`)
+send this value as `max_tokens`. `bedrock-converse` reads it only to size
+the legacy thinking budget: on that path the three budgets above are
+fitted under it on Converse too, and Converse still sends no `maxTokens`
+the client did not send. The other egresses (`openai-compat`,
+`openai-responses`) forward a caller-supplied
 `max_tokens` under their own wire name (`openai-responses` emits it as
 `max_output_tokens`) and forward caller omission cleanly without
 injection (good-translator principle: do not inject where the upstream
@@ -2246,8 +2262,13 @@ drift.
 
 Set this when an Anthropic-shape egress points at a model whose upstream
 `max_tokens` cap is below the resolved ceiling AND the catalog does not
-confirm that cap for the selector -- otherwise a caller that omits
-`max_tokens` triggers a 400 from the upstream's per-model validation.
+confirm that cap for the selector. Without it, a caller that omits
+`max_tokens` draws a 400 from the upstream's per-model validation. On a
+lane field repair acts on, routectl retries that request at the limit
+the 400 names and learns it, so the key then only saves the first
+refusal per lane (and the one after each decay). On a lane field repair
+does not act on (a Mantle sub-lane, a loopback `base_url`, a forwarded
+client credential), the 400 reaches the client every time.
 Check `routectl doctor`'s **Model knobs** section first: if it reports the
 ceiling as catalog-filled at the right figure, this key is redundant.
 

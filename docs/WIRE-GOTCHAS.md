@@ -68,6 +68,21 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   OpenRouter, opencode-go) nor strict (NIM) hosts see the
   Anthropic-shape field.
 
+- **Reasoning models refuse sampling parameters one per 400.** OpenAI
+  answers `Unsupported parameter: '<name>' is not supported with this
+  model.` with `error.param` set to the one parameter it refused, even
+  when the body carries several. For `temperature`, `top_p`,
+  `presence_penalty` and `frequency_penalty` the refusal resolves to a
+  field-repair drop row: one retry without the parameter, learned for
+  the lane when the retry succeeds. Field repair makes one plan per
+  request, so a body carrying two refused parameters would never be
+  served. The static drop table (`model_profile.rs` `PROFILES` and
+  `SAMPLING_DROP` in `openai_compat/dialects/util.rs`) and the
+  `max_tokens` -> `max_completion_tokens` rename stay as shipped seeds
+  for the models they list. `logprobs` and `top_logprobs` have no row.
+  The grounding envelopes are under
+  `crates/routectl-router/tests/fixtures/rejections/openai-compat/`.
+
 ## Anthropic API surface
 
 - **A mispaired tool transcript is forwarded; of its pairing defects only
@@ -193,8 +208,11 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   `normalize_claude_sampling` in
   `crates/routectl-providers/src/anthropic_api/extras.rs` drops both as
   the LAST body mutation before egress, called from both `complete` and
-  `stream`, so it catches the caller's value, routectl's own
-  thinking-clamp `temperature: 1.0`, and anything a later pass could add.
+  `stream`, so it catches the caller's value, the 1.0 the thinking
+  clamp rewrites a client temperature to, and anything a later pass
+  could add. This strip is a shipped seed, not a learned verdict: the
+  seat refuses either key, one per 400, and field repair makes one
+  plan per request, so a request sending both could never be repaired.
   Three notes for whoever debugs this next:
   - The gate is the LANE predicate `is_cloak_lane` (oauth-bearer + exact
     `api.anthropic.com` host + not the forwarded leg), deliberately NOT
@@ -208,6 +226,28 @@ Surfaces: [openai-compat](#openai-compat-surface) -
     `provider_extras` can still smuggle onto the wire. No confirmed 400
     today, so nothing strips it -- if a `top_k` request starts failing
     on the OAuth lane, this is the first place to look.
+
+- **`max_tokens` is required, so routectl fills it, and the fill can be
+  refused.** The Messages API 400s a body without `max_tokens`, so the
+  `anthropic-api` egress (Mantle included) and Bedrock Invoke send the
+  client's value, else the per-model ceiling the router resolves
+  (`[models.X] max_output_tokens`, else the catalog), else 64000
+  (`resolve_max_tokens` in `anthropic_api/extras.rs`). The fill is
+  declared as a required-field default. A model whose output limit is
+  lower answers `max_tokens: SENT > N, which is the maximum allowed
+  number of output tokens for <model>`, on Messages and on Invoke
+  alike. That refusal resolves to the `max_tokens` ceiling row: one
+  retry with the value lowered to N, learned as the lane's ceiling
+  when the retry succeeds. Because a declared default cannot be undone
+  (dropping a required field trades one 400 for another), a refusal
+  that matches it still reaches field repair instead of stopping at
+  the declaration. Lowering the fill writes the per-model ceiling slot,
+  not the client's `max_tokens`, so the egress keeps declaring its own
+  default, the legacy thinking budget is fitted under the lowered
+  value, and the repair is lossless (`field_ceiling_fill_repair`).
+  Lowering a client value is lossy (`field_ceiling_repair`). Field
+  repair does not act on a Mantle sub-lane, whose egress URL is not
+  its configured one.
 
 - **Anthropic `tool_choice` rejects bare-string OpenAI shape**.
   Bedrock validators 400 on `tool_choice: "auto"` (OpenAI) where
@@ -602,6 +642,32 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   `image_url_data_uri_with_empty_payload_forwards_as_empty_bytes`,
   `thinking_block_signature_forwards_verbatim_when_absent_or_empty` and
   `tool_message_without_id_forwards_an_empty_tool_use_id`.
+
+- **Converse refuses `temperature` and an over-limit `maxTokens` with
+  fixed messages that name no path.** Both arrive as HTTP 400 before
+  generation in the flat `{"message": ...}` body, with no Converse
+  model-errors wrapper: `This model doesn't support the temperature
+  field. Remove temperature and try again.` and `The maximum tokens you
+  requested exceeds the model limit of N. Try again with a maximum
+  tokens value that is lower than N.` Because neither names a field,
+  `rejection_parser.rs` matches each template verbatim (a near-miss
+  wording localizes nothing) and maps it to a const path: the first to
+  the `temperature` drop row, the second to the `max_tokens` ceiling
+  row. N is read from both positions; it counts only as canonical
+  digits of a nonzero `u32` and only when both copies agree, and the
+  repair applies it only when it is below the value sent, so a limit at
+  or above it makes no retry. Converse builds `inferenceConfig.maxTokens`
+  from the client's `max_tokens` alone (`build_inference_config` in
+  `bedrock/converse/request.rs`) and sends none when the client sent
+  none, so only a client value is ever clamped there, and the clamp is
+  lossy. The per-model ceiling slot still sizes the legacy thinking
+  budget in the bag
+  (`the_converse_thinking_budget_fits_the_operator_ceiling_with_no_client_limit`).
+  The grounding envelopes are
+  `crates/routectl-router/tests/fixtures/rejections/bedrock/temperature-field-unsupported.json`
+  and `max-tokens-above-model-limit.json` beside it. Invoke's refusal is
+  the Anthropic `max_tokens: SENT > N` form (see the
+  [Anthropic API surface](#anthropic-api-surface)).
 
 - **Bedrock rejects unsupported `anthropic_beta` values + unknown
   body fields.** Bedrock validates each entry of `anthropic_beta`

@@ -310,6 +310,42 @@ carries `display: "updates"` -- even when the router withholds it from
 the lane -- and never when a forcing `tool_choice` has stripped thinking. Any
 other value forwards unchanged with no beta, and upstream rules on it.
 
+**Converse: a refused `temperature` is dropped and learned.** Some models
+on Converse answer a request carrying `temperature` with a 400: `This
+model doesn't support the temperature field. Remove temperature and try
+again.` routectl retries once on the same target without `temperature`.
+When that retry succeeds, the lane learns the drop, and later requests to
+it go out without the field and draw no 400. A retry the upstream refuses
+again learns nothing. Only that exact message is read; a different wording
+repairs nothing.
+
+**A `max_tokens` above the model's limit is clamped and learned.** Some
+models on Converse refuse a client `max_tokens` above their output limit:
+`The maximum tokens you requested exceeds the model limit of N. Try again
+with a maximum tokens value that is lower than N.` routectl reads N from
+both positions, uses it only when the two agree and N is nonzero and below
+the value sent, and retries once on the same target with `max_tokens`
+lowered to N. The repair is recorded as `repaired_lossy`, because the
+client asked for more. When the retry succeeds the lane learns N as its
+output ceiling (`ceiling:N`), and a later request whose limit is above N
+is lowered to N before it is sent. A stored ceiling never raises a limit:
+a request at or below N ships unchanged. The ceiling recovers by decay
+only: it acts for
+[`decay_hours`](CONFIGURATION.md#learned-capability-tempo-capability) (48
+hours by default) and is never canaried, and the first refusal after it
+lapses learns the limit again. A retry the upstream refuses again learns
+nothing, a fallback target still receives the client's original limit, and
+a refusal that arrives after a stream has delivered content is not
+repaired. Converse sends no `maxTokens` the client did not send, so on
+Converse only a client value is ever clamped. The same ceiling applies on
+`anthropic-api` and on Invoke to the Anthropic refusal `max_tokens: SENT >
+N, which is the maximum allowed number of output tokens for <model>`.
+There it can also lower the `max_tokens` routectl fills in for a client
+that sent none (see
+[`max_output_tokens`](CONFIGURATION.md#max_output_tokens-optionu32-default-none));
+lowering that fill is lossless, since the client asked for no particular
+limit. Field repair does not act on a Mantle sub-lane.
+
 **Example provider + model:**
 
 ```toml
@@ -351,6 +387,8 @@ The HTTP-Referer / X-Title headers improve OpenRouter's analytics and can affect
 ### OpenAI / o-series / GPT-5
 
 Default works. The OpenAI dialect maps canonical `reasoning.effort` -> wire `reasoning_effort` and drops sampling params on reasoning models automatically (driven by `model_profile.rs`).
+
+For a model that table does not list, routectl learns the drop. An `openai-compat` upstream that answers `Unsupported parameter: '<name>' is not supported with this model.` (or names it in `error.param`) for `temperature`, `top_p`, `presence_penalty` or `frequency_penalty` gets one retry on the same target without that parameter. When the retry succeeds, the lane learns the drop and later requests to it go out without the parameter. The static table stays: OpenAI names one parameter per 400 and routectl repairs one field per request, so a request carrying two refused parameters would fail every time and never learn. `logprobs` and `top_logprobs` are not learned.
 
 ```toml
 [providers.openai]
@@ -829,7 +867,9 @@ routectl logs a `body_excerpt` truncated to 256 chars
 | `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on `[models.X]` (DeepSeek v4) |
 | `stream first-content timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
 | Empty `content` + non-zero `reasoning_tokens` | Model used full `max_tokens` budget on reasoning. Increase `max_tokens` |
-| `400 thinking enabled requires temperature 1.0` | Don't set `temperature` when reasoning is enabled (routectl auto-forces 1.0 if you do) |
+| `400 thinking enabled requires temperature 1.0` | Don't set `temperature` when reasoning is enabled. routectl rewrites a client `temperature` to 1.0 while thinking is active and sends none when the client sent none |
+| `400 This model doesn't support the temperature field` (Bedrock Converse) | Expected once per lane: routectl retries without `temperature` and learns the drop for the lane; no config needed |
+| `400 The maximum tokens you requested exceeds the model limit of N` (Bedrock Converse) | Expected once per lane: routectl retries with `max_tokens` lowered to N and learns N as the lane's ceiling. Send a lower `max_tokens` to skip the first refusal |
 | `400 context_management is not allowed` or `400 anthropic-beta header not recognised` | Set `context_management = true` on the provider (DeepSeek /anthropic or similar) |
 
 ## When in doubt
