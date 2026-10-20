@@ -43,19 +43,21 @@ use super::types::{OutputConfig, ThinkingConfig, WireThinking};
 /// 32000, Sonnet 3.5 / DeepSeek V3 at 8000) should set
 /// `[models.X].max_output_tokens` to avoid an upstream 400 on the
 /// per-model ceiling check. See docs/CONFIGURATION.md.
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 64_000;
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 64_000;
 
-/// Resolve the outbound `max_tokens` value: caller's request wins;
-/// absent that, the router-supplied per-model override from
+/// Resolve the `max_tokens` the request is sized to: caller's request
+/// wins; absent that, the router-supplied per-model ceiling from
 /// `req.routectl_internal.max_output_tokens` (when non-zero) wins;
 /// absent that, the hardcoded `DEFAULT_MAX_OUTPUT_TOKENS` baseline
 /// (64000).
 ///
 /// Consumed by Anthropic-shape egresses (anthropic-api +
 /// bedrock-invoke; bedrock-invoke delegates body construction to this
-/// module's `normalize`). Other egresses (openai-compat,
-/// openai-responses, bedrock-converse) forward `req.max_tokens` cleanly
-/// when None per the good-translator principle.
+/// module's `normalize`) as the wire `max_tokens`, and by the legacy
+/// thinking window on those egresses and on bedrock-converse, which
+/// calls `build_thinking` itself. Converse, like openai-compat and
+/// openai-responses, still forwards `req.max_tokens` cleanly when None
+/// per the good-translator principle.
 pub(super) const fn resolve_max_tokens(req: &ChatRequest) -> u32 {
     if let Some(v) = req.max_tokens {
         return v;

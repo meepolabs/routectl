@@ -117,6 +117,9 @@ pub use cloak::{
     SensitiveWordsBoundError, ToolRename, validate_sensitive_words,
 };
 pub use context_management::CONTEXT_MANAGEMENT_BETA;
+/// The `max_tokens` this egress sends when neither the client nor the
+/// router-filled `routectl_internal.max_output_tokens` supplies one.
+pub use extras::DEFAULT_MAX_OUTPUT_TOKENS;
 /// The `thinking.type` this egress composes for a request, for a caller
 /// that must reason about the shape before the body is built.
 pub use extras::emitted_thinking_type;

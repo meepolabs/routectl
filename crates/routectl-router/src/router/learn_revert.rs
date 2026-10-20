@@ -344,9 +344,10 @@ impl WireRevert {
     }
 }
 
-/// The wire-check outcome of the rejection at position `rejection` when one
-/// or more declared edits explained it: repaired only when its reverted
-/// attempt succeeded. `None` when no declared edit explained it.
+/// The wire-check outcome of the rejection at position `rejection` when a
+/// revert answered it: repaired only when its reverted attempt succeeded.
+/// `None` when no declared edit explained it or the revert was declined, so
+/// whatever field repair made of the rejection is its outcome.
 pub(super) fn revert_outcome(
     rejection: usize,
     reverts: &[WireRevert],
@@ -354,9 +355,10 @@ pub(super) fn revert_outcome(
     reverts
         .iter()
         .find(|revert| revert.rejection == rejection)
-        .map(|revert| match revert.state {
-            RevertState::Succeeded => FieldRepairOutcome::Repaired,
-            RevertState::Declined | RevertState::Reverted => FieldRepairOutcome::Unrepaired,
+        .and_then(|revert| match revert.state {
+            RevertState::Succeeded => Some(FieldRepairOutcome::Repaired),
+            RevertState::Reverted => Some(FieldRepairOutcome::Unrepaired),
+            RevertState::Declined => None,
         })
 }
 

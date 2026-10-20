@@ -161,12 +161,13 @@ pub(super) fn apply_layered_overlays(
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
     internal.withheld_betas = std::sync::Arc::clone(&target.withheld_betas);
-    // Per-model `max_tokens` ceiling. Zero means no per-model override;
-    // Anthropic-shape egresses (anthropic-api, bedrock-invoke) read this
-    // and fall through to their hardcoded 64000 baseline when zero.
-    // Other egresses (openai-compat, openai-responses, bedrock-converse)
-    // ignore this field and forward `req.max_tokens` omission cleanly.
+    // Per-model `max_tokens` ceiling, on every egress: zero means none is
+    // known. Anthropic-shape egresses fill the wire field from it (else
+    // their 64000 baseline); Converse sizes its legacy thinking window to it.
     internal.max_output_tokens = target.max_output_tokens;
+    internal.fills_max_tokens = target
+        .egress_kind
+        .is_some_and(super::wire_check::fills_max_tokens);
     // Operator-configured beta floor: the provider + model
     // `header_extras["anthropic-beta"]` betas, EXCLUDING the
     // client/ingress betas already on `req.anthropic_beta`. The

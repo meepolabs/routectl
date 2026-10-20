@@ -672,6 +672,8 @@ impl Router {
         // The transform is applied through the ONE production helper below,
         // so the scratch-clone-and-adopt discipline has a single
         // implementation rather than a copy per caller.
+        let fill_clamped =
+            matches!(edit, PreflightEdit::Ceiling(_)) && row.surface.clamp_writes_fill(planned);
         let adopted = apply_transform(planned, row.surface, edit)
             .ok_or(FIELD_PREFLIGHT_AMBIGUOUS_MUTATION)?;
         // The request is now counted against this identity's wrong-repair
@@ -692,13 +694,17 @@ impl Router {
             .begin_modified_request(key, authorization.incarnation)
             .ok_or(FIELD_PREFLIGHT_NOT_ELIGIBLE)?;
         *planned = adopted;
-        declare_field_edit(
-            planned,
-            fidelity_dialect(target, planned),
-            EditSite::Preflight,
-            row.surface,
-            edit.declared_kind(),
-        );
+        // A clamped fill stays the egress's own declared default (see the
+        // reactive repair's declaration).
+        if !fill_clamped {
+            declare_field_edit(
+                planned,
+                fidelity_dialect(target, planned),
+                EditSite::Preflight,
+                row.surface,
+                edit.declared_kind(),
+            );
+        }
         // Counted HERE, at the one site that swaps the rewritten body in, so the
         // count cannot outrun what actually went upstream: a decision refused by
         // any gate above never reaches this line, and the routine fail-open is

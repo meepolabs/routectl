@@ -659,6 +659,7 @@ pub type routectl_providers::anthropic_api::ToolRename::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::anthropic_api::ToolRename where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::anthropic_api::ToolRename::into_shared(self) -> Shared
 pub const routectl_providers::anthropic_api::CONTEXT_MANAGEMENT_BETA: &str
+pub const routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS: u32
 pub const routectl_providers::anthropic_api::MAX_SENSITIVE_WORDS: usize
 pub const routectl_providers::anthropic_api::MAX_SENSITIVE_WORD_FOLDED_CHARS: usize
 pub const routectl_providers::anthropic_api::MAX_THINKING_BUDGET_READER_KINDS: &[&str]

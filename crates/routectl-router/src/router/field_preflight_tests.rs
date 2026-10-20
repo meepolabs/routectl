@@ -515,13 +515,25 @@ fn block_on_dispatch<F: std::future::Future>(fut: F) -> F::Output {
 /// than a target. A walk that recorded two decisions where one row was present,
 /// or none, is a wiring defect that an `unwrap` on the first element would hide.
 fn only_record<'m>(meta: &'m super::super::DispatchMeta, why: &str) -> &'m FieldPreflight {
+    let records: Vec<&FieldPreflight> = dispatched_records(meta).collect();
     assert_eq!(
-        meta.field_preflight.len(),
+        records.len(),
         1,
-        "{why}: expected exactly one record, got {:?}",
-        meta.field_preflight,
+        "{why}: expected exactly one record, got {records:?}",
     );
-    &meta.field_preflight[0]
+    records[0]
+}
+
+/// The path of the row every dispatch to an anthropic-api seat carries: the
+/// egress always sends `max_tokens`, so the router fills it.
+const FILLED_ROW: &str = "max_tokens";
+
+/// A dispatch's pre-flight records, less the decision on the filled
+/// `max_tokens` row each anthropic-api target plans beside the row under test.
+fn dispatched_records(meta: &super::super::DispatchMeta) -> impl Iterator<Item = &FieldPreflight> {
+    meta.field_preflight
+        .iter()
+        .filter(|record| record.field_path != Some(FILLED_ROW))
 }
 
 /// The single decision in `records`, asserting the count on the way -- see
@@ -537,8 +549,7 @@ fn only_decision<'r>(records: &'r [FieldPreflight], why: &str) -> &'r FieldPrefl
 
 /// Every record's `(state_key, acted, reason)`, in planning order.
 fn record_summary(meta: &super::super::DispatchMeta) -> Vec<(String, bool, &'static str)> {
-    meta.field_preflight
-        .iter()
+    dispatched_records(meta)
         .map(|r| (r.state_key.clone(), r.acted, r.reason))
         .collect()
 }
@@ -1581,7 +1592,9 @@ fn captured_diagnostics(
     let debugs = events
         .iter()
         .filter(|e| {
-            e.level == tracing::Level::DEBUG && e.message == "envelope-field pre-flight decision"
+            e.level == tracing::Level::DEBUG
+                && e.message == "envelope-field pre-flight decision"
+                && field_of(e, "field_path") != Some(FILLED_ROW)
         })
         .collect();
     let warns = events
@@ -1627,7 +1640,11 @@ fn one_acting_target_emits_one_debug_and_exactly_one_request_warn() {
         "a request that rewrote an envelope earns exactly ONE request-level WARN",
     );
     assert_eq!(field_of(warns[0], "decisions_acted"), Some("1"));
-    assert_eq!(field_of(warns[0], "decisions_planned"), Some("1"));
+    assert_eq!(
+        field_of(warns[0], "decisions_planned"),
+        Some("2"),
+        "one planned row plus the filled max_tokens row",
+    );
     assert_eq!(
         field_of(warns[0], "action"),
         Some(FIELD_PREFLIGHT_ACTION_DROP),
@@ -1736,7 +1753,11 @@ fn a_fallback_chain_emits_a_debug_per_decision_and_still_one_warn() {
         "one WARN per REQUEST, not per acting target: {warns:#?}",
     );
     assert_eq!(field_of(warns[0], "decisions_acted"), Some("1"));
-    assert_eq!(field_of(warns[0], "decisions_planned"), Some("2"));
+    assert_eq!(
+        field_of(warns[0], "decisions_planned"),
+        Some("4"),
+        "two rows on each of two targets, the filled max_tokens row included",
+    );
 }
 
 #[test]
@@ -4213,7 +4234,11 @@ fn the_request_warn_names_the_prefix_impacting_class_when_both_rows_act() {
         "the aggregate counts still describe every decision, so naming the worst one \
          hides nothing",
     );
-    assert_eq!(field_of(warns[0], "decisions_planned"), Some("2"));
+    assert_eq!(
+        field_of(warns[0], "decisions_planned"),
+        Some("3"),
+        "both rows under test plus the filled max_tokens row",
+    );
     // No request values at either tier, on the class whose dropped value is a
     // prompt rather than an enum token.
     let rendered = format!("{events:#?}");
@@ -4253,7 +4278,11 @@ fn the_request_warn_names_the_envelope_class_when_it_is_the_only_acting_row() {
         Some("1"),
         "one acting decision of two planned",
     );
-    assert_eq!(field_of(warns[0], "decisions_planned"), Some("2"));
+    assert_eq!(
+        field_of(warns[0], "decisions_planned"),
+        Some("3"),
+        "both rows under test plus the filled max_tokens row",
+    );
 }
 
 #[test]
@@ -4460,7 +4489,11 @@ fn the_request_warn_names_the_first_seat_when_two_seats_act_on_one_class() {
     // The aggregate counts still describe BOTH decisions -- naming one never
     // narrows them.
     assert_eq!(field_of(warns[0], "decisions_acted"), Some("2"));
-    assert_eq!(field_of(warns[0], "decisions_planned"), Some("2"));
+    assert_eq!(
+        field_of(warns[0], "decisions_planned"),
+        Some("4"),
+        "two rows on each of two targets, the filled max_tokens row included",
+    );
 }
 
 include!("field_preflight_action_tests.rs");

@@ -2327,5 +2327,6 @@ include!("field_repair_thinking_disabled_tests.rs");
 include!("field_repair_value_slot_tests.rs");
 include!("field_repair_sampling_param_tests.rs");
 include!("field_repair_ceiling_tests.rs");
+include!("field_repair_ceiling_fill_tests.rs");
 
 include!("field_repair_declare_tests.rs");

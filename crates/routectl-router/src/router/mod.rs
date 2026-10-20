@@ -2011,10 +2011,10 @@ struct DispatchTarget {
     /// which `unread_thinking_budget_warnings` reports at load time.
     max_thinking_budget: u32,
     /// Operator-declared per-model `max_tokens` ceiling for the
-    /// anthropic-api egress. Threaded from
+    /// Anthropic-shape egresses. Threaded from
     /// `ResolvedModel.max_output_tokens`. Zero means no model
-    /// override -- `apply_layered_overlays` falls through to the
-    /// server-side default.
+    /// override -- `apply_layered_overlays` then fills the egress
+    /// baseline for an egress that sends the field.
     max_output_tokens: u32,
     /// Operator-declared label echoed back in the response `model`
     /// field. Threaded from `ResolvedModel.reported_model`. `None`

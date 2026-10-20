@@ -354,16 +354,24 @@ pub struct RoutectlInternal {
     /// Threaded through from `[models.X] max_thinking_budget` via
     /// `ResolvedModel` -> `DispatchTarget`.
     pub max_thinking_budget: u32,
-    /// Operator-declared per-model `max_tokens` ceiling resolved by
-    /// the router from `[models.X].max_output_tokens`. Only consumed
-    /// by Anthropic-shape egresses (anthropic-api, bedrock-invoke);
-    /// other egresses forward `req.max_tokens` omission cleanly
+    /// The per-model output ceiling the router resolves from
+    /// `[models.X].max_output_tokens`, else the catalog ceiling; on every
+    /// egress. Consumed by the Anthropic-shape egresses (anthropic-api,
+    /// bedrock-invoke) as the wire `max_tokens` when the client sent none,
+    /// and by Converse's legacy thinking window, which fits a budget under
+    /// it. Converse sends no `max_tokens` the client did not
     /// (good-translator principle: do not inject where the upstream
     /// already handles it).
     ///
-    /// Sentinel `0` means "no per-model override"; the consuming
-    /// egress falls through to its hardcoded baseline (64000).
+    /// Sentinel `0` means no ceiling is known; a consumer then falls
+    /// through to its hardcoded baseline (64000). A client value always
+    /// wins.
     pub max_output_tokens: u32,
+
+    /// Whether this attempt's egress sends `max_tokens` when the client
+    /// sent none, filling it from [`Self::max_output_tokens`]. Set by the
+    /// router per target; false on an egress that forwards omission.
+    pub fills_max_tokens: bool,
 
     /// Operator-configured `anthropic-beta` flags composed by the
     /// dispatch layer from provider `header_extras["anthropic-beta"]`

@@ -376,7 +376,7 @@ upstream body, and the session key are never carried:
 
 | Field | Meaning |
 |---|---|
-| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it), `field_rewrite_repair` when the field was rewritten to the one accepted value the rejection named (learned like a drop of a refused field) |
+| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it), `field_rewrite_repair` when the field was rewritten to the one accepted value the rejection named (learned like a drop of a refused field), `field_ceiling_repair` when a client's token limit was lowered to the ceiling the rejection named, `field_ceiling_fill_repair` when the lowered limit was the one routectl filled in for a client that sent none (lossless: the client asked for no particular limit). Both ceiling repairs learn the named ceiling |
 | `state_key` | Sanitized `[providers]` state key of the repaired target |
 | `field_path` | The closed-table qualified dotted path that was repaired |
 | `reason` | Why the repair fired (`upstream_field_rejection`) |

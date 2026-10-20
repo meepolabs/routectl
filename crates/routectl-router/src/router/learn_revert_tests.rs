@@ -16,7 +16,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use routectl_core::wire_check::{DeclaredEdit, IngressDialect, IngressWire};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result,
-    SystemContent, ToolDef,
+    SystemContent, TokenCount, ToolDef,
 };
 use routectl_testkit::CapturedEvent;
 use serde_json::{Value, json};
@@ -116,6 +116,12 @@ impl Provider for ScriptedProvider {
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.run(&req)
             .map(|()| stream::iter([Ok(content_chunk())]).boxed())
+    }
+    async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        self.run(&req).map(|()| TokenCount {
+            input_tokens: 7,
+            ..Default::default()
+        })
     }
 }
 

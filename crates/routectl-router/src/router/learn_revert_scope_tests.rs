@@ -293,8 +293,8 @@ async fn dispatch_test_row_declared_by(
 
 /// A required field routectl wrote with its own value cannot be reverted,
 /// yet the upstream refusing it still says what it accepts: the rejection
-/// reaches the field repair, whose retry serves and learns. The declined
-/// revert stays recorded, so the finding reads unrepaired.
+/// reaches the field repair, whose retry serves and learns. A declined revert
+/// answered nothing, so the finding takes the field repair's outcome.
 #[tokio::test]
 async fn an_unrevertible_required_field_default_reaches_the_field_repair() {
     for surface in SURFACES {
@@ -311,8 +311,8 @@ async fn an_unrevertible_required_field_default_reaches_the_field_repair() {
         );
         assert_eq!(
             rejections(&router.wire_check_snapshot()),
-            [("routectl_added", FieldRepairOutcome::Unrepaired)],
-            "{surface:?}: the declined revert is the finding's outcome"
+            [("routectl_added", FieldRepairOutcome::Repaired)],
+            "{surface:?}: the field repair is the finding's outcome"
         );
         assert_eq!(
             warned(&outcome.events),
@@ -324,6 +324,28 @@ async fn an_unrevertible_required_field_default_reaches_the_field_repair() {
             "{surface:?}: the matched edit warns"
         );
     }
+}
+
+/// The token-count walk answers the same rejection the same way: the
+/// unrevertible required-field default reaches the field repair, whose
+/// repaired count is the one returned. A count settles no verdict.
+#[tokio::test]
+async fn an_unrevertible_required_field_default_reaches_the_count_repair() {
+    let edit = DeclaredEdit::new(
+        EditSite::RequiredFieldDefault,
+        TEST_ROW_POINTER,
+        EditKind::Add,
+    )
+    .expect("a matchable pattern");
+    let provider = ScriptedProvider::declaring(faithful, refuse_test_row_while_carried, edit);
+    let router = router(ANTHROPIC, false, &[Arc::clone(&provider)]);
+    let mut req = anthropic_request();
+    carry_test_row(&mut req);
+
+    let counted = router.count_tokens(req).await;
+
+    assert!(counted.is_ok(), "the repaired count serves: {counted:?}");
+    assert_eq!(provider.calls(), 2, "repaired and re-counted");
 }
 
 /// Every other unrevertible site keeps the rejection from the proposers,

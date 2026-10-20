@@ -2396,6 +2396,7 @@ pub routectl_core::schema::RoutectlInternal::beta_repair_report: core::option::O
 pub routectl_core::schema::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::declared_edits: alloc::vec::Vec<routectl_core::wire_check::DeclaredEdit>
 pub routectl_core::schema::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
+pub routectl_core::schema::RoutectlInternal::fills_max_tokens: bool
 pub routectl_core::schema::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
 pub routectl_core::schema::RoutectlInternal::header_extras: core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>
 pub routectl_core::schema::RoutectlInternal::history_reasoning: core::option::Option<routectl_core::CoreHistoryReasoning>
@@ -7335,6 +7336,7 @@ pub routectl_core::RoutectlInternal::beta_repair_report: core::option::Option<ro
 pub routectl_core::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::declared_edits: alloc::vec::Vec<routectl_core::wire_check::DeclaredEdit>
 pub routectl_core::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
+pub routectl_core::RoutectlInternal::fills_max_tokens: bool
 pub routectl_core::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
 pub routectl_core::RoutectlInternal::header_extras: core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>
 pub routectl_core::RoutectlInternal::history_reasoning: core::option::Option<routectl_core::CoreHistoryReasoning>

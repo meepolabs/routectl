@@ -397,21 +397,21 @@ fn router_with_reported_model(
 // ---------------------------------------------------------------------------
 
 // The router writes the per-model override (when set) to
-// `req.routectl_internal.max_output_tokens`. Sentinel `0` means "no
-// override"; the consuming Anthropic-shape egress falls through to its
-// hardcoded 64000 baseline. Other egresses (openai-compat,
-// openai-responses, bedrock-converse) ignore this field.
+// `req.routectl_internal.max_output_tokens` on every egress; sentinel `0`
+// means no override. `fills_max_tokens` marks the egresses that send a
+// `max_tokens` the client did not (the Anthropic shapes); every other egress
+// forwards omission, so the marker is false there whatever the override.
 
 mod max_output_tokens_resolution {
     use super::*;
     use routectl_router::ModelEntry;
 
     /// Build a router around a `MockCaptureProvider` that snapshots the
-    /// `routectl_internal.max_output_tokens` value on each dispatch
-    /// attempt.
+    /// `routectl_internal.max_output_tokens` value and the fill marker on
+    /// each dispatch attempt.
     struct CaptureProvider {
         id: String,
-        observed: std::sync::Mutex<Vec<u32>>,
+        observed: std::sync::Mutex<Vec<(u32, bool)>>,
     }
 
     impl CaptureProvider {
@@ -422,7 +422,7 @@ mod max_output_tokens_resolution {
             })
         }
 
-        fn observed(&self) -> Vec<u32> {
+        fn observed(&self) -> Vec<(u32, bool)> {
             self.observed.lock().unwrap().clone()
         }
     }
@@ -442,10 +442,10 @@ mod max_output_tokens_resolution {
         }
 
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-            self.observed
-                .lock()
-                .unwrap()
-                .push(req.routectl_internal.max_output_tokens);
+            self.observed.lock().unwrap().push((
+                req.routectl_internal.max_output_tokens,
+                req.routectl_internal.fills_max_tokens,
+            ));
             Ok(ChatResponse::default())
         }
 
@@ -454,12 +454,9 @@ mod max_output_tokens_resolution {
         }
     }
 
-    fn config_with_model_override(model_override: Option<u32>) -> Config {
+    fn config_with_model_override(entry: ProviderEntry, model_override: Option<u32>) -> Config {
         let mut providers = BTreeMap::new();
-        providers.insert(
-            "p1".into(),
-            ProviderEntry::openai_compat("http://example.invalid", common::file_ref("x")),
-        );
+        providers.insert("p1".into(), entry);
         let mut models = BTreeMap::new();
         let mut entry = ModelEntry::new("p1", "u");
         if let Some(t) = model_override {
@@ -476,13 +473,27 @@ mod max_output_tokens_resolution {
         }
     }
 
-    fn router_with_override(model_override: u32) -> (Router, Arc<CaptureProvider>) {
+    fn openai_compat() -> ProviderEntry {
+        ProviderEntry::openai_compat("http://example.invalid", common::file_ref("x"))
+    }
+
+    fn anthropic_api() -> ProviderEntry {
+        ProviderEntry::anthropic_api(common::file_ref("x"))
+    }
+
+    fn router_with_override(
+        entry: ProviderEntry,
+        model_override: u32,
+    ) -> (Router, Arc<CaptureProvider>) {
         let capture = CaptureProvider::new("p1");
-        let cfg = config_with_model_override(if model_override > 0 {
-            Some(model_override)
-        } else {
-            None
-        });
+        let cfg = config_with_model_override(
+            entry,
+            if model_override > 0 {
+                Some(model_override)
+            } else {
+                None
+            },
+        );
         let mut router = Router::new(Arc::new(cfg));
         let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
         let mut rm = ResolvedModel::new("m", "p1", capture.clone() as Arc<dyn Provider>, "u");
@@ -494,37 +505,58 @@ mod max_output_tokens_resolution {
         (router, capture)
     }
 
+    async fn observed_fill(
+        entry: ProviderEntry,
+        model_override: u32,
+        client: Option<u32>,
+    ) -> Vec<(u32, bool)> {
+        let (router, capture) = router_with_override(entry, model_override);
+        let mut r = req("alias");
+        r.max_tokens = client;
+        let _ = router.complete(r).await.expect("dispatch ok");
+        capture.observed()
+    }
+
+    /// An egress that sends no limit the client did not is never marked as
+    /// filling one, yet still carries the override for any other reader.
+    #[tokio::test]
+    async fn a_non_filling_egress_is_unmarked_and_keeps_the_override() {
+        for model_override in [0, 16_000] {
+            assert_eq!(
+                observed_fill(openai_compat(), model_override, None).await,
+                vec![(model_override, false)],
+                "override {model_override}",
+            );
+        }
+    }
+
     /// No per-model override means routectl_internal carries the `0`
-    /// sentinel; the consuming egress falls through to its hardcoded
-    /// baseline.
+    /// sentinel; the filling egress falls through to its hardcoded baseline.
     #[tokio::test]
     async fn no_model_override_writes_zero_sentinel() {
-        let (router, capture) = router_with_override(0);
-        let mut r = req("alias");
-        r.max_tokens = None;
-        let _ = router.complete(r).await.expect("dispatch ok");
-        assert_eq!(capture.observed(), vec![0]);
+        assert_eq!(
+            observed_fill(anthropic_api(), 0, None).await,
+            vec![(0, true)]
+        );
     }
 
     /// Per-model `max_output_tokens` is projected onto routectl_internal.
     #[tokio::test]
     async fn model_override_lands_in_routectl_internal() {
-        let (router, capture) = router_with_override(16_000);
-        let mut r = req("alias");
-        r.max_tokens = None;
-        let _ = router.complete(r).await.expect("dispatch ok");
-        assert_eq!(capture.observed(), vec![16_000]);
+        assert_eq!(
+            observed_fill(anthropic_api(), 16_000, None).await,
+            vec![(16_000, true)]
+        );
     }
 
     /// req.max_tokens does not alter the carrier value -- the egress's
     /// own `resolve_max_tokens` picks req.max_tokens first.
     #[tokio::test]
     async fn req_max_tokens_does_not_alter_routectl_internal() {
-        let (router, capture) = router_with_override(0);
-        let mut r = req("alias");
-        r.max_tokens = Some(1234);
-        let _ = router.complete(r).await.expect("dispatch ok");
-        assert_eq!(capture.observed(), vec![0]);
+        assert_eq!(
+            observed_fill(anthropic_api(), 16_000, Some(1234)).await,
+            vec![(16_000, true)]
+        );
     }
 }
 

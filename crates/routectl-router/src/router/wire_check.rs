@@ -22,6 +22,16 @@ use crate::wire_check_state::WireCheckState;
 
 use super::{DispatchTarget, Router};
 
+/// Whether an `egress` must send `max_tokens` and so fills it when the
+/// client sent none: the Anthropic Messages body, direct, through Bedrock's
+/// managed surface, or on Invoke.
+pub(super) const fn fills_max_tokens(egress: EgressKind) -> bool {
+    matches!(
+        egress,
+        EgressKind::AnthropicApi | EgressKind::AnthropicApiMantle | EgressKind::BedrockInvoke
+    )
+}
+
 /// The egress kind a provider entry sends with. Bedrock splits by API shape
 /// and every Mantle sub-lane is its own kind, because each sends a different
 /// wire body than its standard sibling.

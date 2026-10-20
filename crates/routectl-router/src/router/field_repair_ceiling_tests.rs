@@ -7,22 +7,148 @@
 #[test]
 fn a_max_tokens_clamp_lowers_only_a_value_above_the_ceiling() {
     let surface = super::FieldSurface::MaxTokens;
+    // (name, client value, egress fills, ceiling slot, clamp to, present,
+    //  changed, client after, slot after)
     let rows = [
-        ("unset", None, 8192, false, None),
-        ("above", Some(64_000), 8192, true, Some(8192)),
-        ("equal", Some(8192), 8192, false, Some(8192)),
-        ("below", Some(4096), 8192, false, Some(4096)),
-        ("zero ceiling", Some(64_000), 0, false, Some(64_000)),
+        ("unset", None, false, 0, 8192, false, false, None, 0),
+        (
+            "above",
+            Some(64_000),
+            false,
+            0,
+            8192,
+            true,
+            true,
+            Some(8192),
+            0,
+        ),
+        (
+            "equal",
+            Some(8192),
+            false,
+            0,
+            8192,
+            true,
+            false,
+            Some(8192),
+            0,
+        ),
+        (
+            "below",
+            Some(4096),
+            false,
+            0,
+            8192,
+            true,
+            false,
+            Some(4096),
+            0,
+        ),
+        (
+            "zero ceiling",
+            Some(64_000),
+            false,
+            0,
+            0,
+            true,
+            false,
+            Some(64_000),
+            0,
+        ),
+        (
+            "fill above",
+            None,
+            true,
+            64_000,
+            8192,
+            true,
+            true,
+            None,
+            8192,
+        ),
+        (
+            "fill equal",
+            None,
+            true,
+            8192,
+            8192,
+            true,
+            false,
+            None,
+            8192,
+        ),
+        (
+            "fill below",
+            None,
+            true,
+            4096,
+            8192,
+            true,
+            false,
+            None,
+            4096,
+        ),
+        (
+            "fill at the baseline",
+            None,
+            true,
+            0,
+            8192,
+            true,
+            true,
+            None,
+            8192,
+        ),
+        (
+            "ceiling, no fill",
+            None,
+            false,
+            64_000,
+            8192,
+            false,
+            false,
+            None,
+            64_000,
+        ),
+        (
+            "client wins over fill",
+            Some(4096),
+            true,
+            64_000,
+            8192,
+            true,
+            false,
+            Some(4096),
+            64_000,
+        ),
+        (
+            "client above, slot kept",
+            Some(64_000),
+            true,
+            4096,
+            8192,
+            true,
+            true,
+            Some(8192),
+            4096,
+        ),
     ];
 
-    for (name, sent, ceiling, changed, after) in rows {
+    for (name, sent, fills, slot, ceiling, present, changed, after, slot_after) in rows {
         let mut req = req_on(ALIAS);
         req.max_tokens = sent;
-        assert_eq!(surface.present_in(&req), sent.is_some(), "{name}");
+        req.routectl_internal.fills_max_tokens = fills;
+        req.routectl_internal.max_output_tokens = slot;
+        assert_eq!(surface.present_in(&req), present, "{name}");
+        assert_eq!(surface.clamp_writes_fill(&req), sent.is_none(), "{name}");
 
         assert_eq!(surface.clamp_to(&mut req, ceiling), changed, "{name}");
 
         assert_eq!(req.max_tokens, after, "{name}");
+        assert_eq!(
+            req.routectl_internal.max_output_tokens, slot_after,
+            "{name}"
+        );
         assert!(!surface.drop_from(&mut req), "{name}: never dropped");
     }
 }

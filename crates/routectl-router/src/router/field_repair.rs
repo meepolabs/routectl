@@ -75,6 +75,11 @@ pub(super) const FIELD_ACTION_REWRITE_REPAIR: &str = "field_rewrite_repair";
 /// limit to the ceiling the rejection named. Closed set.
 pub(super) const FIELD_ACTION_CEILING_REPAIR: &str = "field_ceiling_repair";
 
+/// Action token for the field-repair WARN when the repair lowered the token
+/// limit routectl filled in for a client that sent none, so the served
+/// request carries nothing the client asked for differently. Closed set.
+pub(super) const FIELD_ACTION_CEILING_FILL_REPAIR: &str = "field_ceiling_fill_repair";
+
 /// Reason token: the attempt drew an upstream rejection naming this field
 /// path. Closed set.
 pub(super) const FIELD_REASON_UPSTREAM_REJECTION: &str = "upstream_field_rejection";
@@ -129,10 +134,12 @@ pub(super) enum FieldSurface {
     /// A canonical sampling parameter every egress emits from one request
     /// field when it is set; see [`SamplingParam`].
     SamplingParam(SamplingParam),
-    /// The canonical `max_tokens`, PRESENT when the request carries one, which
-    /// only a client sets: an egress that needs a value it lacks fills its own
-    /// wire field, never this one. Never dropped and never probed; a ceiling
-    /// repair lowers it (see [`Self::clamp_to`]).
+    /// The wire `max_tokens`, PRESENT when the client sent one or the egress
+    /// fills it (`routectl_internal.fills_max_tokens`) from the model's
+    /// ceiling, else its baseline. The client's value wins on the wire, so it
+    /// is the emitted value whenever it is set.
+    /// Never dropped and never probed; a ceiling repair lowers the emitted
+    /// value (see [`Self::clamp_to`]).
     MaxTokens,
     /// Test-only: reports itself PRESENT and removes NOTHING.
     ///
@@ -260,7 +267,7 @@ impl FieldSurface {
                 emitted_thinking_type(req).as_deref() == Some(*refused)
             }
             Self::SamplingParam(param) => param.is_set(req),
-            Self::MaxTokens => req.max_tokens.is_some(),
+            Self::MaxTokens => emitted_max_tokens(req).is_some(),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => true,
             #[cfg(test)]
@@ -540,19 +547,29 @@ impl FieldSurface {
 
     /// Lower this surface's token limit on `req` to `ceiling`, returning
     /// whether it changed. Only a nonzero ceiling strictly below the value the
-    /// request carries is applied: a ceiling at or above it names a limit the
+    /// request emits is applied: a ceiling at or above it names a limit the
     /// request already meets, so the retry would repeat the rejection, and a
     /// clamp never raises a value.
+    ///
+    /// The value is written where the emitted one came from: the client's
+    /// `max_tokens` when it sent one, otherwise the ceiling slot the egress
+    /// fills from, so a client that sent none still sends none and the egress
+    /// keeps declaring its own default. With no client value [`Self::clamp_lowers`]
+    /// admits only an egress that fills.
     pub(super) const fn clamp_to(&self, req: &mut ChatRequest, ceiling: u32) -> bool {
         if !self.clamp_lowers(req, ceiling) {
             return false;
         }
-        req.max_tokens = Some(ceiling);
+        if req.max_tokens.is_some() {
+            req.max_tokens = Some(ceiling);
+        } else {
+            req.routectl_internal.max_output_tokens = ceiling;
+        }
         true
     }
 
     /// Whether [`Self::clamp_to`] with `ceiling` would lower the token limit
-    /// `req` carries on this surface. The one statement of that rule, so a
+    /// `req` emits on this surface. The one statement of that rule, so a
     /// caller deciding ahead of the clamp cannot disagree with it.
     pub(super) const fn clamp_lowers(&self, req: &ChatRequest, ceiling: u32) -> bool {
         let clampable = match self {
@@ -561,10 +578,34 @@ impl FieldSurface {
             Self::CeilingFieldForTests => matches!(req.max_tokens, Some(TEST_CEILING_SENTINEL)),
             _ => false,
         };
-        match req.max_tokens {
+        match emitted_max_tokens(req) {
             Some(emitted) => clampable && 0 < ceiling && ceiling < emitted,
             None => false,
         }
+    }
+
+    /// Whether [`Self::clamp_to`] on `req` writes the ceiling slot the egress
+    /// fills from rather than a value the client sent. Such a clamp changes no client field, and
+    /// the egress already declares the wire field as its own default.
+    pub(super) const fn clamp_writes_fill(&self, req: &ChatRequest) -> bool {
+        matches!(self, Self::MaxTokens) && req.max_tokens.is_none()
+    }
+}
+
+/// The `max_tokens` the request's egress sends: the client's value; else,
+/// on an egress that fills it, the model's nonzero ceiling or the egress
+/// baseline; else none.
+const fn emitted_max_tokens(req: &ChatRequest) -> Option<u32> {
+    let internal = &req.routectl_internal;
+    match (
+        req.max_tokens,
+        internal.fills_max_tokens,
+        internal.max_output_tokens,
+    ) {
+        (Some(client), _, _) => Some(client),
+        (None, false, _) => None,
+        (None, true, 0) => Some(routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS),
+        (None, true, ceiling) => Some(ceiling),
     }
 }
 
@@ -1515,6 +1556,9 @@ pub(super) struct FieldRepairPlan<'a> {
     /// records it, so an inferred attribution persists without acting until an
     /// independent request corroborates it.
     repaired_tier: Option<SignalTier>,
+    /// Whether the applied ceiling lowered routectl's fill rather than a
+    /// client value.
+    fill_clamped: bool,
     /// The wire dialect the attempt shares with its client, for declaring the
     /// repair's edit; `None` on a translation lane.
     wire: Option<IngressDialect>,
@@ -1597,11 +1641,12 @@ impl FieldRepairPlan<'_> {
 
     /// Whether the repair this plan applied served the attempt by changing a
     /// value the client asked for and the lane accepts: a DROP of a field
-    /// whose VALUE was refused, or a lowered client token limit.
+    /// whose VALUE was refused, or a lowered client token limit. Lowering
+    /// routectl's own fill is lossless.
     pub(super) fn repaired_lossy(&self) -> bool {
         match self.applied {
             Some(FieldEdit::Drop) => self.repaired_kind == Some(RejectionKind::InvalidValue),
-            Some(FieldEdit::Ceiling(_)) => true,
+            Some(FieldEdit::Ceiling(_)) => !self.fill_clamped,
             Some(FieldEdit::Rewrite(_)) | None => false,
         }
     }
@@ -1615,6 +1660,7 @@ impl FieldRepairPlan<'_> {
     fn repair_action(&self) -> &'static str {
         match self.applied {
             Some(FieldEdit::Rewrite(_)) => FIELD_ACTION_REWRITE_REPAIR,
+            Some(FieldEdit::Ceiling(_)) if self.fill_clamped => FIELD_ACTION_CEILING_FILL_REPAIR,
             Some(FieldEdit::Ceiling(_)) => FIELD_ACTION_CEILING_REPAIR,
             Some(FieldEdit::Drop) | None if self.repaired_lossy() => FIELD_ACTION_LOSSY_DROP_REPAIR,
             Some(FieldEdit::Drop) | None => FIELD_ACTION_DROP_REPAIR,
@@ -1729,6 +1775,8 @@ impl FieldRepairPlan<'_> {
         if !budget.can_draw() {
             return None;
         }
+        let fill_clamped =
+            matches!(edit, FieldEdit::Ceiling(_)) && surface.clamp_writes_fill(attempt_req);
         if !edit.apply_to(surface, attempt_req) {
             // FAIL CLOSED. A rewrite may refuse by design: the value is
             // already carried, or the rewritten body failed its read-back. A
@@ -1764,13 +1812,19 @@ impl FieldRepairPlan<'_> {
             charged,
             "can_draw held before the mutation, so the draw after it cannot fail",
         );
-        declare_field_edit(
-            attempt_req,
-            self.wire,
-            EditSite::FieldRepair,
-            surface,
-            edit.declared_kind(),
-        );
+        // A clamped fill is still the egress's declared default; a second
+        // declaration at the same pointer would read as a conflict to the next
+        // rejection there and keep it from the proposers.
+        if !fill_clamped {
+            declare_field_edit(
+                attempt_req,
+                self.wire,
+                EditSite::FieldRepair,
+                surface,
+                edit.declared_kind(),
+            );
+        }
+        self.fill_clamped = fill_clamped;
         self.repaired = Some(idx);
         // Every OTHER candidate's guard is released now rather than held to
         // settlement. This attempt has spent its one repair on `idx`, so no
@@ -1811,6 +1865,7 @@ impl FieldRepairPlan<'_> {
             repaired_kind: None,
             applied: None,
             repaired_tier: None,
+            fill_clamped: false,
             wire: None,
         }
     }
@@ -2052,6 +2107,7 @@ impl Router {
             repaired_kind: None,
             applied: None,
             repaired_tier: None,
+            fill_clamped: false,
             wire: fidelity_dialect(target, attempt_req),
         })
     }

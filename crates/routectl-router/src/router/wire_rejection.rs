@@ -163,8 +163,8 @@ impl Router {
     /// Record every rejection the request drew, each with what field repair
     /// made of it. Called once, when the dispatch has resolved and every
     /// repair record is final.
-    /// A rejection a declared routectl edit explains takes the outcome of
-    /// its revert; every other takes what field repair made of it.
+    /// A rejection a revert answered takes the outcome of that revert; every
+    /// other, a declined revert included, takes what field repair made of it.
     pub(super) fn emit_wire_rejections(&self, meta: &DispatchMeta) {
         for (position, pending) in meta.wire_rejections.iter().enumerate() {
             let outcome = revert_outcome(position, &meta.wire_reverts)
@@ -367,8 +367,8 @@ const UNION_TAG: &str = "type";
 /// What field repair made of `pending`: the first repair on the same target
 /// for the same field recorded at or after the rejection. A repair whose
 /// retry did not succeed left the rejection unrepaired. A rewrite or a
-/// lowered token limit is lossy: the request served carried a value the
-/// client did not send.
+/// lowered client token limit is lossy: the request served carried a value
+/// the client did not send. A lowered fill is not: the client sent none.
 fn field_repair_outcome(
     pending: &PendingWireRejection,
     repairs: &[FieldRepair],
