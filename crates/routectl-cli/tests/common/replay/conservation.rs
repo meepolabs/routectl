@@ -1975,6 +1975,45 @@ mod tests {
         assert_eq!(hits(&rewritten_run, "thinking-temperature-clamp"), 1);
     }
 
+    /// A client `null` temperature deserializes to no temperature, so a wire
+    /// `1.0` against it was invented, not clamped, even though the diff sees
+    /// a changed value rather than an added key.
+    #[test]
+    fn a_wire_temperature_against_a_client_null_is_a_finding() {
+        let nulled = fixture(
+            "temperature-null",
+            "anthropic",
+            "anthropic",
+            json!({
+                "model": "m",
+                "temperature": null,
+                "messages": [{"role": "user", "content": "one"}],
+            }),
+            json!({
+                "model": "m",
+                "temperature": 1.0,
+                "messages": [{"role": "user", "content": "one"}],
+            }),
+        );
+
+        let nulled_run = run(&[nulled]);
+
+        assert_eq!(
+            nulled_run.lanes[0].unexplained, 1,
+            "{:?}",
+            nulled_run.failures
+        );
+        assert!(
+            nulled_run
+                .failures
+                .iter()
+                .any(|f| f.contains("temperature")),
+            "got: {:?}",
+            nulled_run.failures,
+        );
+        assert_eq!(hits(&nulled_run, "thinking-temperature-clamp"), 0);
+    }
+
     // ---------- counter scoping ----------
 
     #[test]

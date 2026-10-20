@@ -1206,7 +1206,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  `adaptive`, since Anthropic accepts no other value then, and drops `top_p` \
                  under active thinking. It never ADDS a temperature: a request with no client \
                  temperature ships none, so an ADDED `1.0` is not this transform and stays a \
-                 finding. NOT `reconcile_sampling_params`: that function early-returns while \
+                 finding. A client `null` is no temperature either, so the client side must be \
+                 numeric. NOT `reconcile_sampling_params`: that function early-returns while \
                  active thinking survives on the body and so cannot be the source. The \
                  client's original value is deliberately NOT pinned: the clamp rewrites \
                  whatever the caller sent. In-place value change, hence a MATCHER.",
@@ -1218,6 +1219,7 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Changed
                 && divergence.actual().and_then(Value::as_f64) == Some(1.0)
+                && divergence.expected().and_then(Value::as_f64).is_some()
         }),
         matched: AtomicUsize::new(0),
     },
@@ -2544,6 +2546,14 @@ mod tests {
             DivergenceKind::Added,
             Some(json!(1.0)),
             None,
+        )));
+        // The client sent `null`, which deserializes to no temperature, so
+        // a `1.0` on the wire was invented rather than clamped.
+        assert!(!entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Changed,
+            Some(json!(1.0)),
+            Some(Value::Null),
         )));
         // An unrelated path carrying the same shape.
         assert!(!entry.matches(&Divergence::new(
