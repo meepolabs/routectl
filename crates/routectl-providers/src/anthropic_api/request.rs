@@ -194,10 +194,7 @@ fn flush_response_format_tally(tally: &UnrecognizedResponseFormatTally, req: &Ch
 /// reasoning budget (`is_active_thinking_type`: `enabled` and `adaptive`)
 /// Anthropic accepts only `temperature = 1.0` and no `top_p`, so a client
 /// temperature is rewritten to 1.0 and `top_p` is dropped. A request with no
-/// client temperature ships none: 1.0 is the documented default. Kept as a
-/// fixed rule rather than a learned repair because the refusal depends on
-/// the emitted thinking type, and a learned per-field drop would also strip
-/// temperature from the same target's non-thinking requests.
+/// client temperature ships none: 1.0 is the documented default.
 /// `thinking_type` is the EMITTED `thinking.type`; any other type, or none,
 /// keeps the caller's sampling. Anthropic also rejects a request carrying
 /// both `temperature` and `top_p`, so outside active thinking `top_p`
@@ -213,8 +210,14 @@ pub(crate) fn clamp_sampling_for_thinking(
     top_p: Option<f64>,
 ) -> (Option<f64>, Option<f64>) {
     if thinking_type.is_some_and(is_active_thinking_type) {
+        // Baked seed verdict: the refusal depends on the emitted thinking
+        // type, but learned verdicts key one field per target, so a learned
+        // drop would also strip temperature from non-thinking requests.
         return (temperature.map(|_| 1.0f64), None);
     }
+    // Baked seed verdict: the refusal depends on the other sampling key being
+    // present, so a learned one-field drop would also strip `top_p` from
+    // requests that send it alone, which the host accepts.
     let top_p = if temperature.is_some() { None } else { top_p };
     (temperature, top_p)
 }

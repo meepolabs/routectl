@@ -83,6 +83,9 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         // and chatgpt.com's codex backend rejects fields the client never
         // sends. Other auth_kinds (ApiKey, BedrockMantle) accept it as a
         // documented top-level field, so forward the caller's ceiling there.
+        // Baked seed verdict: this provider kind sits outside field repair,
+        // and its refusal can arrive as a status-0 `response.failed` after
+        // the stream has started, too late to retry invisibly.
         max_output_tokens: match cfg.auth_kind {
             AuthKind::ChatgptOauth => None,
             _ => req.max_tokens,

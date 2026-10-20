@@ -76,6 +76,11 @@ impl ModelProfile {
 /// The full registry of per-model quirks, in declaration order. The
 /// first match wins, so list more-specific patterns before
 /// less-specific ones if collisions are possible.
+///
+/// Baked seed verdict: OpenAI names one refused parameter per 400 and field
+/// repair runs one plan per request, so a body carrying two refused sampling
+/// keys never succeeds and never teaches anything; this table is what keeps
+/// those requests working.
 pub const PROFILES: &[ModelProfile] = &[
     // OpenAI reasoning-only series: drop sampling params (400 otherwise).
     ModelProfile {

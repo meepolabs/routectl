@@ -46,6 +46,10 @@ impl Dialect for OpenAiDialect {
             // models and requires `max_completion_tokens`. The OpenAI ingress
             // renames the inbound `max_completion_tokens` to canonical
             // `max_tokens`; restore it here for reasoning models only.
+            // Baked seed verdict: the refusal arrives alongside the sampling
+            // refusals (one key named per 400, one repair plan per request),
+            // and no learned verdict renames a field; `max_tokens` is the
+            // output ceiling's path, not a field to drop or move.
             if let Some(v) = obj.remove("max_tokens") {
                 obj.insert("max_completion_tokens".into(), v);
                 declare_max_tokens_rename(tap);

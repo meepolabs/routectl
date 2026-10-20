@@ -49,6 +49,9 @@ impl Dialect for DeepSeekDialect {
         req: &ChatRequest,
     ) -> Result<()> {
         let tap = crate::wire_declare::tap(req);
+        // Baked seed verdict: no recorded DeepSeek refusal exists to ground a
+        // learned repair or show the host's envelope parses, so there is no
+        // evidence the rule could be relearned; it stays until there is.
         if profile_for(&req.model).drops_sampling_params {
             drop_sampling_params(obj, tap);
         }

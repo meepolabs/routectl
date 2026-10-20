@@ -832,6 +832,10 @@ const OAUTH_OWN_ANTHROPIC_LANE: &str = "oauth-own-anthropic";
 ///
 /// Returns the top-level keys it removed, so the dispatch site can declare
 /// them.
+///
+/// Baked seed verdict: the seat refuses either key, one per 400, and field
+/// repair runs one plan per request, so a request sending both would need two
+/// repairs and would fail permanently without learning.
 pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) -> Vec<&'static str> {
     let Some(obj) = body.as_object_mut() else {
         return Vec::new();
