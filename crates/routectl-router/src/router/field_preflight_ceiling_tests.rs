@@ -15,10 +15,13 @@ fn req_max_tokens_only(alias: &str, max_tokens: u32) -> ChatRequest {
     req
 }
 
-fn ceiling_verdict_key(state_key: &str) -> FieldVerdictKey {
+/// The qualified dotted path of the grounded temperature drop row.
+const TEMPERATURE_ROW_PATH: &str = "temperature";
+
+fn row_verdict_key(state_key: &str, path: &str) -> FieldVerdictKey {
     FieldVerdictKey::new(
         &crate::router::probe_test_support::seat_chain_lane(state_key),
-        CEILING_ROW_PATH,
+        path,
         ANTHROPIC,
     )
     .expect("a qualified path mints a key")
@@ -27,8 +30,19 @@ fn ceiling_verdict_key(state_key: &str) -> FieldVerdictKey {
 /// Plant a resident ACTING, acknowledged verdict on the ceiling row's identity,
 /// storing `value` for its incarnation.
 fn plant_ceiling_eligible(router: &Router, state_key: &str, value: Option<crate::VerdictValue>) {
+    plant_row_eligible(router, state_key, CEILING_ROW_PATH, value);
+}
+
+/// Plant a resident ACTING, acknowledged verdict on `path`'s row identity,
+/// storing `value` for its incarnation.
+fn plant_row_eligible(
+    router: &Router,
+    state_key: &str,
+    path: &str,
+    value: Option<crate::VerdictValue>,
+) {
     let lane = crate::router::probe_test_support::seat_chain_lane(state_key);
-    let feature_key = crate::field_capability::field_capability_key(CEILING_ROW_PATH)
+    let feature_key = crate::field_capability::field_capability_key(path)
         .expect("the row path is a qualified path");
     let stamped = Instant::now();
     router
@@ -56,7 +70,7 @@ fn plant_ceiling_eligible(router: &Router, state_key: &str, value: Option<crate:
         &feature_key,
         ANTHROPIC,
     );
-    let key = ceiling_verdict_key(state_key);
+    let key = row_verdict_key(state_key, path);
     router
         .field_verdicts()
         .canaries()
@@ -70,7 +84,7 @@ fn plant_ceiling_eligible(router: &Router, state_key: &str, value: Option<crate:
             router.registry_generation(),
             Instant::now()
         ),
-        "fixture premise: the ceiling verdict is pre-flight eligible",
+        "fixture premise: the `{path}` verdict is pre-flight eligible",
     );
 }
 
@@ -187,6 +201,68 @@ fn a_ceiling_verdict_never_claims_the_canary() {
             "request {request}"
         );
     }
+}
+
+/// A stored temperature drop and a stored ceiling on the same lane both land on
+/// ONE planned request, each recorded as its own action, and nothing else on
+/// the request moves.
+///
+/// Mutation check: plan each row from a fresh clone of the client request
+/// instead of the running planned body -> red (whichever edit is planned
+/// first is lost from the shipped request).
+#[test]
+fn a_stored_drop_and_a_stored_ceiling_compose_onto_one_planned_request() {
+    let (router, _seen) = single_seat(Answer::ServeImmediately);
+    plant_row_eligible(&router, "m0", TEMPERATURE_ROW_PATH, None);
+    plant_ceiling_eligible(
+        &router,
+        "m0",
+        Some(crate::VerdictValue::Ceiling(STORED_CEILING)),
+    );
+    let mut req = req_max_tokens_only(ALIAS, 64_000);
+    req.temperature = Some(0.5);
+    req.top_p = Some(0.9);
+
+    let (planned, records) = plan_all(&router, &req, "m0");
+
+    let mut decisions: Vec<(Option<&'static str>, bool, &'static str)> = records
+        .iter()
+        .map(|r| (r.field_path, r.acted, r.reason))
+        .collect();
+    decisions.sort_unstable();
+    let mut expected = vec![
+        (
+            Some(TEMPERATURE_ROW_PATH),
+            true,
+            FIELD_PREFLIGHT_ACTION_DROP,
+        ),
+        (
+            Some(CEILING_ROW_PATH),
+            true,
+            super::FIELD_PREFLIGHT_ACTION_CEILING,
+        ),
+        (Some("top_p"), false, FIELD_PREFLIGHT_NOT_ELIGIBLE),
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        decisions, expected,
+        "one action per stored row, none on the unrelated row: {records:?}",
+    );
+    assert_eq!(planned.temperature, None, "the drop landed");
+    assert_eq!(
+        planned.max_tokens,
+        Some(STORED_CEILING),
+        "and so did the ceiling, on the same request",
+    );
+    let mut restored = planned.clone();
+    restored.temperature = req.temperature;
+    restored.max_tokens = req.max_tokens;
+    assert_eq!(
+        serde_json::to_value(&restored).expect("serialize"),
+        serde_json::to_value(&req).expect("serialize"),
+        "nothing but the two edited fields changes, `top_p` included",
+    );
+    assert_eq!(router.field_repair_counters().preflight_actions, 2);
 }
 
 /// The two ceiling tokens are spelled as the operator docs say, and the docs

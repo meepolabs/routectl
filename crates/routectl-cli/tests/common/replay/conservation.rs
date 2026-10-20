@@ -951,8 +951,11 @@ mod tests {
     }
 
     /// A body carrying every matcher-visible transform plus both
-    /// length-changing ones. Every exception on the lane is exercised by
-    /// this one pair.
+    /// length-changing ones, except the dropped `disabled` thinking config:
+    /// the thinking clamp is gated on an ACTIVE wire thinking type, which a
+    /// body whose wire lost its `thinking` key cannot carry, so that shape
+    /// lives in [`disabled_thinking_dropped`] and [`every_transform_corpus`]
+    /// pairs the two.
     ///
     /// It is a COMPOSITE of the two credential surfaces rather than a
     /// portrait of either: the rewritten `temperature` is the thinking clamp
@@ -972,7 +975,7 @@ mod tests {
             "max_tokens": 1024,
             "temperature": 0.2,
             "top_p": 0.9,
-            "thinking": {"type": "disabled"},
+            "thinking": {"type": "adaptive"},
             "tools": [{"name": "Read"}],
             "system": [
                 {"type": "text", "text": "x-anthropic-billing-header: cc_version=1.2.3;"},
@@ -988,6 +991,7 @@ mod tests {
             "model": "claude-opus-4-8",
             "max_tokens": 1024,
             "temperature": 1.0,
+            "thinking": {"type": "adaptive"},
             "cache_control": {"type": "ephemeral", "ttl": "5m"},
             "tools": [{"name": "mcp__Read"}],
             "system": [
@@ -1006,6 +1010,29 @@ mod tests {
             outgoing_request_headers: bearer_outgoing_headers(),
             ..fixture(name, "anthropic", "anthropic", ingress, outgoing)
         }
+    }
+
+    /// A `disabled` thinking config the wire dropped, and nothing else.
+    fn disabled_thinking_dropped(name: &str) -> Fixture {
+        fixture(
+            name,
+            "anthropic",
+            "anthropic",
+            json!({
+                "model": "m",
+                "thinking": {"type": "disabled"},
+                "messages": [{"role": "user", "content": "one"}],
+            }),
+            json!({"model": "m", "messages": [{"role": "user", "content": "one"}]}),
+        )
+    }
+
+    /// The smallest corpus that exercises every exception on the lane.
+    fn every_transform_corpus(name: &str) -> Vec<Fixture> {
+        vec![
+            all_transforms(name),
+            disabled_thinking_dropped(&format!("{name}-thinking-dropped")),
+        ]
     }
 
     fn slice(fixtures: &[Fixture]) -> CorpusSlice<'_> {
@@ -1036,19 +1063,20 @@ mod tests {
         // POSITIVE CONTROL FIRST: the explained pair really does pass, so
         // the failure below is caused by the added divergence and not by
         // the fixture shape being unadjudicable.
-        let clean = vec![all_transforms("explained")];
+        let clean = every_transform_corpus("explained");
 
         let passing = run(&clean);
 
         assert_eq!(passing.verdict(), Verdict::Pass, "{:?}", passing.failures);
         assert_eq!(passing.lanes[0].unexplained, 0);
-        assert_eq!(passing.lanes[0].asserted, 1);
+        assert_eq!(passing.lanes[0].asserted, 2);
 
         // Same fixture with ONE unexplainable change: the wire dropped
         // half the token budget, which no exception claims.
         let mut lossy = all_transforms("unexplained");
         lossy.outgoing_request["max_tokens"] = json!(512);
-        let corpus = vec![all_transforms("explained"), lossy];
+        let mut corpus = every_transform_corpus("explained");
+        corpus.push(lossy);
 
         let failing = run(&corpus);
 
@@ -1882,11 +1910,13 @@ mod tests {
             json!({
                 "model": "m",
                 "temperature": 0.2,
+                "thinking": {"type": "enabled", "budget_tokens": 2048},
                 "messages": [{"role": "user", "content": "one"}],
             }),
             json!({
                 "model": "m",
                 "temperature": 1.0,
+                "thinking": {"type": "enabled", "budget_tokens": 2048},
                 "messages": [{"role": "user", "content": "one"}],
             }),
         );
@@ -1917,56 +1947,70 @@ mod tests {
         // POSITIVE CONTROL: the pair that exercises every entry passes, so
         // the failure above is the zero-match rule firing and not this
         // corpus being unadjudicable.
-        let full = run(&[all_transforms("every-transform")]);
+        let full = run(&every_transform_corpus("every-transform"));
         assert_eq!(full.verdict(), Verdict::Pass, "{:?}", full.failures);
     }
 
-    /// The thinking clamp only rewrites a temperature the client sent, so a
-    /// `1.0` the wire gained with no client temperature is unexplained. The
-    /// rewritten pair is the positive control: same lane, same wire value.
-    #[test]
-    fn an_added_temperature_is_a_finding_while_a_rewritten_one_is_explained() {
-        let wire = json!({
-            "model": "m",
-            "temperature": 1.0,
-            "messages": [{"role": "user", "content": "one"}],
-        });
-        let invented = fixture(
-            "temperature-invented",
-            "anthropic",
-            "anthropic",
-            json!({"model": "m", "messages": [{"role": "user", "content": "one"}]}),
-            wire.clone(),
-        );
-        let rewritten = fixture(
-            "temperature-rewritten",
-            "anthropic",
-            "anthropic",
-            json!({
-                "model": "m",
-                "temperature": 0.2,
-                "messages": [{"role": "user", "content": "one"}],
-            }),
-            wire,
-        );
+    /// A same-lane pair whose wire `temperature` differs from the client's,
+    /// with `thinking` (when given) sent identically on both sides so it
+    /// adds no divergence of its own.
+    fn temperature_pair(
+        name: &str,
+        client_temperature: Option<Value>,
+        wire_temperature: Value,
+        thinking: Option<Value>,
+    ) -> Fixture {
+        let mut ingress = json!({"model": "m", "messages": [{"role": "user", "content": "one"}]});
+        let mut outgoing = ingress.clone();
+        if let Some(value) = client_temperature {
+            ingress["temperature"] = value;
+        }
+        outgoing["temperature"] = wire_temperature;
+        if let Some(thinking) = thinking {
+            ingress["thinking"] = thinking.clone();
+            outgoing["thinking"] = thinking;
+        }
+        fixture(name, "anthropic", "anthropic", ingress, outgoing)
+    }
 
-        let invented_run = run(&[invented]);
-        let rewritten_run = run(&[rewritten]);
+    fn active_thinking() -> Value {
+        json!({"type": "enabled", "budget_tokens": 2048})
+    }
 
+    /// Asserts `run` left exactly the one `temperature` divergence
+    /// unexplained and credited nothing to the thinking clamp.
+    fn assert_temperature_unexplained(run: &ConservationRun, row: &str) {
         assert_eq!(
-            invented_run.lanes[0].unexplained, 1,
-            "{:?}",
-            invented_run.failures
+            run.lanes[0].unexplained, 1,
+            "row `{row}`: {:?}",
+            run.failures
         );
         assert!(
-            invented_run
-                .failures
-                .iter()
-                .any(|f| f.contains("temperature")),
-            "got: {:?}",
-            invented_run.failures,
+            run.failures.iter().any(|f| f.contains("temperature")),
+            "row `{row}`: {:?}",
+            run.failures,
         );
-        assert_eq!(hits(&invented_run, "thinking-temperature-clamp"), 0);
+        assert_eq!(
+            hits(run, "thinking-temperature-clamp"),
+            0,
+            "row `{row}` must not be credited to the clamp",
+        );
+    }
+
+    /// The thinking clamp rewrites a client temperature to the float `1.0`
+    /// only while the WIRE thinking type is active. The rewritten pair is
+    /// the positive control: same lane, same wire value, active thinking.
+    #[test]
+    fn a_temperature_rewritten_under_active_wire_thinking_is_explained() {
+        let rewritten = temperature_pair(
+            "temperature-rewritten",
+            Some(json!(0.2)),
+            json!(1.0),
+            Some(active_thinking()),
+        );
+
+        let rewritten_run = run(&[rewritten]);
+
         assert_eq!(
             rewritten_run.lanes[0].unexplained, 0,
             "{:?}",
@@ -1975,43 +2019,44 @@ mod tests {
         assert_eq!(hits(&rewritten_run, "thinking-temperature-clamp"), 1);
     }
 
-    /// A client `null` temperature deserializes to no temperature, so a wire
-    /// `1.0` against it was invented, not clamped, even though the diff sees
-    /// a changed value rather than an added key.
+    /// Every shape the clamp cannot have produced stays a finding, each
+    /// differing from the positive control above in one respect.
     #[test]
-    fn a_wire_temperature_against_a_client_null_is_a_finding() {
-        let nulled = fixture(
-            "temperature-null",
-            "anthropic",
-            "anthropic",
-            json!({
-                "model": "m",
-                "temperature": null,
-                "messages": [{"role": "user", "content": "one"}],
-            }),
-            json!({
-                "model": "m",
-                "temperature": 1.0,
-                "messages": [{"role": "user", "content": "one"}],
-            }),
-        );
+    fn a_wire_temperature_the_clamp_did_not_write_is_a_finding() {
+        for (row, client, wire, thinking) in [
+            // The clamp never adds a temperature the client did not send.
+            ("invented", None, json!(1.0), Some(active_thinking())),
+            // A client `null` deserializes to no temperature, so the wire
+            // `1.0` was invented even though the diff reports a CHANGED value.
+            (
+                "client-null",
+                Some(Value::Null),
+                json!(1.0),
+                Some(active_thinking()),
+            ),
+            // No thinking on the wire: the clamp does not run.
+            ("no-thinking", Some(json!(0.2)), json!(1.0), None),
+            // Disabled thinking is not an active type.
+            (
+                "thinking-disabled",
+                Some(json!(0.2)),
+                json!(1.0),
+                Some(json!({"type": "disabled"})),
+            ),
+            // The clamp writes the float `1.0`, never the integer `1`.
+            (
+                "integer-one",
+                Some(json!(0.2)),
+                json!(1),
+                Some(active_thinking()),
+            ),
+        ] {
+            let pair = temperature_pair(&format!("temperature-{row}"), client, wire, thinking);
 
-        let nulled_run = run(&[nulled]);
+            let row_run = run(&[pair]);
 
-        assert_eq!(
-            nulled_run.lanes[0].unexplained, 1,
-            "{:?}",
-            nulled_run.failures
-        );
-        assert!(
-            nulled_run
-                .failures
-                .iter()
-                .any(|f| f.contains("temperature")),
-            "got: {:?}",
-            nulled_run.failures,
-        );
-        assert_eq!(hits(&nulled_run, "thinking-temperature-clamp"), 0);
+            assert_temperature_unexplained(&row_run, row);
+        }
     }
 
     // ---------- counter scoping ----------
@@ -2042,7 +2087,7 @@ mod tests {
         // POSITIVE CONTROL: the real vocabularies resolve, so the two
         // rejections below are boundaries and not a broken resolver.
         assert_eq!(
-            run(&[all_transforms("resolvable")]).verdict(),
+            run(&every_transform_corpus("resolvable")).verdict(),
             Verdict::Pass,
         );
 
@@ -2184,7 +2229,7 @@ mod tests {
     #[test]
     fn a_non_gateable_slice_is_never_gated_even_when_its_lane_is_listed() {
         let gated = GatedLanes::Listed(vec!["anthropic-api".to_string()]);
-        let corpus = vec![all_transforms("live-box")];
+        let corpus = every_transform_corpus("live-box");
 
         let report_only = adjudicate(&[slice(&corpus)], &gated, &[]);
 
@@ -2431,12 +2476,12 @@ mod tests {
         );
 
         // POSITIVE CONTROL: one asserted fixture is enough to clear it.
-        assert_eq!(run(&[all_transforms("one")]).verdict(), Verdict::Pass);
+        assert_eq!(run(&every_transform_corpus("one")).verdict(), Verdict::Pass);
     }
 
     #[test]
     fn unloadable_corpus_entries_degrade_the_run() {
-        let fixtures = vec![all_transforms("loaded")];
+        let fixtures = every_transform_corpus("loaded");
 
         let degraded = adjudicate(
             &[CorpusSlice {

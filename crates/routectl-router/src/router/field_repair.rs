@@ -840,8 +840,9 @@ pub(super) enum FieldTransform {
     /// the substituted value is always the upstream's own answer.
     Rewrite { accepted: &'static [&'static str] },
     /// Lower a token limit to the ceiling the rejection names, only when that
-    /// ceiling is below the value sent. Repaired for the attempt; no pre-flight
-    /// applies it yet.
+    /// ceiling is below the value sent. Repaired for the attempt, and a learned
+    /// ceiling also lowers a later request's limit before dispatch; it never
+    /// raises one.
     Ceiling,
 }
 

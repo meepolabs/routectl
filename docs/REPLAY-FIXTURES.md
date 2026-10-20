@@ -827,9 +827,12 @@ That table is a historical record of a corpus that no longer exists, taken
 when the thinking clamp still added `temperature: 1.0` to requests that
 sent none. The clamp now only rewrites a client-sent temperature to `1.0`
 under active thinking and adds none otherwise, so
-`thinking-temperature-clamp` matches a `.temperature` CHANGED to `1.0`;
-an ADDED `1.0` is unexplained. Current code produces no ADDED
-divergence of that shape, so the 133 cannot recur.
+`thinking-temperature-clamp` matches a numeric client `.temperature`
+CHANGED to the float `1.0`, and only on a fixture whose OUTGOING body
+carries `thinking.type` `enabled` or `adaptive` (the type the clamp reads
+is the one that ships). An ADDED `1.0`, an integer `1`, or a `1.0` beside
+absent or inactive wire thinking is unexplained. Current code produces no
+ADDED divergence of that shape, so the 133 cannot recur.
 
 Note the `output_config` stale fixtures do NOT diverge on this axis:
 `output_config` is present on BOTH captured sides, so conservation reads

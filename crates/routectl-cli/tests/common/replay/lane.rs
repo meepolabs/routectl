@@ -59,7 +59,10 @@
 //!   runs only for routectl's own OAuth-bearer credential against
 //!   `api.anthropic.com`; keyed on the lane alone, its entry excused a
 //!   dropped `temperature` on every fixture of the lane, api-key captures
-//!   included. `None` -- the state of every ungated entry -- means every
+//!   included. A gate may also read the captured OUTGOING body:
+//!   `thinking-temperature-clamp` fires only under an active wire
+//!   `thinking.type`, which its single `temperature` divergence cannot
+//!   show. `None` -- the state of every ungated entry -- means every
 //!   fixture on the lane.
 //! - [`Exception::max_per_fixture`] -- a per-fixture CARDINALITY bound, for
 //!   a transform that writes a bounded number of identical shapes. Auto-cache
@@ -165,6 +168,8 @@
 //! An entry whose transform fires on only ONE of them carries an
 //! [`Exception::applies_to`] gate keyed on the captured outgoing
 //! credential; an entry whose transform is credential-independent does not.
+//! (`thinking-temperature-clamp` is gated too, but on the outgoing BODY's
+//! thinking type rather than on the credential.)
 //!
 //! The live-box corpus is the NON-cloak surface, and that scope is measured
 //! rather than assumed: the Claude Code billing text survives in the
@@ -972,6 +977,25 @@ fn outgoing_credential_is_bearer(fixture: &Fixture) -> bool {
         })
 }
 
+/// Whether the fixture's OUTGOING body carries an active thinking type
+/// (`enabled` or `adaptive`), the condition under which
+/// `clamp_sampling_for_thinking`
+/// (`crates/routectl-providers/src/anthropic_api/request.rs`) rewrites a
+/// client temperature. Mirrors `is_active_thinking_type`
+/// (`crates/routectl-providers/src/anthropic_api/extras.rs`). Keyed on the
+/// wire body, never the ingress: the clamp reads the thinking type that
+/// ships, which an override or a strip may have changed from the client's.
+fn outgoing_thinking_is_active(fixture: &Fixture) -> bool {
+    matches!(
+        fixture
+            .outgoing_request
+            .get("thinking")
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str),
+        Some("enabled" | "adaptive")
+    )
+}
+
 /// The single-underscore prefix whose result is DOUBLED rather than
 /// prefixed again, mirroring `MCP_SINGLE_PREFIX` in the producer.
 const MCP_SINGLE_PREFIX: &str = "mcp_";
@@ -1199,24 +1223,35 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
     Exception {
         lane: ANTHROPIC_FIDELITY_LANE,
         id: "thinking-temperature-clamp",
-        reason: "`.temperature` the client sent appears on the wire as `1.0`. Confirmed at \
+        reason: "`.temperature` the client sent appears on the wire as the float `1.0`, on a \
+                 wire body whose `thinking.type` is `enabled` or `adaptive`. Confirmed at \
                  `clamp_sampling_for_thinking` \
                  (crates/routectl-providers/src/anthropic_api/request.rs), which rewrites a \
-                 client temperature to `1.0` while the emitted thinking type is `enabled` or \
-                 `adaptive`, since Anthropic accepts no other value then, and drops `top_p` \
-                 under active thinking. It never ADDS a temperature: a request with no client \
-                 temperature ships none, so an ADDED `1.0` is not this transform and stays a \
-                 finding. A client `null` is no temperature either, so the client side must be \
-                 numeric. The client's original value is deliberately NOT pinned: the clamp \
-                 rewrites whatever the caller sent. In-place value change, hence a MATCHER.",
+                 client temperature to `1.0f64` only while the EMITTED thinking type is active, \
+                 since Anthropic accepts no other value then, and drops `top_p` under active \
+                 thinking. The clamp follows the type actually sent, so this entry carries an \
+                 `applies_to` FIXTURE gate (`outgoing_thinking_is_active`) that reads the \
+                 captured OUTGOING body, never the ingress: a `1.0` on a fixture whose wire \
+                 thinking is absent, `disabled`, or any other type was not clamped and stays a \
+                 finding. The wire value must be a JSON float: the clamp writes `1.0`, so an \
+                 integer `1` came from somewhere else. It never ADDS a temperature: a request \
+                 with no client temperature ships none, so an ADDED `1.0` is not this \
+                 transform and stays a finding. A client `null` is no temperature either, so \
+                 the client side must be numeric. The client's original value is deliberately \
+                 NOT pinned: the clamp rewrites whatever the caller sent. In-place value \
+                 change, hence a MATCHER.",
         site_symbol: "clamp_sampling_for_thinking",
         site_path: "crates/routectl-providers/src/anthropic_api/request.rs",
         path_predicate: |path| path == "temperature",
-        applies_to: None,
+        applies_to: Some(outgoing_thinking_is_active),
         max_per_fixture: None,
         transform: Transform::Matcher(|divergence| {
             divergence.kind == DivergenceKind::Changed
-                && divergence.actual().and_then(Value::as_f64) == Some(1.0)
+                && divergence
+                    .actual()
+                    .filter(|wire| wire.is_f64())
+                    .and_then(Value::as_f64)
+                    == Some(1.0)
                 && divergence.expected().and_then(Value::as_f64).is_some()
         }),
         matched: AtomicUsize::new(0),
@@ -2537,6 +2572,13 @@ mod tests {
             Some(json!(0.7)),
             Some(json!(0.2)),
         )));
+        // The integer `1`: equal as a number, but the clamp writes a float.
+        assert!(!entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Changed,
+            Some(json!(1)),
+            Some(json!(0.2)),
+        )));
         // Same path and value, but the client sent none: the clamp never
         // adds a temperature, so this is a finding.
         assert!(!entry.matches(&Divergence::new(
@@ -3037,11 +3079,67 @@ mod tests {
         assert!(!entry.eligible_for(&ingress_only));
     }
 
-    /// The entries that carry a per-fixture credential gate, and the only
-    /// ones allowed to. Both transforms behind them run on the OAuth cloak
-    /// lane alone, so a capture on any other credential must leave the
-    /// shape they would have produced unexplained.
-    const GATED_ENTRY_IDS: [&str; 2] = ["oauth-sampling-stripped", MCP_TOOL_RENAME_ID];
+    /// The entries that carry a per-fixture gate, and the only ones allowed
+    /// to. Two run on the OAuth cloak lane alone, so a capture on any other
+    /// credential must leave the shape they would have produced
+    /// unexplained; the thinking clamp runs only under an active wire
+    /// thinking type, which an empty outgoing body does not carry.
+    const GATED_ENTRY_IDS: [&str; 3] = [
+        "oauth-sampling-stripped",
+        MCP_TOOL_RENAME_ID,
+        "thinking-temperature-clamp",
+    ];
+
+    fn fixture_with_outgoing_body(outgoing: Value) -> super::super::loader::Fixture {
+        super::super::loader::Fixture {
+            outgoing_request: outgoing,
+            ..fixture_with_outgoing_headers(&[])
+        }
+    }
+
+    #[test]
+    fn the_temperature_clamp_is_eligible_only_under_an_active_wire_thinking_type() {
+        let entry = matcher("thinking-temperature-clamp");
+        for thinking_type in ["enabled", "adaptive"] {
+            let active = fixture_with_outgoing_body(json!({"thinking": {"type": thinking_type}}));
+            assert!(
+                entry.eligible_for(&active),
+                "row `{thinking_type}` must be eligible"
+            );
+        }
+        for (row, outgoing) in [
+            ("absent", json!({"model": "m"})),
+            ("disabled", json!({"thinking": {"type": "disabled"}})),
+            (
+                "between_tools",
+                json!({"thinking": {"type": "between_tools"}}),
+            ),
+            ("non-string type", json!({"thinking": {"type": 1}})),
+            ("not an object", json!({"thinking": "enabled"})),
+        ] {
+            let inactive = fixture_with_outgoing_body(outgoing);
+            assert!(
+                !entry.eligible_for(&inactive),
+                "row `{row}` must not be eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn the_temperature_clamp_gate_reads_the_wire_body_not_the_ingress() {
+        let entry = matcher("thinking-temperature-clamp");
+        let ingress_only = super::super::loader::Fixture {
+            ingress_request: json!({"thinking": {"type": "enabled"}}),
+            ..fixture_with_outgoing_body(json!({"thinking": {"type": "disabled"}}))
+        };
+        let wire_only = super::super::loader::Fixture {
+            ingress_request: json!({"thinking": {"type": "disabled"}}),
+            ..fixture_with_outgoing_body(json!({"thinking": {"type": "enabled"}}))
+        };
+
+        assert!(!entry.eligible_for(&ingress_only));
+        assert!(entry.eligible_for(&wire_only));
+    }
 
     #[test]
     fn an_ungated_entry_is_eligible_for_every_fixture_on_its_lane() {

@@ -2212,10 +2212,13 @@ A learned output ceiling then caps the result. When a lane has learned
 the model's limit from a refusal that named it (see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#bedrock-any-region)), a value
 above that ceiling is lowered to it before the request is sent, whether
-it came from the client or from this chain. A value at or below the
-ceiling ships unchanged: a learned ceiling never raises a limit, and it
-never replaces a lower value you configured here. The ceiling recovers
-by decay only: it lapses after
+it came from the client or, on `anthropic-api` and `bedrock-invoke`,
+from this chain. `bedrock-converse` sends no `maxTokens` the client did
+not send, so there only a client value is lowered: with none, nothing
+is capped, including the value that sizes its legacy thinking budget.
+A value at or below the ceiling ships unchanged: a learned ceiling never
+raises a limit, and it never replaces a lower value you configured here.
+The ceiling recovers by decay only: it lapses after
 [`decay_hours`](#learned-capability-tempo-capability) and the next
 refusal learns it again. Lowering a client value is recorded as a lossy
 repair; lowering the value routectl filled in is not, since the client
