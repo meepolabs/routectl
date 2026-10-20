@@ -618,7 +618,7 @@ mod converse_ceiling {
 
     /// Mutation checks: drop the number capture from the Converse ceiling arm
     /// -> red (no value, so no edit and no retry); map the ceiling action to
-    /// `Repaired` in the S8 join -> red on the outcome; make `repair_teaches`
+    /// `Repaired` in the outcome join (`field_repair_outcome`) -> red on the outcome; make `repair_teaches`
     /// admit only rewrites and refused fields -> red (nothing learned); commit
     /// a ceiling edit with no value -> red on the persisted value.
     #[tokio::test]
