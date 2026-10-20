@@ -103,6 +103,12 @@ const OPENAI_UNSUPPORTED_SUFFIX: &str = "' is not supported with this model.";
 /// The openai `error.code` that refuses a named parameter.
 pub(super) const OPENAI_UNSUPPORTED_CODE: &str = "unsupported_parameter";
 
+/// Bedrock's refusal of the `temperature` field, exactly as captured on
+/// Converse. The message names no path, so only this exact text localizes.
+const BEDROCK_TEMPERATURE_UNSUPPORTED: &str =
+    "This model doesn't support the temperature field. Remove temperature and try again.";
+const TEMPERATURE_PATH: &str = "temperature";
+
 /// The location-prefix reason that refuses the field itself; every other
 /// reason refuses the value.
 const LOCATION_UNSUPPORTED_FIELD_REASON: &str = "Extra inputs are not permitted";
@@ -367,7 +373,7 @@ fn localize<'a>(
     let attribution = match dialect {
         Dialect::AnthropicApi => localize_message(anthropic_message(parsed)?),
         Dialect::Bedrock => {
-            localize_message(strip_converse_errors_prefix(bedrock_message(parsed)?))
+            localize_bedrock(strip_converse_errors_prefix(bedrock_message(parsed)?))
         }
         Dialect::OpenAi => localize_openai(parsed),
     }?;
@@ -392,6 +398,22 @@ fn anthropic_message(parsed: &ParsedErrorBody) -> Option<&str> {
 /// `{"error": {...}}` envelope.
 fn bedrock_message(parsed: &ParsedErrorBody) -> Option<&str> {
     parsed.value().get("message")?.as_str()
+}
+
+/// The Bedrock-only templates first, then the shared Anthropic arms.
+fn localize_bedrock(message: &str) -> Option<Attribution<'_>> {
+    unsupported_temperature(message).or_else(|| localize_message(message))
+}
+
+/// `This model doesn't support the temperature field. ...`, verbatim.
+fn unsupported_temperature(message: &str) -> Option<Attribution<'static>> {
+    (message == BEDROCK_TEMPERATURE_UNSUPPORTED).then(|| Attribution {
+        path: TEMPERATURE_PATH,
+        tier: SignalTier::SelfIdentifying,
+        kind: RejectionKind::UnsupportedField,
+        presupposes_presence: true,
+        replacements: Vec::new(),
+    })
 }
 
 fn localize_message(message: &str) -> Option<Attribution<'_>> {

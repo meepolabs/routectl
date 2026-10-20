@@ -122,6 +122,9 @@ pub(super) enum FieldSurface {
     /// Never dropped: a request with no thinking at all thinks at the model's
     /// default effort.
     AnthropicThinkingType(&'static str),
+    /// A canonical sampling parameter every egress emits from one request
+    /// field when it is set; see [`SamplingParam`].
+    SamplingParam(SamplingParam),
     /// Test-only: reports itself PRESENT and removes NOTHING.
     ///
     /// The real surface's presence check and drop read the same two carriers, so
@@ -247,6 +250,7 @@ impl FieldSurface {
             Self::AnthropicThinkingType(refused) => {
                 emitted_thinking_type(req).as_deref() == Some(*refused)
             }
+            Self::SamplingParam(param) => param.is_set(req),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => true,
             #[cfg(test)]
@@ -324,6 +328,8 @@ impl FieldSurface {
                 }),
             Self::AnthropicThinkingType(_) => emitted_thinking_type(req)
                 .map(|emitted| format!("{THINKING_TYPE_VALUE_PREFIX}{emitted}")),
+            // No probe payload: no token count validates a sampling parameter.
+            Self::SamplingParam(_) => None,
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => None,
             // No probe payload: the test-only surfaces are never rows of
@@ -383,6 +389,7 @@ impl FieldSurface {
                 }
             }
             Self::AnthropicThinkingType(_) => write_thinking_type(req, value),
+            Self::SamplingParam(_) => {}
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => {}
             #[cfg(test)]
@@ -462,6 +469,7 @@ impl FieldSurface {
                 carrier || derived
             }
             Self::AnthropicThinkingType(_) => false,
+            Self::SamplingParam(param) => param.take(req),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => false,
             #[cfg(test)]
@@ -515,6 +523,36 @@ impl FieldSurface {
                 .and_then(serde_json::Value::as_object_mut)
                 .and_then(|object| object.remove(TEST_RECHECK_KWARG))
                 .is_some(),
+        }
+    }
+}
+
+/// A sampling parameter a [`FieldSurface::SamplingParam`] row drops: one
+/// canonical request field, PRESENT when set. Every egress emits it from that
+/// field alone (the thinking clamp only rewrites a value the client sent), so
+/// taking it removes it from the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SamplingParam {
+    Temperature,
+}
+
+impl SamplingParam {
+    const fn is_set(self, req: &ChatRequest) -> bool {
+        match self {
+            Self::Temperature => req.temperature.is_some(),
+        }
+    }
+
+    const fn take(self, req: &mut ChatRequest) -> bool {
+        match self {
+            Self::Temperature => req.temperature.take().is_some(),
+        }
+    }
+
+    /// The parameter's pointer on a client wire that spells it at the root.
+    pub(super) const fn wire_pointer(self) -> &'static str {
+        match self {
+            Self::Temperature => "/temperature",
         }
     }
 }
@@ -782,6 +820,13 @@ const FIELD_REPAIRS: &[FieldRepairRow] = &[
         transform: FieldTransform::Rewrite {
             accepted: &["thinking.type.adaptive", "thinking.type.between_tools"],
         },
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: "temperature",
+        surface: FieldSurface::SamplingParam(SamplingParam::Temperature),
+        transform: FieldTransform::Drop,
         class: TransformClass::Envelope,
         count_tokens_validates: false,
     },
@@ -2261,8 +2306,8 @@ mod table_tests {
         // something a passing suite absorbs silently.
         assert_eq!(
             FIELD_REPAIRS.len(),
-            3,
-            "the closed repair table ships exactly three grounded rows; a new row is a new \
+            4,
+            "the closed repair table ships exactly four grounded rows; a new row is a new \
              permanent commitment and updates this guard deliberately",
         );
         assert_eq!(
@@ -2322,6 +2367,22 @@ mod table_tests {
         );
         assert_eq!(thinking_off.class, TransformClass::Envelope);
         assert!(!thinking_off.count_tokens_validates);
+        let temperature = FIELD_REPAIRS[3];
+        assert_eq!(temperature.path, "temperature");
+        assert_eq!(
+            temperature.surface,
+            FieldSurface::SamplingParam(SamplingParam::Temperature)
+        );
+        assert_eq!(
+            temperature.transform,
+            FieldTransform::Drop,
+            "both committed refusals refuse the field itself and name no replacement",
+        );
+        assert_eq!(temperature.class, TransformClass::Envelope);
+        assert!(
+            !temperature.count_tokens_validates,
+            "the Converse count endpoint is unsupported on the models that refuse it",
+        );
     }
 
     #[test]

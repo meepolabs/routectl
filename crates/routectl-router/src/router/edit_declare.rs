@@ -240,6 +240,9 @@ pub(super) const fn field_wire_pointer(
         (FieldSurface::AnthropicThinkingType(_), IngressDialect::Anthropic) => {
             Some("/thinking/type")
         }
+        (FieldSurface::SamplingParam(param), IngressDialect::Anthropic | IngressDialect::Chat) => {
+            Some(param.wire_pointer())
+        }
         _ => None,
     }
 }

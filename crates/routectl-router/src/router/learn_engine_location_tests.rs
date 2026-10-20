@@ -35,6 +35,8 @@ const CONVERSE_FIXTURE: &str =
 const TEMPERATURE_FIXTURE: &str = include_str!(
     "../../tests/fixtures/rejections/openai-compat/unsupported-parameter-temperature.json"
 );
+const BEDROCK_TEMPERATURE_FIXTURE: &str =
+    include_str!("../../tests/fixtures/rejections/bedrock/temperature-field-unsupported.json");
 
 const ANTHROPIC: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
 const OPENAI_COMPAT: &str = "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
@@ -214,6 +216,16 @@ fn converse_thinking_enabled(_: &ChatRequest, mut client: Value) -> Value {
 fn converse_empty_bag(_: &ChatRequest, mut client: Value) -> Value {
     client[CONVERSE_BAG] = json!({});
     client
+}
+
+/// A Converse body carrying temperature where Converse spells it.
+fn converse_inference_temperature(_: &ChatRequest, mut client: Value) -> Value {
+    client["inferenceConfig"] = json!({"temperature": 0.5});
+    client
+}
+
+fn converse_inference_temperature_and_empty_bag(req: &ChatRequest, client: Value) -> Value {
+    converse_empty_bag(req, converse_inference_temperature(req, client))
 }
 
 /// The thinking union on its `enabled` member, carrying `display` while the
@@ -473,7 +485,7 @@ fn site_rows() -> Vec<SiteRow> {
     rows
 }
 
-fn converse_site_rows() -> [SiteRow; 6] {
+fn converse_site_rows() -> [SiteRow; 8] {
     [
         SiteRow {
             name: "a Converse model field named relative to the bag, carried in it",
@@ -518,6 +530,22 @@ fn converse_site_rows() -> [SiteRow; 6] {
             in_egress: None,
         },
         SiteRow {
+            name: "the captured Converse temperature refusal, temperature in inferenceConfig",
+            provider_block: CONVERSE,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(converse_inference_temperature),
+            err: || fixture_rejection(BEDROCK_TEMPERATURE_FIXTURE),
+            in_egress: None,
+        },
+        SiteRow {
+            name: "the captured Converse temperature refusal beside an empty bag",
+            provider_block: CONVERSE,
+            dialect: IngressDialect::Anthropic,
+            sent: Some(converse_inference_temperature_and_empty_bag),
+            err: || fixture_rejection(BEDROCK_TEMPERATURE_FIXTURE),
+            in_egress: None,
+        },
+        SiteRow {
             name: "a bag-prefixed path on an Invoke body, which has no bag",
             provider_block: INVOKE,
             dialect: IngressDialect::Anthropic,
@@ -533,6 +561,46 @@ fn the_settlement_reads_each_rejection_against_the_body_that_went_out() {
     for row in site_rows() {
         assert_eq!(settle(&row), row.in_egress, "{}", row.name);
     }
+}
+
+/// The Converse temperature refusal names a root path a Converse body never
+/// spells at the root, so the walk cannot call it absent and no proposer is
+/// suppressed. The rejection does localize, and the same walk reads a root
+/// field the body lacks as absent, so the `None` is about where Converse
+/// spells temperature.
+#[cfg(feature = "bedrock")]
+#[test]
+fn a_converse_temperature_refusal_is_not_read_as_an_absent_field() {
+    let row = |name, sent: Shape, err: fn() -> Error, in_egress| SiteRow {
+        name,
+        provider_block: CONVERSE,
+        dialect: IngressDialect::Anthropic,
+        sent: Some(sent),
+        err,
+        in_egress,
+    };
+    let refusal = row(
+        "temperature in inferenceConfig",
+        converse_inference_temperature,
+        || fixture_rejection(BEDROCK_TEMPERATURE_FIXTURE),
+        None,
+    );
+    let site = settle_site(&refusal);
+    assert_eq!(site.in_egress, None, "{}", refusal.name);
+    assert!(
+        site.locator
+            .as_ref()
+            .is_some_and(|locator| locator.segments().eq(["temperature"])),
+        "premise: the refusal localizes to the root temperature path",
+    );
+
+    let control = row(
+        "a refused root field the Converse body lacks everywhere",
+        converse_empty_bag,
+        || bedrock_rejection(&bag_prefixed("temperature")),
+        Some(false),
+    );
+    assert_eq!(settle(&control), control.in_egress, "{}", control.name);
 }
 
 // ---------------------------------------------------------------------------

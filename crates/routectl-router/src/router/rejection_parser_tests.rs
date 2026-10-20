@@ -29,6 +29,7 @@ const DISPLAY_PATH: &str = "thinking.enabled.display";
 const DISPLAY_MESSAGE: &str = "thinking.enabled.display: Input should be 'summarized', 'omitted'";
 const CONVERSE_WRAPPER: &str = "The model returned the following errors: ";
 const THINKING_DISABLED_PATH: &str = "thinking.type.disabled";
+const TEMPERATURE_PATH: &str = "temperature";
 /// The off-switch template exactly as the committed Bedrock capture spells it.
 const THINKING_SWITCH_MESSAGE: &str = "To turn thinking off on this model, send \"thinking\": \
      {\"type\": \"between_tools\"} instead of {\"type\": \"disabled\"}. The model does not \
@@ -185,7 +186,7 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "bedrock/temperature-field-unsupported",
-            Outcome::NotLocalized,
+            Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, UnsupportedField),
         ),
         (
             "bedrock/thinking-type-disabled-unsupported",
@@ -197,7 +198,7 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "openai-compat/unsupported-parameter-temperature",
-            unresolved("temperature", SelfIdentifying, UnsupportedField),
+            Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, UnsupportedField),
         ),
     ]
     .into_iter()
@@ -1213,4 +1214,111 @@ fn the_thinking_off_switch_returns_only_table_entries() {
     for returned in [localized.raw, replacement] {
         assert!(!body_bytes.contains(&returned.as_ptr()), "{returned}");
     }
+}
+
+/// The Bedrock temperature refusal exactly as the committed capture spells it.
+const TEMPERATURE_MESSAGE: &str =
+    "This model doesn't support the temperature field. Remove temperature and try again.";
+
+#[test]
+fn the_bedrock_temperature_template_names_the_row_flat_and_converse_wrapped() {
+    let captured: Value =
+        serde_json::from_str(&fixture(BEDROCK, "temperature-field-unsupported").1).unwrap();
+    assert_eq!(
+        captured["message"].as_str(),
+        Some(TEMPERATURE_MESSAGE),
+        "premise: the template constant is the committed capture's message",
+    );
+    let row = Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, UnsupportedField);
+    let cases = [
+        ("flat", bedrock_body(TEMPERATURE_MESSAGE)),
+        (
+            "converse-wrapped",
+            bedrock_body(&format!("{CONVERSE_WRAPPER}{TEMPERATURE_MESSAGE}")),
+        ),
+    ];
+
+    for (name, body) in cases {
+        assert_eq!(outcome(BEDROCK, 400, &body), row, "{name}");
+        let parsed = UpstreamBody::new(body);
+        let rejected = rejected_wire_path(BEDROCK, 400, parsed.parsed()).expect("localized");
+        assert!(rejected.presupposes_presence, "{name}");
+        assert!(rejected.field.segments().eq([TEMPERATURE_PATH]), "{name}");
+        assert_eq!(
+            replacements(BEDROCK, 400, parsed.text()),
+            Some(Vec::new()),
+            "{name}: a drop names no replacement",
+        );
+    }
+}
+
+#[test]
+fn bedrock_temperature_near_misses_localize_nothing() {
+    let exact = TEMPERATURE_MESSAGE;
+    let swap = |from: &str, to: &str| {
+        assert!(exact.contains(from), "premise: {from:?} is in the template");
+        exact.replace(from, to)
+    };
+    let cases = [
+        (
+            "another field name",
+            BEDROCK,
+            bedrock_body(&swap("temperature", "top_p")),
+        ),
+        (
+            "missing tail sentence",
+            BEDROCK,
+            bedrock_body(&swap(" Remove temperature and try again.", "")),
+        ),
+        (
+            "case change",
+            BEDROCK,
+            bedrock_body(&swap("This model", "this model")),
+        ),
+        (
+            "extra prefix other than the Converse wrapper",
+            BEDROCK,
+            bedrock_body(&format!("Validation failed. {exact}")),
+        ),
+        (
+            "trailing prose",
+            BEDROCK,
+            bedrock_body(&format!("{exact} See the docs.")),
+        ),
+        (
+            "same message on anthropic-api",
+            ANTHROPIC,
+            anthropic_body(exact),
+        ),
+        (
+            "same flat body on anthropic-api",
+            ANTHROPIC,
+            bedrock_body(exact),
+        ),
+        (
+            "same message on openai-compat",
+            OPENAI_COMPAT,
+            openai_body(exact, None),
+        ),
+    ];
+    assert_eq!(
+        outcome(BEDROCK, 400, &bedrock_body(exact)),
+        Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, UnsupportedField),
+        "premise: the same harness localizes the exact template",
+    );
+
+    for (name, kind, body) in cases {
+        assert_eq!(outcome(kind, 400, &body), Outcome::NotLocalized, "{name}");
+    }
+}
+
+#[test]
+fn the_bedrock_temperature_arm_returns_no_body_bytes() {
+    let body = UpstreamBody::new(bedrock_body(TEMPERATURE_MESSAGE));
+    let body_bytes = body.text().as_bytes().as_ptr_range();
+
+    let localized = localize(BEDROCK, 400, body.parsed().unwrap()).expect("localized");
+
+    assert_eq!(localized.raw, TEMPERATURE_PATH);
+    assert!(!body_bytes.contains(&localized.raw.as_ptr()));
 }
