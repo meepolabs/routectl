@@ -176,8 +176,16 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         ),
         (
+            "bedrock/max-tokens-above-model-limit",
+            Outcome::NotLocalized,
+        ),
+        (
             "bedrock/max-tokens-above-model-limit-invoke",
             unresolved("max_tokens", Inferred, InvalidValue),
+        ),
+        (
+            "bedrock/temperature-field-unsupported",
+            Outcome::NotLocalized,
         ),
         (
             "bedrock/thinking-type-disabled-unsupported",

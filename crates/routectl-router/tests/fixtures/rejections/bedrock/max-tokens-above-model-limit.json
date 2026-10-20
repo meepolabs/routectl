@@ -1,0 +1,5 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-10-20, Converse, meta.llama3-1-8b-instruct-v1:0): a max_tokens value above the model's output limit. The limit appears twice in the message and differs per model. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns, with no Converse model-errors wrapper. No x-amzn-ErrorType header was recorded, so there is no lifted_type.",
+  "status": 400,
+  "body": "{\"message\":\"The maximum tokens you requested exceeds the model limit of 8192. Try again with a maximum tokens value that is lower than 8192.\"}"
+}
