@@ -200,6 +200,18 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "openai-compat/unsupported-parameter-temperature",
             Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, UnsupportedField),
         ),
+        (
+            "openai-compat/unsupported-parameter-top-p",
+            Outcome::Row("top_p", SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "openai-compat/unsupported-parameter-presence-penalty",
+            Outcome::Row("presence_penalty", SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "openai-compat/unsupported-parameter-frequency-penalty",
+            Outcome::Row("frequency_penalty", SelfIdentifying, UnsupportedField),
+        ),
     ]
     .into_iter()
     .map(|(case, outcome)| (case.to_string(), outcome))

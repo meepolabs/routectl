@@ -1,51 +1,99 @@
 // The sampling-parameter drop rows: which requests carry them, where a
-// fidelity lane declares the drop, and the temperature row end to end on a
-// Bedrock Converse seat that assembles the real Converse body, so every
-// assertion about the repair reads the body an upstream would receive.
+// fidelity lane declares the drop, the temperature row end to end on a
+// Bedrock Converse seat, and each openai-compat row end to end on a seat
+// that assembles the real openai-compat body, so every assertion about the
+// repair reads the body an upstream would receive.
 // An `include!`d FRAGMENT of `field_repair_tests.rs`.
+
+/// Each sampling parameter's canonical field, read back after a drop.
+type SamplingField = fn(&ChatRequest) -> Option<f64>;
+
+fn sampling_params() -> [(super::SamplingParam, &'static str, SamplingField); 4] {
+    use super::SamplingParam::{FrequencyPenalty, PresencePenalty, Temperature, TopP};
+    [
+        (Temperature, "temperature", |req| req.temperature),
+        (TopP, "top_p", |req| req.top_p),
+        (PresencePenalty, "presence_penalty", |req| {
+            req.presence_penalty
+        }),
+        (FrequencyPenalty, "frequency_penalty", |req| {
+            req.frequency_penalty
+        }),
+    ]
+}
+
+fn set_sampling_param(req: &mut ChatRequest, param: super::SamplingParam, value: f64) {
+    use super::SamplingParam::{FrequencyPenalty, PresencePenalty, Temperature, TopP};
+    match param {
+        Temperature => req.temperature = Some(value),
+        TopP => req.top_p = Some(value),
+        PresencePenalty => req.presence_penalty = Some(value),
+        FrequencyPenalty => req.frequency_penalty = Some(value),
+    }
+}
 
 #[test]
 fn a_sampling_param_is_present_while_set_and_dropped_by_taking_it() {
-    let surface = super::FieldSurface::SamplingParam(super::SamplingParam::Temperature);
-    let mut req = req_on(ALIAS);
-    assert!(!surface.present_in(&req), "unset is absent");
-    assert!(!surface.drop_from(&mut req), "nothing to drop");
+    for (param, name, field) in sampling_params() {
+        let surface = super::FieldSurface::SamplingParam(param);
+        let mut req = req_on(ALIAS);
+        req.temperature = Some(0.25);
+        req.top_p = Some(0.25);
+        req.presence_penalty = Some(0.25);
+        req.frequency_penalty = Some(0.25);
+        let mut unset = req_on(ALIAS);
+        assert!(!surface.present_in(&unset), "{name}: unset is absent");
+        assert!(!surface.drop_from(&mut unset), "{name}: nothing to drop");
 
-    req.temperature = Some(0.0);
-    assert!(surface.present_in(&req), "a zero temperature is still sent");
-    assert!(surface.drop_from(&mut req));
+        set_sampling_param(&mut req, param, 0.0);
+        assert!(
+            surface.present_in(&req),
+            "{name}: a zero value is still sent"
+        );
+        assert!(surface.drop_from(&mut req), "{name}");
 
-    assert_eq!(req.temperature, None);
-    assert!(!surface.present_in(&req));
+        assert_eq!(field(&req), None, "{name}");
+        assert!(!surface.present_in(&req), "{name}");
+        let untouched = sampling_params()
+            .into_iter()
+            .filter(|(other, ..)| *other != param)
+            .all(|(_, _, other_field)| other_field(&req) == Some(0.25));
+        assert!(untouched, "{name}: the drop takes only its own field");
+    }
 }
 
 #[test]
 fn a_sampling_param_drop_declares_its_root_pointer_on_a_root_spelling_wire() {
     use routectl_core::wire_check::IngressDialect;
-    let surface = super::FieldSurface::SamplingParam(super::SamplingParam::Temperature);
-    let rows = [
-        (IngressDialect::Anthropic, Some("/temperature")),
-        (IngressDialect::Chat, Some("/temperature")),
-        (IngressDialect::Responses, None),
-    ];
+    for (param, name, _) in sampling_params() {
+        let surface = super::FieldSurface::SamplingParam(param);
+        let root = format!("/{name}");
+        let rows = [
+            (IngressDialect::Anthropic, Some(root.as_str())),
+            (IngressDialect::Chat, Some(root.as_str())),
+            (IngressDialect::Responses, None),
+        ];
 
-    for (wire, pointer) in rows {
-        assert_eq!(
-            super::super::edit_declare::field_wire_pointer(surface, wire),
-            pointer,
-            "{wire:?}",
-        );
+        for (wire, pointer) in rows {
+            assert_eq!(
+                super::super::edit_declare::field_wire_pointer(surface, wire),
+                pointer,
+                "{name} on {wire:?}",
+            );
+        }
     }
 }
 
 #[test]
-fn the_temperature_row_has_no_recheck_payload() {
+fn no_sampling_param_row_has_a_recheck_payload() {
     let mut req = req_on(ALIAS);
-    req.temperature = Some(0.5);
-    assert!(
-        super::FieldSurface::SamplingParam(super::SamplingParam::Temperature).present_in(&req),
-        "premise: the request carries the row",
-    );
+    for (param, name, _) in sampling_params() {
+        set_sampling_param(&mut req, param, 0.5);
+        assert!(
+            super::FieldSurface::SamplingParam(param).present_in(&req),
+            "premise: the request carries the {name} row",
+        );
+    }
 
     let grounded: Vec<_> =
         super::recheck_payloads(crate::router::FieldRepairTable::grounded_only(), &req).collect();
@@ -382,5 +430,311 @@ mod converse_temperature {
             0,
             "nothing is resident"
         );
+    }
+}
+
+mod openai_compat_sampling {
+    use super::*;
+
+    use routectl_providers::openai_compat::request::normalize;
+    use routectl_providers::openai_compat::{HistoryReasoning, ReasoningDialect};
+
+    /// An upstream model name no reasoning-model profile matches, so the
+    /// egress forwards every sampling parameter the client sent.
+    const UNPROFILED_MODEL: &str = "acme-chat-1";
+
+    const OPENAI_COMPAT_SEAT_TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
+         [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+         [providers.p0]\nkind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
+         api_key_ref = \"literal:k\"\n";
+
+    /// One openai-compat row: its key, the committed refusal of it, and how
+    /// a client sets it.
+    struct Case {
+        key: &'static str,
+        fixture: &'static str,
+        set: fn(&mut ChatRequest),
+    }
+
+    fn cases() -> [Case; 4] {
+        [
+            Case {
+                key: "temperature",
+                fixture: include_str!(
+                    "../../tests/fixtures/rejections/openai-compat/unsupported-parameter-temperature.json"
+                ),
+                set: |req| req.temperature = Some(0.5),
+            },
+            Case {
+                key: "top_p",
+                fixture: include_str!(
+                    "../../tests/fixtures/rejections/openai-compat/unsupported-parameter-top-p.json"
+                ),
+                set: |req| req.top_p = Some(0.5),
+            },
+            Case {
+                key: "presence_penalty",
+                fixture: include_str!(
+                    "../../tests/fixtures/rejections/openai-compat/unsupported-parameter-presence-penalty.json"
+                ),
+                set: |req| req.presence_penalty = Some(0.5),
+            },
+            Case {
+                key: "frequency_penalty",
+                fixture: include_str!(
+                    "../../tests/fixtures/rejections/openai-compat/unsupported-parameter-frequency-penalty.json"
+                ),
+                set: |req| req.frequency_penalty = Some(0.5),
+            },
+        ]
+    }
+
+    /// The committed refusal as the openai-compat provider surfaces it: the
+    /// body with its lifted `error.type` and `error.code`.
+    fn fixture_rejection(fixture: &str) -> Error {
+        let fixture: serde_json::Value =
+            serde_json::from_str(fixture).expect("the fixture is JSON");
+        let status = u16::try_from(fixture["status"].as_u64().expect("a status")).expect("u16");
+        let body = fixture["body"]
+            .as_str()
+            .expect("the fixture carries its body");
+        let parsed: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+        let token = |pointer: &str| {
+            parsed
+                .pointer(pointer)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        Error::upstream_with_body(
+            "openai-compat-seat",
+            status,
+            routectl_core::UpstreamBody::new(body),
+            None,
+            token("/error/type"),
+            token("/error/code"),
+        )
+    }
+
+    /// An openai-compat seat: assembles each attempt's body with the real
+    /// openai-compat translation, deposits it into the attempt's wire tap,
+    /// refuses it with the committed refusal while the body carries `key`,
+    /// and otherwise serves.
+    struct CompatSeat {
+        key: &'static str,
+        fixture: &'static str,
+        bodies: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl CompatSeat {
+        fn bodies(&self) -> Vec<serde_json::Value> {
+            self.bodies.lock().clone()
+        }
+
+        fn answer(&self, req: &ChatRequest) -> Result<()> {
+            let body = normalize(
+                "openai-compat-seat",
+                req,
+                ReasoningDialect::OpenAi,
+                HistoryReasoning::default(),
+                None,
+                false,
+            )?;
+            if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
+                tap.deposit(serde_json::to_vec(&body).expect("serialize").into());
+            }
+            let refused = body.get(self.key).is_some();
+            self.bodies.lock().push(body);
+            if refused {
+                return Err(fixture_rejection(self.fixture));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CompatSeat {
+        fn id(&self) -> &'static str {
+            "openai-compat-seat"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("openai-compat-seat", "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            self.answer(&req).map(|()| success_response())
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.answer(&req).map(|()| {
+                stream::iter(vec![Ok(content_chunk())]).boxed()
+                    as BoxStream<'static, Result<ChatChunk>>
+            })
+        }
+    }
+
+    fn compat_router(seat: &Arc<CompatSeat>) -> Router {
+        let mut config: Config = toml::from_str(OPENAI_COMPAT_SEAT_TOML).expect("valid test toml");
+        config
+            .aliases
+            .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
+        let mut router = Router::new(Arc::new(config));
+        router.install_resolved_models(BTreeMap::from([(
+            "m0".to_string(),
+            Arc::new(ResolvedModel::new(
+                "m0",
+                "p0",
+                Arc::clone(seat) as Arc<dyn Provider>,
+                UNPROFILED_MODEL,
+            )),
+        )]));
+        router.with_capability_writes_assumed_durable_for_tests()
+    }
+
+    /// A Chat Completions client's request setting `case.key`, with no
+    /// thinking, as the ingress parses it, client bytes included for the
+    /// wire check.
+    fn sampling_req(case: &Case) -> ChatRequest {
+        let mut req = req_on(ALIAS);
+        req.max_tokens = Some(1024);
+        (case.set)(&mut req);
+        req.reasoning = None;
+        req.routectl_internal.anthropic_thinking_display = None;
+        req.routectl_internal.anthropic_thinking = routectl_core::AnthropicThinking::SentNone;
+        let mut client = json!({
+            "model": ALIAS,
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "hello"}],
+        });
+        client[case.key] = json!(0.5);
+        req.routectl_internal.ingress_wire = Some(routectl_core::wire_check::IngressWire {
+            dialect: routectl_core::wire_check::IngressDialect::Chat,
+            client_version: None,
+            bytes: serde_json::to_vec(&client).expect("serialize").into(),
+        });
+        req
+    }
+
+    /// Mutation check: delete one openai-compat sampling row from the closed
+    /// table -> its case reds (the refusal resolves no row, so no retry).
+    #[tokio::test]
+    async fn an_openai_compat_sampling_refusal_drops_the_key_commits_and_preflights_the_next_request()
+     {
+        use crate::wire_check_state::FieldRepairOutcome;
+
+        for case in cases() {
+            let key = case.key;
+            let seat = Arc::new(CompatSeat {
+                key,
+                fixture: case.fixture,
+                bodies: Mutex::new(Vec::new()),
+            });
+            let router = compat_router(&seat);
+
+            let first = router
+                .complete_with_options(sampling_req(&case), RouterOptions::new())
+                .await;
+
+            assert!(first.result.is_ok(), "{key}: {:?}", first.result.err());
+            let bodies = seat.bodies();
+            assert_eq!(bodies.len(), 2, "{key}: one refused attempt, one retry");
+            assert_eq!(
+                bodies[0].get(key),
+                Some(&json!(0.5)),
+                "{key}: premise: the egress forwards the key, so no profile stripped it: {}",
+                bodies[0],
+            );
+            assert_eq!(bodies[1].get(key), None, "{key}: {}", bodies[1]);
+            let mut without_key = bodies[0].clone();
+            without_key.as_object_mut().expect("an object").remove(key);
+            assert_eq!(
+                bodies[1], without_key,
+                "{key}: the retry drops the key and nothing else"
+            );
+            assert_eq!(first.meta.field_repairs.len(), 1, "{key}");
+            let repair = &first.meta.field_repairs[0];
+            assert!(repair.repair_succeeded, "{key}");
+            assert_eq!(repair.field_path, key);
+            assert_eq!(
+                repair.action,
+                super::super::FIELD_ACTION_DROP_REPAIR,
+                "{key}"
+            );
+            let outcomes: Vec<FieldRepairOutcome> = router
+                .wire_check_snapshot()
+                .findings
+                .iter()
+                .filter_map(|finding| finding.field_repair_outcome)
+                .collect();
+            assert_eq!(outcomes, vec![FieldRepairOutcome::Repaired], "{key}");
+            let [event] = first.meta.learned_capabilities.as_slice() else {
+                panic!("{key}: one verdict: {:?}", first.meta.learned_capabilities);
+            };
+            assert_eq!(
+                (
+                    event.capability_key.as_str(),
+                    event.provider_kind.as_str(),
+                    event.value
+                ),
+                (
+                    crate::field_capability::field_capability_key(key)
+                        .expect("a grounded path mints a key")
+                        .as_str(),
+                    "openai-compat",
+                    None
+                ),
+                "{key}",
+            );
+            assert!(
+                router.acknowledge_durable_field_confirmation(
+                    &event.state_key,
+                    &event.capability_key,
+                    &event.provider_kind,
+                    event.persistence_generation,
+                    event.incarnation,
+                    event.observations,
+                ),
+                "{key}: premise: the durable write acknowledges the confirmation",
+            );
+            let verdict_key = crate::field_verdict::FieldVerdictKey::new(
+                &crate::state_key::StateKey::parse(&event.state_key)
+                    .expect("the event names a lane"),
+                key,
+                "openai-compat",
+            )
+            .expect("a grounded path mints a key");
+            let cadence = router
+                .field_verdicts()
+                .canaries()
+                .snapshot(&verdict_key)
+                .expect("the confirmation seeded the canary state")
+                .cadence;
+            assert!(
+                cadence > 1,
+                "{key}: premise: the next request is not the canary"
+            );
+
+            let second = router
+                .complete_with_options(sampling_req(&case), RouterOptions::new())
+                .await;
+
+            assert!(second.result.is_ok(), "{key}: {:?}", second.result.err());
+            let bodies = seat.bodies();
+            assert_eq!(bodies.len(), 3, "{key}: the second request is sent once");
+            assert_eq!(bodies[2].get(key), None, "{key}: {}", bodies[2]);
+            assert!(
+                second.meta.field_repairs.is_empty(),
+                "{key}: no reactive repair"
+            );
+            assert!(
+                second
+                    .meta
+                    .field_preflight
+                    .iter()
+                    .any(|record| record.acted && record.field_path == Some(key)),
+                "{key}: the pre-flight drop acted: {:?}",
+                second.meta.field_preflight,
+            );
+        }
     }
 }

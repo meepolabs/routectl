@@ -1,0 +1,6 @@
+{
+  "note": "Tier 2, vendor-documented, not captured here: OpenAI Chat Completions (gpt-5, OpenAI direct) rejecting frequency_penalty on a reasoning model, as reported by a third party at https://github.com/oracle/ai-optimizer/issues/240. The report prints the documented {error: {message, type, param, code}} envelope as a Python dict; the body is that envelope re-serialized compactly as JSON. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"Unsupported parameter: 'frequency_penalty' is not supported with this model.\",\"type\":\"invalid_request_error\",\"param\":\"frequency_penalty\",\"code\":\"unsupported_parameter\"}}"
+}

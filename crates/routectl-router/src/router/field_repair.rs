@@ -534,18 +534,27 @@ impl FieldSurface {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SamplingParam {
     Temperature,
+    TopP,
+    PresencePenalty,
+    FrequencyPenalty,
 }
 
 impl SamplingParam {
     const fn is_set(self, req: &ChatRequest) -> bool {
         match self {
             Self::Temperature => req.temperature.is_some(),
+            Self::TopP => req.top_p.is_some(),
+            Self::PresencePenalty => req.presence_penalty.is_some(),
+            Self::FrequencyPenalty => req.frequency_penalty.is_some(),
         }
     }
 
     const fn take(self, req: &mut ChatRequest) -> bool {
         match self {
             Self::Temperature => req.temperature.take().is_some(),
+            Self::TopP => req.top_p.take().is_some(),
+            Self::PresencePenalty => req.presence_penalty.take().is_some(),
+            Self::FrequencyPenalty => req.frequency_penalty.take().is_some(),
         }
     }
 
@@ -553,6 +562,9 @@ impl SamplingParam {
     pub(super) const fn wire_pointer(self) -> &'static str {
         match self {
             Self::Temperature => "/temperature",
+            Self::TopP => "/top_p",
+            Self::PresencePenalty => "/presence_penalty",
+            Self::FrequencyPenalty => "/frequency_penalty",
         }
     }
 }
@@ -826,6 +838,27 @@ const FIELD_REPAIRS: &[FieldRepairRow] = &[
     FieldRepairRow {
         path: "temperature",
         surface: FieldSurface::SamplingParam(SamplingParam::Temperature),
+        transform: FieldTransform::Drop,
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: "top_p",
+        surface: FieldSurface::SamplingParam(SamplingParam::TopP),
+        transform: FieldTransform::Drop,
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: "presence_penalty",
+        surface: FieldSurface::SamplingParam(SamplingParam::PresencePenalty),
+        transform: FieldTransform::Drop,
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: "frequency_penalty",
+        surface: FieldSurface::SamplingParam(SamplingParam::FrequencyPenalty),
         transform: FieldTransform::Drop,
         class: TransformClass::Envelope,
         count_tokens_validates: false,
@@ -2306,8 +2339,8 @@ mod table_tests {
         // something a passing suite absorbs silently.
         assert_eq!(
             FIELD_REPAIRS.len(),
-            4,
-            "the closed repair table ships exactly four grounded rows; a new row is a new \
+            7,
+            "the closed repair table ships exactly seven grounded rows; a new row is a new \
              permanent commitment and updates this guard deliberately",
         );
         assert_eq!(
@@ -2383,6 +2416,20 @@ mod table_tests {
             !temperature.count_tokens_validates,
             "the Converse count endpoint is unsupported on the models that refuse it",
         );
+        for (path, param) in [
+            ("top_p", SamplingParam::TopP),
+            ("presence_penalty", SamplingParam::PresencePenalty),
+            ("frequency_penalty", SamplingParam::FrequencyPenalty),
+        ] {
+            let row = FIELD_REPAIRS
+                .iter()
+                .find(|row| row.path == path)
+                .unwrap_or_else(|| panic!("{path}: a grounded row"));
+            assert_eq!(row.surface, FieldSurface::SamplingParam(param), "{path}");
+            assert_eq!(row.transform, FieldTransform::Drop, "{path}");
+            assert_eq!(row.class, TransformClass::Envelope, "{path}");
+            assert!(!row.count_tokens_validates, "{path}");
+        }
     }
 
     #[test]

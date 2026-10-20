@@ -1,0 +1,6 @@
+{
+  "note": "Tier 2, vendor-documented, not captured here: OpenAI Chat Completions (gpt-5-mini) rejecting presence_penalty, as reported at https://github.com/nextai-translator/nextai-translator/issues/1781. The report quotes the message alone, followed by two request-id suffixes that are not part of the documented message, omitted here; the body places that message in the documented {error: {message, type, param, code}} envelope, re-serialized compactly. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"Unsupported parameter: 'presence_penalty' is not supported with this model.\",\"type\":\"invalid_request_error\",\"param\":\"presence_penalty\",\"code\":\"unsupported_parameter\"}}"
+}

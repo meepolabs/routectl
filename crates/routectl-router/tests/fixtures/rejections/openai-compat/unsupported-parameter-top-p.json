@@ -1,0 +1,6 @@
+{
+  "note": "Tier 2, vendor-documented, not captured here: Azure OpenAI Chat Completions (o3-mini deployment) rejecting top_p on a reasoning model, as reported at https://github.com/lobehub/lobehub/issues/7528. The report shows a client wrapper around the upstream error; the body is the inner documented {error: {message, type, param, code}} envelope re-serialized compactly. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"Unsupported parameter: 'top_p' is not supported with this model.\",\"type\":\"invalid_request_error\",\"param\":\"top_p\",\"code\":\"unsupported_parameter\"}}"
+}
