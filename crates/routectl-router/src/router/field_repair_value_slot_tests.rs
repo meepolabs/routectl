@@ -51,8 +51,9 @@ fn a_value_edits_only_the_row_whose_slot_it_fills() {
             "ceiling_row_ceiling_value",
             super::TEST_CEILING_PATH,
             Some(Ceiling(NAMED_CEILING)),
-            None,
+            Some(super::FieldEdit::Ceiling(NAMED_CEILING)),
         ),
+        ("ceiling_row_no_value", super::TEST_CEILING_PATH, None, None),
     ];
 
     for (name, path, value, expected) in cases {

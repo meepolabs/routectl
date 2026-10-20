@@ -332,10 +332,14 @@ fn a_target_of_an_old_kind_on_a_re_kinded_entry_plans_nothing() {
     let decisions: Vec<(bool, &str)> = records.iter().map(|r| (r.acted, r.reason)).collect();
     assert_eq!(
         decisions,
-        vec![(
-            false,
-            super::super::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET
-        )],
-        "the pre-flight planner refuses on attribution, before any verdict read",
+        vec![
+            (
+                false,
+                super::super::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET
+            );
+            2
+        ],
+        "the pre-flight planner refuses each carried row (display, max_tokens) on \
+         attribution, before any verdict read",
     );
 }

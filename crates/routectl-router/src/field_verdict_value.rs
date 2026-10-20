@@ -141,6 +141,12 @@ fn parse(token: &str, slot: ValueSlot) -> Result<VerdictValue, Malformed> {
     Err(Malformed::UnknownPrefix)
 }
 
+/// `digits` as a ceiling under the persisted codec's own rule (canonical
+/// decimal, nonzero, in `u32`), or `None`.
+pub fn canonical_ceiling(digits: &str) -> Option<u32> {
+    parse_ceiling(digits).ok()
+}
+
 /// Canonical decimal only (no sign, no leading zero, no whitespace), so every
 /// accepted token is exactly what [`VerdictValue::encode`] writes.
 fn parse_ceiling(digits: &str) -> Result<u32, Malformed> {

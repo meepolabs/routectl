@@ -71,6 +71,10 @@ pub(super) const FIELD_ACTION_LOSSY_DROP_REPAIR: &str = "field_lossy_drop_repair
 /// the one accepted value the rejection named. Closed set.
 pub(super) const FIELD_ACTION_REWRITE_REPAIR: &str = "field_rewrite_repair";
 
+/// Action token for the field-repair WARN when the repair lowered a token
+/// limit to the ceiling the rejection named. Closed set.
+pub(super) const FIELD_ACTION_CEILING_REPAIR: &str = "field_ceiling_repair";
+
 /// Reason token: the attempt drew an upstream rejection naming this field
 /// path. Closed set.
 pub(super) const FIELD_REASON_UPSTREAM_REJECTION: &str = "upstream_field_rejection";
@@ -125,6 +129,11 @@ pub(super) enum FieldSurface {
     /// A canonical sampling parameter every egress emits from one request
     /// field when it is set; see [`SamplingParam`].
     SamplingParam(SamplingParam),
+    /// The canonical `max_tokens`, PRESENT when the request carries one, which
+    /// only a client sets: an egress that needs a value it lacks fills its own
+    /// wire field, never this one. Never dropped and never probed; a ceiling
+    /// repair lowers it (see [`Self::clamp_to`]).
+    MaxTokens,
     /// Test-only: reports itself PRESENT and removes NOTHING.
     ///
     /// The real surface's presence check and drop read the same two carriers, so
@@ -251,6 +260,7 @@ impl FieldSurface {
                 emitted_thinking_type(req).as_deref() == Some(*refused)
             }
             Self::SamplingParam(param) => param.is_set(req),
+            Self::MaxTokens => req.max_tokens.is_some(),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => true,
             #[cfg(test)]
@@ -328,8 +338,9 @@ impl FieldSurface {
                 }),
             Self::AnthropicThinkingType(_) => emitted_thinking_type(req)
                 .map(|emitted| format!("{THINKING_TYPE_VALUE_PREFIX}{emitted}")),
-            // No probe payload: no token count validates a sampling parameter.
-            Self::SamplingParam(_) => None,
+            // No probe payload: no token count validates a sampling parameter
+            // or an output token limit.
+            Self::SamplingParam(_) | Self::MaxTokens => None,
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => None,
             // No probe payload: the test-only surfaces are never rows of
@@ -389,7 +400,7 @@ impl FieldSurface {
                 }
             }
             Self::AnthropicThinkingType(_) => write_thinking_type(req, value),
-            Self::SamplingParam(_) => {}
+            Self::SamplingParam(_) | Self::MaxTokens => {}
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => {}
             #[cfg(test)]
@@ -470,6 +481,7 @@ impl FieldSurface {
             }
             Self::AnthropicThinkingType(_) => false,
             Self::SamplingParam(param) => param.take(req),
+            Self::MaxTokens => false,
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => false,
             #[cfg(test)]
@@ -523,6 +535,27 @@ impl FieldSurface {
                 .and_then(serde_json::Value::as_object_mut)
                 .and_then(|object| object.remove(TEST_RECHECK_KWARG))
                 .is_some(),
+        }
+    }
+
+    /// Lower this surface's token limit on `req` to `ceiling`, returning
+    /// whether it changed. Only a nonzero ceiling strictly below the value the
+    /// request carries is applied: a ceiling at or above it names a limit the
+    /// request already meets, so the retry would repeat the rejection, and a
+    /// clamp never raises a value.
+    pub(super) const fn clamp_to(&self, req: &mut ChatRequest, ceiling: u32) -> bool {
+        let clampable = match self {
+            Self::MaxTokens => true,
+            #[cfg(test)]
+            Self::CeilingFieldForTests => matches!(req.max_tokens, Some(TEST_CEILING_SENTINEL)),
+            _ => false,
+        };
+        match req.max_tokens {
+            Some(emitted) if clampable && 0 < ceiling && ceiling < emitted => {
+                req.max_tokens = Some(ceiling);
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -757,15 +790,9 @@ pub(super) enum FieldTransform {
     /// rejection names. A rejection naming none, or several, repairs nothing:
     /// the substituted value is always the upstream's own answer.
     Rewrite { accepted: &'static [&'static str] },
-    /// Clamp a token budget to a learned ceiling. Reserved: no repair applies
-    /// it yet, so a row carrying it is never repaired and never applied.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reserved for learned token ceilings; the test table carries one"
-        )
-    )]
+    /// Lower a token limit to the ceiling the rejection names, only when that
+    /// ceiling is below the value sent. Repaired for the attempt; no pre-flight
+    /// applies it yet.
     Ceiling,
 }
 
@@ -860,6 +887,13 @@ const FIELD_REPAIRS: &[FieldRepairRow] = &[
         path: "frequency_penalty",
         surface: FieldSurface::SamplingParam(SamplingParam::FrequencyPenalty),
         transform: FieldTransform::Drop,
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: "max_tokens",
+        surface: FieldSurface::MaxTokens,
+        transform: FieldTransform::Ceiling,
         class: TransformClass::Envelope,
         count_tokens_validates: false,
     },
@@ -1465,10 +1499,10 @@ pub(super) struct FieldRepairPlan<'a> {
     /// What the rejection that drove the repair refused. A refused FIELD may
     /// commit; a refused value commits only through a rewrite.
     repaired_kind: Option<RejectionKind>,
-    /// The accepted value a rewrite repair wrote, or `None` for a drop. A
-    /// rewrite commits whatever the rejection refused: its value is the
-    /// upstream's own named answer, not a guess.
-    rewritten: Option<&'static str>,
+    /// The edit a successful [`Self::apply_named`] made, or `None` until one
+    /// succeeds. A rewrite commits whatever the rejection refused: its value
+    /// is the upstream's own named answer, not a guess.
+    applied: Option<FieldEdit>,
     /// How confidently that rejection was attributed to the row. The commit
     /// records it, so an inferred attribution persists without acting until an
     /// independent request corroborates it.
@@ -1499,20 +1533,24 @@ struct FieldRepairCandidate<'a> {
 enum FieldEdit {
     Drop,
     Rewrite(&'static str),
+    Ceiling(u32),
 }
 
 impl FieldEdit {
-    /// The edit `transform` makes for `named`, or `None` when it makes none: a
-    /// rewrite whose rejection named no shape (a ceiling value included), and
-    /// the reserved ceiling transform, which no repair applies yet.
+    /// The edit `transform` makes for `named`, or `None` when it makes none:
+    /// a rewrite whose rejection named no shape, and a ceiling whose rejection
+    /// named no ceiling.
     const fn for_rejection(transform: FieldTransform, named: &NamedRejection) -> Option<Self> {
         match (transform, named.value) {
             (FieldTransform::Drop, _) => Some(Self::Drop),
             (FieldTransform::Rewrite { .. }, Some(RejectionValue::Shape(value))) => {
                 Some(Self::Rewrite(value))
             }
+            (FieldTransform::Ceiling, Some(RejectionValue::Ceiling(ceiling))) => {
+                Some(Self::Ceiling(ceiling))
+            }
             (FieldTransform::Rewrite { .. }, Some(RejectionValue::Ceiling(_)) | None)
-            | (FieldTransform::Ceiling, _) => None,
+            | (FieldTransform::Ceiling, Some(RejectionValue::Shape(_)) | None) => None,
         }
     }
 
@@ -1520,19 +1558,20 @@ impl FieldEdit {
         match self {
             Self::Drop => surface.drop_from(req),
             Self::Rewrite(value) => surface.rewrite_in(req, value),
+            Self::Ceiling(ceiling) => surface.clamp_to(req, ceiling),
         }
     }
 
     const fn declared_kind(self) -> EditKind {
         match self {
             Self::Drop => EditKind::Remove,
-            Self::Rewrite(_) => EditKind::Rewrite,
+            Self::Rewrite(_) | Self::Ceiling(_) => EditKind::Rewrite,
         }
     }
 
     const fn rewritten(self) -> Option<&'static str> {
         match self {
-            Self::Drop => None,
+            Self::Drop | Self::Ceiling(_) => None,
             Self::Rewrite(value) => Some(value),
         }
     }
@@ -1546,27 +1585,35 @@ impl FieldRepairPlan<'_> {
         self.repaired.map(|idx| self.candidates[idx].path)
     }
 
-    /// Whether the repair this plan applied DROPPED a field whose VALUE was
-    /// refused: the drop served the attempt but changed what the client asked
-    /// for, and nothing may be learned from it.
+    /// Whether the repair this plan applied served the attempt by changing a
+    /// value the client asked for and the lane accepts: a DROP of a field
+    /// whose VALUE was refused, or a lowered client token limit.
     pub(super) fn repaired_lossy(&self) -> bool {
-        self.repaired_kind == Some(RejectionKind::InvalidValue) && self.rewritten.is_none()
+        match self.applied {
+            Some(FieldEdit::Drop) => self.repaired_kind == Some(RejectionKind::InvalidValue),
+            Some(FieldEdit::Ceiling(_)) => true,
+            Some(FieldEdit::Rewrite(_)) | None => false,
+        }
+    }
+
+    /// The accepted value a rewrite repair wrote, or `None` for any other.
+    fn rewritten(&self) -> Option<&'static str> {
+        self.applied.and_then(FieldEdit::rewritten)
     }
 
     /// The closed-set WARN action token for the repair this plan applied.
     fn repair_action(&self) -> &'static str {
-        if self.rewritten.is_some() {
-            FIELD_ACTION_REWRITE_REPAIR
-        } else if self.repaired_lossy() {
-            FIELD_ACTION_LOSSY_DROP_REPAIR
-        } else {
-            FIELD_ACTION_DROP_REPAIR
+        match self.applied {
+            Some(FieldEdit::Rewrite(_)) => FIELD_ACTION_REWRITE_REPAIR,
+            Some(FieldEdit::Ceiling(_)) => FIELD_ACTION_CEILING_REPAIR,
+            Some(FieldEdit::Drop) | None if self.repaired_lossy() => FIELD_ACTION_LOSSY_DROP_REPAIR,
+            Some(FieldEdit::Drop) | None => FIELD_ACTION_DROP_REPAIR,
         }
     }
 
     /// Whether the applied repair may commit a verdict once its retry succeeds.
     fn repair_teaches(&self) -> bool {
-        self.rewritten.is_some() || self.repaired_kind == Some(RejectionKind::UnsupportedField)
+        self.rewritten().is_some() || self.repaired_kind == Some(RejectionKind::UnsupportedField)
     }
 
     /// Perform the repair for whichever admitted row `err` names: apply that
@@ -1633,7 +1680,7 @@ impl FieldRepairPlan<'_> {
         let status = self.apply_candidate(idx, edit, attempt_req, meta, budget, rejection)?;
         self.repaired_kind = Some(named.kind);
         self.repaired_tier = Some(named.tier);
-        self.rewritten = edit.rewritten();
+        self.applied = Some(edit);
         Some(status)
     }
 
@@ -1674,6 +1721,7 @@ impl FieldRepairPlan<'_> {
         if !edit.apply_to(surface, attempt_req) {
             // FAIL CLOSED. A rewrite may refuse by design: the value is
             // already carried, or the rewritten body failed its read-back. A
+            // ceiling may too: the request already meets the named limit. A
             // drop cannot: `present_in` held immediately above and nothing
             // between touches the request, so reaching here means the two have
             // diverged -- a bug in this module. The debug assertion names it in
@@ -1750,7 +1798,7 @@ impl FieldRepairPlan<'_> {
             }],
             repaired: None,
             repaired_kind: None,
-            rewritten: None,
+            applied: None,
             repaired_tier: None,
             wire: None,
         }
@@ -1813,7 +1861,7 @@ impl FieldRepairPlan<'_> {
         if !self.repair_teaches() {
             return None;
         }
-        let value = self.rewritten.map(VerdictValue::Shape);
+        let value = self.rewritten().map(VerdictValue::Shape);
         self.candidates[idx].guard.take()?.commit(
             tier,
             value,
@@ -1990,7 +2038,7 @@ impl Router {
             candidates,
             repaired: None,
             repaired_kind: None,
-            rewritten: None,
+            applied: None,
             repaired_tier: None,
             wire: fidelity_dialect(target, attempt_req),
         })
@@ -2339,8 +2387,8 @@ mod table_tests {
         // something a passing suite absorbs silently.
         assert_eq!(
             FIELD_REPAIRS.len(),
-            7,
-            "the closed repair table ships exactly seven grounded rows; a new row is a new \
+            8,
+            "the closed repair table ships exactly eight grounded rows; a new row is a new \
              permanent commitment and updates this guard deliberately",
         );
         assert_eq!(
@@ -2430,6 +2478,19 @@ mod table_tests {
             assert_eq!(row.class, TransformClass::Envelope, "{path}");
             assert!(!row.count_tokens_validates, "{path}");
         }
+        let max_tokens = FIELD_REPAIRS[7];
+        assert_eq!(max_tokens.path, "max_tokens");
+        assert_eq!(max_tokens.surface, FieldSurface::MaxTokens);
+        assert_eq!(
+            max_tokens.transform,
+            FieldTransform::Ceiling,
+            "the committed refusal names the model's own output limit",
+        );
+        assert_eq!(max_tokens.class, TransformClass::Envelope);
+        assert!(
+            !max_tokens.count_tokens_validates,
+            "a token count generates nothing, so it cannot refuse an output limit",
+        );
     }
 
     #[test]

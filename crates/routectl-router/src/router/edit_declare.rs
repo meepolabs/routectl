@@ -243,6 +243,9 @@ pub(super) const fn field_wire_pointer(
         (FieldSurface::SamplingParam(param), IngressDialect::Anthropic | IngressDialect::Chat) => {
             Some(param.wire_pointer())
         }
+        (FieldSurface::MaxTokens, IngressDialect::Anthropic | IngressDialect::Chat) => {
+            Some("/max_tokens")
+        }
         _ => None,
     }
 }

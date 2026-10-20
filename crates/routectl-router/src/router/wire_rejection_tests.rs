@@ -18,7 +18,8 @@ use routectl_core::{
 use serde_json::{Value, json};
 
 use super::super::field_repair::{
-    FIELD_ACTION_DROP_REPAIR, FIELD_REASON_UPSTREAM_REJECTION, TEST_REWRITE_ACCEPTED,
+    FIELD_ACTION_CEILING_REPAIR, FIELD_ACTION_DROP_REPAIR, FIELD_ACTION_LOSSY_DROP_REPAIR,
+    FIELD_ACTION_REWRITE_REPAIR, FIELD_REASON_UPSTREAM_REJECTION, TEST_REWRITE_ACCEPTED,
     TEST_REWRITE_KWARG, TEST_REWRITE_PATH, TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL,
 };
 use super::super::rejection_parser::rejected_wire_path;
@@ -607,6 +608,51 @@ fn a_rejected_container_key_joins_its_repair_by_the_unmasked_field() {
             rejections(&router.wire_check_snapshot()),
             [("/metadata/*".to_string(), "client_unchanged", expected)],
             "{name}: the rendered path stays masked"
+        );
+    }
+}
+
+/// Mutation check: drop the ceiling token from the lossy arm of
+/// `field_repair_outcome` -> red on `ceiling`.
+#[test]
+fn each_succeeded_repair_action_joins_its_own_outcome() {
+    let rows = [
+        (
+            "drop",
+            FIELD_ACTION_DROP_REPAIR,
+            FieldRepairOutcome::Repaired,
+        ),
+        (
+            "lossy drop",
+            FIELD_ACTION_LOSSY_DROP_REPAIR,
+            FieldRepairOutcome::RepairedLossy,
+        ),
+        (
+            "rewrite",
+            FIELD_ACTION_REWRITE_REPAIR,
+            FieldRepairOutcome::RepairedLossy,
+        ),
+        (
+            "ceiling",
+            FIELD_ACTION_CEILING_REPAIR,
+            FieldRepairOutcome::RepairedLossy,
+        ),
+    ];
+    for (name, action, expected) in rows {
+        let router = router(NEVER_SAMPLED, vec![]);
+        let mut meta = DispatchMeta::for_alias(ALIAS);
+        meta.wire_rejections.push(container_key_rejection());
+        meta.field_repairs = vec![FieldRepair {
+            action,
+            ..repair_of(CONTAINER_KEY_PATH, true)
+        }];
+
+        router.emit_wire_rejections(&meta);
+
+        assert_eq!(
+            rejections(&router.wire_check_snapshot()),
+            [("/metadata/*".to_string(), "client_unchanged", expected)],
+            "{name}",
         );
     }
 }

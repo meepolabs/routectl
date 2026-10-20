@@ -30,6 +30,7 @@ const DISPLAY_MESSAGE: &str = "thinking.enabled.display: Input should be 'summar
 const CONVERSE_WRAPPER: &str = "The model returned the following errors: ";
 const THINKING_DISABLED_PATH: &str = "thinking.type.disabled";
 const TEMPERATURE_PATH: &str = "temperature";
+const MAX_TOKENS_PATH: &str = "max_tokens";
 /// The off-switch template exactly as the committed Bedrock capture spells it.
 const THINKING_SWITCH_MESSAGE: &str = "To turn thinking off on this model, send \"thinking\": \
      {\"type\": \"between_tools\"} instead of {\"type\": \"disabled\"}. The model does not \
@@ -166,7 +167,7 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
     let expected: BTreeMap<String, Outcome> = [
         (
             "anthropic-api/max-tokens-above-model-limit-messages",
-            unresolved("max_tokens", Inferred, InvalidValue),
+            Outcome::Row(MAX_TOKENS_PATH, Inferred, InvalidValue),
         ),
         (
             "anthropic-api/thinking-display-enum",
@@ -178,11 +179,11 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "bedrock/max-tokens-above-model-limit",
-            Outcome::NotLocalized,
+            Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "bedrock/max-tokens-above-model-limit-invoke",
-            unresolved("max_tokens", Inferred, InvalidValue),
+            Outcome::Row(MAX_TOKENS_PATH, Inferred, InvalidValue),
         ),
         (
             "bedrock/temperature-field-unsupported",
@@ -1333,4 +1334,169 @@ fn the_bedrock_temperature_arm_returns_no_body_bytes() {
 
     assert_eq!(localized.raw, TEMPERATURE_PATH);
     assert!(!body_bytes.contains(&localized.raw.as_ptr()));
+}
+
+/// The Bedrock output-limit refusal exactly as the committed capture spells it.
+const CEILING_MESSAGE: &str = "The maximum tokens you requested exceeds the model limit of 8192. \
+     Try again with a maximum tokens value that is lower than 8192.";
+
+/// The row path and value `parse_rejection` names for `body` on `kind`, or
+/// `None` when it names no row.
+fn named_value(kind: &str, body: &str) -> Option<(&'static str, Option<RejectionValue>)> {
+    let body = UpstreamBody::new(body);
+    parse_rejection(
+        crate::router::FieldRepairTable::default(),
+        kind,
+        400,
+        body.parsed(),
+    )
+    .map(|named| (named.row.path, named.value))
+}
+
+/// Mutation check: drop the number capture from the Converse ceiling arm ->
+/// red (the Converse fixture resolves its row with no value).
+#[test]
+fn the_committed_max_tokens_fixtures_carry_the_ceiling_only_the_converse_template_names() {
+    let cases = [
+        (
+            BEDROCK,
+            "max-tokens-above-model-limit",
+            Some(RejectionValue::Ceiling(8192)),
+        ),
+        (BEDROCK, "max-tokens-above-model-limit-invoke", None),
+        (ANTHROPIC, "max-tokens-above-model-limit-messages", None),
+    ];
+
+    for (kind, case, expected) in cases {
+        let (status, body) = fixture(kind, case);
+        assert_eq!(status, 400, "{case}");
+
+        assert_eq!(
+            named_value(kind, &body),
+            Some((MAX_TOKENS_PATH, expected)),
+            "{kind}/{case}"
+        );
+    }
+}
+
+#[test]
+fn the_bedrock_ceiling_template_names_the_row_flat_and_converse_wrapped() {
+    let captured: Value =
+        serde_json::from_str(&fixture(BEDROCK, "max-tokens-above-model-limit").1).unwrap();
+    assert_eq!(
+        captured["message"].as_str(),
+        Some(CEILING_MESSAGE),
+        "premise: the template constant is the committed capture's message",
+    );
+    let other_limit = CEILING_MESSAGE.replace("8192", "4096");
+    let cases = [
+        ("flat", bedrock_body(CEILING_MESSAGE), 8192),
+        (
+            "converse-wrapped",
+            bedrock_body(&format!("{CONVERSE_WRAPPER}{CEILING_MESSAGE}")),
+            8192,
+        ),
+        ("another limit", bedrock_body(&other_limit), 4096),
+    ];
+
+    for (name, body, limit) in cases {
+        assert_eq!(
+            outcome(BEDROCK, 400, &body),
+            Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
+            "{name}",
+        );
+        assert_eq!(
+            named_value(BEDROCK, &body),
+            Some((MAX_TOKENS_PATH, Some(RejectionValue::Ceiling(limit)))),
+            "{name}",
+        );
+        let parsed = UpstreamBody::new(body);
+        let rejected = rejected_wire_path(BEDROCK, 400, parsed.parsed()).expect("localized");
+        assert!(rejected.presupposes_presence, "{name}");
+        assert!(rejected.field.segments().eq([MAX_TOKENS_PATH]), "{name}");
+    }
+}
+
+#[test]
+fn bedrock_ceiling_near_misses_localize_nothing() {
+    let exact = CEILING_MESSAGE;
+    let second = |to: &str| exact.replacen("lower than 8192", &format!("lower than {to}"), 1);
+    let both = |to: &str| exact.replace("8192", to);
+    let cases = [
+        ("mismatched limits", BEDROCK, bedrock_body(&second("8191"))),
+        ("zero", BEDROCK, bedrock_body(&both("0"))),
+        ("leading zero", BEDROCK, bedrock_body(&both("08192"))),
+        ("plus sign", BEDROCK, bedrock_body(&both("+8192"))),
+        ("minus sign", BEDROCK, bedrock_body(&both("-8192"))),
+        ("overflow", BEDROCK, bedrock_body(&both("4294967296"))),
+        ("non-digit", BEDROCK, bedrock_body(&both("8k"))),
+        ("empty limit", BEDROCK, bedrock_body(&both(""))),
+        ("grouped digits", BEDROCK, bedrock_body(&both("8,192"))),
+        (
+            "context-window message",
+            BEDROCK,
+            bedrock_body(&format!(
+                "{CONVERSE_WRAPPER}Input is too long for requested model."
+            )),
+        ),
+        (
+            "wrong prose",
+            BEDROCK,
+            bedrock_body(&exact.replace("exceeds the model limit", "is above the model limit")),
+        ),
+        (
+            "missing final period",
+            BEDROCK,
+            bedrock_body(exact.strip_suffix('.').unwrap()),
+        ),
+        (
+            "trailing prose",
+            BEDROCK,
+            bedrock_body(&format!("{exact} See the docs.")),
+        ),
+        (
+            "same message on anthropic-api",
+            ANTHROPIC,
+            anthropic_body(exact),
+        ),
+        (
+            "same message on openai-compat",
+            OPENAI_COMPAT,
+            openai_body(exact, None),
+        ),
+    ];
+    assert_eq!(
+        outcome(BEDROCK, 400, &bedrock_body(exact)),
+        Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
+        "premise: the same harness localizes the exact template",
+    );
+    assert_eq!(
+        u32::MAX.checked_add(1).map(|n| n.to_string()),
+        None,
+        "premise: the overflow row is one past u32",
+    );
+
+    for (name, kind, body) in cases {
+        assert_eq!(outcome(kind, 400, &body), Outcome::NotLocalized, "{name}");
+    }
+}
+
+/// The openai-compat structured refusal of `max_tokens` refuses the field
+/// itself and names no number, so it resolves the row with no value.
+#[test]
+fn an_openai_compat_unsupported_max_tokens_resolves_the_row_with_no_value() {
+    let body = openai_coded_body(
+        "Unsupported parameter: 'max_tokens' is not supported with this model.",
+        Some(MAX_TOKENS_PATH),
+        "unsupported_parameter",
+    );
+
+    assert_eq!(
+        outcome(OPENAI_COMPAT, 400, &body),
+        Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, UnsupportedField),
+    );
+    assert_eq!(
+        named_value(OPENAI_COMPAT, &body),
+        Some((MAX_TOKENS_PATH, None))
+    );
 }

@@ -37,6 +37,7 @@ use routectl_core::wire_check::WirePath;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
 
 use super::field_repair::{FieldRepairRow, FieldRepairTable, FieldTransform};
+use crate::field_verdict_value::canonical_ceiling;
 
 /// Statuses a caller-shaped field rejection arrives on. Everything else says
 /// nothing about the request envelope.
@@ -109,6 +110,16 @@ const BEDROCK_TEMPERATURE_UNSUPPORTED: &str =
     "This model doesn't support the temperature field. Remove temperature and try again.";
 const TEMPERATURE_PATH: &str = "temperature";
 
+/// Bedrock's refusal of an output token limit above the model's, exactly as
+/// captured on Converse: `<lead-in>N<middle>N<close>`. The message names no
+/// path; the limit is read only from these two positions, and both must
+/// spell the same canonical nonzero `u32`.
+const BEDROCK_CEILING_LEAD_IN: &str =
+    "The maximum tokens you requested exceeds the model limit of ";
+const BEDROCK_CEILING_MIDDLE: &str = ". Try again with a maximum tokens value that is lower than ";
+const BEDROCK_CEILING_CLOSE: &str = ".";
+const MAX_TOKENS_PATH: &str = "max_tokens";
+
 /// The location-prefix reason that refuses the field itself; every other
 /// reason refuses the value.
 const LOCATION_UNSUPPORTED_FIELD_REASON: &str = "Extra inputs are not permitted";
@@ -128,13 +139,6 @@ pub(super) enum RejectionValue {
     /// A member of the row's closed accepted set.
     Shape(&'static str),
     /// A token limit the upstream named for the field.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no grounded template names a token limit yet; tests inject one"
-        )
-    )]
     Ceiling(u32),
 }
 
@@ -170,8 +174,20 @@ pub(super) fn parse_rejection(
         row,
         tier: localized.tier,
         kind: localized.kind,
-        value: named_accepted(row, &localized.replacements).map(RejectionValue::Shape),
+        value: named_value(row, &localized),
     })
+}
+
+/// The value `localized` names for `row`, in the slot `row`'s transform
+/// declares: a shape only for a rewrite row, a ceiling only for a ceiling
+/// row.
+fn named_value(row: &FieldRepairRow, localized: &LocalizedPath<'_>) -> Option<RejectionValue> {
+    match row.transform {
+        FieldTransform::Ceiling => localized.ceiling.map(RejectionValue::Ceiling),
+        FieldTransform::Rewrite { .. } | FieldTransform::Drop => {
+            named_accepted(row, &localized.replacements).map(RejectionValue::Shape)
+        }
+    }
 }
 
 /// Where a rejection says the refused field sits.
@@ -347,6 +363,8 @@ struct LocalizedPath<'a> {
     presupposes_presence: bool,
     /// The tokens the envelope's template names as replacements.
     replacements: Vec<&'a str>,
+    /// The token limit the envelope's template names.
+    ceiling: Option<u32>,
 }
 
 /// One arm's reading of an envelope: the raw path and what it says about it.
@@ -359,6 +377,7 @@ struct Attribution<'a> {
     /// that `path` is missing.
     presupposes_presence: bool,
     replacements: Vec<&'a str>,
+    ceiling: Option<u32>,
 }
 
 fn localize<'a>(
@@ -385,6 +404,7 @@ fn localize<'a>(
         kind: attribution.kind,
         presupposes_presence: attribution.presupposes_presence,
         replacements: attribution.replacements,
+        ceiling: attribution.ceiling,
     })
 }
 
@@ -402,7 +422,9 @@ fn bedrock_message(parsed: &ParsedErrorBody) -> Option<&str> {
 
 /// The Bedrock-only templates first, then the shared Anthropic arms.
 fn localize_bedrock(message: &str) -> Option<Attribution<'_>> {
-    unsupported_temperature(message).or_else(|| localize_message(message))
+    unsupported_temperature(message)
+        .or_else(|| output_ceiling(message))
+        .or_else(|| localize_message(message))
 }
 
 /// `This model doesn't support the temperature field. ...`, verbatim.
@@ -413,6 +435,26 @@ fn unsupported_temperature(message: &str) -> Option<Attribution<'static>> {
         kind: RejectionKind::UnsupportedField,
         presupposes_presence: true,
         replacements: Vec::new(),
+        ceiling: None,
+    })
+}
+
+/// `The maximum tokens you requested exceeds the model limit of N. Try again
+/// with a maximum tokens value that is lower than N.`, verbatim, both copies
+/// of N agreeing. Whether N is below the value sent is the repair's check:
+/// the parser never sees the request.
+fn output_ceiling(message: &str) -> Option<Attribution<'static>> {
+    let rest = message.strip_prefix(BEDROCK_CEILING_LEAD_IN)?;
+    let (first, rest) = rest.split_once(BEDROCK_CEILING_MIDDLE)?;
+    let second = rest.strip_suffix(BEDROCK_CEILING_CLOSE)?;
+    let ceiling = canonical_ceiling(first)?;
+    (canonical_ceiling(second)? == ceiling).then(|| Attribution {
+        path: MAX_TOKENS_PATH,
+        tier: SignalTier::SelfIdentifying,
+        kind: RejectionKind::InvalidValue,
+        presupposes_presence: true,
+        replacements: Vec::new(),
+        ceiling: Some(ceiling),
     })
 }
 
@@ -440,6 +482,7 @@ fn quoted_not_supported(message: &str) -> Option<Attribution<'_>> {
         kind: RejectionKind::UnsupportedField,
         presupposes_presence: replacement.is_some(),
         replacements: replacement.flatten().into_iter().collect(),
+        ceiling: None,
     })
 }
 
@@ -458,6 +501,7 @@ fn thinking_off_switch(message: &str) -> Option<Attribution<'static>> {
         kind: RejectionKind::UnsupportedField,
         presupposes_presence: true,
         replacements: vec![thinking_type(accepted)?.path],
+        ceiling: None,
     })
 }
 
@@ -486,6 +530,7 @@ fn location_prefix(message: &str) -> Option<Attribution<'_>> {
         kind,
         presupposes_presence: grounded,
         replacements: listed.map(quoted_list).unwrap_or_default(),
+        ceiling: None,
     })
 }
 
@@ -515,6 +560,7 @@ fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
         kind,
         presupposes_presence: unsupported,
         replacements: Vec::new(),
+        ceiling: None,
     })
 }
 
