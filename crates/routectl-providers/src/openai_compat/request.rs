@@ -29,6 +29,7 @@ use routectl_core::{
 use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
+use crate::managed_keys::{Dialect, is_managed_key};
 use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
 /// `source` value passed to [`merge_extras`] for operator-config-supplied
@@ -418,7 +419,7 @@ fn merge_extras(
         return;
     };
     for (k, v) in extra_obj {
-        if is_routectl_managed_key(k) {
+        if is_managed_key(Dialect::OpenAiCompat, k) {
             if k == "metadata" {
                 // Anthropic ingress stashes the full inbound `metadata`
                 // object into provider_extras. Strict openai-compat hosts
@@ -531,49 +532,6 @@ fn declare_member(tap: Option<&WireTap>, site: EditSite, key: &str, kind: EditKi
     {
         crate::wire_declare::declare(tap, site, path, kind);
     }
-}
-
-/// OpenAI-compat wire keys that routectl owns. Delegates to the shared
-/// canonical list (`routectl_core::is_canonical_request_key`) and adds
-/// keys that are openai-compat-specific wire artefacts not on `ChatRequest`
-/// but still managed by this egress:
-///
-///   - `output_config` -- Anthropic-shape nested structured-output config.
-///     The openai-compat egress uses `response_format` for JSON mode; an
-///     `output_config` key in `provider_extras` would land on OpenAI-shape
-///     hosts that don't understand it, so it is blocked here. (The
-///     Anthropic-API egress lets `output_config` through from provider_extras
-///     because that is the intended forwarding path for Anthropic upstreams.)
-///   - Anthropic-only beta fields swept into `provider_extras` by the
-///     Anthropic ingress's forward-compat sweep
-///     (`crates/routectl-cli/src/ingress/anthropic.rs::translate_request`).
-///     These must NOT reach openai-compat upstreams: lenient hosts
-///     (OpenRouter) silently ignore them; strict hosts (NIM, DeepSeek
-///     API direct, vLLM with strict schema) 400 with `Unsupported
-///     parameter(s): <field>`. Bug I (2026-05-18, NIM 400 on cc's
-///     `context_management`) is the canonical case. Add new entries
-///     here when a new Anthropic-only top-level beta field ships.
-///     (Anthropic-API egress correctly forwards these via its own
-///     `merge_provider_extras` path, untouched by this block-list.)
-fn is_routectl_managed_key(key: &str) -> bool {
-    is_canonical_request_key(key)
-        || matches!(
-            key,
-            // Anthropic-only nested output config; not valid on OpenAI wire.
-            "output_config"
-            // Anthropic ingress sweeps the inbound `metadata` object into
-            // provider_extras. Strict openai-compat hosts 400 on it; drop.
-            | "metadata"
-            // Anthropic-only quarterly-cadence beta fields. Forwarding
-            // these to strict openai-compat upstreams 400s the request.
-            | "context_management"
-            | "context_hint"
-            | "mcp_servers"
-            | "container"
-            | "inference_geo"
-            | "speed"
-            | "diagnostics"
-        )
 }
 
 /// Log each canonical field or block the openai-compat wire cannot

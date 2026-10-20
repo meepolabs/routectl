@@ -323,7 +323,10 @@ fn output_config_is_not_routectl_managed() {
     // `output_config.format` flow through verbatim. The adaptive-branch
     // re-clamp at reconcile_output_config_effort relies on output_config
     // surviving merge_provider_extras intact.
-    assert!(!is_routectl_managed_key("output_config"));
+    assert!(!crate::managed_keys::is_managed_key(
+        crate::managed_keys::Dialect::AnthropicApi,
+        "output_config"
+    ));
 }
 
 mod forwarded_effort {

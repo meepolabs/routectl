@@ -544,6 +544,8 @@ license.
 - `src/effort.rs` -- shared effort helpers: `clamp_effort_to_supported`
   (caller effort against per-model `effort_levels`) and the one
   effort/budget table (`budget_from_level`, `level_from_budget`)
+- `src/managed_keys.rs` -- `is_managed_key(Dialect, key)`, the top-level keys
+  each egress's extras merge refuses to let extras override
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every
   egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the
   redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream ->

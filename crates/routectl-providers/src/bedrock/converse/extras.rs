@@ -6,12 +6,12 @@
 //! `cache_control`, `output_config`, plus operator-supplied extras.
 //!
 //! Routectl-managed keys are shielded from operator overrides via
-//! `is_converse_managed_key` -- a misconfigured TOML cannot silently
+//! `managed_keys::is_managed_key` -- a misconfigured TOML cannot silently
 //! replace the `thinking` block we computed.
 
 use serde_json::{Map, Value};
 
-use routectl_core::{AnthropicThinking, ChatRequest, is_canonical_request_key, sanitize_for_log};
+use routectl_core::{AnthropicThinking, ChatRequest, sanitize_for_log};
 
 use routectl_core::wire_check::{EditKind, EditSite};
 
@@ -20,6 +20,7 @@ use crate::anthropic_api::request::{
     compose_thinking, is_active_thinking_type, reclamp_client_effort,
 };
 use crate::anthropic_api::types::WireThinking;
+use crate::managed_keys::{Dialect, is_managed_key};
 
 use super::super::betas::{operator_floor, union_feature_implied_betas, withhold_betas};
 use super::super::{BedrockApiShape, BedrockConfig};
@@ -213,7 +214,7 @@ fn insert_provider_extras(
         // the `thinking` block (or the Converse body field) routectl derived
         // from canonical. Baked seed verdict per foundations sec 14.
         // TRANSLATION-DROP: policy-action class=provider_extra_managed_key_conflict test=provider_extra_managed_key_conflict_bumps_the_policy_action_counter_once
-        if is_converse_managed_key(k) {
+        if is_managed_key(Dialect::BedrockConverse, k) {
             actions.provider_extra_managed_key_conflict = true;
             tracing::debug!(
                 provider = %cfg.id,
@@ -398,8 +399,7 @@ fn insert_top_level_cache_control(req: &ChatRequest, bag: &mut Map<String, Value
 /// routectl didn't set, but lose to canonical-derived fields above when
 /// keys clash -- avoids a misconfigured config silently overriding
 /// anthropic_beta the caller intended to send. Routectl-managed keys
-/// are withheld with a WARN to match the Invoke egress's
-/// `is_bedrock_invoke_managed_key` policy.
+/// are withheld with a WARN, as on the Invoke egress's operator merge.
 ///
 /// Returns the request's policy-action flags for the caller to flush once.
 fn insert_operator_extras(
@@ -421,7 +421,7 @@ fn insert_operator_extras(
         // rather than DEBUG because this path IS an operator misconfig, not
         // a forward-compat sweep. Baked seed verdict per foundations sec 14.
         // TRANSLATION-DROP: policy-action class=operator_extra_managed_key_conflict test=operator_extra_managed_key_conflict_bumps_the_policy_action_counter_once
-        if is_converse_managed_key(k) {
+        if is_managed_key(Dialect::BedrockConverse, k) {
             actions.operator_extra_managed_key_conflict = true;
             tracing::warn!(
                 provider = %cfg.id,
@@ -434,42 +434,6 @@ fn insert_operator_extras(
         bag.entry(k.clone()).or_insert_with(|| v.clone());
     }
     actions
-}
-
-/// Keys in `additionalModelRequestFields` that routectl manages. This
-/// guards the bag level, not the top-level Converse request body. The
-/// function delegates to the shared canonical list first (catching any
-/// attempt to smuggle a ChatRequest-level key name into the bag, e.g.
-/// `provider_extras = {"messages": [...]}` which after bag assembly
-/// would forward a second `messages` value downstream) and then adds
-/// the Converse-bag-specific keys that routectl writes from canonical
-/// fields:
-///
-///   - `thinking`      -- composed by `insert_thinking` (the client's object
-///     or a translation of `req.reasoning`).
-///   - `output_config` -- its `effort` written by `insert_thinking`.
-///
-/// Note: `anthropic_beta` and `cache_control` are already covered by
-/// `is_canonical_request_key` (they are `ChatRequest` wire fields) and
-/// do not need to be listed here.
-///
-/// Converse top-level body fields (`inferenceConfig`, `toolConfig`,
-/// `additionalModelResponseFieldPaths`) also appear here because an
-/// operator TOML that sets `additional_model_request_fields.messages`
-/// would produce a malformed Converse body if forwarded.
-fn is_converse_managed_key(key: &str) -> bool {
-    is_canonical_request_key(key)
-        || matches!(
-            key,
-            // Converse-bag-level keys routectl writes from canonical fields.
-            "thinking"
-                | "output_config"
-                // Converse top-level body fields -- should never appear in
-                // the bag; if they do, drop them to avoid confusing AWS.
-                | "inferenceConfig"
-                | "toolConfig"
-                | "additionalModelResponseFieldPaths"
-        )
 }
 
 /// The Converse half of the anthropic-api egress's forced-tool rule
@@ -529,11 +493,9 @@ fn strip_thinking_when_tool_choice_forces_use(
 mod tests {
     use super::super::request::ClientFingerprintStripTally;
     use super::super::types::{ConverseSpecificTool, ConverseToolChoice, EmptyObject};
-    use super::{
-        build_additional_fields, is_converse_managed_key,
-        strip_thinking_when_tool_choice_forces_use,
-    };
+    use super::{build_additional_fields, strip_thinking_when_tool_choice_forces_use};
     use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
+    use crate::managed_keys::{Dialect, is_managed_key};
     use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
     use tracing_test::traced_test;
 
@@ -541,7 +503,7 @@ mod tests {
     fn output_config_is_managed_key() {
         // Regression: adaptive-thinking writes output_config into the
         // bag; an operator-supplied value must not silently override.
-        assert!(is_converse_managed_key("output_config"));
+        assert!(is_managed_key(Dialect::BedrockConverse, "output_config"));
     }
 
     #[test]
@@ -556,14 +518,20 @@ mod tests {
             "thinking",
             "cache_control",
         ] {
-            assert!(is_converse_managed_key(k), "expected {k:?} managed");
+            assert!(
+                is_managed_key(Dialect::BedrockConverse, k),
+                "expected {k:?} managed"
+            );
         }
     }
 
     #[test]
     fn non_managed_keys_pass_through() {
         for k in ["top_k", "service_tier", "container"] {
-            assert!(!is_converse_managed_key(k), "expected {k:?} NOT managed");
+            assert!(
+                !is_managed_key(Dialect::BedrockConverse, k),
+                "expected {k:?} NOT managed"
+            );
         }
     }
 

@@ -176,7 +176,7 @@ fn provider_extras_cannot_override_managed_keys_on_converse() {
     // Arrange: an attempt to inject managed-key overrides via
     // provider_extras (e.g. a malicious or careless caller setting
     // `provider_extras = {"thinking": ...}`) must drop the keys
-    // with a WARN, mirroring is_converse_managed_key.
+    // with a WARN, mirroring managed_keys::is_managed_key.
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),

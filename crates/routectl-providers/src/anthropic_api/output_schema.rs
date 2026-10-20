@@ -204,7 +204,7 @@ impl AdditionalPropertiesRepair {
 ///
 /// Reading the assembled body is load-bearing, not belt-and-braces.
 /// `output_config` is deliberately not a routectl-managed key (see
-/// `extras::is_routectl_managed_key`), so `merge_provider_extras` forwards a
+/// `managed_keys::is_managed_key`), so `merge_provider_extras` forwards a
 /// caller's whole `output_config` verbatim and
 /// `request::set_output_config_format`'s `or_insert` then leaves it
 /// untouched. A caller-supplied `output_config.format` therefore never

@@ -3699,7 +3699,7 @@ fn cloak_lane_strips_thinking_clamp_temperature() {
 /// `temperature` / `top_p` are canonical routectl-managed keys, so
 /// `merge_provider_extras` drops them BEFORE the strip ever runs. Pin both
 /// layers -- the extras shield upstream, and the stripped final body -- so a
-/// future relaxation of `is_routectl_managed_key` cannot quietly re-open the
+/// future relaxation of `managed_keys::is_managed_key` cannot quietly re-open the
 /// route without failing here. (`top_k` is NOT canonical and remains a
 /// genuine pass-through hole; see docs/WIRE-GOTCHAS.md.)
 #[test]

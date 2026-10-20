@@ -15,7 +15,7 @@
 //! `compose_thinking` and `build_output_config` too. (2) The post-merge
 //! body reconciliation: `merge_provider_extras` layers forward-compat
 //! extras in while shielding routectl-managed keys
-//! (`is_routectl_managed_key`), and `reconcile_output_config_effort`
+//! (`managed_keys::is_managed_key`), and `reconcile_output_config_effort`
 //! re-clamps a sent `output_config.effort` against an explicit
 //! `effort_levels` and supplies one beside adaptive thinking that has
 //! none.
@@ -24,13 +24,12 @@ use serde_json::Value;
 
 use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
-use routectl_core::{
-    AnthropicThinking, ChatRequest, ThinkingObject, is_canonical_request_key, sanitize_for_log,
-};
+use routectl_core::{AnthropicThinking, ChatRequest, ThinkingObject, sanitize_for_log};
 
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
+use crate::managed_keys::{Dialect, is_managed_key};
 
-use super::tools::{PARALLEL_TOOL_CALLS_KEY, forced_tool_choice_type};
+use super::tools::forced_tool_choice_type;
 use super::types::{OutputConfig, ThinkingConfig, WireThinking};
 
 /// Hardcoded baseline `max_tokens` value injected on outbound
@@ -593,7 +592,7 @@ pub fn build_output_config(
 
 /// Merge `provider_extras` into the assembled body. Caller-supplied
 /// keys win EXCEPT for routectl-managed top-level keys (see
-/// `is_routectl_managed_key`); those are dropped so a malicious or
+/// `crate::managed_keys::is_managed_key`); those are dropped so a malicious or
 /// careless `provider_extras = {"messages": [...]}` can't replace the
 /// assembled messages array.
 ///
@@ -612,7 +611,7 @@ pub(super) fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&
         return;
     };
     for (k, v) in extra_obj {
-        if is_routectl_managed_key(k) {
+        if is_managed_key(Dialect::AnthropicApi, k) {
             tracing::debug!(
                 provider = id,
                 key = %sanitize_for_log(k),
@@ -622,34 +621,6 @@ pub(super) fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&
         }
         obj.insert(k.clone(), v.clone());
     }
-}
-
-/// Top-level Anthropic body keys that routectl owns. Delegates to the
-/// shared canonical list and adds Anthropic-API-specific keys that are
-/// not on `ChatRequest` but are written by this egress from canonical
-/// fields:
-/// - `thinking`  -- composed by `compose_thinking` (the client's object or
-///   a translation of `req.reasoning`); not a raw ChatRequest field but
-///   routectl writes it.
-///
-/// `output_config` is intentionally NOT here -- the client's object rides
-/// through `provider_extras` as sent, `effort` and `format` included. The
-/// `output_config.effort` sub-field is reconciled post-merge in
-/// `reconcile_output_config_effort`.
-///
-/// `parallel_tool_calls` is Anthropic-egress-local: the OpenAI-dialect
-/// toggle is consumed into `disable_parallel_tool_use` on `tool_choice`
-/// (see `tools::apply_parallel_tool_use`) and must not also reach the
-/// wire (invalid top-level Anthropic field). It is NOT on shared
-/// `reserved.rs` so the openai-compat egress keeps forwarding it verbatim.
-pub(super) fn is_routectl_managed_key(key: &str) -> bool {
-    is_canonical_request_key(key)
-        || matches!(
-            key,
-            // Anthropic-API-specific managed keys not on ChatRequest:
-            // `thinking` is composed by this egress.
-            "thinking" | PARALLEL_TOOL_CALLS_KEY
-        )
 }
 
 /// Late pass over `output_config.effort` on the assembled body, after
@@ -719,7 +690,7 @@ fn body_has_active_thinking(body: &Value) -> bool {
 /// True iff `body.thinking.type == "adaptive"`.
 ///
 /// INVARIANT: this trusts `thinking` read straight from the assembled
-/// body, safe only because `is_routectl_managed_key` keeps "thinking"
+/// body, safe only because `managed_keys::is_managed_key` keeps "thinking"
 /// routectl-managed and so blocks `provider_extras` from injecting a
 /// forged `thinking: {type: "adaptive"}`. If "thinking" is ever dropped
 /// from that set, provider_extras could forge adaptive here and trigger

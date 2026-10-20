@@ -10,16 +10,16 @@
 //!
 //! Any key whose wire name corresponds to a typed field on `ChatRequest`
 //! (or that routectl writes from a canonical field, like `stop_sequences`
-//! which maps from `req.stop`). Egress-local additions belong in each
-//! egress's own `is_*_managed_key` function, which should call this fn
-//! first and `||`-chain any local extras.
+//! which maps from `req.stop`). Egress-local additions belong in that
+//! egress's arm of `routectl-providers`' `managed_keys::is_managed_key`,
+//! which calls this fn first and `||`-chains the local extras.
 //!
 //! # What does NOT belong here
 //!
 //! Keys that are Converse-native body fields (e.g. `inferenceConfig`,
 //! `toolConfig`, `additionalModelResponseFieldPaths`) -- those are
 //! Converse-layer keys, not canonical `ChatRequest` fields, and live only
-//! in `bedrock/converse/extras.rs::is_converse_managed_key`.
+//! in the Converse arm of `managed_keys::is_managed_key`.
 
 /// Returns `true` when `key` is a wire field name that routectl derives
 /// directly from `ChatRequest`, or a wire-level alias that routectl owns

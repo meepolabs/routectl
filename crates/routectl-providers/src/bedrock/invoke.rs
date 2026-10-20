@@ -23,6 +23,7 @@ use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, ChatResponse, Error, Result, sanitize_for_log};
 
 use crate::anthropic_api::wire_edits;
+use crate::managed_keys::{Dialect, is_managed_key};
 
 use super::BedrockConfig;
 use super::betas::{operator_floor, withhold_betas};
@@ -135,7 +136,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         && let Some(extras_obj) = extras.as_object()
     {
         for (k, v) in extras_obj {
-            if is_bedrock_invoke_managed_key(k) {
+            if is_managed_key(Dialect::BedrockInvokeOperator, k) {
                 tracing::warn!(
                     provider = %cfg.id,
                     key = %sanitize_for_log(k),
@@ -207,7 +208,8 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // Re-run both `output_config` passes the shared assembly already ran, on
     // the body that ACTUALLY ships. The `additional_model_request_fields`
     // merge above is a post-normalize write path that
-    // `is_bedrock_invoke_managed_key` does not cover for `output_config`, so
+    // the Invoke operator arm of `managed_keys::is_managed_key` does not cover
+    // for `output_config`, so
     // an operator-supplied object can both reintroduce the `format` keys
     // Anthropic cannot represent and replace the whole repaired schema with
     // an unrepaired one (missing the mandatory `additionalProperties: false`).
@@ -297,31 +299,6 @@ fn withhold_client_betas(
             "anthropic_beta_rejected_by_bedrock",
         );
     }
-}
-
-/// Top-level Bedrock-Invoke body keys (Anthropic-shape today) that
-/// `additional_model_request_fields` is NOT permitted to override.
-/// Mirrors the Anthropic egress allow-list plus the Bedrock-specific
-/// `anthropic_version` field. Long-tail Anthropic-only knobs
-/// (`top_k`, `metadata`, `service_tier`) still pass through.
-fn is_bedrock_invoke_managed_key(key: &str) -> bool {
-    matches!(
-        key,
-        "model"
-            | "messages"
-            | "system"
-            | "max_tokens"
-            | "thinking"
-            | "tools"
-            | "tool_choice"
-            | "stream"
-            | "stop_sequences"
-            | "temperature"
-            | "top_p"
-            | "anthropic_beta"
-            | "anthropic_version"
-            | "cache_control"
-    )
 }
 
 /// Drop the Claude Code billing/attribution block from the assembled
@@ -1613,7 +1590,8 @@ mod tests {
 
     /// An operator `additional_model_request_fields` entry is merged onto the
     /// assembled Invoke body AFTER the shared normalizer ran, and
-    /// `output_config` is not on `is_bedrock_invoke_managed_key`, so that
+    /// `output_config` is not on the Invoke operator arm of
+    /// `managed_keys::is_managed_key`, so that
     /// merge is a second write path for the rejected keys. The Invoke-side
     /// scrub closes it.
     #[test]

@@ -95,11 +95,11 @@ pub(crate) use super::system::lift_legacy_system_stripped;
 #[cfg(feature = "bedrock")]
 pub(crate) use super::tools::translate_tool;
 
-// `effort_ratio` and `is_routectl_managed_key` are surfaced only for the
-// inline test modules below (via `use super::*;`); test-gated so they do
-// not register as unused re-exports in release builds.
+// `effort_ratio` is surfaced only for the inline test modules below (via
+// `use super::*;`); test-gated so it does not register as an unused
+// re-export in release builds.
 #[cfg(test)]
-use super::extras::{effort_ratio, is_routectl_managed_key};
+use super::extras::effort_ratio;
 
 // ---------------------------------------------------------------------------
 // Per-request policy-action tallies
@@ -458,7 +458,7 @@ impl DeferredOutputConfigDiagnostics {
 ///
 /// Reading the assembled object is load-bearing rather than belt-and-braces:
 /// `output_config` is deliberately not a routectl-managed key (see
-/// `extras::is_routectl_managed_key`), so `merge_provider_extras` forwards a
+/// `managed_keys::is_managed_key`), so `merge_provider_extras` forwards a
 /// caller's whole `output_config` verbatim and
 /// `set_output_config_format`'s `or_insert` leaves it untouched -- a
 /// caller-supplied `output_config.format` never passes through
@@ -629,7 +629,8 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 ///
 /// Bedrock Invoke is the only such caller: it merges
 /// `additional_model_request_fields` AFTER normalization, a post-normalize
-/// write path `is_bedrock_invoke_managed_key` does not cover for
+/// write path the Invoke operator arm of `managed_keys::is_managed_key` does
+/// not cover for
 /// `output_config`, so an operator-supplied object can both reintroduce the
 /// unrepresentable keys this pass removed and replace the repaired schema
 /// wholesale. It re-runs both passes on the body it ships and emits ONE line
@@ -865,7 +866,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // that actually ship (post `tool_choice="none"` suppression), so a
     // suppressed request never synthesizes an `auto` carrier. The raw
     // `parallel_tool_calls` key is stripped from the wire in the
-    // Anthropic managed-key path (`is_routectl_managed_key`).
+    // Anthropic managed-key path (`managed_keys::is_managed_key`).
     let parallel = parallel_tool_calls_extra(req.provider_extras.as_ref());
     let has_wire_tools = tools.as_ref().is_some_and(|t| !t.is_empty());
     let tool_choice = apply_parallel_tool_use(

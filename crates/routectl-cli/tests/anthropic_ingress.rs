@@ -1123,7 +1123,7 @@ async fn provider_extras_cannot_stomp_messages_or_system_via_anthropic_ingress()
     // `provider_extras` is a recognized canonical field, so a caller CAN
     // send it on the Anthropic wire. The defense lives at the egress:
     // `merge_provider_extras` drops keys listed in
-    // `is_routectl_managed_key` (which covers `messages` and `system`).
+    // the managed-key predicate (which covers `messages` and `system`).
     // Pin that the upstream receives the ORIGINAL messages array, not the
     // evil override the caller tried to inject via provider_extras.
     let upstream = MockServer::start().await;

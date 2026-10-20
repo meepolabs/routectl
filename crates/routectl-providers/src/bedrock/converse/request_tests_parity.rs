@@ -202,7 +202,7 @@ fn response_format_maps_to_output_config_format_bag() {
 }
 
 /// The Converse bag shields `output_config` from BOTH extras paths
-/// (`is_converse_managed_key` covers it), so an operator- or caller-supplied
+/// (`managed_keys::is_managed_key` covers it), so an operator- or caller-supplied
 /// object never reaches the bag and the shared converter is the only writer.
 /// Pinned here because that is what makes the Converse seam's exposure
 /// narrower than the Invoke seam's, where `output_config` is NOT a managed

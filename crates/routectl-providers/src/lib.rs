@@ -308,6 +308,16 @@ pub use aws_error::{VALIDATION_EXCEPTION_TYPE, aws_exception_type_is};
 ))]
 pub(crate) mod wire_declare;
 
+// The managed-key predicate shared by every egress whose extras merge drops
+// routectl-written keys. Gated on those egresses (bedrock implies
+// anthropic-api); openai-responses forwards an allowlist instead.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+pub(crate) mod managed_keys;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 

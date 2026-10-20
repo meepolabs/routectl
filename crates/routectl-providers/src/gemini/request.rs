@@ -21,6 +21,7 @@ use routectl_core::{
 };
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
+use crate::managed_keys::{Dialect, is_managed_key};
 use crate::translation_drop_metrics::{
     ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
     record_translation_policy_action,
@@ -185,7 +186,7 @@ fn assemble_provider_body(
     })?;
     // The merge is shallow: an entry colliding with a routectl-managed key --
     // including the whole `generationConfig` object -- is dropped with a WARN,
-    // so no field nested inside one is reachable. See `is_gemini_managed_key`.
+    // so no field nested inside one is reachable. See `managed_keys::is_managed_key`.
     if let Some(extras) = forwardable_extras(req) {
         merge_payload_extras(provider_id, &mut body, &extras);
     }
@@ -1342,7 +1343,7 @@ fn build_generation_config(
     // topK is unreachable on this egress: it is not in the canonical
     // schema, and `payload_extras` cannot supply it either because the
     // merge is top-level only and drops the whole managed
-    // `generationConfig` object (see `is_gemini_managed_key`). Emitting
+    // `generationConfig` object (see `managed_keys::is_managed_key`). Emitting
     // it would require a field here.
     // seed / penalties are forwarded exactly as the caller set them:
     // Gemini's own reference publishes no range for them on this endpoint,
@@ -1660,27 +1661,12 @@ fn reasoning_details_to_thought_parts(
     parts
 }
 
-/// True when `key` is a request field routectl assembles itself and an
-/// operator/client must not be able to clobber via `payload_extras`.
-/// Chains the canonical-request-key set (model, messages, tools,
-/// response_format, reasoning, ...) with the Gemini wire-owned top-level
-/// keys this translator writes. Unknown top-level request keys are
-/// forwarded into `provider_extras` by both ingresses, so without the
-/// Gemini-key guard a client could smuggle a raw `contents` /
-/// `generationConfig` block that replaces the routectl-normalized body.
-fn is_gemini_managed_key(key: &str) -> bool {
-    routectl_core::is_canonical_request_key(key)
-        || matches!(
-            key,
-            "contents" | "systemInstruction" | "toolConfig" | "generationConfig"
-        )
-}
-
 /// Shallow-merge canonical `provider_extras` (the router's dispatch-time
 /// merge of provider + model `payload_extras`) into the outgoing Gemini
 /// body so operator-supplied top-level knobs like `safetySettings` reach
 /// the wire. Entries that collide with a routectl-managed key (canonical
-/// fields or a Gemini wire-owned key per [`is_gemini_managed_key`]) are
+/// fields or a Gemini wire-owned key per
+/// [`is_managed_key`]) are
 /// dropped with a WARN so neither an operator nor a client smuggling
 /// extras through an ingress can clobber the assembled `contents` /
 /// `generationConfig` / `tools` / etc.
@@ -1704,7 +1690,7 @@ pub fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value)
     };
     let mut refused_a_managed_key = false;
     for (k, v) in extra_obj {
-        if is_gemini_managed_key(k) {
+        if is_managed_key(Dialect::Gemini, k) {
             refused_a_managed_key = true;
             tracing::warn!(
                 provider = %provider_id,
