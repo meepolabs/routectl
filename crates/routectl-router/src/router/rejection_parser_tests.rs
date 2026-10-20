@@ -164,12 +164,20 @@ fn bedrock_canary_outcomes() -> BTreeMap<String, Outcome> {
 fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved() {
     let expected: BTreeMap<String, Outcome> = [
         (
+            "anthropic-api/max-tokens-above-model-limit-messages",
+            unresolved("max_tokens", Inferred, InvalidValue),
+        ),
+        (
             "anthropic-api/thinking-display-enum",
             Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "anthropic-api/thinking-type-disabled-unsupported",
             Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "bedrock/max-tokens-above-model-limit-invoke",
+            unresolved("max_tokens", Inferred, InvalidValue),
         ),
         (
             "bedrock/thinking-type-disabled-unsupported",

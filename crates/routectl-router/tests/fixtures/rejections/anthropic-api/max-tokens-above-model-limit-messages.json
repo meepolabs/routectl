@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-10-20, Messages, claude-haiku-5-5, OAuth seat): max_tokens 1000000 sent to a model whose output cap is 128000, rejected before generation. error.message is verbatim; request_id dropped from the envelope. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"max_tokens: 1000000 > 128000, which is the maximum allowed number of output tokens for claude-haiku-5-5\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}
