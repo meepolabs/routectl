@@ -28,7 +28,7 @@ use routectl_core::capability::{FailurePhase, SignalTier};
 use routectl_core::failure_class::{
     ClassifiedFailure, FailureClass, classify, classify_with_attempt,
 };
-use routectl_core::wire_check::RejectionProvenance;
+use routectl_core::wire_check::{EditSite, RejectionProvenance};
 use routectl_core::{BetaRepairReport, ChatRequest, Error, sanitize_for_log};
 
 use super::capability_learn::LearnDedupeKey;
@@ -82,6 +82,18 @@ impl RejectionSite {
     /// so no path-keyed proposal may act on it.
     fn names_absent_path(site: Option<&Self>) -> bool {
         site.and_then(|site| site.in_egress) == Some(false)
+    }
+
+    /// Whether a declared edit that could not be undone still leaves the
+    /// rejection to the proposers: only one routectl-written required field
+    /// does, since the upstream may refuse routectl's value and a learned
+    /// repair can supply another. A path with no closed-table row stays
+    /// inert, as no proposer names it.
+    fn unreverted_reaches_proposers(site: Option<&Self>) -> bool {
+        matches!(
+            site.map(|site| &site.matched_edit),
+            Some(MatchedEdit::One(edit)) if edit.site() == EditSite::RequiredFieldDefault
+        )
     }
 }
 
@@ -399,6 +411,9 @@ impl<'a> AttemptLearning<'a> {
     /// naming a path one or more declared routectl edits put on the wire is
     /// answered by undoing that edit, or not at all, and no proposer reads
     /// it: such a rejection says nothing about what the upstream accepts.
+    /// The one exception is a single required field routectl wrote with its
+    /// own value: when that edit is not undone, the proposers read the
+    /// rejection as if no edit explained it.
     ///
     /// On `Retry` after the replay repair the running error is the
     /// rejection's body-free form, so a re-gate refusal cannot surface the
@@ -429,7 +444,9 @@ impl<'a> AttemptLearning<'a> {
 
     /// The decision for a rejection laid to declared routectl edits: a retry
     /// when the one edit was undone, otherwise `Proceed` with no proposer
-    /// consulted. `None` when no declared edit explains the rejection.
+    /// consulted. `None` when no declared edit explains the rejection, or
+    /// when the one edit not undone is a required-field default, which the
+    /// proposers then answer.
     fn answer_declared(
         &mut self,
         rejection: &Rejection<'_>,
@@ -446,6 +463,9 @@ impl<'a> AttemptLearning<'a> {
             budget,
         )?;
         if !reverted {
+            if RejectionSite::unreverted_reaches_proposers(rejection.site.as_ref()) {
+                return None;
+            }
             return Some(FailureDecision::Proceed);
         }
         self.skip_replay_backoff = true;

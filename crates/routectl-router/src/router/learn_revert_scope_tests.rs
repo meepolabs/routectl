@@ -1,7 +1,8 @@
 //! Where the revert does not reach and what bounds it: a path the body
 //! lacks, a translation lane, a routectl-added path no declaration explains
 //! (warned, then left to the learners), a second rejection after a revert,
-//! and the once-per-target and per-request bounds.
+//! the once-per-target and per-request bounds, and the one unrevertible
+//! site whose rejection still reaches the proposers.
 
 use std::sync::Arc;
 
@@ -269,4 +270,139 @@ async fn reverting_one_masked_leaf_keeps_its_sibling_declared() {
         warning: Some((ANTHROPIC_LANE, MASKED_OP_KEY, "operator_payload_extras")),
     }])
     .await;
+}
+
+/// The declared path of the closed-table test field, as a pointer pattern.
+const TEST_ROW_POINTER: &str = "/routectl_test_unsupported_field";
+
+/// One dispatch of the closed-table test field, refused while carried, on a
+/// provider that declares `site` wrote that field.
+async fn dispatch_test_row_declared_by(
+    site: EditSite,
+    surface: Surface,
+) -> (Arc<ScriptedProvider>, Router, Outcome) {
+    let edit =
+        DeclaredEdit::new(site, TEST_ROW_POINTER, EditKind::Add).expect("a matchable pattern");
+    let provider = ScriptedProvider::declaring(faithful, refuse_test_row_while_carried, edit);
+    let router = router(ANTHROPIC, false, &[Arc::clone(&provider)]);
+    let mut req = anthropic_request();
+    carry_test_row(&mut req);
+    let outcome = dispatch(&router, surface, req).await;
+    (provider, router, outcome)
+}
+
+/// A required field routectl wrote with its own value cannot be reverted,
+/// yet the upstream refusing it still says what it accepts: the rejection
+/// reaches the field repair, whose retry serves and learns. The declined
+/// revert stays recorded, so the finding reads unrepaired.
+#[tokio::test]
+async fn an_unrevertible_required_field_default_reaches_the_field_repair() {
+    for surface in SURFACES {
+        let (provider, router, outcome) =
+            dispatch_test_row_declared_by(EditSite::RequiredFieldDefault, surface).await;
+
+        assert_eq!(provider.calls(), 2, "{surface:?}: repaired and re-sent");
+        assert!(outcome.served, "{surface:?}: the repaired retry serves");
+        assert_eq!(outcome.field_repairs, 1, "{surface:?}: one field repair");
+        assert_eq!(
+            router.field_verdicts().snapshot_len(),
+            1,
+            "{surface:?}: the repair learns a field verdict"
+        );
+        assert_eq!(
+            rejections(&router.wire_check_snapshot()),
+            [("routectl_added", FieldRepairOutcome::Unrepaired)],
+            "{surface:?}: the declined revert is the finding's outcome"
+        );
+        assert_eq!(
+            warned(&outcome.events),
+            [(
+                ANTHROPIC_LANE.to_owned(),
+                TEST_ROW_POINTER.to_owned(),
+                "required_field_default".to_owned()
+            )],
+            "{surface:?}: the matched edit warns"
+        );
+    }
+}
+
+/// Every other unrevertible site keeps the rejection from the proposers,
+/// though the field table names the path the declaration covers.
+#[tokio::test]
+async fn another_unrevertible_site_still_proceeds_without_a_proposer() {
+    for surface in SURFACES {
+        let (provider, router, outcome) =
+            dispatch_test_row_declared_by(EditSite::ThinkingSamplingClamp, surface).await;
+
+        assert_eq!(provider.calls(), 1, "{surface:?}: not re-sent");
+        assert!(!outcome.served, "{surface:?}");
+        assert_eq!(outcome.field_repairs, 0, "{surface:?}: no field repair");
+        assert_eq!(
+            rejections(&router.wire_check_snapshot()),
+            [("routectl_added", FieldRepairOutcome::Unrepaired)],
+            "{surface:?}"
+        );
+        assert_eq!(
+            warned(&outcome.events),
+            [(
+                ANTHROPIC_LANE.to_owned(),
+                TEST_ROW_POINTER.to_owned(),
+                "thinking_sampling_clamp".to_owned()
+            )],
+            "{surface:?}"
+        );
+        assert_nothing_learned(&router, &outcome, &format!("{surface:?}"));
+    }
+}
+
+const ANTHROPIC_VERSION: &str = "anthropic_version";
+
+/// A faithful body that also carries routectl's `anthropic_version`.
+fn with_anthropic_version(req: &ChatRequest) -> Value {
+    let mut body = faithful(req);
+    body[ANTHROPIC_VERSION] = json!("routectl-version");
+    body
+}
+
+fn refuse_anthropic_version(_: &ChatRequest) -> Result<()> {
+    Err(rejection(ANTHROPIC_VERSION))
+}
+
+/// A required-field default at a path no closed-table row names reaches the
+/// proposers and none answers it: no re-send (so no repair budget drawn), no
+/// repair, nothing learned.
+#[tokio::test]
+async fn an_unrevertible_required_field_default_with_no_row_proceeds_inert() {
+    for surface in SURFACES {
+        let edit = DeclaredEdit::new(
+            EditSite::RequiredFieldDefault,
+            "/anthropic_version",
+            EditKind::Add,
+        )
+        .expect("a matchable pattern");
+        let provider =
+            ScriptedProvider::declaring(with_anthropic_version, refuse_anthropic_version, edit);
+        let router = router(ANTHROPIC, false, &[Arc::clone(&provider)]);
+
+        let outcome = dispatch(&router, surface, anthropic_request()).await;
+
+        assert_eq!(provider.calls(), 1, "{surface:?}: not re-sent");
+        assert!(!outcome.served, "{surface:?}");
+        assert_eq!(outcome.field_repairs, 0, "{surface:?}: no field repair");
+        assert_eq!(
+            rejections(&router.wire_check_snapshot()),
+            [("routectl_added", FieldRepairOutcome::Unrepaired)],
+            "{surface:?}"
+        );
+        assert_eq!(
+            warned(&outcome.events),
+            [(
+                ANTHROPIC_LANE.to_owned(),
+                "/anthropic_version".to_owned(),
+                "required_field_default".to_owned()
+            )],
+            "{surface:?}"
+        );
+        assert_nothing_learned(&router, &outcome, &format!("{surface:?}"));
+    }
 }
