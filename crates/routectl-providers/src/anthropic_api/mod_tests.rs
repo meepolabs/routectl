@@ -3660,15 +3660,16 @@ fn cloak_lane_strips_caller_sampling_and_keeps_stop_sequences() {
     }
 }
 
-/// routectl's OWN thinking clamp forces `temperature: 1.0` whenever
-/// thinking is composed. The strip is the last word on the body, so that
-/// self-inflicted value is removed too -- not just caller-supplied ones.
+/// routectl's OWN thinking clamp rewrites a client temperature to `1.0`
+/// whenever active thinking is composed. The strip is the last word on the
+/// body, so that clamped value is removed too, not just the caller's own.
 #[test]
 fn cloak_lane_strips_thinking_clamp_temperature() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
     let req = ChatRequest {
         model: "claude-sonnet-4-5".into(),
         max_tokens: Some(4096),
+        temperature: Some(0.5),
         reasoning: Some(routectl_core::ReasoningConfig {
             effort: Some("high".into()),
             ..Default::default()
@@ -3684,7 +3685,7 @@ fn cloak_lane_strips_thinking_clamp_temperature() {
     assert_eq!(
         assembled["temperature"],
         serde_json::json!(1.0),
-        "precondition: the thinking clamp must force temperature 1.0; got: {assembled}"
+        "precondition: the thinking clamp must rewrite temperature to 1.0; got: {assembled}"
     );
 
     let body = final_body(&provider, &req);

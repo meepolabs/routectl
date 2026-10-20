@@ -140,6 +140,13 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
         expected: &[(EditKind::Rewrite, "/temperature")],
     },
     AssemblyRow {
+        name: "thinking clamp drops top_p and adds no temperature",
+        site: EditSite::ThinkingSamplingClamp,
+        firing: || base(json!({"top_p": 0.9, "reasoning": {"effort": "high"}})),
+        idle: || base(json!({"top_p": 0.9})),
+        expected: &[(EditKind::Remove, "/top_p")],
+    },
+    AssemblyRow {
         name: "effort injected beside adaptive thinking",
         site: EditSite::EffortInjection,
         firing: || {

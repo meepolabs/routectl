@@ -361,12 +361,15 @@ Surfaces: [openai-compat](#openai-compat-surface) -
     Only a non-empty `effort_levels` re-clamps it, and routectl supplies
     an effort only beside adaptive thinking that has none
     (`the_effort_on_the_wire_per_thinking_shape_and_operator_knob`).
-  - **The sampling clamp reads the shipped type.** Anthropic pins
-    `temperature` while thinking is active, so the clamp keys off the
-    emitted `thinking.type`, never the canonical config: `enabled` and
-    `adaptive` pin it, `disabled`, `between_tools` and an unknown type
-    keep the caller's sampling
-    (`the_clamp_pins_temperature_only_for_active_thinking_types`,
+  - **The sampling clamp reads the shipped type.** Anthropic accepts
+    only `temperature: 1.0` and no `top_p` while thinking is active, so
+    the clamp keys off the emitted `thinking.type`, never the canonical
+    config: under `enabled` and `adaptive` a client temperature is
+    rewritten to 1.0 and `top_p` is dropped, and a request with no client
+    temperature ships none (1.0 is the default); `disabled`,
+    `between_tools` and an unknown type keep the caller's sampling
+    (`the_clamp_rewrites_only_a_client_temperature_under_active_thinking`,
+    `active_thinking_without_a_client_temperature_ships_no_temperature`,
     `the_body_keeps_caller_sampling_for_inactive_forwarded_types`).
   - **Forced tool use strips only active thinking, as a seed.** Anthropic
     400s with "Thinking may not be enabled when tool_choice forces tool

@@ -190,10 +190,11 @@
 //!   400s a request carrying either -- see `oauth-sampling-stripped`, which
 //!   is gated to Bearer-credential captures for exactly that reason. On
 //!   this surface the two sampling entries COMPOSE rather than conflict:
-//!   `thinking-temperature-clamp` writes `1.0` during request assembly and
-//!   this strip removes the key at the egress boundary, so a capture here
-//!   reports a REMOVED `temperature` while a non-cloak capture reports an
-//!   ADDED one. Two directions, two sites, two entries.
+//!   `thinking-temperature-clamp` rewrites the client's temperature to
+//!   `1.0` during request assembly and this strip removes the key at the
+//!   egress boundary, so a capture here reports a REMOVED `temperature`
+//!   while a non-cloak capture reports a CHANGED one. Two shapes, two
+//!   sites, two entries.
 //!
 //! The remaining cloak sub-transforms are named here so the next
 //! contributor re-derives rather than rediscovers:
@@ -1198,21 +1199,24 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
     Exception {
         lane: ANTHROPIC_FIDELITY_LANE,
         id: "thinking-temperature-clamp",
-        reason: "`.temperature` appears on the wire as `1.0` without the client sending it. \
-                 Confirmed at `clamp_sampling_for_thinking` \
-                 (crates/routectl-providers/src/anthropic_api/request.rs), which returns \
-                 `Some(1.0)` for a thinking config of Enabled or Adaptive regardless of the \
-                 caller's value (and drops `top_p` whenever a temperature is in play, since \
-                 Anthropic rejects both together). NOT `reconcile_sampling_params`: that \
-                 function early-returns while active thinking survives on the body and so \
-                 cannot be the source. In-place value change, hence a MATCHER.",
+        reason: "`.temperature` the client sent appears on the wire as `1.0`. Confirmed at \
+                 `clamp_sampling_for_thinking` \
+                 (crates/routectl-providers/src/anthropic_api/request.rs), which rewrites a \
+                 client temperature to `1.0` while the emitted thinking type is `enabled` or \
+                 `adaptive`, since Anthropic accepts no other value then, and drops `top_p` \
+                 under active thinking. It never ADDS a temperature: a request with no client \
+                 temperature ships none, so an ADDED `1.0` is not this transform and stays a \
+                 finding. NOT `reconcile_sampling_params`: that function early-returns while \
+                 active thinking survives on the body and so cannot be the source. The \
+                 client's original value is deliberately NOT pinned: the clamp rewrites \
+                 whatever the caller sent. In-place value change, hence a MATCHER.",
         site_symbol: "clamp_sampling_for_thinking",
         site_path: "crates/routectl-providers/src/anthropic_api/request.rs",
         path_predicate: |path| path == "temperature",
         applies_to: None,
         max_per_fixture: None,
         transform: Transform::Matcher(|divergence| {
-            divergence.kind == DivergenceKind::Added
+            divergence.kind == DivergenceKind::Changed
                 && divergence.actual().and_then(Value::as_f64) == Some(1.0)
         }),
         matched: AtomicUsize::new(0),
@@ -1401,12 +1405,12 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  whatever the caller, the thinking clamp, or a `provider_extras` smuggle put \
                  there, so pinning a value would fail to explain the identical transform on the \
                  next capture that happens to send a different one. Distinct from \
-                 `thinking-temperature-clamp` and deliberately a separate entry: that one is an \
-                 ADDED `1.0` -- a value the wire GAINS from the clamp at request-assembly time \
-                 -- while this is a REMOVED key, a value the wire LOSES at the egress boundary. \
-                 Different direction, different site, and on this lane the two compose (the \
-                 clamp writes `1.0`, then this strips it), which is why one entry could not \
-                 cover both. In-place key removal that moves no positions, hence a MATCHER.",
+                 `thinking-temperature-clamp` and deliberately a separate entry: that one is a \
+                 CHANGED value -- the client's temperature rewritten to `1.0` at \
+                 request-assembly time -- while this is a REMOVED key, a value the wire LOSES \
+                 at the egress boundary. Different shape, different site, and on this lane the \
+                 two compose (the clamp rewrites to `1.0`, then this strips it), which is why \
+                 one entry could not cover both. In-place key removal that moves no positions, hence a MATCHER.",
         site_symbol: "normalize_claude_sampling",
         site_path: "crates/routectl-providers/src/anthropic_api/extras.rs",
         path_predicate: |path| path == "temperature" || path == "top_p",
@@ -2512,36 +2516,41 @@ mod tests {
     }
 
     #[test]
-    fn the_temperature_clamp_matches_a_forced_one_point_zero_and_nothing_else() {
+    fn the_temperature_clamp_matches_a_client_value_rewritten_to_one_and_nothing_else() {
         let _guard = super::COUNTER_DELTA_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = matcher("thinking-temperature-clamp");
-        let clamped = Divergence::new("temperature", DivergenceKind::Added, Some(json!(1.0)), None);
-
-        assert!(entry.matches(&clamped));
-
-        // Same path, a value the clamp never produces.
-        assert!(!entry.matches(&Divergence::new(
-            "temperature",
-            DivergenceKind::Added,
-            Some(json!(0.7)),
-            None,
-        )));
-        // Same path and value, but the client sent it too -- that is a
-        // rewrite of the caller's sampling, not the clamp adding a field.
-        assert!(!entry.matches(&Divergence::new(
+        let clamped = Divergence::new(
             "temperature",
             DivergenceKind::Changed,
             Some(json!(1.0)),
             Some(json!(0.2)),
+        );
+
+        assert!(entry.matches(&clamped));
+
+        // Same path, rewritten to a value the clamp never produces.
+        assert!(!entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Changed,
+            Some(json!(0.7)),
+            Some(json!(0.2)),
+        )));
+        // Same path and value, but the client sent none: the clamp never
+        // adds a temperature, so this is a finding.
+        assert!(!entry.matches(&Divergence::new(
+            "temperature",
+            DivergenceKind::Added,
+            Some(json!(1.0)),
+            None,
         )));
         // An unrelated path carrying the same shape.
         assert!(!entry.matches(&Divergence::new(
             "top_p",
-            DivergenceKind::Added,
+            DivergenceKind::Changed,
             Some(json!(1.0)),
-            None,
+            Some(json!(0.2)),
         )));
     }
 
@@ -2763,9 +2772,7 @@ mod tests {
             Some(json!(1.0)),
             Some(json!(0.2)),
         )));
-        // An ADDED temperature stays `thinking-temperature-clamp`'s
-        // territory: that entry is a value the wire GAINS, this one a
-        // value the wire LOSES.
+        // An ADDED temperature is not a removal, whatever its value.
         assert!(!entry.matches(&Divergence::new(
             "temperature",
             DivergenceKind::Added,
@@ -3126,9 +3133,9 @@ mod tests {
 
         assert!(entry.matches(&Divergence::new(
             "temperature",
-            DivergenceKind::Added,
+            DivergenceKind::Changed,
             Some(json!(1.0)),
-            None,
+            Some(json!(0.2)),
         )));
 
         assert!(
@@ -3203,8 +3210,12 @@ mod tests {
         let _guard = super::COUNTER_DELTA_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let explained =
-            Divergence::new("temperature", DivergenceKind::Added, Some(json!(1.0)), None);
+        let explained = Divergence::new(
+            "temperature",
+            DivergenceKind::Changed,
+            Some(json!(1.0)),
+            Some(json!(0.2)),
+        );
         let real_loss = Divergence::new(
             "max_tokens",
             DivergenceKind::Changed,
@@ -3232,9 +3243,9 @@ mod tests {
         };
         let divergences = vec![Divergence::new(
             "temperature",
-            DivergenceKind::Added,
+            DivergenceKind::Changed,
             Some(json!(1.0)),
-            None,
+            Some(json!(0.2)),
         )];
 
         assert!(exceptions_for_lane(&gemini_lane).is_empty());

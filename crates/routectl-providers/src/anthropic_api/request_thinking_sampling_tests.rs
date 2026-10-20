@@ -19,26 +19,114 @@ use crate::anthropic_api::extras::reconcile_sampling_params;
 
 const CALLER_TEMPERATURE: f64 = 0.5;
 
-#[test]
-fn the_clamp_pins_temperature_only_for_active_thinking_types() {
-    let rows: [(&str, Option<&str>, Option<f64>); 6] = [
-        ("enabled", Some("enabled"), Some(1.0)),
-        ("adaptive", Some("adaptive"), Some(1.0)),
-        ("disabled", Some("disabled"), Some(CALLER_TEMPERATURE)),
-        (
-            "between_tools",
-            Some("between_tools"),
-            Some(CALLER_TEMPERATURE),
-        ),
-        ("unknown", Some("future_mode"), Some(CALLER_TEMPERATURE)),
-        ("no thinking", None, Some(CALLER_TEMPERATURE)),
-    ];
-    for (row, thinking_type, expected) in rows {
-        let (temperature, top_p) =
-            clamp_sampling_for_thinking(thinking_type, Some(CALLER_TEMPERATURE), Some(0.9));
+type ClampRow = (
+    &'static str,
+    Option<&'static str>,
+    Option<f64>,
+    Option<f64>,
+    (Option<f64>, Option<f64>),
+);
 
-        assert_eq!(temperature, expected, "{row}");
-        assert_eq!(top_p, None, "{row}: temperature in play drops top_p");
+#[test]
+fn the_clamp_rewrites_only_a_client_temperature_under_active_thinking() {
+    let rows: [ClampRow; 14] = [
+        (
+            "enabled, both",
+            Some("enabled"),
+            Some(0.3),
+            Some(0.9),
+            (Some(1.0), None),
+        ),
+        (
+            "adaptive, both",
+            Some("adaptive"),
+            Some(0.3),
+            Some(0.9),
+            (Some(1.0), None),
+        ),
+        (
+            "enabled, temperature",
+            Some("enabled"),
+            Some(0.3),
+            None,
+            (Some(1.0), None),
+        ),
+        (
+            "adaptive, temperature",
+            Some("adaptive"),
+            Some(0.3),
+            None,
+            (Some(1.0), None),
+        ),
+        (
+            "enabled, nothing",
+            Some("enabled"),
+            None,
+            None,
+            (None, None),
+        ),
+        (
+            "adaptive, nothing",
+            Some("adaptive"),
+            None,
+            None,
+            (None, None),
+        ),
+        (
+            "enabled, top_p",
+            Some("enabled"),
+            None,
+            Some(0.9),
+            (None, None),
+        ),
+        (
+            "adaptive, top_p",
+            Some("adaptive"),
+            None,
+            Some(0.9),
+            (None, None),
+        ),
+        (
+            "disabled, both",
+            Some("disabled"),
+            Some(0.3),
+            Some(0.9),
+            (Some(0.3), None),
+        ),
+        (
+            "between_tools, both",
+            Some("between_tools"),
+            Some(0.3),
+            Some(0.9),
+            (Some(0.3), None),
+        ),
+        (
+            "unknown, both",
+            Some("future_mode"),
+            Some(0.3),
+            Some(0.9),
+            (Some(0.3), None),
+        ),
+        (
+            "no thinking, both",
+            None,
+            Some(0.3),
+            Some(0.9),
+            (Some(0.3), None),
+        ),
+        (
+            "no thinking, top_p",
+            None,
+            None,
+            Some(0.9),
+            (None, Some(0.9)),
+        ),
+        ("no thinking, nothing", None, None, None, (None, None)),
+    ];
+    for (row, thinking_type, temperature, top_p, expected) in rows {
+        let clamped = clamp_sampling_for_thinking(thinking_type, temperature, top_p);
+
+        assert_eq!(clamped, expected, "{row}");
     }
 }
 
@@ -75,6 +163,25 @@ fn an_adaptive_carrier_on_a_non_adaptive_lane_pins_temperature() {
     // Assert
     assert_eq!(wire["thinking"]["type"], "adaptive");
     assert_eq!(wire["temperature"], 1.0);
+}
+
+#[test]
+fn active_thinking_without_a_client_temperature_ships_no_temperature() {
+    for thinking in [
+        json!({"type": "adaptive"}),
+        json!({"type": "enabled", "budget_tokens": 4096}),
+    ] {
+        // Arrange
+        let req = ingress_request(Some(thinking.clone()), Some("high"), 64_000);
+
+        // Act
+        let wire = body(&req, false);
+
+        // Assert
+        assert_eq!(wire["thinking"]["type"], thinking["type"], "{wire}");
+        assert!(wire.get("temperature").is_none(), "{wire}");
+        assert!(wire.get("top_p").is_none(), "{wire}");
+    }
 }
 
 #[test]

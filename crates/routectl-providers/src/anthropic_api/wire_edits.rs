@@ -91,7 +91,8 @@ pub fn declare_unsigned_thinking_strip(
 }
 
 /// Declare where the thinking-mode sampling clamp moved the client's
-/// `temperature` / `top_p` off the values the client sent.
+/// `temperature` / `top_p` off the values the client sent. The clamp only
+/// rewrites or removes a key the client sent, never adds one.
 pub fn declare_sampling_clamp(
     tap: Option<&WireTap>,
     req: &ChatRequest,
@@ -104,7 +105,6 @@ pub fn declare_sampling_clamp(
     ] {
         let kind = match (client, sent) {
             (Some(_), None) => EditKind::Remove,
-            (None, Some(_)) => EditKind::Add,
             (Some(a), Some(b)) if a != b => EditKind::Rewrite,
             _ => continue,
         };

@@ -166,7 +166,7 @@ fn build_inference_config(
     thinking_type: Option<&str>,
 ) -> Option<InferenceConfig> {
     // Clamp sampling for thinking mode via the shared Anthropic-API helper:
-    // Claude requires temperature=1.0 (and no top_p) while thinking, and
+    // Claude accepts only temperature=1.0 (and no top_p) while thinking, and
     // rejects a temperature+top_p pair otherwise. The Anthropic-API and
     // Bedrock-Invoke seams apply the identical clamp; Converse builds its
     // inferenceConfig independently, so it must call the same helper or the

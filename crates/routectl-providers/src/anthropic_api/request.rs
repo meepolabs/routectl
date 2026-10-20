@@ -190,14 +190,18 @@ fn flush_response_format_tally(tally: &UnrecognizedResponseFormatTally, req: &Ch
 // Sampling clamp (shared with the Bedrock egresses)
 // ---------------------------------------------------------------------------
 
-/// Clamp sampling params for Claude thinking mode. Anthropic requires
-/// `temperature = 1.0` while thinking spends reasoning budget
-/// (`is_active_thinking_type`: `enabled` and `adaptive`): no
-/// alternative-continuation sampling then. `thinking_type` is the EMITTED
-/// `thinking.type`; any other type, or none, keeps the caller's sampling.
-/// Anthropic also rejects a request carrying both `temperature` and `top_p`
-/// (and rejects `top_p` while thinking is active), so `top_p` survives only
-/// when no temperature is in play; temperature wins.
+/// Clamp sampling params for Claude thinking mode. While thinking spends
+/// reasoning budget (`is_active_thinking_type`: `enabled` and `adaptive`)
+/// Anthropic accepts only `temperature = 1.0` and no `top_p`, so a client
+/// temperature is rewritten to 1.0 and `top_p` is dropped. A request with no
+/// client temperature ships none: 1.0 is the documented default. Kept as a
+/// fixed rule rather than a learned repair because the refusal depends on
+/// the emitted thinking type, and a learned per-field drop would also strip
+/// temperature from the same target's non-thinking requests.
+/// `thinking_type` is the EMITTED `thinking.type`; any other type, or none,
+/// keeps the caller's sampling. Anthropic also rejects a request carrying
+/// both `temperature` and `top_p`, so outside active thinking `top_p`
+/// survives only when no temperature is in play; temperature wins.
 ///
 /// Shared by the Anthropic-API egress (`normalize` below, inherited by the
 /// Bedrock-Invoke seam) and the Bedrock-Converse `inferenceConfig` builder so
@@ -208,11 +212,9 @@ pub(crate) fn clamp_sampling_for_thinking(
     temperature: Option<f64>,
     top_p: Option<f64>,
 ) -> (Option<f64>, Option<f64>) {
-    let temperature = if thinking_type.is_some_and(is_active_thinking_type) {
-        Some(1.0f64)
-    } else {
-        temperature
-    };
+    if thinking_type.is_some_and(is_active_thinking_type) {
+        return (temperature.map(|_| 1.0f64), None);
+    }
     let top_p = if temperature.is_some() { None } else { top_p };
     (temperature, top_p)
 }

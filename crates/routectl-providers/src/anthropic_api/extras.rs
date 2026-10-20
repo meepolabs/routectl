@@ -709,8 +709,8 @@ fn body_thinking_type(body: &Value) -> Option<&str> {
 }
 
 /// True iff the body carries a `thinking` block whose type spends reasoning
-/// budget (`is_active_thinking_type`). Anthropic's forced `temperature = 1.0`
-/// applies only to active thinking, so a body whose thinking is `disabled`,
+/// budget (`is_active_thinking_type`). The thinking clamp's `temperature = 1.0`
+/// rewrite applies only to active thinking, so a body whose thinking is `disabled`,
 /// another type, or stripped entirely gets the caller's sampling back.
 fn body_has_active_thinking(body: &Value) -> bool {
     body_thinking_type(body).is_some_and(is_active_thinking_type)
@@ -842,8 +842,8 @@ pub(super) fn drop_redact_beta_for_display(
 }
 
 /// Late enforcer of the temperature/top_p invariant on the assembled body.
-/// Assembly forces `temperature = 1.0` and drops `top_p` whenever active
-/// thinking ships (Anthropic forbids alternative-continuation sampling while
+/// Assembly rewrites a client `temperature` to 1.0 and drops `top_p` whenever
+/// active thinking ships (Anthropic forbids alternative-continuation sampling while
 /// spending reasoning budget); a pass that removed `thinking` after that
 /// clamp would leave the forced sampling behind and discard the caller's
 /// original values.
@@ -892,7 +892,7 @@ const OAUTH_OWN_ANTHROPIC_LANE: &str = "oauth-own-anthropic";
 /// 400s a `/v1/messages` body carrying either sampling param (both
 /// confirmed), so routectl -- which owns the outbound fingerprint on this
 /// lane -- must present a body the seat accepts regardless of what the
-/// caller, the thinking-clamp (`temperature: 1.0`), or a `provider_extras`
+/// caller, the thinking clamp (a rewritten `temperature: 1.0`), or a `provider_extras`
 /// smuggle put there.
 ///
 /// The LAST word on the JSON: called after `cloak_body` and before the
@@ -1086,7 +1086,7 @@ mod tests {
         }
     }
 
-    /// The thinking-clamp forced `temperature: 1.0` is stripped like any
+    /// The thinking clamp's rewritten `temperature: 1.0` is stripped like any
     /// other sampling value -- the strip reads the final body, not intent.
     #[test]
     fn sampling_strip_removes_thinking_clamp_temperature() {

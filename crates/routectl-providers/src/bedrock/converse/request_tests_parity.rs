@@ -6,8 +6,9 @@
 //!
 //! Coverage:
 //!   - Thinking-mode sampling clamp: a reasoning-enabled Converse request
-//!     forces `temperature = 1.0` and drops `top_p`, matching the
-//!     Anthropic-API + Bedrock-Invoke seams (shared clamp helper).
+//!     rewrites a caller temperature to `1.0`, adds none when the caller
+//!     sent none, and drops `top_p`, matching the Anthropic-API +
+//!     Bedrock-Invoke seams (shared clamp helper).
 //!   - Non-thinking requests pass `temperature` / `top_p` through
 //!     unchanged (temperature still wins over top_p per Claude 4.x).
 //!   - `req.response_format` is honored onto the Converse
@@ -88,8 +89,8 @@ fn thinking_enabled_forces_temperature_one_and_drops_top_p() {
 #[test]
 fn thinking_enabled_drops_caller_top_p() {
     // Arrange: reasoning enabled, caller sets top_p (no temperature).
-    // Claude forbids top_p while thinking, so the forced temperature=1.0
-    // wins and top_p is dropped.
+    // Claude forbids top_p while thinking, so top_p is dropped and no
+    // temperature is invented in its place.
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-sonnet-4-5".into(),
@@ -105,7 +106,7 @@ fn thinking_enabled_drops_caller_top_p() {
 
     // Assert
     let inf = &body["inferenceConfig"];
-    assert_eq!(inf["temperature"], 1.0, "got: {body}");
+    assert!(inf.get("temperature").is_none(), "got: {body}");
     assert!(inf.get("topP").is_none(), "top_p must be dropped: {body}");
 }
 
@@ -412,9 +413,9 @@ fn required_tool_choice_strips_thinking_and_preserves_caller_temperature() {
 #[test]
 fn auto_tool_choice_keeps_thinking_and_clamps_sampling() {
     // Regression guard for the strip/clamp interaction: an Auto toolChoice
-    // does NOT strip thinking, so the clamp must still fire (temperature
-    // forced to 1.0, top_p dropped) -- the fix must not disable clamping
-    // for surviving-thinking requests.
+    // does NOT strip thinking, so the clamp must still fire (top_p dropped,
+    // no temperature added) -- the fix must not disable clamping for
+    // surviving-thinking requests.
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-sonnet-4-5".into(),
@@ -436,7 +437,7 @@ fn auto_tool_choice_keeps_thinking_and_clamps_sampling() {
         "thinking must survive on Auto: {body}"
     );
     let inf = &body["inferenceConfig"];
-    assert_eq!(inf["temperature"], 1.0, "clamp must fire: {body}");
+    assert!(inf.get("temperature").is_none(), "clamp adds none: {body}");
     assert!(inf.get("topP").is_none(), "top_p dropped by clamp: {body}");
 }
 

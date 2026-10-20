@@ -819,9 +819,17 @@ exactly four explained classes with ZERO unexplained:
 | class | fixtures / divergences | exception |
 |---|---|---|
 | `messages[]` length shrink (system-turn lift) | 238 bodies rewritten | `system-turn-lift` (NORMALIZER) |
-| `.temperature` ADDED as `1.0` | 133 | `thinking-temperature-clamp` |
+| `.temperature` ADDED as `1.0` (old clamp, see below) | 133 | `thinking-temperature-clamp` |
 | `.model` VALUE change (bracketed alias resolved) | 6 | `model-alias-suffix-resolved` |
 | whole `thinking` key REMOVED | 4 | `disabled-thinking-dropped` |
+
+That table is a historical record of a corpus that no longer exists, taken
+when the thinking clamp still added `temperature: 1.0` to requests that
+sent none. The clamp now only rewrites a client-sent temperature to `1.0`
+under active thinking and adds none otherwise, so
+`thinking-temperature-clamp` matches a `.temperature` CHANGED to `1.0`;
+an ADDED `1.0` is unexplained. Current code produces no ADDED
+divergence of that shape, so the 133 cannot recur.
 
 Note the `output_config` stale fixtures do NOT diverge on this axis:
 `output_config` is present on BOTH captured sides, so conservation reads

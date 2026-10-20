@@ -665,7 +665,7 @@ fn assistant_tool_call_with_unparseable_arguments_wraps_under_underscore() {
 
 /// Ordering invariant (tool_choice-forces-use path): `shipped_thinking`
 /// removes the composed `thinking` because tool_choice forces tool use,
-/// so the sampling clamp never forces `temperature=1.0`. Sampling params
+/// so the sampling clamp never touches sampling. Sampling params
 /// follow the SOURCE request: `temperature == req.temperature` (None here, so
 /// absent) and `top_p` re-emitted per the else-branch (present because
 /// temperature is None). This is the documented Claude Code WebSearch
@@ -737,9 +737,11 @@ fn adaptive_emits_adaptive_shape_with_output_config() {
     let oc = body.get("output_config").expect("output_config present");
     assert_eq!(oc["effort"], "xhigh");
 
-    // Anthropic requires temperature == 1.0 with thinking active --
-    // both Enabled and Adaptive variants trigger the same constraint.
-    assert_eq!(body["temperature"], 1.0);
+    // No client temperature, so active thinking ships none.
+    assert!(
+        body.get("temperature").is_none(),
+        "no temperature is invented under adaptive thinking, got {body:?}"
+    );
 }
 
 /// End-to-end: a ChatRequest whose canonical `reasoning.effort` was
@@ -836,7 +838,10 @@ fn legacy_thinking_unchanged_when_flag_false() {
         "legacy shape must not emit output_config, got {body:?}"
     );
 
-    assert_eq!(body["temperature"], 1.0);
+    assert!(
+        body.get("temperature").is_none(),
+        "no temperature is invented under enabled thinking, got {body:?}"
+    );
 }
 
 /// `effort = "max"` on the legacy path maps via the exact table to
@@ -2245,10 +2250,10 @@ fn keeps_temperature_when_top_p_unset() {
     );
 }
 
-/// Thinking forces temperature to 1.0; top_p must then be dropped too,
-/// since Anthropic also rejects top_p while thinking is active.
+/// Anthropic rejects top_p while thinking is active, so a caller's top_p is
+/// dropped, and no temperature is invented in its place.
 #[test]
-fn drops_top_p_when_thinking_forces_temperature() {
+fn drops_top_p_under_active_thinking_without_adding_temperature() {
     use routectl_core::ReasoningConfig;
     // Arrange
     let req = ChatRequest {
@@ -2269,7 +2274,10 @@ fn drops_top_p_when_thinking_forces_temperature() {
     let body = normalize("test-anthropic", &req, true, false, None, false, true).unwrap();
 
     // Assert
-    assert_eq!(body["temperature"], 1.0);
+    assert!(
+        body.get("temperature").is_none(),
+        "no temperature is invented in top_p's place, got {body:?}"
+    );
     assert!(
         body.get("top_p").is_none(),
         "top_p must be dropped while thinking is active, got {body:?}"

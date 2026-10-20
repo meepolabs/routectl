@@ -237,6 +237,23 @@ fn an_adaptive_carrier_on_a_legacy_lane_pins_temperature() {
 }
 
 #[test]
+fn adaptive_thinking_without_a_client_temperature_ships_no_temperature() {
+    // Arrange
+    let req = ingress_request(Some(json!({"type": "adaptive"})), Some("high"), 64_000);
+
+    // Act
+    let body = converse_body(&req, true);
+
+    // Assert
+    assert_eq!(bag(&body)["thinking"]["type"], "adaptive", "{body}");
+    let inference = body["inferenceConfig"]
+        .as_object()
+        .expect("max_tokens keeps inferenceConfig on the body");
+    assert!(!inference.contains_key("temperature"), "{body}");
+    assert!(!inference.contains_key("topP"), "{body}");
+}
+
+#[test]
 fn inactive_thinking_types_keep_the_caller_temperature() {
     for thinking in [
         json!({"type": "disabled"}),

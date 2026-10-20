@@ -955,7 +955,7 @@ mod tests {
     /// this one pair.
     ///
     /// It is a COMPOSITE of the two credential surfaces rather than a
-    /// portrait of either: the added `temperature` is the thinking clamp
+    /// portrait of either: the rewritten `temperature` is the thinking clamp
     /// (non-cloak) while the dropped `top_p` is the OAuth seat strip
     /// (cloak), and no single real request produces both. That is
     /// deliberate -- this fixture exists to reach every entry in one walk,
@@ -970,6 +970,7 @@ mod tests {
         let ingress = json!({
             "model": "claude-opus-4-8[1m]",
             "max_tokens": 1024,
+            "temperature": 0.2,
             "top_p": 0.9,
             "thinking": {"type": "disabled"},
             "tools": [{"name": "Read"}],
@@ -1878,7 +1879,11 @@ mod tests {
             "temperature-only",
             "anthropic",
             "anthropic",
-            json!({"model": "m", "messages": [{"role": "user", "content": "one"}]}),
+            json!({
+                "model": "m",
+                "temperature": 0.2,
+                "messages": [{"role": "user", "content": "one"}],
+            }),
             json!({
                 "model": "m",
                 "temperature": 1.0,
@@ -1914,6 +1919,60 @@ mod tests {
         // corpus being unadjudicable.
         let full = run(&[all_transforms("every-transform")]);
         assert_eq!(full.verdict(), Verdict::Pass, "{:?}", full.failures);
+    }
+
+    /// The thinking clamp only rewrites a temperature the client sent, so a
+    /// `1.0` the wire gained with no client temperature is unexplained. The
+    /// rewritten pair is the positive control: same lane, same wire value.
+    #[test]
+    fn an_added_temperature_is_a_finding_while_a_rewritten_one_is_explained() {
+        let wire = json!({
+            "model": "m",
+            "temperature": 1.0,
+            "messages": [{"role": "user", "content": "one"}],
+        });
+        let invented = fixture(
+            "temperature-invented",
+            "anthropic",
+            "anthropic",
+            json!({"model": "m", "messages": [{"role": "user", "content": "one"}]}),
+            wire.clone(),
+        );
+        let rewritten = fixture(
+            "temperature-rewritten",
+            "anthropic",
+            "anthropic",
+            json!({
+                "model": "m",
+                "temperature": 0.2,
+                "messages": [{"role": "user", "content": "one"}],
+            }),
+            wire,
+        );
+
+        let invented_run = run(&[invented]);
+        let rewritten_run = run(&[rewritten]);
+
+        assert_eq!(
+            invented_run.lanes[0].unexplained, 1,
+            "{:?}",
+            invented_run.failures
+        );
+        assert!(
+            invented_run
+                .failures
+                .iter()
+                .any(|f| f.contains("temperature")),
+            "got: {:?}",
+            invented_run.failures,
+        );
+        assert_eq!(hits(&invented_run, "thinking-temperature-clamp"), 0);
+        assert_eq!(
+            rewritten_run.lanes[0].unexplained, 0,
+            "{:?}",
+            rewritten_run.failures
+        );
+        assert_eq!(hits(&rewritten_run, "thinking-temperature-clamp"), 1);
     }
 
     // ---------- counter scoping ----------
