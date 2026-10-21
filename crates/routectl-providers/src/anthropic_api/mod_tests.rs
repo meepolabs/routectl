@@ -4426,7 +4426,7 @@ fn only_client_traffic_counts_toward_this_lanes_statistics() {
 }
 
 /// EVERY recorder call on this lane is gated on that predicate -- the denominator
-/// and all seven numerators.
+/// and all eight numerators.
 ///
 /// A source guard, because the property is coverage: a call added later without
 /// the gate would count probes into one counter while the others exclude them,
@@ -4457,7 +4457,7 @@ fn every_recorder_call_on_this_lane_is_probe_gated() {
     // of THAT gate visible to this guard too; the sibling behavioral tests pin
     // its effect.
     for (name, src, expected_calls, expected_gates) in [
-        ("request.rs", REQUEST, 4usize, 4usize),
+        ("request.rs", REQUEST, 5usize, 5usize),
         ("client.rs", CLIENT, 2, 2),
         ("cloak.rs", CLOAK, 3, 1),
     ] {

@@ -42,8 +42,11 @@ use serde_json::Value;
 
 use routectl_core::cache_control::{self, BreakpointPosition};
 use routectl_core::{
-    ChatRequest, CoreHistoryReasoning, Error, Result, TranslationKey, TranslationReason,
+    ChatRequest, CoreHistoryReasoning, Error, RequestProvenance, Result, TranslationKey,
+    TranslationReason,
 };
+
+use crate::managed_keys::{Dialect, client_extras_for};
 
 // `MessageContent`, `ReasoningDetail`, and `ReasoningDetailKind` are
 // referenced by the inline test modules below via `use super::*;`; the
@@ -111,6 +114,7 @@ use super::extras::effort_ratio;
 // today -- the lift runs only when no canonical system survives -- but the
 // class is counted per request, not per branch.
 pub(crate) use super::tools::HostedMcpToolWithholdTally;
+pub(crate) use crate::managed_keys::ForeignDialectExtraTally;
 pub(crate) use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
 /// Count this request's hosted-MCP tool withhold on the anthropic lane and
@@ -182,6 +186,25 @@ fn flush_response_format_tally(tally: &UnrecognizedResponseFormatTally, req: &Ch
         crate::translation_drop_metrics::record_translation_drop(
             super::LANE,
             "response_format_unrepresentable",
+        );
+    }
+}
+
+/// Count this request's foreign-dialect client extras on the anthropic lane:
+/// keys a client of another ingress dialect sent, spelled for that dialect's
+/// upstream, which Anthropic Messages refuses as extra inputs. Takes the
+/// request so a background probe records nothing. Names keys, never values.
+/// TRANSLATION-DROP: lane=anthropic class=foreign_dialect_extra test=foreign_dialect_extras_are_absent_from_every_anthropic_shape_egress_and_counted_once
+fn flush_foreign_dialect_tally(tally: &ForeignDialectExtraTally, id: &str, req: &ChatRequest) {
+    if tally.dropped() && super::is_client_traffic(req) {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "foreign_dialect_extra",
+        );
+        tracing::debug!(
+            provider = id,
+            keys = %tally.keys_for_log(),
+            "anthropic-api egress: client extras from another ingress dialect dropped",
         );
     }
 }
@@ -656,7 +679,8 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// seam). `hosted_mcp` is the same shape of caller-owned tally for the
 /// Responses hosted-MCP tools withheld from the translated `tools` list, and
 /// `response_format` for a structured-output directive dropped for an
-/// unrecognized type tag.
+/// unrecognized type tag, and `foreign` for client extras withheld because
+/// another ingress dialect sent them.
 ///
 /// Every other caller wants [`normalize`], which emits before returning.
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
@@ -673,6 +697,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     fingerprint: &mut ClientFingerprintStripTally,
     hosted_mcp: &mut HostedMcpToolWithholdTally,
     response_format: &mut UnrecognizedResponseFormatTally,
+    foreign: &mut ForeignDialectExtraTally,
 ) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; log once at
@@ -908,7 +933,14 @@ pub(crate) fn normalize_deferring_format_key_warn(
     let mut body = serde_json::to_value(&ar)
         .map_err(|e| Error::Internal(format!("provider `{id}`: serialize request body: {e}")))?;
 
-    merge_provider_extras(id, &mut body, req.provider_extras.as_ref());
+    let client_extras = client_extras_for(
+        req,
+        Dialect::AnthropicApi,
+        RequestProvenance::AnthropicIngress,
+        &[],
+    );
+    foreign.record(&client_extras.foreign_keys);
+    merge_provider_extras(id, &mut body, client_extras.forwardable.as_deref());
 
     // Honor the canonical structured-output directive: map req.response_format
     // (OpenAI-shape) onto Anthropic's output_config.format. Runs after the
@@ -1064,6 +1096,7 @@ pub(crate) fn normalize(
     let mut fingerprint = ClientFingerprintStripTally::default();
     let mut hosted_mcp = HostedMcpToolWithholdTally::default();
     let mut response_format = UnrecognizedResponseFormatTally::default();
+    let mut foreign = ForeignDialectExtraTally::default();
     let assembled = normalize_deferring_format_key_warn(
         id,
         req,
@@ -1075,6 +1108,7 @@ pub(crate) fn normalize(
         &mut fingerprint,
         &mut hosted_mcp,
         &mut response_format,
+        &mut foreign,
     );
     // Flushed on BOTH arms and outside every fallible step of the assembly: a
     // request whose entire system IS the fingerprint block assembles to no
@@ -1085,6 +1119,7 @@ pub(crate) fn normalize(
     flush_fingerprint_tally(&fingerprint, req);
     flush_hosted_mcp_tally(&hosted_mcp, req);
     flush_response_format_tally(&response_format, req);
+    flush_foreign_dialect_tally(&foreign, id, req);
     let (body, deferred) = assembled?;
     deferred.warn(id);
     Ok(body)
@@ -1126,6 +1161,12 @@ mod thinking_display_carrier_tests;
 #[cfg(test)]
 #[path = "request_thinking_carrier_tests.rs"]
 pub(crate) mod thinking_carrier_tests;
+
+// Client extras reach the Anthropic-shape bodies only from the Anthropic
+// ingress or a library caller, across anthropic-api, Invoke and Converse.
+#[cfg(all(test, feature = "bedrock"))]
+#[path = "request_foreign_dialect_extras_tests.rs"]
+mod foreign_dialect_extras_tests;
 
 // The sampling clamp and the public thinking-type read key off the emitted
 // thinking type.

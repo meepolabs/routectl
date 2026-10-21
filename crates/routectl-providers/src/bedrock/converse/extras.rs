@@ -11,7 +11,7 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{AnthropicThinking, ChatRequest, sanitize_for_log};
+use routectl_core::{AnthropicThinking, ChatRequest, RequestProvenance, sanitize_for_log};
 
 use routectl_core::wire_check::{EditKind, EditSite};
 
@@ -20,7 +20,7 @@ use crate::anthropic_api::request::{
     compose_thinking, is_active_thinking_type, reclamp_client_effort,
 };
 use crate::anthropic_api::types::WireThinking;
-use crate::managed_keys::{Dialect, is_managed_key};
+use crate::managed_keys::{Dialect, ForeignDialectExtraTally, client_extras_for, is_managed_key};
 
 use super::super::betas::{operator_floor, union_and_deposit_betas, withhold_betas};
 use super::super::{BedrockApiShape, BedrockConfig};
@@ -71,7 +71,8 @@ pub(super) fn build_additional_fields(
     let dropped_format_keys = insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
-    let provider_actions = insert_provider_extras(cfg, req, &mut bag, fingerprint);
+    let mut foreign = ForeignDialectExtraTally::default();
+    let provider_actions = insert_provider_extras(cfg, req, &mut bag, fingerprint, &mut foreign);
     let operator_actions = insert_operator_extras(cfg, &mut bag);
     // Once per REQUEST per class, never once per withheld key: a bag whose
     // extras collide on three managed keys is one policy-action event against
@@ -83,6 +84,7 @@ pub(super) fn build_additional_fields(
     // by the whole-request translation and flushed there.
     provider_actions.flush();
     operator_actions.flush();
+    flush_foreign_dialect_tally(cfg, &foreign);
 
     // Drop the request's router-withheld client flags; every other flag
     // reaches the wire verbatim and the operator floor is never withheld.
@@ -191,8 +193,8 @@ impl OperatorExtrasPolicyActions {
 /// Converse egress because they're stored in `provider_extras`, not
 /// on canonical's typed surface.
 ///
-/// Source: this helper only ever sees `req.provider_extras` -- the
-/// Anthropic ingress's forward-compat sweep. Withholding here is by design
+/// Source: `req.provider_extras`, mostly the Anthropic ingress's
+/// forward-compat sweep. Withholding here is by design
 /// (the swept key conflicts with a key routectl builds itself, e.g.
 /// `thinking`) and was flooding `routectl-warn.log` on every
 /// claude-code request. The refusal log fires at DEBUG with neutral
@@ -200,15 +202,32 @@ impl OperatorExtrasPolicyActions {
 /// `insert_operator_extras` below, which keeps the WARN-level
 /// adversarial phrasing because that path IS an operator misconfig.
 ///
+/// Only a request from the Anthropic ingress (or a library caller) forwards
+/// its swept keys here: the bag reaches Claude as Anthropic body fields.
+/// Another dialect's keys are withheld into `foreign`; the operator's
+/// `payload_extras` forward whatever the provenance.
+///
 /// Returns the request's policy-action flags for the caller to flush once.
 fn insert_provider_extras(
     cfg: &BedrockConfig,
     req: &ChatRequest,
     bag: &mut Map<String, Value>,
     fingerprint: &mut ClientFingerprintStripTally,
+    foreign: &mut ForeignDialectExtraTally,
 ) -> ProviderExtrasPolicyActions {
     let mut actions = ProviderExtrasPolicyActions::default();
-    let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
+    let client_extras = client_extras_for(
+        req,
+        Dialect::BedrockConverse,
+        RequestProvenance::AnthropicIngress,
+        &[crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY],
+    );
+    foreign.record(&client_extras.foreign_keys);
+    let Some(extras) = client_extras
+        .forwardable
+        .as_deref()
+        .and_then(Value::as_object)
+    else {
         return actions;
     };
     for (k, v) in extras {
@@ -258,6 +277,24 @@ fn insert_provider_extras(
         bag.insert(k.clone(), v.clone());
     }
     actions
+}
+
+/// Count this request's foreign-dialect client extras on the Converse lane.
+/// AWS hands the bag to the model as model-specific parameters, and Claude
+/// refuses another dialect's keys there as extra inputs.
+/// TRANSLATION-DROP: lane=bedrock-converse class=foreign_dialect_extra test=foreign_dialect_extras_are_absent_from_every_anthropic_shape_egress_and_counted_once
+fn flush_foreign_dialect_tally(cfg: &BedrockConfig, tally: &ForeignDialectExtraTally) {
+    if tally.dropped() {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "foreign_dialect_extra",
+        );
+        tracing::debug!(
+            provider = %cfg.id,
+            keys = %tally.keys_for_log(),
+            "bedrock-converse egress: client extras from another ingress dialect dropped",
+        );
+    }
 }
 
 /// Merge the Anthropic client's own `output_config.format` into the bag's
@@ -585,6 +622,7 @@ mod tests {
             &req,
             &mut bag,
             &mut ClientFingerprintStripTally::default(),
+            &mut super::ForeignDialectExtraTally::default(),
         );
 
         // Assert: no metadata key, and no fingerprint substring.

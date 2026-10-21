@@ -2,7 +2,8 @@
 //! that does to the egress bodies. An Anthropic body carrying the OpenAI
 //! token-cap alias `max_completion_tokens` and a top-level
 //! `reasoning_details` must reach every egress exactly as the same body
-//! without them does, while an unknown knob beside them still forwards.
+//! without them does, while an unknown knob beside them still forwards to
+//! every Anthropic-shape egress.
 
 use routectl_core::Provider;
 use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
@@ -118,7 +119,12 @@ fn the_canonical_aliases_leave_every_egress_body_byte_identical() {
         assert_eq!(with_body, without_body, "{lane}");
     }
     for (lane, body) in &with_bodies {
-        assert!(body.contains(KNOB), "the knob forwards on {lane}: {body}");
+        assert_eq!(
+            body.contains(KNOB),
+            *lane != "openai-compat",
+            "the knob forwards on every Anthropic-shape lane, and never to the Chat wire \
+             another dialect's client did not address: {lane}: {body}"
+        );
     }
 }
 

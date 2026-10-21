@@ -297,41 +297,133 @@ fn anthropic_beta_flags_are_absent_from_the_openai_compat_wire_and_counted() {
     assert_eq!(delta, 1);
 }
 
-#[test]
-fn an_ingress_metadata_object_is_absent_from_the_openai_compat_wire_and_counted() {
-    // Arrange
-    let mut req = simple_req("m");
-    req.provider_extras = Some(json!({"metadata": {"user_id": "zz-user-tell"}}));
-
-    // Act
-    let (rendered, delta) =
-        wire_and_delta(&req, None, || compat_drop_count("metadata_unsupported"));
-
-    // Assert
-    assert!(!rendered.contains("zz-user-tell"), "{rendered}");
-    assert_eq!(delta, 1);
+fn with_provenance(mut req: ChatRequest, provenance: RequestProvenance) -> ChatRequest {
+    req.routectl_internal.provenance = provenance;
+    req
 }
 
 #[test]
-fn a_forward_compat_extra_is_absent_from_the_openai_compat_wire_and_counted() {
-    // Arrange -- two swept fields, one request, one drop event; a long-tail
-    // extra beside them still forwards.
+fn an_anthropic_ingress_metadata_object_is_absent_from_the_openai_compat_wire_and_counted_once() {
+    // Arrange -- the identity block alone, as the Anthropic ingress sweeps it.
     let mut req = simple_req("m");
-    req.provider_extras = Some(json!({
+    req.provider_extras = Some(json!({"metadata": {"user_id": "zz-user-tell"}}));
+    let req = with_provenance(req, RequestProvenance::AnthropicIngress);
+    let foreign_before = compat_drop_count("foreign_dialect_extra");
+
+    // Act
+    let (rendered, delta) = wire_and_delta(&req, None, || {
+        compat_policy_count("client_fingerprint_stripped")
+    });
+
+    // Assert -- one class, once: the fingerprint withhold, never also foreign.
+    assert!(!rendered.contains("zz-user-tell"), "{rendered}");
+    assert_eq!(delta, 1);
+    assert_eq!(compat_drop_count("foreign_dialect_extra"), foreign_before);
+}
+
+#[test]
+fn a_chat_ingress_metadata_object_forwards_to_the_openai_compat_wire() {
+    // Arrange -- `metadata` is a Chat Completions field when a Chat client
+    // sends it.
+    let mut req = simple_req("m");
+    req.provider_extras = Some(json!({"metadata": {"tag": "zz-chat-meta"}}));
+    let req = with_provenance(req, RequestProvenance::OpenaiIngress);
+
+    // Act
+    let (rendered, delta) = wire_and_delta(&req, None, || {
+        compat_policy_count("client_fingerprint_stripped")
+    });
+
+    // Assert
+    assert!(rendered.contains("zz-chat-meta"), "{rendered}");
+    assert_eq!(delta, 0);
+}
+
+#[test]
+fn foreign_dialect_extras_are_absent_from_the_openai_compat_wire_and_counted_once() {
+    // Arrange -- two Anthropic-only fields from one Anthropic-ingress request:
+    // one drop event. The same bag from a Chat client is the positive control.
+    let extras = json!({
         "context_management": {"edits": []},
         "mcp_servers": [{"name": "zz-mcp-tell"}],
+    });
+    let mut foreign = simple_req("m");
+    foreign.provider_extras = Some(extras.clone());
+    let foreign = with_provenance(foreign, RequestProvenance::AnthropicIngress);
+    let mut same_dialect = simple_req("m");
+    same_dialect.provider_extras = Some(extras);
+    let same_dialect = with_provenance(same_dialect, RequestProvenance::OpenaiIngress);
+    let count = || compat_drop_count("foreign_dialect_extra");
+
+    // Act
+    let (foreign_wire, foreign_delta) = wire_and_delta(&foreign, None, count);
+    let (control_wire, control_delta) = wire_and_delta(&same_dialect, None, count);
+
+    // Assert
+    assert!(
+        !foreign_wire.contains("context_management"),
+        "{foreign_wire}"
+    );
+    assert!(!foreign_wire.contains("zz-mcp-tell"), "{foreign_wire}");
+    assert_eq!(foreign_delta, 1);
+    assert!(control_wire.contains("zz-mcp-tell"), "{control_wire}");
+    assert_eq!(control_delta, 0);
+}
+
+#[test]
+fn a_chat_ingress_service_tier_still_forwards_to_the_openai_compat_wire() {
+    // Arrange
+    let mut req = simple_req("m");
+    req.provider_extras = Some(json!({"service_tier": "flex"}));
+    let req = with_provenance(req, RequestProvenance::OpenaiIngress);
+
+    // Act
+    let (rendered, delta) =
+        wire_and_delta(&req, None, || compat_drop_count("foreign_dialect_extra"));
+
+    // Assert
+    assert!(rendered.contains("\"service_tier\":\"flex\""), "{rendered}");
+    assert_eq!(delta, 0);
+}
+
+#[test]
+fn a_library_caller_forwards_its_extras_to_the_openai_compat_wire_unchanged() {
+    // Arrange -- Anthropic-shape keys a library caller chose to send.
+    let mut req = simple_req("m");
+    req.provider_extras = Some(json!({
+        "context_management": {"edits": ["zz-lib-edit"]},
         "top_k": 40,
     }));
 
     // Act
-    let (rendered, delta) = wire_and_delta(&req, None, || {
-        compat_drop_count("forward_compat_extra_unrepresentable")
-    });
+    let (rendered, delta) =
+        wire_and_delta(&req, None, || compat_drop_count("foreign_dialect_extra"));
 
     // Assert
-    assert!(!rendered.contains("context_management"), "{rendered}");
-    assert!(!rendered.contains("zz-mcp-tell"), "{rendered}");
+    assert!(rendered.contains("zz-lib-edit"), "{rendered}");
     assert!(rendered.contains("\"top_k\":40"), "{rendered}");
+    assert_eq!(delta, 0);
+}
+
+#[test]
+fn a_foreign_client_key_is_dropped_while_an_operator_payload_extra_forwards_on_openai_compat() {
+    // Arrange -- the router merged the operator's `top_k` and a Responses
+    // client's `top_k` and `store` into one bag; the client won `top_k`.
+    let mut req = simple_req("m");
+    req.provider_extras = Some(json!({"top_k": 99, "store": true, "seed_note": "op"}));
+    req.routectl_internal.operator_payload_extras =
+        Some(std::sync::Arc::new(json!({"top_k": 40, "seed_note": "op"})));
+    let req = with_provenance(req, RequestProvenance::ResponsesIngress);
+
+    // Act
+    let (rendered, delta) =
+        wire_and_delta(&req, None, || compat_drop_count("foreign_dialect_extra"));
+
+    // Assert -- the operator's value ships, the client's never does.
+    let body: serde_json::Value = serde_json::from_str(&rendered).expect("json");
+    assert_eq!(body["top_k"], 40, "{rendered}");
+    assert_eq!(body["seed_note"], "op", "{rendered}");
+    assert!(body.get("store").is_none(), "{rendered}");
     assert_eq!(delta, 1);
 }
 
@@ -374,10 +466,12 @@ fn an_operator_extra_naming_a_managed_key_is_refused_and_counted() {
 #[test]
 fn a_swept_output_config_is_withheld_without_a_second_count() {
     // Arrange -- a json_object format the lift maps, so nothing is lost; the
-    // leftover object is withheld and counts on neither extras class.
+    // leftover object is withheld and counts on neither extras class, though
+    // the Anthropic ingress sent it.
     let mut req = simple_req("m");
     req.provider_extras = Some(json!({"output_config": {"format": {"type": "json_object"}}}));
-    let drops = || compat_drop_count("forward_compat_extra_unrepresentable");
+    let req = with_provenance(req, RequestProvenance::AnthropicIngress);
+    let drops = || compat_drop_count("foreign_dialect_extra");
     let actions = || compat_policy_count("provider_extra_managed_key_conflict");
     let (drops_before, actions_before) = (drops(), actions());
 

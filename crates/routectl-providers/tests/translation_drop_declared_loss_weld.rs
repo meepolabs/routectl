@@ -369,6 +369,7 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
 /// symbol passes every weld in this repository. Content-pinned by
 /// `(file, symbol)`, so a count that moves either way is a review moment.
 const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
+    ("anthropic_api/request.rs", "flush_foreign_dialect_tally", 1),
     (
         "anthropic_api/request.rs",
         "normalize_deferring_format_key_warn",
@@ -378,6 +379,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "anthropic_api/request.rs",
         "response_format_to_anthropic_format",
         5,
+    ),
+    (
+        "bedrock/converse/extras.rs",
+        "flush_foreign_dialect_tally",
+        1,
     ),
     ("bedrock/converse/extras.rs", "insert_operator_extras", 1),
     ("bedrock/converse/extras.rs", "insert_provider_extras", 1),
@@ -413,6 +419,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "translate_typed_tool_choice",
         3,
     ),
+    ("bedrock/invoke.rs", "flush_foreign_dialect_tally", 1),
     ("gemini/request.rs", "build_response_format", 1),
     ("gemini/request.rs", "build_system_instruction", 2),
     ("gemini/request.rs", "build_tools_and_config", 2),
@@ -430,8 +437,9 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "check_dropped_anthropic_fields",
         5,
     ),
-    ("openai_compat/request.rs", "merge_extras", 3),
+    ("openai_compat/request.rs", "merge_extras", 2),
     ("openai_compat/request.rs", "project_system", 2),
+    ("openai_compat/request.rs", "select_client_extras", 2),
     (
         "openai_compat/wire_lift/mod.rs",
         "reject_or_drop_unrepresentable",

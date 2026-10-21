@@ -22,14 +22,14 @@ use tracing::{debug, warn};
 
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
-    ChatRequest, Error, Message, RefusalReason, Result, ToolDef, is_canonical_request_key,
+    ChatRequest, Error, Message, RefusalReason, RequestProvenance, Result, ToolDef,
     sanitize_for_log,
 };
 
 use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
-use crate::managed_keys::{Dialect, is_managed_key};
+use crate::managed_keys::{ClientExtras, Dialect, client_extras_for, is_managed_key};
 use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
 /// `source` value passed to [`merge_extras`] for operator-config-supplied
@@ -38,13 +38,20 @@ use crate::translation_drop_metrics::ClientFingerprintStripTally;
 /// operator asked routectl to send a managed key.
 const DEFAULT_EXTRAS_SOURCE: &str = "payload_extras";
 
-/// `source` value passed to [`merge_extras`] for canonical-swept
-/// `req.provider_extras` (the Anthropic ingress's forward-compat sweep
-/// destination). Drop here is by design -- the swept field has no
-/// openai-compat equivalent and routectl already documented it gets
-/// dropped; an Anthropic-only beta field showing up in extras is NOT
-/// an operator misconfiguration.
+/// `source` value passed to [`merge_extras`] for `req.provider_extras`: the
+/// Chat ingress's forward-compat sweep, a library caller's own extras, or
+/// the operator's `payload_extras` the router merged in. Another ingress
+/// dialect's swept keys never reach the merge (see [`client_extras_for`]).
 const PROVIDER_EXTRAS_SOURCE: &str = "provider_extras";
+
+/// Extras keys this egress consumes into another field before the merge: the
+/// response_format lift reads `output_config.format`. Withheld from the merge
+/// whatever the provenance, and never counted as a foreign-dialect extra.
+const TRANSLATED_EXTRAS_KEYS: [&str; 1] = ["output_config"];
+
+/// Top-level extras key carrying the Anthropic client identity block
+/// (`user_id`, `account_uuid`).
+const CLIENT_METADATA_KEY: &str = "metadata";
 
 /// Canonical top-level keys this egress removes from the serialized body
 /// before the dialect runs, with the edit site each removal declares.
@@ -86,6 +93,7 @@ pub fn normalize(
     // already counted it.
     let mut fingerprint = ClientFingerprintStripTally::default();
     let system = project_system(id, req, &mut fingerprint);
+    let client_extras = select_client_extras(id, req, &mut fingerprint);
     flush_fingerprint_tally(&fingerprint);
 
     // Seams the OpenAI-compat wire can't represent: Anthropic-only
@@ -176,7 +184,8 @@ pub fn normalize(
     if let Some(extras) = payload_extras {
         merge_extras(id, obj, extras, DEFAULT_EXTRAS_SOURCE, &mut withheld, tap);
     }
-    if let Some(extras) = req.provider_extras.as_ref() {
+    declare_foreign_extras(tap, &client_extras);
+    if let Some(extras) = client_extras.forwardable.as_deref() {
         merge_extras(id, obj, extras, PROVIDER_EXTRAS_SOURCE, &mut withheld, tap);
     }
     withheld.flush();
@@ -358,26 +367,12 @@ fn count_unmodeled_thinking_type(req: &ChatRequest) {
 #[must_use = "an extras withhold counts nothing until the tally is flushed"]
 #[derive(Debug, Default)]
 struct ExtrasWithholdTally {
-    metadata: bool,
-    forward_compat_extra: bool,
     provider_managed_key: bool,
     operator_managed_key: bool,
 }
 
 impl ExtrasWithholdTally {
     fn flush(&self) {
-        if self.metadata {
-            crate::translation_drop_metrics::record_translation_drop(
-                super::LANE,
-                "metadata_unsupported",
-            );
-        }
-        if self.forward_compat_extra {
-            crate::translation_drop_metrics::record_translation_drop(
-                super::LANE,
-                "forward_compat_extra_unrepresentable",
-            );
-        }
         if self.provider_managed_key {
             crate::translation_drop_metrics::record_translation_policy_action(
                 super::LANE,
@@ -402,11 +397,9 @@ impl ExtrasWithholdTally {
 ///   - `DEFAULT_EXTRAS_SOURCE` -> WARN with the existing adversarial
 ///     phrasing. Operator asked routectl to send a managed key, so
 ///     the drop deserves their attention.
-///   - `PROVIDER_EXTRAS_SOURCE` -> DEBUG with neutral phrasing. The
-///     Anthropic ingress's forward-compat sweep is the source for
-///     this path; a swept Anthropic-only beta field with no
-///     openai-compat equivalent is BY DESIGN and was flooding
-///     `routectl-warn.log` on every Anthropic-ingress request.
+///   - `PROVIDER_EXTRAS_SOURCE` -> DEBUG with neutral phrasing. A
+///     canonical key in a client's extras bag is a client shape, not an
+///     operator misconfiguration.
 fn merge_extras(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
@@ -419,46 +412,28 @@ fn merge_extras(
         return;
     };
     for (k, v) in extra_obj {
-        if is_managed_key(Dialect::OpenAiCompat, k) {
-            if k == "metadata" {
-                // Anthropic ingress stashes the full inbound `metadata`
-                // object into provider_extras. Strict openai-compat hosts
-                // (NIM, vLLM-strict, DeepSeek-direct) 400 with
-                // `Unsupported parameter(s): metadata`. The drop is by
-                // design on every such request; log the key only, never the
-                // object's contents (may carry PII like user_id).
-                // TRANSLATION-DROP: lane=openai-compat class=metadata_unsupported test=an_ingress_metadata_object_is_absent_from_the_openai_compat_wire_and_counted
-                withheld.metadata = true;
-                tracing::debug!(
-                    provider = id,
-                    source = source,
-                    "openai-compat egress: Anthropic `metadata` object dropped (not valid on OpenAI wire)"
-                );
-            } else if source == PROVIDER_EXTRAS_SOURCE {
-                match k.as_str() {
+        if withholds_extras_key(k) {
+            if source == PROVIDER_EXTRAS_SOURCE {
+                if TRANSLATED_EXTRAS_KEYS.contains(&k.as_str()) {
                     // TRANSLATION-DROP: structural -- the response_format lift reads
                     // `output_config.format` off the request before this merge and
                     // counts its own loss when the format has no equivalent here,
                     // so withholding the leftover object loses no format twice.
-                    "output_config" => {}
+                } else {
                     // A canonical key arriving through the extras bag would
                     // replace a field routectl assembled; the wire would carry
                     // it, and routectl refuses it to keep its own value
                     // authoritative.
                     // TRANSLATION-DROP: policy-action class=provider_extra_managed_key_conflict test=a_provider_extra_naming_a_canonical_key_is_refused_and_counted
-                    key if is_canonical_request_key(key) => withheld.provider_managed_key = true,
-                    // The swept Anthropic-only fields (`context_management`,
-                    // `mcp_servers`, ...) have no field on this wire, and strict
-                    // hosts 400 on them, so the upstream compels the loss.
-                    // TRANSLATION-DROP: lane=openai-compat class=forward_compat_extra_unrepresentable test=a_forward_compat_extra_is_absent_from_the_openai_compat_wire_and_counted
-                    _ => withheld.forward_compat_extra = true,
+                    withheld.provider_managed_key = true;
                 }
                 tracing::debug!(
                     provider = id,
                     source = source,
                     key = %sanitize_for_log(k),
-                    "forward-compat extra has no openai-compat equivalent; dropped"
+                    "extras entry names a key routectl writes itself; dropped"
                 );
+                declare_member(tap, EditSite::ManagedExtrasStrip, k, EditKind::Remove);
             } else {
                 // The operator's configured value would ride fine; routectl
                 // refuses it so its own assembled field stays authoritative.
@@ -471,9 +446,6 @@ fn merge_extras(
                     "extras attempted to override routectl-managed key; dropped"
                 );
             }
-            if source == PROVIDER_EXTRAS_SOURCE {
-                declare_member(tap, EditSite::ManagedExtrasStrip, k, EditKind::Remove);
-            }
             continue;
         }
         if source == DEFAULT_EXTRAS_SOURCE {
@@ -485,6 +457,70 @@ fn merge_extras(
             declare_member(tap, EditSite::OperatorPayloadExtras, k, kind);
         }
         obj.insert(k.clone(), v.clone());
+    }
+}
+
+/// True when an extras entry under `key` never reaches this wire: a key
+/// routectl writes itself, or one this egress consumes into another field.
+fn withholds_extras_key(key: &str) -> bool {
+    is_managed_key(Dialect::OpenAiCompat, key) || TRANSLATED_EXTRAS_KEYS.contains(&key)
+}
+
+/// The client extras this request may merge onto the Chat body. Only the
+/// Chat ingress (and a library caller) speaks this wire's vocabulary; another
+/// ingress's swept keys are withheld, and only the operator's own
+/// `payload_extras` forward. Runs ahead of every fallible step so the
+/// request's counts are flushed with the fingerprint tally.
+fn select_client_extras<'a>(
+    id: &str,
+    req: &'a ChatRequest,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> ClientExtras<'a> {
+    let client_extras = client_extras_for(
+        req,
+        Dialect::OpenAiCompat,
+        RequestProvenance::OpenaiIngress,
+        &TRANSLATED_EXTRAS_KEYS,
+    );
+    let (metadata, foreign): (Vec<&str>, Vec<&str>) = client_extras
+        .foreign_keys
+        .iter()
+        .partition(|k| **k == CLIENT_METADATA_KEY);
+    // Another dialect's `metadata` is the Anthropic client identity block.
+    // It shares the request's fingerprint tally with the system strips, so a
+    // request withholding it there too is still one action, and it is never
+    // counted again as a foreign-dialect extra. Logs the key only.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=an_anthropic_ingress_metadata_object_is_absent_from_the_openai_compat_wire_and_counted_once
+    if !metadata.is_empty() {
+        fingerprint.record();
+        debug!(
+            provider = id,
+            "openai-compat egress: client metadata from another ingress dialect dropped",
+        );
+    }
+    // A key another dialect's client sent is spelled for that dialect's
+    // upstream; strict hosts answer `Unsupported parameter`, and routectl
+    // does not guess a Chat equivalent.
+    // TRANSLATION-DROP: lane=openai-compat class=foreign_dialect_extra test=foreign_dialect_extras_are_absent_from_the_openai_compat_wire_and_counted_once
+    if !foreign.is_empty() {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "foreign_dialect_extra",
+        );
+        debug!(
+            provider = id,
+            keys = %sanitize_for_log(&foreign.join(",")),
+            "openai-compat egress: client extras from another ingress dialect dropped",
+        );
+    }
+    client_extras
+}
+
+/// Declare each top-level extra withheld for its provenance, `metadata`
+/// included, as removed from the body.
+fn declare_foreign_extras(tap: Option<&WireTap>, client_extras: &ClientExtras<'_>) {
+    for key in &client_extras.foreign_keys {
+        declare_member(tap, EditSite::ManagedExtrasStrip, key, EditKind::Remove);
     }
 }
 
@@ -1341,16 +1377,14 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_metadata_is_dropped_from_openai_compat_body() {
+    fn anthropic_ingress_metadata_is_dropped_from_openai_compat_body() {
         // The Anthropic ingress sweeps the inbound `metadata` object into
         // provider_extras. Strict openai-compat hosts (NIM, vLLM-strict,
         // DeepSeek-direct) 400 with `Unsupported parameter(s): metadata`,
         // so the egress must strip it from the upstream body.
         let mut req = simple_req("gpt-4o");
-        req.provider_extras = Some(json!({
-            "metadata": {"user_id": "abc123"},
-            "top_k": 40,
-        }));
+        req.provider_extras = Some(json!({"metadata": {"user_id": "abc123"}}));
+        req.routectl_internal.provenance = RequestProvenance::AnthropicIngress;
         let body = normalize(
             "test",
             &req,
@@ -1364,8 +1398,6 @@ mod tests {
             body.get("metadata").is_none(),
             "Anthropic metadata must not reach the openai-compat wire, got: {body}"
         );
-        // A non-metadata provider_extras key still forwards.
-        assert_eq!(body["top_k"], 40);
     }
 
     #[test]

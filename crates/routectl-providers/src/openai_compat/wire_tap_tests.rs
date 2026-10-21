@@ -484,11 +484,16 @@ fn site_rows() -> Vec<SiteRow> {
             kind: EditKind::Remove,
         },
         SiteRow {
-            name: "managed extra withheld",
+            name: "foreign-dialect extra withheld",
             dialect: ReasoningDialect::OpenAi,
-            fires: || ChatRequest {
-                provider_extras: Some(json!({"metadata": {"user_id": "u"}})),
-                ..request("gpt-4o")
+            fires: || {
+                let mut req = ChatRequest {
+                    provider_extras: Some(json!({"metadata": {"user_id": "u"}})),
+                    ..request("gpt-4o")
+                };
+                req.routectl_internal.provenance =
+                    routectl_core::RequestProvenance::AnthropicIngress;
+                req
             },
             quiet: || ChatRequest {
                 provider_extras: Some(json!({"service_tier": "auto"})),
@@ -496,6 +501,21 @@ fn site_rows() -> Vec<SiteRow> {
             },
             site: EditSite::ManagedExtrasStrip,
             pattern: "/metadata",
+            kind: EditKind::Remove,
+        },
+        SiteRow {
+            name: "managed extra withheld",
+            dialect: ReasoningDialect::OpenAi,
+            fires: || ChatRequest {
+                provider_extras: Some(json!({"seed": 7})),
+                ..request("gpt-4o")
+            },
+            quiet: || ChatRequest {
+                provider_extras: Some(json!({"service_tier": "auto"})),
+                ..request("gpt-4o")
+            },
+            site: EditSite::ManagedExtrasStrip,
+            pattern: "/seed",
             kind: EditKind::Remove,
         },
         SiteRow {

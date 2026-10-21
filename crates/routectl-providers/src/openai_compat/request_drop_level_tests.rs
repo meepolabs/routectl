@@ -60,6 +60,7 @@ fn anthropic_only_field_drops_log_once_at_debug() {
     );
     let mut metadata = simple_req("m");
     metadata.provider_extras = Some(json!({"metadata": {"user_id": "abc123"}}));
+    metadata.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
     let rows = [
         (
             "top-level cache_control",
@@ -78,7 +79,11 @@ fn anthropic_only_field_drops_log_once_at_debug() {
             block,
             "per-block cache_control dropped",
         ),
-        ("metadata", metadata, "`metadata` object dropped"),
+        (
+            "metadata",
+            metadata,
+            "client metadata from another ingress dialect dropped",
+        ),
     ];
 
     for (row, req, needle) in rows {

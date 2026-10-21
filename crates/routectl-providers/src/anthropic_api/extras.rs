@@ -598,8 +598,10 @@ pub fn build_output_config(
 /// careless `provider_extras = {"messages": [...]}` can't replace the
 /// assembled messages array.
 ///
-/// Source: this helper only ever sees `req.provider_extras` -- the
-/// Anthropic ingress's forward-compat sweep destination. Drops here
+/// Source: `req.provider_extras` as `managed_keys::client_extras_for`
+/// selects it for this request's provenance -- the Anthropic ingress's
+/// forward-compat sweep, a library caller's own extras, or the operator's
+/// `payload_extras` alone for another ingress dialect. Drops here
 /// are by design (the swept key would conflict with a key routectl
 /// builds itself, e.g. `thinking`) and were flooding
 /// `routectl-warn.log` on every claude-code request. The drop log

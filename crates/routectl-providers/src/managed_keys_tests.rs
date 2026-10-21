@@ -178,29 +178,20 @@ const OPENAI_COMPAT_MANAGED: &[&str] = &[
     "anthropic_beta",
     "cache_control",
     "chat_template_kwargs",
-    "container",
-    "context_hint",
-    "context_management",
-    "diagnostics",
     "frequency_penalty",
-    "inference_geo",
     "logit_bias",
     "logprobs",
     "max_completion_tokens",
     "max_tokens",
-    "mcp_servers",
     "messages",
-    "metadata",
     "model",
     "n",
-    "output_config",
     "presence_penalty",
     "provider_extras",
     "reasoning",
     "reasoning_details",
     "response_format",
     "seed",
-    "speed",
     "stop",
     "stop_sequences",
     "stream",
@@ -383,6 +374,25 @@ fn unmanaged_controls_pass_through_every_pair_that_does_not_name_them() {
             pair.name
         );
     }
+}
+
+/// The openai-compat merge refuses exactly the canonical keys: which client
+/// extras reach that wire is decided by provenance, never by a list of
+/// another dialect's field names kept here.
+#[cfg(feature = "openai-compat")]
+#[test]
+fn the_openai_compat_set_is_the_canonical_set_only() {
+    let canonical: BTreeSet<&str> = UNIVERSE
+        .iter()
+        .copied()
+        .filter(|k| routectl_core::is_canonical_request_key(k))
+        .collect();
+    let compat: BTreeSet<&str> = UNIVERSE
+        .iter()
+        .copied()
+        .filter(|k| is_managed_key(Dialect::OpenAiCompat, k))
+        .collect();
+    assert_eq!(compat, canonical);
 }
 
 /// String literals inside every macro invocation (`matches!`) in the body of

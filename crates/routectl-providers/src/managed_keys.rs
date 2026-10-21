@@ -15,8 +15,21 @@
 //! request fields by exact name. Gemini's ProtoJSON parser also accepts proto
 //! field names (`generation_config` for `generationConfig`); only the
 //! lowerCamelCase spelling is named here.
+//!
+//! Which client extras reach the merge at all is decided first, by the
+//! request's ingress dialect (`client_extras_for`): a swept key is spelled
+//! in its ingress's vocabulary, so it forwards only to the egress that speaks
+//! that vocabulary.
+
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+use std::borrow::Cow;
+
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+use serde_json::{Map, Value};
 
 use routectl_core::is_canonical_request_key;
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+use routectl_core::{ChatRequest, RequestProvenance};
 
 /// The extras merge whose managed set a key is checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,23 +102,7 @@ pub fn is_managed_key(dialect: Dialect, key: &str) -> bool {
                 )
         }
         #[cfg(feature = "openai-compat")]
-        Dialect::OpenAiCompat => {
-            is_canonical_request_key(key)
-                || matches!(
-                    key,
-                    // Anthropic-shape fields the ingress sweep forwards; strict
-                    // openai-compat hosts reject them as unsupported parameters.
-                    "output_config"
-                        | "metadata"
-                        | "context_management"
-                        | "context_hint"
-                        | "mcp_servers"
-                        | "container"
-                        | "inference_geo"
-                        | "speed"
-                        | "diagnostics"
-                )
-        }
+        Dialect::OpenAiCompat => is_canonical_request_key(key),
         #[cfg(feature = "gemini")]
         Dialect::Gemini => {
             is_canonical_request_key(key)
@@ -114,6 +111,135 @@ pub fn is_managed_key(dialect: Dialect, key: &str) -> bool {
                     "contents" | "systemInstruction" | "toolConfig" | "generationConfig"
                 )
         }
+    }
+}
+
+/// The client extras one egress may merge for a request, split by where the
+/// request came from.
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+#[derive(Debug)]
+pub struct ClientExtras<'a> {
+    /// The bag to hand the egress's merge. Borrowed whole when the request
+    /// speaks the egress's dialect; otherwise rebuilt from the keys the egress
+    /// handles itself plus the operator's own `payload_extras`.
+    pub forwardable: Option<Cow<'a, Value>>,
+    /// Top-level keys withheld because a client of another ingress dialect
+    /// supplied them. Sorted, so a diagnostic naming them is deterministic.
+    pub foreign_keys: Vec<&'a str>,
+}
+
+/// Split `req.provider_extras` for an egress whose vocabulary is spoken by
+/// the `matching` ingress.
+///
+/// A library caller built its extras itself and a matching ingress swept keys
+/// spelled for this egress, so both forward unchanged. Every other provenance,
+/// including any variant added later, keeps only:
+///
+/// - keys the egress handles itself whatever their source: those its
+///   managed-key predicate refuses, and `handled_by_egress` (a key it
+///   translates into another field, or withholds under its own count). The
+///   egress's own handling of them stays identical across provenances.
+/// - the operator's `payload_extras`, with the operator's value, so a client
+///   contribution merged under an operator key does not ride along.
+///
+/// Any other key is foreign and lands in `foreign_keys`.
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+pub fn client_extras_for<'a>(
+    req: &'a ChatRequest,
+    egress: Dialect,
+    matching: RequestProvenance,
+    handled_by_egress: &[&str],
+) -> ClientExtras<'a> {
+    let dispatched = req.provider_extras.as_ref();
+    if speaks_egress_dialect(req.routectl_internal.provenance, matching) {
+        return ClientExtras {
+            forwardable: dispatched.map(Cow::Borrowed),
+            foreign_keys: Vec::new(),
+        };
+    }
+    let Some(dispatched) = dispatched.and_then(Value::as_object) else {
+        return ClientExtras {
+            forwardable: None,
+            foreign_keys: Vec::new(),
+        };
+    };
+    let operator = operator_extras_still_dispatched(req);
+    let mut kept = Map::new();
+    let mut foreign_keys = Vec::new();
+    for (key, value) in dispatched {
+        if is_managed_key(egress, key) || handled_by_egress.contains(&key.as_str()) {
+            kept.insert(key.clone(), value.clone());
+            continue;
+        }
+        let operator_value = operator.as_ref().and_then(|o| o.get(key));
+        if operator_value != Some(value) {
+            foreign_keys.push(key.as_str());
+        }
+        if let Some(v) = operator_value {
+            kept.insert(key.clone(), v.clone());
+        }
+    }
+    foreign_keys.sort_unstable();
+    ClientExtras {
+        forwardable: Some(Cow::Owned(Value::Object(kept))),
+        foreign_keys,
+    }
+}
+
+/// Whether a request of `provenance` carries extras spelled for an egress
+/// whose vocabulary the `matching` ingress speaks.
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+fn speaks_egress_dialect(provenance: RequestProvenance, matching: RequestProvenance) -> bool {
+    provenance == RequestProvenance::Library || provenance == matching
+}
+
+/// The operator's `payload_extras`, restricted to the keys the attempt's
+/// merged `provider_extras` still carries: a dispatch-time strip that removed
+/// a key from this attempt must not see the operator layer put it back.
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+fn operator_extras_still_dispatched(req: &ChatRequest) -> Option<Map<String, Value>> {
+    let dispatched = req.provider_extras.as_ref()?.as_object()?;
+    let operator = req
+        .routectl_internal
+        .operator_payload_extras
+        .as_deref()?
+        .as_object()?;
+    Some(
+        operator
+            .iter()
+            .filter(|(k, _)| dispatched.contains_key(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
+}
+
+/// Per-request record that client extras from another ingress dialect were
+/// withheld. A flag, not a count: the `(lane, class)` counters are per
+/// request, and the egress that owns the request's lane flushes it once.
+#[cfg(feature = "anthropic-api")]
+#[must_use = "a foreign-dialect withhold counts nothing until its lane flushes it"]
+#[derive(Debug, Default)]
+pub struct ForeignDialectExtraTally {
+    keys: Vec<String>,
+}
+
+#[cfg(feature = "anthropic-api")]
+impl ForeignDialectExtraTally {
+    /// Note the request's withheld keys, if any.
+    pub fn record(&mut self, foreign_keys: &[&str]) {
+        self.keys
+            .extend(foreign_keys.iter().map(|k| (*k).to_string()));
+    }
+
+    /// Whether this request withheld any foreign-dialect client extra.
+    pub const fn dropped(&self) -> bool {
+        !self.keys.is_empty()
+    }
+
+    /// The withheld key names, comma-joined and sanitized for a log line.
+    /// Values are never part of it: a client extra may carry a credential.
+    pub fn keys_for_log(&self) -> String {
+        routectl_core::sanitize_for_log(&self.keys.join(","))
     }
 }
 

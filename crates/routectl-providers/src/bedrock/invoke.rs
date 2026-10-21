@@ -56,6 +56,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     crate::translation_drop_metrics::record_translation_lane_seen(LANE);
     let mut response_format =
         crate::anthropic_api::request::UnrecognizedResponseFormatTally::default();
+    let mut foreign = crate::anthropic_api::request::ForeignDialectExtraTally::default();
     let assembled = crate::anthropic_api::request::normalize_deferring_format_key_warn(
         &cfg.id,
         req,
@@ -87,11 +88,13 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         // lane's body and is not counted on it yet.
         &mut crate::anthropic_api::request::HostedMcpToolWithholdTally::default(),
         &mut response_format,
+        &mut foreign,
     );
     // Flushed on BOTH arms of the assembly, so a request that dropped its
     // directive and then failed is still in the numerator its denominator
     // already counted.
     flush_response_format_tally(&response_format);
+    flush_foreign_dialect_tally(&cfg.id, &foreign);
     let (mut body, deferred) = assembled?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::Internal(format!(
@@ -273,6 +276,24 @@ fn flush_response_format_tally(
         crate::translation_drop_metrics::record_translation_drop(
             LANE,
             "response_format_unrepresentable",
+        );
+    }
+}
+
+/// Count this request's foreign-dialect client extras on the Invoke lane.
+/// The shared Anthropic assembly withheld them: the Invoke body is Anthropic
+/// Messages JSON, which refuses another dialect's keys as extra inputs.
+/// TRANSLATION-DROP: lane=bedrock-invoke class=foreign_dialect_extra test=foreign_dialect_extras_are_absent_from_every_anthropic_shape_egress_and_counted_once
+fn flush_foreign_dialect_tally(
+    provider_id: &str,
+    tally: &crate::anthropic_api::request::ForeignDialectExtraTally,
+) {
+    if tally.dropped() {
+        crate::translation_drop_metrics::record_translation_drop(LANE, "foreign_dialect_extra");
+        tracing::debug!(
+            provider = %provider_id,
+            keys = %tally.keys_for_log(),
+            "bedrock-invoke egress: client extras from another ingress dialect dropped",
         );
     }
 }

@@ -290,16 +290,20 @@ fn every_excluded_pair_really_leaks_today() {
 
 const METADATA_TELL: &str = "sweep-meta-5v";
 
-/// Lanes that forward the ingress `metadata` block by design: the
+/// Lanes that forward the Anthropic ingress `metadata` block by design: the
 /// anthropic-api egress speaks to the party the block is addressed to.
 /// Content-pinned by [`first_party_lanes_really_forward_ingress_metadata`].
 const METADATA_FIRST_PARTY: &[&str] = &["anthropic"];
 
+/// The identity block as the Anthropic ingress sweeps it: the provenance is
+/// what marks it as that dialect's client identity rather than a library
+/// caller's own extras.
 fn request_with_ingress_metadata() -> ChatRequest {
     let mut req = request_for(Source::TopLevelSystem);
     req.provider_extras = Some(serde_json::json!({
         "metadata": {"user_id": METADATA_TELL, "account_uuid": METADATA_TELL}
     }));
+    req.routectl_internal.provenance = RequestProvenance::AnthropicIngress;
     req
 }
 
@@ -351,12 +355,21 @@ fn first_party_lanes_really_forward_ingress_metadata() {
 
 const CREDENTIAL_TELL: &str = "sweep-mcp-tok-4r";
 
-/// Lanes that forward a swept `mcp_servers` entry from either ingress today.
-/// The Gemini source boundary and the Bedrock unrepresentable-field drop do
-/// not cover them; they are recorded here so the sweep states its reach
-/// instead of implying it. Content-pinned in both directions by
+/// `(lane, provenance)` pairs that forward a swept `mcp_servers` entry today:
+/// each lane forwards its own dialect's client extras, so a client of that
+/// dialect addressed the entry to that wire. Another dialect's swept entry is
+/// withheld by the provenance rule, the Gemini source boundary, or the
+/// Bedrock unrepresentable-field drop. Recorded here so the sweep states its
+/// reach instead of implying it. Content-pinned in both directions by
 /// [`every_lane_outside_the_credential_boundary_really_forwards_it_today`].
-const CREDENTIAL_FORWARDING_LANES: &[&str] = &["anthropic"];
+const CREDENTIAL_FORWARDING: &[(&str, RequestProvenance)] = &[
+    ("anthropic", RequestProvenance::AnthropicIngress),
+    ("openai-compat", RequestProvenance::OpenaiIngress),
+];
+
+fn forwards_credential(lane: &str, provenance: RequestProvenance) -> bool {
+    CREDENTIAL_FORWARDING.contains(&(lane, provenance))
+}
 
 const INGRESS_PROVENANCES: &[RequestProvenance] = &[
     RequestProvenance::AnthropicIngress,
@@ -386,7 +399,7 @@ fn no_egress_inside_the_boundary_ships_an_ingress_credential() {
         let req = request_with_ingress_credential(provenance);
 
         for (lane, provider) in lanes() {
-            if CREDENTIAL_FORWARDING_LANES.contains(&lane) {
+            if forwards_credential(lane, provenance) {
                 continue;
             }
 
@@ -433,8 +446,8 @@ fn every_lane_outside_the_credential_boundary_really_forwards_it_today() {
             );
             assert_eq!(
                 body.contains(CREDENTIAL_TELL),
-                CREDENTIAL_FORWARDING_LANES.contains(&lane),
-                "{lane} from {provenance:?} no longer matches its CREDENTIAL_FORWARDING_LANES \
+                forwards_credential(lane, provenance),
+                "{lane} from {provenance:?} no longer matches its CREDENTIAL_FORWARDING \
                  entry; update the register so the sweep covers what it claims"
             );
         }
