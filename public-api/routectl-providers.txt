@@ -1768,7 +1768,6 @@ pub fn routectl_providers::openai_compat::dialect::ReasoningDialect::into_shared
 pub struct routectl_providers::openai_compat::OpenAiCompatConfig
 pub routectl_providers::openai_compat::OpenAiCompatConfig::api_key: alloc::string::String
 pub routectl_providers::openai_compat::OpenAiCompatConfig::base_url: alloc::string::String
-pub routectl_providers::openai_compat::OpenAiCompatConfig::disable_stream_include_usage: bool
 pub routectl_providers::openai_compat::OpenAiCompatConfig::header_extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_providers::openai_compat::OpenAiCompatConfig::history_reasoning: routectl_providers::openai_compat::HistoryReasoning
 pub routectl_providers::openai_compat::OpenAiCompatConfig::id: alloc::string::String

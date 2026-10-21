@@ -692,7 +692,6 @@ async fn invoke_then_compat_router(base: &str) -> Router {
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         mantle: None,
     });
     let mut router = Router::new(Arc::new(config));

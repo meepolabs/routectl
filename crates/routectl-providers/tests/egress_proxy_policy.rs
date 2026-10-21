@@ -320,7 +320,6 @@ async fn compat(
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         mantle: if mantle {
             Some(mantle_auth().await)
         } else {

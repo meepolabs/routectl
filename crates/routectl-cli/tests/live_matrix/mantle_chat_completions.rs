@@ -65,7 +65,6 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
         history_reasoning: HistoryReasoning::Auto,
         user_agent: Some("routectl-live-test/0.4".into()),
         strict_translation: false,
-        disable_stream_include_usage: false,
         mantle: Some(MantleAuth {
             region: region.clone(),
             creds: resolved,

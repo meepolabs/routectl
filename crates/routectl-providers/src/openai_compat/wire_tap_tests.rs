@@ -25,7 +25,6 @@ fn config(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatConfig {
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     }
@@ -668,34 +667,69 @@ fn the_stream_flag_is_declared_only_when_forced_against_the_request() {
     }
 }
 
+/// A row: name, client extras, operator `payload_extras`, expected edit.
+type StreamOptionsRow = (
+    &'static str,
+    Option<Value>,
+    Option<Value>,
+    Option<(&'static str, EditKind)>,
+);
+
 #[test]
-fn stream_options_injection_names_the_member_it_creates() {
-    let rows: [(&str, Option<Value>, Option<&str>); 3] = [
-        ("absent object", None, Some("/stream_options")),
+fn stream_options_injection_declares_each_edit_it_makes() {
+    let operator_false = json!({"stream_options": {"include_usage": false}});
+    let rows: [StreamOptionsRow; 6] = [
+        (
+            "absent object",
+            None,
+            None,
+            Some(("/stream_options", EditKind::Add)),
+        ),
         (
             "object without the flag",
             Some(json!({"stream_options": {"other": 1}})),
-            Some("/stream_options/include_usage"),
+            None,
+            Some(("/stream_options/include_usage", EditKind::Add)),
         ),
         (
-            "flag already set",
+            "client flag false",
             Some(json!({"stream_options": {"include_usage": false}})),
+            None,
+            Some(("/stream_options/include_usage", EditKind::Rewrite)),
+        ),
+        (
+            "client stream_options not an object",
+            Some(json!({"stream_options": null})),
+            None,
+            Some(("/stream_options", EditKind::Rewrite)),
+        ),
+        (
+            "client flag already true",
+            Some(json!({"stream_options": {"include_usage": true}})),
+            None,
+            None,
+        ),
+        (
+            "operator flag false",
+            Some(operator_false.clone()),
+            Some(operator_false),
             None,
         ),
     ];
-    for (name, extras, want) in rows {
-        let req = ChatRequest {
+    for (name, extras, operator, want) in rows {
+        let mut req = ChatRequest {
             provider_extras: extras,
             stream: Some(true),
             ..request("gpt-4o")
         };
+        req.routectl_internal.operator_payload_extras = operator.map(std::sync::Arc::new);
 
         let edits = declared_on_send(true, req);
 
-        let got: Vec<&str> = edits
+        let got: Vec<(&str, EditKind)> = edits
             .iter()
             .filter(|(s, _, _)| *s == EditSite::StreamOptionsInjection)
-            .map(|(_, p, _)| p.as_str())
+            .map(|(_, p, k)| (p.as_str(), *k))
             .collect();
         assert_eq!(got, want.into_iter().collect::<Vec<_>>(), "{name}");
     }

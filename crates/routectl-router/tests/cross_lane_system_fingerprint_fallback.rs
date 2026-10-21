@@ -276,7 +276,6 @@ async fn an_openai_compat_first_hop_withholds_the_fingerprint_and_keeps_every_sy
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     });

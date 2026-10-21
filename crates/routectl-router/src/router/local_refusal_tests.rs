@@ -337,7 +337,6 @@ fn strict_openai_compat() -> OpenAiCompatProvider {
         history_reasoning: Default::default(),
         user_agent: None,
         strict_translation: true,
-        disable_stream_include_usage: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     })

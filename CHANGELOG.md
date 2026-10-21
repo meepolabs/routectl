@@ -408,6 +408,8 @@ list with more narrative.
 
 ### Changed
 
+- **openai-compat streaming always asks for usage unless the operator says otherwise.** routectl sets `stream_options.include_usage: true` on every streaming openai-compat request after merging extras, so the stream summary and usage accounting get the terminal usage chunk. A client value other than `true` (such as `false`, or a `stream_options` that is not an object) is now overridden, recorded as a declared edit, and counted once per request as the `client_stream_include_usage_overridden` policy action; a client `stream_options` without the flag still gains it. Only `payload_extras` in operator config can set the flag to something else.
+
 - **Active thinking no longer adds a `temperature` the client did not send.** With `enabled` or `adaptive` thinking, anthropic-api, Bedrock Invoke and Bedrock Converse used to send `temperature: 1.0` even when the client sent none. A client temperature is still rewritten to 1.0 and `top_p` is still dropped while thinking is active, but an absent temperature now stays absent (1.0 is the upstream default). The late pass that recomputed `temperature` and `top_p` after body assembly is removed; it never changed a body, since assembly already reads the thinking type that ships.
 
 - **A learned output ceiling now caps the `max_tokens` routectl fills from `[models.X] max_output_tokens`.** On anthropic-api and Bedrock Invoke, a request whose client sent no `max_tokens` still gets the filled value by the unchanged precedence (this key, else the catalog ceiling, else 64000); when the lane has learned a lower output ceiling, that fill is lowered to it before the request is sent, and it is never raised. Bedrock Converse sends no `maxTokens` the client did not send, so there a learned ceiling caps only a client value, and with none nothing is capped. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#max_output_tokens-optionu32-default-none).
@@ -619,6 +621,7 @@ list with more narrative.
 
 ### Removed
 
+- **`OpenAiCompatConfig::disable_stream_include_usage`.** No configuration key ever set it. Library callers that want the upstream not to send usage set `stream_options.include_usage` in `OpenAiCompatConfig::payload_extras`.
 - **The hidden `routectl pricing` alias for `routectl catalog`.** Use `routectl catalog ...`.
 - **Paid capability probes, and the `[fidelity] paid_probe_daily_caps` key** (both added on develop after v0.9.0 and never released). routectl no longer makes paid probe calls, keeps no paid-probe reservation ledger, and no longer reports paid-probe budget rows: `rc_paid_probe_budgets`, `rc_paid_probe_budgets_total`, `rc_paid_probe_budgets_omitted`, and `rc_paid_probe_consumed_unauthorized_total` are gone from the status line, as is the `paid-probe unit committed as shutdown began` WARN. A config written against a development build that still sets `[fidelity] paid_probe_daily_caps` is refused at load, by `config check`, by the edit commands, and by `config migrate` at any version, with an error naming the key to delete. Reservation rows an earlier development build left in the usage database are inert and are not removed. `[fidelity] prefix_impact_opt_in` is unchanged.
 - **The hidden `routectl provider capture-envelope` command** and its `ROUTECTL_BEDROCK_ENVELOPE_CAPTURE` environment variable.

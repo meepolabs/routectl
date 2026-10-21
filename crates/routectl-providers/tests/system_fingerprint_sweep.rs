@@ -156,7 +156,6 @@ fn lanes() -> Vec<(&'static str, Box<dyn Provider>)> {
                 history_reasoning: HistoryReasoning::Auto,
                 user_agent: None,
                 strict_translation: false,
-                disable_stream_include_usage: false,
                 mantle: None,
             })),
         ),

@@ -107,7 +107,6 @@ fn compat_provider(id: &str, base_url: &str, mantle: Option<MantleAuth>) -> Open
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         mantle,
     })
 }

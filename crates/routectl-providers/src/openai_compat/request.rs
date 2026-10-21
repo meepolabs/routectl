@@ -540,6 +540,80 @@ fn declare_stripped_keys(
     }
 }
 
+/// Force `stream_options.include_usage: true` onto a finished streaming
+/// body: without it many hosts end the stream on a bare `[DONE]`, with no
+/// terminal usage chunk or `finish_reason` for the stream summary. Runs
+/// after the extras merge, so it sees whatever value the client sent. Only
+/// the operator's own `payload_extras` (the router's per-request record, or
+/// the config slot of a provider built without the router) may set the flag;
+/// when it does, the body is left as merged.
+pub(super) fn force_stream_include_usage(
+    id: &str,
+    body: &mut Value,
+    req: &ChatRequest,
+    config_payload_extras: Option<&Value>,
+) {
+    let operator_sets_flag = [
+        req.routectl_internal.operator_payload_extras.as_deref(),
+        config_payload_extras,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|extras| extras.pointer(INCLUDE_USAGE_POINTER).is_some());
+    if operator_sets_flag {
+        return;
+    }
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let tap = crate::wire_declare::tap(req);
+    let (path, kind) = match obj.get_mut("stream_options") {
+        None => {
+            obj.insert(
+                "stream_options".to_owned(),
+                serde_json::json!({ "include_usage": true }),
+            );
+            ("/stream_options", EditKind::Add)
+        }
+        Some(Value::Object(options)) => match options.get("include_usage") {
+            Some(Value::Bool(true)) => return,
+            None => {
+                options.insert("include_usage".to_owned(), Value::Bool(true));
+                (INCLUDE_USAGE_POINTER, EditKind::Add)
+            }
+            Some(_) => {
+                options.insert("include_usage".to_owned(), Value::Bool(true));
+                (INCLUDE_USAGE_POINTER, EditKind::Rewrite)
+            }
+        },
+        Some(other) => {
+            *other = serde_json::json!({ "include_usage": true });
+            ("/stream_options", EditKind::Rewrite)
+        }
+    };
+    if let Some(tap) = tap {
+        crate::wire_declare::declare(tap, EditSite::StreamOptionsInjection, path, kind);
+    }
+    if kind == EditKind::Rewrite {
+        // The client's value would ride the wire fine; routectl replaces it
+        // because the stream summary and usage accounting need the usage chunk.
+        // TRANSLATION-DROP: policy-action class=client_stream_include_usage_overridden test=a_client_include_usage_false_is_forced_true_declared_and_counted_once
+        crate::translation_drop_metrics::record_translation_policy_action(
+            super::LANE,
+            "client_stream_include_usage_overridden",
+        );
+        debug!(
+            provider = id,
+            path = path,
+            "openai-compat egress: client stream_options value overridden to request usage",
+        );
+    }
+}
+
+/// JSON pointer of the stream usage flag, in the body and in an operator's
+/// `payload_extras` alike.
+const INCLUDE_USAGE_POINTER: &str = "/stream_options/include_usage";
+
 /// The canonical effort reaches this wire only as a dialect's flat
 /// `reasoning_effort`. When the finished body carries none (a dialect with
 /// no effort field, reasoning disabled, or `effort: "none"`), declare the
@@ -2097,4 +2171,5 @@ mod tests {
     include!("request_system_tests.rs");
     include!("request_drop_level_tests.rs");
     include!("request_drop_counter_tests.rs");
+    include!("request_stream_usage_tests.rs");
 }

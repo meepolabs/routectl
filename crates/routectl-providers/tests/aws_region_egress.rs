@@ -264,7 +264,6 @@ fn compat_mantle(region: &str, resolved: ResolvedCreds) -> OpenAiCompatProvider 
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         mantle: Some(MantleAuth {
             region: region.into(),
             creds: resolved,

@@ -37,7 +37,6 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tracing::debug;
 
-use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, debug_upstream_error_body,
     sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
@@ -109,13 +108,6 @@ pub struct OpenAiCompatConfig {
     /// interpret. Set from `[server] strict_translation` at provider build
     /// time.
     pub strict_translation: bool,
-    /// When `true`, suppress the auto-injected
-    /// `stream_options.include_usage = true` on streaming requests.
-    /// Default `false` (auto-inject). Use for openai-compat hosts that
-    /// 400 on unknown fields. Operator-supplied `stream_options` in
-    /// `payload_extras` / `provider_extras` always wins -- including an
-    /// explicit `include_usage = false`.
-    pub disable_stream_include_usage: bool,
     /// Bedrock mantle authentication. `Some` selects the mantle lane: the
     /// request body is SigV4/bearer-signed under the `bedrock-mantle`
     /// scope, the first-party `Authorization: Bearer <api_key>` insert is
@@ -465,18 +457,11 @@ impl Provider for OpenAiCompatProvider {
         body["stream"] = Value::Bool(true);
         crate::wire_declare::declare_stream_flag(&req, true);
 
-        // Auto-inject `stream_options.include_usage = true` so the
-        // upstream emits a terminal usage chunk + finish_reason.
-        // Without this, many openai-compat hosts end the stream with a
-        // bare `data: [DONE]` and routectl's stream summary reports
-        // `chunks=N finish_reason=unknown total_tokens=0` even on a
-        // fully successful stream. Operator-supplied `stream_options`
-        // (default_extras / provider_extras) always wins; the opt-out
-        // toggle is `disable_stream_include_usage = true`.
-        ensure_stream_options_include_usage(
+        request::force_stream_include_usage(
+            &self.cfg.id,
             &mut body,
-            self.cfg.disable_stream_include_usage,
-            crate::wire_declare::tap(&req),
+            &req,
+            self.cfg.payload_extras.as_ref(),
         );
 
         let headers = self.build_headers(&req)?;
@@ -896,65 +881,6 @@ fn choice_tail_mut(tails: &mut Vec<ChoiceTail>, index: u32) -> Option<&mut Choic
     Some(&mut tails[idx])
 }
 
-/// Ensure `body.stream_options.include_usage = true` on outgoing
-/// streaming requests so the upstream emits a terminal usage chunk +
-/// finish_reason. Precedence rules:
-///
-///   1. If `disabled == true`, return early (operator opt-out).
-///   2. If `stream_options.include_usage` is already present (operator
-///      supplied via `default_extras` / `provider_extras`), leave it
-///      verbatim -- even an explicit `false` wins over the auto-inject.
-///   3. Otherwise, create the `stream_options` object if missing and
-///      set `include_usage = true`.
-///
-/// Body MUST be a JSON object (caller is the openai-compat egress; its
-/// `normalize_request` always returns an object). Non-object bodies are
-/// no-ops for safety.
-/// Auto-inject `stream_options.include_usage = true` on streaming
-/// request bodies so openai-compat hosts emit the terminal
-/// `finish_reason` + usage object that routectl's stream summary
-/// (and downstream token accounting) needs. Order-dependent: caller
-/// MUST run `normalize_request` first so operator-supplied
-/// `stream_options` from `default_extras` / `provider_extras` are
-/// already in `body` when this helper runs. The helper preserves any
-/// existing value (including explicit `false`) and short-circuits
-/// when `disabled` is `true`.
-///
-/// Private to the module: the single caller is `stream()` below.
-/// Promoting to `pub(crate)` would expose an order-dependent contract
-/// the type system cannot enforce.
-fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool, tap: Option<&WireTap>) {
-    if disabled {
-        return;
-    }
-    if body.pointer("/stream_options/include_usage").is_some() {
-        return;
-    }
-    let Some(obj) = body.as_object_mut() else {
-        return;
-    };
-    let created = !obj.contains_key("stream_options");
-    let entry = obj
-        .entry("stream_options".to_string())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if let Some(so) = entry.as_object_mut() {
-        so.insert("include_usage".to_string(), Value::Bool(true));
-        if let Some(tap) = tap {
-            let path = if created {
-                "/stream_options"
-            } else {
-                "/stream_options/include_usage"
-            };
-            crate::wire_declare::declare(
-                tap,
-                EditSite::StreamOptionsInjection,
-                path,
-                EditKind::Add,
-            );
-        }
-    }
-}
-
 /// Map a non-success openai-compat HTTP response into a canonical
 /// `Error::Upstream`. Single source of truth shared by both `complete()`
 /// and `stream()` (and the 2xx inline-error detection): the response-derived
@@ -1056,8 +982,7 @@ mod helper_tests {
     use super::{
         ChoiceTail, MAX_STREAM_CHOICES, StreamTail, accumulate_choice_text,
         choice_carries_finish_reason, choice_carries_tool_call_delta, choice_tail_mut,
-        classify_stream_tail, detect_inline_error_2xx, ensure_stream_options_include_usage,
-        map_openai_compat_upstream_error,
+        classify_stream_tail, detect_inline_error_2xx, map_openai_compat_upstream_error,
     };
     use crate::http_client::body_cap_exceeded_message;
     use crate::upstream_error::UpstreamErrorRead;
@@ -1457,46 +1382,6 @@ mod helper_tests {
             !safe_excerpt.contains('\x1b'),
             "ESC in excerpt: {safe_excerpt:?}"
         );
-    }
-
-    #[test]
-    fn injects_when_absent_and_not_disabled() {
-        let mut body = json!({"model": "x", "stream": true});
-        ensure_stream_options_include_usage(&mut body, false, None);
-        assert_eq!(body["stream_options"]["include_usage"], true);
-    }
-
-    #[test]
-    fn opt_out_suppresses_injection() {
-        let mut body = json!({"model": "x", "stream": true});
-        ensure_stream_options_include_usage(&mut body, true, None);
-        assert!(body.get("stream_options").is_none());
-    }
-
-    #[test]
-    fn preserves_operator_supplied_true() {
-        let mut body = json!({"stream_options": {"include_usage": true, "other": 1}});
-        ensure_stream_options_include_usage(&mut body, false, None);
-        assert_eq!(body["stream_options"]["include_usage"], true);
-        // Existing sibling fields untouched.
-        assert_eq!(body["stream_options"]["other"], 1);
-    }
-
-    #[test]
-    fn preserves_operator_supplied_false() {
-        // Operator opted out via extras -- explicit `false` must win
-        // over the auto-inject, not silently flip to true.
-        let mut body = json!({"stream_options": {"include_usage": false}});
-        ensure_stream_options_include_usage(&mut body, false, None);
-        assert_eq!(body["stream_options"]["include_usage"], false);
-    }
-
-    #[test]
-    fn creates_stream_options_object_when_other_keys_present_outside() {
-        let mut body = json!({"stream_options": {"unrelated_key": "v"}});
-        ensure_stream_options_include_usage(&mut body, false, None);
-        assert_eq!(body["stream_options"]["include_usage"], true);
-        assert_eq!(body["stream_options"]["unrelated_key"], "v");
     }
 
     #[test]
@@ -2018,7 +1903,6 @@ mod mantle_header_tests {
             history_reasoning: HistoryReasoning::Auto,
             user_agent: None,
             strict_translation: false,
-            disable_stream_include_usage: false,
             mantle: Some(MantleAuth {
                 region: "us-west-2".into(),
                 creds: ResolvedCreds::Bearer {

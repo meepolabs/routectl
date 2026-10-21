@@ -111,7 +111,6 @@ async fn openai_compat_provider(base_url: String, mantle: bool) -> Box<dyn Provi
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         mantle: if mantle {
             Some(mantle_auth().await)
         } else {

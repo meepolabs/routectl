@@ -81,7 +81,6 @@ fn openai_compat_provider(base_url: &str) -> OpenAiCompatProvider {
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     })
@@ -400,19 +399,16 @@ mod scenario_8_post_done_trailer {
 }
 
 // =====================================================================
-// stream_options auto-inject precedence (issue #4)
+// stream_options.include_usage is forced (issue #4)
 // =====================================================================
 //
-// The openai-compat egress defaults to injecting `stream_options.include_usage = true`
-// on streaming requests so most upstreams emit a terminal usage chunk +
-// finish_reason. The precedence rules:
-//
-//   - operator opt-out via `disable_stream_include_usage = true` -> no inject
-//   - operator-supplied `stream_options` in `default_extras` /
-//     `provider_extras` wins -- including an explicit `include_usage = false`.
+// The openai-compat egress sends `stream_options.include_usage = true` on
+// every streaming request so the upstream emits a terminal usage chunk +
+// finish_reason. Only the operator's own `payload_extras` may set the flag
+// to something else; a client's value is overridden.
 
 #[tokio::test]
-async fn openai_compat_egress_opt_out_suppresses_stream_options() {
+async fn openai_compat_egress_overrides_a_client_include_usage_false() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -423,30 +419,23 @@ async fn openai_compat_egress_opt_out_suppresses_stream_options() {
         )
         .mount(&server)
         .await;
+    let provider = openai_compat_provider(&server.uri());
+    let mut req = stream_request("gpt-4o");
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
+    req.provider_extras = Some(serde_json::json!({
+        "stream_options": {"include_usage": false, "other": 1}
+    }));
 
-    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat-test".into(),
-        base_url: server.uri(),
-        api_key: "test-key".into(),
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        disable_stream_include_usage: true,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
-    });
-    let _ = collect_chunks(&provider, stream_request("gpt-4o")).await;
+    let _ = collect_chunks(&provider, req).await;
 
     let received = server.received_requests().await.expect("received requests");
     assert_eq!(received.len(), 1, "exactly one upstream request expected");
     let body: serde_json::Value =
         serde_json::from_slice(&received[0].body).expect("body parses as JSON");
-    assert!(
-        body.get("stream_options").is_none(),
-        "opt-out must suppress the auto-injected stream_options entirely; body: {body}"
+    assert_eq!(
+        body.pointer("/stream_options"),
+        Some(&serde_json::json!({"include_usage": true, "other": 1})),
+        "a client include_usage=false must be forced to true, siblings kept; body: {body}"
     );
 }
 
@@ -495,7 +484,6 @@ async fn openai_compat_per_model_header_extras_reach_wire() {
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     });
@@ -555,7 +543,6 @@ async fn openai_compat_egress_preserves_operator_supplied_stream_options() {
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     });

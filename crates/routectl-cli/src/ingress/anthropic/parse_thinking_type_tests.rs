@@ -145,7 +145,6 @@ fn a_cross_dialect_egress_adds_no_second_unrecognized_warn() {
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
-        disable_stream_include_usage: false,
         mantle: None,
     });
 
