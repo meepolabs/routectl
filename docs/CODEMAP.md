@@ -919,7 +919,8 @@ license.
 - `src/openai_compat/dialects/openai.rs` -- vanilla OpenAI o-series:
   `reasoning_effort` param, drops sampling params per profile
 - `src/openai_compat/dialects/deepseek.rs` -- DeepSeek: lift
-  `reasoning_content`, strip echo-back; effort derived from budget
+  `reasoning_content`, strip echo-back, empty `reasoning_content` on
+  history tool-call turns; effort derived from budget
 - `src/openai_compat/dialects/vllm.rs` -- vLLM thinking models (Qwen3, MiMo):
   `chat_template_kwargs.enable_thinking`, lift reasoning_content
 - `src/openai_compat/dialects/openrouter.rs` -- OpenRouter: pass-through with
@@ -959,8 +960,8 @@ license.
 - `src/openai_compat/wire_lift/tool_use.rs` -- assistant `tool_use` content
   blocks -> top-level `tool_calls` array
 - `src/openai_compat/wire_lift/tool_result.rs` -- user-message `tool_result`
-  blocks -> separate `role:"tool"` wire messages; drops inner document and
-  unrepresentable image-source blocks via `ToolResultDropTally`
+  blocks -> `role:"tool"` wire messages, inner images hoisted into a following
+  user message; `ToolResultDropTally`
 - `src/openai_compat/wire_lift/tool_choice.rs` -- Anthropic tool_choice tagged
   objects -> OpenAI bare-string / function-object form
 - `src/openai_compat/wire_lift/response_format.rs` -- `output_config.format`
@@ -1355,15 +1356,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (surface enumeration, test-file predicate, per-marker parse), as a shared
   module so the welds built on the census consume one parse rather than each
   re-deriving one that could disagree
-- `tests/translation_drop_census/seed.rs` -- the `SEED-VERDICT:` marker grammar
-  (closed tag enum, reason continuation, forbidden-content refusal over the
-  whole comment block), the recursive providers + router `src` sweep with its
-  test-file exclusion, and the occurrence-count table comparison; a child
-  module of the marker parser so both refuse the same shapes
-- `tests/seed_verdict_census.rs` -- the seed census: the exact
-  `(crate, file, tag)` table of every `SEED-VERDICT:` marker, red in both
-  directions, plus the grammar controls and the derived router test-file
-  exclusion list
+- `tests/translation_drop_census/seed.rs` -- the `SEED-VERDICT:` marker
+  grammar and the providers + router `src` sweep; a child of the marker parser
+- `tests/seed_verdict_census.rs` -- the seed census: the pinned
+  `(crate, file, tag)` table of `SEED-VERDICT:` markers plus grammar controls
 - `tests/translation_drop_census/counter.rs` -- the counter side of the census:
   every `record_translation_drop` / `record_translation_policy_action` /
   `record_translation_lane_seen` call in the crate's production source, with
