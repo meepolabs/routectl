@@ -566,6 +566,10 @@ struct BakedCell {
 /// a `const` slice): `CatalogRow` is no longer `Copy` (it carries a
 /// `BTreeMap`), and lookup is off the hot path (dispatch never calls into
 /// this table directly -- see the module doc).
+/// SEED-VERDICT: acceptance-seed -- per-model priors generated from vendored
+/// snapshots are what routectl knows before any upstream evidence exists; an
+/// operator or learned row overrides them, and the generated source is never
+/// hand-edited.
 static TABLE: LazyLock<Vec<BakedCell>> = LazyLock::new(|| {
     crate::catalog_baked::baked_cells()
         .into_iter()

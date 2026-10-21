@@ -1352,6 +1352,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (surface enumeration, test-file predicate, per-marker parse), as a shared
   module so the welds built on the census consume one parse rather than each
   re-deriving one that could disagree
+- `tests/translation_drop_census/seed.rs` -- the `SEED-VERDICT:` marker grammar
+  (closed tag enum, reason continuation, forbidden-content refusal over the
+  whole comment block), the recursive providers + router `src` sweep with its
+  test-file exclusion, and the occurrence-count table comparison; a child
+  module of the marker parser so both refuse the same shapes
+- `tests/seed_verdict_census.rs` -- the seed census: the exact
+  `(crate, file, tag)` table of every `SEED-VERDICT:` marker, red in both
+  directions, plus the grammar controls and the derived router test-file
+  exclusion list
 - `tests/translation_drop_census/counter.rs` -- the counter side of the census:
   every `record_translation_drop` / `record_translation_policy_action` /
   `record_translation_lane_seen` call in the crate's production source, with

@@ -71,6 +71,9 @@ const ROUTING_PREFIXES: [&str; 7] = ["us.", "eu.", "apac.", "global.", "us-gov."
 const VENDOR_BEARING_ARN_RESOURCES: [&str; 1] = ["foundation-model"];
 
 /// Classify `model_id` per the rules documented on this module.
+/// SEED-VERDICT: structural -- the vendor family decides which request shape
+/// routectl can build at all, and an opaque resource id cannot be learned into
+/// a vendor, so the classification stays static.
 pub fn anthropic_family(model_id: &str) -> AnthropicFamily {
     if model_id.starts_with("arn:") {
         return arn_family(model_id);

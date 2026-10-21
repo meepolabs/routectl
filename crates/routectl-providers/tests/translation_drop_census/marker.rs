@@ -283,10 +283,16 @@ fn is_snake_case(value: &str) -> bool {
 }
 
 /// The shared weld helpers, declared here rather than in each consumer so the
-/// four binaries that pull this parser in reach one implementation of the
+/// five binaries that pull this parser in reach one implementation of the
 /// name-resolution and threat-surface scans.
 #[path = "../weld_support/item_resolve.rs"]
 pub mod item_resolve;
+
+/// The `SEED-VERDICT:` grammar, a child module so it reuses this parser's
+/// comment, anchor and forbidden-content rules without widening their
+/// visibility. Only the seed census calls into it.
+#[path = "seed.rs"]
+pub mod seed;
 
 /// The board-task-id scan, the bounded `fn <name>` resolver, and the shared
 /// pinning corpus, re-exported from the weld helpers so this parser's consumers
@@ -295,7 +301,7 @@ pub mod item_resolve;
 /// shapes, leaving a reader unsure which rule is the contract.
 ///
 /// `unused_imports` rather than the file's blanket `dead_code`: these are
-/// re-exports, which that lint does not cover, and each of the four binaries
+/// re-exports, which that lint does not cover, and each of the five binaries
 /// that pull this module in uses a different subset. The allow is narrowed to
 /// this one item so an unused import anywhere else in the file is still an
 /// error.

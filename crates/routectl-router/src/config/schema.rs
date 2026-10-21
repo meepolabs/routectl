@@ -1367,6 +1367,9 @@ impl CacheCapability {
     /// stable `kind = "..."` discriminant). An unrecognized kind maps to
     /// "supports nothing" so the dispatch path never auto-emits a
     /// breakpoint to an upstream routectl does not understand.
+    /// SEED-VERDICT: acceptance-seed -- an unhonored breakpoint is ignored
+    /// rather than refused, so a wrong default never produces a rejection to
+    /// learn from; the per-kind prior stands until an operator overrides it.
     pub fn for_provider_kind(kind: &str) -> Self {
         match kind {
             kind::ANTHROPIC_API => Self::new(true, true),

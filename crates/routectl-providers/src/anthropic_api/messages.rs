@@ -189,6 +189,10 @@ pub(super) fn normalize_replay_invariants<'a>(
 
     // Strip / Auto pre-scan: do we need to strip anything? No -> return
     // Borrowed (no clone). Yes -> rebuild on the second pass.
+    // SEED-VERDICT: acceptance-seed -- Anthropic refuses a replayed thinking
+    // block whose signature is not its own, so stripping before send avoids a
+    // certain rejection on every multi-turn replay; Preserve is the opt-out for
+    // an upstream that needs the blocks echoed back.
     let needs_strip = req.messages.iter().any(message_has_unsigned_thinking);
     if !needs_strip {
         return Ok(Cow::Borrowed(&req.messages));
@@ -346,6 +350,9 @@ fn is_unsigned_thinking_part(p: &ContentPart) -> bool {
 /// A `<word>#` cache prefix may precede the E/R marker; strip one such
 /// leading segment before inspecting. Anything else -- other prefix,
 /// malformed base64, decoded byte0 != 0x12, empty -- is not Claude-shaped.
+/// SEED-VERDICT: structural -- routectl can neither mint nor verify a
+/// signature, only check its shape; a block that fails the shape cannot be made
+/// acceptable, so no upstream evidence could relax this check.
 fn is_claude_shaped_signature(sig: &str) -> bool {
     // A historical cache key (`modelGroup#<sig>`) may prefix the raw
     // signature; inspect only the segment after the first `#`.

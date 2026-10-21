@@ -57,6 +57,9 @@ pub const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// Scope: the CLOUD CODE lane only. `gemini-2.5-flash` is a live, current id
 /// on the native api-key REST surface -- a caller must gate on the
 /// `cloud-code` auth mode before treating a hit here as a finding.
+/// SEED-VERDICT: acceptance-seed -- the deprecated ids still resolve without
+/// any rejection, so nothing upstream signals the drift; the mapping is a baked
+/// prior re-verified by hand against the live catalog.
 #[must_use]
 pub const fn deprecated_alias_replacement(upstream: &str) -> Option<&'static str> {
     // Matching on bytes, not &str, is what lets this be `const fn`.

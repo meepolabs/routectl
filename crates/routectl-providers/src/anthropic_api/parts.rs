@@ -26,6 +26,12 @@ use routectl_core::{ContentPart, KnownContentPart, sanitize_for_log};
 ///
 /// All entries are lowercase; the allowlist comparison normalizes
 /// caller input before lookup so `Image/PNG` matches `image/png`.
+/// SEED-VERDICT: static-security -- a media type outside the list never reaches
+/// the body verbatim whatever the upstream would accept; a crafted data URI
+/// must not choose what is shipped.
+/// SEED-VERDICT: acceptance-seed -- the list also records which image types the
+/// upstream accepts today; refusing an image is content loss, so a newly
+/// accepted type widens the list on evidence rather than by invisible repair.
 const ALLOWED_IMAGE_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// Anthropic + Bedrock accept this MIME type as a base64 document source
@@ -35,6 +41,12 @@ const ALLOWED_IMAGE_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/g
 /// Same defense-in-depth rationale as `ALLOWED_IMAGE_MEDIA_TYPES`: a
 /// crafted or typo'd `media_type` must never reach the Anthropic body
 /// verbatim. All entries lowercase; comparison normalizes caller input.
+/// SEED-VERDICT: static-security -- a media type outside the list never reaches
+/// the body verbatim whatever the upstream would accept; a crafted data URI
+/// must not choose what is shipped.
+/// SEED-VERDICT: acceptance-seed -- the list also records which document types
+/// the upstream accepts today; refusing a document is content loss, so a newly
+/// accepted type widens the list on evidence rather than by invisible repair.
 const ALLOWED_DOCUMENT_MEDIA_TYPES: &[&str] = &["application/pdf"];
 
 /// Translate an OpenAI-style `image_url.url` value into the Anthropic
