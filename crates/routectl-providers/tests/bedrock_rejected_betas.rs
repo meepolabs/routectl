@@ -42,10 +42,18 @@ fn invoke_drop_count() -> u64 {
 }
 
 fn provider(api_shape: BedrockApiShape, anthropic_beta: Vec<String>) -> BedrockProvider {
+    provider_for("anthropic.claude-opus-4-6-v1", api_shape, anthropic_beta)
+}
+
+fn provider_for(
+    model_id: &str,
+    api_shape: BedrockApiShape,
+    anthropic_beta: Vec<String>,
+) -> BedrockProvider {
     let cfg = BedrockConfig {
         id: "bedrock-rejected-betas-test".into(),
         region: "us-east-1".into(),
-        model_id: "anthropic.claude-opus-4-6-v1".into(),
+        model_id: model_id.into(),
         api_shape,
         creds: BedrockCreds::BearerKey {
             key: "test-key".into(),
@@ -327,4 +335,29 @@ fn invoke_request_without_a_withheld_set_ships_every_client_beta() {
 #[serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
 fn converse_request_without_a_withheld_set_ships_every_client_beta() {
     assert_request_without_a_withheld_set_ships_every_client_beta(BedrockApiShape::Converse);
+}
+
+#[test]
+#[serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
+fn a_non_claude_converse_bag_with_every_client_beta_withheld_carries_none_and_counts_once() {
+    // Arrange: a non-Claude model refuses the bag key itself, so the router
+    // withholds every client flag the request carries.
+    let model_id = "us.amazon.nova-2-lite-v1:0";
+    let provider = provider_for(model_id, BedrockApiShape::Converse, Vec::new());
+    let mut req = request_with_client_betas();
+    req.model = model_id.into();
+    req.routectl_internal.withheld_betas = req.anthropic_beta.iter().cloned().collect();
+    let before = converse_drop_count();
+
+    // Act
+    let body = provider.normalize_request(&req).expect("bedrock normalize");
+
+    // Assert
+    assert!(
+        body["additionalModelRequestFields"]
+            .get("anthropic_beta")
+            .is_none(),
+        "the bag carries the refused key: {body}"
+    );
+    assert_eq!(converse_drop_count() - before, 1);
 }

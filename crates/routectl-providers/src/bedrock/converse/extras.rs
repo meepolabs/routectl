@@ -323,10 +323,11 @@ fn insert_client_output_format(req: &ChatRequest, bag: &mut Map<String, Value>) 
 /// `insert_thinking` already wrote (its effort), preserving that sibling;
 /// a caller-supplied `output_config.format` is left untouched.
 ///
-/// Non-Claude Converse models do not honor `output_config.format`; the
-/// admission-time capability gate (an operator `[capability.overrides]`
-/// `unsupported` declaration) is what routes those away -- forwarding the inert bag key
-/// here is harmless (AWS ignores unknown bag fields for such models).
+/// Non-Claude Converse models refuse Anthropic bag keys outright rather than
+/// ignoring them: Nova and Llama 400 with `extraneous key [output_config] is
+/// not permitted`. Nothing here omits the key for such a model; an operator
+/// `[capability.overrides]` `unsupported` declaration is what routes a
+/// structured-output request away from one.
 ///
 /// An unrecognized type tag is counted here, once per request: this runs once
 /// per bag assembly and nothing it does can fail afterwards.

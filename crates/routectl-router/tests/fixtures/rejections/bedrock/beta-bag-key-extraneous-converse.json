@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-10-20, Converse, us.amazon.nova-2-lite-v1:0): hand-written from a wire-watch cell excerpt of a non-Claude model refusing the anthropic_beta key in additionalModelRequestFields. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns on Converse, inside the Converse model-errors wrapper. Llama Converse ids drew the same clause after an output_config one. The excerpt carries no response headers: lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the other bedrock fixtures.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"The model returned the following errors: Malformed input request: #: extraneous key [anthropic_beta] is not permitted, please reformat your input and try again.\"}"
+}

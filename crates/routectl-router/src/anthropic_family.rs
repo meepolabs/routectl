@@ -1,12 +1,14 @@
 //! Classifies an upstream model id as Anthropic-family, or not, or
 //! not-provably-either.
 //!
-//! Two independent consumers need the same answer about a Bedrock model
+//! Independent consumers need the same answer about a Bedrock model
 //! id -- the config-validation gate on the InvokeModel lane (which
-//! builds an Anthropic-shaped body) and the token-counting seat filter
-//! (which needs an Anthropic tokenizer) -- and they want OPPOSITE
-//! defaults when the id proves nothing. Hence one classifier with three
-//! outcomes rather than a boolean: the gate accepts
+//! builds an Anthropic-shaped body), the token-counting seat filter
+//! (which needs an Anthropic tokenizer), and the router's client-beta
+//! withhold on the Converse lane (whose non-Anthropic models refuse the
+//! `anthropic_beta` bag key) -- and they want OPPOSITE defaults when the
+//! id proves nothing. Hence one classifier with three outcomes rather
+//! than a boolean: the gate and the beta withhold accept
 //! [`AnthropicFamily::Unknown`], the seat filter refuses it.
 //!
 //! The classification is purely lexical, and deliberately narrower than

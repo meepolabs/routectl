@@ -247,7 +247,10 @@ reaches AWS, so a flag or field Anthropic adds needs no routectl release.
 The router withholds, per lane, a small shipped seed of betas Bedrock
 rejects (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
 `prompt-caching-scope-2026-01-05`; applied even with `[capability]
-enabled = false`) plus every beta flag it learned that lane rejects. A
+enabled = false`) plus every beta flag it learned that lane rejects. On
+`api_shape = "converse"` it withholds every client beta from a model
+whose id is provably not Anthropic (GPT, Nova, Llama, ...), since those
+models refuse the `anthropic_beta` field itself. A
 rejection that names its client betas is repaired with one retry, and
 the stripped flags become learned `beta:<flag>` negatives: persisted
 across restarts, decaying after 48 hours into one re-probe, visible in

@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-10-21, Converse, us.openai.gpt-6-sol): hand-written from a wire-watch cell excerpt of a non-Claude model refusing the anthropic_beta key in additionalModelRequestFields. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns on Converse, inside the Converse model-errors wrapper. The same message was drawn by every us.openai.gpt-5.6-*, gpt-6-* and gpt-6.1-* Converse id. The excerpt carries no response headers: lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the other bedrock fixtures.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"The model returned the following errors: Unknown parameter: 'anthropic_beta'.\"}"
+}

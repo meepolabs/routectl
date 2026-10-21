@@ -5,14 +5,18 @@
 //!
 //! 1. operator floor pin -- the flag is re-added on the wire regardless, so
 //!    nothing is withheld;
-//! 2. operator override on the flag's capability key -- `force_supported`
+//! 2. a Bedrock Converse target whose upstream is provably not Anthropic --
+//!    withholds every client flag: such a model refuses the `anthropic_beta`
+//!    bag key itself, whatever flags it carries. An upstream that proves
+//!    neither (an inference-profile ARN) falls through;
+//! 3. operator override on the flag's capability key -- `force_supported`
 //!    sends, `unsupported` withholds (a beta flag never routes a target away);
-//! 3. learned lane verdict, only with the capability subsystem enabled -- an
+//! 4. learned lane verdict, only with the capability subsystem enabled -- an
 //!    acting negative withholds, a lapsed one admits a re-probe and sends on
 //!    an inference surface (a token count carries no capability test, so
 //!    there it stays withheld and the slot stays free), a verified positive
 //!    sends;
-//! 4. the shipped Bedrock seed -- withholds, independent of the kill switch,
+//! 5. the shipped Bedrock seed -- withholds, independent of the kill switch,
 //!    unless the registry holds a seed-clear marker for the cell.
 //!
 //! A forwarded-credential target withholds nothing: the client owns that
@@ -22,7 +26,9 @@ use std::time::Instant;
 
 use routectl_core::ChatRequest;
 use routectl_core::capability::normalize_capability_key;
+use routectl_core::wire_check::EgressKind;
 
+use crate::anthropic_family::{AnthropicFamily, anthropic_family};
 use crate::beta_capability::beta_capability_key;
 use crate::learned_capability::{BetaLaneReading, ProbeClaim};
 use crate::override_registry::OverrideVerdict;
@@ -37,6 +43,13 @@ pub(super) enum BetaVerdict {
     Withhold,
     /// Undecided by every tier above the seed.
     Open,
+}
+
+/// Whether `target` is a Converse lane to a model that refuses the
+/// `anthropic_beta` bag key outright, so no client flag can ride it.
+fn refuses_the_beta_bag_key(target: &DispatchTarget) -> bool {
+    target.egress_kind == Some(EgressKind::BedrockConverse)
+        && anthropic_family(&target.upstream) == AnthropicFamily::No
 }
 
 impl Router {
@@ -131,6 +144,9 @@ impl Router {
     ) -> BetaVerdict {
         if self.beta_flag_pinned_for_target(target, flag) {
             return BetaVerdict::Send;
+        }
+        if refuses_the_beta_bag_key(target) {
+            return BetaVerdict::Withhold;
         }
         let Some(key) = beta_capability_key(flag) else {
             return BetaVerdict::Send;
@@ -237,3 +253,7 @@ impl Router {
 #[cfg(all(test, feature = "bedrock"))]
 #[path = "beta_withhold_tests.rs"]
 mod beta_withhold_tests;
+
+#[cfg(all(test, feature = "bedrock"))]
+#[path = "beta_withhold_converse_tests.rs"]
+mod beta_withhold_converse_tests;

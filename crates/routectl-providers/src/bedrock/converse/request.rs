@@ -14,11 +14,13 @@
 //! `additional_model_request_fields` through it here. A top-level
 //! `cache_control` marker is also forwarded inert into this bag (with a
 //! WARN), since Converse does not honor a top-level marker for caching
-//! -- only per-block `cachePoint` blocks cache. The request normalizer
-//! is intentionally lossy for non-Claude vendors: Mistral / Cohere /
-//! Llama on Converse won't honor `thinking` or `anthropic_beta` in the
-//! bag, but they also won't 400 on it, so a single code path serves
-//! both.
+//! -- only per-block `cachePoint` blocks cache. Non-Claude models on
+//! Converse do not ignore these Anthropic keys: they refuse the request
+//! (GPT models with `Unknown parameter: 'anthropic_beta'`, Nova and
+//! Llama with `extraneous key [anthropic_beta] is not permitted`, and
+//! the same for `output_config`). The router keeps client betas off
+//! such a target by withholding every one of them; the operator's beta
+//! floor still ships.
 //!
 //! cache_control breakpoints don't translate to per-block markers on
 //! the Converse wire -- AWS uses inline `cachePoint` blocks instead.

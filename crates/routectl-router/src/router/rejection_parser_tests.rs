@@ -183,6 +183,14 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         ),
         (
+            "bedrock/beta-bag-key-extraneous-converse",
+            Outcome::NotLocalized,
+        ),
+        (
+            "bedrock/beta-bag-key-unknown-parameter-converse",
+            Outcome::NotLocalized,
+        ),
+        (
             "bedrock/beta-redact-thinking-converse",
             Outcome::NotLocalized,
         ),

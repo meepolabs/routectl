@@ -769,16 +769,23 @@ strongest first:
    [`[providers.X] anthropic_beta`](#providersx-anthropic_beta----per-provider-bedrock-floor)
    plus any flag pinned through provider or model
    `header_extras["anthropic-beta"]` is always sent and never withheld.
-2. **A capability override decides.** An entry on the flag's
+2. **A non-Anthropic model on Converse withholds every client flag.** On
+   `api_shape = "converse"`, a model whose upstream id is provably not
+   Anthropic (`openai.*`, `amazon.nova-*`, `meta.llama*`, ..., with or
+   without a region prefix, or a `foundation-model/` ARN embedding one)
+   refuses the `anthropic_beta` field itself, so no client flag is sent
+   to it. An inference-profile ARN proves no vendor and falls through to
+   the steps below.
+3. **A capability override decides.** An entry on the flag's
    `beta:<flag>` key under
    [`[capability.overrides]`](#capabilityoverrides-is-the-durable-decision-surface)
    sends it (`force_supported`) or withholds it (`unsupported`). A beta
    flag never routes a target away; it is only withheld.
-3. **A learned beta verdict decides** (only with `[capability] enabled`).
+4. **A learned beta verdict decides** (only with `[capability] enabled`).
    A flag the lane rejected is withheld; once its negative lapses it is
    sent once as a re-probe, and an accepted re-probe records a positive
    that sends it from then on.
-4. **The shipped seed withholds.** Three flags AWS rejects on every
+5. **The shipped seed withholds.** Three flags AWS rejects on every
    request (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
    `prompt-caching-scope-2026-01-05`) are withheld on every `bedrock`
    lane, even with `[capability] enabled = false`, unless an operator
