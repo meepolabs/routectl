@@ -43,7 +43,7 @@ fn seat_capability_requires_an_anthropic_family_upstream_for_bedrock() {
 /// existing predicate test does not, since that one exercises the
 /// `anthropic-api` arm only with an Anthropic-family id.
 #[test]
-fn anthropic_family_gate_is_bedrock_scoped_not_global() {
+fn the_seat_family_gate_is_bedrock_scoped_not_global() {
     // A non-Anthropic model id under anthropic-api is still admitted: the
     // family requirement does not apply to that kind.
     assert!(

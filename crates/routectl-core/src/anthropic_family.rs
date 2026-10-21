@@ -4,11 +4,13 @@
 //! Independent consumers need the same answer about a Bedrock model
 //! id -- the config-validation gate on the InvokeModel lane (which
 //! builds an Anthropic-shaped body), the token-counting seat filter
-//! (which needs an Anthropic tokenizer), and the router's client-beta
+//! (which needs an Anthropic tokenizer), the router's client-beta
 //! withhold on the Converse lane (whose non-Anthropic models refuse the
-//! `anthropic_beta` bag key) -- and they want OPPOSITE defaults when the
-//! id proves nothing. Hence one classifier with three outcomes rather
-//! than a boolean: the gate and the beta withhold accept
+//! `anthropic_beta` bag key), and the Converse egress's `output_config`
+//! omission (the same models refuse that bag key too) -- and they want
+//! OPPOSITE defaults when the id proves nothing. Hence one classifier
+//! with three outcomes rather than a boolean: the gate, the beta
+//! withhold and the `output_config` omission accept
 //! [`AnthropicFamily::Unknown`], the seat filter refuses it.
 //!
 //! The classification is purely lexical, and deliberately narrower than
@@ -43,7 +45,8 @@
 //! fabricated constraint, and a missing one rejects a working config.
 //!
 //! This module holds no provider types and carries no feature gate, so
-//! both consumers can reach it without a `#[cfg]` of their own.
+//! the router and the provider egress both reach it without a `#[cfg]`
+//! of their own.
 
 /// Whether a model id names an Anthropic-family model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

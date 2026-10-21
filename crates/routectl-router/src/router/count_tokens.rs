@@ -67,7 +67,7 @@ use super::transcript_defect::{is_transcript_rejection, record_transcript_defect
 use super::{
     CountedTokens, DispatchMeta, DispatchTarget, Router, StripDecision, apply_layered_overlays,
 };
-use crate::anthropic_family::{AnthropicFamily, anthropic_family};
+use routectl_core::anthropic_family::{AnthropicFamily, anthropic_family};
 
 /// Whether one dispatch seat can serve a token count, decided from its
 /// egress kind together with the upstream model id that kind would be

@@ -20,7 +20,6 @@ static ALLOC_PROBE: alloc_probe::ProbeAllocator = alloc_probe::ProbeAllocator;
 pub(crate) mod activation;
 #[cfg(test)]
 pub(crate) mod alloc_probe;
-pub(crate) mod anthropic_family;
 pub(crate) mod beta_capability;
 pub(crate) mod beta_seed;
 pub(crate) mod calibration;

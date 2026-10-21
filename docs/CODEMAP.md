@@ -42,6 +42,18 @@ license.
   `RoutectlInternal` carrier (resolved per-model knobs plus the
   transport-internal capture fields, never serialized to the wire -- see the
   struct's own docs for the field-by-field contract)
+- `src/anthropic_family.rs` -- purely lexical classification of an upstream
+  model id as Anthropic-family: `anthropic_family(&str) -> AnthropicFamily
+  {Yes, No, Unknown}`. Strips at most ONE leading routing prefix, then requires
+  `anthropic` as the first dot-segment (admits the bracket-suffixed catalog
+  form); a `foundation-model/` ARN is classified from its embedded id, every
+  other ARN resource form (inference profile, provisioned / custom / imported
+  model) is `Unknown`. THREE outcomes rather than a bool because its consumers
+  want opposite defaults on the unprovable case: the router's Bedrock
+  invoke-lane config gate and Converse beta withhold, and the providers'
+  Converse `output_config` omission, accept `Unknown`; the router's
+  tokenizer-family seat filter does not. Ungated and free of provider types so
+  both crates share the one rule
 - `src/beta_assembly_report.rs` -- `BetaAssemblyReport`: clone-shared
   per-attempt slot where an anthropic-vocabulary egress records the
   `BetaAssembly` it computed at header / bag assembly (the beta floor it never
@@ -1358,7 +1370,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   values and the upstream would accept them; routectl withholds them). Separate
   types per path so a flag cannot be set from both and counted twice for one
   request. The bag's client-fingerprint strip is the lane's third strip site
-  and records into the request-wide tally the orchestrator owns
+  and records into the request-wide tally the orchestrator owns. For a target
+  whose `model_id` `anthropic_family` classifies `No`, the composed
+  `output_config` is omitted before the format scrub and the beta union, and
+  counted once per request as `output_config_unrepresentable`
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
   (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame
@@ -1536,17 +1551,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   assert a hot-path predicate's short-circuit allocates nothing without a
   parallel test's allocations landing in the tally. Deliberately not the
   process-global-atomic shape `routectl-testkit::bench_alloc` uses for benches
-- `src/anthropic_family.rs` -- purely lexical classification of an upstream
-  model id as Anthropic-family: `anthropic_family(&str) -> AnthropicFamily
-  {Yes, No, Unknown}`. Strips at most ONE leading routing-prefix segment
-  (`us.`/`eu.`/`apac.`/`global.`/`us-gov.`), then requires `anthropic` as the
-  first dot-segment (admits the bracket-suffixed catalog form); an
-  `arn:`-prefixed id is `Unknown` because an inference-profile ARN may carry no
-  vendor token. THREE outcomes rather than a bool because its two consumers
-  want opposite defaults on the unprovable case -- the Bedrock invoke-lane
-  config gate accepts `Unknown`, a tokenizer-family predicate must not.
-  Un-gated (holds no provider types) so both consumers reach it with no
-  `#[cfg]` of their own
 - `src/doctor.rs` -- serialize-safe `routectl doctor` report data types
   (orchestration + rendering stay CLI-side): `Status` (fixed
   `Pass`/`Warn`/`Fail` triad), `Finding`

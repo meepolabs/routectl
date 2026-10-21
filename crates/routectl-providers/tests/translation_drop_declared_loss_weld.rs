@@ -382,6 +382,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ),
     ("bedrock/converse/extras.rs", "insert_operator_extras", 1),
     ("bedrock/converse/extras.rs", "insert_provider_extras", 1),
+    (
+        "bedrock/converse/extras.rs",
+        "omit_output_config_for_non_claude",
+        1,
+    ),
     ("bedrock/converse/messages.rs", "flush", 3),
     ("bedrock/converse/messages.rs", "translate_document", 2),
     ("bedrock/converse/messages.rs", "translate_image_source", 2),

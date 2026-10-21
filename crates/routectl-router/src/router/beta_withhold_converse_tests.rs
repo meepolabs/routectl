@@ -203,8 +203,8 @@ fn every_non_claude_converse_id_that_refused_the_bag_key_withholds_every_client_
 
         // Assert
         assert_eq!(
-            crate::anthropic_family::anthropic_family(id),
-            crate::anthropic_family::AnthropicFamily::No,
+            routectl_core::anthropic_family::anthropic_family(id),
+            routectl_core::anthropic_family::AnthropicFamily::No,
             "row {id}: classification",
         );
         assert_eq!(out, owned(&[CLIENT_BETA, OTHER_CLIENT_BETA]), "row {id}");

@@ -11,6 +11,7 @@
 
 use serde_json::{Map, Value};
 
+use routectl_core::anthropic_family::{AnthropicFamily, anthropic_family};
 use routectl_core::{AnthropicThinking, ChatRequest, RequestProvenance, sanitize_for_log};
 
 use routectl_core::wire_check::{EditKind, EditSite};
@@ -71,7 +72,7 @@ pub(super) fn build_additional_fields(
     // before the `response_format` conversion, whose `or_insert` then leaves
     // the client's format in place.
     insert_client_output_format(req, &mut bag, &mut foreign);
-    let dropped_format_keys = insert_response_format(req, &mut bag);
+    let converted_format_keys = insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
     let provider_actions = insert_provider_extras(cfg, req, &mut bag, fingerprint, &mut foreign);
@@ -102,11 +103,20 @@ pub(super) fn build_additional_fields(
     // managed keys), matching the wire body the request will carry.
     strip_thinking_when_tool_choice_forces_use(cfg, req, &mut bag, tool_choice);
 
+    // After every writer of `output_config` and before the passes that read
+    // it, so an omitted object neither counts its converted format's lost
+    // keys nor implies the structured-outputs beta.
+    let converted_format_keys = if omit_output_config_for_non_claude(cfg, req, &mut bag) {
+        DroppedFormatKeys::default()
+    } else {
+        count_converted_format_key_loss(converted_format_keys)
+    };
+
     // Scrub the `output_config.format` keys Anthropic cannot represent from
     // the fully composed bag, so every path that can write the field is
     // covered rather than just the shared converter. One DEBUG line for the request,
     // from whichever path supplied the keys.
-    dropped_format_keys
+    converted_format_keys
         .merged(crate::anthropic_api::request::drop_unrepresentable_output_format_keys(&mut bag))
         .emit(&cfg.id);
 
@@ -354,16 +364,17 @@ fn insert_client_output_format(
 /// a caller-supplied `output_config.format` is left untouched.
 ///
 /// Non-Claude Converse models refuse Anthropic bag keys outright rather than
-/// ignoring them: Nova and Llama 400 with `extraneous key [output_config] is
-/// not permitted`. Nothing here omits the key for such a model; an operator
+/// ignoring them, so the format written here is later omitted for such a
+/// model with the rest of `output_config` (see
+/// [`omit_output_config_for_non_claude`]); an operator
 /// `[capability.overrides]` `unsupported` declaration is what routes a
-/// structured-output request away from one.
+/// structured-output request away from one instead.
 ///
-/// An unrecognized type tag, and a shipped conversion's lost `name` /
-/// `strict`, are counted here, once per request: this runs once per bag
-/// assembly and nothing it does can fail afterwards. A conversion that loses
-/// to the client's own format loses nothing and reports nothing.
-/// TRANSLATION-DROP: lane=bedrock-converse class=response_format_keys_unrepresentable test=response_format_name_and_strict_count_once_on_the_converse_lane
+/// An unrecognized type tag is counted here, once per request: this runs once
+/// per bag assembly and nothing it does can fail afterwards. The conversion's
+/// lost `name` / `strict` are returned rather than counted, since only the
+/// final bag knows whether the format ships. A conversion that loses to the
+/// client's own format loses nothing and reports nothing.
 fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) -> DroppedFormatKeys {
     let Some(rf) = req.response_format.as_ref() else {
         return DroppedFormatKeys::default();
@@ -372,12 +383,6 @@ fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) -> Dr
         AnthropicFormat::Mapped(format, dropped) => {
             if !crate::anthropic_api::request::set_output_config_format(bag, format) {
                 return DroppedFormatKeys::default();
-            }
-            if dropped.any() {
-                crate::translation_drop_metrics::record_translation_drop(
-                    super::LANE,
-                    "response_format_keys_unrepresentable",
-                );
             }
             dropped
         }
@@ -390,6 +395,58 @@ fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) -> Dr
         }
         AnthropicFormat::PlainText | AnthropicFormat::Malformed => DroppedFormatKeys::default(),
     }
+}
+
+/// Count a shipped `response_format` conversion's lost `name` / `strict` once
+/// for the request, and hand the keys on for the request's one DEBUG line.
+/// TRANSLATION-DROP: lane=bedrock-converse class=response_format_keys_unrepresentable test=response_format_name_and_strict_count_once_on_the_converse_lane
+fn count_converted_format_key_loss(dropped: DroppedFormatKeys) -> DroppedFormatKeys {
+    if dropped.any() {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "response_format_keys_unrepresentable",
+        );
+    }
+    dropped
+}
+
+/// Remove the bag's `output_config` when the target model is provably not
+/// Claude. Nova and Llama 400 on it with `extraneous key [output_config] is
+/// not permitted`, whichever members it carries, so neither the effort nor the
+/// format it holds can be represented there. An id that proves nothing (an
+/// inference-profile ARN) keeps the key, as a Claude id does.
+///
+/// Returns whether the key was removed. One removal is one count for the
+/// request, whatever the object held.
+/// TRANSLATION-DROP: lane=bedrock-converse class=output_config_unrepresentable test=a_non_claude_converse_bag_omits_output_config_and_counts_once
+fn omit_output_config_for_non_claude(
+    cfg: &BedrockConfig,
+    req: &ChatRequest,
+    bag: &mut Map<String, Value>,
+) -> bool {
+    if anthropic_family(&cfg.model_id) != AnthropicFamily::No {
+        return false;
+    }
+    if bag.remove("output_config").is_none() {
+        return false;
+    }
+    crate::anthropic_api::wire_edits::declare(
+        crate::anthropic_api::wire_edits::tap_of(req),
+        EditSite::DialectFieldStrip,
+        "/output_config",
+        EditKind::Remove,
+    );
+    crate::translation_drop_metrics::record_translation_drop(
+        super::LANE,
+        "output_config_unrepresentable",
+    );
+    tracing::debug!(
+        provider = %cfg.id,
+        model = %sanitize_for_log(&cfg.model_id),
+        "dropped output_config from Converse additionalModelRequestFields: \
+         the non-Claude model refuses the key"
+    );
+    true
 }
 
 /// Compose the bag's `thinking` through the Anthropic egress's own

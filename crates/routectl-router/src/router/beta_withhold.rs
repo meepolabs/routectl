@@ -28,10 +28,10 @@ use routectl_core::ChatRequest;
 use routectl_core::capability::normalize_capability_key;
 use routectl_core::wire_check::EgressKind;
 
-use crate::anthropic_family::{AnthropicFamily, anthropic_family};
 use crate::beta_capability::beta_capability_key;
 use crate::learned_capability::{BetaLaneReading, ProbeClaim};
 use crate::override_registry::OverrideVerdict;
+use routectl_core::anthropic_family::{AnthropicFamily, anthropic_family};
 
 use super::class_observe::DispatchSurface;
 use super::{DispatchTarget, ProbeAdmission, Router};

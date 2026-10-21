@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use routectl_core::ChatRequest;
 use routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
+use routectl_core::wire_check::{EditSite, Leg, WireTap};
 
 use super::super::normalize_request;
 use crate::anthropic_api::request::thinking_carrier_tests::ingress_request;
@@ -20,10 +21,14 @@ use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 const MANAGED_KEY_CONFLICT: &str = "provider_extra_managed_key_conflict";
 
 fn cfg(adaptive: bool) -> BedrockConfig {
+    cfg_for("anthropic.claude-sonnet-4-6", adaptive)
+}
+
+fn cfg_for(model_id: &str, adaptive: bool) -> BedrockConfig {
     BedrockConfig {
         id: "bedrock:test-converse".into(),
         region: "us-west-2".into(),
-        model_id: "anthropic.claude-sonnet-4-6".into(),
+        model_id: model_id.into(),
         api_shape: BedrockApiShape::Converse,
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
@@ -331,4 +336,173 @@ fn converse_response_format_key_loss_counts_nothing_when_no_conversion_loses_a_k
         );
         assert_eq!(after, before, "row {row}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// `output_config` on a non-Claude Converse model.
+// ---------------------------------------------------------------------------
+
+const OUTPUT_CONFIG_LOST: &str = "output_config_unrepresentable";
+
+/// Upstream ids whose live Converse turns refused the bag's `output_config`
+/// or `anthropic_beta` key: GPT, Nova and Llama.
+const NON_CLAUDE_IDS: [&str; 4] = [
+    "us.amazon.nova-2-lite-v1:0",
+    "us.openai.gpt-6-sol",
+    "us.meta.llama4-maverick-17b-instruct-v1:0",
+    "meta.llama3-1-70b-instruct-v1:0",
+];
+
+const CLAUDE_ID: &str = "us.anthropic.claude-sonnet-4-6";
+
+const PROFILE_ARN: &str =
+    "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abcd1234";
+
+fn output_config_drop_count(lane: &str) -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == lane && e.drop_class == OUTPUT_CONFIG_LOST)
+        .map_or(0, |e| e.drop_count)
+}
+
+fn effort_only_request() -> ChatRequest {
+    ingress_request(None, Some("high"), 2048)
+}
+
+fn client_format_request() -> ChatRequest {
+    request_with_client_output_config(None, None, json!({"format": {"type": "json_object"}}))
+}
+
+fn response_format_request() -> ChatRequest {
+    let mut req = ingress_request(None, None, 2048);
+    req.response_format = Some(json_schema_response_format(
+        json!({"name": "widget", "strict": true}),
+    ));
+    req
+}
+
+/// The three request shapes that put an `output_config` in the bag, named.
+fn output_config_shapes() -> [(&'static str, ChatRequest); 3] {
+    [
+        ("effort only", effort_only_request()),
+        ("client output_config.format", client_format_request()),
+        ("response_format conversion", response_format_request()),
+    ]
+}
+
+/// A provably non-Claude Converse model ships no `output_config` and no beta
+/// it would have implied, and the request counts the loss once on this lane.
+/// An effort-only request leaves nothing else in the bag, so no
+/// `additionalModelRequestFields` ships at all.
+#[test]
+fn a_non_claude_converse_bag_omits_output_config_and_counts_once() {
+    for id in NON_CLAUDE_IDS {
+        for (shape, req) in output_config_shapes() {
+            // Arrange
+            let cfg = cfg_for(id, false);
+            let before = (
+                output_config_drop_count("bedrock-converse"),
+                output_config_drop_count("anthropic"),
+                format_keys_drop_count("bedrock-converse"),
+            );
+
+            // Act
+            let bag = shipped_bag(&cfg, &req);
+            let after = (
+                output_config_drop_count("bedrock-converse"),
+                output_config_drop_count("anthropic"),
+                format_keys_drop_count("bedrock-converse"),
+            );
+
+            // Assert
+            let row = format!("{id} / {shape}");
+            assert!(bag.get("output_config").is_none(), "row {row}: {bag}");
+            assert!(
+                !bag_betas(&bag).contains(&STRUCTURED_OUTPUTS_BETA),
+                "row {row}: no format ships, so its beta must not: {bag}"
+            );
+            assert_eq!(after.0 - before.0, 1, "row {row}");
+            assert_eq!(after.1, before.1, "row {row}: not anthropic traffic");
+            assert_eq!(
+                after.2, before.2,
+                "row {row}: an omitted conversion loses no keys of its own"
+            );
+            if shape == "effort only" {
+                assert_eq!(bag, Value::Null, "row {row}: an empty bag ships");
+            }
+        }
+    }
+}
+
+/// An `output_config` carrying both an effort and a format is one loss for
+/// the request, not one per member.
+#[test]
+fn a_non_claude_output_config_with_effort_and_format_counts_once() {
+    // Arrange
+    let mut req = effort_only_request();
+    req.response_format = Some(json!({"type": "json_object"}));
+    let cfg = cfg_for("us.amazon.nova-2-lite-v1:0", false);
+    let before = output_config_drop_count("bedrock-converse");
+
+    // Act
+    let bag = shipped_bag(&cfg, &req);
+    let after = output_config_drop_count("bedrock-converse");
+
+    // Assert
+    assert_eq!(bag, Value::Null, "{bag}");
+    assert_eq!(after - before, 1);
+}
+
+/// A Claude id, and an inference-profile ARN that proves no vendor, keep the
+/// bag's `output_config` and its implied beta, and count nothing.
+#[test]
+fn claude_and_profile_arn_converse_bags_keep_output_config() {
+    for id in [CLAUDE_ID, PROFILE_ARN] {
+        for (shape, req) in output_config_shapes() {
+            // Arrange
+            let cfg = cfg_for(id, false);
+            let before = output_config_drop_count("bedrock-converse");
+
+            // Act
+            let bag = shipped_bag(&cfg, &req);
+            let after = output_config_drop_count("bedrock-converse");
+
+            // Assert
+            let row = format!("{id} / {shape}");
+            let output_config = &bag["output_config"];
+            assert!(output_config.is_object(), "row {row}: {bag}");
+            assert_eq!(
+                bag_betas(&bag).contains(&STRUCTURED_OUTPUTS_BETA),
+                output_config.get("format").is_some(),
+                "row {row}: {bag}"
+            );
+            assert_eq!(after, before, "row {row}");
+        }
+    }
+}
+
+/// The omission is declared on the attempt's tap, relative to the bag like
+/// every Converse bag declaration.
+#[test]
+fn the_non_claude_output_config_omission_is_declared() {
+    // Arrange
+    let mut req = effort_only_request();
+    let tap = WireTap::admitted();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+
+    // Act
+    let _ = shipped_bag(&cfg_for("us.amazon.nova-2-lite-v1:0", false), &req);
+
+    // Assert
+    let edits: Vec<(EditSite, String)> = tap
+        .take_request()
+        .edits(Leg::Request)
+        .iter()
+        .filter(|edit| edit.site() == EditSite::DialectFieldStrip)
+        .map(|edit| (edit.site(), edit.path().to_string()))
+        .collect();
+    assert_eq!(
+        edits,
+        vec![(EditSite::DialectFieldStrip, "/output_config".to_string())]
+    );
 }

@@ -90,7 +90,7 @@ use marker::{
 /// would have hidden the `gemini/schema.rs` markers.
 const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("anthropic_api/request.rs", 9),
-    ("bedrock/converse/extras.rs", 6),
+    ("bedrock/converse/extras.rs", 7),
     ("bedrock/converse/messages.rs", 22),
     ("bedrock/converse/system.rs", 3),
     ("bedrock/converse/tools.rs", 10),
@@ -116,7 +116,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
-const EXPECTED_LANE_MARKERS: usize = 83;
+const EXPECTED_LANE_MARKERS: usize = 84;
 const EXPECTED_POLICY_ACTION_MARKERS: usize = 23;
 const EXPECTED_STRUCTURAL_MARKERS: usize = 51;
 

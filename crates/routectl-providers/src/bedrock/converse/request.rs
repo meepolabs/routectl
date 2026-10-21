@@ -20,7 +20,8 @@
 //! Llama with `extraneous key [anthropic_beta] is not permitted`, and
 //! the same for `output_config`). The router keeps client betas off
 //! such a target by withholding every one of them; the operator's beta
-//! floor still ships.
+//! floor still ships. The bag assembly omits `output_config` for such a
+//! target and counts the loss.
 //!
 //! cache_control breakpoints don't translate to per-block markers on
 //! the Converse wire -- AWS uses inline `cachePoint` blocks instead.
