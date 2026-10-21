@@ -81,8 +81,9 @@ impl Dialect for VllmDialect {
         Ok(())
     }
 
-    /// vLLM (recent versions) accepts the same `reasoning_content`
-    /// preserve shape as DeepSeek for echo-back history.
+    /// Echo history reasoning back as `reasoning_content` via the shared
+    /// rename. Unlike DeepSeek, no empty key is added to an assistant turn
+    /// that has no reasoning to carry.
     fn preserve_history_reasoning(
         &self,
         id: &str,
@@ -561,6 +562,100 @@ mod tests {
         assert_eq!(
             body["chat_template_kwargs"]["enable_thinking"], false,
             "caller-supplied chat_template_kwargs must win: {body}"
+        );
+    }
+
+    // ----- history_reasoning on an assistant tool_calls turn -----
+
+    /// A conversation whose assistant turn called a tool and carried no
+    /// reasoning, followed by the tool result.
+    fn reasoningless_tool_call_req() -> ChatRequest {
+        let mut req = user_req("qwen3-30b");
+        let mut msgs = req.messages.to_vec();
+        msgs.push(Message {
+            refusal: None,
+            role: Role::Assistant,
+            content: MessageContent::Text(String::new()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![serde_json::json!({
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            })]),
+        });
+        msgs.push(Message {
+            refusal: None,
+            role: Role::Tool,
+            content: MessageContent::Text("42".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some("call_1".into()),
+            tool_calls: None,
+        });
+        req.messages = msgs.into();
+        req
+    }
+
+    fn preserved_assistant_turn(req: &ChatRequest) -> serde_json::Value {
+        let body = normalize(
+            "test",
+            req,
+            ReasoningDialect::Vllm,
+            HistoryReasoning::Preserve,
+            None,
+            false,
+        )
+        .unwrap();
+        body["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant turn on the wire")
+            .clone()
+    }
+
+    #[test]
+    fn preserve_renames_real_reasoning_on_a_tool_call_turn() {
+        let mut req = reasoningless_tool_call_req();
+        let mut msgs = req.messages.to_vec();
+        msgs[1].reasoning = Some("look it up".into());
+        req.messages = msgs.into();
+
+        let assistant = preserved_assistant_turn(&req);
+
+        assert_eq!(assistant["reasoning_content"], "look it up");
+    }
+
+    #[test]
+    fn preserve_adds_no_reasoning_content_to_a_reasoningless_tool_call_turn() {
+        let assistant = preserved_assistant_turn(&reasoningless_tool_call_req());
+
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "got {assistant}"
+        );
+        assert!(assistant.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn preserve_leaves_a_plain_reasoningless_assistant_turn_without_the_key() {
+        let mut req = reasoningless_tool_call_req();
+        let mut msgs = req.messages.to_vec();
+        msgs[1].tool_calls = None;
+        msgs[1].content = MessageContent::Text("done".into());
+        msgs.truncate(2);
+        req.messages = msgs.into();
+
+        let assistant = preserved_assistant_turn(&req);
+
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "got {assistant}"
         );
     }
 }

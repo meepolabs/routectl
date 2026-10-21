@@ -79,7 +79,9 @@ impl Dialect for DeepSeekDialect {
         id: &str,
         obj: &mut serde_json::Map<String, Value>,
     ) -> Result<()> {
-        preserve_history_reasoning_content(id, obj)
+        preserve_history_reasoning_content(id, obj)?;
+        insert_empty_reasoning_content_on_tool_call_turns(obj);
+        Ok(())
     }
 
     fn apply_response(&self, _id: &str, msg: &mut Message) -> Result<()> {
@@ -90,6 +92,29 @@ impl Dialect for DeepSeekDialect {
     fn apply_chunk(&self, id: &str, val: &mut Value, reasoning_index: &mut u32) -> Result<()> {
         lift_delta_reasoning_content(id, val, self.format_tag(), reasoning_index)
     }
+}
+
+/// Give every reasoning-less assistant `tool_calls` turn an empty
+/// `reasoning_content`. DeepSeek's thinking mode rejects a tool-call turn
+/// whose `reasoning_content` key is ABSENT but accepts an explicit empty
+/// value; a plain-text assistant turn stays without the key.
+fn insert_empty_reasoning_content_on_tool_call_turns(obj: &mut serde_json::Map<String, Value>) {
+    let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for m in messages.iter_mut().filter_map(Value::as_object_mut) {
+        let is_assistant = m.get("role").and_then(Value::as_str) == Some("assistant");
+        if is_assistant && !m.contains_key("reasoning_content") && carries_tool_calls(m) {
+            m.insert("reasoning_content".into(), Value::String(String::new()));
+        }
+    }
+}
+
+/// True when the message carries a non-empty `tool_calls` array.
+fn carries_tool_calls(m: &serde_json::Map<String, Value>) -> bool {
+    m.get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty())
 }
 
 #[cfg(test)]

@@ -267,16 +267,12 @@ fn declare_history_reasoning_strip(tap: &WireTap, index: usize) {
 const HISTORY_REASONING_KEYS: [&str; 3] = ["reasoning_content", "reasoning_details", "reasoning"];
 
 /// Preserve outgoing assistant reasoning as a `reasoning_content`
-/// string field. DeepSeek v4+ and recent vLLM require this on
-/// echo-back; the canonical schema uses `reasoning` for OpenRouter
-/// compat, so we rename. Falls back to lowering `reasoning_details`
-/// to a joined text string.
+/// string field for dialects that echo it back under that name; the
+/// canonical schema uses `reasoning` for OpenRouter compat, so we rename.
+/// Falls back to lowering `reasoning_details` to a joined text string.
 ///
-/// An assistant turn carrying `tool_calls` always leaves with the key: an
-/// empty string when no non-empty reasoning source exists. DeepSeek's
-/// thinking mode rejects a tool-call turn whose `reasoning_content` key is
-/// ABSENT but accepts an explicit empty value. A plain-text assistant turn
-/// with no reasoning still leaves without the key.
+/// An assistant turn with no non-empty reasoning source leaves without the
+/// key, whether or not it carries `tool_calls`.
 pub(super) fn preserve_history_reasoning_content(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
@@ -299,9 +295,6 @@ pub(super) fn preserve_history_reasoning_content(
             continue;
         }
         lift_assistant_reasoning_content(id, m);
-        if !m.contains_key("reasoning_content") && carries_tool_calls(m) {
-            m.insert("reasoning_content".into(), Value::String(String::new()));
-        }
     }
     Ok(())
 }
@@ -336,13 +329,6 @@ fn lift_assistant_reasoning_content(id: &str, m: &mut serde_json::Map<String, Va
             m.insert("reasoning_content".into(), Value::String(lowered));
         }
     }
-}
-
-/// True when the message carries a non-empty `tool_calls` array.
-fn carries_tool_calls(m: &serde_json::Map<String, Value>) -> bool {
-    m.get("tool_calls")
-        .and_then(Value::as_array)
-        .is_some_and(|calls| !calls.is_empty())
 }
 
 /// Preserve outgoing assistant reasoning as a structured
@@ -597,6 +583,20 @@ mod tests {
         let m = obj["messages"][0].as_object().unwrap();
         assert!(m.get("reasoning_content").is_none());
         assert!(m.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn preserve_content_adds_no_key_to_a_reasoningless_tool_call_turn() {
+        let mut obj = body_with_messages(json!([{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"}}],
+        }]));
+        preserve_history_reasoning_content("test", &mut obj).unwrap();
+        let m = obj["messages"][0].as_object().unwrap();
+        assert!(m.get("reasoning_content").is_none(), "got {m:?}");
+        assert!(m.get("tool_calls").is_some());
     }
 
     // ----- preserve_history_reasoning_details -----
