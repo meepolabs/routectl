@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 
 use routectl_core::{
     AnthropicThinking, ChatRequest, Error, ReasoningConfig, RefusalReason, Result, ThinkingObject,
-    sanitize_detail_for_log,
+    is_canonical_request_key, sanitize_detail_for_log,
 };
 
 // Referenced only by the inline test module (`parse_tests.rs`) via
@@ -39,7 +39,7 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // ChatRequest field gets stashed in provider_extras. This is the
     // forward-compat seam -- new Anthropic fields land in extras and
     // the egress's merge_provider_extras forwards them upstream
-    // without ever needing to touch the ingress strip list.
+    // without an ingress code edit.
     let extras = sweep_anthropic_extras(obj);
     let mut extras = match extras {
         Value::Object(map) => map,
@@ -252,49 +252,16 @@ fn metadata_session_id(metadata: &Option<Value>) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
-/// Field names the canonical `ChatRequest` deserializes directly from
-/// an Anthropic-shape wire body. Anything NOT in this list and not
-/// otherwise pre-handled (`thinking`, `metadata`, `output_format`,
-/// `stop_sequences`) is Anthropic-only and gets stashed in
-/// `provider_extras`.
-///
-/// Keep this list in sync with `routectl_core::schema::ChatRequest`
-/// field names. The build pins the contract: a missing entry here is
-/// a silent drop, exactly like the bug that motivated this design.
-const CANONICAL_CHAT_REQUEST_WIRE_FIELDS: &[&str] = &[
-    "model",
-    "messages",
-    "system",
-    "temperature",
-    "top_p",
-    "max_tokens",
-    "stop",
-    "stream",
-    "n",
-    "seed",
-    "logprobs",
-    "top_logprobs",
-    "logit_bias",
-    "presence_penalty",
-    "frequency_penalty",
-    "user",
-    "tools",
-    "tool_choice",
-    "response_format",
-    "cache_control",
-    "anthropic_beta",
-    "reasoning",
-    "chat_template_kwargs",
-    "provider_extras",
-];
-
-/// Move every key not in `CANONICAL_CHAT_REQUEST_WIRE_FIELDS` out of
-/// `obj` and return them as a JSON object. The caller threads the
-/// returned object into `provider_extras`.
+/// Move every key `is_canonical_request_key` does not claim out of `obj`
+/// and return them as a JSON object; the caller threads it into
+/// `provider_extras`. The OpenAI Chat ingress sweeps with the same
+/// predicate, so the two dialects agree on what an extra is. A canonical
+/// alias with no `ChatRequest` field (`max_completion_tokens`, a top-level
+/// `reasoning_details`) stays in the body and serde drops it.
 fn sweep_anthropic_extras(obj: &mut Map<String, Value>) -> Value {
     let extra_keys: Vec<String> = obj
         .keys()
-        .filter(|k| !CANONICAL_CHAT_REQUEST_WIRE_FIELDS.contains(&k.as_str()))
+        .filter(|k| !is_canonical_request_key(k))
         .cloned()
         .collect();
     let mut extras = Map::new();
@@ -576,3 +543,7 @@ mod thinking_carrier_tests;
 #[cfg(test)]
 #[path = "parse_thinking_wire_tests.rs"]
 mod thinking_wire_tests;
+
+#[cfg(test)]
+#[path = "parse_extras_sweep_tests.rs"]
+mod extras_sweep_tests;
