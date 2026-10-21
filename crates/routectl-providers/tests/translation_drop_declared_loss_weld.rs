@@ -204,9 +204,11 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
         "anthropic_api/request.rs",
         "emit",
         "output_config.format keys omitted",
-        "uncounted request-side loss: the aggregated DEBUG for the `name` / `strict` keys \
-         Anthropic's structured-output format cannot carry, emitted once per request by every \
-         Claude seam; no lane counts it",
+        "aggregated DEBUG for the `name` / `strict` keys Anthropic's structured-output format \
+         cannot carry, emitted once per request by every Claude seam. The response_format \
+         conversion half is counted per lane where each lane flushes its tally; the scrub of a \
+         client-native format stays uncounted, and one helper serving both halves cannot carry \
+         a single class",
     ),
     (
         "bedrock/converse/eventstream.rs",

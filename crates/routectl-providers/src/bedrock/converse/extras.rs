@@ -329,15 +329,26 @@ fn insert_client_output_format(req: &ChatRequest, bag: &mut Map<String, Value>) 
 /// `[capability.overrides]` `unsupported` declaration is what routes a
 /// structured-output request away from one.
 ///
-/// An unrecognized type tag is counted here, once per request: this runs once
-/// per bag assembly and nothing it does can fail afterwards.
+/// An unrecognized type tag, and a shipped conversion's lost `name` /
+/// `strict`, are counted here, once per request: this runs once per bag
+/// assembly and nothing it does can fail afterwards. A conversion that loses
+/// to the client's own format loses nothing and reports nothing.
+/// TRANSLATION-DROP: lane=bedrock-converse class=response_format_keys_unrepresentable test=response_format_name_and_strict_count_once_on_the_converse_lane
 fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) -> DroppedFormatKeys {
     let Some(rf) = req.response_format.as_ref() else {
         return DroppedFormatKeys::default();
     };
     match crate::anthropic_api::request::response_format_to_anthropic_format(rf) {
         AnthropicFormat::Mapped(format, dropped) => {
-            crate::anthropic_api::request::set_output_config_format(bag, format);
+            if !crate::anthropic_api::request::set_output_config_format(bag, format) {
+                return DroppedFormatKeys::default();
+            }
+            if dropped.any() {
+                crate::translation_drop_metrics::record_translation_drop(
+                    super::LANE,
+                    "response_format_keys_unrepresentable",
+                );
+            }
             dropped
         }
         AnthropicFormat::UnrecognizedType => {

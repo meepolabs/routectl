@@ -413,3 +413,144 @@ fn response_formats_that_lose_nothing_or_are_not_client_traffic_count_nothing() 
         assert_eq!(after, before, "row {row}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The response_format `name` / `strict` conversion loss.
+// ---------------------------------------------------------------------------
+
+/// The `(anthropic, response_format_keys_unrepresentable)` drop counter.
+fn format_keys_drop_count() -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == super::LANE && e.drop_class == "response_format_keys_unrepresentable")
+        .map_or(0, |e| e.drop_count)
+}
+
+/// A `json_schema` directive carrying `json_schema` members beside its schema.
+pub fn json_schema_response_format(members: serde_json::Value) -> serde_json::Value {
+    let mut json_schema = serde_json::json!({
+        "schema": {"type": "object", "properties": {}, "additionalProperties": false}
+    });
+    if let (Some(target), Some(extra)) = (json_schema.as_object_mut(), members.as_object()) {
+        target.extend(extra.clone());
+    }
+    serde_json::json!({"type": "json_schema", "json_schema": json_schema})
+}
+
+/// A client-native `output_config.format` carrying both keys the format
+/// object cannot represent.
+pub fn client_native_format_with_name_and_strict() -> serde_json::Value {
+    serde_json::json!({"output_config": {"format": {
+        "type": "json_schema",
+        "name": "client_native",
+        "strict": true,
+        "schema": {"type": "object", "properties": {"client_marker": {"type": "string"}},
+                   "additionalProperties": false}
+    }}})
+}
+
+/// Each row's converted format ships without the keys it carried, and the
+/// request counts once however many of the two keys were lost.
+#[test]
+fn response_format_name_and_strict_count_once_on_the_anthropic_lane() {
+    let rows = [
+        ("name only", serde_json::json!({"name": "widget"})),
+        ("strict only", serde_json::json!({"strict": true})),
+        (
+            "name and strict",
+            serde_json::json!({"name": "widget", "strict": true}),
+        ),
+    ];
+    for (row, members) in rows {
+        // Arrange
+        let req = with_response_format(json_schema_response_format(members));
+
+        // Act
+        let before = format_keys_drop_count();
+        let body = assemble(&req);
+        let after = format_keys_drop_count();
+
+        // Assert
+        let format = &body["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema", "row {row}: {body}");
+        assert!(
+            format.get("name").is_none() && format.get("strict").is_none(),
+            "row {row}: {body}"
+        );
+        assert_eq!(after - before, 1, "row {row}");
+    }
+}
+
+/// The flush runs on the Err arm too: the converted format ships, then the
+/// schema repair rejects it.
+#[test]
+fn response_format_name_still_counts_when_assembly_fails() {
+    // Arrange
+    let deep = schema_past_the_repair_depth_bound()["output_config"]["format"]["schema"].clone();
+    let req = with_response_format(serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {"name": "widget", "schema": deep}
+    }));
+
+    // Act
+    let before = format_keys_drop_count();
+    let outcome = normalize("test", &req, false, false, None, false, true);
+    let after = format_keys_drop_count();
+
+    // Assert
+    assert!(outcome.is_err(), "the fixture must fail assembly");
+    assert_eq!(after - before, 1);
+}
+
+/// Nothing is counted when no converted key is lost. The client-native row
+/// is the scrub-only case: its `name` / `strict` are removed from a format
+/// that never passed through the converter.
+#[test]
+fn response_format_key_loss_counts_nothing_when_no_conversion_loses_a_key() {
+    let mut client_native = base_req();
+    client_native.provider_extras = Some(client_native_format_with_name_and_strict());
+    let mut lost_to_client = with_response_format(json_schema_response_format(
+        serde_json::json!({"name": "converted", "strict": true}),
+    ));
+    lost_to_client.provider_extras = Some(client_native_format_with_name_and_strict());
+    let mut probe = with_response_format(json_schema_response_format(
+        serde_json::json!({"name": "widget"}),
+    ));
+    probe.routectl_internal.background_probe = true;
+    let rows = [
+        ("client-native format scrubbed", client_native, true),
+        (
+            "conversion lost to a client-native format",
+            lost_to_client,
+            true,
+        ),
+        (
+            "json_schema without name or strict",
+            with_response_format(json_schema_response_format(serde_json::json!({}))),
+            false,
+        ),
+        ("background probe", probe, false),
+    ];
+    for (row, req, ships_client_format) in rows {
+        // Act
+        let before = format_keys_drop_count();
+        let body = assemble(&req);
+        let after = format_keys_drop_count();
+
+        // Assert
+        let format = &body["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema", "row {row}: {body}");
+        assert!(
+            format.get("name").is_none() && format.get("strict").is_none(),
+            "row {row}: {body}"
+        );
+        assert_eq!(
+            format["schema"]["properties"]
+                .get("client_marker")
+                .is_some(),
+            ships_client_format,
+            "row {row}: {body}"
+        );
+        assert_eq!(after, before, "row {row}");
+    }
+}

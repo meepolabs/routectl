@@ -7,7 +7,10 @@ use serde_json::json;
 use routectl_core::{ChatRequest, Message, MessageContent, Role};
 
 use super::{LANE, normalize_request};
-use crate::anthropic_api::request_drop_counter_tests::schema_past_the_repair_depth_bound;
+use crate::anthropic_api::request_drop_counter_tests::{
+    client_native_format_with_name_and_strict, json_schema_response_format,
+    schema_past_the_repair_depth_bound,
+};
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 
 const DROP_CLASS: &str = "response_format_unrepresentable";
@@ -47,11 +50,17 @@ fn user_req() -> ChatRequest {
 }
 
 fn drop_count(lane: &str) -> u64 {
+    class_count(lane, DROP_CLASS)
+}
+
+fn class_count(lane: &str, class: &str) -> u64 {
     crate::translation_drop_metrics::translation_drop_snapshot()
         .into_iter()
-        .find(|e| e.lane == lane && e.drop_class == DROP_CLASS)
+        .find(|e| e.lane == lane && e.drop_class == class)
         .map_or(0, |e| e.drop_count)
 }
+
+const FORMAT_KEYS_CLASS: &str = "response_format_keys_unrepresentable";
 
 /// Every Invoke request counts toward this lane's denominator exactly once,
 /// including one that fails assembly.
@@ -140,4 +149,98 @@ fn a_mapped_response_format_counts_no_invoke_drop() {
     // Assert
     assert_eq!(body["output_config"]["format"]["type"], "json_object");
     assert_eq!(after, before);
+}
+
+/// SINGLE-SOURCE pin for this lane's `name` / `strict` conversion loss: the
+/// converted format ships without them, counted once here and credited to no
+/// other lane.
+#[test]
+fn response_format_name_and_strict_count_once_on_the_invoke_lane() {
+    // Arrange
+    let mut req = user_req();
+    req.response_format = Some(json_schema_response_format(
+        json!({"name": "widget", "strict": true}),
+    ));
+
+    // Act
+    let before = (
+        class_count(LANE, FORMAT_KEYS_CLASS),
+        class_count("anthropic", FORMAT_KEYS_CLASS),
+    );
+    let body = normalize_request(&cfg(), &req).expect("invoke body assembles");
+    let after = (
+        class_count(LANE, FORMAT_KEYS_CLASS),
+        class_count("anthropic", FORMAT_KEYS_CLASS),
+    );
+
+    // Assert
+    let format = &body["output_config"]["format"];
+    assert_eq!(format["type"], "json_schema", "{body}");
+    assert!(
+        format.get("name").is_none() && format.get("strict").is_none(),
+        "{body}"
+    );
+    assert_eq!(after.0 - before.0, 1);
+    assert_eq!(
+        after.1, before.1,
+        "an Invoke request is not anthropic traffic"
+    );
+}
+
+/// The flush runs on the Err arm of the shared assembly: the converted format
+/// ships, then the schema repair rejects it.
+#[test]
+fn response_format_name_still_counts_when_invoke_assembly_fails() {
+    // Arrange
+    let deep = schema_past_the_repair_depth_bound()["output_config"]["format"]["schema"].clone();
+    let mut req = user_req();
+    req.response_format = Some(json!({
+        "type": "json_schema",
+        "json_schema": {"name": "widget", "schema": deep}
+    }));
+
+    // Act
+    let before = class_count(LANE, FORMAT_KEYS_CLASS);
+    let outcome = normalize_request(&cfg(), &req);
+    let after = class_count(LANE, FORMAT_KEYS_CLASS);
+
+    // Assert
+    assert!(outcome.is_err(), "the fixture must fail assembly");
+    assert_eq!(after - before, 1);
+}
+
+/// A client-native format's scrubbed keys, and a conversion that lost to it,
+/// count nothing; the client format is what ships in both rows.
+#[test]
+fn invoke_response_format_key_loss_counts_nothing_for_a_client_native_format() {
+    let mut client_native = user_req();
+    client_native.provider_extras = Some(client_native_format_with_name_and_strict());
+    let mut lost_to_client = client_native.clone();
+    lost_to_client.response_format = Some(json_schema_response_format(
+        json!({"name": "converted", "strict": true}),
+    ));
+    let rows = [
+        ("client-native format scrubbed", client_native),
+        ("conversion lost to a client-native format", lost_to_client),
+    ];
+    for (row, req) in rows {
+        // Act
+        let before = class_count(LANE, FORMAT_KEYS_CLASS);
+        let body = normalize_request(&cfg(), &req).expect("invoke body assembles");
+        let after = class_count(LANE, FORMAT_KEYS_CLASS);
+
+        // Assert
+        let format = &body["output_config"]["format"];
+        assert!(
+            format["schema"]["properties"]
+                .get("client_marker")
+                .is_some(),
+            "row {row}: the client format must ship: {body}"
+        );
+        assert!(
+            format.get("name").is_none() && format.get("strict").is_none(),
+            "row {row}: {body}"
+        );
+        assert_eq!(after, before, "row {row}");
+    }
 }

@@ -155,37 +155,57 @@ fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally, req: &Chat
     }
 }
 
-/// Per-request record that the canonical `response_format` carried a type tag
-/// [`response_format_to_anthropic_format`] cannot map. Caller-owned for the
-/// same reason as [`ClientFingerprintStripTally`]: the assembly that records
-/// into it serves two telemetry lanes, so each lane flushes it under its own
-/// lane constant, outside every fallible step.
-#[must_use = "an unrecognized response_format counts nothing until its lane flushes it"]
+/// Per-request record of what the canonical `response_format` lost on its way
+/// to `output_config.format`: a type tag [`response_format_to_anthropic_format`]
+/// cannot map, or a mapped `json_schema` whose `name` / `strict` the format
+/// object cannot carry. Caller-owned for the same reason as
+/// [`ClientFingerprintStripTally`]: the assembly that records into it serves
+/// two telemetry lanes, so each lane flushes it under its own lane constant,
+/// outside every fallible step.
+#[must_use = "a response_format loss counts nothing until its lane flushes it"]
 #[derive(Debug, Default)]
-pub(crate) struct UnrecognizedResponseFormatTally {
-    dropped: bool,
+pub(crate) struct ResponseFormatTally {
+    unrecognized: bool,
+    format_keys_lost: bool,
 }
 
-impl UnrecognizedResponseFormatTally {
-    const fn record(&mut self) {
-        self.dropped = true;
+impl ResponseFormatTally {
+    const fn record_unrecognized(&mut self) {
+        self.unrecognized = true;
+    }
+
+    const fn record_format_keys_lost(&mut self) {
+        self.format_keys_lost = true;
     }
 
     /// Whether this request's structured-output directive was dropped for an
     /// unrecognized type tag.
-    pub(crate) const fn dropped(&self) -> bool {
-        self.dropped
+    pub(crate) const fn unrecognized(&self) -> bool {
+        self.unrecognized
+    }
+
+    /// Whether this request's converted format shipped without the `name` /
+    /// `strict` its `json_schema` carried.
+    pub(crate) const fn format_keys_lost(&self) -> bool {
+        self.format_keys_lost
     }
 }
 
-/// Count this request's unrecognized `response_format` on the anthropic lane.
+/// Count this request's `response_format` losses on the anthropic lane.
 /// Takes the request so a background probe records nothing -- see
 /// `super::probe_aware_metrics`.
-fn flush_response_format_tally(tally: &UnrecognizedResponseFormatTally, req: &ChatRequest) {
-    if tally.dropped() && super::is_client_traffic(req) {
+/// TRANSLATION-DROP: lane=anthropic class=response_format_keys_unrepresentable test=response_format_name_and_strict_count_once_on_the_anthropic_lane
+fn flush_response_format_tally(tally: &ResponseFormatTally, req: &ChatRequest) {
+    if tally.unrecognized() && super::is_client_traffic(req) {
         crate::translation_drop_metrics::record_translation_drop(
             super::LANE,
             "response_format_unrepresentable",
+        );
+    }
+    if tally.format_keys_lost() && super::is_client_traffic(req) {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "response_format_keys_unrepresentable",
         );
     }
 }
@@ -355,7 +375,13 @@ pub(crate) enum AnthropicFormat {
 /// present is left untouched (a caller-supplied `output_config.format` wins
 /// over the canonical `response_format`). Creates `output_config` when
 /// absent. Shared with the Bedrock-Converse bag builder.
-pub(crate) fn set_output_config_format(obj: &mut serde_json::Map<String, Value>, format: Value) {
+///
+/// Returns whether `format` was inserted, so a caller can tell a format that
+/// ships from one discarded in favour of the caller's own.
+pub(crate) fn set_output_config_format(
+    obj: &mut serde_json::Map<String, Value>,
+    format: Value,
+) -> bool {
     let oc = obj
         .entry("output_config")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
@@ -367,8 +393,15 @@ pub(crate) fn set_output_config_format(obj: &mut serde_json::Map<String, Value>,
         // than silently dropping the caller's structured-output directive.
         *oc = Value::Object(serde_json::Map::new());
     }
-    if let Some(oc_obj) = oc.as_object_mut() {
-        oc_obj.entry("format").or_insert(format);
+    let Some(oc_obj) = oc.as_object_mut() else {
+        return false;
+    };
+    match oc_obj.entry("format") {
+        serde_json::map::Entry::Occupied(_) => false,
+        serde_json::map::Entry::Vacant(slot) => {
+            slot.insert(format);
+            true
+        }
     }
 }
 
@@ -391,6 +424,11 @@ pub(crate) struct DroppedFormatKeys {
 }
 
 impl DroppedFormatKeys {
+    /// Whether either key was omitted.
+    pub(crate) const fn any(self) -> bool {
+        self.name || self.strict
+    }
+
     /// Union of two paths' omissions.
     pub(crate) const fn merged(self, other: Self) -> Self {
         Self {
@@ -409,7 +447,7 @@ impl DroppedFormatKeys {
     /// object has no `strict` member to honor in the first place, so what the
     /// omission changes upstream is not something routectl can assert.
     pub(crate) fn emit(self, provider: &str) {
-        if !self.name && !self.strict {
+        if !self.any() {
             return;
         }
         // Never log the caller's `name` VALUE -- it is caller-controlled.
@@ -679,7 +717,8 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// seam). `hosted_mcp` is the same shape of caller-owned tally for the
 /// Responses hosted-MCP tools withheld from the translated `tools` list, and
 /// `response_format` for a structured-output directive dropped for an
-/// unrecognized type tag, and `foreign` for client extras withheld because
+/// unrecognized type tag or converted without its `name` / `strict`, and
+/// `foreign` for client extras withheld because
 /// another ingress dialect sent them.
 ///
 /// Every other caller wants [`normalize`], which emits before returning.
@@ -696,7 +735,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     forward_system_turns: bool,
     fingerprint: &mut ClientFingerprintStripTally,
     hosted_mcp: &mut HostedMcpToolWithholdTally,
-    response_format: &mut UnrecognizedResponseFormatTally,
+    response_format: &mut ResponseFormatTally,
     foreign: &mut ForeignDialectExtraTally,
 ) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
@@ -950,12 +989,18 @@ pub(crate) fn normalize_deferring_format_key_warn(
     if let Some(rf) = req.response_format.as_ref() {
         match response_format_to_anthropic_format(rf) {
             AnthropicFormat::Mapped(format, dropped) => {
-                if let Some(obj) = body.as_object_mut() {
+                // A conversion that loses to the caller's own format loses
+                // nothing: its keys never reach the wire either way.
+                if let Some(obj) = body.as_object_mut()
+                    && set_output_config_format(obj, format)
+                {
                     dropped_format_keys = dropped;
-                    set_output_config_format(obj, format);
+                    if dropped.any() {
+                        response_format.record_format_keys_lost();
+                    }
                 }
             }
-            AnthropicFormat::UnrecognizedType => response_format.record(),
+            AnthropicFormat::UnrecognizedType => response_format.record_unrecognized(),
             AnthropicFormat::PlainText | AnthropicFormat::Malformed => {}
         }
     }
@@ -1095,7 +1140,7 @@ pub(crate) fn normalize(
     }
     let mut fingerprint = ClientFingerprintStripTally::default();
     let mut hosted_mcp = HostedMcpToolWithholdTally::default();
-    let mut response_format = UnrecognizedResponseFormatTally::default();
+    let mut response_format = ResponseFormatTally::default();
     let mut foreign = ForeignDialectExtraTally::default();
     let assembled = normalize_deferring_format_key_warn(
         id,
@@ -1611,7 +1656,7 @@ mod set_output_config_format_tests {
     #[test]
     fn creates_output_config_when_absent() {
         let mut obj: Map<String, Value> = Map::new();
-        set_output_config_format(&mut obj, format());
+        assert!(set_output_config_format(&mut obj, format()));
         assert_eq!(obj["output_config"]["format"]["type"], "json_object");
     }
 
@@ -1631,7 +1676,10 @@ mod set_output_config_format_tests {
             "output_config".into(),
             json!({"format": {"type": "json_schema", "schema": {"type": "string"}}}),
         );
-        set_output_config_format(&mut obj, format());
+        assert!(
+            !set_output_config_format(&mut obj, format()),
+            "a discarded format reports that it was not inserted"
+        );
         assert_eq!(obj["output_config"]["format"]["type"], "json_schema");
     }
 

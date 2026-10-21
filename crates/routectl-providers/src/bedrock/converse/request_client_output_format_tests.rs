@@ -230,3 +230,105 @@ fn client_output_config_without_a_format_ships_the_bag_unchanged_and_counted() {
         "the withheld client output_config counts once for the request"
     );
 }
+
+const FORMAT_KEYS_LOST: &str = "response_format_keys_unrepresentable";
+
+fn format_keys_drop_count(lane: &str) -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == lane && e.drop_class == FORMAT_KEYS_LOST)
+        .map_or(0, |e| e.drop_count)
+}
+
+fn json_schema_response_format(members: Value) -> Value {
+    crate::anthropic_api::request_drop_counter_tests::json_schema_response_format(members)
+}
+
+/// Each row's converted format ships without the keys it carried, counted
+/// once on this lane and credited to no other.
+#[test]
+fn response_format_name_and_strict_count_once_on_the_converse_lane() {
+    let rows = [
+        ("name only", json!({"name": "widget"})),
+        ("strict only", json!({"strict": true})),
+        ("name and strict", json!({"name": "widget", "strict": true})),
+    ];
+    for (row, members) in rows {
+        // Arrange
+        let mut req = ingress_request(None, None, 2048);
+        req.response_format = Some(json_schema_response_format(members));
+
+        // Act
+        let before = (
+            format_keys_drop_count("bedrock-converse"),
+            format_keys_drop_count("anthropic"),
+        );
+        let bag = shipped_bag(&cfg(false), &req);
+        let after = (
+            format_keys_drop_count("bedrock-converse"),
+            format_keys_drop_count("anthropic"),
+        );
+
+        // Assert
+        let format = &bag["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema", "row {row}: {bag}");
+        assert!(
+            format.get("name").is_none() && format.get("strict").is_none(),
+            "row {row}: {bag}"
+        );
+        assert_eq!(after.0 - before.0, 1, "row {row}");
+        assert_eq!(after.1, before.1, "row {row}: not anthropic traffic");
+    }
+}
+
+/// Nothing is counted when no converted key is lost: a client-native format
+/// whose keys the final-bag scrub removes, a conversion that lost to that
+/// format, and a conversion carrying neither key.
+#[test]
+fn converse_response_format_key_loss_counts_nothing_when_no_conversion_loses_a_key() {
+    let client_native_extras =
+        crate::anthropic_api::request_drop_counter_tests::client_native_format_with_name_and_strict(
+        );
+    let client_native = request_with_client_output_config(
+        None,
+        None,
+        client_native_extras["output_config"].clone(),
+    );
+    let mut lost_to_client = client_native.clone();
+    lost_to_client.response_format = Some(json_schema_response_format(
+        json!({"name": "converted", "strict": true}),
+    ));
+    let mut keyless = ingress_request(None, None, 2048);
+    keyless.response_format = Some(json_schema_response_format(json!({})));
+    let rows = [
+        ("client-native format scrubbed", client_native, true),
+        (
+            "conversion lost to a client-native format",
+            lost_to_client,
+            true,
+        ),
+        ("json_schema without name or strict", keyless, false),
+    ];
+    for (row, req, ships_client_format) in rows {
+        // Act
+        let before = format_keys_drop_count("bedrock-converse");
+        let bag = shipped_bag(&cfg(false), &req);
+        let after = format_keys_drop_count("bedrock-converse");
+
+        // Assert
+        let format = &bag["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema", "row {row}: {bag}");
+        assert!(
+            format.get("name").is_none() && format.get("strict").is_none(),
+            "row {row}: {bag}"
+        );
+        assert_eq!(
+            format["schema"]["properties"]
+                .get("client_marker")
+                .is_some(),
+            ships_client_format,
+            "row {row}: {bag}"
+        );
+        assert_eq!(after, before, "row {row}");
+    }
+}

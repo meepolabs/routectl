@@ -54,8 +54,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // and the Err arm, ahead of the first fallible step: this lane's
     // request-volume DENOMINATOR. Exactly one call site per lane.
     crate::translation_drop_metrics::record_translation_lane_seen(LANE);
-    let mut response_format =
-        crate::anthropic_api::request::UnrecognizedResponseFormatTally::default();
+    let mut response_format = crate::anthropic_api::request::ResponseFormatTally::default();
     let mut foreign = crate::anthropic_api::request::ForeignDialectExtraTally::default();
     let assembled = crate::anthropic_api::request::normalize_deferring_format_key_warn(
         &cfg.id,
@@ -258,14 +257,19 @@ fn declare_anthropic_version(req: &ChatRequest) {
     );
 }
 
-/// Count this request's unrecognized `response_format` on the Invoke lane.
-fn flush_response_format_tally(
-    tally: &crate::anthropic_api::request::UnrecognizedResponseFormatTally,
-) {
-    if tally.dropped() {
+/// Count this request's `response_format` losses on the Invoke lane.
+/// TRANSLATION-DROP: lane=bedrock-invoke class=response_format_keys_unrepresentable test=response_format_name_and_strict_count_once_on_the_invoke_lane
+fn flush_response_format_tally(tally: &crate::anthropic_api::request::ResponseFormatTally) {
+    if tally.unrecognized() {
         crate::translation_drop_metrics::record_translation_drop(
             LANE,
             "response_format_unrepresentable",
+        );
+    }
+    if tally.format_keys_lost() {
+        crate::translation_drop_metrics::record_translation_drop(
+            LANE,
+            "response_format_keys_unrepresentable",
         );
     }
 }
