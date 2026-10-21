@@ -83,6 +83,32 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   The grounding envelopes are under
   `crates/routectl-router/tests/fixtures/rejections/openai-compat/`.
 
+- **Client extras forward only from the Chat ingress.** A Chat client's
+  unmodeled top-level fields (`metadata`, `service_tier`, `prediction`,
+  ...) are merged onto the Chat body as sent; there is no key blocklist
+  to keep current, so a strict host that refuses one answers with its
+  own 400. Fields an Anthropic or Responses client sent are spelled for
+  another vendor and never reach this wire: they count once per request
+  as the `foreign_dialect_extra` drop class, except such a client's
+  `metadata` identity block, which counts as
+  `client_fingerprint_stripped` (`select_client_extras` in
+  `openai_compat/request.rs`). The operator's `payload_extras` always
+  ship. One field never does, whoever wrote it: `mcp_servers`, whose
+  entries can carry a token issued for a remote MCP server, is removed
+  as the last mutation of the body and counted as the
+  `credential_bearing_field_withheld` policy action
+  (`drop_credential_bearing_fields`).
+
+- **A stream without `include_usage` ends with no usage.** Many
+  openai-compat hosts close a stream on a bare `[DONE]`, with no
+  terminal usage chunk or `finish_reason`, unless the body asks for
+  `stream_options.include_usage: true`. The egress sets it on every
+  streaming request after merging extras (`force_stream_include_usage`),
+  overriding a client's `false` or non-object `stream_options` as a
+  declared edit counted once as the `client_stream_include_usage_overridden`
+  policy action. Only an operator `payload_extras` value for
+  `stream_options.include_usage` is left as configured.
+
 ## Anthropic API surface
 
 - **A mispaired tool transcript is forwarded; of its pairing defects only
@@ -222,10 +248,12 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   - `stop_sequences` is NOT stripped: probed and accepted (200). Only
     the two alternative-continuation sampling knobs are rejected.
   - `top_k` is the sibling hole. `reserved.rs` treats it as
-    non-canonical pass-through, so it is the one sampling param
-    `provider_extras` can still smuggle onto the wire. No confirmed 400
-    today, so nothing strips it -- if a `top_k` request starts failing
-    on the OAuth lane, this is the first place to look.
+    non-canonical pass-through, so it is the one sampling param an
+    Anthropic client's `provider_extras` can still put on the wire (a
+    Chat client's `top_k` is a foreign-dialect extra and never reaches
+    this egress). No confirmed 400 today, so nothing strips it: if a
+    `top_k` request starts failing on the OAuth lane, this is the first
+    place to look.
 
 - **`max_tokens` is required, so routectl fills it, and the fill can be
   refused.** The Messages API 400s a body without `max_tokens`, so the
@@ -293,22 +321,34 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   bag, Bedrock-Invoke) because AWS forwards the field verbatim to an
   Anthropic validator; Bedrock acceptance itself is unmeasured and a
   probe item is filed. The drop reads the ASSEMBLED body, not just the
-  `response_format` converter: `output_config` is deliberately not a
-  routectl-managed key, so a caller-supplied `output_config.format`
-  rides through `provider_extras` and WINS over the converter, and
-  would otherwise never be reshaped.
+  `response_format` converter: an Anthropic client's own
+  `output_config.format` WINS over the converter and would otherwise
+  never be reshaped. On the Anthropic egress and Invoke, `output_config`
+  is not a routectl-managed key, so the client's object rides through
+  `provider_extras`; on Converse it is a managed bag key, so only the
+  client's `format` member is merged into the `output_config` routectl
+  composes (`insert_client_output_format` in
+  `bedrock/converse/extras.rs`). Either way the client value is read only
+  from the Anthropic ingress or a library caller. A converted format's
+  lost `name` / `strict` is counted once per request as the
+  `response_format_keys_unrepresentable` drop class on all three seams;
+  a conversion that loses to the client's own format counts nothing.
 
 - **Forward-compat sweep on the Anthropic ingress.** Anthropic adds
   new top-level body fields on a quarterly cadence (e.g. recent
   additions: `context_management`, `context_hint`, `speed`,
   `diagnostics`, `mcp_servers`). Without an explicit pull-out, serde
   on `ChatRequest` would silently drop them at the ingress boundary.
-  `translate_request` sweeps every key NOT in
-  `CANONICAL_CHAT_REQUEST_WIRE_FIELDS` into `provider_extras` so the
-  egress's `merge_provider_extras` forwards them upstream verbatim.
-  When canonical adds a new field, also add it to the
-  `CANONICAL_CHAT_REQUEST_WIRE_FIELDS` const in
-  `crates/routectl-cli/src/ingress/anthropic/parse.rs`.
+  `translate_request` sweeps every key `is_canonical_request_key`
+  (`crates/routectl-core/src/reserved.rs`) does not claim into
+  `provider_extras`, the same predicate the OpenAI Chat ingress sweeps
+  with, so the two dialects agree on what an extra is. A swept key is
+  forwarded verbatim only to an egress that speaks the client's
+  dialect: Anthropic-ingress extras reach anthropic-api, Invoke and the
+  Converse bag, Chat-ingress extras reach openai-compat, and any other
+  pairing drops the key and counts it once per request as
+  `foreign_dialect_extra` (`managed_keys::client_extras_for`). When
+  canonical adds a new field, add it to `is_canonical_request_key`.
 
 - **Inbound `anthropic-beta` HTTP header lift.** The
   `@anthropic-ai/sdk` Beta API translates the SDK option `betas:
@@ -686,17 +726,25 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   needs no routectl release. A few entries are still filtered:
 
   - the router withholds, per lane, its shipped seed of Bedrock-rejected
-    client betas and any beta flag it learned the lane rejects, and a
-    rejection naming its client betas is repaired with one retry, which
-    teaches the lane those flags;
+    client betas and any beta flag it learned the lane rejects, and
+    every client beta from a Converse model whose id is provably not
+    Anthropic (such a model refuses the `anthropic_beta` bag key itself,
+    and `output_config` too, which the Converse egress omits for it);
+  - a rejection naming its client betas is repaired by the router's
+    learning engine (`router/learn_beta_repair.rs`): one re-send without
+    those flags, drawn from the request's shared repair budget, which
+    teaches the lane those flags once an attempt without them succeeds;
+  - a body field a Chat or Responses client sent is dropped as a
+    foreign-dialect extra;
   - `mcp_servers` never ships, and neither does a `tool_choice` left
     with no non-empty `tools`.
 
   Use `ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture what
   is sent (see
   [CONFIGURATION.md](CONFIGURATION.md#bedrock-which-client-betas-reach-aws)).
-  The withholding lives in `bedrock/betas.rs` and the body-field drops in
-  `bedrock/body_fields.rs`. The withholding and the `mcp_servers` drop
+  The withhold decision lives in the router (`router/beta_withhold.rs`),
+  the carriers apply it through `beta_withhold.rs` and `bedrock/betas.rs`,
+  and the body-field drops live in `bedrock/body_fields.rs`. The withholding and the `mcp_servers` drop
   apply on both Invoke (top-level Anthropic body) and Converse
   (`additionalModelRequestFields` bag); the orphan `tool_choice` drop is
   Invoke-only. Drops log at
@@ -706,7 +754,7 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   Per-provider escape hatch -- `[providers.X] anthropic_beta = [...]`:
   those flags are always sent, once each (operator-asserted). Together
   with `header_extras`-pinned betas it always sends a seeded or
-  learned-rejected flag, and the beta repair never strips it.
+  learned-rejected flag, and the beta repair never withholds it.
 
 - **`ValidationException` 400s are header-discriminated, not
   `__type`-bodied.** AWS docs show request-validation errors as a flat

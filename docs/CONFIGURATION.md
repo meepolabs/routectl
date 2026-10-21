@@ -78,7 +78,8 @@ overlays merge, what's reserved.
 **Advanced: overlay merge internals**
 - [Field-assignment table](#field-assignment-table)
 - [header_extras merge](#header_extras-merge) /
-  [payload_extras merge](#payload_extras-merge) /
+  [payload_extras merge](#payload_extras-merge)
+  ([client extras by dialect](#client-extras-follow-the-clients-dialect)) /
   [Reserved-header buckets](#reserved-header-buckets)
 - [Worked example: three-source anthropic-beta compose](#worked-example-three-source-anthropic-beta-compose)
 
@@ -692,10 +693,57 @@ provider + model ON TOP. A provider-side `payload_extras = { foo = "p" }`
 wins over a swept ingress value at the same key; a model-side value
 wins over both.
 
-The Gemini egress is the exception: it forwards the operator layer
-alone for ingress traffic, so a swept client value never reaches it,
-even underneath an operator value at the same key. See the
+### Client extras follow the client's dialect
+
+The swept client fields are spelled for the client's own wire, so an
+egress forwards them only when the client speaks that egress's
+vocabulary:
+
+| Egress | Forwards client extras from |
+|---|---|
+| `anthropic-api` (Mantle's Anthropic lane included), Bedrock Invoke, the Bedrock Converse bag | the Anthropic Messages ingress |
+| `openai-compat` (Mantle's OpenAI-compatible lane included) | the OpenAI Chat Completions ingress |
+| `openai-responses` | its own fixed allowlist of keys, whatever the ingress |
+| `gemini` | no ingress: only the operator layer |
+
+A library caller that builds its own `ChatRequest` keeps forwarding its
+`provider_extras` to every egress but Responses, which applies its
+allowlist to it too. For any other request, an egress keeps only the
+keys it handles itself (a key it manages, which its merge drops as
+before, or one it translates, such as `output_config` on openai-compat)
+and the operator's `payload_extras` with the operator's value. Every
+other client extra is dropped, and a request that dropped any is counted
+once as the `foreign_dialect_extra` drop class on that lane, with the
+sanitized key names (never the values) at `debug`. On openai-compat a
+`metadata` object from a client of another dialect is the exception: it
+is the client identity block, and counts as `client_fingerprint_stripped`
+instead.
+
+The operator layer is never affected: a key set in `payload_extras` is
+sent whatever the client's dialect. To send a field a client of another
+dialect cannot reach the upstream with (a Chat client's `top_k` to
+Claude, say), set it in `payload_extras`.
+
+Gemini forwards the operator layer alone for all ingress traffic, so a
+swept client value never reaches it, even underneath an operator value
+at the same key. See the
 [Gemini `payload_extras`](#providersx-gemini-kind--gemini) entry.
+
+Whatever the source, openai-compat never sends `mcp_servers`: its
+entries can carry a token issued for a remote MCP server, so the field
+is removed from the finished body, operator `payload_extras` included,
+and counted once per request as the `credential_bearing_field_withheld`
+policy action. Bedrock drops it the same way (see
+[Bedrock body fields](#bedrock-body-fields)). Gemini, by contrast, still
+sends an `mcp_servers` the operator put in its `payload_extras`.
+
+On an openai-compat streaming request, `stream_options.include_usage` is
+set to `true` after the merge, so the upstream ends the stream with the
+usage chunk routectl's accounting reads. A client value other than
+`true` (or a `stream_options` that is not an object) is overridden and
+counted once per request as the `client_stream_include_usage_overridden`
+policy action. Only an operator `payload_extras` value for
+`stream_options.include_usage` is sent as configured.
 
 ## Reserved-header buckets
 
@@ -793,38 +841,49 @@ strongest first:
 
 A request on a forwarded credential withholds nothing: the client owns
 that credential and its beta choices. Each withheld flag is logged at
-`debug` on both `api_shape = "invoke"` and `"converse"`; Converse also
-counts the withhold once per request in the translation-drop metrics.
+`debug` on both `api_shape = "invoke"` and `"converse"`, and each carrier
+counts the withhold once per request as the `anthropic_beta_rejected_by_bedrock`
+drop class.
 
-For a client flag the router let through, routectl repairs AWS's
-rejection itself, on both carriers and for streaming, non-streaming, and
-token-count calls. Bedrock answers with a `ValidationException` naming
-the flags (``Unexpected value(s) `<flag>`, ... for the `anthropic-beta`
-header. ...``, which Converse prefixes with `The model returned the
-following errors: `). When it does, routectl retries the same request
-once without exactly those flags. The repair applies only to the exact
-message and only when every named flag came from the client; it never
-removes an operator-floor flag (including a `header_extras`-pinned one).
-It skips a rejection that names no flags (`invalid beta flag`), skips one
-naming a flag routectl itself would re-add to the retry (the
-structured-outputs or `thinking.display` `"updates"` beta, which the
-request's own body implies), and never retries a second time. The retry
-is logged at `warn`, with flag names only.
+For a client flag the router let through, the router repairs the
+upstream's rejection itself, on both carriers and for streaming,
+non-streaming, and token-count calls. Bedrock answers with a
+`ValidationException` naming the flags (``Unexpected value(s) `<flag>`,
+... for the `anthropic-beta` header. ...``, which Converse prefixes with
+`The model returned the following errors: `). When it does, the router's
+learning engine re-sends the request once on the same target without
+exactly those flags. The repair applies only to that exact message on a
+400, and only when every named flag came from the client: it never
+removes an operator-floor flag (including a `header_extras`-pinned one),
+skips a rejection that names no flags (`invalid beta flag`), skips one
+naming a flag the request's own body requires (the structured-outputs or
+`thinking.display` `"updates"` beta, which the egress would re-add),
+skips a flag already withheld, and does nothing on a forwarded
+credential. It is one of the at most two repairs a request may draw,
+shared with field repair, and a target repairs a beta
+rejection once. The re-send is logged at `debug`, with flag names only.
+The same repair runs on an `anthropic-api` provider, Mantle's Anthropic
+lane included, where the rejection arrives as an `invalid_request_error`
+with the same message; see
+[Anthropic API: client betas pass through](#anthropic-api-client-betas-pass-through).
 
-**Learned beta verdicts.** When an inference retry succeeds, the router
-records each stripped flag as a learned negative on that lane
-(`<provider>#<upstream>`, capability `beta:<flag>`), so later requests
-withhold it without another 400. These are ordinary learned capability
-facts: they are written to the capability ledger and survive a restart,
-decay on the `[capability] decay_hours` window (48 hours by default) and
-then revalidate with one re-probe, show in `routectl doctor` as
-`beta:<flag>` cells with action `withhold`, and are dropped with
+**Learned beta verdicts.** Once an attempt sent without the repaired flags
+succeeds, the router records each of them as a learned negative on that
+lane (`<provider>#<upstream>`, capability `beta:<flag>`), so later
+requests withhold it without another 400. These are ordinary learned
+capability facts: they are written to the capability ledger and survive
+a restart, decay on the `[capability] decay_hours` window (48 hours by
+default) and then revalidate with one re-probe, show in `routectl doctor`
+as `beta:<flag>` cells with action `withhold`, and are dropped with
 `routectl capability purge <provider#upstream> beta:<flag>`. A lane
 holds at most 32 learned beta entries; a new one past that evicts the
-lane's most recently learned one, so established entries outlast a burst of
-new flags. Nothing is learned from a token-count retry, a
+lane's most recently learned one, so established entries outlast a burst
+of new flags. Nothing is learned from a token-count repair, a
 forwarded-credential request, a flag under a `force_supported` override,
-or with `[capability] enabled = false`.
+or with `[capability] enabled = false`. The live wire check reports a
+rejection the repair answered as `repaired_lossy` once the repaired
+attempt succeeds (the client asked for the flag), and as unrepaired
+otherwise.
 
 **Lifting the seed on one lane.** If your account accepts a seeded flag,
 `routectl capability purge <provider#upstream> beta:<flag>` lifts the
@@ -839,8 +898,9 @@ To send a flag permanently, use a `force_supported` override on
 **Library consumers.** The seed and the learned verdicts live in the
 router, which hands each request its withheld set. Code that calls the
 Bedrock provider directly, without the router, gets no withheld set and
-so no longer has the seed applied: it must drop rejected flags itself
-(or route through the router).
+so no longer has the seed applied, and no beta rejection is repaired:
+the repair belongs to the router too. Such code must drop rejected
+flags itself (or route through the router).
 
 ### Bedrock body fields
 
@@ -858,7 +918,48 @@ operator knob:
   a pairing Anthropic rejects -- is removed from the Invoke body that
   ships.
 
-Both drops log at `debug`, by field name only. A field the account's
+Both drops log at `debug`, by field name only. Two more rules decide
+what reaches the bag or body:
+
+- **Client fields follow the client's dialect.** A swept client field
+  reaches Invoke and the Converse bag only from an Anthropic Messages
+  client (or a library caller); one a Chat or Responses client sent is
+  dropped and counted as `foreign_dialect_extra` (see
+  [Client extras follow the client's dialect](#client-extras-follow-the-clients-dialect)).
+  On Converse, `output_config` is a key routectl composes, so a client's
+  `output_config` object is not merged whole: its `format` member is
+  merged into the composed `output_config`, beside any effort, and wins
+  over a `response_format` conversion.
+- **A non-Claude model on Converse gets no `output_config`.** For a
+  model whose upstream id is provably not Anthropic (see
+  [which client betas reach AWS](#bedrock-which-client-betas-reach-aws)),
+  the composed `output_config` (its effort and its structured-output
+  format alike) is omitted from the bag, because such a model refuses the
+  key, and the request counts once as the `output_config_unrepresentable`
+  drop class. The structured-outputs beta is then not added either. To
+  keep structured-output requests away from such a model, list
+  `structured_output` under `unsupported` in
+  [`[capability.overrides]`](#capabilityoverrides-is-the-durable-decision-surface).
+
+The operator's `[models.X] additional_request_fields` map merges onto
+the Invoke body and into the Converse bag, except a key routectl writes
+itself, which is dropped with the WARN `additional_model_request_fields
+attempted to override routectl-managed key; dropped` naming it and
+counted once per request as the `operator_extra_managed_key_conflict`
+policy action. On Invoke the refused set is every field the
+`anthropic-api` egress manages plus `anthropic_version` (which the Invoke
+body must carry as `bedrock-2023-05-31`): `model`, `messages`, `system`,
+`temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `stop`,
+`stop_sequences`, `stream`, `n`, `seed`, `logprobs`, `top_logprobs`,
+`logit_bias`, `presence_penalty`, `frequency_penalty`, `user`, `tools`,
+`tool_choice`, `response_format`, `cache_control`, `anthropic_beta`,
+`reasoning`, `reasoning_details`, `provider_extras`,
+`chat_template_kwargs`, `thinking` and `parallel_tool_calls`. On Converse
+it is the same canonical set plus the bag keys `thinking` and
+`output_config` and the Converse body fields `inferenceConfig`,
+`toolConfig` and `additionalModelResponseFieldPaths`.
+
+A field the account's
 Bedrock schema has not caught up with is answered with a 400 naming it
 (`Extra inputs are not permitted`); route requests that carry it
 elsewhere, or have the client stop sending it.
@@ -890,7 +991,9 @@ the upstream except the ones the router withholds from the lane: an
 `unsupported` override on the flag's `beta:<flag>` key under
 [`[capability.overrides]`](#capabilityoverrides-is-the-durable-decision-surface)
 (a `force_supported` one sends it), and a learned or seeded `beta:` verdict
-where the lane has one (today only Bedrock lanes learn or seed them). The
+where the lane has one (only Bedrock lanes carry the shipped seed; a
+`beta:` negative is learned on any lane whose rejection names the client
+flags, see below). The
 floor is never withheld: the operator floor (provider and model
 `header_extras["anthropic-beta"]`) always ships, as do the own-OAuth flags
 below and the [capability betas](#capability-betas-are-always-unioned); a
@@ -942,6 +1045,15 @@ supplied it; and `redact-thinking-2026-02-12` is reported with the exception
 provider, where no removal runs). The warning is advisory: the config still
 loads and the exit code is unchanged.
 
+When an `anthropic-api` upstream, Mantle's Anthropic lane included,
+answers a 400 `invalid_request_error` whose message is ``Unexpected
+value(s) `<flag>`, ... for the `anthropic-beta` header. ...``, the router
+repairs and learns it exactly as on Bedrock: one re-send without the
+named client flags, never a floor or body-implied flag, then a learned
+`beta:<flag>` negative once an attempt without them succeeds (see
+[which client betas reach AWS](#bedrock-which-client-betas-reach-aws)
+for the full rules).
+
 At ingress, client flags from the body and the `anthropic-beta` header are
 split on commas, trimmed and deduplicated; a flag holding any byte outside
 visible ASCII is dropped, and a request with more than 64 distinct flags is
@@ -982,9 +1094,12 @@ Neither is a client-opted beta: each is a routectl-derived capability
 signal implied by the feature the request is already using. A 2026-08-11
 live capture on `api.anthropic.com` (one lane, one seat, one model)
 accepted `output_config.format` both with and without
-`structured-outputs-2025-12-15`, so that union is retained as
-belt-and-braces rather than a proven hard requirement; the
-`output_config.effort` case remains unmeasured. Dropping either flag is
+`structured-outputs-2025-12-15`, and a 2026-10-21 measurement on Bedrock
+Invoke and Converse (one model) accepted both `output_config.format` and
+`output_config.effort` without either flag. The structured-outputs union
+is therefore retained as belt-and-braces rather than a proven hard
+requirement, and Bedrock gains no effort beta; the `output_config.effort`
+case on `api.anthropic.com` remains unmeasured. Dropping either flag is
 therefore not a reliable way to constrain a request -- an older account or
 model tier may still gate the field.
 

@@ -187,7 +187,7 @@ Two of the gated flags are additionally unioned ON DEMAND, keyed on what the ass
 | `output_config.format` | `structured-outputs-2025-12-15` | every auth kind (suppressed on the forwarded leg) |
 | `output_config.effort` | `effort-2025-11-24` | own-OAuth to `api.anthropic.com` only |
 
-Both unions run after the floor and after every other beta step: they are capability signals implied by the shipped body, not client-opted betas. `output_config.format` was measured 2026-08-11 (one lane, one seat, one model) to be accepted both with and without its beta, so its union is retained as belt-and-braces rather than a proven hard requirement; the `output_config.effort` case is unmeasured. Both are one-way -- the body's field adds the flag; a caller-supplied flag with no matching field is left untouched.
+Both unions run after the floor and after every other beta step: they are capability signals implied by the shipped body, not client-opted betas. `output_config.format` was measured 2026-08-11 (one lane, one seat, one model) to be accepted both with and without its beta, so its union is retained as belt-and-braces rather than a proven hard requirement; the `output_config.effort` case is unmeasured on `api.anthropic.com`. Bedrock Invoke and Converse accepted both fields without either flag when measured 2026-10-21 (one model), so Bedrock adds the structured-outputs flag only as the same belt-and-braces union and never adds an effort flag. Both are one-way -- the body's field adds the flag; a caller-supplied flag with no matching field is left untouched.
 
 ### Sampling params stripped on the own-OAuth lane
 
@@ -195,7 +195,7 @@ Both unions run after the floor and after every other beta step: they are capabi
 | --- | --- |
 | `temperature`, `top_p` | REMOVED from the final body on the own-OAuth `api.anthropic.com` lane |
 | `stop_sequences` | preserved (the OAuth seat accepts it) |
-| `top_k` | not touched -- see [WIRE-GOTCHAS.md](./WIRE-GOTCHAS.md) |
+| `top_k` | not touched when an Anthropic client sends it; a Chat client's `top_k` never reaches this egress (see [WIRE-GOTCHAS.md](./WIRE-GOTCHAS.md)) |
 
 Anthropic's OAuth seat 400s a `/v1/messages` body carrying either `temperature` or `top_p` (both confirmed). routectl drops them as the last mutation before the request goes out, on both the streaming and non-streaming paths, and emits one structured `DEBUG` event per affected request naming only the dropped keys (never their values).
 
@@ -242,17 +242,26 @@ shapes repair and learn a refused thinking type per lane (see
 [Anthropic Opus 4.7+](#anthropic-opus-47-and-any-future-adaptive-thinking-models)).
 
 **Betas and body fields pass through.** routectl keeps no Bedrock
-allowlist: every client `anthropic_beta` flag and every body field
-reaches AWS, so a flag or field Anthropic adds needs no routectl release.
+allowlist: every client `anthropic_beta` flag and every body field an
+Anthropic client sends reaches AWS, so a flag or field Anthropic adds
+needs no routectl release. A body field a Chat or Responses client sent
+is spelled for another vendor and is dropped (counted as
+`foreign_dialect_extra`).
 The router withholds, per lane, a small shipped seed of betas Bedrock
 rejects (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
 `prompt-caching-scope-2026-01-05`; applied even with `[capability]
 enabled = false`) plus every beta flag it learned that lane rejects. On
 `api_shape = "converse"` it withholds every client beta from a model
 whose id is provably not Anthropic (GPT, Nova, Llama, ...), since those
-models refuse the `anthropic_beta` field itself. A
-rejection that names its client betas is repaired with one retry, and
-the stripped flags become learned `beta:<flag>` negatives: persisted
+models refuse the `anthropic_beta` field itself; the operator floor still
+ships. Those models refuse `output_config` too, so the Converse egress
+omits it (effort and structured-output format alike) and counts the loss
+as `output_config_unrepresentable`. An inference-profile ARN proves no
+vendor and gets neither treatment. A rejection that names its client
+betas is repaired by the router's learning engine, which re-sends once
+without those flags within the request's shared repair budget, and once
+an attempt without them succeeds the flags become learned `beta:<flag>`
+negatives: persisted
 across restarts, decaying after 48 hours into one re-probe, visible in
 `routectl doctor`, and removable with `routectl capability purge
 <provider#upstream> beta:<flag>`. The same purge lifts a seeded flag on a
@@ -261,7 +270,8 @@ decision, put the flag under `[capability.overrides.<provider>]`:
 `unsupported = ["beta:<flag>"]` never sends it, `force_supported`
 always does. The operator floor (provider `anthropic_beta` plus
 `header_extras`-pinned betas) is always sent, once each. Code that calls
-the Bedrock provider directly, without the router, gets no seed.
+the Bedrock provider directly, without the router, gets no seed and no
+beta repair.
 Two body fields never ship: `mcp_servers`, and a `tool_choice` left
 with no non-empty `tools`. Use
 `ROUTECTL_LOG=routectl_providers::bedrock=trace` to see what is sent.
