@@ -202,11 +202,11 @@ fn response_format_maps_to_output_config_format_bag() {
 }
 
 /// The Converse bag shields `output_config` from BOTH extras paths
-/// (`managed_keys::is_managed_key` covers it), so an operator- or caller-supplied
-/// object never reaches the bag and the shared converter is the only writer.
-/// Pinned here because that is what makes the Converse seam's exposure
-/// narrower than the Invoke seam's, where `output_config` is NOT a managed
-/// key.
+/// (`managed_keys::is_managed_key` covers it), so an operator-supplied object
+/// never reaches the bag; the only writers are the composed effort, the
+/// shared converter, and the client's own `format` member. Pinned here
+/// because that is what makes the Converse seam's exposure narrower than the
+/// Invoke seam's, where `output_config` is NOT a managed key.
 #[test]
 fn operator_supplied_output_config_never_reaches_the_bag() {
     let mut cfg = fake_cfg();

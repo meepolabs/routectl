@@ -227,3 +227,7 @@ mod tests_output_schema;
 #[cfg(test)]
 #[path = "request_thinking_carrier_tests.rs"]
 mod tests_thinking_carrier;
+
+#[cfg(test)]
+#[path = "request_client_output_format_tests.rs"]
+mod tests_client_output_format;

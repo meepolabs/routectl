@@ -64,6 +64,10 @@ pub(super) fn build_additional_fields(
     // silently shadowed. Do not reorder these calls or relax the
     // `or_insert_with` semantics.
     insert_thinking(cfg, req, &mut bag);
+    // After `insert_thinking`, which writes `output_config` wholesale, and
+    // before the `response_format` conversion, whose `or_insert` then leaves
+    // the client's format in place.
+    insert_client_output_format(req, &mut bag);
     let dropped_format_keys = insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
@@ -254,6 +258,24 @@ fn insert_provider_extras(
         bag.insert(k.clone(), v.clone());
     }
     actions
+}
+
+/// Merge the Anthropic client's own `output_config.format` into the bag's
+/// `output_config`, beside any effort `insert_thinking` composed.
+/// `output_config` is a managed bag key, so `insert_provider_extras` withholds
+/// the client's object whole; `format` is the one member forwarded, as the
+/// Anthropic egress forwards it. The final-bag passes scrub, repair and gate
+/// it like a converted format.
+fn insert_client_output_format(req: &ChatRequest, bag: &mut Map<String, Value>) {
+    let Some(format) = req
+        .provider_extras
+        .as_ref()
+        .and_then(|extras| extras.get("output_config"))
+        .and_then(|config| config.get("format"))
+    else {
+        return;
+    };
+    crate::anthropic_api::request::set_output_config_format(bag, format.clone());
 }
 
 /// Honor the canonical structured-output directive on the Converse bag by
