@@ -92,8 +92,9 @@ history_reasoning = "preserve"          # echoes reasoning_content back to upstr
 Under `preserve`, an assistant turn that carries `tool_calls` always
 leaves with a `reasoning_content` key -- an empty string when the turn
 had no reasoning -- because DeepSeek's thinking mode rejects a tool-call
-turn with the key absent. vLLM shares this preserve path and receives the
-same empty key.
+turn with the key absent. This empty key is DeepSeek-only: the vLLM
+dialect shares the rename to `reasoning_content` but never adds the key to
+a turn that had no reasoning.
 
 **Default behavior (without the knob):** routectl strips reasoning fields from outgoing assistant history (correct for DeepSeek v3). When you upgrade to v4, the strip is wrong and the upstream 400s. Routectl warns at the strip site so you see the loss in logs:
 
