@@ -289,13 +289,6 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "bedrock/invoke.rs",
-        "normalize_request",
-        "additional_model_request_fields attempted to override",
-        "uncounted policy action: an operator extra naming a managed key is refused on this \
-         lane, declared by this WARN only, where the Converse lane counts the same refusal",
-    ),
-    (
-        "bedrock/invoke.rs",
         "strip_billing_system_field",
         "billing/attribution system block dropped",
         "uncounted policy action: the client fingerprint is withheld from the assembled body, \
@@ -422,6 +415,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         3,
     ),
     ("bedrock/invoke.rs", "flush_foreign_dialect_tally", 1),
+    ("bedrock/invoke.rs", "merge_operator_extras", 1),
     ("gemini/request.rs", "build_response_format", 1),
     ("gemini/request.rs", "build_system_instruction", 2),
     ("gemini/request.rs", "build_tools_and_config", 2),

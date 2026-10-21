@@ -134,22 +134,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // (rather than at config load) so the WARN line carries the
     // provider id at request time and matches the operator's
     // existing log workflow.
-    if let Some(extras) = cfg.additional_model_request_fields.as_ref()
-        && let Some(extras_obj) = extras.as_object()
-    {
-        for (k, v) in extras_obj {
-            if is_managed_key(Dialect::BedrockInvokeOperator, k) {
-                tracing::warn!(
-                    provider = %cfg.id,
-                    key = %sanitize_for_log(k),
-                    "additional_model_request_fields attempted to override \
-                     routectl-managed key; dropped"
-                );
-                continue;
-            }
-            obj.insert(k.clone(), v.clone());
-        }
-    }
+    merge_operator_extras(cfg, obj);
 
     // Stream flag is decided at HTTP level (different endpoint suffix),
     // not via a body field, so strip any leftover.
@@ -255,6 +240,42 @@ fn declare_anthropic_version(req: &ChatRequest) {
         "/anthropic_version",
         kind,
     );
+}
+
+/// Merge the operator's `additional_model_request_fields` over the assembled
+/// body, withholding every key the Invoke operator arm manages. A refusal is
+/// counted once per request, however many keys collide.
+fn merge_operator_extras(cfg: &BedrockConfig, obj: &mut serde_json::Map<String, Value>) {
+    let Some(extras_obj) = cfg
+        .additional_model_request_fields
+        .as_ref()
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    let mut refused_a_managed_key = false;
+    for (k, v) in extras_obj {
+        // The operator's value would ride fine; routectl refuses it so its own
+        // assembled field stays authoritative.
+        // TRANSLATION-DROP: policy-action class=operator_extra_managed_key_conflict test=an_operator_extra_naming_a_managed_key_is_withheld_and_counted_once
+        if is_managed_key(Dialect::BedrockInvokeOperator, k) {
+            refused_a_managed_key = true;
+            tracing::warn!(
+                provider = %cfg.id,
+                key = %sanitize_for_log(k),
+                "additional_model_request_fields attempted to override \
+                 routectl-managed key; dropped"
+            );
+            continue;
+        }
+        obj.insert(k.clone(), v.clone());
+    }
+    if refused_a_managed_key {
+        crate::translation_drop_metrics::record_translation_policy_action(
+            LANE,
+            "operator_extra_managed_key_conflict",
+        );
+    }
 }
 
 /// Count this request's `response_format` losses on the Invoke lane.

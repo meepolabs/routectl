@@ -244,3 +244,103 @@ fn invoke_response_format_key_loss_counts_nothing_for_a_client_native_format() {
         assert_eq!(after, before, "row {row}");
     }
 }
+
+const OPERATOR_CONFLICT_CLASS: &str = "operator_extra_managed_key_conflict";
+
+fn operator_conflict_count() -> u64 {
+    crate::translation_drop_metrics::translation_policy_action_snapshot()
+        .into_iter()
+        .find(|e| e.lane == LANE && e.policy_class == OPERATOR_CONFLICT_CLASS)
+        .map_or(0, |e| e.action_count)
+}
+
+/// The Invoke body after merging `extras` as the operator's
+/// `additional_model_request_fields`, the managed-key WARNs it emitted (by
+/// key), and how much it moved the operator conflict count.
+fn merge_operator_extras_observed(
+    extras: serde_json::Value,
+) -> (serde_json::Value, Vec<String>, u64) {
+    let cfg = BedrockConfig {
+        additional_model_request_fields: Some(extras),
+        ..cfg()
+    };
+    let req = user_req();
+    let before = operator_conflict_count();
+    let mut body = serde_json::Value::Null;
+    let events = routectl_testkit::capture_events(|| {
+        body = normalize_request(&cfg, &req).expect("invoke body assembles");
+    });
+    let after = operator_conflict_count();
+    let warned = events
+        .iter()
+        .filter(|e| {
+            e.level == tracing::Level::WARN
+                && e.message
+                    .contains("additional_model_request_fields attempted to override")
+        })
+        .filter_map(|e| e.field("key").map(str::to_owned))
+        .collect();
+    (body, warned, after - before)
+}
+
+/// SINGLE-SOURCE pin for this lane's operator refusal, one row per managed
+/// key: `anthropic_version` keeps the value Bedrock requires, and
+/// `response_format` (absent from the old closed Invoke set) never reaches the
+/// top level, where the Messages validator refuses it as an extra input.
+#[test]
+fn an_operator_extra_naming_a_managed_key_is_withheld_and_counted_once() {
+    let rows = [
+        (
+            "anthropic_version",
+            json!({"anthropic_version": "zz-operator-version"}),
+        ),
+        (
+            "response_format",
+            json!({"response_format": {"type": "json_object"}}),
+        ),
+    ];
+    for (key, extras) in rows {
+        // Act
+        let (body, warned, delta) = merge_operator_extras_observed(extras);
+
+        // Assert
+        assert!(
+            !body.to_string().contains("zz-operator-version"),
+            "row {key}: {body}"
+        );
+        assert_eq!(body["anthropic_version"], "bedrock-2023-05-31", "row {key}");
+        assert!(body.get("response_format").is_none(), "row {key}: {body}");
+        assert_eq!(warned, vec![key.to_string()], "row {key}");
+        assert_eq!(delta, 1, "row {key}");
+    }
+}
+
+/// Two refused keys on one request are one policy action, each still named
+/// by its own WARN.
+#[test]
+fn two_refused_operator_keys_count_one_policy_action() {
+    // Act
+    let (body, mut warned, delta) = merge_operator_extras_observed(json!({
+        "anthropic_version": "zz-operator-version",
+        "response_format": {"type": "json_object"},
+    }));
+
+    // Assert
+    warned.sort();
+    assert_eq!(warned, ["anthropic_version", "response_format"]);
+    assert!(body.get("response_format").is_none(), "{body}");
+    assert_eq!(delta, 1);
+}
+
+/// POSITIVE CONTROL: an unmanaged operator key lands on the body, with no WARN
+/// and no count.
+#[test]
+fn an_unmanaged_operator_extra_lands_on_the_invoke_body_uncounted() {
+    // Act
+    let (body, warned, delta) = merge_operator_extras_observed(json!({"top_k": 40}));
+
+    // Assert
+    assert_eq!(body["top_k"], 40, "{body}");
+    assert!(warned.is_empty(), "{warned:?}");
+    assert_eq!(delta, 0);
+}

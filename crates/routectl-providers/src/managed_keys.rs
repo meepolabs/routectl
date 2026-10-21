@@ -5,11 +5,8 @@
 //! predicate names is one routectl writes itself, so the merge drops the
 //! extras value rather than let it replace the assembled one.
 //!
-//! Every dialect except the Bedrock Invoke operator path composes the shared
-//! canonical list (`routectl_core::is_canonical_request_key`) with its own
-//! wire-layer keys. The Invoke operator path is a closed literal set that does
-//! not compose the canonical list: widening it changes which configured
-//! `additional_model_request_fields` reach the wire.
+//! Every dialect composes the shared canonical list
+//! (`routectl_core::is_canonical_request_key`) with its own wire-layer keys.
 //!
 //! Keys match case-sensitively: the Anthropic and OpenAI upstreams key their
 //! request fields by exact name. Gemini's ProtoJSON parser also accepts proto
@@ -40,7 +37,8 @@ pub enum Dialect {
     /// reused by Bedrock Invoke for client `provider_extras`.
     #[cfg(feature = "anthropic-api")]
     AnthropicApi,
-    /// Bedrock Invoke operator `additional_model_request_fields`.
+    /// Bedrock Invoke operator `additional_model_request_fields`: the
+    /// Anthropic Messages set plus the Invoke seam's own body field.
     #[cfg(feature = "bedrock")]
     BedrockInvokeOperator,
     /// The Bedrock Converse `additionalModelRequestFields` bag, client and
@@ -72,23 +70,12 @@ pub fn is_managed_key(dialect: Dialect, key: &str) -> bool {
                 )
         }
         #[cfg(feature = "bedrock")]
-        Dialect::BedrockInvokeOperator => matches!(
-            key,
-            "model"
-                | "messages"
-                | "system"
-                | "max_tokens"
-                | "thinking"
-                | "tools"
-                | "tool_choice"
-                | "stream"
-                | "stop_sequences"
-                | "temperature"
-                | "top_p"
-                | "anthropic_beta"
-                | "anthropic_version"
-                | "cache_control"
-        ),
+        Dialect::BedrockInvokeOperator => {
+            is_managed_key(Dialect::AnthropicApi, key)
+                // Written by the Invoke seam before the operator merge, which
+                // inserts over the assembled body.
+                || matches!(key, "anthropic_version")
+        }
         #[cfg(feature = "bedrock")]
         Dialect::BedrockConverse => {
             is_canonical_request_key(key)
