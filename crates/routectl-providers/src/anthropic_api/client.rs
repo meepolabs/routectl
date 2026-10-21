@@ -696,8 +696,13 @@ impl AnthropicApiProvider {
         // per the FORWARDING TRANSPARENCY CONTRACT, and the client owns the
         // forwarded body too -- so widening its fingerprint with a flag it
         // did not send is never routectl's call.
-        if !forwarded_leg && let Some(body) = wire_body {
-            super::extras::union_structured_outputs_beta(body, &mut merged_betas);
+        let mut body_implied: Vec<String> = Vec::new();
+        if !forwarded_leg
+            && let Some(body) = wire_body
+            && let Some(flag) =
+                super::extras::union_structured_outputs_beta(body, &mut merged_betas)
+        {
+            body_implied.push(flag.to_string());
         }
 
         // Capability-driven effort union, mirroring the structured-outputs
@@ -713,8 +718,9 @@ impl AnthropicApiProvider {
         // untouched.
         if self.is_cloak_lane(req)
             && let Some(body) = wire_body
+            && let Some(flag) = super::extras::union_effort_beta(body, &mut merged_betas)
         {
-            super::extras::union_effort_beta(body, &mut merged_betas);
+            body_implied.push(flag.to_string());
         }
 
         // Display-vs-redaction conflict, after every union so the flag is
@@ -724,6 +730,13 @@ impl AnthropicApiProvider {
         if !forwarded_leg && let Some(body) = wire_body {
             super::extras::drop_redact_beta_for_display(&self.cfg.id, body, &mut merged_betas);
         }
+
+        crate::beta_withhold::deposit_beta_assembly(
+            req,
+            self.beta_floor(req, is_non_cc),
+            body_implied,
+            |flag| merged_betas.iter().any(|b| b == flag),
+        );
 
         // Snapshot the FINAL composed beta set (post context_management
         // strip, post capability unions) so the decision context reflects

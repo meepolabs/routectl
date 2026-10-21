@@ -45,6 +45,7 @@ use std::time::Instant;
 use routectl_core::provider_kind::config as config_kind;
 use routectl_core::{BetaRepairReport, ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
+use super::beta_report_learn::install_beta_assembly;
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::UntranslatedCapabilities;
 use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
@@ -495,6 +496,7 @@ impl Router {
             // sees counting still activates -- reading the pre-flight
             // capture and the per-target body actually being sent.
             self.on_admitted_request(&target, &probe_fields, &attempt_req);
+            let _beta_assembly = install_beta_assembly(&mut attempt_req);
             let wire_tap = Self::install_count_wire_tap(&mut attempt_req);
             let result = provider.count_tokens(attempt_req.clone()).await;
             attempts_made += 1;

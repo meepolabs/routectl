@@ -42,6 +42,11 @@ license.
   `RoutectlInternal` carrier (resolved per-model knobs plus the
   transport-internal capture fields, never serialized to the wire -- see the
   struct's own docs for the field-by-field contract)
+- `src/beta_assembly_report.rs` -- `BetaAssemblyReport`: clone-shared
+  per-attempt slot where an anthropic-vocabulary egress records the
+  `BetaAssembly` it computed at header / bag assembly (the beta floor it never
+  withholds and the body-implied set it re-adds); last record wins; the
+  router installs a fresh one on every complete, stream and count_tokens call
 - `src/beta_repair_report.rs` -- `BetaRepairReport`: clone-shared slot where a
   provider records the client beta flags it stripped after a named rejection
   (deduped, first-seen order); the router `take`s it after the call

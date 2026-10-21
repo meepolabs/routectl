@@ -31,7 +31,7 @@ use crate::context_trim::{
 };
 use crate::cost_gate::{break_even_k, emission_break_even_k};
 
-use super::beta_report_learn::install_beta_repair_report;
+use super::beta_report_learn::{install_beta_assembly, install_beta_repair_report};
 use super::cache_plan::{AutoCacheRequestPlan, CacheDecision, CacheInjection};
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::{UntranslatedCapabilities, install_translation_report};
@@ -646,6 +646,7 @@ impl Router {
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
+                let _beta_assembly = install_beta_assembly(&mut attempt_req);
                 let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
                 let result = run_with_timeout(
                     provider_name,
@@ -1426,6 +1427,7 @@ impl Router {
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
                 let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
+                let _beta_assembly = install_beta_assembly(&mut attempt_req);
                 let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
                 let r = try_stream_with_first_content(
                     provider_name,

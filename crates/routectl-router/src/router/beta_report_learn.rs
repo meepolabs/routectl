@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use routectl_core::capability::{BETA_ACCEPTED, EvidenceSource, FailurePhase, SignalTier};
-use routectl_core::{BetaRepairReport, ChatRequest};
+use routectl_core::{BetaAssemblyReport, BetaRepairReport, ChatRequest};
 
 use super::capability_learn::{LearnDedupeKey, LearnedMint};
 use super::capability_observe::{CapabilityObserveEvent, UntranslatedCapabilities};
@@ -41,6 +41,19 @@ const BETA_REJECTION_STATUS: u16 = 400;
 pub(super) fn install_beta_repair_report(attempt_req: &mut ChatRequest) -> BetaRepairReport {
     let report = BetaRepairReport::default();
     attempt_req.routectl_internal.beta_repair_report = Some(report.clone());
+    report
+}
+
+/// Install a fresh, empty beta assembly slot on the request about to go
+/// upstream and return the handle the router reads after the call.
+///
+/// Called once per provider call on every walk, whether or not the attempt
+/// carries a captured ingress body: clones share one slot, so a slot reused
+/// across calls would let an earlier attempt's sets stand in for a later
+/// attempt that assembled nothing.
+pub(super) fn install_beta_assembly(attempt_req: &mut ChatRequest) -> BetaAssemblyReport {
+    let report = BetaAssemblyReport::default();
+    attempt_req.routectl_internal.beta_assembly = Some(report.clone());
     report
 }
 
@@ -225,3 +238,7 @@ impl Router {
 #[cfg(all(test, feature = "bedrock"))]
 #[path = "beta_report_learn_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "beta_assembly_install_tests.rs"]
+mod beta_assembly_install_tests;

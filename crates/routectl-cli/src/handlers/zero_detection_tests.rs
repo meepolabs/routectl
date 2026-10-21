@@ -1011,7 +1011,7 @@ async fn every_walked_request_is_clean_or_a_listed_known_loss_on_both_legs() {
         .chain(responses_cases())
         .collect();
 
-    let walked = walk_all(cases).await;
+    let walked = Box::pin(walk_all(cases)).await;
 
     for ((lane, leg), count) in &walked.counts {
         println!("zero-detection walked lane={lane} leg={leg} requests={count}");
@@ -1085,7 +1085,7 @@ async fn the_walk_surfaces_an_undeclared_difference() {
         chat_provider,
     );
 
-    let walked = walk_all(vec![probe]).await;
+    let walked = Box::pin(walk_all(vec![probe])).await;
 
     assert_eq!(walked.total(), 2, "one request, both legs");
     assert_eq!(

@@ -728,15 +728,21 @@ pub(super) fn body_has_output_config_format(body: &Value) -> bool {
 /// UNMEASURED: whether an unknown or withdrawn beta string is itself
 /// rejected. That is what would turn this union from harmless-redundant
 /// into a liability, so revisit it if Anthropic retires the flag.
-pub(super) fn union_structured_outputs_beta(body: &Value, betas: &mut Vec<String>) {
+///
+/// Returns the flag whenever `body` implies it, whether or not `betas`
+/// already held it.
+pub(super) fn union_structured_outputs_beta(
+    body: &Value,
+    betas: &mut Vec<String>,
+) -> Option<&'static str> {
     if !body_has_output_config_format(body) {
-        return;
+        return None;
     }
     let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
-    if betas.iter().any(|b| b == flag) {
-        return;
+    if !betas.iter().any(|b| b == flag) {
+        betas.push(flag.to_string());
     }
-    betas.push(flag.to_string());
+    Some(flag)
 }
 
 /// True iff the assembled body carries `output_config.effort`, the
@@ -760,15 +766,18 @@ pub(super) fn body_has_output_config_effort(body: &Value) -> bool {
 /// body, so it runs AFTER the client betas and the floor are composed. The invariant is ONE-WAY -- a body carrying the gated field
 /// gains the flag; a caller-supplied effort beta with NO field is left
 /// untouched (the inverse is never manufactured here).
-pub(super) fn union_effort_beta(body: &Value, betas: &mut Vec<String>) {
+///
+/// Returns the flag whenever `body` implies it, whether or not `betas`
+/// already held it.
+pub(super) fn union_effort_beta(body: &Value, betas: &mut Vec<String>) -> Option<&'static str> {
     if !body_has_output_config_effort(body) {
-        return;
+        return None;
     }
     let flag = routectl_core::identity::anthropic::EFFORT_BETA;
-    if betas.iter().any(|b| b == flag) {
-        return;
+    if !betas.iter().any(|b| b == flag) {
+        betas.push(flag.to_string());
     }
-    betas.push(flag.to_string());
+    Some(flag)
 }
 
 /// Remove `REDACT_THINKING_BETA` from `betas` when `body` carries

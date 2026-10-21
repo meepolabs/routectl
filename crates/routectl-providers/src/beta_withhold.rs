@@ -44,6 +44,23 @@ pub fn split_withheld<T: Clone>(
     split
 }
 
+/// Record `floor` and `body_implied` on the attempt's beta assembly slot, when
+/// the router installed one. `floor` keeps only the flags `ships` says the
+/// final carrier holds, so a floor flag a later strip removed is not claimed
+/// as shipped. Records no flag anywhere else.
+pub fn deposit_beta_assembly(
+    req: &routectl_core::ChatRequest,
+    floor: Vec<String>,
+    body_implied: Vec<String>,
+    ships: impl Fn(&str) -> bool,
+) {
+    let Some(slot) = req.routectl_internal.beta_assembly.as_ref() else {
+        return;
+    };
+    let floor = floor.into_iter().filter(|flag| ships(flag)).collect();
+    slot.record(routectl_core::BetaAssembly::new(floor, body_implied));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -270,8 +270,8 @@ pub struct ResponsesPassthroughItem {
 /// egresses read and re-emit deliberately rather than by serialization.
 /// The same holds for the per-request beta-repair fields the router sets
 /// (`withheld_betas`, `beta_repair_report`), the per-attempt
-/// `translation_report` and `wire_tap` slots, which only providers write
-/// into, and the wire-check carriage (`ingress_wire`, `declared_edits`).
+/// `translation_report`, `beta_assembly` and `wire_tap` slots, which only
+/// providers write into, and the wire-check carriage (`ingress_wire`, `declared_edits`).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct RoutectlInternal {
@@ -574,6 +574,12 @@ pub struct RoutectlInternal {
     /// translate on this attempt; the router reads it after the call. `None`
     /// means nobody is listening and the egress records nothing.
     pub translation_report: Option<crate::translation_report::TranslationReport>,
+
+    /// Slot where an anthropic-vocabulary egress records the beta floor and
+    /// body-implied beta set it computed while assembling this attempt; the
+    /// router reads it after the call. `None` means nobody is listening and
+    /// the egress records nothing.
+    pub beta_assembly: Option<crate::beta_assembly_report::BetaAssemblyReport>,
 
     /// The request body exactly as the client sent it, captured once by the
     /// ingress after parsing. `None` for library consumers.
@@ -1766,6 +1772,7 @@ mod tests {
         assert!(internal.withheld_betas.is_empty());
         assert!(internal.beta_repair_report.is_none());
         assert!(internal.translation_report.is_none());
+        assert!(internal.beta_assembly.is_none());
     }
 
     #[test]

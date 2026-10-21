@@ -22,7 +22,7 @@ use crate::anthropic_api::request::{
 use crate::anthropic_api::types::WireThinking;
 use crate::managed_keys::{Dialect, is_managed_key};
 
-use super::super::betas::{operator_floor, union_feature_implied_betas, withhold_betas};
+use super::super::betas::{operator_floor, union_and_deposit_betas, withhold_betas};
 use super::super::{BedrockApiShape, BedrockConfig};
 use super::request::ClientFingerprintStripTally;
 use super::types::ConverseToolChoice;
@@ -108,7 +108,7 @@ pub(super) fn build_additional_fields(
     // withheld entry cannot drop them, and a bag whose
     // `output_config` or `thinking` was removed gains neither. An empty bag
     // implies nothing, so the union never fills one.
-    union_feature_implied_betas(BedrockApiShape::Converse, &mut bag);
+    union_and_deposit_betas(cfg, req, BedrockApiShape::Converse, &mut bag);
     let mut bag = Value::Object(bag);
 
     if let Some(obj) = bag.as_object_mut() {

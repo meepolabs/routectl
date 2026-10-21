@@ -64,23 +64,48 @@ pub(super) fn feature_implied_betas(
 /// Union [`feature_implied_betas`] into `fields["anthropic_beta"]`. Must run
 /// after the withhold and every strip that can change the implying fields,
 /// so a withheld entry cannot drop a flag the shipped body needs. Idempotent: a present flag is neither duplicated nor
-/// reordered.
-pub(super) fn union_feature_implied_betas(shape: BedrockApiShape, fields: &mut Map<String, Value>) {
+/// reordered. Returns the implied set, whether or not each flag was already
+/// present.
+pub(super) fn union_feature_implied_betas(
+    shape: BedrockApiShape,
+    fields: &mut Map<String, Value>,
+) -> Vec<&'static str> {
     let implied = feature_implied_betas(shape, fields);
     if implied.is_empty() {
-        return;
+        return implied;
     }
     let betas = fields
         .entry("anthropic_beta")
         .or_insert_with(|| Value::Array(Vec::new()));
     let Some(arr) = betas.as_array_mut() else {
-        return;
+        return implied;
     };
-    for flag in implied {
+    for flag in &implied {
         if !arr.iter().any(|b| b.as_str() == Some(flag)) {
-            arr.push(Value::from(flag));
+            arr.push(Value::from(*flag));
         }
     }
+    implied
+}
+
+/// Union the body-implied betas into `fields` (see
+/// [`union_feature_implied_betas`]) and record the request's beta floor and
+/// that implied set on its beta assembly slot. `fields` must be the final
+/// carrier: the Invoke body or the Converse bag as it ships.
+pub(super) fn union_and_deposit_betas(
+    cfg: &BedrockConfig,
+    req: &ChatRequest,
+    shape: BedrockApiShape,
+    fields: &mut Map<String, Value>,
+) {
+    let implied = union_feature_implied_betas(shape, fields);
+    let shipped = fields.get("anthropic_beta").and_then(Value::as_array);
+    crate::beta_withhold::deposit_beta_assembly(
+        req,
+        operator_floor(cfg, req),
+        implied.into_iter().map(str::to_string).collect(),
+        |flag| shipped.is_some_and(|arr| arr.iter().any(|b| b.as_str() == Some(flag))),
+    );
 }
 
 /// The operator-asserted beta floor for `req` on this lane: the provider

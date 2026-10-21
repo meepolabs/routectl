@@ -2392,6 +2392,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::Responses
 pub routectl_core::schema::RoutectlInternal::anthropic_thinking: routectl_core::schema::AnthropicThinking
 pub routectl_core::schema::RoutectlInternal::anthropic_thinking_display: core::option::Option<alloc::string::String>
 pub routectl_core::schema::RoutectlInternal::background_probe: bool
+pub routectl_core::schema::RoutectlInternal::beta_assembly: core::option::Option<routectl_core::BetaAssemblyReport>
 pub routectl_core::schema::RoutectlInternal::beta_repair_report: core::option::Option<routectl_core::BetaRepairReport>
 pub routectl_core::schema::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::declared_edits: alloc::vec::Vec<routectl_core::wire_check::DeclaredEdit>
@@ -6081,6 +6082,93 @@ impl<T> core::convert::From<T> for routectl_core::upstream_meta::AnthropicUnifie
 pub fn routectl_core::upstream_meta::AnthropicUnifiedQuota::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::AnthropicUnifiedQuota
 impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::AnthropicUnifiedQuota
+pub struct routectl_core::BetaAssembly
+impl routectl_core::BetaAssembly
+pub fn routectl_core::BetaAssembly::body_implied(&self) -> &[alloc::string::String]
+pub fn routectl_core::BetaAssembly::floor(&self) -> &[alloc::string::String]
+pub fn routectl_core::BetaAssembly::new(alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<alloc::string::String>) -> Self
+impl core::clone::Clone for routectl_core::BetaAssembly
+pub fn routectl_core::BetaAssembly::clone(&self) -> routectl_core::BetaAssembly
+impl core::cmp::Eq for routectl_core::BetaAssembly
+impl core::cmp::PartialEq for routectl_core::BetaAssembly
+pub fn routectl_core::BetaAssembly::eq(&self, &routectl_core::BetaAssembly) -> bool
+impl core::default::Default for routectl_core::BetaAssembly
+pub fn routectl_core::BetaAssembly::default() -> routectl_core::BetaAssembly
+impl core::fmt::Debug for routectl_core::BetaAssembly
+pub fn routectl_core::BetaAssembly::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::BetaAssembly
+impl core::marker::Freeze for routectl_core::BetaAssembly
+impl core::marker::Send for routectl_core::BetaAssembly
+impl core::marker::Sync for routectl_core::BetaAssembly
+impl core::marker::Unpin for routectl_core::BetaAssembly
+impl core::marker::UnsafeUnpin for routectl_core::BetaAssembly
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::BetaAssembly
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::BetaAssembly
+impl<T, U> core::convert::Into<U> for routectl_core::BetaAssembly where U: core::convert::From<T>
+pub fn routectl_core::BetaAssembly::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::BetaAssembly where U: core::convert::Into<T>
+pub type routectl_core::BetaAssembly::Error = core::convert::Infallible
+pub fn routectl_core::BetaAssembly::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::BetaAssembly where U: core::convert::TryFrom<T>
+pub type routectl_core::BetaAssembly::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::BetaAssembly::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::BetaAssembly where T: core::clone::Clone
+pub type routectl_core::BetaAssembly::Owned = T
+pub fn routectl_core::BetaAssembly::clone_into(&self, &mut T)
+pub fn routectl_core::BetaAssembly::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::BetaAssembly where T: 'static + ?core::marker::Sized
+pub fn routectl_core::BetaAssembly::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::BetaAssembly where T: ?core::marker::Sized
+pub fn routectl_core::BetaAssembly::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::BetaAssembly where T: ?core::marker::Sized
+pub fn routectl_core::BetaAssembly::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::BetaAssembly where T: core::clone::Clone
+pub unsafe fn routectl_core::BetaAssembly::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::BetaAssembly
+pub fn routectl_core::BetaAssembly::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::BetaAssembly
+impl<T> tracing::instrument::WithSubscriber for routectl_core::BetaAssembly
+pub struct routectl_core::BetaAssemblyReport
+impl routectl_core::BetaAssemblyReport
+pub fn routectl_core::BetaAssemblyReport::record(&self, routectl_core::BetaAssembly)
+pub fn routectl_core::BetaAssemblyReport::take(&self) -> core::option::Option<routectl_core::BetaAssembly>
+impl core::clone::Clone for routectl_core::BetaAssemblyReport
+pub fn routectl_core::BetaAssemblyReport::clone(&self) -> routectl_core::BetaAssemblyReport
+impl core::default::Default for routectl_core::BetaAssemblyReport
+pub fn routectl_core::BetaAssemblyReport::default() -> routectl_core::BetaAssemblyReport
+impl core::fmt::Debug for routectl_core::BetaAssemblyReport
+pub fn routectl_core::BetaAssemblyReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::BetaAssemblyReport
+impl core::marker::Send for routectl_core::BetaAssemblyReport
+impl core::marker::Sync for routectl_core::BetaAssemblyReport
+impl core::marker::Unpin for routectl_core::BetaAssemblyReport
+impl core::marker::UnsafeUnpin for routectl_core::BetaAssemblyReport
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::BetaAssemblyReport
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::BetaAssemblyReport
+impl<T, U> core::convert::Into<U> for routectl_core::BetaAssemblyReport where U: core::convert::From<T>
+pub fn routectl_core::BetaAssemblyReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::BetaAssemblyReport where U: core::convert::Into<T>
+pub type routectl_core::BetaAssemblyReport::Error = core::convert::Infallible
+pub fn routectl_core::BetaAssemblyReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::BetaAssemblyReport where U: core::convert::TryFrom<T>
+pub type routectl_core::BetaAssemblyReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::BetaAssemblyReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::BetaAssemblyReport where T: core::clone::Clone
+pub type routectl_core::BetaAssemblyReport::Owned = T
+pub fn routectl_core::BetaAssemblyReport::clone_into(&self, &mut T)
+pub fn routectl_core::BetaAssemblyReport::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::BetaAssemblyReport where T: 'static + ?core::marker::Sized
+pub fn routectl_core::BetaAssemblyReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::BetaAssemblyReport where T: ?core::marker::Sized
+pub fn routectl_core::BetaAssemblyReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::BetaAssemblyReport where T: ?core::marker::Sized
+pub fn routectl_core::BetaAssemblyReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::BetaAssemblyReport where T: core::clone::Clone
+pub unsafe fn routectl_core::BetaAssemblyReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::BetaAssemblyReport
+pub fn routectl_core::BetaAssemblyReport::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::BetaAssemblyReport
+impl<T> tracing::instrument::WithSubscriber for routectl_core::BetaAssemblyReport
 pub struct routectl_core::BetaRepairReport
 impl routectl_core::BetaRepairReport
 pub fn routectl_core::BetaRepairReport::record(&self, &[alloc::string::String])
@@ -7332,6 +7420,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::Responses
 pub routectl_core::RoutectlInternal::anthropic_thinking: routectl_core::schema::AnthropicThinking
 pub routectl_core::RoutectlInternal::anthropic_thinking_display: core::option::Option<alloc::string::String>
 pub routectl_core::RoutectlInternal::background_probe: bool
+pub routectl_core::RoutectlInternal::beta_assembly: core::option::Option<routectl_core::BetaAssemblyReport>
 pub routectl_core::RoutectlInternal::beta_repair_report: core::option::Option<routectl_core::BetaRepairReport>
 pub routectl_core::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::declared_edits: alloc::vec::Vec<routectl_core::wire_check::DeclaredEdit>

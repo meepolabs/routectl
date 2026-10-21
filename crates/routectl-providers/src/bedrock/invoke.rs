@@ -234,7 +234,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // Feature-triggered and idempotent: no `output_config.format` means no
     // flag, and an already-present flag is neither duplicated nor reordered.
     if let Some(obj) = body.as_object_mut() {
-        super::betas::union_feature_implied_betas(super::BedrockApiShape::Invoke, obj);
+        super::betas::union_and_deposit_betas(cfg, req, super::BedrockApiShape::Invoke, obj);
         super::body_fields::drop_unrepresentable_body_fields(
             &cfg.id,
             obj,
