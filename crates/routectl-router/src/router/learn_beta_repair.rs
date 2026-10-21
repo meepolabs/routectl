@@ -24,6 +24,9 @@ pub(super) struct EngineSink<'s, 'a> {
     pub(super) attempt_req: &'s mut ChatRequest,
     pub(super) meta: &'s mut DispatchMeta,
     pub(super) budget: &'s mut RepairBudget,
+    /// The rejection's position among the request's pending wire
+    /// rejections; `None` when the walk records none for it.
+    pub(super) pending_rejection: Option<usize>,
 }
 
 impl RepairSink for EngineSink<'_, '_> {
@@ -60,8 +63,13 @@ impl RepairSink for EngineSink<'_, '_> {
     }
 
     fn withhold_betas(&mut self, flags: Vec<String>) -> bool {
-        self.learning
-            .try_beta_repair(flags, self.target, self.attempt_req, self.budget)
+        self.learning.try_beta_repair(
+            flags,
+            self.target,
+            self.attempt_req,
+            self.budget,
+            self.pending_rejection,
+        )
     }
 }
 
@@ -72,13 +80,15 @@ impl AttemptLearning<'_> {
     ///
     /// The repaired flags are kept for the rest of the chain iteration, so a
     /// same-target retry that succeeds after the repaired attempt failed
-    /// still settles them: that success was served without them too.
+    /// still settles them: that success was served without them too. The
+    /// wire rejection at `pending_rejection` is joined the same way.
     pub(super) fn try_beta_repair(
         &mut self,
         flags: Vec<String>,
         target: &DispatchTarget,
         attempt_req: &mut ChatRequest,
         budget: &mut RepairBudget,
+        pending_rejection: Option<usize>,
     ) -> bool {
         if !self.repaired_betas.is_empty() {
             return false;
@@ -96,6 +106,7 @@ impl AttemptLearning<'_> {
             "upstream rejected named beta flags; retrying once without them",
         );
         self.repaired_betas = flags;
+        self.beta_rejection = pending_rejection;
         self.skip_replay_backoff = true;
         true
     }

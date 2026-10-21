@@ -1604,8 +1604,8 @@ pub struct DispatchMeta {
     /// the two are never conflated into one record or one budget charge.
     pub field_preflight: Vec<FieldPreflight>,
     /// Upstream rejections the walk drew, each classified against the body
-    /// that drew it and waiting for the field-repair outcome. Content-free;
-    /// read once at request resolution.
+    /// that drew it and waiting for the outcome of the repair answering it.
+    /// Content-free; read once at request resolution.
     pub(crate) wire_rejections: Vec<wire_rejection::PendingWireRejection>,
     /// The rejections among [`Self::wire_rejections`] a declared routectl
     /// edit explains, each with what its revert came to. Content-free;

@@ -47,6 +47,7 @@ use super::rejection_parser::{NamedRejection, RawPath, RejectionKind, RejectionV
 use super::repair_budget::RepairBudget;
 use super::replay_repair::{ReplayCarryPlan, strip_replay_artifacts_recalibrating};
 use super::runtime_gate::LearnedProbeGuard;
+use super::wire_rejection::note_beta_repair_succeeded;
 use super::{DispatchMeta, DispatchTarget, ReplayDegradation, Router};
 
 /// A generic capability attribution: the canonical capability key, the
@@ -327,6 +328,9 @@ pub(super) struct AttemptLearning<'a> {
     /// The client beta flags this target's beta repair withheld; empty until
     /// one takes. Settled as `beta:` negatives only by a later success.
     repaired_betas: Vec<String>,
+    /// The position of the rejection the beta repair answered among the
+    /// request's pending wire rejections; a later success marks it repaired.
+    beta_rejection: Option<usize>,
     skip_replay_backoff: bool,
     /// The generic capability proposal of the last rejection that took no
     /// repair, held until [`Self::observe_generic`] applies it.
@@ -363,6 +367,7 @@ impl<'a> AttemptLearning<'a> {
             canary_reject_status: 0,
             canary_lossy_repair: None,
             repaired_betas: Vec::new(),
+            beta_rejection: None,
             skip_replay_backoff: false,
             pending_capability: None,
             revert: TargetRevert::default(),
@@ -422,8 +427,9 @@ impl<'a> AttemptLearning<'a> {
 
     /// Arbitrate a rejection that already passed auth recovery: every
     /// proposer reads it, and the first proposal in [`ARBITRATION_ORDER`] that
-    /// takes decides it -- replay strip, envelope field, the canary's repaired
-    /// retry, then the generic capability learner. Each repair fires at most
+    /// takes decides it -- replay strip, envelope field (the canary's repaired
+    /// retry answering the same proposal when the reactive repair does not),
+    /// beta withhold, then the generic capability learner. Each repair fires at most
     /// once per target and never nests inside the per-target retry or the
     /// fallback walk, so the call count stays additive.
     ///
@@ -442,7 +448,7 @@ impl<'a> AttemptLearning<'a> {
     ///
     /// On `Retry` after the replay repair the running error is the
     /// rejection's body-free form, so a re-gate refusal cannot surface the
-    /// reasoning blob a replay rejection may echo; the field and canary
+    /// reasoning blob a replay rejection may echo; the field, canary and beta
     /// repairs keep the raw rejection.
     ///
     /// A rejection laid to the request's defective transcript (see
@@ -510,6 +516,11 @@ impl<'a> AttemptLearning<'a> {
     ) -> FailureDecision {
         let (err, class, target) = (rejection.err, rejection.class, rejection.target);
         let withheld_betas = std::sync::Arc::clone(&attempt_req.routectl_internal.withheld_betas);
+        let pending_rejection = rejection
+            .site
+            .as_ref()
+            .filter(|_| !self.count_surface)
+            .map(|site| site.pending);
         let input = RejectionInput {
             err,
             class,
@@ -529,6 +540,7 @@ impl<'a> AttemptLearning<'a> {
             attempt_req,
             meta,
             budget,
+            pending_rejection,
         };
         match arbitrate(&input, &mut sink) {
             Arbitration::ReplayStrip => FailureDecision::Retry {
@@ -743,6 +755,9 @@ impl<'a> AttemptLearning<'a> {
             &mut self.learned_probe_guard,
         );
         self.revert.on_success(meta);
+        if let Some(position) = self.beta_rejection {
+            note_beta_repair_succeeded(meta, position);
+        }
         self.settle_replay_success(req, meta);
         self.settle_field_success(req, meta);
         if self.canary_enabled {

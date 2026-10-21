@@ -12,8 +12,8 @@ use routectl_core::wire_check::{
     EgressKind, IngressDialect, IngressWire, Lane, RejectionProvenance,
 };
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Error, Message,
-    MessageContent, Provider, Result, Role,
+    BetaAssembly, ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Error,
+    Message, MessageContent, Provider, Result, Role,
 };
 use serde_json::{Value, json};
 
@@ -549,6 +549,105 @@ async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns(
     }
 }
 
+/// The client beta flag the upstream rejects by name.
+const NAMED_BETA: &str = "zz-named-2099-01-01";
+
+/// A request whose client beta set carries the flag the upstream rejects.
+fn beta_request() -> ChatRequest {
+    let mut req = request(IngressDialect::Anthropic);
+    req.anthropic_beta = vec![NAMED_BETA.to_string()];
+    req
+}
+
+/// Record the empty beta assembly an egress records, so the named flag is
+/// a removable client flag, and say whether the attempt withheld it.
+fn assemble_betas(req: &ChatRequest) -> bool {
+    if let Some(slot) = req.routectl_internal.beta_assembly.as_ref() {
+        slot.record(BetaAssembly::new(Vec::new(), Vec::new()));
+    }
+    req.routectl_internal
+        .withheld_betas
+        .iter()
+        .any(|flag| flag == NAMED_BETA)
+}
+
+/// The anthropic-api 400 naming `NAMED_BETA` in the `anthropic-beta` header.
+fn beta_rejection() -> Error {
+    let body = json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": format!(
+                "Unexpected value(s) `{NAMED_BETA}` for the `anthropic-beta` header. Please \
+                 consult our documentation at platform.claude.com/docs or try again without \
+                 the header."
+            ),
+        },
+    });
+    Error::upstream("scripted", 400, body.to_string())
+}
+
+/// A 400 naming no path, answering the repaired attempt.
+fn unlocalized_rejection() -> Error {
+    let body = json!({
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "the request is malformed"},
+    });
+    Error::upstream("scripted", 400, body.to_string())
+}
+
+#[tokio::test]
+async fn a_beta_rejection_takes_the_outcome_of_its_repaired_attempt() {
+    let rows: [(&str, Answer, bool, Vec<FieldRepairOutcome>); 2] = [
+        (
+            "repaired attempt succeeds",
+            |req| {
+                if assemble_betas(req) {
+                    return Ok(());
+                }
+                Err(beta_rejection())
+            },
+            true,
+            vec![FieldRepairOutcome::RepairedLossy],
+        ),
+        (
+            "repaired attempt fails",
+            |req| {
+                if assemble_betas(req) {
+                    return Err(unlocalized_rejection());
+                }
+                Err(beta_rejection())
+            },
+            false,
+            vec![
+                FieldRepairOutcome::Unrepaired,
+                FieldRepairOutcome::Unrepaired,
+            ],
+        ),
+    ];
+    for surface in SURFACES {
+        for (name, answer, serves, expected) in &rows {
+            let provider = ScriptedProvider::boxed(unchanged, *answer);
+            let router = router(NEVER_SAMPLED, vec![provider]);
+
+            let served = dispatch(&router, surface, beta_request()).await;
+
+            assert_eq!(served, *serves, "{surface:?} {name}: served");
+            let found = rejections(&router.wire_check_snapshot());
+            let outcomes: Vec<FieldRepairOutcome> = found.iter().map(|f| f.2).collect();
+            assert_eq!(
+                &outcomes, expected,
+                "{surface:?} {name}: outcomes, oldest first"
+            );
+            assert_eq!(
+                (found[0].0.as_str(), found[0].1),
+                ("", "unlocalized"),
+                "{surface:?} {name}: a header rejection names no body path"
+            );
+        }
+    }
+}
+
 const CONTAINER_KEY_PATH: &str = "metadata.user_id";
 const CONTAINER_KEY: &str = "user_id";
 const STATE_KEY: &str = "p0";
@@ -566,6 +665,7 @@ fn container_key_rejection() -> PendingWireRejection {
         provenance: RejectionProvenance::ClientUnchanged,
         state_key: STATE_KEY.to_string(),
         repairs_before: 0,
+        beta_repaired: false,
     }
 }
 

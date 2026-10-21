@@ -6,8 +6,9 @@
 //! A rejection is always checked, whatever the sampler decided: the
 //! sampler counts successful attempts only. The classification is held on
 //! [`DispatchMeta`] as a content-free pending record and joined at dispatch
-//! end with what field repair made of the same path, because the repair
-//! that answers a rejection runs after it and may never run at all.
+//! end with what the repair answering it came to (a revert, a beta
+//! withhold, or a field repair of the same path), because that repair runs
+//! after the rejection and may never run at all.
 //!
 //! The same settlement says whether the body that went out carries the path
 //! at all, which the learning engine reads to leave alone a rejection naming
@@ -41,7 +42,7 @@ use super::{DispatchMeta, DispatchTarget, FieldRepair, Router};
 use crate::wire_check_state::FieldRepairOutcome;
 
 /// One rejected attempt, classified before any repair touched its request
-/// and waiting for the field-repair outcome. Holds no body content: a
+/// and waiting for the repair outcome. Holds no body content: a
 /// sanitized pointer, the unmasked field path the join needs (never
 /// rendered, opaque to `Debug`), closed labels, the target's sanitized state
 /// key and a position in the request's repair records.
@@ -59,6 +60,17 @@ pub struct PendingWireRejection {
     /// How many repair records the request held when the rejection
     /// arrived; a repair answering it can only be recorded after.
     repairs_before: usize,
+    /// Whether a beta repair answered the rejection and an attempt served
+    /// without the withheld flags succeeded.
+    beta_repaired: bool,
+}
+
+/// Mark the rejection at `position` among `meta`'s pending rejections as
+/// answered by a beta repair whose repaired attempt succeeded.
+pub(super) fn note_beta_repair_succeeded(meta: &mut DispatchMeta, position: usize) {
+    if let Some(pending) = meta.wire_rejections.get_mut(position) {
+        pending.beta_repaired = true;
+    }
 }
 
 impl Router {
@@ -117,6 +129,7 @@ impl Router {
             provenance: site.provenance,
             state_key: sanitize_for_log(&target.state_key),
             repairs_before: meta.field_repairs.len(),
+            beta_repaired: false,
         });
         Some(site)
     }
@@ -160,14 +173,23 @@ impl Router {
         Some(site)
     }
 
-    /// Record every rejection the request drew, each with what field repair
+    /// Record every rejection the request drew, each with what its repair
     /// made of it. Called once, when the dispatch has resolved and every
     /// repair record is final.
-    /// A rejection a revert answered takes the outcome of that revert; every
-    /// other, a declined revert included, takes what field repair made of it.
+    ///
+    /// A rejection a revert answered takes the outcome of that revert. One a
+    /// beta repair answered and whose repaired attempt succeeded is lossy:
+    /// the request served lacked a flag the client sent. Every other, a
+    /// declined revert and a failed beta retry included, takes what field
+    /// repair made of it.
     pub(super) fn emit_wire_rejections(&self, meta: &DispatchMeta) {
         for (position, pending) in meta.wire_rejections.iter().enumerate() {
             let outcome = revert_outcome(position, &meta.wire_reverts)
+                .or_else(|| {
+                    pending
+                        .beta_repaired
+                        .then_some(FieldRepairOutcome::RepairedLossy)
+                })
                 .unwrap_or_else(|| field_repair_outcome(pending, &meta.field_repairs));
             self.wire_check.record_rejection(
                 pending.lane,
