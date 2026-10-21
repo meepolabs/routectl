@@ -547,7 +547,17 @@ license.
   (caller effort against per-model `effort_levels`) and the one
   effort/budget table (`budget_from_level`, `level_from_budget`)
 - `src/managed_keys.rs` -- `is_managed_key(Dialect, key)`, the top-level keys
-  each egress's extras merge refuses to let extras override
+  each egress's extras merge refuses to let extras override (every dialect
+  composes `is_canonical_request_key`; `BedrockInvokeOperator` is the
+  `AnthropicApi` set plus `anthropic_version`); and the ingress-dialect rule
+  for client extras: `client_extras_for` -> `ClientExtras` (a matching
+  ingress or a library caller forwards the bag whole; any other provenance
+  keeps only managed keys, the egress's `handled_by_egress` keys and the
+  operator `payload_extras` values, the rest landing sorted in
+  `foreign_keys`), `readable_extra` -> `ReadableExtra` (the same rule for one
+  key an egress reads itself), `declare_foreign_keys` (top-level
+  `ManagedExtrasStrip` removes on the wire tap) and
+  `ForeignDialectExtraTally` (per-request flag the owning lane flushes once)
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every
   egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the
   redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream ->
@@ -615,7 +625,15 @@ license.
 - `src/beta_withhold.rs` -- `split_withheld`: the withheld client-beta
   decision shared by the anthropic-api header compose and Bedrock's
   `withhold_betas` (drop a withheld flag unless the caller's floor asserts it;
-  both sides keep order); gated on `anthropic-api` or `bedrock`
+  both sides keep order); `merge_unique`, the order-preserving first-wins
+  merge every beta carrier uses; `BetaLane` (cloak, other anthropic-api,
+  forwarded, Bedrock Invoke, Bedrock Converse) with `body_implied_betas` /
+  `union_body_implied_betas`, the one source for the flags the shipped body
+  requires (structured-outputs on every non-forwarded lane, effort on the
+  cloak lane only, `THINKING_DISPLAY_UPDATES_BETA` on Converse only); and
+  `deposit_beta_assembly`, which records the floor that ships and the implied
+  set on the attempt's `BetaAssemblyReport`; gated on `anthropic-api` or
+  `bedrock`
 - `src/aws_error.rs` -- shared redaction + token lift for AWS/Bedrock upstream
   error envelopes: single `classify_bedrock_error` source drives both
   `classify_client_error_message` (client-facing) and `sanitized_debug_body`
@@ -757,12 +775,16 @@ license.
   Claude-Code identity headers/UA never fire on this ApiKey lane),
   `sign_mantle` (post-build SigV4/bearer signing via `crate::mantle::sign`),
   and `record_mantle_span_fields` (records `lane`/`auth_mode`/`region` on the
-  request span). `build_headers` also takes the assembled `wire_body`
-  (`Option<&Value>`) so the beta compose can union capability betas the
-  shipped body implies -- today `output_config.format` ->
-  `STRUCTURED_OUTPUTS_BETA`, unioned last (post-floor,
-  post-context_management-strip, suppressed on the forwarded leg) and
-  idempotent, so an OAuth Claude-Code list stays byte-identical. Off the
+  request span). `build_headers` merges client, provider-config and operator
+  betas through `beta_withhold::merge_unique`, then the OAuth gate and (non-CC)
+  Claude Code floor on the cloak lane, then the context_management strip; it
+  also takes the assembled `wire_body` (`Option<&Value>`) so the compose can
+  union the betas the shipped body implies via
+  `beta_withhold::union_body_implied_betas` on the request's `BetaLane`
+  (`AnthropicApiForwarded` implies nothing, `AnthropicApiCloak` format and
+  effort, `AnthropicApi` format), unioned last and idempotent, so an OAuth
+  Claude-Code list stays byte-identical; after `drop_redact_beta_for_display`,
+  `deposit_beta_assembly` records `beta_floor` and the implied set. Off the
   forwarded leg, the client betas first lose the request's
   `routectl_internal.withheld_betas` (`withhold_client_betas`, via
   `crate::beta_withhold`) except a flag in `beta_floor` (provider and operator
@@ -849,9 +871,9 @@ license.
   effort (`reclamp_client_effort`, `client_sent_output_config_effort`,
   `build_output_config`, `reconcile_output_config_effort`), post-merge body
   passes (`merge_provider_extras`, `drop_redact_beta_for_display`,
-  `normalize_claude_sampling`), the capability-beta unions
-  (`union_structured_outputs_beta`, `union_effort_beta`), and
+  `normalize_claude_sampling`), and
   `MAX_THINKING_BUDGET_READER_KINDS` / `egress_reads_max_thinking_budget`
+  (body-implied betas are `crate::beta_withhold`'s)
 - `src/anthropic_api/output_schema.rs` -- surgical repair of the ONE field
   Anthropic requires on every object in `output_config.format.schema`:
   `inject_additional_properties_false` walks the ASSEMBLED body (after the
@@ -959,7 +981,15 @@ license.
 - `src/openai_compat/dialect.rs` -- public `ReasoningDialect` enum +
   format-tag accessors
 - `src/openai_compat/request.rs` -- `ChatRequest` -> OpenAI-compat wire body
-  (system projection, dialect dispatch, extras merge)
+  (system projection, dialect dispatch, extras merge); `select_client_extras`
+  applies `managed_keys::client_extras_for` (Chat ingress or library only;
+  another dialect's `metadata` joins the fingerprint tally, other foreign keys
+  count once); `drop_credential_bearing_fields` removes `mcp_servers` as the
+  last mutation of `normalize`, counted as a policy action;
+  `force_stream_include_usage` sets `stream_options.include_usage: true` on
+  every streaming body after the extras merge unless the operator's own
+  `payload_extras` (router record or provider config) sets the flag; there is
+  no opt-out knob
 - `src/openai_compat/request_system_tests.rs` -- `include!`d into
   `request.rs`'s `tests` module: system-content wire and count pins
 - `src/openai_compat/request_drop_level_tests.rs` -- `include!`d into
@@ -1284,20 +1314,24 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `DeferredOutputConfigDiagnostics::rescanning`, since that merge is a
   post-normalize write path that can replace `output_config` wholesale.
   The body's `anthropic_beta` is the operator floor then the client's flags,
-  each flag once (`merge_floor_and_client_betas`; sidecar
-  `invoke_beta_merge_tests.rs`), then `withhold_betas`. Order after that:
-  `drop_orphan_tool_choice`, the `output_config` rescan, `union_feature_implied_betas` (so a body shipping
-  `output_config.format` never egresses without its gating flag), then
+  each flag once (`merge_floor_and_client_betas`, through
+  `beta_withhold::merge_unique`; sidecar `invoke_beta_merge_tests.rs`), then
+  `withhold_betas`, then the operator `additional_model_request_fields` merge
+  under `Dialect::BedrockInvokeOperator`. Order after that:
+  `drop_orphan_tool_choice`, the `output_config` rescan,
+  `betas::union_and_deposit_betas` (so a body shipping `output_config.format`
+  never egresses without its gating flag, and the attempt's
+  `BetaAssemblyReport` records the floor and implied set), then
   `drop_unrepresentable_body_fields` as the last mutation
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` handling (Invoke body +
   Converse `additionalModelRequestFields`): client flags pass verbatim except
   that `withhold_betas` drops the request's `routectl_internal.withheld_betas`
   unless the operator floor (`operator_floor`) asserts it, deciding through
-  `crate::beta_withhold`; plus
-  `feature_implied_betas` /
-  `union_feature_implied_betas`: the single source for the betas both
-  carriers add from body fields (structured-outputs; Converse
-  display-updates)
+  `crate::beta_withhold`; plus `union_and_deposit_betas`: unions
+  `beta_withhold::body_implied_betas` for the shape's `BetaLane` into the
+  final carrier (Invoke body or Converse bag), then records `operator_floor`
+  (only the flags that still ship) and the implied set via
+  `deposit_beta_assembly`
 - `src/bedrock/count_tokens.rs` -- CountTokens lane body assembly: the
   `invokeModel` union member (invoke body verbatim, base64) and the
   `converse` member (four-key allowlist), and the `inputTokens` response
@@ -1351,9 +1385,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
   (thinking, anthropic_beta, cache_control, output_config); `insert_thinking`
   composes the bag `thinking` through `anthropic_api`'s `compose_thinking`;
-  `thinking.display`
+  `insert_client_output_format` reads the client `output_config` through
+  `managed_keys::readable_extra` (Anthropic-ingress dialect rule) and forwards
+  only its `format`, which a converted `response_format` never overrides;
+  `insert_anthropic_beta` merges config then client flags through
+  `beta_withhold::merge_unique`; `thinking.display`
   rides verbatim, and display `updates` gains its beta through the shared
-  `union_feature_implied_betas`; a withheld client beta counts once
+  `betas::union_and_deposit_betas`; a withheld client beta counts once
   per request as `anthropic_beta_rejected_by_bedrock` on the drop counter;
   `ProviderExtrasPolicyActions` and `OperatorExtrasPolicyActions` count the
   managed-key override refusals once per request each, on the POLICY-ACTION
@@ -1362,9 +1400,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   types per path so a flag cannot be set from both and counted twice for one
   request. The bag's client-fingerprint strip is the lane's third strip site
   and records into the request-wide tally the orchestrator owns. For a target
-  whose `model_id` `anthropic_family` classifies `No`, the composed
-  `output_config` is omitted before the format scrub and the beta union, and
-  counted once per request as `output_config_unrepresentable`
+  whose `model_id` `anthropic_family` classifies `No`,
+  `omit_output_config_for_non_claude` removes the composed `output_config`
+  before the format scrub and the beta union, counted once per request as
+  `output_config_unrepresentable`
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
   (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame
@@ -3444,7 +3483,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   row, and only when the grounded template position names exactly ONE member
   of the row's closed accepted set; a `Ceiling` only for the ceiling row, read
   as a canonical nonzero `u32` through `field_verdict_value::canonical_ceiling`.
-  Consumed by `field_repair::rejected_field`.
+  Consumed by `field_repair::rejected_field`. Also
+  `rejected_beta_flags(provider_kind, status, upstream_type, parsed) ->
+  Option<Vec<String>>`: the flags an exact backtick-quoted beta-rejection
+  envelope names, deduplicated first-seen, on a 400 only (anthropic-api,
+  Mantle included: `error.message`; Bedrock: the flat `message` of a
+  `ValidationException`, one Converse errors wrapper stripped; openai-compat
+  never); pinned against the `beta-*` rejection fixtures in
+  `src/router/rejection_parser_beta_tests.rs`.
   `src/router/rejection_parser_tests.rs` welds it to the
   committed corpus (`tests/fixtures/rejections/**`, the Bedrock validation
   canaries, the forced tool_choice capture and both near-miss sets): every
@@ -3527,7 +3573,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   computed only when `learn_revert::attributable`. Holds a content-free
   `PendingWireRejection` on `DispatchMeta`; `emit_wire_rejections` takes a
   revert's outcome from `DispatchMeta.wire_reverts` when the revert answered
-  the rejection (a declined revert answers nothing), else
+  the rejection (a declined revert answers nothing), else `RepairedLossy`
+  when `note_beta_repair_succeeded` marked it (a beta repair whose repaired
+  attempt succeeded), else
   joins the field-repair outcome at dispatch end on the unmasked raw field
   path (never rendered) and records the ring entry (WARN on `unrepaired`,
   deduped). `Router::read_count_rejection_site` is the token-count form: it
@@ -3541,7 +3589,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   only, uncompared, for a trace-only check; declares the router's own
   response edits (model relabel, provider attribution)
 - `src/router/beta_withhold.rs` -- per-target withheld client beta set
-  (`withhold_betas_on_chain`), resolved pin > override > learned > seed; a
+  (`withhold_betas_on_chain`), resolved pin > non-Claude Converse target
+  (`refuses_the_beta_bag_key`: `EgressKind::BedrockConverse` whose upstream
+  `anthropic_family` classifies `No` withholds every client flag) > override
+  > learned > seed; a forwarded-credential target withholds nothing; a
   seed-clear marker on the cell stops the seed withholding; a lapsed learned
   negative claims its re-probe only on complete / stream, never count_tokens
 - `src/router/feature_filter.rs` -- capability pre-filter + strip-interceptor
@@ -7359,7 +7410,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   bounded LRU of immutable `AnchorRecord`s; `reserve_turn(key)` ->
   `TurnTicket::measure` -> consuming `PendingAnchor::settle`; newest turn wins
 - `src/ingress/anthropic/parse.rs` -- Anthropic body -> canonical
-  `ChatRequest`; forward-compat sweep into `provider_extras`. Captures the
+  `ChatRequest`; forward-compat sweep into `provider_extras` (every key
+  `routectl_core::is_canonical_request_key` does not claim). Captures the
   inbound per-conversation key into
   `routectl_internal.inbound_session_key` for session-sticky seat
   selection: the dialect-local accessors `inbound_session_header` (the
