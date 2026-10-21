@@ -180,7 +180,10 @@ async fn assert_refused_before_send(schema: fn() -> Value, reason: RefusalReason
             let err = call_error(provider.as_ref(), call, req).await;
 
             // Assert
-            let received = server.received_requests().await.unwrap_or_default();
+            let received = server
+                .received_requests()
+                .await
+                .expect("read mock requests");
             assert!(
                 received.is_empty(),
                 "{seam:?} {call:?}: an over-limit schema reached the upstream"
@@ -230,7 +233,10 @@ async fn a_schema_within_the_limits_ships_repaired_on_every_seam() {
         let _ = call_error(provider.as_ref(), Call::Complete, req).await;
 
         // Assert
-        let received = server.received_requests().await.unwrap_or_default();
+        let received = server
+            .received_requests()
+            .await
+            .expect("read mock requests");
         assert_eq!(received.len(), 1, "{seam:?}: one upstream call");
         let body: Value = serde_json::from_slice(&received[0].body).expect("JSON body");
         let schema = shipped_schema(seam, &body)

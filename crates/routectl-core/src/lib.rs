@@ -6,7 +6,6 @@
 //! OpenRouter speaks routectl. See `schema` for request/response types and
 //! `provider` for the per-backend trait.
 
-pub mod anthropic_family;
 mod beta_assembly_report;
 pub mod cache_control;
 pub mod cache_decision;

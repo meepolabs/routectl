@@ -244,7 +244,7 @@ fn validate_openai_responses_account_ids(config: &Config) -> Result<()> {
 #[cfg(feature = "bedrock")]
 pub fn validate_bedrock_invoke_model_family(config: &crate::config::Config) -> Result<()> {
     use routectl_core::Error;
-    use routectl_core::anthropic_family::{AnthropicFamily, anthropic_family};
+    use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
 
     let mut errors: Vec<String> = Vec::new();
     for (nickname, model) in &config.models {

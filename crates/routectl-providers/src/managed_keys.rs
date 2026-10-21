@@ -152,7 +152,7 @@ pub fn client_extras_for<'a>(
             foreign_keys: Vec::new(),
         };
     };
-    let operator = operator_extras_still_dispatched(req);
+    let operator = operator_payload_extras(req);
     let mut kept = Map::new();
     let mut foreign_keys = Vec::new();
     for (key, value) in dispatched {
@@ -160,7 +160,7 @@ pub fn client_extras_for<'a>(
             kept.insert(key.clone(), value.clone());
             continue;
         }
-        let operator_value = operator.as_ref().and_then(|o| o.get(key));
+        let operator_value = operator.and_then(|o| o.get(key));
         if operator_value != Some(value) {
             foreign_keys.push(key.as_str());
         }
@@ -243,24 +243,15 @@ fn speaks_egress_dialect(provenance: RequestProvenance, matching: RequestProvena
     provenance == RequestProvenance::Library || provenance == matching
 }
 
-/// The operator's `payload_extras`, restricted to the keys the attempt's
-/// merged `provider_extras` still carries: a dispatch-time strip that removed
-/// a key from this attempt must not see the operator layer put it back.
+/// The operator's `payload_extras` object, if any. Callers consult it only
+/// for keys the attempt's merged `provider_extras` still carries, so a
+/// dispatch-time strip that removed a key is never undone by this layer.
 #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
-fn operator_extras_still_dispatched(req: &ChatRequest) -> Option<Map<String, Value>> {
-    let dispatched = req.provider_extras.as_ref()?.as_object()?;
-    let operator = req
-        .routectl_internal
+fn operator_payload_extras(req: &ChatRequest) -> Option<&Map<String, Value>> {
+    req.routectl_internal
         .operator_payload_extras
         .as_deref()?
-        .as_object()?;
-    Some(
-        operator
-            .iter()
-            .filter(|(k, _)| dispatched.contains_key(*k))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    )
+        .as_object()
 }
 
 /// Per-request record that client extras from another ingress dialect were

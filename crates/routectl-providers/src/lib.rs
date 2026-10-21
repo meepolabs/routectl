@@ -128,6 +128,10 @@ pub mod mantle;
 pub(crate) mod aws_region;
 pub use aws_region::{InvalidAwsRegion, validate_aws_region};
 
+// Bedrock model-id vendor classification. Unconditional and dependency-free:
+// the router's config gates read it whatever provider features are enabled.
+pub mod anthropic_family;
+
 // Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Gated like
 // `http_client` (both lean on `reqwest`, which any provider feature pulls
 // in); every provider calls into it, so there is no dead code in a

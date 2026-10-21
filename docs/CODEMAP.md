@@ -42,18 +42,6 @@ license.
   `RoutectlInternal` carrier (resolved per-model knobs plus the
   transport-internal capture fields, never serialized to the wire -- see the
   struct's own docs for the field-by-field contract)
-- `src/anthropic_family.rs` -- purely lexical classification of an upstream
-  model id as Anthropic-family: `anthropic_family(&str) -> AnthropicFamily
-  {Yes, No, Unknown}`. Strips at most ONE leading routing prefix, then requires
-  `anthropic` as the first dot-segment (admits the bracket-suffixed catalog
-  form); a `foundation-model/` ARN is classified from its embedded id, every
-  other ARN resource form (inference profile, provisioned / custom / imported
-  model) is `Unknown`. THREE outcomes rather than a bool because its consumers
-  want opposite defaults on the unprovable case: the router's Bedrock
-  invoke-lane config gate and Converse beta withhold, and the providers'
-  Converse `output_config` omission, accept `Unknown`; the router's
-  tokenizer-family seat filter does not. Ungated and free of provider types so
-  both crates share the one rule
 - `src/beta_assembly_report.rs` -- `BetaAssemblyReport`: clone-shared
   per-attempt slot where an anthropic-vocabulary egress records the
   `BetaAssembly` it computed at header / bag assembly (the beta floor it never
@@ -680,6 +668,9 @@ license.
 - `src/aws_region.rs` -- crate-private canonical AWS region parser behind
   every region-derived endpoint builder and signer; exports only
   `validate_aws_region` / `InvalidAwsRegion` for the router's config-load check
+- `src/anthropic_family.rs` -- `anthropic_family(&str) -> AnthropicFamily
+  {Yes, No, Unknown}`: lexical Bedrock model-id vendor classifier (routing
+  prefix, `foundation-model/` ARN); ungated, shared by router and egress
 - `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: fallible
   region-to-URL builders (`mantle_host` ->
   `https://bedrock-mantle.<region>.api.aws`, `mantle_anthropic_base` ->
