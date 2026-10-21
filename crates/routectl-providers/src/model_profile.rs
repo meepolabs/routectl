@@ -81,6 +81,8 @@ impl ModelProfile {
 /// repair runs one plan per request, so a body carrying two refused sampling
 /// keys never succeeds and never teaches anything; this table is what keeps
 /// those requests working.
+/// SEED-VERDICT: acceptance-seed -- per-model refusals of sampling keys arrive
+/// one key per rejection, so a body with two never repairs into acceptance.
 pub const PROFILES: &[ModelProfile] = &[
     // OpenAI reasoning-only series: drop sampling params (400 otherwise).
     ModelProfile {

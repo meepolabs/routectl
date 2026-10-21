@@ -200,10 +200,12 @@ pub fn production_files() -> Result<Vec<String>, String> {
 // ---------------------------------------------------------------------------
 
 /// The comment text of a line, or `None` when the line is not a comment. Both
-/// `//` and `///` carry markers in the tree.
+/// `//` and `///` carry markers in the tree; the `!` of a `//!` inner doc line
+/// is part of the prefix, so a bare `//!` reads as a blank comment line.
 fn comment_text(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     let rest = trimmed.strip_prefix("//")?;
+    let rest = rest.strip_prefix('!').unwrap_or(rest);
     Some(rest.trim_start_matches('/').trim())
 }
 

@@ -257,6 +257,8 @@ fn insert_provider_extras(
         // per key, and letting the client value win would silently replace
         // the `thinking` block (or the Converse body field) routectl derived
         // from canonical. Baked seed verdict per foundations sec 14.
+        // SEED-VERDICT: structural -- the bag has one slot per key, so a
+        // client value cannot coexist with the field routectl derives.
         // TRANSLATION-DROP: policy-action class=provider_extra_managed_key_conflict test=provider_extra_managed_key_conflict_bumps_the_policy_action_counter_once
         if is_managed_key(Dialect::BedrockConverse, k) {
             actions.provider_extra_managed_key_conflict = true;
@@ -578,6 +580,8 @@ fn insert_operator_extras(
         // replace a field routectl derived from the canonical request. WARN
         // rather than DEBUG because this path IS an operator misconfig, not
         // a forward-compat sweep. Baked seed verdict per foundations sec 14.
+        // SEED-VERDICT: structural -- the bag has one slot per key, so an
+        // operator value cannot coexist with the field routectl derives.
         // TRANSLATION-DROP: policy-action class=operator_extra_managed_key_conflict test=operator_extra_managed_key_conflict_bumps_the_policy_action_counter_once
         if is_managed_key(Dialect::BedrockConverse, k) {
             actions.operator_extra_managed_key_conflict = true;

@@ -10,12 +10,23 @@
 //! // SEED-VERDICT: <tag> -- <self-contained reason>
 //! ```
 //!
-//! A long reason wraps onto the comment lines below; the reason ends at a
-//! blank comment line or at the next `SEED-VERDICT:` / `TRANSLATION-DROP:`
-//! token. The refusal of file paths, line numbers and planning ids reads the
-//! WHOLE comment block below the marker, blank comment lines included, so the
-//! marker and its wrapped reason close their comment block, directly above the
-//! item they record.
+//! A comment BLOCK is a run of non-blank comment lines: a blank `//`, `///`
+//! or `//!` line ends one, as does any line that is not a comment. A long
+//! reason wraps onto the lines below the marker and ends where its block
+//! ends, or at the next `SEED-VERDICT:` / `TRANSLATION-DROP:` line. Past that
+//! point, up to the item the marker anchors, only blank comment lines and
+//! other markers' paragraphs may follow: the marker is the last prose
+//! paragraph of its comment, so nothing a reader takes for its reason sits
+//! outside the reason the census pins.
+//!
+//! A seed line directly below a prose `TRANSLATION-DROP:` marker in the same
+//! block would be read as part of that marker's reason, so it is refused:
+//! the seed line goes above the drop marker, or a blank comment line
+//! separates them.
+//!
+//! The refusal of file paths, line numbers and planning ids reads the whole
+//! contiguous comment below the marker, blank comment lines included, up to
+//! the next marker.
 //!
 //! The population is not confined to the drop census's surfaces: the sweep
 //! walks the providers and router `src` trees recursively.
@@ -23,24 +34,28 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::{
-    MARKER_TOKEN, anchors_code, comment_text, is_test_file, normalize, reject_forbidden_content,
+    MARKER_TOKEN, anchors_code, comment_text, is_test_file, normalize, parse_file, parse_verdict,
+    reject_forbidden_content,
 };
 
 /// The token that opens every seed marker.
 pub const SEED_TOKEN: &str = "SEED-VERDICT:";
 
-/// Router test modules whose names the `_tests` / `_test_support` naming
-/// derivation does not recognize. Each is a `#[cfg(test)]` module declaration,
-/// which the census derives and checks against this list.
-pub const ROUTER_TEST_FILES: &[&str] = &[
-    "alloc_probe.rs",
-    "config/tests.rs",
-    "probe_scheduler/test_support.rs",
-    "router/tests.rs",
-    "test_secret.rs",
+/// Test modules whose names the `_tests` / `_test_support` naming derivation
+/// does not recognize, as `(crate, src-relative file)`. Each is an outline
+/// module declared under a `#[cfg(...)]` whose predicate holds a bare `test`
+/// atom, which the census derives and checks against this list.
+pub const UNNAMED_TEST_FILES: &[(&str, &str)] = &[
+    (PROVIDERS, "alloc_probe.rs"),
+    (ROUTER, "alloc_probe.rs"),
+    (ROUTER, "config/tests.rs"),
+    (ROUTER, "probe_scheduler/test_support.rs"),
+    (ROUTER, "router/tests.rs"),
+    (ROUTER, "test_secret.rs"),
 ];
 
 pub const PROVIDERS: &str = "routectl-providers";
@@ -104,32 +119,123 @@ fn is_marker_line(text: &str) -> bool {
     text.contains(SEED_TOKEN) || text.contains(MARKER_TOKEN)
 }
 
-fn seed_continuation(lines: &[&str], marker_line: usize) -> String {
-    let mut parts = Vec::new();
-    for line in lines.iter().skip(marker_line + 1) {
-        let Some(text) = comment_text(line) else {
-            break;
-        };
-        if text.is_empty() || is_marker_line(text) {
-            break;
-        }
-        parts.push(text.to_string());
+/// The maximal run of lines around `index` that satisfy `in_run`, or `None`
+/// when `index` itself does not.
+fn bounds_where(
+    lines: &[&str],
+    index: usize,
+    in_run: impl Fn(&str) -> bool,
+) -> Option<Range<usize>> {
+    if index >= lines.len() || !in_run(lines[index]) {
+        return None;
     }
-    parts.join(" ")
+    let start = (0..index)
+        .rev()
+        .take_while(|&i| in_run(lines[i]))
+        .last()
+        .unwrap_or(index);
+    let end = (index + 1..lines.len())
+        .find(|&i| !in_run(lines[i]))
+        .unwrap_or(lines.len());
+    Some(start..end)
 }
 
+/// The comment block holding `index`: the maximal run of non-blank comment
+/// lines around it. A blank comment line and a non-comment line both end a
+/// block. `None` when `index` is itself blank or not a comment.
+pub fn comment_block_bounds(lines: &[&str], index: usize) -> Option<Range<usize>> {
+    bounds_where(lines, index, |line| {
+        comment_text(line).is_some_and(|text| !text.is_empty())
+    })
+}
+
+/// The whole comment holding `index`: every contiguous comment line around
+/// it, blank comment lines included, so a doc comment's paragraphs are one
+/// comment. Only a non-comment line ends it.
+pub fn comment_run_bounds(lines: &[&str], index: usize) -> Option<Range<usize>> {
+    bounds_where(lines, index, |line| comment_text(line).is_some())
+}
+
+/// The line just past the marker's reason: its block's end, or an earlier
+/// marker line inside the block.
+fn reason_end(lines: &[&str], block: &Range<usize>, marker_line: usize) -> usize {
+    (marker_line + 1..block.end)
+        .find(|&i| comment_text(lines[i]).is_some_and(is_marker_line))
+        .unwrap_or(block.end)
+}
+
+fn seed_continuation(lines: &[&str], marker_line: usize, end: usize) -> String {
+    lines[marker_line + 1..end]
+        .iter()
+        .filter_map(|line| comment_text(line))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The contiguous comment below the marker, blank comment lines included, up
+/// to the next marker: what the forbidden-content scan reads.
 fn seed_block_below(lines: &[&str], marker_line: usize) -> String {
-    let mut parts = Vec::new();
-    for line in lines.iter().skip(marker_line + 1) {
-        let Some(text) = comment_text(line) else {
-            break;
-        };
-        if is_marker_line(text) {
-            break;
-        }
-        parts.push(text.to_string());
+    let run_end = comment_run_bounds(lines, marker_line).map_or(marker_line + 1, |run| run.end);
+    lines[marker_line + 1..run_end]
+        .iter()
+        .filter_map(|line| comment_text(line))
+        .take_while(|text| !is_marker_line(text))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Refuse a seed line sitting below a prose drop marker in the same block,
+/// where that marker's reason would absorb it. A counted drop marker keeps no
+/// reason, and a seed line above stacks independently.
+fn refuse_absorption_into_a_drop_reason(
+    lines: &[&str],
+    block: &Range<usize>,
+    index: usize,
+    where_: &str,
+) -> Result<(), String> {
+    let Some(above) = (block.start..index)
+        .rev()
+        .find(|&i| comment_text(lines[i]).is_some_and(is_marker_line))
+    else {
+        return Ok(());
+    };
+    let Some(drop) = comment_text(lines[above])
+        .and_then(|text| text.split_once(MARKER_TOKEN))
+        .map(|(_, rest)| rest)
+    else {
+        return Ok(());
+    };
+    let counted = drop
+        .split_whitespace()
+        .next()
+        .and_then(|token| parse_verdict(token, where_).ok())
+        .is_some_and(|verdict| verdict.is_counted());
+    if counted {
+        return Ok(());
     }
-    parts.join(" ")
+    Err(format!(
+        "{where_} sits directly below a prose {MARKER_TOKEN} marker, whose reason would absorb          it; place the SEED line above the TRANSLATION-DROP marker or separate them with a blank          comment line"
+    ))
+}
+
+/// Refuse prose after the marker's reason before the anchored item: past the
+/// reason only blank comment lines and other markers' paragraphs may follow.
+fn refuse_trailing_prose(lines: &[&str], from: usize, where_: &str) -> Result<(), String> {
+    let mut in_marker_paragraph = false;
+    for line in &lines[from..] {
+        match comment_text(line) {
+            None => return Ok(()),
+            Some("") => in_marker_paragraph = false,
+            Some(text) if is_marker_line(text) => in_marker_paragraph = true,
+            Some(_) if in_marker_paragraph => {}
+            Some(_) => {
+                return Err(format!(
+                    "{where_} is followed by prose in the same comment; the marker must be the                      last paragraph of its comment, directly above the item it records"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_seed_marker(
@@ -174,7 +280,14 @@ fn parse_seed_marker(
              `<tag> -- <reason>`"
         ));
     }
-    let reason = normalize(&format!("{reason} {}", seed_continuation(lines, index)));
+    let block = comment_block_bounds(lines, index).unwrap_or(index..index + 1);
+    refuse_absorption_into_a_drop_reason(lines, &block, index, &where_)?;
+    let end = reason_end(lines, &block, index);
+    refuse_trailing_prose(lines, end, &where_)?;
+    let reason = normalize(&format!(
+        "{reason} {}",
+        seed_continuation(lines, index, end)
+    ));
     if reason.is_empty() {
         return Err(format!("{where_} has an empty reason"));
     }
@@ -197,6 +310,87 @@ pub fn parse_seed_file(krate: &str, file: &str, source: &str) -> Result<Vec<Seed
         }
     }
     Ok(markers)
+}
+
+/// The prose phrase every baked rule's justification opens with.
+pub const BAKED_PHRASE: &str = "Baked seed verdict";
+
+/// A comment holding the baked-rule phrase, and whether a parsed marker in the
+/// same comment records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BakedBlock {
+    pub krate: String,
+    pub file: String,
+    /// 1-based first line of the comment, for error attribution only.
+    pub line: usize,
+    pub covered: bool,
+}
+
+/// Every comment in one source holding [`BAKED_PHRASE`], matched over the
+/// comment's text with prefixes stripped and whitespace collapsed, so a phrase
+/// wrapped across lines still counts. Coverage reads parsed markers, seed and
+/// drop alike, never a token grep: a token that does not parse covers nothing.
+pub fn baked_blocks_in(krate: &str, file: &str, source: &str) -> Result<Vec<BakedBlock>, String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let marker_lines: Vec<usize> = parse_seed_file(krate, file, source)?
+        .iter()
+        .map(|m| m.line - 1)
+        .chain(parse_file(file, source)?.iter().map(|m| m.line - 1))
+        .collect();
+    let mut blocks = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some(run) = comment_run_bounds(&lines, index) else {
+            index += 1;
+            continue;
+        };
+        let text = normalize(
+            &lines[run.clone()]
+                .iter()
+                .filter_map(|line| comment_text(line))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        if text.contains(BAKED_PHRASE) {
+            blocks.push(BakedBlock {
+                krate: krate.to_string(),
+                file: file.to_string(),
+                line: run.start + 1,
+                covered: marker_lines.iter().any(|line| run.contains(line)),
+            });
+        }
+        index = run.end;
+    }
+    Ok(blocks)
+}
+
+/// Every baked-phrase comment over a supplied population. Zero is an error.
+pub fn baked_blocks_over(population: &[SweptSource]) -> Result<Vec<BakedBlock>, String> {
+    let mut blocks = Vec::new();
+    for (krate, file, source) in population {
+        blocks.extend(baked_blocks_in(krate, file, source)?);
+    }
+    if blocks.is_empty() {
+        return Err(format!(
+            "the sweep found no `{BAKED_PHRASE}` comment; an empty sweep is a failed sweep"
+        ));
+    }
+    Ok(blocks)
+}
+
+/// The comments holding the phrase with no marker beside them, as messages.
+pub fn uncovered_baked_blocks(blocks: &[BakedBlock]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter(|block| !block.covered)
+        .map(|block| {
+            format!(
+                "{} {}: the comment opening on line {} states a baked seed verdict but holds no \
+                 {SEED_TOKEN} or {MARKER_TOKEN} marker",
+                block.krate, block.file, block.line
+            )
+        })
+        .collect()
 }
 
 /// One swept source: `(crate, src-relative path, source)`.
@@ -267,7 +461,7 @@ pub fn sweep_all(roots: &[(&str, PathBuf)]) -> Result<Vec<SweptSource>, String> 
 }
 
 pub fn is_excluded(krate: &str, file: &str) -> bool {
-    is_test_file(file) || (krate == ROUTER && ROUTER_TEST_FILES.contains(&file))
+    is_test_file(file) || UNNAMED_TEST_FILES.contains(&(krate, file))
 }
 
 /// The production half of [`sweep_all`].
@@ -350,8 +544,31 @@ pub fn compare_to_table(
     Err(problems.join("; "))
 }
 
-/// The `#[cfg(test)]` outline module declarations in one source file, resolved
-/// to src-relative paths: `mod name;` with an optional `#[path = "..."]`.
+/// Whether an attribute line is a `#[cfg(...)]` whose predicate holds a bare
+/// `test` atom and no `not`. String literals are blanked first, so
+/// `feature = "test-utils"` names no atom.
+fn is_test_cfg(line: &str) -> bool {
+    let Some(predicate) = line
+        .strip_prefix("#[cfg(")
+        .and_then(|rest| rest.strip_suffix(")]"))
+    else {
+        return false;
+    };
+    let unquoted: String = predicate
+        .split('"')
+        .step_by(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let atoms: Vec<&str> = unquoted
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|atom| !atom.is_empty())
+        .collect();
+    atoms.contains(&"test") && !atoms.contains(&"not")
+}
+
+/// The test-gated outline module declarations in one source file, resolved to
+/// src-relative paths: a [`is_test_cfg`] attribute, an optional
+/// `#[path = "..."]`, then `mod name;`.
 pub fn cfg_test_module_files(file: &str, source: &str) -> Vec<String> {
     let dir = file.rsplit_once('/').map_or("", |(d, _)| d);
     let name = file.rsplit('/').next().unwrap_or(file);
@@ -367,7 +584,7 @@ pub fn cfg_test_module_files(file: &str, source: &str) -> Vec<String> {
     let lines: Vec<&str> = source.lines().map(str::trim).collect();
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        if *line != "#[cfg(test)]" {
+        if !is_test_cfg(line) {
             continue;
         }
         let mut next = i + 1;

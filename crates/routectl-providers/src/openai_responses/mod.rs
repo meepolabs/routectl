@@ -186,6 +186,8 @@ impl Provider for OpenAiResponsesProvider {
         // Confirmed stream-only behavior: smoke 2026-05-12.
         // Baked seed verdict: this provider kind sits outside field repair, so
         // that 400 would fail every non-stream request instead of being learned.
+        // SEED-VERDICT: acceptance-seed -- the endpoint is stream-only and sits
+        // outside field repair, so streaming is forced before send.
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));

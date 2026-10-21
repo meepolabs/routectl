@@ -52,6 +52,8 @@ impl Dialect for DeepSeekDialect {
         // Baked seed verdict: no recorded DeepSeek refusal exists to ground a
         // learned repair or show the host's envelope parses, so there is no
         // evidence the rule could be relearned; it stays until there is.
+        // SEED-VERDICT: acceptance-seed -- no recorded refusal from this host
+        // exists to ground a learned repair, so the sampling drop stays baked.
         if profile_for(&req.model).drops_sampling_params {
             drop_sampling_params(obj, tap);
         }
@@ -98,6 +100,8 @@ impl Dialect for DeepSeekDialect {
 /// `reasoning_content`. DeepSeek's thinking mode rejects a tool-call turn
 /// whose `reasoning_content` key is ABSENT but accepts an explicit empty
 /// value; a plain-text assistant turn stays without the key.
+/// SEED-VERDICT: acceptance-seed -- learned repair can only remove or rewrite
+/// a field, never add one, so the empty value is inserted before send.
 fn insert_empty_reasoning_content_on_tool_call_turns(obj: &mut serde_json::Map<String, Value>) {
     let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) else {
         return;

@@ -605,6 +605,8 @@ fn operator_set_include(req: &ChatRequest) -> bool {
 /// `store` refusal on `ChatgptOauth` can arrive as a status-0
 /// `response.failed` after the stream has started, too late to retry
 /// invisibly.
+/// SEED-VERDICT: acceptance-seed -- the refusal can arrive mid-stream outside
+/// field repair, so the forced value is a baked prior nothing can relearn.
 fn apply_store_override(request: &mut ResponsesRequest, v: &Value, auth_kind: AuthKind) {
     if matches!(auth_kind, AuthKind::ChatgptOauth | AuthKind::BedrockMantle) {
         tracing::debug!(

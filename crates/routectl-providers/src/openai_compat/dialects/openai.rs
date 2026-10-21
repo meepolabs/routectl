@@ -50,6 +50,8 @@ impl Dialect for OpenAiDialect {
             // refusals (one key named per 400, one repair plan per request),
             // and no learned verdict renames a field; `max_tokens` is the
             // output ceiling's path, not a field to drop or move.
+            // SEED-VERDICT: acceptance-seed -- no learned verdict renames a
+            // field, so reasoning models get the renamed ceiling before send.
             if let Some(v) = obj.remove("max_tokens") {
                 obj.insert("max_completion_tokens".into(), v);
                 declare_max_tokens_rename(tap);

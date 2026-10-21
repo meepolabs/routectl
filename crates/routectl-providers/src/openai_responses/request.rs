@@ -86,6 +86,8 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         // Baked seed verdict: this provider kind sits outside field repair,
         // and its refusal can arrive as a status-0 `response.failed` after
         // the stream has started, too late to retry invisibly.
+        // SEED-VERDICT: acceptance-seed -- the refusal can arrive mid-stream
+        // outside field repair, so the ceiling is withheld before send.
         max_output_tokens: match cfg.auth_kind {
             AuthKind::ChatgptOauth => None,
             _ => req.max_tokens,

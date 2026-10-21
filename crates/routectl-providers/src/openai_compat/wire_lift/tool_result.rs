@@ -303,6 +303,10 @@ fn mark_error_content(content: Value) -> Value {
 ///   unknown image source) are dropped (lenient) or rejected (strict) via
 ///   `reject_or_drop_unrepresentable`.
 /// - Object / scalar -> stringified JSON
+///
+/// SEED-VERDICT: acceptance-seed -- strict backends refuse an array of text
+/// blocks on a tool message while every backend accepts the joined string, so
+/// the join runs before send rather than waiting for a refusal.
 fn translate_tool_result_content(
     id: &str,
     content: Value,

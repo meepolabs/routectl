@@ -220,6 +220,8 @@ impl AdditionalPropertiesRepair {
 /// never add one, so this stays one bounded walk. A limit error leaves the
 /// schema partly edited in place; every seam propagates it before any send,
 /// so that body never ships.
+/// SEED-VERDICT: acceptance-seed -- field repair can remove or rewrite a field
+/// but never add one, so the required key is injected before send.
 pub fn inject_additional_properties_false(
     provider: &str,
     body: &mut Map<String, Value>,

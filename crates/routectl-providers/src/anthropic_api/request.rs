@@ -256,11 +256,16 @@ pub(crate) fn clamp_sampling_for_thinking(
         // Baked seed verdict: the refusal depends on the emitted thinking
         // type, but learned verdicts key one field per target, so a learned
         // drop would also strip temperature from non-thinking requests.
+        // SEED-VERDICT: acceptance-seed -- the refusal is conditional on
+        // active thinking, which a one-field learned verdict cannot express.
         return (temperature.map(|_| 1.0f64), None);
     }
     // Baked seed verdict: the refusal depends on the other sampling key being
     // present, so a learned one-field drop would also strip `top_p` from
     // requests that send it alone, which the host accepts.
+    // SEED-VERDICT: acceptance-seed -- the refusal is conditional on both
+    // sampling keys being present, which a one-field learned verdict cannot
+    // express.
     let top_p = if temperature.is_some() { None } else { top_p };
     (temperature, top_p)
 }
@@ -544,6 +549,9 @@ impl DeferredOutputConfigDiagnostics {
 /// one plan per request, so a conventional body carrying both would fail
 /// permanently without learning. Uncounted: only the `response_format`
 /// conversion is a representability loss, and it is counted where it runs.
+/// SEED-VERDICT: acceptance-seed -- the host refuses each extra format key one
+/// per rejection, so the conventional body carrying both never repairs into
+/// acceptance.
 pub(crate) fn drop_unrepresentable_output_format_keys(
     obj: &mut serde_json::Map<String, Value>,
 ) -> DroppedFormatKeys {

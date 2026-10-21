@@ -224,6 +224,10 @@ pub(super) fn lift_delta_reasoning_content(
 /// strip-or-preserve choice is owned by the runtime, not the dialect
 /// trait, because it depends on the per-provider `history_reasoning`
 /// TOML knob (which dialects don't see).
+///
+/// SEED-VERDICT: acceptance-seed -- the strip runs before send because a
+/// replayed reasoning field is refused on every multi-turn request; the
+/// per-provider preserve setting is the opt-out for an upstream that needs it.
 pub(in crate::openai_compat) fn strip_history_reasoning(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
@@ -434,6 +438,8 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
 /// Baked seed verdict: the host refuses these one key per 400 while field
 /// repair runs one plan per request, so a request sending two of them would
 /// fail permanently without learning if this list were left to repair.
+/// SEED-VERDICT: acceptance-seed -- reasoning models refuse these keys one per
+/// rejection, so a body with two never repairs into acceptance.
 pub(super) const SAMPLING_DROP: &[&str] = &[
     "temperature",
     "top_p",
