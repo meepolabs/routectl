@@ -175,6 +175,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "gemini/request_fingerprint_tests.rs",
     "gemini/sse_tests.rs",
     "gemini/wire_tap_tests.rs",
+    "openai_compat/wire_lift/tool_result_tests.rs",
     "openai_responses/auth_wiring_tests.rs",
     "openai_responses/e2e_tests.rs",
     "openai_responses/excerpt_tests.rs",
