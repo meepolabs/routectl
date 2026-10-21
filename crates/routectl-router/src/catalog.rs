@@ -566,9 +566,12 @@ struct BakedCell {
 /// a `const` slice): `CatalogRow` is no longer `Copy` (it carries a
 /// `BTreeMap`), and lookup is off the hot path (dispatch never calls into
 /// this table directly -- see the module doc).
-/// SEED-VERDICT: acceptance-seed -- cache prices and TTLs never appear in a
-/// rejection, so nothing upstream could teach them; the vendored snapshot is
-/// the prior and an overlay cell overrides it per field.
+/// SEED-VERDICT: acceptance-seed -- the vendored snapshot is the prior routectl
+/// starts from. Cache economics never appear in a rejection, so nothing
+/// upstream could teach them, while a learned output ceiling lowers a limit the
+/// table supplied and a learned capability verdict outranks the table's
+/// capability prior. An overlay cell overrides most fields per field, but never
+/// storage rent, the auto-cacher flag or the tier.
 static TABLE: LazyLock<Vec<BakedCell>> = LazyLock::new(|| {
     crate::catalog_baked::baked_cells()
         .into_iter()

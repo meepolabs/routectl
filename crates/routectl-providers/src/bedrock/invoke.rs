@@ -437,7 +437,8 @@ fn strip_client_metadata(
 ///
 /// SEED-VERDICT: acceptance-seed -- the lowered breakpoint is accepted, so no
 /// rejection could retire the lowering, and it moves the cache breakpoint:
-/// prefix-changing, retired only through the sampled canary.
+/// prefix-changing, retirable only by a canary showing the top-level marker
+/// accepted, and no canary samples this site yet.
 fn lower_top_level_cache_control_to_per_block(
     provider_id: &str,
     obj: &mut serde_json::Map<String, Value>,

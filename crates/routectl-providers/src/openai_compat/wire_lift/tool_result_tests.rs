@@ -403,6 +403,13 @@ fn hoisted_images_flush_before_a_message_that_does_not_continue_the_run() {
             ]}),
             vec!["tool", "user", "user", "tool"],
         ),
+        (
+            "assistant message opening with a tool_result block",
+            json!({"role": "assistant", "content": [
+                {"type": "tool_result", "tool_use_id": "t2", "content": "two"}
+            ]}),
+            vec!["tool", "user", "assistant"],
+        ),
     ];
     for (name, next, expected_roles) in cases {
         // Arrange
@@ -424,6 +431,36 @@ fn hoisted_images_flush_before_a_message_that_does_not_continue_the_run() {
             "{name}: the image must flush right after its run"
         );
     }
+}
+
+#[test]
+fn run_split_across_three_user_messages_hoists_images_after_the_whole_run() {
+    // Arrange
+    let messages = json!([
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": [image_block("QQ==")]}
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t2", "content": "two"}
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t3", "content": [image_block("Qw==")]}
+        ]}
+    ]);
+
+    // Act
+    let obj = run(messages);
+
+    // Assert
+    assert_eq!(
+        obj["messages"],
+        json!([
+            {"role": "tool", "tool_call_id": "t1", "content": ""},
+            {"role": "tool", "tool_call_id": "t2", "content": "two"},
+            {"role": "tool", "tool_call_id": "t3", "content": ""},
+            {"role": "user", "content": [image_url_part("QQ=="), image_url_part("Qw==")]}
+        ])
+    );
 }
 
 #[test]
@@ -561,6 +598,45 @@ fn tool_result_multi_text_array_joins_with_double_newline() {
     // Assert
     let msgs = obj["messages"].as_array().unwrap();
     assert_eq!(msgs[0]["content"], json!("first\n\nsecond"));
+}
+
+#[test]
+fn joined_tool_result_text_keeps_non_ascii_and_empty_blocks_verbatim() {
+    let cases = [
+        (
+            "accented latin",
+            json!([{"type": "text", "text": "caf\u{e9}"}, {"type": "text", "text": "na\u{ef}ve"}]),
+            "caf\u{e9}\n\nna\u{ef}ve",
+        ),
+        (
+            "cjk",
+            json!([{"type": "text", "text": "\u{4f60}\u{597d}"}, {"type": "text", "text": "\u{4e16}\u{754c}"}]),
+            "\u{4f60}\u{597d}\n\n\u{4e16}\u{754c}",
+        ),
+        (
+            "empty middle block keeps its separators",
+            json!([
+                {"type": "text", "text": "a"},
+                {"type": "text", "text": ""},
+                {"type": "text", "text": "b"}
+            ]),
+            "a\n\n\n\nb",
+        ),
+    ];
+    for (name, content, expected) in cases {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": content}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        assert_eq!(obj["messages"][0]["content"], json!(expected), "{name}");
+    }
 }
 
 #[test]

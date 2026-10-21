@@ -122,6 +122,7 @@ fn lift_tallied(
         };
         rewrite_message(msg, &mut ctx, &mut rewritten)?;
     }
+    debug_assert!(hoisted_images.is_empty());
     obj.insert("messages".into(), Value::Array(rewritten));
     Ok(())
 }
@@ -336,7 +337,8 @@ fn mark_error_content(content: Value) -> Value {
 ///
 /// SEED-VERDICT: acceptance-seed -- every backend accepts the joined string, so
 /// no rejection could retire the join, and it rewrites tool history:
-/// prefix-changing, retired only through the sampled canary.
+/// prefix-changing, retirable only by a canary showing the unjoined array
+/// accepted, and no canary samples this site yet.
 fn translate_tool_result_content(
     id: &str,
     content: Value,

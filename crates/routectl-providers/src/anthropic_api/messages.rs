@@ -191,7 +191,8 @@ pub(super) fn normalize_replay_invariants<'a>(
     // Borrowed (no clone). Yes -> rebuild on the second pass.
     // SEED-VERDICT: acceptance-seed -- Anthropic accepts the stripped history,
     // so no rejection could retire the strip, and it rewrites replayed turns:
-    // prefix-changing, retired only through the sampled canary.
+    // prefix-changing, retirable only by a canary showing the unstripped
+    // history accepted, and no canary samples this site yet.
     let needs_strip = req.messages.iter().any(message_has_unsigned_thinking);
     if !needs_strip {
         return Ok(Cow::Borrowed(&req.messages));

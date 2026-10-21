@@ -126,7 +126,8 @@ fn is_wire_safe(id: &str) -> bool {
 /// verbatim, escaped, and digest namespaces disjoint.
 /// SEED-VERDICT: acceptance-seed -- the escape lands in the charset the strict
 /// upstreams accept, so no rejection could retire it, and ids sit in replayed
-/// history: prefix-changing, retired only through the sampled canary.
+/// history: prefix-changing, retirable only by a canary showing the raw id
+/// accepted, and no canary samples this site yet.
 pub fn sanitize_tool_id(id: &str) -> Cow<'_, str> {
     // No debug_assert that `id` lacks a marker prefix: a legitimate raw
     // client id may genuinely start with `esc_` / `esct_` (the case the

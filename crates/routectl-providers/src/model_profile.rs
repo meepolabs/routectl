@@ -78,7 +78,7 @@ impl ModelProfile {
 /// less-specific ones if collisions are possible.
 ///
 /// Baked seed verdict: OpenAI names one refused parameter per 400 and field
-/// repair runs one plan per request, so a body carrying two refused sampling
+/// repair makes one edit per target, so a body carrying two refused sampling
 /// keys never succeeds and never teaches anything; this table is what keeps
 /// those requests working.
 /// SEED-VERDICT: acceptance-seed -- the host names one refused key per 400

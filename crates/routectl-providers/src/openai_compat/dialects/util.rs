@@ -227,7 +227,8 @@ pub(super) fn lift_delta_reasoning_content(
 ///
 /// SEED-VERDICT: acceptance-seed -- a stripping dialect accepts the stripped
 /// history, so no rejection could retire the strip, and it rewrites assistant
-/// turns: prefix-changing, retired only through the sampled canary.
+/// turns: prefix-changing, retirable only by a canary showing the unstripped
+/// history accepted, and no canary samples this site yet.
 pub(in crate::openai_compat) fn strip_history_reasoning(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
@@ -436,7 +437,7 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
 /// models reject. Applied via [`drop_sampling_params`].
 ///
 /// Baked seed verdict: the host refuses these one key per 400 while field
-/// repair runs one plan per request, so a request sending two of them would
+/// repair makes one edit per target, so a request sending two of them would
 /// fail permanently without learning if this list were left to repair.
 /// SEED-VERDICT: acceptance-seed -- the host names one refused key per 400
 /// and repair makes one edit per target, so two keys fail and teach nothing.
