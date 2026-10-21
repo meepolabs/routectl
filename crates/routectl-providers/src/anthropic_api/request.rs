@@ -539,6 +539,11 @@ impl DeferredOutputConfigDiagnostics {
 /// verbatim to the same Anthropic validator. So the uniform drop is correct
 /// and the seams do not diverge; if that ever changes, re-splitting is a
 /// change to this one function and its three call sites.
+///
+/// Baked seed verdict: the host names one key per 400 and field repair runs
+/// one plan per request, so a conventional body carrying both would fail
+/// permanently without learning. Uncounted: only the `response_format`
+/// conversion is a representability loss, and it is counted where it runs.
 pub(crate) fn drop_unrepresentable_output_format_keys(
     obj: &mut serde_json::Map<String, Value>,
 ) -> DroppedFormatKeys {

@@ -83,13 +83,13 @@ const ADDITIONAL_PROPERTIES: &str = "additionalProperties";
 /// structured-output schema nests anywhere near this deep, and a body can
 /// reach 32 MiB, so the bound exists to keep a pathological schema from
 /// turning the walk into an unbounded memory sink.
-const MAX_SCHEMA_DEPTH: usize = 256;
+pub const MAX_SCHEMA_DEPTH: usize = 256;
 
 /// Maximum schema nodes the walk visits before failing the request. Same
 /// standing as [`MAX_SCHEMA_DEPTH`]: an assumption, generous against real
 /// schemas, present so the cost of the walk is bounded by something other
 /// than the body size limit.
-const MAX_SCHEMA_NODES: usize = 100_000;
+pub const MAX_SCHEMA_NODES: usize = 100_000;
 
 /// Characters of caller-chosen segment text one rendered path may carry.
 /// Matches the cap `routectl_core::sanitize_for_log` applies, so the bound
@@ -215,6 +215,11 @@ impl AdditionalPropertiesRepair {
 ///
 /// A body with no `output_config.format.schema`, or a non-object schema, is
 /// left alone and reports nothing.
+///
+/// Baked seed verdict: field repair can drop, rewrite or lower a field but
+/// never add one, so this stays one bounded walk. A limit error leaves the
+/// schema partly edited in place; every seam propagates it before any send,
+/// so that body never ships.
 pub fn inject_additional_properties_false(
     provider: &str,
     body: &mut Map<String, Value>,

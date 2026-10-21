@@ -600,6 +600,11 @@ fn operator_set_include(req: &ChatRequest) -> bool {
 /// config-time provider-level reject cannot see. Combined with the `false`
 /// default in `request.rs`, no origin of `store = true` survives on the
 /// mantle lane.
+///
+/// Baked seed verdict: this provider kind sits outside field repair, and a
+/// `store` refusal on `ChatgptOauth` can arrive as a status-0
+/// `response.failed` after the stream has started, too late to retry
+/// invisibly.
 fn apply_store_override(request: &mut ResponsesRequest, v: &Value, auth_kind: AuthKind) {
     if matches!(auth_kind, AuthKind::ChatgptOauth | AuthKind::BedrockMantle) {
         tracing::debug!(

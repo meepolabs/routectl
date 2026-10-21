@@ -1025,6 +1025,11 @@ mod error_parse_tests;
 #[path = "beta_withhold_wire_tests.rs"]
 mod beta_withhold_wire_tests;
 
+// The schema repair walk's limits refuse the request before any send.
+#[cfg(test)]
+#[path = "output_schema_limit_wire_tests.rs"]
+mod output_schema_limit_wire_tests;
+
 #[cfg(test)]
 #[path = "error_read_tests.rs"]
 mod error_read_tests;

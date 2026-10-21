@@ -715,6 +715,9 @@ pub(super) fn body_has_output_config_effort(body: &Value) -> bool {
 /// Must run after every source that can contribute the flag (client
 /// betas, operator betas, the pinned floor). Logs one DEBUG line when it
 /// removes the flag; a body without `thinking.display` is untouched.
+///
+/// Baked seed verdict: the host accepts the pair and lets the redaction win,
+/// so no rejection ever arrives for field repair to learn the drop from.
 pub(super) fn drop_redact_beta_for_display(
     provider_id: &str,
     body: &Value,

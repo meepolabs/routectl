@@ -184,6 +184,8 @@ impl Provider for OpenAiResponsesProvider {
         // until the `response.completed` event fires (which carries the full
         // ResponsesResponse body), then translating that body to ChatResponse.
         // Confirmed stream-only behavior: smoke 2026-05-12.
+        // Baked seed verdict: this provider kind sits outside field repair, so
+        // that 400 would fail every non-stream request instead of being learned.
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));

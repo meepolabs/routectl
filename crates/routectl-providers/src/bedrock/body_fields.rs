@@ -73,6 +73,8 @@ pub(super) fn drop_orphan_tool_choice(
 /// answer `mcp_servers` with a generic 400 that names no field, so it is not
 /// representable on any account. Its entries can also carry a
 /// connector credential issued for a remote MCP server, never for AWS.
+/// Static security: a learned drop needs one attempt that ships the value,
+/// so this stays a fixed drop rather than a learned verdict.
 const BEDROCK_UNREPRESENTABLE_BODY_FIELDS: &[&str] = &["mcp_servers"];
 
 /// Remove every [`BEDROCK_UNREPRESENTABLE_BODY_FIELDS`] key from `bag`,
