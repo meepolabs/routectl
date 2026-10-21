@@ -919,8 +919,8 @@ license.
 - `src/openai_compat/dialects/openai.rs` -- vanilla OpenAI o-series:
   `reasoning_effort` param, drops sampling params per profile
 - `src/openai_compat/dialects/deepseek.rs` -- DeepSeek: lift
-  `reasoning_content`, strip echo-back, empty `reasoning_content` on
-  history tool-call turns; effort derived from budget
+  `reasoning_content`, strip echo-back; in preserve mode, empty
+  `reasoning_content` on reasoning-less tool-call turns; effort from budget
 - `src/openai_compat/dialects/vllm.rs` -- vLLM thinking models (Qwen3, MiMo):
   `chat_template_kwargs.enable_thinking`, lift reasoning_content
 - `src/openai_compat/dialects/openrouter.rs` -- OpenRouter: pass-through with
@@ -960,8 +960,8 @@ license.
 - `src/openai_compat/wire_lift/tool_use.rs` -- assistant `tool_use` content
   blocks -> top-level `tool_calls` array
 - `src/openai_compat/wire_lift/tool_result.rs` -- user-message `tool_result`
-  blocks -> `role:"tool"` wire messages, inner images hoisted into a following
-  user message; `ToolResultDropTally`
+  blocks -> `role:"tool"` messages, inner images hoisted into one user message
+  per run; drops inner documents and unknown image sources (`ToolResultDropTally`)
 - `src/openai_compat/wire_lift/tool_choice.rs` -- Anthropic tool_choice tagged
   objects -> OpenAI bare-string / function-object form
 - `src/openai_compat/wire_lift/response_format.rs` -- `output_config.format`
@@ -1336,11 +1336,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   snapshots via insta
 - `tests/contract_egress_bedrock_invoke.rs` -- canonical -> Bedrock-Invoke
   (Anthropic-shape) body snapshots
+- `tests/contract_egress_bedrock_converse.rs` -- canonical -> Bedrock-Converse
+  vendor-neutral body snapshots
 - `tests/mid_conversation_tool_changes.rs` -- one request (top-level system
   plus a `tool_addition` system turn) through both Anthropic-shape lanes:
   anthropic-api carries the turn in place; Bedrock Invoke loses it whole
-- `tests/contract_egress_bedrock_converse.rs` -- canonical -> Bedrock-Converse
-  vendor-neutral body snapshots
 - `tests/contract_egress_openai_responses.rs` -- canonical -> OpenAI Responses
   body snapshots; pins flat tool/tool_choice shapes, the api-key
   `max_output_tokens` passthrough, and the bedrock-mantle store lock
@@ -1357,9 +1357,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   module so the welds built on the census consume one parse rather than each
   re-deriving one that could disagree
 - `tests/translation_drop_census/seed.rs` -- the `SEED-VERDICT:` marker
-  grammar and the providers + router `src` sweep; a child of the marker parser
+  grammar, the providers + router `src` sweep and the `Baked seed verdict`
+  comment-coverage sweep; a child of the marker parser
 - `tests/seed_verdict_census.rs` -- the seed census: the pinned
-  `(crate, file, tag)` table of `SEED-VERDICT:` markers plus grammar controls
+  `(crate, file, tag)` table of `SEED-VERDICT:` markers, the baked-comment
+  coverage guard and grammar controls
 - `tests/translation_drop_census/counter.rs` -- the counter side of the census:
   every `record_translation_drop` / `record_translation_policy_action` /
   `record_translation_lane_seen` call in the crate's production source, with
@@ -8677,10 +8679,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`driver/anthropic-api/plain-turn-01` and its `-fp` twin): asserts each
   half's `meta.client.connection_mode`, the MITM seam header and
   `authorization` present on the front-proxy half and absent on the base-url
-  half, zero in-band `role:"system"` turns on BOTH halves (an Anthropic
-  ingress-dialect fact), and equal `lane` / `ingress_kind` / `wire_pattern`;
-  skips by name when either half is absent, and runs the same predicate over
-  planted pairs with one clause flipped as the paired controls
+  half, an equal in-band `role:"system"` turn count (a client-release fact;
+  one tolerated release gap), and equal `lane` / `ingress_kind` /
+  `wire_pattern`; fails by name when either half is absent, and runs the same
+  predicate over planted pairs with one clause flipped as the paired controls
 - `tests/wire_pattern_weld.rs` -- cross-language weld over the wire-pattern
   vocabulary: parses `WIRE_PATTERNS` from `scripts/drivers/lib/validate_case.py`
   and the predicate table from `scripts/drivers/lib/verify_pattern.py` as text
