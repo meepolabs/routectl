@@ -708,20 +708,13 @@ fn merge_floor_and_client_betas(floor: &[String], client: Option<&Value>) -> Vec
     let client = client
         .and_then(Value::as_array)
         .map_or(&[][..], Vec::as_slice);
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut merged: Vec<Value> = Vec::with_capacity(floor.len() + client.len());
-    for flag in floor {
-        if seen.insert(flag.as_str()) {
-            merged.push(Value::String(flag.clone()));
-        }
-    }
-    for item in client {
-        let is_repeat = item.as_str().is_some_and(|flag| !seen.insert(flag));
-        if !is_repeat {
-            merged.push(item.clone());
-        }
-    }
-    merged
+    crate::beta_withhold::merge_unique(
+        floor
+            .iter()
+            .map(|flag| Value::String(flag.clone()))
+            .chain(client.iter().cloned()),
+        Value::as_str,
+    )
 }
 
 /// Parse the Bedrock InvokeModel response body into a `ChatResponse`.

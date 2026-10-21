@@ -6,6 +6,9 @@
 //! operator-asserted floor also carries: the floor always ships. What counts
 //! as the floor is each egress's own call; the decision itself lives here so
 //! the two lanes cannot drift on it.
+//!
+//! Each carrier also merges its beta lists into one before the wire; the
+//! order-preserving merge they share lives here too.
 
 /// The client flags split by the withhold decision, each side in its
 /// original order.
@@ -42,6 +45,25 @@ pub fn split_withheld<T: Clone>(
         }
     }
     split
+}
+
+/// `entries` in order, minus every entry whose flag an earlier entry already
+/// carries: the first occurrence of a flag keeps its position. An entry
+/// `flag_of` cannot read a flag from is never a repeat, so it is kept in
+/// place.
+pub fn merge_unique<T>(
+    entries: impl IntoIterator<Item = T>,
+    flag_of: impl Fn(&T) -> Option<&str>,
+) -> Vec<T> {
+    let mut merged: Vec<T> = Vec::new();
+    for entry in entries {
+        let is_repeat = flag_of(&entry)
+            .is_some_and(|flag| merged.iter().any(|kept| flag_of(kept) == Some(flag)));
+        if !is_repeat {
+            merged.push(entry);
+        }
+    }
+    merged
 }
 
 /// Record `floor` and `body_implied` on the attempt's beta assembly slot, when
@@ -100,6 +122,48 @@ mod tests {
 
         assert_eq!(got.kept, owned(&["a", "b"]));
         assert!(got.dropped.is_empty());
+    }
+
+    #[test]
+    fn merge_unique_keeps_the_first_occurrence_in_order() {
+        let rows: [(&str, &[&str], &[&str]); 5] = [
+            ("empty in, empty out", &[], &[]),
+            (
+                "distinct flags keep their order",
+                &["b", "a", "c"],
+                &["b", "a", "c"],
+            ),
+            (
+                "a repeat keeps the first position",
+                &["a", "b", "a"],
+                &["a", "b"],
+            ),
+            (
+                "every repeat collapses",
+                &["c", "c", "b", "c", "b"],
+                &["c", "b"],
+            ),
+            (
+                "flags compare exactly",
+                &["a", " a", "A"],
+                &["a", " a", "A"],
+            ),
+        ];
+
+        for (name, input, want) in rows {
+            let got = merge_unique(owned(input), |f| Some(f.as_str()));
+
+            assert_eq!(got, owned(want), "{name}");
+        }
+    }
+
+    #[test]
+    fn merge_unique_keeps_every_entry_without_a_readable_flag() {
+        let items = vec![None, Some("x"), None, Some("x"), Some("a")];
+
+        let got = merge_unique(items, |i| *i);
+
+        assert_eq!(got, vec![None, Some("x"), None, Some("a")]);
     }
 
     #[test]

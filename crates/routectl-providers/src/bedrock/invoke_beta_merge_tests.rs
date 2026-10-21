@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use routectl_core::{ChatRequest, Message, MessageContent, Role};
 
-use super::normalize_request;
+use super::{merge_floor_and_client_betas, normalize_request};
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 
 const CONTEXT_1M: &str = "context-1m-2025-08-07";
@@ -105,4 +105,70 @@ fn withholding_a_floor_flag_the_client_also_sent_keeps_one_copy() {
 
     // Assert
     assert_eq!(betas, json!([CONTEXT_1M]));
+}
+
+/// The merge on the body array itself, where a client entry can be any JSON
+/// value: a non-string entry is kept verbatim (a repeat included), string
+/// entries are compared as sent (no trim), and an empty string is a flag
+/// like any other.
+#[test]
+fn merge_keeps_non_string_entries_verbatim_and_compares_strings_as_sent() {
+    struct Row {
+        name: &'static str,
+        floor: &'static [&'static str],
+        client: Option<Value>,
+        want: Value,
+    }
+    let rows = [
+        Row {
+            name: "no floor and no client array merges to nothing",
+            floor: &[],
+            client: None,
+            want: json!([]),
+        },
+        Row {
+            name: "a client value that is not an array is ignored",
+            floor: &[CONTEXT_1M],
+            client: Some(json!(INTERLEAVED)),
+            want: json!([CONTEXT_1M]),
+        },
+        Row {
+            name: "a floor repeat ships once",
+            floor: &[CONTEXT_1M, CLAUDE_CODE, CONTEXT_1M],
+            client: Some(json!([])),
+            want: json!([CONTEXT_1M, CLAUDE_CODE]),
+        },
+        Row {
+            name: "non-string entries keep their place, repeats included",
+            floor: &[CONTEXT_1M],
+            client: Some(json!([7, CONTEXT_1M, null, {"x": 1}, 7, INTERLEAVED])),
+            want: json!([CONTEXT_1M, 7, null, {"x": 1}, 7, INTERLEAVED]),
+        },
+        Row {
+            name: "a whitespace-padded flag is a distinct flag",
+            floor: &[CONTEXT_1M],
+            client: Some(json!([" context-1m-2025-08-07 ", CONTEXT_1M])),
+            want: json!([CONTEXT_1M, " context-1m-2025-08-07 "]),
+        },
+        Row {
+            name: "an empty string is kept once",
+            floor: &[],
+            client: Some(json!(["", INTERLEAVED, ""])),
+            want: json!(["", INTERLEAVED]),
+        },
+        Row {
+            name: "a client repeat with a flag between keeps the first position",
+            floor: &[],
+            client: Some(json!([EFFORT, INTERLEAVED, EFFORT])),
+            want: json!([EFFORT, INTERLEAVED]),
+        },
+    ];
+
+    for row in rows {
+        let floor: Vec<String> = row.floor.iter().map(|f| (*f).to_string()).collect();
+
+        let merged = merge_floor_and_client_betas(&floor, row.client.as_ref());
+
+        assert_eq!(Value::Array(merged), row.want, "{}", row.name);
+    }
 }

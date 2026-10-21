@@ -403,13 +403,13 @@ fn output_config_effort(
 /// ingress) with any provider-config flags. Dedup; preserve first-seen
 /// order so config-asserted flags win on dup.
 fn insert_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
-    let mut betas: Vec<Value> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for s in cfg.anthropic_beta.iter().chain(req.anthropic_beta.iter()) {
-        if seen.insert(s.clone()) {
-            betas.push(Value::String(s.clone()));
-        }
-    }
+    let betas = crate::beta_withhold::merge_unique(
+        cfg.anthropic_beta
+            .iter()
+            .chain(req.anthropic_beta.iter())
+            .map(|flag| Value::String(flag.clone())),
+        Value::as_str,
+    );
     if !betas.is_empty() {
         bag.insert("anthropic_beta".to_string(), Value::Array(betas));
     }
@@ -547,6 +547,11 @@ fn strip_thinking_when_tool_choice_forces_use(
          toolChoice forces tool use; Anthropic forbids the combo"
     );
 }
+
+// The floor and client beta lists merge into the bag's `anthropic_beta`.
+#[cfg(test)]
+#[path = "extras_beta_merge_tests.rs"]
+mod beta_merge_tests;
 
 #[cfg(test)]
 mod tests {

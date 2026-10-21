@@ -53,6 +53,7 @@ use serde_json::Value;
 use routectl_core::capability::{COMPUTER_USE, REASONING_REPLAY, STRUCTURED_OUTPUT, WEB_SEARCH};
 use routectl_core::error::Error;
 use routectl_core::{ChatRequest, RefusalReason, ToolDef};
+use routectl_providers::anthropic_api::CONTEXT_MANAGEMENT_BETA;
 
 use crate::beta_capability::capability_key_is_beta;
 use crate::feature_keys::strip_date_suffix;
@@ -61,8 +62,6 @@ use crate::feature_keys::strip_date_suffix;
 const ADVISOR: &str = "advisor";
 /// Feature key for the Anthropic context-management beta.
 const CONTEXT_MANAGEMENT: &str = "context_management";
-/// The grounded `anthropic_beta` token that enables context management.
-const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
 
 /// What to do with a target that only fails on a given capability.
 #[derive(Debug, Clone, PartialEq, Eq)]

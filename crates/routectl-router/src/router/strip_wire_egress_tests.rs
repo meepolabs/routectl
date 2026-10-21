@@ -16,17 +16,12 @@ use crate::router::RouterOptions;
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::{Message, MessageContent, Role, ToolDef};
+use routectl_providers::anthropic_api::CONTEXT_MANAGEMENT_BETA;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-/// The grounded `anthropic_beta` token that enables context management.
-/// An operator floor pinning this token makes stripping the capability a
-/// false success (the egress re-adds it), so a pinned capability must
-/// route away instead of stripping.
-const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
 
 /// Single-attempt, fast-backoff retry so a chain walk falls back promptly
 /// without wall-clock sleeps.

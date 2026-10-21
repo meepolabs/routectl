@@ -609,30 +609,29 @@ impl AnthropicApiProvider {
         } else {
             self.withhold_client_betas(req, is_non_cc)
         };
-        let mut beta_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut merged_betas: Vec<String> = Vec::new();
-        for entry in &client_betas {
-            let t = entry.trim();
-            if !t.is_empty() && beta_seen.insert(t.to_string()) {
-                merged_betas.push(t.to_string());
-            }
-        }
-        for entry in self.config_betas().split(',') {
-            let t = entry.trim();
-            if !t.is_empty() && beta_seen.insert(t.to_string()) {
-                merged_betas.push(t.to_string());
-            }
-        }
-        // Operator-configured model-level betas, composed by the router
-        // from `[models.X] header_extras["anthropic-beta"]`. Like the
-        // provider-level `config_betas` floor above, these always ship.
-        // Empty for library consumers that bypass the router.
-        for entry in &req.routectl_internal.operator_betas {
-            let t = entry.trim();
-            if !t.is_empty() && beta_seen.insert(t.to_string()) {
-                merged_betas.push(t.to_string());
-            }
-        }
+        // After the client flags and the provider-level `config_betas` floor
+        // come the operator-configured model-level betas, composed by the
+        // router from `[models.X] header_extras["anthropic-beta"]`. Like the
+        // provider-level floor, these always ship. Empty for library
+        // consumers that bypass the router.
+        let mut merged_betas = crate::beta_withhold::merge_unique(
+            client_betas
+                .iter()
+                .map(String::as_str)
+                .chain(self.config_betas().split(','))
+                .chain(
+                    req.routectl_internal
+                        .operator_betas
+                        .iter()
+                        .map(String::as_str),
+                )
+                .map(str::trim)
+                .filter(|flag| !flag.is_empty())
+                .map(str::to_string),
+            |flag| Some(flag.as_str()),
+        );
+        let mut beta_seen: std::collections::BTreeSet<String> =
+            merged_betas.iter().cloned().collect();
 
         // OAuth gate for the OauthBearer + api.anthropic.com surface.
         // `oauth-2025-04-20` is REQUIRED for OAuth to function on

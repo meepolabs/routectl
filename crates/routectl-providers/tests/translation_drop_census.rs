@@ -150,6 +150,7 @@ const EXPECTED_SILENT: &[(&str, &str)] = &[];
 const EXPECTED_TEST_FILES: &[&str] = &[
     "bedrock/converse/eventstream_history_compat_tests.rs",
     "bedrock/converse/eventstream_tests.rs",
+    "bedrock/converse/extras_beta_merge_tests.rs",
     "bedrock/converse/messages_content_drop_counter_tests.rs",
     "bedrock/converse/messages_document_policy_tests.rs",
     "bedrock/converse/messages_document_source_tests.rs",

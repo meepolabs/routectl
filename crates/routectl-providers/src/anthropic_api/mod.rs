@@ -1134,6 +1134,11 @@ mod client_beta_withhold_tests;
 #[path = "client_beta_floor_site_tests.rs"]
 mod client_beta_floor_site_tests;
 
+// Client, provider-config and operator betas merge into one header list.
+#[cfg(test)]
+#[path = "client_beta_merge_tests.rs"]
+mod client_beta_merge_tests;
+
 // The floor and body-implied beta sets each carrier deposits per attempt.
 #[cfg(all(test, feature = "bedrock"))]
 #[path = "client_beta_assembly_tests.rs"]
