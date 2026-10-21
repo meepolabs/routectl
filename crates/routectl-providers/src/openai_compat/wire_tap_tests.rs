@@ -503,6 +503,25 @@ fn site_rows() -> Vec<SiteRow> {
             kind: EditKind::Remove,
         },
         SiteRow {
+            name: "credential-bearing field withheld",
+            dialect: ReasoningDialect::OpenAi,
+            fires: || {
+                let mut req = ChatRequest {
+                    provider_extras: Some(json!({"mcp_servers": [{"name": "s"}]})),
+                    ..request("gpt-4o")
+                };
+                req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
+                req
+            },
+            quiet: || ChatRequest {
+                provider_extras: Some(json!({"service_tier": "auto"})),
+                ..request("gpt-4o")
+            },
+            site: EditSite::ManagedExtrasStrip,
+            pattern: "/mcp_servers",
+            kind: EditKind::Remove,
+        },
+        SiteRow {
             name: "managed extra withheld",
             dialect: ReasoningDialect::OpenAi,
             fires: || ChatRequest {
@@ -779,4 +798,59 @@ async fn a_response_checking_tap_holds_what_the_upstream_answered() {
     assert_eq!(complete, ok_completion());
     assert_eq!(streamed["choices"][0]["message"]["content"], "ok");
     assert_eq!(streamed["choices"][0]["finish_reason"], "stop");
+}
+
+/// The Bedrock mantle lane shares this egress's request normalization, so a
+/// Chat client's `mcp_servers` is withheld there too, declared and counted
+/// once, while its other extras still forward.
+#[cfg(feature = "bedrock")]
+#[test]
+fn a_chat_ingress_mcp_servers_is_withheld_on_the_mantle_lane() {
+    // Arrange
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        mantle: Some(crate::mantle::MantleAuth {
+            region: "us-west-2".into(),
+            creds: crate::bedrock::auth::ResolvedCreds::Bearer {
+                key: "mantle-bearer-key".into(),
+            },
+        }),
+        api_key: String::new(),
+        ..config(
+            "https://bedrock-mantle.us-west-2.api.aws/openai/v1",
+            ReasoningDialect::OpenAi,
+        )
+    });
+    assert!(provider.is_mantle());
+    let mut req = ChatRequest {
+        provider_extras: Some(json!({
+            "mcp_servers": [{"name": "s", "authorization_token": "zz-mantle-token"}],
+            "service_tier": "flex",
+        })),
+        ..request("anthropic.claude-haiku-4-5")
+    };
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
+    let (req, wire_tap) = tapped(req);
+    let count = || {
+        crate::translation_drop_metrics::translation_policy_action_snapshot()
+            .into_iter()
+            .find(|e| {
+                e.lane == super::LANE && e.policy_class == "credential_bearing_field_withheld"
+            })
+            .map_or(0, |e| e.action_count)
+    };
+    let before = count();
+
+    // Act
+    let body = provider.normalize_request(&req).expect("normalize");
+
+    // Assert
+    assert!(body.get("mcp_servers").is_none(), "{body}");
+    assert_eq!(body["service_tier"], "flex", "{body}");
+    assert_eq!(count() - before, 1);
+    assert!(has(
+        &edits(&wire_tap.take_request()),
+        EditSite::ManagedExtrasStrip,
+        "/mcp_servers",
+        EditKind::Remove
+    ));
 }

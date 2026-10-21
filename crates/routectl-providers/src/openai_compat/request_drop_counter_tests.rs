@@ -344,8 +344,8 @@ fn foreign_dialect_extras_are_absent_from_the_openai_compat_wire_and_counted_onc
     // Arrange -- two Anthropic-only fields from one Anthropic-ingress request:
     // one drop event. The same bag from a Chat client is the positive control.
     let extras = json!({
-        "context_management": {"edits": []},
-        "mcp_servers": [{"name": "zz-mcp-tell"}],
+        "context_management": {"edits": ["zz-cm-tell"]},
+        "container": "zz-container-tell",
     });
     let mut foreign = simple_req("m");
     foreign.provider_extras = Some(extras.clone());
@@ -364,10 +364,99 @@ fn foreign_dialect_extras_are_absent_from_the_openai_compat_wire_and_counted_onc
         !foreign_wire.contains("context_management"),
         "{foreign_wire}"
     );
-    assert!(!foreign_wire.contains("zz-mcp-tell"), "{foreign_wire}");
+    assert!(
+        !foreign_wire.contains("zz-container-tell"),
+        "{foreign_wire}"
+    );
     assert_eq!(foreign_delta, 1);
-    assert!(control_wire.contains("zz-mcp-tell"), "{control_wire}");
+    assert!(control_wire.contains("zz-cm-tell"), "{control_wire}");
+    assert!(control_wire.contains("zz-container-tell"), "{control_wire}");
     assert_eq!(control_delta, 0);
+}
+
+fn credential_withhold_count() -> u64 {
+    compat_policy_count("credential_bearing_field_withheld")
+}
+
+#[test]
+fn a_chat_ingress_mcp_servers_is_absent_from_the_openai_compat_wire_and_counted_once() {
+    // Arrange -- two servers, each with a connector credential: one action.
+    let mut req = simple_req("m");
+    req.provider_extras = Some(json!({"mcp_servers": [
+        {"name": "a", "authorization_token": "zz-mcp-token-a"},
+        {"name": "b", "authorization_token": "zz-mcp-token-b"},
+    ]}));
+    let req = with_provenance(req, RequestProvenance::OpenaiIngress);
+
+    // Act
+    let (rendered, delta) = wire_and_delta(&req, None, credential_withhold_count);
+
+    // Assert
+    assert!(!rendered.contains("mcp_servers"), "{rendered}");
+    assert!(!rendered.contains("zz-mcp-token"), "{rendered}");
+    assert_eq!(delta, 1);
+}
+
+#[test]
+fn mcp_servers_never_reaches_the_openai_compat_wire_from_any_source() {
+    // Arrange -- a library caller's and an operator's value are withheld too,
+    // as Bedrock withholds the field whichever writer put it there.
+    let token = json!([{"name": "s", "authorization_token": "zz-mcp-token"}]);
+    let mut library = simple_req("m");
+    library.provider_extras = Some(json!({"mcp_servers": token.clone()}));
+    let mut via_router = simple_req("m");
+    via_router.provider_extras = Some(json!({"mcp_servers": token.clone()}));
+    via_router.routectl_internal.operator_payload_extras =
+        Some(std::sync::Arc::new(json!({"mcp_servers": token.clone()})));
+    let via_router = with_provenance(via_router, RequestProvenance::ResponsesIngress);
+    let config_operator = json!({"mcp_servers": token});
+    let rows: [(&str, &ChatRequest, Option<&serde_json::Value>); 3] = [
+        ("library caller", &library, None),
+        ("operator payload_extras via the router", &via_router, None),
+        (
+            "operator payload_extras config slot",
+            &simple_req("m"),
+            Some(&config_operator),
+        ),
+    ];
+
+    for (row, req, payload_extras) in rows {
+        // Act
+        let (rendered, delta) = wire_and_delta(req, payload_extras, credential_withhold_count);
+
+        // Assert
+        assert!(!rendered.contains("zz-mcp-token"), "{row}: {rendered}");
+        assert_eq!(delta, 1, "{row}");
+    }
+}
+
+#[test]
+fn the_other_anthropic_shape_keys_from_a_chat_client_still_forward() {
+    // Arrange -- the keys the removed openai-compat blocklist named besides
+    // `mcp_servers` and `output_config` (which the response_format lift reads
+    // for every provenance): a Chat client spells them for its own upstream.
+    let fields = [
+        "metadata",
+        "context_management",
+        "context_hint",
+        "container",
+        "inference_geo",
+        "speed",
+        "diagnostics",
+    ];
+    for field in fields {
+        let mut req = simple_req("m");
+        req.provider_extras = Some(json!({field: "zz-chat-value", "mcp_servers": []}));
+        let req = with_provenance(req, RequestProvenance::OpenaiIngress);
+
+        // Act
+        let (rendered, _) = wire_and_delta(&req, None, || 0);
+
+        // Assert
+        let body: serde_json::Value = serde_json::from_str(&rendered).expect("json");
+        assert_eq!(body[field], "zz-chat-value", "{field}: {rendered}");
+        assert!(body.get("mcp_servers").is_none(), "{field}: {rendered}");
+    }
 }
 
 #[test]

@@ -205,11 +205,13 @@ pub struct ChatRequest {
 /// is the default for consumers that construct a `ChatRequest`
 /// directly (no ingress in the loop).
 ///
-/// Also a forwarding-policy input, not only observability: an egress whose
-/// dialect no ingress speaks (Gemini) forwards `provider_extras` only for
-/// `Library`, and for every other variant -- including any added later --
-/// forwards only the operator's `RoutectlInternal::operator_payload_extras`.
-/// A new variant that should forward client extras there needs its own arm.
+/// Also a forwarding-policy input, not only observability: every egress
+/// forwards client `provider_extras` only for `Library` and for the ingress
+/// whose dialect it speaks (Anthropic for anthropic-api, Bedrock Invoke and
+/// the Converse bag; Chat Completions for openai-compat; none for Gemini).
+/// Every other variant -- including any added later -- forwards only the
+/// operator's `RoutectlInternal::operator_payload_extras`. A new variant
+/// that should forward client extras somewhere needs its own arm there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum RequestProvenance {

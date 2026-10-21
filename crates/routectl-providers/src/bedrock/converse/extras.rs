@@ -20,7 +20,9 @@ use crate::anthropic_api::request::{
     compose_thinking, is_active_thinking_type, reclamp_client_effort,
 };
 use crate::anthropic_api::types::WireThinking;
-use crate::managed_keys::{Dialect, ForeignDialectExtraTally, client_extras_for, is_managed_key};
+use crate::managed_keys::{
+    Dialect, ForeignDialectExtraTally, client_extras_for, is_managed_key, readable_extra,
+};
 
 use super::super::betas::{operator_floor, union_and_deposit_betas, withhold_betas};
 use super::super::{BedrockApiShape, BedrockConfig};
@@ -63,15 +65,15 @@ pub(super) fn build_additional_fields(
     // (e.g. `metadata`, `top_k`), or the operator's config value would be
     // silently shadowed. Do not reorder these calls or relax the
     // `or_insert_with` semantics.
+    let mut foreign = ForeignDialectExtraTally::default();
     insert_thinking(cfg, req, &mut bag);
     // After `insert_thinking`, which writes `output_config` wholesale, and
     // before the `response_format` conversion, whose `or_insert` then leaves
     // the client's format in place.
-    insert_client_output_format(req, &mut bag);
+    insert_client_output_format(req, &mut bag, &mut foreign);
     let dropped_format_keys = insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
-    let mut foreign = ForeignDialectExtraTally::default();
     let provider_actions = insert_provider_extras(cfg, req, &mut bag, fingerprint, &mut foreign);
     let operator_actions = insert_operator_extras(cfg, &mut bag);
     // Once per REQUEST per class, never once per withheld key: a bag whose
@@ -223,6 +225,10 @@ fn insert_provider_extras(
         &[crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY],
     );
     foreign.record(&client_extras.foreign_keys);
+    crate::managed_keys::declare_foreign_keys(
+        crate::anthropic_api::wire_edits::tap_of(req),
+        &client_extras.foreign_keys,
+    );
     let Some(extras) = client_extras
         .forwardable
         .as_deref()
@@ -231,6 +237,11 @@ fn insert_provider_extras(
         return actions;
     };
     for (k, v) in extras {
+        // Read by `insert_client_output_format` under the same dialect rule,
+        // which counted it there when another dialect's client sent it.
+        if k == CLIENT_OUTPUT_CONFIG_KEY && foreign.contains(CLIENT_OUTPUT_CONFIG_KEY) {
+            continue;
+        }
         // A swept forward-compat key that collides with a field routectl
         // itself computes cannot be forwarded: the bag has exactly one slot
         // per key, and letting the client value win would silently replace
@@ -297,19 +308,38 @@ fn flush_foreign_dialect_tally(cfg: &BedrockConfig, tally: &ForeignDialectExtraT
     }
 }
 
+/// Top-level extras key whose `format` member the Converse bag reads.
+const CLIENT_OUTPUT_CONFIG_KEY: &str = "output_config";
+
 /// Merge the Anthropic client's own `output_config.format` into the bag's
 /// `output_config`, beside any effort `insert_thinking` composed.
 /// `output_config` is a managed bag key, so `insert_provider_extras` withholds
 /// the client's object whole; `format` is the one member forwarded, as the
 /// Anthropic egress forwards it. The final-bag passes scrub, repair and gate
 /// it like a converted format.
-fn insert_client_output_format(req: &ChatRequest, bag: &mut Map<String, Value>) {
-    let Some(format) = req
-        .provider_extras
-        .as_ref()
-        .and_then(|extras| extras.get("output_config"))
-        .and_then(|config| config.get("format"))
-    else {
+///
+/// Read under the same dialect rule as every other client extra: only from
+/// the Anthropic ingress or a library caller, otherwise only the operator's
+/// own `payload_extras` value. Another dialect's `output_config` is noted in
+/// `foreign`, so it counts once with the request's other foreign keys.
+fn insert_client_output_format(
+    req: &ChatRequest,
+    bag: &mut Map<String, Value>,
+    foreign: &mut ForeignDialectExtraTally,
+) {
+    let read = readable_extra(
+        req,
+        RequestProvenance::AnthropicIngress,
+        CLIENT_OUTPUT_CONFIG_KEY,
+    );
+    if read.foreign {
+        foreign.record(&[CLIENT_OUTPUT_CONFIG_KEY]);
+        crate::managed_keys::declare_foreign_keys(
+            crate::anthropic_api::wire_edits::tap_of(req),
+            &[CLIENT_OUTPUT_CONFIG_KEY],
+        );
+    }
+    let Some(format) = read.value.and_then(|config| config.get("format")) else {
         return;
     };
     crate::anthropic_api::request::set_output_config_format(bag, format.clone());

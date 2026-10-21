@@ -355,16 +355,15 @@ fn first_party_lanes_really_forward_ingress_metadata() {
 const CREDENTIAL_TELL: &str = "sweep-mcp-tok-4r";
 
 /// `(lane, provenance)` pairs that forward a swept `mcp_servers` entry today:
-/// each lane forwards its own dialect's client extras, so a client of that
-/// dialect addressed the entry to that wire. Another dialect's swept entry is
-/// withheld by the provenance rule, the Gemini source boundary, or the
-/// Bedrock unrepresentable-field drop. Recorded here so the sweep states its
-/// reach instead of implying it. Content-pinned in both directions by
+/// the anthropic-api egress forwards its own dialect's client extras, and an
+/// Anthropic client addressed the entry to that wire. Every other pair is
+/// withheld by the provenance rule, the Gemini source boundary, the Bedrock
+/// unrepresentable-field drop, or the openai-compat credential-bearing-field
+/// drop. Recorded here so the sweep states its reach instead of implying it.
+/// Content-pinned in both directions by
 /// [`every_lane_outside_the_credential_boundary_really_forwards_it_today`].
-const CREDENTIAL_FORWARDING: &[(&str, RequestProvenance)] = &[
-    ("anthropic", RequestProvenance::AnthropicIngress),
-    ("openai-compat", RequestProvenance::OpenaiIngress),
-];
+const CREDENTIAL_FORWARDING: &[(&str, RequestProvenance)] =
+    &[("anthropic", RequestProvenance::AnthropicIngress)];
 
 fn forwards_credential(lane: &str, provenance: RequestProvenance) -> bool {
     CREDENTIAL_FORWARDING.contains(&(lane, provenance))

@@ -29,6 +29,8 @@ use serde_json::{Map, Value};
 
 use routectl_core::is_canonical_request_key;
 #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
 use routectl_core::{ChatRequest, RequestProvenance};
 
 /// The extras merge whose managed set a key is checked against.
@@ -186,6 +188,67 @@ pub fn client_extras_for<'a>(
     }
 }
 
+/// One top-level extras entry an egress reads into a field it composes
+/// itself, rather than merging the entry whole.
+#[cfg(feature = "bedrock")]
+#[derive(Debug)]
+pub struct ReadableExtra<'a> {
+    /// The value the egress may read: the merged one when the request speaks
+    /// the egress's dialect, otherwise only the operator's `payload_extras`
+    /// value, if any.
+    pub value: Option<&'a Value>,
+    /// True when a client of another ingress dialect supplied a value the
+    /// egress must not read.
+    pub foreign: bool,
+}
+
+/// Read the `key` entry of `req.provider_extras` under the same dialect rule
+/// as [`client_extras_for`].
+#[cfg(feature = "bedrock")]
+pub fn readable_extra<'a>(
+    req: &'a ChatRequest,
+    matching: RequestProvenance,
+    key: &str,
+) -> ReadableExtra<'a> {
+    let dispatched = req.provider_extras.as_ref().and_then(|e| e.get(key));
+    if speaks_egress_dialect(req.routectl_internal.provenance, matching) {
+        return ReadableExtra {
+            value: dispatched,
+            foreign: false,
+        };
+    }
+    let Some(dispatched) = dispatched else {
+        return ReadableExtra {
+            value: None,
+            foreign: false,
+        };
+    };
+    let operator = req
+        .routectl_internal
+        .operator_payload_extras
+        .as_deref()
+        .and_then(|o| o.get(key));
+    ReadableExtra {
+        value: operator,
+        foreign: operator != Some(dispatched),
+    }
+}
+
+/// Declare each withheld foreign-dialect key as removed from the top level
+/// of the body (the Converse bag counts as its own top level). A key that is
+/// not token-shaped is left undeclared, so it still surfaces as a finding.
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+pub fn declare_foreign_keys(tap: Option<&WireTap>, foreign_keys: &[&str]) {
+    let Some(tap) = tap else {
+        return;
+    };
+    for key in foreign_keys {
+        if let Some(path) = crate::wire_declare::member_pointer("", key) {
+            crate::wire_declare::declare(tap, EditSite::ManagedExtrasStrip, path, EditKind::Remove);
+        }
+    }
+}
+
 /// Whether a request of `provenance` carries extras spelled for an egress
 /// whose vocabulary the `matching` ingress speaks.
 #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
@@ -229,6 +292,12 @@ impl ForeignDialectExtraTally {
     pub fn record(&mut self, foreign_keys: &[&str]) {
         self.keys
             .extend(foreign_keys.iter().map(|k| (*k).to_string()));
+    }
+
+    /// Whether `key` was noted as withheld for this request.
+    #[cfg(feature = "bedrock")]
+    pub fn contains(&self, key: &str) -> bool {
+        self.keys.iter().any(|k| k == key)
     }
 
     /// Whether this request withheld any foreign-dialect client extra.

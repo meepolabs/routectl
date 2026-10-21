@@ -126,7 +126,7 @@ pub fn declare_response(tap: Option<&WireTap>, site: EditSite, path: &'static st
 /// level), or `None` when the key is not token-shaped: such a key renders
 /// as a wildcard in a finding, and a top-level wildcard pattern is refused
 /// as a blanket exemption.
-#[cfg(feature = "openai-compat")]
+#[cfg(any(feature = "openai-compat", feature = "anthropic-api"))]
 pub fn member_pointer(parent: &str, key: &str) -> Option<String> {
     routectl_core::is_safe_token(key)
         .then(|| format!("{parent}/{}", key.replace('~', "~0").replace('/', "~1")))

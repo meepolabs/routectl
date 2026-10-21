@@ -439,6 +439,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "check_dropped_anthropic_fields",
         5,
     ),
+    (
+        "openai_compat/request.rs",
+        "drop_credential_bearing_fields",
+        1,
+    ),
     ("openai_compat/request.rs", "merge_extras", 2),
     ("openai_compat/request.rs", "project_system", 2),
     ("openai_compat/request.rs", "select_client_extras", 2),

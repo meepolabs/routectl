@@ -979,6 +979,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         &[],
     );
     foreign.record(&client_extras.foreign_keys);
+    crate::managed_keys::declare_foreign_keys(tap, &client_extras.foreign_keys);
     merge_provider_extras(id, &mut body, client_extras.forwardable.as_deref());
 
     // Honor the canonical structured-output directive: map req.response_format

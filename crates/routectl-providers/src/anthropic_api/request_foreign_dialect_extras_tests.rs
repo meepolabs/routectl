@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
 use routectl_core::{ChatRequest, Message, MessageContent, RequestProvenance, Role};
 use serde_json::{Value, json};
 
@@ -259,15 +260,58 @@ fn an_operator_payload_extra_alone_is_never_counted_foreign() {
     }
 }
 
+fn policy_count(lane: &str, class: &str) -> u64 {
+    crate::translation_drop_metrics::translation_policy_action_snapshot()
+        .into_iter()
+        .find(|e| e.lane == lane && e.policy_class == class)
+        .map_or(0, |e| e.action_count)
+}
+
 #[test]
-fn a_chat_client_output_config_format_is_never_counted_foreign_on_converse() {
-    // Arrange -- the Converse bag reads the client format into its own
-    // composed `output_config`; that read is a translation, not a forward.
+fn a_foreign_client_output_config_format_is_dropped_and_counted_on_every_anthropic_shape_egress() {
+    // Arrange -- a Chat client's `output_config` is spelled for its own
+    // upstream; the Converse bag must not read its `format` either. The
+    // Anthropic-ingress copy of the same bag is the positive control.
     let format = json!({"type": "json_schema", "schema": {"type": "object"}});
-    let req = request(
+    let extras = json!({"output_config": {"format": format}});
+    let foreign = request(RequestProvenance::OpenaiIngress, extras.clone());
+    let same_dialect = request(RequestProvenance::AnthropicIngress, extras);
+
+    for egress in egresses() {
+        let conflicts_before = policy_count(egress.lane, "provider_extra_managed_key_conflict");
+
+        // Act
+        let (wire, delta) = wire_and_delta(&egress, &foreign);
+        let conflicts = policy_count(egress.lane, "provider_extra_managed_key_conflict");
+        let (control, control_delta) = wire_and_delta(&egress, &same_dialect);
+
+        // Assert -- counted once, foreign only, never also a managed-key conflict.
+        assert!(
+            wire.pointer("/output_config/format").is_none(),
+            "{}: {wire}",
+            egress.lane
+        );
+        assert_eq!(delta, 1, "{}", egress.lane);
+        assert_eq!(conflicts, conflicts_before, "{}", egress.lane);
+        assert_eq!(
+            control["output_config"]["format"]["type"], "json_schema",
+            "{}: {control}",
+            egress.lane
+        );
+        assert_eq!(control_delta, 0, "{}", egress.lane);
+    }
+}
+
+#[test]
+fn an_operator_output_config_format_still_reaches_the_converse_bag_for_a_foreign_client() {
+    // Arrange -- the router merged the operator's `output_config` over a Chat
+    // client's; only the operator's format may ship.
+    let operator = json!({"output_config": {"format": {"type": "json_schema", "schema": {"type": "object", "title": "zz-operator"}}}});
+    let mut req = request(
         RequestProvenance::OpenaiIngress,
-        json!({"output_config": {"format": format.clone()}}),
+        json!({"output_config": {"format": {"type": "json_schema", "schema": {"type": "object", "title": "zz-client"}}}}),
     );
+    req.routectl_internal.operator_payload_extras = Some(Arc::new(operator));
     let egress = &egresses()[2];
 
     // Act
@@ -275,8 +319,68 @@ fn a_chat_client_output_config_format_is_never_counted_foreign_on_converse() {
 
     // Assert
     assert_eq!(
-        bag["output_config"]["format"]["type"], "json_schema",
+        bag["output_config"]["format"]["schema"]["title"], "zz-operator",
         "{bag}"
     );
-    assert_eq!(delta, 0);
+    assert_eq!(delta, 1);
+}
+
+/// The request-leg edits a normalize declared on its tap.
+fn declared_edits(egress: &Egress, mut req: ChatRequest) -> Vec<(EditSite, String, EditKind)> {
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    (egress.wire)(&req);
+    tap.take_request()
+        .edits(Leg::Request)
+        .iter()
+        .map(|e| (e.site(), e.path().to_string(), e.kind()))
+        .collect()
+}
+
+#[test]
+fn every_foreign_dialect_key_is_declared_removed_on_every_anthropic_shape_egress() {
+    // Arrange -- `output_config` takes the Converse format-read path; the
+    // others take the extras merge. A non-token key is left undeclared.
+    let foreign = request(
+        RequestProvenance::ResponsesIngress,
+        json!({
+            "store": true,
+            "prompt_cache_key": "zz",
+            "output_config": {"format": {"type": "json_object"}},
+            "has space": 1,
+        }),
+    );
+    let same_dialect = request(RequestProvenance::AnthropicIngress, json!({"store": true}));
+    let removed = |key: &str| {
+        (
+            EditSite::ManagedExtrasStrip,
+            format!("/{key}"),
+            EditKind::Remove,
+        )
+    };
+
+    for egress in egresses() {
+        // Act
+        let edits = declared_edits(&egress, foreign.clone());
+        let control = declared_edits(&egress, same_dialect.clone());
+
+        // Assert
+        for key in ["store", "prompt_cache_key", "output_config"] {
+            assert!(
+                edits.contains(&removed(key)),
+                "{} {key}: {edits:?}",
+                egress.lane
+            );
+        }
+        let strips = edits
+            .iter()
+            .filter(|(site, _, _)| *site == EditSite::ManagedExtrasStrip)
+            .count();
+        assert_eq!(strips, 3, "{}: {edits:?}", egress.lane);
+        assert!(
+            !control.contains(&removed("store")),
+            "{}: {control:?}",
+            egress.lane
+        );
+    }
 }

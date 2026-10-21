@@ -29,7 +29,9 @@ use routectl_core::{
 use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
-use crate::managed_keys::{ClientExtras, Dialect, client_extras_for, is_managed_key};
+use crate::managed_keys::{
+    ClientExtras, Dialect, client_extras_for, declare_foreign_keys, is_managed_key,
+};
 use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
 /// `source` value passed to [`merge_extras`] for operator-config-supplied
@@ -184,15 +186,51 @@ pub fn normalize(
     if let Some(extras) = payload_extras {
         merge_extras(id, obj, extras, DEFAULT_EXTRAS_SOURCE, &mut withheld, tap);
     }
-    declare_foreign_extras(tap, &client_extras);
+    declare_foreign_keys(tap, &client_extras.foreign_keys);
     if let Some(extras) = client_extras.forwardable.as_deref() {
         merge_extras(id, obj, extras, PROVIDER_EXTRAS_SOURCE, &mut withheld, tap);
     }
     withheld.flush();
     declare_stripped_keys(tap, obj, &stripped);
     declare_effort_withheld(tap, obj, req);
+    drop_credential_bearing_fields(id, obj, tap);
 
     Ok(body)
+}
+
+/// Body fields never sent to an openai-compat host, whichever writer put
+/// them there: `mcp_servers` entries can carry a connector credential issued
+/// for a remote MCP server, never for this upstream.
+const CREDENTIAL_BEARING_BODY_FIELDS: &[&str] = &["mcp_servers"];
+
+/// Remove every [`CREDENTIAL_BEARING_BODY_FIELDS`] key from the finished
+/// body, client and operator values alike. Runs as the LAST mutation of
+/// [`normalize`] so no later writer can reintroduce a key. Logs the key name
+/// only: a value may hold a credential.
+/// TRANSLATION-DROP: policy-action class=credential_bearing_field_withheld test=a_chat_ingress_mcp_servers_is_absent_from_the_openai_compat_wire_and_counted_once
+fn drop_credential_bearing_fields(
+    id: &str,
+    obj: &mut serde_json::Map<String, Value>,
+    tap: Option<&WireTap>,
+) {
+    let mut withheld = false;
+    for &key in CREDENTIAL_BEARING_BODY_FIELDS {
+        if obj.remove(key).is_some() {
+            withheld = true;
+            declare_member(tap, EditSite::ManagedExtrasStrip, key, EditKind::Remove);
+            debug!(
+                provider = id,
+                field = key,
+                "openai-compat egress: credential-bearing body field dropped before egress",
+            );
+        }
+    }
+    if withheld {
+        crate::translation_drop_metrics::record_translation_policy_action(
+            super::LANE,
+            "credential_bearing_field_withheld",
+        );
+    }
 }
 
 /// Canonical system content projected onto this lane's wire, with the Claude
@@ -514,14 +552,6 @@ fn select_client_extras<'a>(
         );
     }
     client_extras
-}
-
-/// Declare each top-level extra withheld for its provenance, `metadata`
-/// included, as removed from the body.
-fn declare_foreign_extras(tap: Option<&WireTap>, client_extras: &ClientExtras<'_>) {
-    for key in &client_extras.foreign_keys {
-        declare_member(tap, EditSite::ManagedExtrasStrip, key, EditKind::Remove);
-    }
 }
 
 /// Declare the removal of each stripped top-level key the finished body
