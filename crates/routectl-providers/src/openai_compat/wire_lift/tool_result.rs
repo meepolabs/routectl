@@ -25,6 +25,17 @@
 //! preceding `content` lift -- but that lift only walks
 //! `messages[].content[]`, not nested-inside-tool_result. So we
 //! lift inner image shapes here too.
+//!
+//! OpenAI tool messages admit text only, so lifted images leave the
+//! tool message. Every tool message of one contiguous run of results
+//! is emitted first, then ONE user message carrying the run's images
+//! in source order, ahead of any user parts that follow the run:
+//!
+//!   `user[ tr1(text1, img1) + tr2(img2) + text ]`
+//!     -> `tool[text1], tool[""], user[img1, img2, text]`
+//!
+//! A user message between two results would end the tool-result
+//! segment and orphan the second result, hence one message per run.
 
 use serde_json::{Map, Value};
 
@@ -143,18 +154,23 @@ fn rewrite_message(
     };
 
     // Split the user message into a sequence of (user-text-chunk, tool-msg)
-    // entries preserving original order.
+    // entries preserving original order. Images hoisted out of a run of
+    // results open the user chunk that follows that run.
     let mut pending_user_chunk: Vec<Value> = Vec::new();
+    let mut hoisted_images: Vec<Value> = Vec::new();
     for part in parts {
         if part_is_tool_result(&part) {
             flush_user_chunk(&msg, &mut pending_user_chunk, out);
-            if let Some(tool_msg) = build_tool_message(id, &part, strict, tally)? {
-                out.push(tool_msg);
+            if let Some(lifted) = build_tool_message(id, &part, strict, tally)? {
+                out.push(lifted.message);
+                hoisted_images.extend(lifted.images);
             }
         } else {
+            pending_user_chunk.append(&mut hoisted_images);
             pending_user_chunk.push(part);
         }
     }
+    pending_user_chunk.append(&mut hoisted_images);
     flush_user_chunk(&msg, &mut pending_user_chunk, out);
     Ok(())
 }
@@ -200,12 +216,19 @@ fn is_text_block(part: &Value) -> bool {
         == Some("text")
 }
 
+/// One translated tool result: its `role:"tool"` message, plus the lifted
+/// `image_url` blocks that must ride in the user message after the run.
+struct LiftedToolResult {
+    message: Value,
+    images: Vec<Value>,
+}
+
 fn build_tool_message(
     id: &str,
     part: &Value,
     strict: bool,
     tally: &mut ToolResultDropTally,
-) -> Result<Option<Value>> {
+) -> Result<Option<LiftedToolResult>> {
     // TRANSLATION-DROP: structural -- `part_is_tool_result` already proved this is
     // an object, so this arm is unreachable defensive coding, not a drop.
     let obj = match part.as_object() {
@@ -224,7 +247,7 @@ fn build_tool_message(
         .get("content")
         .cloned()
         .unwrap_or(Value::String(String::new()));
-    let content = translate_tool_result_content(id, content, strict, tally)?;
+    let (content, images) = translate_tool_result_content(id, content, strict, tally)?;
     let content = if is_error {
         mark_error_content(content)
     } else {
@@ -236,7 +259,10 @@ fn build_tool_message(
         tool_msg.insert("tool_call_id".into(), tool_use_id);
     }
     tool_msg.insert("content".into(), content);
-    Ok(Some(Value::Object(tool_msg)))
+    Ok(Some(LiftedToolResult {
+        message: Value::Object(tool_msg),
+        images,
+    }))
 }
 
 /// Prefix a tool_result payload with an `Error:` marker so the upstream
@@ -263,52 +289,79 @@ fn mark_error_content(content: Value) -> Value {
     }
 }
 
-/// Translate a tool_result content payload for OpenAI:
+/// Translate a tool_result content payload for OpenAI, returning the
+/// tool message content and the lifted images hoisted out of it:
 /// - String -> string
 /// - Text-only array -> single string (text fields joined with "\n\n").
 ///   Strict backends (DeepSeek, older vLLM) 400 on an array here and
 ///   accept only a string.
-/// - Array with an image block -> array, with Anthropic image shapes
-///   lifted to image_url shape (mirrors the `content` lift, which
-///   doesn't recurse into tool_result). Unrepresentable inner blocks
-///   (document, unknown image source) are dropped (lenient) or rejected
-///   (strict) via `reject_or_drop_unrepresentable`.
+/// - Array with an image block -> Anthropic image shapes lifted to
+///   image_url shape (mirrors the `content` lift, which doesn't recurse
+///   into tool_result) and hoisted out; what remains is joined as the
+///   text-only case (`""` when nothing remains), or stays an array when a
+///   non-text block survives. Unrepresentable inner blocks (document,
+///   unknown image source) are dropped (lenient) or rejected (strict) via
+///   `reject_or_drop_unrepresentable`.
 /// - Object / scalar -> stringified JSON
 fn translate_tool_result_content(
     id: &str,
     content: Value,
     strict: bool,
     tally: &mut ToolResultDropTally,
-) -> Result<Value> {
+) -> Result<(Value, Vec<Value>)> {
     match content {
-        Value::String(_) => Ok(content),
+        Value::String(_) => Ok((content, Vec::new())),
         Value::Array(arr) => {
             if !arr.is_empty() && arr.iter().all(is_text_block) {
-                let texts = arr.iter().map(|b| b["text"].as_str().unwrap_or(""));
-                let sep = "\n\n";
-                let cap = texts.clone().map(str::len).sum::<usize>()
-                    + sep.len() * arr.len().saturating_sub(1);
-                let mut joined = String::with_capacity(cap);
-                for (i, text) in texts.enumerate() {
-                    if i > 0 {
-                        joined.push_str(sep);
-                    }
-                    joined.push_str(text);
-                }
-                return Ok(Value::String(joined));
+                return Ok((join_text_blocks(&arr), Vec::new()));
             }
-            let mut lifted: Vec<Value> = Vec::with_capacity(arr.len());
+            let mut kept: Vec<Value> = Vec::with_capacity(arr.len());
+            let mut images: Vec<Value> = Vec::new();
             for block in arr {
-                if let Some(out) = lift_inner_block(id, block, strict, tally)? {
-                    lifted.push(out);
+                let Some(out) = lift_inner_block(id, block, strict, tally)? else {
+                    continue;
+                };
+                // TRANSLATION-DROP: structural -- a lifted image is relocated, not
+                // lost: OpenAI tool messages admit only text, so it rides in the user
+                // message emitted right after the run of tool messages.
+                if is_image_url_block(&out) {
+                    images.push(out);
+                } else {
+                    kept.push(out);
                 }
             }
-            Ok(Value::Array(lifted))
+            if images.is_empty() || !kept.iter().all(is_text_block) {
+                return Ok((Value::Array(kept), images));
+            }
+            Ok((join_text_blocks(&kept), images))
         }
         // Object or scalar: encode as string for OpenAI's wire (which
         // expects string content on tool messages outside of multimodal).
-        other => Ok(Value::String(other.to_string())),
+        other => Ok((Value::String(other.to_string()), Vec::new())),
     }
+}
+
+/// Join the `text` fields of text blocks with "\n\n" into one string.
+fn join_text_blocks(blocks: &[Value]) -> Value {
+    let texts = blocks.iter().map(|b| b["text"].as_str().unwrap_or(""));
+    let sep = "\n\n";
+    let cap =
+        texts.clone().map(str::len).sum::<usize>() + sep.len() * blocks.len().saturating_sub(1);
+    let mut joined = String::with_capacity(cap);
+    for (i, text) in texts.enumerate() {
+        if i > 0 {
+            joined.push_str(sep);
+        }
+        joined.push_str(text);
+    }
+    Value::String(joined)
+}
+
+fn is_image_url_block(part: &Value) -> bool {
+    part.as_object()
+        .and_then(|o| o.get("type"))
+        .and_then(|t| t.as_str())
+        == Some("image_url")
 }
 
 /// Lift one inner tool_result content block to OpenAI wire shape.
@@ -532,8 +585,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_with_array_content_lifts_inner_image() {
-        // Arrange -- tool_result containing an Anthropic image block.
+    fn tool_result_image_hoists_into_following_user_message() {
+        // Arrange -- tool_result containing text and an Anthropic image block.
         let messages = json!([
             {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "t1", "content": [
@@ -548,14 +601,164 @@ mod tests {
         // Act
         let obj = run(messages);
 
+        // Assert -- the text stays on the tool message, the lifted image
+        // moves to one user message right after it.
+        let msgs = obj["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2, "got: {msgs:?}");
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[0]["tool_call_id"], "t1");
+        assert_eq!(msgs[0]["content"], json!("here is the rendering"));
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(
+            msgs[1]["content"],
+            json!([{"type": "image_url", "image_url": {"url": "data:image/png;base64,ZZ=="}}])
+        );
+    }
+
+    #[test]
+    fn parallel_tool_result_images_hoist_into_one_user_message_after_all_tools() {
+        // Arrange -- two results of one parallel call turn, each with an image.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "one"},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "SU1HMQ=="
+                    }}
+                ]},
+                {"type": "tool_result", "tool_use_id": "t2", "content": [
+                    {"type": "text", "text": "two"},
+                    {"type": "image", "source": {"type": "url", "url": "https://example.com/2.png"}}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert -- [tool, tool, user(img1, img2)]: the tool messages stay
+        // contiguous and the images keep source order.
+        let msgs = obj["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["tool", "tool", "user"], "got: {msgs:?}");
+        assert_eq!(msgs[0]["tool_call_id"], "t1");
+        assert_eq!(msgs[0]["content"], json!("one"));
+        assert_eq!(msgs[1]["tool_call_id"], "t2");
+        assert_eq!(msgs[1]["content"], json!("two"));
+        assert_eq!(
+            msgs[2]["content"],
+            json!([
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,SU1HMQ=="}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/2.png"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn image_only_tool_result_keeps_empty_string_tool_message() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
         // Assert
         let msgs = obj["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs.len(), 2, "got: {msgs:?}");
         assert_eq!(msgs[0]["role"], "tool");
-        let content = msgs[0]["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[1]["type"], "image_url");
-        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,ZZ==");
+        assert_eq!(msgs[0]["tool_call_id"], "t1");
+        assert_eq!(msgs[0]["content"], json!(""));
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"][0]["type"], "image_url");
+    }
+
+    #[test]
+    fn user_text_after_tool_results_follows_hoisted_images() {
+        // Arrange -- user text trailing the results in the same message.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]},
+                {"type": "text", "text": "what do you see?"}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert -- one user message: images first, then the text.
+        let msgs = obj["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2, "got: {msgs:?}");
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[1]["role"], "user");
+        let content = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "image_url");
+        assert_eq!(
+            content[1],
+            json!({"type": "text", "text": "what do you see?"})
+        );
+    }
+
+    #[test]
+    fn leading_user_text_stays_ahead_of_tool_message_with_image() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "text", "text": "see result:"},
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let msgs = obj["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "tool", "user"], "got: {msgs:?}");
+        assert_eq!(msgs[0]["content"], json!("see result:"));
+        assert_eq!(msgs[2]["content"][0]["type"], "image_url");
+    }
+
+    #[test]
+    fn text_only_tool_results_emit_no_user_message() {
+        // Arrange -- positive control: no image, nothing hoisted.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "a"}
+                ]},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "b"}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        assert_eq!(
+            obj["messages"],
+            json!([
+                {"role": "tool", "tool_call_id": "t1", "content": "a"},
+                {"role": "tool", "tool_call_id": "t2", "content": "b"}
+            ])
+        );
     }
 
     #[test]
@@ -606,9 +809,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_text_plus_image_array_stays_array() {
-        // Arrange -- a non-text (image) block present, so the array form
-        // must be preserved (with the image lifted to image_url).
+    fn tool_result_text_plus_image_joins_text_on_tool_message() {
+        // Arrange -- once the image is hoisted, the remaining text-only
+        // content collapses to a string like any text-only result.
         let messages = json!([
             {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "t1", "content": [
@@ -625,12 +828,8 @@ mod tests {
 
         // Assert
         let msgs = obj["messages"].as_array().unwrap();
-        assert!(
-            msgs[0]["content"].is_array(),
-            "array with an image block must stay an array"
-        );
-        let content = msgs[0]["content"].as_array().unwrap();
-        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(msgs[0]["content"], json!("see image"));
+        assert_eq!(msgs[1]["content"][0]["type"], "image_url");
     }
 
     #[test]
@@ -720,19 +919,17 @@ mod tests {
     }
 
     /// cache_control on an inner tool_result block (kept in array
-    /// form by a sibling image) must be stripped from the wire, mirroring
-    /// the top-level content strip.
+    /// form by a non-text sibling) must be stripped from the wire,
+    /// mirroring the top-level content strip.
     #[test]
     fn inner_block_cache_control_is_stripped() {
-        // Arrange -- a text block carrying cache_control plus an image so
-        // the array form survives (text-only collapses to a string).
+        // Arrange -- a text block carrying cache_control plus an unknown
+        // block so the array form survives (text-only collapses to a string).
         let messages = json!([
             {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "t1", "content": [
                     {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
-                    {"type": "image", "source": {
-                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
-                    }}
+                    {"type": "future_block", "payload": "kept"}
                 ]}
             ]}
         ]);
@@ -771,7 +968,7 @@ mod tests {
         let obj = run(messages);
 
         // Assert -- only the recognized image survives, lifted to image_url.
-        let content = obj["messages"][0]["content"].as_array().unwrap();
+        let content = obj["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1, "unknown-source image must be dropped");
         assert_eq!(content[0]["type"], "image_url");
     }
@@ -795,7 +992,7 @@ mod tests {
         let obj = run(messages);
 
         // Assert
-        let content = obj["messages"][0]["content"].as_array().unwrap();
+        let content = obj["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1, "url-missing-url image must be dropped");
         assert_eq!(content[0]["type"], "image_url");
     }
@@ -849,7 +1046,7 @@ mod tests {
         let obj = run(messages);
 
         // Assert -- document gone, image lifted.
-        let content = obj["messages"][0]["content"].as_array().unwrap();
+        let content = obj["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1, "document block must be dropped");
         assert_eq!(content[0]["type"], "image_url");
     }
@@ -904,11 +1101,11 @@ mod tests {
         assert_eq!(content, "Error: boom");
     }
 
-    /// is_error with array content prepends a leading error
-    /// text block.
+    /// is_error with text plus image content keeps the `Error:` marker on
+    /// the tool message; the image is hoisted unmarked.
     #[test]
-    fn is_error_array_content_prepends_error_block() {
-        // Arrange -- array kept in array form via an image block.
+    fn is_error_with_image_marks_tool_message() {
+        // Arrange
         let messages = json!([
             {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "t1", "is_error": true,
@@ -924,20 +1121,66 @@ mod tests {
         // Act
         let obj = run(messages);
 
-        // Assert -- first block is the injected error text marker, and the
-        // original blocks (details text + lifted image) survive in order.
-        let content = obj["messages"][0]["content"].as_array().unwrap();
+        // Assert
+        let msgs = obj["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2, "got: {msgs:?}");
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[0]["content"], json!("Error: details"));
+        assert_eq!(msgs[1]["role"], "user");
         assert_eq!(
-            content.len(),
-            3,
-            "error marker is prepended ahead of the two original blocks"
+            msgs[1]["content"],
+            json!([{"type": "image_url", "image_url": {"url": "data:image/png;base64,ZZ=="}}])
         );
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[0]["text"], "Error: ");
-        assert_eq!(content[1]["type"], "text");
+    }
+
+    /// An image-only error result keeps a bare `Error: ` tool message.
+    #[test]
+    fn is_error_image_only_marks_empty_tool_message() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": true,
+                 "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                 ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let msgs = obj["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"], json!("Error: "));
+        assert_eq!(msgs[1]["content"][0]["type"], "image_url");
+    }
+
+    /// is_error with array content that stays an array (a non-text
+    /// sibling survives) prepends a leading error text block.
+    #[test]
+    fn is_error_array_content_prepends_error_block() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": true,
+                 "content": [
+                    {"type": "text", "text": "details"},
+                    {"type": "future_block", "payload": "kept"}
+                 ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let content = obj["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0], json!({"type": "text", "text": "Error: "}));
         assert_eq!(content[1]["text"], "details");
-        assert_eq!(content[2]["type"], "image_url");
-        assert_eq!(content[2]["image_url"]["url"], "data:image/png;base64,ZZ==");
+        assert_eq!(content[2]["type"], "future_block");
     }
 
     /// Absence of is_error leaves content unchanged.

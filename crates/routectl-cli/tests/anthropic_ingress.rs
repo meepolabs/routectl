@@ -2145,6 +2145,57 @@ async fn cross_anthropic_tool_result_translated_to_openai_tool_role_message() {
 }
 
 #[tokio::test]
+async fn cross_anthropic_tool_result_images_hoist_after_the_tool_messages() {
+    // OpenAI tool messages admit text only: images in parallel tool results
+    // ride in ONE user message after every tool message of the run.
+    let png = |data: &str| {
+        json!({"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": data
+        }})
+    };
+    let up = capture_openai_egress_body(json!({
+        "model": "heavy",
+        "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": "render both"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_A", "name": "render", "input": {}},
+                {"type": "tool_use", "id": "toolu_B", "name": "render", "input": {}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_A",
+                 "content": [{"type": "text", "text": "first"}, png("SU1HQQ==")]},
+                {"type": "tool_result", "tool_use_id": "toolu_B",
+                 "content": [png("SU1HQg==")]}
+            ]}
+        ]
+    }))
+    .await;
+    let messages = up["messages"].as_array().expect("messages array");
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        roles,
+        ["user", "assistant", "tool", "tool", "user"],
+        "body={up}"
+    );
+    assert_eq!(messages[2]["tool_call_id"], "toolu_A");
+    assert_eq!(messages[2]["content"], "first");
+    assert_eq!(messages[3]["tool_call_id"], "toolu_B");
+    assert_eq!(messages[3]["content"], "");
+    assert_eq!(
+        messages[4]["content"],
+        json!([
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,SU1HQQ=="}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,SU1HQg=="}}
+        ]),
+        "body={up}"
+    );
+}
+
+#[tokio::test]
 async fn cross_anthropic_thinking_translates_to_openai_reasoning() {
     // claude-code sends Anthropic `thinking: {type:"enabled", budget_tokens}`.
     // For OpenAI-compat hosts (DeepSeek v4 reasoner, vLLM-served reasoning

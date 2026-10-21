@@ -104,7 +104,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("openai_compat/wire_lift/response_format.rs", 4),
     ("openai_compat/wire_lift/thinking.rs", 3),
     ("openai_compat/wire_lift/tool_choice.rs", 5),
-    ("openai_compat/wire_lift/tool_result.rs", 11),
+    ("openai_compat/wire_lift/tool_result.rs", 12),
     ("openai_compat/wire_lift/tool_use.rs", 2),
     ("openai_compat/wire_lift/tools.rs", 1),
     ("openai_responses/extras.rs", 5),
@@ -118,7 +118,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
 const EXPECTED_LANE_MARKERS: usize = 84;
 const EXPECTED_POLICY_ACTION_MARKERS: usize = 23;
-const EXPECTED_STRUCTURAL_MARKERS: usize = 51;
+const EXPECTED_STRUCTURAL_MARKERS: usize = 52;
 
 /// The `fidelity-risk` register: a same-dialect-reachable candidate, which is
 /// a worse defect to be FILED rather than an accepted drop. Pinned by CONTENT
