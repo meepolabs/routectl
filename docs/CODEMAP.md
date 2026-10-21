@@ -47,9 +47,6 @@ license.
   `BetaAssembly` it computed at header / bag assembly (the beta floor it never
   withholds and the body-implied set it re-adds); last record wins; the
   router installs a fresh one on every complete, stream and count_tokens call
-- `src/beta_repair_report.rs` -- `BetaRepairReport`: clone-shared slot where a
-  provider records the client beta flags it stripped after a named rejection
-  (deduped, first-seen order); the router `take`s it after the call
 - `src/provider_kind.rs` -- the two provider-kind vocabularies: `config::*`
   (the `kind = "..."` token the usage ledger persists) and `trace::*` (the
   `provider_kind=` token providers log), plus `trace_kind` mapping each
@@ -1298,10 +1295,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `union_feature_implied_betas`: the single source for the betas both
   carriers add from body fields (structured-outputs; Converse
   display-updates)
-- `src/bedrock/beta_repair.rs` -- `with_beta_repair`: one strip-and-retry
-  for a 400 naming rejected `anthropic-beta` flags (normalizing each attempt
-  once; refused when a named flag is feature-implied); a successful inference
-  retry records the stripped flags into the request's `BetaRepairReport`
 - `src/bedrock/count_tokens.rs` -- CountTokens lane body assembly: the
   `invokeModel` union member (invoke body verbatim, base64) and the
   `converse` member (four-key allowlist), and the `inputTokens` response
@@ -3307,17 +3300,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   otherwise it builds a read-only
   `RejectionInput` and runs `arbitrate`: the ONE precedence, the static
   `ARBITRATION_ORDER` of `Proposer`s (no trait objects) over the closed
-  `Proposal` enum (`ReplayStrip` / `FieldRow` / `Capability`) -- replay strip
-  -> field repair -> canary retry (on the field-row proposal) -> generic
-  capability, repairs applied in place on `attempt_req` through the
-  `RepairSink` effects. A site with `in_egress == Some(false)` skips every
+  `Proposal` enum (`ReplayStrip` / `FieldRow` / `Beta` / `Capability`) --
+  replay strip -> field repair -> canary retry (on the field-row proposal) ->
+  named beta withhold -> generic capability, repairs applied in place on
+  `attempt_req` through the `RepairSink` effects. A site with `in_egress == Some(false)` skips every
   path-keyed slot (the field-row slot, and with it the canary), so the
   rejection proceeds unrepaired; the generic capability slot still runs. On
   `Proceed` the capability proposal is held and
   `observe_generic` (still after the class observability) applies only it via
-  `observe_for_learning`; `on_success` settles betas, a pending revert,
-  replay, field and canary (the carry settlements live in
-  `learn_settle.rs`). `admit_carries` takes the caller's
+  `observe_for_learning`; `on_success` settles the repaired betas (none on
+  the `CountTokens` surface), a pending revert, replay, field and canary (the
+  carry settlements live in `learn_settle.rs`, the beta sink in
+  `learn_beta_repair.rs`). `admit_carries` takes the caller's
   `FieldSettlementMode`. On the `CountTokens` surface (derived once in `new`)
   `observe_generic` never mints: it only feeds
   `observe_unlocalized_field_rejection` (or the transcript counter).
@@ -3337,11 +3331,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   without `learned`. Field: a repaired success commits (persisted claim
   derived from the commit), an unrepaired one clears. Canary: an unrepaired
   success disproves the verdict, one after its repaired retry re-confirms it
-- `src/router/learn_proposers.rs` -- the three thin `Proposer`s the engine
+- `src/router/learn_beta_repair.rs` -- child module of `learn_engine.rs`:
+  `EngineSink`, the `RepairSink` the arbitration applies every repair
+  through, and the beta repair, `try_beta_repair`: once per target, draws
+  the shared `RepairBudget` last, appends the named flags to the attempt's
+  `withheld_betas` and keeps them for settlement; eligibility table,
+  operator pin and count-surface rows in
+  `src/router/learn_beta_repair_tests.rs`
+- `src/router/learn_proposers.rs` -- the four thin `Proposer`s the engine
   arbitrates: `ReplayProposer` (`is_replay_rejection_class` on the remapped
   class, replay carried), `FieldRowProposer` (`rejected_field` on the native
-  class), `CapabilityProposer` (`resolve_requested_capability` on the
-  body-free error form)
+  class), `BetaProposer` (`rejected_beta_flags`; every named flag must be in
+  the client's `anthropic_beta`, not already withheld, and outside the
+  attempt's recorded beta floor and body-implied set),
+  `CapabilityProposer` (`resolve_requested_capability` on the body-free
+  error form)
 - `src/router/learn_revert.rs` -- a rejection naming a path a declared
   routectl edit put on the wire: `MatchedEdit` (`None` / `One` / `Conflict`,
   computed at settlement from the attempt's request edits, only for a
@@ -4001,10 +4005,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the entry's lane; a one-nickname change is left to the per-target filter), `learned_capability_snapshot` and
   `learned_seed_clear_snapshot` (the status read-model), and `learned_replay` (the crate-internal `&self` delegate handing
   the dispatch arm the `ReplayLearnRegistry` for its carry-slot claim)
-- `src/router/beta_report_learn.rs` -- learning from the provider's per-attempt
-  `BetaRepairReport`: `install_beta_repair_report` (fresh slot per provider
-  call) and `settle_attempt_success` (`beta:<flag>` negatives for reported
-  flags, a `BETA_ACCEPTED` verified positive for an accepted re-probe)
+- `src/router/beta_report_learn.rs` -- learning from the engine's beta repair:
+  `install_beta_assembly` (fresh `BetaAssemblyReport` slot per provider call)
+  and `settle_attempt_success` (`beta:<flag>` negatives for the flags the
+  repair withheld, a `BETA_ACCEPTED` verified positive for an accepted
+  re-probe)
 - `src/router/capability_observe.rs` -- response-evidence observer: the
   SUCCESS-arm mirror of `observe_for_learning`, run inline on the terminal
   successful NON-STREAMING response (the streaming arm records nothing -- no
@@ -5152,7 +5157,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   loop end-to-end binary: shared upstream/router fixtures plus `#[path]`
   wiring of the scenario submodules under `tests/learned_capability_loop/`
   (`real_envelope`, `learn_and_decay`, `never_learn`, `learned_tail`,
-  `streaming`, `bedrock_new_beta`, `anthropic_beta_withhold`); one binary
+  `streaming`, `bedrock_new_beta`, `anthropic_beta_withhold`,
+  `anthropic_beta_repair`); one binary
 - `tests/learned_capability_loop/bedrock_new_beta.rs` -- a beta flag
   routectl has never seen crosses a real Bedrock lane (Invoke and Converse)
   against a mock bedrock-runtime: sent verbatim, repaired after the named
@@ -5163,6 +5169,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   anthropic-api lane's `anthropic-beta` header (own-OAuth, exact Anthropic
   host resolved to a mock), for non-CC and genuine-CC requests, with the
   floor and client order intact
+- `tests/learned_capability_loop/anthropic_beta_repair.rs` -- the committed
+  Mantle beta-rejection capture on a real anthropic-api lane: the engine
+  re-sends without the named flag, learns one `beta:` negative, and the next
+  request withholds it before the wire
 - `tests/live_learned_capability.rs` -- live-network smoke of that loop
   against the real openai-compat provider at `ROUTECTL_LIVE_BASE_URL`;
   `test = false` behind `live-integration`, so it runs only when named

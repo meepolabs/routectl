@@ -7,7 +7,6 @@
 //! `provider` for the per-backend trait.
 
 mod beta_assembly_report;
-mod beta_repair_report;
 pub mod cache_control;
 pub mod cache_decision;
 pub mod capability;
@@ -49,7 +48,6 @@ pub mod wire_check;
 pub mod test_utils;
 
 pub use beta_assembly_report::{BetaAssembly, BetaAssemblyReport};
-pub use beta_repair_report::BetaRepairReport;
 pub use cache_control::{
     Breakpoint, BreakpointPosition, CacheBreakpointSource, CacheControl, FrontSlot, FrozenFloor,
     OwnedBreakpoint, compute_frozen_floor, eligible_system_block_index, front_breakpoint_slot,

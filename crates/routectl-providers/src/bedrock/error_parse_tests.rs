@@ -126,30 +126,3 @@ fn access_denied_403_carries_its_envelope_not_the_raw_principal_body() {
         "the carried parse leaked the principal ARN: {carried_parse:?}"
     );
 }
-
-/// The BOM-prefixed row pins the source of the message: the carried parse
-/// strips a leading BOM under the shared body rules, while a fresh
-/// `serde_json` parse of the stored text rejects it.
-#[test]
-fn beta_repair_reads_the_carried_parse_without_parsing_again() {
-    let message = "Unexpected value(s) `zz-probe-2099-01-01` for the `anthropic-beta` header. Please consult our documentation at platform.claude.com/docs or try again without the header.";
-    let envelope = serde_json::json!({
-        "__type": "com.amazon.coral.validate#ValidationException",
-        "message": message,
-    })
-    .to_string();
-    let client = vec!["zz-probe-2099-01-01".to_string()];
-    for (name, text) in [
-        ("plain", envelope.clone()),
-        ("bom-prefixed", format!("\u{feff}{envelope}")),
-    ] {
-        let err = parses_during(|| read(400, text)).0;
-
-        let (flags, parses) = parses_during(|| {
-            beta_repair::repairable_rejected_betas("prov", "bedrock-invoke", &err, &client, &[])
-        });
-
-        assert_eq!(parses, 0, "{name}");
-        assert_eq!(flags.as_ref(), Some(&client), "{name}");
-    }
-}

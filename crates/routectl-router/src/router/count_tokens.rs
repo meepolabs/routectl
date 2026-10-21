@@ -33,17 +33,18 @@
 //! client's body, so a rejection can be laid to a declared routectl edit
 //! and reverted; the tap is never admitted to the wire check.
 //!
-//! A count admits no beta report or untranslated-capability report, and the
-//! filter's re-probe admissions are settled before the walk, so the engine
-//! holds an inert re-probe guard and settles successes against empty
-//! reports. A rejection laid to a defective transcript is never repaired:
+//! A count admits no untranslated-capability report, and the filter's
+//! re-probe admissions are settled before the walk, so the engine holds an
+//! inert re-probe guard and settles successes against an empty report. A
+//! named beta rejection is repaired for the count it returns and never
+//! learned. A rejection laid to a defective transcript is never repaired:
 //! the engine proceeds without consulting a proposer.
 
 use std::collections::HashSet;
 use std::time::Instant;
 
 use routectl_core::provider_kind::config as config_kind;
-use routectl_core::{BetaRepairReport, ChatRequest, Error, Result, TokenCount, sanitize_for_log};
+use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
 use super::beta_report_learn::install_beta_assembly;
 use super::capability_learn::LearnDedupeKey;
@@ -496,7 +497,7 @@ impl Router {
             // sees counting still activates -- reading the pre-flight
             // capture and the per-target body actually being sent.
             self.on_admitted_request(&target, &probe_fields, &attempt_req);
-            let _beta_assembly = install_beta_assembly(&mut attempt_req);
+            let beta_assembly = install_beta_assembly(&mut attempt_req);
             let wire_tap = Self::install_count_wire_tap(&mut attempt_req);
             let result = provider.count_tokens(attempt_req.clone()).await;
             attempts_made += 1;
@@ -509,7 +510,6 @@ impl Router {
                     // walks do, so a repaired commit keys on what the caller
                     // asked for rather than the repaired body.
                     learning.on_success(
-                        &BetaRepairReport::default(),
                         &UntranslatedCapabilities::default(),
                         &target,
                         req,
@@ -623,6 +623,7 @@ impl Router {
                         wire_tap.as_ref(),
                         &e,
                     );
+                    let assembly = beta_assembly.take();
                     let rejection = Rejection {
                         err: &e,
                         class: &cf,
@@ -631,6 +632,7 @@ impl Router {
                         client_req: req,
                         site,
                         transcript_rejection,
+                        beta_assembly: assembly.as_ref(),
                     };
                     if let FailureDecision::Retry { .. } =
                         learning.on_rejection(rejection, &mut attempt_req, meta, repair_budget)

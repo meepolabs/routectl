@@ -1,6 +1,6 @@
-//! The router's read of the provider's per-attempt beta repair report: a
-//! fresh slot per provider call, a `beta:<flag>` negative minted on success,
-//! the mint gates, and the settle-rejections-before-success order.
+//! The settlement of the engine's beta repair: a `beta:<flag>` negative minted
+//! when the repaired attempt succeeds, the mint gates, and the
+//! settle-rejections-before-success order.
 
 use super::*;
 use std::collections::{BTreeMap, HashSet};
@@ -12,7 +12,8 @@ use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::{
-    ChatChunk, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result, TokenCount,
+    BetaAssembly, ChatChunk, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result,
+    TokenCount,
 };
 use serde_json::json;
 
@@ -46,35 +47,41 @@ fn flag_key() -> String {
     crate::beta_capability::beta_capability_key(FLAG).expect("the fixture flag is well formed")
 }
 
-/// What one provider call does: the flags it records on the request's report
-/// slot, and the upstream status it then fails with, if any.
+/// What one provider call does: whether the upstream names the call's client
+/// flags in a beta rejection, or fails it with another status, or serves it.
 #[derive(Clone)]
-struct Call {
-    record: Vec<&'static str>,
-    fail_status: Option<u16>,
+enum Call {
+    /// A 400 naming these flags, when every one of them is still on the
+    /// attempt's wire (not withheld); a success otherwise.
+    RejectNamed(Vec<&'static str>),
+    Fail(u16),
+    Ok,
 }
 
-const fn ok_recording(record: Vec<&'static str>) -> Call {
-    Call {
-        record,
-        fail_status: None,
-    }
+/// A Bedrock 400 `ValidationException` naming `flags` in the exact envelope.
+fn beta_rejection(flags: &[&str]) -> Error {
+    let list: Vec<String> = flags.iter().map(|f| format!("`{f}`")).collect();
+    let message = format!(
+        "Unexpected value(s) {} for the `anthropic-beta` header. Please consult our \
+         documentation at platform.claude.com/docs or try again without the header.",
+        list.join(", ")
+    );
+    Error::upstream_full(
+        "p1",
+        400,
+        json!({ "message": message }).to_string(),
+        None,
+        Some("ValidationException".into()),
+        None,
+    )
 }
 
-const fn failing_after_recording(record: Vec<&'static str>, status: u16) -> Call {
-    Call {
-        record,
-        fail_status: Some(status),
-    }
-}
-
-/// A provider that plays a scripted call per attempt (the last entry repeats)
-/// and records whether each call it received carried a report slot, and the
-/// withheld beta set it carried.
+/// A provider that plays a scripted call per attempt (the last entry repeats),
+/// deposits an empty beta assembly the way an anthropic-vocabulary egress
+/// does, and records the withheld beta set each call carried.
 struct ReportingProvider {
     script: Vec<Call>,
     calls: AtomicUsize,
-    slot_seen: Mutex<Vec<bool>>,
     withheld_seen: Mutex<Vec<Vec<String>>>,
 }
 
@@ -83,7 +90,6 @@ impl ReportingProvider {
         Arc::new(Self {
             script,
             calls: AtomicUsize::new(0),
-            slot_seen: Mutex::new(Vec::new()),
             withheld_seen: Mutex::new(Vec::new()),
         })
     }
@@ -99,19 +105,18 @@ impl ReportingProvider {
     fn play(&self, req: &ChatRequest) -> Result<()> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         let call = self.script[n.min(self.script.len() - 1)].clone();
-        let slot = req.routectl_internal.beta_repair_report.as_ref();
-        self.slot_seen.lock().push(slot.is_some());
-        self.withheld_seen
-            .lock()
-            .push(req.routectl_internal.withheld_betas.to_vec());
-        if let Some(report) = slot {
-            let flags: Vec<String> = call.record.iter().map(|f| (*f).to_string()).collect();
-            report.record(&flags);
+        let withheld = req.routectl_internal.withheld_betas.to_vec();
+        self.withheld_seen.lock().push(withheld.clone());
+        if let Some(slot) = req.routectl_internal.beta_assembly.as_ref() {
+            slot.record(BetaAssembly::new(Vec::new(), Vec::new()));
         }
-        if let Some(status) = call.fail_status {
-            return Err(Error::upstream("p1", status, "upstream refused"));
+        match call {
+            Call::RejectNamed(flags) if !flags.iter().any(|f| withheld.iter().any(|w| w == f)) => {
+                Err(beta_rejection(&flags))
+            }
+            Call::Fail(status) => Err(Error::upstream("p1", status, "upstream refused")),
+            _ => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -226,16 +231,26 @@ fn assert_one_beta_event(events: &[crate::router::CapabilityLearnEvent]) {
     assert!(!ev.remapped);
 }
 
+/// The provider saw the flag rejected once and the repaired attempt once.
+fn assert_repaired_once(provider: &ReportingProvider) {
+    assert_eq!(
+        *provider.withheld_seen.lock(),
+        vec![Vec::<String>::new(), vec![FLAG.to_string()]],
+        "one rejected call carrying the flag, then one call withholding it",
+    );
+}
+
 #[tokio::test]
-async fn complete_success_with_a_reported_flag_mints_one_beta_negative() {
-    let provider = ReportingProvider::new(vec![ok_recording(vec![FLAG])]);
-    let router = router_with(BEDROCK_P1, provider);
+async fn complete_success_after_a_beta_repair_mints_one_beta_negative() {
+    let provider = ReportingProvider::new(vec![Call::RejectNamed(vec![FLAG])]);
+    let router = router_with(BEDROCK_P1, provider.clone());
 
     let dispatched = router
         .complete_with_options(req_with_betas(&[FLAG]), RouterOptions::default())
         .await;
 
     assert!(dispatched.result.is_ok());
+    assert_repaired_once(&provider);
     assert_one_beta_event(&dispatched.meta.learned_capabilities);
     assert!(matches!(
         beta_decision(&router, &flag_key()),
@@ -244,15 +259,16 @@ async fn complete_success_with_a_reported_flag_mints_one_beta_negative() {
 }
 
 #[tokio::test]
-async fn stream_first_content_with_a_reported_flag_mints_one_beta_negative() {
-    let provider = ReportingProvider::new(vec![ok_recording(vec![FLAG])]);
-    let router = router_with(BEDROCK_P1, provider);
+async fn stream_first_content_after_a_beta_repair_mints_one_beta_negative() {
+    let provider = ReportingProvider::new(vec![Call::RejectNamed(vec![FLAG])]);
+    let router = router_with(BEDROCK_P1, provider.clone());
 
     let dispatched = router
         .stream_with_options(req_with_betas(&[FLAG]), RouterOptions::default())
         .await;
 
     assert!(dispatched.result.is_ok());
+    assert_repaired_once(&provider);
     assert_one_beta_event(&dispatched.meta.learned_capabilities);
     assert!(matches!(
         beta_decision(&router, &flag_key()),
@@ -261,14 +277,10 @@ async fn stream_first_content_with_a_reported_flag_mints_one_beta_negative() {
 }
 
 #[tokio::test]
-async fn a_flag_recorded_by_a_failed_attempt_is_not_learned_on_a_clean_retry() {
-    // Attempt 1 records the flag, then the upstream 500s; attempt 2 succeeds
-    // and records nothing. Each provider call gets its own slot, so the
-    // success reads an empty report.
-    let provider = ReportingProvider::new(vec![
-        failing_after_recording(vec![FLAG], 500),
-        ok_recording(vec![]),
-    ]);
+async fn a_5xx_retry_with_no_beta_repair_learns_nothing() {
+    // Control for the repaired-flag settlement: a same-target retry that
+    // succeeds after a non-beta failure withheld nothing and learns nothing.
+    let provider = ReportingProvider::new(vec![Call::Fail(500), Call::Ok]);
     let router = router_with(BEDROCK_P1, provider.clone());
 
     let dispatched = router
@@ -277,69 +289,58 @@ async fn a_flag_recorded_by_a_failed_attempt_is_not_learned_on_a_clean_retry() {
 
     assert!(dispatched.result.is_ok());
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "the 5xx retried");
+    assert!(provider.last_withheld().is_empty());
     assert!(dispatched.meta.learned_capabilities.is_empty());
     assert_eq!(beta_decision(&router, &flag_key()), RoutingDecision::Allow);
 }
 
 #[tokio::test]
-async fn count_tokens_calls_carry_no_report_slot() {
-    let provider = ReportingProvider::new(vec![ok_recording(vec![FLAG])]);
+async fn a_count_tokens_beta_repair_serves_the_count_and_mints_nothing() {
+    let provider = ReportingProvider::new(vec![Call::RejectNamed(vec![FLAG])]);
     let router = router_with(BEDROCK_P1, provider.clone());
 
     let counted = router.count_tokens_with_meta(req_with_betas(&[FLAG])).await;
 
-    assert!(counted.result.is_ok());
-    assert_eq!(*provider.slot_seen.lock(), vec![false]);
+    assert!(counted.result.is_ok(), "{:?}", counted.result.err());
+    assert_repaired_once(&provider);
     assert!(counted.meta.learned_capabilities.is_empty());
     assert_eq!(beta_decision(&router, &flag_key()), RoutingDecision::Allow);
 }
 
 #[tokio::test]
-async fn complete_calls_each_carry_a_report_slot() {
-    // Positive control for the count_tokens case: the same provider sees a
-    // slot on every messages call, including a retry.
-    let provider = ReportingProvider::new(vec![
-        failing_after_recording(vec![], 500),
-        ok_recording(vec![]),
-    ]);
-    let router = router_with(BEDROCK_P1, provider.clone());
-
-    let dispatched = router
-        .complete_with_options(req_with_betas(&[FLAG]), RouterOptions::default())
-        .await;
-
-    assert!(dispatched.result.is_ok());
-    assert_eq!(*provider.slot_seen.lock(), vec![true, true]);
-}
-
-#[tokio::test]
-async fn ineligible_reported_flags_mint_nothing() {
+async fn ineligible_repaired_flags_mint_nothing() {
     let disabled = format!("{BEDROCK_P1}\n[capability]\nenabled = false\n");
     let masked = format!(
         "{BEDROCK_P1}\n[capability.overrides.p1]\nforce_supported = [\"{}\"]\n",
         flag_key()
     );
-    // (case, config, client betas, reported flags)
-    let cases: [(&str, &str, &[&str], &[&'static str]); 4] = [
-        ("dotted flag", BEDROCK_P1, &["zz.flag"], &["zz.flag"]),
+    // (case, config, client betas, named flags, repaired)
+    let cases: [(&str, &str, &[&str], &'static str, bool); 4] = [
+        ("dotted flag", BEDROCK_P1, &["zz.flag"], "zz.flag", true),
         (
             "flag absent from client betas",
             BEDROCK_P1,
             &["zz-other"],
-            &[FLAG],
+            FLAG,
+            false,
         ),
-        ("learning switch off", &disabled, &[FLAG], &[FLAG]),
-        ("force_supported mask", &masked, &[FLAG], &[FLAG]),
+        ("learning switch off", &disabled, &[FLAG], FLAG, true),
+        ("force_supported mask", &masked, &[FLAG], FLAG, true),
     ];
-    for (case, toml_text, client, reported) in cases {
-        let provider = ReportingProvider::new(vec![ok_recording(reported.to_vec())]);
-        let router = router_with(toml_text, provider);
+    for (case, toml_text, client, named, repaired) in cases {
+        let provider = ReportingProvider::new(vec![Call::RejectNamed(vec![named])]);
+        let router = router_with(toml_text, provider.clone());
 
         let dispatched = router
             .complete_with_options(req_with_betas(client), RouterOptions::default())
             .await;
 
-        assert!(dispatched.result.is_ok(), "{case}: dispatch succeeds");
+        assert_eq!(dispatched.result.is_ok(), repaired, "{case}: served");
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            if repaired { 2 } else { 1 },
+            "{case}: upstream calls",
+        );
         assert!(
             dispatched.meta.learned_capabilities.is_empty(),
             "{case}: no learn event",
@@ -416,8 +417,8 @@ fn admit_beta_probe(router: &Router) -> LearnedProbeGuard {
 }
 
 #[test]
-fn a_reported_flag_settles_its_admitted_probe_as_a_rejection_not_a_success() {
-    let provider = ReportingProvider::new(vec![ok_recording(vec![])]);
+fn a_repaired_flag_settles_its_admitted_probe_as_a_rejection_not_a_success() {
+    let provider = ReportingProvider::new(vec![Call::Ok]);
     let router = router_with(BEDROCK_P1, provider.clone());
     let target = router
         .expand_chain_to_targets(
@@ -432,14 +433,13 @@ fn a_reported_flag_settles_its_admitted_probe_as_a_rejection_not_a_success() {
         .pop()
         .expect("one target");
     let mut guard = admit_beta_probe(&router);
-    let report = routectl_core::BetaRepairReport::default();
-    report.record(&[FLAG.to_string()]);
+    let repaired = [FLAG.to_string()];
     let req = req_with_betas(&[FLAG]);
     let mut dedupe = HashSet::new();
     let mut meta = DispatchMeta::for_alias("m1");
 
     router.settle_attempt_success(
-        &report,
+        &repaired,
         &UntranslatedCapabilities::default(),
         &target,
         &req,
@@ -469,13 +469,14 @@ fn a_reported_flag_settles_its_admitted_probe_as_a_rejection_not_a_success() {
 }
 
 #[tokio::test]
-async fn a_stream_flag_recorded_before_an_auth_retry_is_not_learned() {
-    // Streams retry the same target only after a 401. Attempt 1 records the
-    // flag and then 401s; attempt 2 reaches first content and records nothing.
-    // The retry must read its own, empty slot.
+async fn a_repaired_flag_still_settles_when_a_same_target_auth_retry_serves() {
+    // Streams retry the same target after a 401. The repaired attempt 401s;
+    // the retry still withholds the flag and reaches first content, so the
+    // success the flag was absent from settles it.
     let provider = ReportingProvider::new(vec![
-        failing_after_recording(vec![FLAG], 401),
-        ok_recording(vec![]),
+        Call::RejectNamed(vec![FLAG]),
+        Call::Fail(401),
+        Call::Ok,
     ]);
     let router = router_with(BEDROCK_P1, provider.clone());
 
@@ -484,10 +485,9 @@ async fn a_stream_flag_recorded_before_an_auth_retry_is_not_learned() {
         .await;
 
     assert!(dispatched.result.is_ok());
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "the 401 retried");
-    assert_eq!(*provider.slot_seen.lock(), vec![true, true]);
-    assert!(dispatched.meta.learned_capabilities.is_empty());
-    assert_eq!(beta_decision(&router, &flag_key()), RoutingDecision::Allow);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.last_withheld(), vec![FLAG.to_string()]);
+    assert_one_beta_event(&dispatched.meta.learned_capabilities);
 }
 
 /// Which messages surface a test dispatches through.
@@ -532,7 +532,7 @@ async fn dispatch_on(router: &Router, surface: Surface, req: ChatRequest) -> Rid
 async fn the_seed_withholds_the_fixture_flag_with_no_learned_verdict() {
     // Control for the acceptance tests below: the fixture router really does
     // withhold the seeded flag, so "the next request sends it" is evidence.
-    let provider = ReportingProvider::new(vec![ok_recording(vec![])]);
+    let provider = ReportingProvider::new(vec![Call::Ok]);
     let router = seeded_router_with(provider.clone());
 
     let _ = dispatch_on(&router, Surface::Complete, req_with_betas(&[FLAG])).await;
@@ -545,11 +545,11 @@ async fn an_accepted_beta_reprobe_records_a_positive_that_beats_the_seed() {
     for surface in [Surface::Complete, Surface::Stream] {
         // Arrange: a seeded flag whose learned negative has lapsed, so the
         // next request claims the re-probe and sends the flag.
-        let provider = ReportingProvider::new(vec![ok_recording(vec![])]);
+        let provider = ReportingProvider::new(vec![Call::Ok]);
         let router = seeded_router_with(provider.clone());
         seed_lapsed_beta_negative(&router);
 
-        // Act: the re-probe succeeds and the provider reports nothing.
+        // Act: the re-probe succeeds and nothing is repaired.
         let first = dispatch_on(&router, surface, req_with_betas(&[FLAG])).await;
 
         // Assert: the flag was sent, and the acceptance became one verified
@@ -601,7 +601,7 @@ async fn an_accepted_beta_reprobe_records_a_positive_that_beats_the_seed() {
 
 #[test]
 fn a_repeated_accepted_beta_settlement_emits_no_second_event() {
-    let provider = ReportingProvider::new(vec![ok_recording(vec![])]);
+    let provider = ReportingProvider::new(vec![Call::Ok]);
     let router = router_with(BEDROCK_P1, provider.clone());
     let target = router
         .expand_chain_to_targets(
@@ -617,7 +617,7 @@ fn a_repeated_accepted_beta_settlement_emits_no_second_event() {
         .expect("one target");
     let req = req_with_betas(&[FLAG]);
     let mut dedupe = HashSet::new();
-    let empty = routectl_core::BetaRepairReport::default();
+    let empty: [String; 0] = [];
 
     let mut first_meta = DispatchMeta::for_alias("m1");
     let mut first_guard = admit_beta_probe(&router);
@@ -706,7 +706,7 @@ fn flag_resident(router: &Router) -> bool {
 #[test]
 fn a_lease_refused_beta_is_learned_by_a_same_request_retry_once_a_lease_releases() {
     // Arrange
-    let provider = ReportingProvider::new(vec![ok_recording(vec![])]);
+    let provider = ReportingProvider::new(vec![Call::Ok]);
     let router = router_with(BEDROCK_P1, provider.clone());
     let target = router
         .expand_chain_to_targets(
@@ -724,10 +724,8 @@ fn a_lease_refused_beta_is_learned_by_a_same_request_retry_once_a_lease_releases
     let req = req_with_betas(&[FLAG]);
     let mut dedupe = HashSet::new();
     let settle = |dedupe: &mut HashSet<LearnDedupeKey>, meta: &mut DispatchMeta| {
-        let report = routectl_core::BetaRepairReport::default();
-        report.record(&[FLAG.to_string()]);
         router.settle_attempt_success(
-            &report,
+            &[FLAG.to_string()],
             &UntranslatedCapabilities::default(),
             &target,
             &req,

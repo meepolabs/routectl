@@ -1,6 +1,8 @@
 //! Every provider call on every walk carries a fresh beta assembly slot, and
 //! the router's handle reads what the provider deposited on it, whether or
-//! not the request carries a captured ingress body.
+//! not the request carries a captured ingress body. A call that reaches the
+//! learning engine's rejection arbitration has its deposit read there; one
+//! the walk retries before it (auth recovery) leaves it in the slot.
 
 use super::*;
 use std::collections::BTreeMap;
@@ -190,13 +192,14 @@ async fn dispatch(router: &Router, walk: Walk) -> bool {
 
 #[tokio::test]
 async fn every_provider_call_gets_its_own_fresh_beta_assembly_slot() {
-    // (walk, status of the first call that makes the walk call again)
+    // (walk, status of the first call that makes the walk call again,
+    //  whether that rejection reaches the engine, which reads the deposit)
     let rows = [
-        (Walk::Complete, 500),
-        (Walk::Stream, 401),
-        (Walk::CountTokens, 401),
+        (Walk::Complete, 500, true),
+        (Walk::Stream, 401, false),
+        (Walk::CountTokens, 401, false),
     ];
-    for (walk, first_status) in rows {
+    for (walk, first_status, read_at_rejection) in rows {
         let provider = DepositingProvider::new(first_status);
         let router = router_with(provider.clone());
 
@@ -215,8 +218,8 @@ async fn every_provider_call_gets_its_own_fresh_beta_assembly_slot() {
         );
         assert_eq!(
             handles[0].take(),
-            Some(deposit(0)),
-            "{walk:?}: first call's deposit"
+            (!read_at_rejection).then(|| deposit(0)),
+            "{walk:?}: first call's deposit, unless the engine read it"
         );
     }
 }

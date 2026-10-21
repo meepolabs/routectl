@@ -14,8 +14,7 @@ use futures::stream::BoxStream;
 use routectl_core::capability::{FailurePhase, SignalTier};
 #[cfg(feature = "openai-responses")]
 use routectl_core::{
-    BetaRepairReport, CODEX_OAUTH, Message, MessageContent, ReasoningDetail, ReasoningDetailKind,
-    Role,
+    CODEX_OAUTH, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role,
 };
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result, ToolDef,
@@ -166,6 +165,7 @@ fn reject_and_observe(
         client_req: req,
         site: None,
         transcript_rejection: false,
+        beta_assembly: None,
     };
     let decision = learning.on_rejection(
         rejection,
@@ -330,6 +330,7 @@ fn count_tokens_engine_drops_a_repaired_replay_carry() {
             client_req: &req,
             site: None,
             transcript_rejection: false,
+            beta_assembly: None,
         };
         let decision = learning.on_rejection(
             rejection,
@@ -344,7 +345,6 @@ fn count_tokens_engine_drops_a_repaired_replay_carry() {
 
         // Act
         learning.on_success(
-            &BetaRepairReport::default(),
             &UntranslatedCapabilities::default(),
             &target,
             &attempt_req,

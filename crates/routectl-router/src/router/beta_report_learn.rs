@@ -1,15 +1,14 @@
-//! Learning from the beta flags a provider reports it stripped.
+//! Learning from the beta flags the engine's beta repair withheld.
 //!
-//! A provider that drops a client `anthropic-beta` flag after the upstream
-//! rejected it by name, and then succeeds without it, records the flag on the
-//! per-attempt [`BetaRepairReport`]. The attempt succeeded, but the upstream
-//! still refused that flag on this lane, so the router mints a `beta:<flag>`
-//! negative for the target through the same probe-settle and mint path a 400
-//! rejection takes.
+//! When the upstream rejects client `anthropic-beta` flags by name, the
+//! learning engine re-sends the attempt withholding exactly those flags. If
+//! that repaired attempt succeeds, the upstream still refused the flags on
+//! this lane, so the router mints a `beta:<flag>` negative for each through
+//! the same probe-settle and mint path a 400 rejection takes.
 //!
 //! The converse is evidence too. A target admitted to re-probe a lapsed beta
-//! negative sent that flag; if the attempt succeeded and the report does not
-//! name it, the upstream accepted it, and the router records a verified
+//! negative sent that flag; if the attempt succeeded and the repair did not
+//! withhold it, the upstream accepted it, and the router records a verified
 //! positive. A plain clear would not do: the flag's cell would fall back to
 //! the shipped seed, which withholds it again, so live acceptance could never
 //! override the seed.
@@ -18,7 +17,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use routectl_core::capability::{BETA_ACCEPTED, EvidenceSource, FailurePhase, SignalTier};
-use routectl_core::{BetaAssemblyReport, BetaRepairReport, ChatRequest};
+use routectl_core::{BetaAssemblyReport, ChatRequest};
 
 use super::capability_learn::{LearnDedupeKey, LearnedMint};
 use super::capability_observe::{CapabilityObserveEvent, UntranslatedCapabilities};
@@ -29,20 +28,8 @@ use crate::capability_detect::ObservationDirection;
 use crate::learned_capability::{GenerationOutcome, PositiveOutcome};
 
 /// The status recorded on a beta negative's learn event: the upstream named
-/// the flag in a 400 before the provider's stripped retry succeeded.
+/// the flag in a 400 before the repaired attempt succeeded.
 const BETA_REJECTION_STATUS: u16 = 400;
-
-/// Install a fresh, empty report slot on the request about to go upstream and
-/// return the handle the router reads after the call.
-///
-/// Called once per provider call, never once per target: every call clones
-/// the request, and clones share one slot, so a slot reused across retries
-/// would carry an earlier failed attempt's flags into a later success.
-pub(super) fn install_beta_repair_report(attempt_req: &mut ChatRequest) -> BetaRepairReport {
-    let report = BetaRepairReport::default();
-    attempt_req.routectl_internal.beta_repair_report = Some(report.clone());
-    report
-}
 
 /// Install a fresh, empty beta assembly slot on the request about to go
 /// upstream and return the handle the router reads after the call.
@@ -58,22 +45,22 @@ pub(super) fn install_beta_assembly(attempt_req: &mut ChatRequest) -> BetaAssemb
 }
 
 impl Router {
-    /// Settle a successful attempt, in three steps: every flag the provider
-    /// reported stripping, as a rejection; then every held beta re-probe the
-    /// report did not name, as a verified positive; then the remaining held
+    /// Settle a successful attempt, in three steps: every flag the beta repair
+    /// withheld (`repaired`), as a rejection; then every held beta re-probe it
+    /// did not withhold, as a verified positive; then the remaining held
     /// re-probes as successes, except any whose capability the attempt's
     /// egress withheld (`untranslated`): that 2xx never tested it, so its
     /// admission stays held and the negative stands.
     ///
-    /// The order is load-bearing. A reported flag was rejected even though the
+    /// The order is load-bearing. A repaired flag was rejected even though the
     /// attempt succeeded; settled after the success, an admitted re-probe for
     /// that flag would clear the very negative the upstream just re-confirmed.
-    /// An unreported beta re-probe must leave the held set before the success
+    /// An unrepaired beta re-probe must leave the held set before the success
     /// settlement, which would otherwise clear it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn settle_attempt_success(
         &self,
-        beta_report: &BetaRepairReport,
+        repaired: &[String],
         untranslated: &UntranslatedCapabilities,
         target: &DispatchTarget,
         req: &ChatRequest,
@@ -81,13 +68,12 @@ impl Router {
         meta: &mut DispatchMeta,
         probe_guard: &mut LearnedProbeGuard,
     ) {
-        let reported = beta_report.take();
-        self.learn_reported_betas(&reported, target, req, dedupe, meta, probe_guard);
-        let reported_keys: Vec<String> = reported
+        self.learn_repaired_betas(repaired, target, req, dedupe, meta, probe_guard);
+        let repaired_keys: Vec<String> = repaired
             .iter()
             .filter_map(|flag| beta_capability_key(flag))
             .collect();
-        for admission in probe_guard.take_unreported_beta_admissions(&reported_keys) {
+        for admission in probe_guard.take_unreported_beta_admissions(&repaired_keys) {
             self.record_accepted_beta(&admission, req, meta);
         }
         meta.cleared_capabilities
@@ -163,12 +149,12 @@ impl Router {
         });
     }
 
-    /// Mint a `beta:<flag>` negative for each flag the provider reported,
-    /// unless the flag was not a client beta on this request, is not a
-    /// well-formed flag, the target forwards the client's credential, the
-    /// learning switch is off, or an operator `force_supported` override masks
-    /// it. A held re-probe for the same key settles instead of minting.
-    fn learn_reported_betas(
+    /// Mint a `beta:<flag>` negative for each repaired flag, unless the flag
+    /// was not a client beta on this request, is not a well-formed flag, the
+    /// target forwards the client's credential, the learning switch is off,
+    /// or an operator `force_supported` override masks it. A held re-probe
+    /// for the same key settles instead of minting.
+    fn learn_repaired_betas(
         &self,
         flags: &[String],
         target: &DispatchTarget,
@@ -191,7 +177,7 @@ impl Router {
                 tracing::debug!(
                     state_key = %routectl_core::sanitize_for_log(&target.state_key),
                     flag = %routectl_core::sanitize_for_log(flag),
-                    "reported beta flag is not a well-formed flag; not learned",
+                    "repaired beta flag is not a well-formed flag; not learned",
                 );
                 continue;
             };

@@ -44,7 +44,7 @@ use common::scenarios;
 /// The request carries no withheld set, so the scenarios exercise the
 /// translator with every client beta forwarded. The withhold has dedicated
 /// coverage in `tests/bedrock_rejected_betas.rs` and
-/// `bedrock/beta_repair_tests.rs`.
+/// `bedrock/beta_withhold_wire_tests.rs`.
 fn bedrock_converse_provider() -> BedrockProvider {
     let cfg = BedrockConfig {
         id: "bedrock-converse-test".into(),

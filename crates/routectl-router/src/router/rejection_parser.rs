@@ -618,7 +618,6 @@ fn unsupported_parameter(message: &str) -> Option<&str> {
 /// `error.message` of a 400 `invalid_request_error`. A never-issued flag
 /// draws the same envelope, so the caller must still check each flag against
 /// what the request actually sent.
-#[cfg_attr(not(test), expect(dead_code))]
 pub(super) fn rejected_beta_flags(
     provider_kind: &str,
     status: u16,

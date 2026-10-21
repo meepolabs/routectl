@@ -31,7 +31,7 @@ use crate::context_trim::{
 };
 use crate::cost_gate::{break_even_k, emission_break_even_k};
 
-use super::beta_report_learn::{install_beta_assembly, install_beta_repair_report};
+use super::beta_report_learn::install_beta_assembly;
 use super::cache_plan::{AutoCacheRequestPlan, CacheDecision, CacheInjection};
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::{UntranslatedCapabilities, install_translation_report};
@@ -644,9 +644,8 @@ impl Router {
                 // capability and returns without dialing or awaiting, so this
                 // request is not delayed and its outcome does not depend on it.
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
-                let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
-                let _beta_assembly = install_beta_assembly(&mut attempt_req);
+                let beta_assembly = install_beta_assembly(&mut attempt_req);
                 let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
                 let result = run_with_timeout(
                     provider_name,
@@ -695,21 +694,14 @@ impl Router {
                         // any learned negative this dispatch re-probed, and
                         // ride each clear out on the meta so the ledger records
                         // it and a warm rebuild does not resurrect the negative.
-                        // Beta flags the provider reported stripping settle
+                        // Beta flags the engine's repair withheld settle
                         // first, as rejections. A capability the egress
                         // withheld was never tested, so it is not cleared.
                         let untranslated = UntranslatedCapabilities::take_from(&translation_report);
                         // Then settle the replay carry, the envelope-field
                         // carry, and the re-verification canary against this
                         // success.
-                        learning.on_success(
-                            &beta_report,
-                            &untranslated,
-                            target,
-                            &req,
-                            &mut learn_dedupe,
-                            meta,
-                        );
+                        learning.on_success(&untranslated, target, &req, &mut learn_dedupe, meta);
                         // Response-evidence observer: the success-arm mirror of
                         // `observe_for_learning`. Reads structural positive /
                         // suspected-absence evidence off the assembled response
@@ -853,7 +845,8 @@ impl Router {
                             continue;
                         }
                         // The learner repair branches: replay strip, then
-                        // envelope field, then the canary's same-field retry.
+                        // envelope field, then the canary's same-field retry,
+                        // then the named beta withhold.
                         // A FIXED correctness branch, not a retry policy: each
                         // fires at most once per target, re-dispatches this
                         // same target with no backoff, and draws the shared
@@ -862,6 +855,7 @@ impl Router {
                         // handling below, which a canary's provoked 400 would
                         // otherwise reach.
                         let untranslated = UntranslatedCapabilities::take_from(&translation_report);
+                        let assembly = beta_assembly.take();
                         let rejection = Rejection {
                             err: &e,
                             class: &cf,
@@ -870,6 +864,7 @@ impl Router {
                             client_req: &req,
                             site: rejection_site,
                             transcript_rejection,
+                            beta_assembly: assembly.as_ref(),
                         };
                         if let FailureDecision::Retry { last_err_body_free } = learning
                             .on_rejection(rejection, &mut attempt_req, meta, &mut repair_budget)
@@ -1425,9 +1420,8 @@ impl Router {
                 // lane/capability identity, so a session mixing surfaces still
                 // queues one job.
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
-                let beta_report = install_beta_repair_report(&mut attempt_req);
                 let translation_report = install_translation_report(&mut attempt_req);
-                let _beta_assembly = install_beta_assembly(&mut attempt_req);
+                let beta_assembly = install_beta_assembly(&mut attempt_req);
                 let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
                 let r = try_stream_with_first_content(
                     provider_name,
@@ -1482,21 +1476,14 @@ impl Router {
                         // clear any learned negative this dispatch re-probed,
                         // and ride each clear out on the meta so the ledger
                         // records it and a warm rebuild does not resurrect it.
-                        // Beta flags the provider reported stripping settle
+                        // Beta flags the engine's repair withheld settle
                         // first, as rejections. A capability the egress
                         // withheld was never tested, so it is not cleared.
                         let untranslated = UntranslatedCapabilities::take_from(&translation_report);
                         // Then settle the replay carry and the envelope-field
                         // carry against this first content (see
                         // `complete_inner`); a stream holds no canary.
-                        learning.on_success(
-                            &beta_report,
-                            &untranslated,
-                            target,
-                            &req,
-                            &mut learn_dedupe,
-                            meta,
-                        );
+                        learning.on_success(&untranslated, target, &req, &mut learn_dedupe, meta);
                         // No response-evidence observation on the stream path:
                         // no assembled response exists here to read structural
                         // evidence from, so positive detection fails closed. A
@@ -1628,11 +1615,12 @@ impl Router {
                             continue;
                         }
                         // The learner repair branches (see `complete_inner`):
-                        // replay strip, then envelope field, each a FIXED
+                        // replay strip, envelope field, named beta, each a FIXED
                         // correctness branch that re-dispatches this target
                         // exactly ONCE. Streams take no in-loop backoff, so the
                         // retry is immediate; a stream holds no canary.
                         let untranslated = UntranslatedCapabilities::take_from(&translation_report);
+                        let assembly = beta_assembly.take();
                         let rejection = Rejection {
                             err: &e,
                             class: &cf,
@@ -1641,6 +1629,7 @@ impl Router {
                             client_req: &req,
                             site: rejection_site,
                             transcript_rejection,
+                            beta_assembly: assembly.as_ref(),
                         };
                         if let FailureDecision::Retry { last_err_body_free } = learning
                             .on_rejection(rejection, &mut attempt_req, meta, &mut repair_budget)

@@ -30,12 +30,14 @@ struct Takes {
     strip: bool,
     field: bool,
     canary: bool,
+    beta: bool,
 }
 
 const ALL_TAKE: Takes = Takes {
     strip: true,
     field: true,
     canary: true,
+    beta: true,
 };
 
 /// A sink that records nothing but whether each effect takes.
@@ -50,6 +52,9 @@ impl RepairSink for ScriptedSink {
     }
     fn canary_retry(&mut self, _: NamedRejection) -> bool {
         self.0.canary
+    }
+    fn withhold_betas(&mut self, _: Vec<String>) -> bool {
+        self.0.beta
     }
 }
 
@@ -147,6 +152,7 @@ fn the_arbitration_order_decides_every_contested_rejection() {
                 strip: true,
                 field: false,
                 canary: true,
+                beta: true,
             },
             expected: Arbitration::CanaryRetry,
         },
@@ -158,6 +164,7 @@ fn the_arbitration_order_decides_every_contested_rejection() {
                 strip: false,
                 field: false,
                 canary: false,
+                beta: false,
             },
             expected: generic_proposal(),
         },
@@ -173,6 +180,9 @@ fn the_arbitration_order_decides_every_contested_rejection() {
             replay_carried: row.replay_carried,
             table: FieldRepairTable::default(),
             site: None,
+            client_betas: &[],
+            withheld_betas: &[],
+            beta_assembly: None,
         };
 
         // Act

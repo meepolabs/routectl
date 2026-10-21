@@ -2,7 +2,7 @@
 //! negative and an operator seed lift.
 //!
 //! Each piece is pinned in isolation elsewhere: the router mints a beta
-//! negative from a provider's repair report, the control route commits a seed
+//! negative from a repaired named rejection, the control route commits a seed
 //! lift's `cleared` row, and the warm rebuild replays both. None of those pins
 //! spans the seam from a live dispatch or a live purge, through the production
 //! writer, to the decision a SECOND Router makes after reading the ledger back.
@@ -11,10 +11,11 @@
 //!
 //! Like `canary_span_tests`, this drives a real Router rather than a spawned
 //! daemon. A real Bedrock provider derives its endpoint from the region, so it
-//! cannot be aimed at an in-process mock; the wire behavior (stripping a
-//! withheld flag, recording a rejected one) is pinned in the providers crate.
-//! The seat below stands in at exactly that seam: it records what the router
-//! handed it and, when told to, reports a flag as stripped.
+//! cannot be aimed at an in-process mock; the wire behavior (dropping a
+//! withheld flag) is pinned in the providers crate. The seat below stands in
+//! at exactly that seam: it records what the router handed it, deposits the
+//! beta assembly an egress records, and, when told to, rejects one flag by
+//! name the way the upstream does until the router withholds it.
 //!
 //! Every assertion reads the `withheld_betas` a rebuilt Router hands its
 //! provider -- what would reach the upstream, not what a registry snapshot
@@ -29,7 +30,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request as HttpRequest, StatusCode};
 use axum::routing::post;
 use parking_lot::Mutex;
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
+use routectl_core::{BetaAssembly, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
 use routectl_router::{Config, ResolvedModel, Router, RouterOptions};
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 use tower::ServiceExt;
@@ -79,11 +80,10 @@ struct SeenCall {
 }
 
 /// The stand-in for a Bedrock provider: records each call's client betas and
-/// withheld set, and optionally reports one flag as stripped after an upstream
-/// rejection, the way the real provider's repair does.
+/// withheld set, and optionally rejects one flag by name while it is sent.
 #[derive(Default)]
 struct BetaSeat {
-    reports_stripped: Option<&'static str>,
+    rejects: Option<&'static str>,
     seen: Mutex<Vec<SeenCall>>,
 }
 
@@ -93,6 +93,26 @@ impl BetaSeat {
         assert_eq!(seen.len(), 1, "exactly one attempt reached the provider");
         seen[0].clone()
     }
+
+    fn calls(&self) -> Vec<SeenCall> {
+        self.seen.lock().clone()
+    }
+}
+
+/// The Bedrock 400 naming `flag` in the exact beta-rejection envelope.
+fn named_rejection(flag: &str) -> Error {
+    let message = format!(
+        "Unexpected value(s) `{flag}` for the `anthropic-beta` header. Please consult our \
+         documentation at platform.claude.com/docs or try again without the header."
+    );
+    Error::upstream_full(
+        "beta-seat",
+        400,
+        serde_json::json!({ "message": message }).to_string(),
+        None,
+        Some("ValidationException".into()),
+        None,
+    )
 }
 
 #[async_trait::async_trait]
@@ -107,15 +127,19 @@ impl Provider for BetaSeat {
         Err(Error::normalize_response("beta-seat", "unused"))
     }
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        let withheld = req.routectl_internal.withheld_betas.to_vec();
         self.seen.lock().push(SeenCall {
             client_betas: req.anthropic_beta.clone(),
-            withheld_betas: req.routectl_internal.withheld_betas.to_vec(),
+            withheld_betas: withheld.clone(),
         });
-        if let (Some(flag), Some(report)) = (
-            self.reports_stripped,
-            req.routectl_internal.beta_repair_report.as_ref(),
-        ) {
-            report.record(&[flag.to_string()]);
+        if let Some(slot) = req.routectl_internal.beta_assembly.as_ref() {
+            slot.record(BetaAssembly::new(Vec::new(), Vec::new()));
+        }
+        if let Some(flag) = self.rejects
+            && req.anthropic_beta.iter().any(|b| b == flag)
+            && !withheld.iter().any(|w| w == flag)
+        {
+            return Err(named_rejection(flag));
         }
         Ok(ChatResponse {
             model: UPSTREAM.to_string(),
@@ -289,19 +313,21 @@ async fn first_seed_session(config: &Arc<Config>, lift: bool) {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_learned_beta_negative_survives_a_restart() {
-    // Arrange -- session 1 learns the flag from a reported strip.
+    // Arrange -- session 1 learns the flag from a repaired named rejection.
     let (config, _dir) = fixture_config();
     let (usage, writer) = start_writer(&config);
     let seat = Arc::new(BetaSeat {
-        reports_stripped: Some(LEARNED_FLAG),
+        rejects: Some(LEARNED_FLAG),
         ..BetaSeat::default()
     });
     let router = boot(&config, 0, Arc::clone(&seat));
     warm_off_runtime(&config, &router, &usage);
     let dispatched = dispatch(&router, LEARNED_FLAG).await;
-    assert!(
-        seat.only_call().withheld_betas.is_empty(),
-        "premise: nothing withholds the unseeded flag before it is learned",
+    let withheld: Vec<Vec<String>> = seat.calls().into_iter().map(|c| c.withheld_betas).collect();
+    assert_eq!(
+        withheld,
+        vec![Vec::new(), vec![LEARNED_FLAG.to_string()]],
+        "premise: nothing withholds the unseeded flag before the rejection names it",
     );
     let learned: Vec<&str> = dispatched
         .meta

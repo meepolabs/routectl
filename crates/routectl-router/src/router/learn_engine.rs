@@ -3,10 +3,10 @@
 //! [`AttemptLearning`] owns every learner handle a chain target holds while
 //! its attempts run: the reasoning-replay carry plan, the envelope-field
 //! carry plan, the field pre-flight plan (with its canary on the complete
-//! surface), the learned re-probe settle guard, and the repaired-state flags
-//! each repair branch sets. One value lives for the whole chain iteration --
-//! across same-provider retries -- and a fallback hop replaces it by building
-//! the next target's.
+//! surface), the learned re-probe settle guard, the beta flags a repair
+//! withheld, and the repaired-state flags each repair branch sets. One value
+//! lives for the whole chain iteration -- across same-provider retries -- and
+//! a fallback hop replaces it by building the next target's.
 //!
 //! The request-scoped learner state (the learn dedupe set and the repair
 //! budget) is NOT owned here: it outlives every target, so the walk keeps it
@@ -29,7 +29,7 @@ use routectl_core::failure_class::{
     ClassifiedFailure, FailureClass, classify, classify_with_attempt,
 };
 use routectl_core::wire_check::{EditSite, RejectionProvenance};
-use routectl_core::{BetaRepairReport, ChatRequest, Error, sanitize_for_log};
+use routectl_core::{BetaAssembly, ChatRequest, Error, sanitize_for_log};
 
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::UntranslatedCapabilities;
@@ -41,7 +41,7 @@ use super::field_preflight::FieldPreflightPlan;
 use super::field_repair::{
     FieldRepairHandle, FieldRepairPlan, FieldRepairRow, FieldRepairTable, FieldSettlementMode,
 };
-use super::learn_proposers::{CapabilityProposer, FieldRowProposer, ReplayProposer};
+use super::learn_proposers::{BetaProposer, CapabilityProposer, FieldRowProposer, ReplayProposer};
 use super::learn_revert::{MatchedEdit, SentSlot, TargetRevert, answer_declared_edit};
 use super::rejection_parser::{NamedRejection, RawPath, RejectionKind, RejectionValue};
 use super::repair_budget::RepairBudget;
@@ -115,6 +115,14 @@ pub(super) struct RejectionInput<'r> {
     pub(super) replay_carried: bool,
     pub(super) table: FieldRepairTable,
     pub(super) site: Option<RejectionSite>,
+    /// The `anthropic-beta` flags the client sent, before any operator
+    /// overlay merged its own pins in.
+    pub(super) client_betas: &'r [String],
+    /// The flags the attempt already withheld from this lane.
+    pub(super) withheld_betas: &'r [String],
+    /// The beta floor and body-implied set the attempt's egress recorded;
+    /// `None` when it recorded none.
+    pub(super) beta_assembly: Option<&'r BetaAssembly>,
 }
 
 /// What one proposer says a rejection supports. Closed: a new learner is a
@@ -131,6 +139,9 @@ pub(super) enum Proposal {
         tier: SignalTier,
         value: Option<RejectionValue>,
     },
+    /// Re-send the attempt withholding the named client `anthropic-beta`
+    /// flags; a success then learns a `beta:<flag>` negative for each.
+    Beta { flags: Vec<String> },
     /// Learn a generic capability negative for the attributed capability.
     Capability(ResolvedCapability),
 }
@@ -146,6 +157,7 @@ pub(super) trait Proposer {
 pub(super) enum ProposerSlot {
     Replay(ReplayProposer),
     FieldRow(FieldRowProposer),
+    Beta(BetaProposer),
     Capability(CapabilityProposer),
 }
 
@@ -163,6 +175,7 @@ impl Proposer for ProposerSlot {
         match self {
             Self::Replay(proposer) => proposer.propose(input),
             Self::FieldRow(proposer) => proposer.propose(input),
+            Self::Beta(proposer) => proposer.propose(input),
             Self::Capability(proposer) => proposer.propose(input),
         }
     }
@@ -170,9 +183,10 @@ impl Proposer for ProposerSlot {
 
 /// THE precedence among the learners: the first slot whose proposal takes
 /// decides the rejection.
-pub(super) const ARBITRATION_ORDER: [ProposerSlot; 3] = [
+pub(super) const ARBITRATION_ORDER: [ProposerSlot; 4] = [
     ProposerSlot::Replay(ReplayProposer),
     ProposerSlot::FieldRow(FieldRowProposer),
+    ProposerSlot::Beta(BetaProposer),
     ProposerSlot::Capability(CapabilityProposer),
 ];
 
@@ -182,6 +196,7 @@ pub(super) trait RepairSink {
     fn strip_replay(&mut self) -> bool;
     fn repair_field(&mut self, named: NamedRejection) -> bool;
     fn canary_retry(&mut self, named: NamedRejection) -> bool;
+    fn withhold_betas(&mut self, flags: Vec<String>) -> bool;
 }
 
 /// What the arbitration decided for one rejection.
@@ -190,6 +205,7 @@ pub(super) enum Arbitration {
     ReplayStrip,
     FieldRepair,
     CanaryRetry,
+    BetaRepair,
     /// No repair took. Carries the generic capability proposal, if any, for
     /// the generic learner to apply.
     Proceed(Option<ResolvedCapability>),
@@ -242,6 +258,9 @@ fn take_proposal(proposal: Proposal, sink: &mut impl RepairSink) -> Option<Arbit
                 sink.canary_retry(named).then_some(Arbitration::CanaryRetry)
             }
         }
+        Proposal::Beta { flags } => sink
+            .withhold_betas(flags)
+            .then_some(Arbitration::BetaRepair),
         Proposal::Capability(resolved) => Some(Arbitration::Proceed(Some(resolved))),
     }
 }
@@ -274,6 +293,8 @@ pub(super) struct Rejection<'r> {
     /// decided once per attempt by
     /// [`is_transcript_rejection`](super::transcript_defect::is_transcript_rejection).
     pub(super) transcript_rejection: bool,
+    /// The beta floor and body-implied set the attempt's egress recorded.
+    pub(super) beta_assembly: Option<&'r BetaAssembly>,
 }
 
 /// The learner state one chain target holds across its attempts.
@@ -303,6 +324,9 @@ pub(super) struct AttemptLearning<'a> {
     canary_repair_attempted: bool,
     canary_reject_status: u16,
     canary_lossy_repair: Option<FieldRepairHandle>,
+    /// The client beta flags this target's beta repair withheld; empty until
+    /// one takes. Settled as `beta:` negatives only by a later success.
+    repaired_betas: Vec<String>,
     skip_replay_backoff: bool,
     /// The generic capability proposal of the last rejection that took no
     /// repair, held until [`Self::observe_generic`] applies it.
@@ -338,6 +362,7 @@ impl<'a> AttemptLearning<'a> {
             canary_repair_attempted: false,
             canary_reject_status: 0,
             canary_lossy_repair: None,
+            repaired_betas: Vec::new(),
             skip_replay_backoff: false,
             pending_capability: None,
             revert: TargetRevert::default(),
@@ -484,6 +509,7 @@ impl<'a> AttemptLearning<'a> {
         budget: &mut RepairBudget,
     ) -> FailureDecision {
         let (err, class, target) = (rejection.err, rejection.class, rejection.target);
+        let withheld_betas = std::sync::Arc::clone(&attempt_req.routectl_internal.withheld_betas);
         let input = RejectionInput {
             err,
             class,
@@ -492,6 +518,9 @@ impl<'a> AttemptLearning<'a> {
             replay_carried: self.replay_plan.is_some(),
             table: self.router.field_repair_table(),
             site: rejection.site,
+            client_betas: &rejection.client_req.anthropic_beta,
+            withheld_betas: &withheld_betas,
+            beta_assembly: rejection.beta_assembly,
         };
         let mut sink = EngineSink {
             learning: self,
@@ -509,9 +538,11 @@ impl<'a> AttemptLearning<'a> {
                     &target.provider_name,
                 ),
             },
-            Arbitration::FieldRepair | Arbitration::CanaryRetry => FailureDecision::Retry {
-                last_err_body_free: None,
-            },
+            Arbitration::FieldRepair | Arbitration::CanaryRetry | Arbitration::BetaRepair => {
+                FailureDecision::Retry {
+                    last_err_body_free: None,
+                }
+            }
             Arbitration::Proceed(resolved) => {
                 self.pending_capability = resolved;
                 FailureDecision::Proceed
@@ -683,22 +714,27 @@ impl<'a> AttemptLearning<'a> {
         );
     }
 
-    /// Settle every learner on a successful attempt: reported betas and the
-    /// held re-probes first, then the replay carry, the field carry, and (on
-    /// the complete surface) the canary. Each settlement rides its learned or
+    /// Settle every learner on a successful attempt: the beta flags a repair
+    /// withheld and the held re-probes first, then the replay carry, the
+    /// field carry, and (on the complete surface) the canary. The count
+    /// surface's beta repair served its answer and settles nothing. Each settlement rides its learned or
     /// cleared rows out on `meta`, so the ledger records them and a warm
     /// rebuild does not resurrect a negative this request disproved.
     pub(super) fn on_success(
         &mut self,
-        beta_report: &BetaRepairReport,
         untranslated: &UntranslatedCapabilities,
         target: &DispatchTarget,
         req: &ChatRequest,
         dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
     ) {
+        let repaired = if self.count_surface {
+            &[][..]
+        } else {
+            self.repaired_betas.as_slice()
+        };
         self.router.settle_attempt_success(
-            beta_report,
+            repaired,
             untranslated,
             target,
             req,
@@ -715,53 +751,12 @@ impl<'a> AttemptLearning<'a> {
     }
 }
 
-/// The repair effects against one live attempt: the target's learner state
-/// plus the request-scoped budget and the attempt body it may edit.
-struct EngineSink<'s, 'a> {
-    learning: &'s mut AttemptLearning<'a>,
-    err: &'s Error,
-    target: &'s DispatchTarget,
-    attempt_req: &'s mut ChatRequest,
-    meta: &'s mut DispatchMeta,
-    budget: &'s mut RepairBudget,
-}
-
-impl RepairSink for EngineSink<'_, '_> {
-    fn strip_replay(&mut self) -> bool {
-        self.learning.try_replay_repair(
-            self.err,
-            self.target,
-            self.attempt_req,
-            self.meta,
-            self.budget,
-        )
-    }
-
-    fn repair_field(&mut self, named: NamedRejection) -> bool {
-        self.learning.try_field_repair(
-            named,
-            self.err,
-            self.target,
-            self.attempt_req,
-            self.meta,
-            self.budget,
-        )
-    }
-
-    fn canary_retry(&mut self, named: NamedRejection) -> bool {
-        self.learning.try_canary_repair(
-            named,
-            self.err,
-            self.target,
-            self.attempt_req,
-            self.meta,
-            self.budget,
-        )
-    }
-}
-
 #[path = "learn_settle.rs"]
 mod learn_settle;
+
+#[path = "learn_beta_repair.rs"]
+mod learn_beta_repair;
+use learn_beta_repair::EngineSink;
 
 #[cfg(test)]
 #[path = "learn_engine_tests.rs"]

@@ -72,7 +72,6 @@ use crate::aws_error::{
 };
 
 pub mod auth;
-pub(crate) mod beta_repair;
 pub(crate) mod betas;
 pub(crate) mod body_fields;
 pub mod converse;
@@ -407,7 +406,7 @@ impl BedrockProvider {
     /// One streaming round trip sending `body`, the normalized form of `req`.
     /// An upstream error status returns `Err` before any stream is built, so
     /// a caller sees either a rejection or a stream, never bytes followed by
-    /// a retry.
+    /// an error status.
     async fn stream_once(
         &self,
         req: &ChatRequest,
@@ -685,18 +684,14 @@ impl Provider for BedrockProvider {
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-        self.with_beta_repair(req, true, |lane, req, body| {
-            Box::pin(lane.complete_once(req, body))
-        })
-        .await
+        let body = self.normalize_request(&req)?;
+        self.complete_once(&req, body).await
     }
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        self.with_beta_repair(req, true, |lane, req, body| {
-            Box::pin(lane.stream_once(req, body))
-        })
-        .await
+        let body = self.normalize_request(&req)?;
+        self.stream_once(&req, body).await
     }
 
     /// `POST /model/{modelId}/count-tokens` -- the token count for a
@@ -736,12 +731,8 @@ impl Provider for BedrockProvider {
     ///   would hide a body-assembly defect behind a silent walk-past.
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
-        // A CountTokens-only rejection says nothing about inference, so its
-        // repair is never reported.
-        self.with_beta_repair(req, false, |lane, req, body| {
-            Box::pin(lane.count_tokens_once(req, body))
-        })
-        .await
+        let body = self.normalize_request(&req)?;
+        self.count_tokens_once(&req, body).await
     }
 
     /// Free reachability probe: resolve the AWS credential chain, no
@@ -1029,6 +1020,10 @@ mod wire_tap_tests;
 #[cfg(test)]
 #[path = "error_parse_tests.rs"]
 mod error_parse_tests;
+
+#[cfg(test)]
+#[path = "beta_withhold_wire_tests.rs"]
+mod beta_withhold_wire_tests;
 
 #[cfg(test)]
 #[path = "error_read_tests.rs"]
