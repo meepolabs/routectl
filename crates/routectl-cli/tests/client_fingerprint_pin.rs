@@ -75,12 +75,12 @@ const MIN_FIXTURES: usize = 7;
 
 // -- OBSERVED SETS, exact-pinned ------------------------------------------
 //
-// Derived from the committed corpus on 2026-10-19 and pinned as EXACTLY
+// Derived from the committed corpus on 2026-10-21 and pinned as EXACTLY
 // these values. Extend a list here in the same commit that lands a capture
 // carrying a new value, having read what changed.
 
 /// Stable Claude CLI versions the corpus self-reports.
-const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246", "2.1.304"];
+const OBSERVED_CLI_VERSIONS: &[&str] = &["2.1.246", "2.1.304", "2.1.306"];
 
 /// `User-Agent` surface tokens the corpus self-reports -- the trailing word
 /// in the `(external, <surface>)` parenthetical. Its own dimension because
@@ -109,6 +109,7 @@ const OBSERVED_CLIENT_BETAS: &[&str] = &[
     "dangerous-tool-use-2026-09-03",
     "effort-2025-11-24",
     "interleaved-thinking-2025-05-14",
+    "mid-conversation-system-clear-at-2026-08-21",
     "mid-conversation-tool-changes-2026-07-01",
     "prompt-caching-scope-2026-01-05",
     "redact-thinking-2026-02-12",
@@ -117,10 +118,12 @@ const OBSERVED_CLIENT_BETAS: &[&str] = &[
 
 /// Distinct `anthropic-beta` sets the corpus carries. Pinned as a count so
 /// a capture that collapses or splits the populations is a review moment.
-/// Three: the base set, the base set plus a cache-diagnosis flag, and the
-/// newer release's set, which also requests redacted thinking and opts into
-/// several model-gated flags (2.1.304 no longer sends the mid-conversation
-/// system flag that 2.1.294 did).
+/// Three, one per release: the 2.1.246 base set; the 2.1.304 set, which also
+/// requests redacted thinking and opts into several model-gated flags (it no
+/// longer sends the mid-conversation system flag that 2.1.294 did); and the
+/// 2.1.306 set, which keeps the redacted-thinking and effort flags, drops the
+/// afk-mode and dangerous-tool-use flags, and adds the cache-diagnosis flag
+/// and a mid-conversation system clear-at flag.
 const OBSERVED_DISTINCT_BETA_SETS: usize = 3;
 
 /// Reviewed rows the register must hold. Pinned so DELETING a row is a red
@@ -237,11 +240,12 @@ fn register() -> Vec<RegisterRow> {
                 routectl_core::identity::anthropic::compiled_claude_cli_version().to_string(),
             ],
             relation: Relation::Diverges,
-            reason: "the corpus spans an older SDK-driven 2.1.246 release and a 2.1.304 \
-                     plain turn, while routectl still mints 2.1.294: the client released past \
-                     the minted constant and no capture of the minted release remains. Rolling \
-                     the constant forward moves this row back to ObservedSpansMinted; until \
-                     then the ingress drift warning reports the live gap",
+            reason: "the corpus spans an older SDK-driven 2.1.246 release and the 2.1.304 \
+                     and 2.1.306 plain turns, while routectl still mints 2.1.294: the client \
+                     released past the minted constant and no capture of the minted release \
+                     remains. Rolling the constant forward moves this row back to \
+                     ObservedSpansMinted; until then the ingress drift warning reports the \
+                     live gap",
         },
         RegisterRow {
             dimension: Dimension::UaSurface,
@@ -249,9 +253,9 @@ fn register() -> Vec<RegisterRow> {
             minted: vec![routectl_core::identity::anthropic::MINTED_UA_SURFACE.to_string()],
             relation: Relation::ObservedSpansMinted,
             reason: "the 2.1.246 captures report the SDK-driven surface while the 2.1.304 \
-                     capture reports the plain CLI surface routectl mints -- the surface is \
-                     a fingerprint difference independent of the version, so pinning the \
-                     version alone would leave it unreviewed",
+                     and 2.1.306 captures report the plain CLI surface routectl mints -- the \
+                     surface is a fingerprint difference independent of the version, so \
+                     pinning the version alone would leave it unreviewed",
         },
         RegisterRow {
             dimension: Dimension::StainlessPackageVersion,
@@ -259,15 +263,15 @@ fn register() -> Vec<RegisterRow> {
             minted: minted_header("x-stainless-package-version"),
             relation: Relation::ObservedSpansMinted,
             reason: "the SDK version travels with the client release: the 2.1.246 captures \
-                     carry the older SDK and the 2.1.304 capture carries the one routectl \
-                     now mints, which 2.1.304 still bundles",
+                     carry the older SDK and the 2.1.304 and 2.1.306 captures carry the one \
+                     routectl now mints, which both releases still bundle",
         },
         RegisterRow {
             dimension: Dimension::StainlessRuntimeVersion,
             observed: sorted(OBSERVED_STAINLESS_RUNTIME_VERSIONS),
             minted: minted_header("x-stainless-runtime-version"),
             relation: Relation::Matches,
-            reason: "both corpus releases bundle the same runtime, which routectl mints as \
+            reason: "every corpus release bundles the same runtime, which routectl mints as \
                      a fixed literal without reading the host runtime",
         },
         RegisterRow {

@@ -194,30 +194,23 @@ fn committed_case(case_id: &str) -> PathBuf {
     driver_root().join(PAIR_LANE).join(case_id)
 }
 
-/// Load a committed half, or report it missing BY NAME. A checkout without
-/// the corpus is missing evidence, not a regression.
-fn load_committed(dir: &Path) -> Option<Fixture> {
-    if !dir.exists() {
-        eprintln!(
-            "cross-mode pair: NOT RUN (committed fixture `{}` is absent from this checkout)",
-            dir.display(),
-        );
-        return None;
-    }
-    Some(
-        load_fixture(dir)
-            .unwrap_or_else(|e| panic!("committed fixture `{}` must load: {e}", dir.display())),
-    )
+/// Load a committed half, panicking BY NAME when it is absent. Both halves
+/// are committed, so a missing one is a lost fixture, and a test that
+/// returned early on it would pass green with nothing adjudicated.
+fn load_committed(dir: &Path) -> Fixture {
+    assert!(
+        dir.exists(),
+        "cross-mode pair: committed fixture `{}` is absent; the pair cannot be adjudicated",
+        dir.display(),
+    );
+    load_fixture(dir)
+        .unwrap_or_else(|e| panic!("committed fixture `{}` must load: {e}", dir.display()))
 }
 
 #[test]
 fn the_committed_pair_differs_only_in_connection_mode() {
-    let base_dir = committed_case(BASE_URL_CASE);
-    let fp_dir = committed_case(FRONT_PROXY_CASE);
-    let (Some(base), Some(front_proxy)) = (load_committed(&base_dir), load_committed(&fp_dir))
-    else {
-        return;
-    };
+    let base = load_committed(&committed_case(BASE_URL_CASE));
+    let front_proxy = load_committed(&committed_case(FRONT_PROXY_CASE));
 
     let violations = cross_mode_violations(&base, &front_proxy);
 
@@ -226,6 +219,16 @@ fn the_committed_pair_differs_only_in_connection_mode() {
         "the committed cross-mode pair no longer holds the mode axis:\n{}",
         violations.join("\n"),
     );
+}
+
+/// CONTROL for the absent-half guard: a committed half that is not on disk
+/// fails the run rather than skipping it.
+#[test]
+#[should_panic(expected = "is absent; the pair cannot be adjudicated")]
+fn an_absent_committed_half_fails_rather_than_skips() {
+    let tmp = tempfile::tempdir().expect("a tempdir with no fixture in it");
+
+    load_committed(&tmp.path().join(PAIR_LANE).join(FRONT_PROXY_CASE));
 }
 
 // ---- paired controls: each clause, flipped, over a planted pair ----
