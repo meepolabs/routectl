@@ -124,10 +124,9 @@ fn is_wire_safe(id: &str) -> bool {
 /// raw client id `esc_x` would then land on the same wire id as the
 /// escaped form of `x`. Escaping such an id again is what keeps the
 /// verbatim, escaped, and digest namespaces disjoint.
-/// SEED-VERDICT: acceptance-seed -- upstreams refuse tool-call ids outside a
-/// narrow alphabet and length; the deterministic escape runs unconditionally
-/// because an upstream that would accept the raw id loses nothing by it, so no
-/// rejection is waited for.
+/// SEED-VERDICT: acceptance-seed -- the escape lands in the charset the strict
+/// upstreams accept, so no rejection could retire it, and ids sit in replayed
+/// history: prefix-changing, retired only through the sampled canary.
 pub fn sanitize_tool_id(id: &str) -> Cow<'_, str> {
     // No debug_assert that `id` lacks a marker prefix: a legitimate raw
     // client id may genuinely start with `esc_` / `esct_` (the case the

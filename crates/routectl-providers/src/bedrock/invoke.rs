@@ -435,10 +435,9 @@ fn strip_client_metadata(
 ///   top-level marker is restored first, so `obj` is left unmutated, and
 ///   the validator's error is returned rather than trimming the marker.
 ///
-/// SEED-VERDICT: acceptance-seed -- the Invoke host refuses a top-level
-/// cache_control, so the lowering runs before send; learning it would cost a
-/// rejected request first, and the lowered breakpoint is accepted silently, so
-/// no later rejection could retire the rule.
+/// SEED-VERDICT: acceptance-seed -- the lowered breakpoint is accepted, so no
+/// rejection could retire the lowering, and it moves the cache breakpoint:
+/// prefix-changing, retired only through the sampled canary.
 fn lower_top_level_cache_control_to_per_block(
     provider_id: &str,
     obj: &mut serde_json::Map<String, Value>,

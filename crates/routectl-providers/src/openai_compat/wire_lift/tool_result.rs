@@ -334,9 +334,9 @@ fn mark_error_content(content: Value) -> Value {
 ///   - any other block kept -> the array of kept blocks
 /// - Object / scalar -> stringified JSON
 ///
-/// SEED-VERDICT: acceptance-seed -- strict backends refuse an array of text
-/// blocks on a tool message while every backend accepts the joined string, so
-/// the join runs before send rather than waiting for a refusal.
+/// SEED-VERDICT: acceptance-seed -- every backend accepts the joined string, so
+/// no rejection could retire the join, and it rewrites tool history:
+/// prefix-changing, retired only through the sampled canary.
 fn translate_tool_result_content(
     id: &str,
     content: Value,

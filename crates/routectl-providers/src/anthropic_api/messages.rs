@@ -189,10 +189,9 @@ pub(super) fn normalize_replay_invariants<'a>(
 
     // Strip / Auto pre-scan: do we need to strip anything? No -> return
     // Borrowed (no clone). Yes -> rebuild on the second pass.
-    // SEED-VERDICT: acceptance-seed -- Anthropic refuses a replayed thinking
-    // block whose signature is not its own, so stripping before send avoids a
-    // certain rejection on every multi-turn replay; Preserve is the opt-out for
-    // an upstream that needs the blocks echoed back.
+    // SEED-VERDICT: acceptance-seed -- Anthropic accepts the stripped history,
+    // so no rejection could retire the strip, and it rewrites replayed turns:
+    // prefix-changing, retired only through the sampled canary.
     let needs_strip = req.messages.iter().any(message_has_unsigned_thinking);
     if !needs_strip {
         return Ok(Cow::Borrowed(&req.messages));

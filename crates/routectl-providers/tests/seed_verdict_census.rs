@@ -231,6 +231,46 @@ fn a_compound_cfg_naming_test_gates_a_module_and_a_feature_string_does_not() {
 }
 
 #[test]
+fn a_test_gated_module_is_found_through_stacked_attributes_a_wrapped_cfg_and_any_visibility() {
+    for (label, source, expected) in [
+        (
+            "stacked attributes",
+            "#[cfg(test)]\n#[allow(clippy::unwrap_used)]\n#[path = \"stacked.rs\"]\n\
+             #[rustfmt::skip]\nmod stacked;\n",
+            "stacked.rs",
+        ),
+        (
+            "wrapped cfg",
+            "#[cfg(all(\n    test,\n    feature = \"lane\"\n))]\nmod wrapped;\n",
+            "wrapped.rs",
+        ),
+        (
+            "restricted visibility",
+            "#[cfg(test)]\npub(super) mod restricted;\n",
+            "restricted.rs",
+        ),
+        (
+            "path-restricted visibility",
+            "#[cfg(test)]\npub(in crate::area) mod scoped;\n",
+            "scoped.rs",
+        ),
+    ] {
+        assert_eq!(
+            cfg_test_module_files("lib.rs", source),
+            vec![expected.to_string()],
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn a_wrapped_cfg_without_a_test_atom_gates_nothing() {
+    let source = "#[cfg(all(\n    feature = \"test-utils\",\n    unix\n))]\nmod utils_only;\n\
+                  #[cfg(test)]\nstatic NOT_A_MODULE: u8 = 0;\nmod after;\n";
+    assert!(cfg_test_module_files("lib.rs", source).is_empty());
+}
+
+#[test]
 fn the_production_sweep_drops_every_excluded_file() {
     let all = expect_seed(sweep_all(&crate_roots()));
     let production = expect_seed(production_sources(&crate_roots()));
@@ -421,6 +461,7 @@ fn a_seed_line_directly_below_a_prose_drop_marker_is_refused() {
             why.contains("above the TRANSLATION-DROP marker"),
             "{verdict}: unexpected reason: {why}"
         );
+        assert!(!why.contains("  "), "{verdict}: broken wrap in: {why}");
     }
 }
 
@@ -449,6 +490,7 @@ fn prose_after_the_seed_paragraph_in_the_same_comment_run_is_refused() {
     );
     let why = parse_source(&source).expect_err("the marker must close its comment run");
     assert!(why.contains("last paragraph"), "unexpected reason: {why}");
+    assert!(!why.contains("  "), "broken wrap in: {why}");
 }
 
 #[test]
@@ -488,7 +530,7 @@ fn a_drop_reason_wrapped_across_inner_doc_lines_reads_without_the_bang() {
 
 /// Comments in the production sweep stating a baked seed verdict. Each is
 /// one comment however many paragraphs it spans.
-const BAKED_BLOCK_TOTAL: usize = 51;
+const BAKED_BLOCK_TOTAL: usize = 58;
 
 fn baked(source: &str) -> Vec<BakedBlock> {
     expect_seed(baked_blocks_in("test-crate", "area/item.rs", source))
@@ -545,6 +587,7 @@ fn a_phrase_wrapped_across_comment_lines_is_matched() {
         "/// the rule. Baked\n/// seed verdict: kept\nfn item() {}\n",
         "    // the rule. Baked seed\n    //   verdict: kept\n    arm();\n",
         "//! the rule. Baked seed\n//! verdict: kept\nfn item() {}\n",
+        "/// the arms are baked seed\n/// verdicts: kept\nfn item() {}\n",
     ] {
         let blocks = baked(source);
         assert_eq!(blocks.len(), 1, "{source}");

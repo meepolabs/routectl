@@ -549,9 +549,9 @@ impl DeferredOutputConfigDiagnostics {
 /// one plan per request, so a conventional body carrying both would fail
 /// permanently without learning. Uncounted: only the `response_format`
 /// conversion is a representability loss, and it is counted where it runs.
-/// SEED-VERDICT: acceptance-seed -- the host refuses each extra format key one
-/// per rejection, so the conventional body carrying both never repairs into
-/// acceptance.
+/// SEED-VERDICT: acceptance-seed -- the host names one extra format key per 400
+/// and repair makes one edit per target, so the conventional body carrying both
+/// fails and teaches nothing.
 pub(crate) fn drop_unrepresentable_output_format_keys(
     obj: &mut serde_json::Map<String, Value>,
 ) -> DroppedFormatKeys {

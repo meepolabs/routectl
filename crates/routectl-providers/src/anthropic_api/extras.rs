@@ -778,8 +778,8 @@ const OAUTH_OWN_ANTHROPIC_LANE: &str = "oauth-own-anthropic";
 /// Baked seed verdict: the seat refuses either key, one per 400, and field
 /// repair runs one plan per request, so a request sending both would need two
 /// repairs and would fail permanently without learning.
-/// SEED-VERDICT: acceptance-seed -- the seat refuses each sampling key one per
-/// rejection, so a body carrying both never repairs into acceptance.
+/// SEED-VERDICT: acceptance-seed -- the seat names one refused key per 400
+/// and repair makes one edit per target, so both keys fail and teach nothing.
 pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) -> Vec<&'static str> {
     let Some(obj) = body.as_object_mut() else {
         return Vec::new();

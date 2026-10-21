@@ -853,10 +853,6 @@ fn translate_known_part(
 /// cannot carry (a nonempty url ref, a nonempty unmapped media type, an
 /// unrecognized source kind) yields `Ok(None)` and a WARN, and the rest of
 /// the turn still ships.
-///
-/// Both unrepresentable arms are baked seed verdicts per foundations sec
-/// 14: deletion stays blocked until this lane's own wire evidence
-/// contradicts them.
 fn translate_image_source(
     id: &str,
     source: &Value,
@@ -902,6 +898,8 @@ fn translate_image_source(
         // Forward-compat: an unknown but nonempty source shape may be a
         // valid vendor extension a later build learns. Erroring here would
         // 400 traffic that works the day one ships.
+        // Baked seed verdict: deletion stays blocked until this lane's own
+        // wire evidence contradicts it.
         // TRANSLATION-DROP: lane=bedrock-converse class=image_source_unrepresentable test=unrepresentable_image_source_bumps_the_drop_counter_once
         content_drops.image_source_unrepresentable = true;
         tracing::warn!(
@@ -932,6 +930,8 @@ fn translate_image_source(
     let Some(format) = forwarded_image_format(media_type) else {
         // AWS's image format table is bounded and the caller did nothing
         // wrong; the bytes simply have no `image.format` value to ride.
+        // Baked seed verdict: deletion stays blocked until this lane's own
+        // wire evidence contradicts it.
         // TRANSLATION-DROP: lane=bedrock-converse class=image_media_type_unsupported test=unmapped_image_media_type_bumps_the_drop_counter_once
         content_drops.image_media_type_unsupported = true;
         tracing::warn!(
@@ -960,9 +960,6 @@ fn translate_image_source(
 /// payload verbatim, an empty one included. Any other ref (`https://...`,
 /// an unmapped media type) cannot ride the JSON Converse wire, so it drops
 /// with a WARN.
-///
-/// The warn-drop is a baked seed verdict per foundations sec 14: deletion
-/// stays blocked until this lane's own wire evidence contradicts it.
 fn translate_image_url(
     id: &str,
     image_url: &Value,
@@ -995,7 +992,8 @@ fn translate_image_url(
     }
     // A well-formed reference this JSON wire cannot dereference: Converse
     // carries inline bytes only, so there is no `image.source` member a URL
-    // could translate onto.
+    // could translate onto. Baked seed verdict: deletion stays blocked until
+    // this lane's own wire evidence contradicts it.
     // TRANSLATION-DROP: lane=bedrock-converse class=image_url_unrepresentable test=unrepresentable_image_url_bumps_the_drop_counter_once
     content_drops.image_url_unrepresentable = true;
     tracing::warn!(
@@ -1100,10 +1098,6 @@ fn media_type_to_image_format(mt: &str) -> Option<String> {
 ///
 /// The source KIND is classified before its fields, because an
 /// unrecognized kind gives no basis for saying which fields it requires.
-///
-/// Both unrepresentable arms are baked seed verdicts per foundations sec
-/// 14: deletion stays blocked until this lane's own wire evidence
-/// contradicts them.
 fn translate_document(
     id: &str,
     source: &Value,
@@ -1136,6 +1130,8 @@ fn translate_document(
         // Forward-compat: an unknown but nonempty source kind (a URL ref,
         // or a shape a later build learns) may be legitimate. Erroring
         // here would 400 traffic that works the day one ships.
+        // Baked seed verdict: deletion stays blocked until this lane's own
+        // wire evidence contradicts it.
         // TRANSLATION-DROP: lane=bedrock-converse class=document_source_unrepresentable test=unrepresentable_document_source_bumps_the_drop_counter_once
         content_drops.document_source_unrepresentable = true;
         tracing::warn!(
@@ -1165,6 +1161,8 @@ fn translate_document(
     let Some(format) = forwarded_document_format(media_type) else {
         // AWS's document format table is bounded and the caller did nothing
         // wrong; the body simply has no `document.format` value to ride.
+        // Baked seed verdict: deletion stays blocked until this lane's own
+        // wire evidence contradicts it.
         // TRANSLATION-DROP: lane=bedrock-converse class=document_media_type_unsupported test=unmapped_document_media_type_bumps_the_drop_counter_once
         content_drops.document_media_type_unsupported = true;
         tracing::warn!(

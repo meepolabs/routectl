@@ -2,9 +2,11 @@
 //! baked rule stays baked instead of being learned from upstream rejections.
 //!
 //! A child of the `TRANSLATION-DROP:` parser so it reuses that parser's
-//! comment, anchor and forbidden-content rules rather than re-deriving them,
-//! while leaving every `TRANSLATION-DROP:` parse untouched: nothing here is
-//! called from the drop census or its welds.
+//! comment, anchor and forbidden-content rules rather than re-deriving them.
+//! Nothing here is called from the drop census or its welds. One shared change
+//! reaches the drop parse: the comment reader takes the `!` of a `//!` line as
+//! part of the prefix in both grammars, so a drop reason wrapped across inner
+//! doc lines reads without it.
 //!
 //! ```text
 //! // SEED-VERDICT: <tag> -- <self-contained reason>
@@ -214,7 +216,9 @@ fn refuse_absorption_into_a_drop_reason(
         return Ok(());
     }
     Err(format!(
-        "{where_} sits directly below a prose {MARKER_TOKEN} marker, whose reason would absorb          it; place the SEED line above the TRANSLATION-DROP marker or separate them with a blank          comment line"
+        "{where_} sits directly below a prose {MARKER_TOKEN} marker, whose reason would absorb \
+         it; place the SEED line above the TRANSLATION-DROP marker or separate them with a blank \
+         comment line"
     ))
 }
 
@@ -230,7 +234,8 @@ fn refuse_trailing_prose(lines: &[&str], from: usize, where_: &str) -> Result<()
             Some(_) if in_marker_paragraph => {}
             Some(_) => {
                 return Err(format!(
-                    "{where_} is followed by prose in the same comment; the marker must be the                      last paragraph of its comment, directly above the item it records"
+                    "{where_} is followed by prose in the same comment; the marker must be the \
+                     last paragraph of its comment, directly above the item it records"
                 ));
             }
         }
@@ -326,9 +331,10 @@ pub struct BakedBlock {
     pub covered: bool,
 }
 
-/// Every comment in one source holding [`BAKED_PHRASE`], matched over the
-/// comment's text with prefixes stripped and whitespace collapsed, so a phrase
-/// wrapped across lines still counts. Coverage reads parsed markers, seed and
+/// Every comment in one source holding [`BAKED_PHRASE`], matched ASCII
+/// case-insensitively over the comment's text with prefixes stripped and
+/// whitespace collapsed, so a phrase wrapped across lines or opening mid
+/// sentence still counts. Coverage reads parsed markers, seed and
 /// drop alike, never a token grep: a token that does not parse covers nothing.
 pub fn baked_blocks_in(krate: &str, file: &str, source: &str) -> Result<Vec<BakedBlock>, String> {
     let lines: Vec<&str> = source.lines().collect();
@@ -337,6 +343,7 @@ pub fn baked_blocks_in(krate: &str, file: &str, source: &str) -> Result<Vec<Bake
         .map(|m| m.line - 1)
         .chain(parse_file(file, source)?.iter().map(|m| m.line - 1))
         .collect();
+    let phrase = BAKED_PHRASE.to_ascii_lowercase();
     let mut blocks = Vec::new();
     let mut index = 0;
     while index < lines.len() {
@@ -351,7 +358,7 @@ pub fn baked_blocks_in(krate: &str, file: &str, source: &str) -> Result<Vec<Bake
                 .collect::<Vec<_>>()
                 .join(" "),
         );
-        if text.contains(BAKED_PHRASE) {
+        if text.to_ascii_lowercase().contains(&phrase) {
             blocks.push(BakedBlock {
                 krate: krate.to_string(),
                 file: file.to_string(),
@@ -566,9 +573,39 @@ fn is_test_cfg(line: &str) -> bool {
     atoms.contains(&"test") && !atoms.contains(&"not")
 }
 
+/// The attribute opening on `lines[start]`, joined with the lines it spans up
+/// to the one balancing its brackets, and the index just past it.
+fn joined_attribute(lines: &[&str], start: usize) -> (String, usize) {
+    let is_open = |text: &str| text.matches('[').count() > text.matches(']').count();
+    let mut joined = lines[start].to_string();
+    let mut next = start + 1;
+    while is_open(&joined) && next < lines.len() {
+        joined.push_str(lines[next]);
+        next += 1;
+    }
+    (joined, next)
+}
+
+/// `decl` with any leading `pub` or `pub(...)` visibility removed.
+fn strip_visibility(decl: &str) -> &str {
+    let Some(rest) = decl.strip_prefix("pub") else {
+        return decl;
+    };
+    let rest = match rest.strip_prefix('(') {
+        Some(inner) => inner.split_once(')').map_or(rest, |(_, after)| after),
+        None => rest,
+    };
+    if rest.starts_with(char::is_whitespace) {
+        rest.trim_start()
+    } else {
+        decl
+    }
+}
+
 /// The test-gated outline module declarations in one source file, resolved to
-/// src-relative paths: a [`is_test_cfg`] attribute, an optional
-/// `#[path = "..."]`, then `mod name;`.
+/// src-relative paths: a [`is_test_cfg`] attribute (possibly spanning lines),
+/// any further attributes with an optional `#[path = "..."]` among them, then
+/// `mod name;` under any visibility.
 pub fn cfg_test_module_files(file: &str, source: &str) -> Vec<String> {
     let dir = file.rsplit_once('/').map_or("", |(d, _)| d);
     let name = file.rsplit('/').next().unwrap_or(file);
@@ -584,24 +621,24 @@ pub fn cfg_test_module_files(file: &str, source: &str) -> Vec<String> {
     let lines: Vec<&str> = source.lines().map(str::trim).collect();
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        if !is_test_cfg(line) {
+        if !line.starts_with("#[cfg(") {
             continue;
         }
-        let mut next = i + 1;
-        let path_attr = lines
-            .get(next)
-            .and_then(|l| l.strip_prefix("#[path = \""))
-            .and_then(|rest| rest.split('"').next());
-        if path_attr.is_some() {
-            next += 1;
+        let (cfg, mut next) = joined_attribute(&lines, i);
+        if !is_test_cfg(&cfg) {
+            continue;
+        }
+        let mut path_attr = None;
+        while next < lines.len() && lines[next].starts_with("#[") {
+            if let Some(rest) = lines[next].strip_prefix("#[path = \"") {
+                path_attr = rest.split('"').next();
+            }
+            next = joined_attribute(&lines, next).1;
         }
         let Some(decl) = lines.get(next) else {
             continue;
         };
-        let decl = decl
-            .strip_prefix("pub(crate) ")
-            .or_else(|| decl.strip_prefix("pub "))
-            .unwrap_or(decl);
+        let decl = strip_visibility(decl);
         let Some(module) = decl.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')) else {
             continue;
         };
