@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-10-20, Bedrock Mantle anthropic-api lane, claude opus 5.5): hand-written from a wire-watch cell excerpt of a client anthropic-beta flag the lane does not accept. error.message is verbatim and the {error, type} envelope keeps the excerpt's key order, with request_id dropped. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"Unexpected value(s) `prompt-caching-scope-2026-01-05` for the `anthropic-beta` header. Please consult our documentation at platform.claude.com/docs or try again without the header.\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}

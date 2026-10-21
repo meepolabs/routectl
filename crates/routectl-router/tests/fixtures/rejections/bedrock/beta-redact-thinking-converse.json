@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-10-20, Converse, claude sonnet 5.5): hand-written from a wire-watch cell excerpt of a client anthropic-beta flag the model does not accept. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns on Converse, the envelope inside the Converse model-errors wrapper. The excerpt carries no response headers: lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the other bedrock fixtures.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"The model returned the following errors: Unexpected value(s) `redact-thinking-2026-02-12` for the `anthropic-beta` header. Please consult our documentation at platform.claude.com/docs or try again without the header.\"}"
+}
