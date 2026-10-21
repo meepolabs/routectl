@@ -65,7 +65,9 @@ fn managed_key_conflict_count() -> u64 {
 }
 
 /// A client-native format with no `response_format` reaches the bag beside
-/// the effort routectl composes for adaptive thinking.
+/// the effort routectl composes, and only the format comes from the client's
+/// object: the sent effort is re-clamped against `effort_levels` to a value
+/// the client did not send, and a sibling member stays withheld.
 #[test]
 fn client_output_config_format_ships_beside_the_composed_effort() {
     // Arrange
@@ -73,11 +75,19 @@ fn client_output_config_format_ships_beside_the_composed_effort() {
         "type": "json_schema",
         "schema": {"type": "object", "additionalProperties": false}
     });
-    let req = request_with_client_output_config(
+    let mut req = request_with_client_output_config(
         Some(json!({"type": "adaptive"})),
-        Some("high"),
-        json!({"effort": "high", "format": format.clone()}),
+        Some("xhigh"),
+        json!({
+            "effort": "xhigh",
+            "task_budget": {"tokens": 4096},
+            "format": format.clone()
+        }),
     );
+    req.routectl_internal.effort_levels = ["low", "high"]
+        .iter()
+        .map(|level| (*level).to_string())
+        .collect();
 
     // Act
     let bag = shipped_bag(&cfg(true), &req);
