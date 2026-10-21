@@ -1335,6 +1335,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   snapshots via insta
 - `tests/contract_egress_bedrock_invoke.rs` -- canonical -> Bedrock-Invoke
   (Anthropic-shape) body snapshots
+- `tests/mid_conversation_tool_changes.rs` -- one request (top-level system
+  plus a `tool_addition` system turn) through both Anthropic-shape lanes:
+  anthropic-api carries the turn in place; Bedrock Invoke loses it whole
 - `tests/contract_egress_bedrock_converse.rs` -- canonical -> Bedrock-Converse
   vendor-neutral body snapshots
 - `tests/contract_egress_openai_responses.rs` -- canonical -> OpenAI Responses

@@ -272,6 +272,13 @@ fn every_bedrock_validation_canary_resolves_to_a_row_or_is_reported_unresolved()
             unresolved("output_config.format", SelfIdentifying, UnsupportedField),
         ),
         ("supp-bad-model-id", Outcome::NotLocalized),
+        // Deliberately never learned. The refused input is a
+        // `tool_addition` / `tool_removal` block in a prior system turn,
+        // i.e. history content, while feature keys derive only from tools,
+        // provider extras and response_format (`derive_feature_keys`). A
+        // negative recorded here could never match a later request, so
+        // learning it needs a history-content feature key derived on the
+        // act side first.
         ("tool-changes-sonnet-5", Outcome::NotLocalized),
         (
             "tool-removal-messages-opus-5-5",

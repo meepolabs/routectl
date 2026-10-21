@@ -830,7 +830,11 @@ mod tests {
     /// false`, so a canonical system present ALONGSIDE `Role::System`
     /// messages still leaves the messages array free of the wire role --
     /// a default flip on the anthropic-api side cannot leak the shape
-    /// here.
+    /// here. With the canonical system present the legacy lift does not
+    /// run either, so the turn's content, text and any non-text block
+    /// alike, is LOST from the body: a measured loss, not an intended edit
+    /// (`tests/mid_conversation_tool_changes.rs` measures it against the
+    /// anthropic-api lane).
     #[test]
     fn system_role_turns_stay_absent_from_the_invoke_body() {
         // Arrange
