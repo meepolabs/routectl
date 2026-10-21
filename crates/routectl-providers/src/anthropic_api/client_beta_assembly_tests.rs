@@ -195,6 +195,34 @@ fn shipped_betas(lane: Lane, req: &mut ChatRequest) -> Vec<String> {
     }
 }
 
+/// What [`crate::beta_withhold::body_implied_betas`] reads off `lane`'s
+/// shipped carrier: the anthropic-api wire body, the Invoke body, or the
+/// Converse bag.
+fn union_implied(lane: Lane, req: &ChatRequest) -> Vec<String> {
+    use crate::beta_withhold::{BetaLane, body_implied_betas};
+    let (carrier, beta_lane) = match lane {
+        Lane::Cloak => (anthropic_wire_body(), BetaLane::AnthropicApiCloak),
+        Lane::ApiKey => (anthropic_wire_body(), BetaLane::AnthropicApi),
+        Lane::Forwarded => (anthropic_wire_body(), BetaLane::AnthropicApiForwarded),
+        Lane::Invoke => (
+            crate::bedrock::invoke::normalize_request(&bedrock_cfg(BedrockApiShape::Invoke), req)
+                .expect("invoke body assembles"),
+            BetaLane::BedrockInvoke,
+        ),
+        Lane::Converse => (
+            crate::bedrock::converse::normalize_request(
+                &bedrock_cfg(BedrockApiShape::Converse),
+                req,
+            )
+            .expect("converse body assembles")["additionalModelRequestFields"]
+                .clone(),
+            BetaLane::BedrockConverse,
+        ),
+    };
+    let carrier = carrier.as_object().expect("an object carrier");
+    owned(&body_implied_betas(carrier, beta_lane))
+}
+
 /// The cloak lane's floor: the config and operator pins, then the OAuth gate
 /// and the minted floor, minus the redaction flag the display body drops.
 fn cloak_floor() -> Vec<String> {
@@ -252,6 +280,11 @@ fn each_carrier_deposits_the_floor_and_body_implied_sets_it_ships() {
             "{lane:?}: deposited sets; shipped {shipped:?}"
         );
         let deposited = deposited.expect("asserted above");
+        assert_eq!(
+            deposited.body_implied(),
+            union_implied(lane, &req),
+            "{lane:?}: the deposit is the union's own implied set"
+        );
         for flag in deposited.floor().iter().chain(deposited.body_implied()) {
             assert!(
                 shipped.contains(flag),

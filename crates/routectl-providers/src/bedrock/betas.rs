@@ -20,57 +20,29 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, sanitize_for_log};
 
-use crate::beta_withhold::split_withheld;
+use crate::beta_withhold::{BetaLane, body_implied_betas, split_withheld};
 
 use super::{BedrockApiShape, BedrockConfig};
 
-/// The `anthropic-beta` flag gating `thinking.display: "updates"`.
-const THINKING_DISPLAY_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
-
-/// The betas `fields` itself requires, in union order: `fields` is the
-/// Invoke body or the Converse `additionalModelRequestFields` bag, as it
-/// ships. Each is implied by a body field rather than opted into by the
-/// client, so [`union_feature_implied_betas`] adds it after the withhold.
-///
-/// - `thinking.display: "updates"` gates on `thinking-display-updates`
-///   (Converse only).
-/// - `output_config.format` gains `STRUCTURED_OUTPUTS_BETA` on both
-///   carriers. Kept as belt-and-braces: api.anthropic.com accepted the field
-///   with and without the flag on one measured lane; whether AWS rejects an
-///   ungated body is unmeasured.
-pub(super) fn feature_implied_betas(
-    shape: BedrockApiShape,
-    fields: &Map<String, Value>,
-) -> Vec<&'static str> {
-    let mut implied = Vec::new();
-    let display_updates = fields
-        .get("thinking")
-        .and_then(|t| t.get("display"))
-        .and_then(Value::as_str)
-        == Some("updates");
-    if shape == BedrockApiShape::Converse && display_updates {
-        implied.push(THINKING_DISPLAY_UPDATES_BETA);
+const fn beta_lane(shape: BedrockApiShape) -> BetaLane {
+    match shape {
+        BedrockApiShape::Invoke => BetaLane::BedrockInvoke,
+        BedrockApiShape::Converse => BetaLane::BedrockConverse,
     }
-    if fields
-        .get("output_config")
-        .and_then(|oc| oc.get("format"))
-        .is_some()
-    {
-        implied.push(routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA);
-    }
-    implied
 }
 
-/// Union [`feature_implied_betas`] into `fields["anthropic_beta"]`. Must run
+/// Union [`body_implied_betas`] into `fields["anthropic_beta"]`. Must run
 /// after the withhold and every strip that can change the implying fields,
-/// so a withheld entry cannot drop a flag the shipped body needs. Idempotent: a present flag is neither duplicated nor
-/// reordered. Returns the implied set, whether or not each flag was already
-/// present.
-pub(super) fn union_feature_implied_betas(
+/// so a withheld entry cannot drop a flag the shipped body needs. Appends
+/// only the flags the array lacks, leaving every existing entry (order,
+/// duplicates, non-strings) as it was; creates the array only when the body
+/// implies a flag, and leaves a non-array value alone. Returns the implied
+/// set, whether or not each flag was already present.
+fn union_body_implied(
     shape: BedrockApiShape,
     fields: &mut Map<String, Value>,
 ) -> Vec<&'static str> {
-    let implied = feature_implied_betas(shape, fields);
+    let implied = body_implied_betas(fields, beta_lane(shape));
     if implied.is_empty() {
         return implied;
     }
@@ -88,17 +60,17 @@ pub(super) fn union_feature_implied_betas(
     implied
 }
 
-/// Union the body-implied betas into `fields` (see
-/// [`union_feature_implied_betas`]) and record the request's beta floor and
-/// that implied set on its beta assembly slot. `fields` must be the final
-/// carrier: the Invoke body or the Converse bag as it ships.
+/// Union the body-implied betas into `fields` (see [`union_body_implied`])
+/// and record the request's beta floor and that implied set on its beta
+/// assembly slot. `fields` must be the final carrier: the Invoke body or the
+/// Converse bag as it ships.
 pub(super) fn union_and_deposit_betas(
     cfg: &BedrockConfig,
     req: &ChatRequest,
     shape: BedrockApiShape,
     fields: &mut Map<String, Value>,
 ) {
-    let implied = union_feature_implied_betas(shape, fields);
+    let implied = union_body_implied(shape, fields);
     let shipped = fields.get("anthropic_beta").and_then(Value::as_array);
     crate::beta_withhold::deposit_beta_assembly(
         req,

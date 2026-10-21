@@ -693,93 +693,17 @@ fn body_has_adaptive_thinking(body: &Value) -> bool {
     body_thinking_type(body) == Some("adaptive")
 }
 
-/// True iff the assembled body carries `output_config.format`, the
-/// structured-output directive routectl pairs with `STRUCTURED_OUTPUTS_BETA`
-/// (see `union_structured_outputs_beta` for why that union is retained
-/// rather than treated as a proven hard requirement).
-///
-/// Reads the ASSEMBLED body for the same reason
-/// `reconcile_output_config_effort` does: `merge_provider_extras` and the
-/// `response_format` lift both add `output_config` after translation, and
-/// the effort reconciler can drop a now-empty `output_config`, so
-/// `req.response_format` is not a reliable signal for what ships.
-pub(super) fn body_has_output_config_format(body: &Value) -> bool {
-    body.get("output_config")
-        .and_then(|oc| oc.get("format"))
-        .is_some()
-}
-
-/// Union `STRUCTURED_OUTPUTS_BETA` into `betas` when `body` carries
-/// `output_config.format`. Idempotent: an already-present flag is neither
-/// duplicated nor reordered.
-///
-/// A capability-driven signal implied by the shipped body rather than a
-/// client-opted beta, so it runs AFTER the client and operator betas are
-/// composed, on every auth kind, with the same standing as the operator's
-/// beta floor.
-///
-/// Retained as belt-and-braces, NOT a proven hard requirement. A 2026-08-11
-/// live capture -- one lane, one seat, one model -- accepted
-/// `output_config.format` both WITH and WITHOUT this beta (200 in both
-/// cases), which refutes the older claim that an ungated body is rejected
-/// upstream regardless of who asked for it. The union stays because that
-/// single measurement does not cover every account or model tier, and an
-/// older tier may still gate the field; the redundant flag was accepted
-/// where measured.
-///
-/// UNMEASURED: whether an unknown or withdrawn beta string is itself
-/// rejected. That is what would turn this union from harmless-redundant
-/// into a liability, so revisit it if Anthropic retires the flag.
-///
-/// Returns the flag whenever `body` implies it, whether or not `betas`
-/// already held it.
-pub(super) fn union_structured_outputs_beta(
-    body: &Value,
-    betas: &mut Vec<String>,
-) -> Option<&'static str> {
-    if !body_has_output_config_format(body) {
-        return None;
-    }
-    let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
-    if !betas.iter().any(|b| b == flag) {
-        betas.push(flag.to_string());
-    }
-    Some(flag)
-}
-
 /// True iff the assembled body carries `output_config.effort`, the
 /// adaptive-thinking directive Anthropic gates behind `EFFORT_BETA`.
 ///
-/// Reads the ASSEMBLED body for the same reason `body_has_output_config_format`
-/// does: `merge_provider_extras` and `reconcile_output_config_effort` add or
-/// re-clamp `output_config.effort` after translation, so `req.reasoning` is
-/// not a reliable signal for what ships.
+/// Reads the ASSEMBLED body: `merge_provider_extras` and
+/// `reconcile_output_config_effort` add or re-clamp `output_config.effort`
+/// after translation, so `req.reasoning` is not a reliable signal for what
+/// ships.
 pub(super) fn body_has_output_config_effort(body: &Value) -> bool {
     body.get("output_config")
         .and_then(|oc| oc.get("effort"))
         .is_some()
-}
-
-/// Union `EFFORT_BETA` into `betas` when `body` carries `output_config.effort`.
-/// Idempotent: an already-present flag is neither duplicated nor reordered.
-///
-/// Mirrors `union_structured_outputs_beta` (body-predicate, dedup, post-filter
-/// ordering): a capability-driven server requirement implied by the shipped
-/// body, so it runs AFTER the client betas and the floor are composed. The invariant is ONE-WAY -- a body carrying the gated field
-/// gains the flag; a caller-supplied effort beta with NO field is left
-/// untouched (the inverse is never manufactured here).
-///
-/// Returns the flag whenever `body` implies it, whether or not `betas`
-/// already held it.
-pub(super) fn union_effort_beta(body: &Value, betas: &mut Vec<String>) -> Option<&'static str> {
-    if !body_has_output_config_effort(body) {
-        return None;
-    }
-    let flag = routectl_core::identity::anthropic::EFFORT_BETA;
-    if !betas.iter().any(|b| b == flag) {
-        betas.push(flag.to_string());
-    }
-    Some(flag)
 }
 
 /// Remove `REDACT_THINKING_BETA` from `betas` when `body` carries
@@ -876,8 +800,8 @@ pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) -> 
 mod tests {
     use super::{
         ThinkingConfig, body_has_output_config_effort, build_thinking, normalize_claude_sampling,
-        union_effort_beta,
     };
+    use crate::beta_withhold::{BetaLane, union_body_implied_betas};
     use routectl_core::identity::anthropic::EFFORT_BETA;
     use routectl_core::{ChatRequest, ReasoningConfig};
     use serde_json::{Value, json};
@@ -1042,7 +966,11 @@ mod tests {
     fn union_effort_beta_appends_flag_once() {
         let body = json!({"output_config": {"effort": "high"}});
         let mut betas = vec!["pre-existing".to_string()];
-        union_effort_beta(&body, &mut betas);
+        union_body_implied_betas(
+            body.as_object().expect("object body"),
+            BetaLane::AnthropicApiCloak,
+            &mut betas,
+        );
         assert_eq!(
             betas,
             vec!["pre-existing".to_string(), EFFORT_BETA.to_string()],
@@ -1057,7 +985,11 @@ mod tests {
         let body = json!({"output_config": {"effort": "high"}});
         let mut betas = vec![EFFORT_BETA.to_string(), "other".to_string()];
         let before = betas.clone();
-        union_effort_beta(&body, &mut betas);
+        union_body_implied_betas(
+            body.as_object().expect("object body"),
+            BetaLane::AnthropicApiCloak,
+            &mut betas,
+        );
         assert_eq!(betas, before, "an already-present flag stays put");
     }
 
@@ -1069,7 +1001,11 @@ mod tests {
         let body = json!({"model": "m"});
         let mut betas = vec![EFFORT_BETA.to_string()];
         let before = betas.clone();
-        union_effort_beta(&body, &mut betas);
+        union_body_implied_betas(
+            body.as_object().expect("object body"),
+            BetaLane::AnthropicApiCloak,
+            &mut betas,
+        );
         assert_eq!(
             betas, before,
             "no effort field -> the beta list is untouched (one-way invariant)"

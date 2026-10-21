@@ -489,7 +489,7 @@ impl DeferredOutputConfigDiagnostics {
 /// `set_output_config_format`'s `or_insert` leaves it untouched -- a
 /// caller-supplied `output_config.format` never passes through
 /// `response_format_to_anthropic_format` at all. Same posture as
-/// `extras::body_has_output_config_format` and
+/// `beta_withhold::body_implied_betas` and
 /// `reconcile_output_config_effort`, and for the same reason.
 ///
 /// Applies uniformly to all three Claude seams (Anthropic egress,

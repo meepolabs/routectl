@@ -221,21 +221,11 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // request.
     deferred.rescanning(&cfg.id, obj)?.warn(&cfg.id);
 
-    // Capability union, LAST so it reads the body that actually ships: a
-    // body carrying `output_config.format` gains the structured-outputs beta
-    // in `anthropic_beta`. Retained as belt-and-braces, NOT a proven hard
-    // requirement -- a 2026-08-11 live capture on api.anthropic.com (one
-    // lane, one seat, one model) accepted the field both WITH and WITHOUT
-    // the beta, refuting the older "rejected unless the flag rides along"
-    // claim on that surface. Whether AWS rejects an ungated body is
-    // UNMEASURED, and an older account/model tier may still gate the field,
-    // so the union stays; revisit it if Anthropic retires the flag (whether
-    // an unknown beta string is itself rejected is also unmeasured).
-    // Deliberately AFTER the withhold, because the flag is a routectl-derived
-    // capability signal implied by the shipped body, not a client-opted beta,
-    // so a withheld entry naming it must not drop it.
-    // Feature-triggered and idempotent: no `output_config.format` means no
-    // flag, and an already-present flag is neither duplicated nor reordered.
+    // Body-implied union (`beta_withhold::body_implied_betas`), LAST so it
+    // reads the body that actually ships, and AFTER the withhold: the flags
+    // are implied by the shipped body, not opted into by the client, so a
+    // withheld entry naming one must not drop it. Idempotent: an
+    // already-present flag is neither duplicated nor reordered.
     if let Some(obj) = body.as_object_mut() {
         super::betas::union_and_deposit_betas(cfg, req, super::BedrockApiShape::Invoke, obj);
         super::body_fields::drop_unrepresentable_body_fields(

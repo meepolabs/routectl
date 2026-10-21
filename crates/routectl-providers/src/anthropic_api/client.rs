@@ -671,56 +671,38 @@ impl AnthropicApiProvider {
             merged_betas.retain(|b| b != context_management::CONTEXT_MANAGEMENT_BETA);
         }
 
-        // Capability-driven union, LAST: a body carrying
-        // `output_config.format` is rejected upstream unless the
-        // structured-outputs beta rides along, on EVERY auth kind. Placed
-        // after the client, operator and floor unions because this is a
-        // server requirement implied by the shipped body, not a client-opted
-        // beta -- the same standing the operator-pinned floor has. Idempotent, so
-        // an OauthBearer request whose floor already carries the flag keeps
-        // its beta list byte-identical.
+        // Body-implied union, LAST: flags the shipped body itself requires
+        // (structured outputs on every non-forwarded lane, effort on the
+        // cloak lane), with the standing of a server requirement rather than
+        // a client-opted beta, so it follows the client, operator and floor
+        // unions and re-adds a flag the withhold dropped. Fires on the
+        // genuine-CC path too, unlike the speculative floor: it fires only
+        // when the body demonstrably carries the gated field.
         //
-        // NOT gated on `is_non_cc`, unlike the pinned floor above -- this
-        // union intentionally fires on the genuine-CC (`is_non_cc == false`)
-        // path too. The floor's gate exists because the floor is
-        // SPECULATIVE: it force-widens a real client's beta set with
-        // capability flags CC never asked for, which Anthropic 400s. This
-        // union is the opposite -- it fires ONLY when the assembled body
-        // actually carries `output_config.format`, so a genuine-CC request
-        // reaching here demonstrably uses the gated feature and needs its
-        // flag, exactly as a cloaked one does.
-        //
-        // SUPPRESSED on the forwarded leg, like every other minted-beta site
-        // here: there the client's own beta set must reach Anthropic verbatim
-        // per the FORWARDING TRANSPARENCY CONTRACT, and the client owns the
-        // forwarded body too -- so widening its fingerprint with a flag it
-        // did not send is never routectl's call.
-        let mut body_implied: Vec<String> = Vec::new();
-        if !forwarded_leg
-            && let Some(body) = wire_body
-            && let Some(flag) =
-                super::extras::union_structured_outputs_beta(body, &mut merged_betas)
-        {
-            body_implied.push(flag.to_string());
-        }
-
-        // Capability-driven effort union, mirroring the structured-outputs
-        // union above (same body-predicate, dedup, post-filter/post-floor
-        // ordering). A body carrying `output_config.effort` is rejected
-        // upstream unless `EFFORT_BETA` rides along. GATED on `is_cloak_lane`
-        // (unlike the structured-outputs union, which fires on every auth
-        // kind): the adaptive-thinking effort directive is composed only for
-        // routectl's own OAuth seat, so the union is scoped to that lane --
-        // the forwarded leg (excluded by the predicate) and the API-key lane
-        // keep byte-identical beta sets. One-way invariant: body has effort
-        // => beta present; a caller-supplied effort beta with no field is left
-        // untouched.
-        if self.is_cloak_lane(req)
-            && let Some(body) = wire_body
-            && let Some(flag) = super::extras::union_effort_beta(body, &mut merged_betas)
-        {
-            body_implied.push(flag.to_string());
-        }
+        // SUPPRESSED on the forwarded leg (its lane implies nothing): the
+        // client's own beta set must reach Anthropic verbatim per the
+        // FORWARDING TRANSPARENCY CONTRACT, and the client owns the forwarded
+        // body too, so widening its fingerprint is never routectl's call.
+        let implied_lane = if forwarded_leg {
+            crate::beta_withhold::BetaLane::AnthropicApiForwarded
+        } else if self.is_cloak_lane(req) {
+            crate::beta_withhold::BetaLane::AnthropicApiCloak
+        } else {
+            crate::beta_withhold::BetaLane::AnthropicApi
+        };
+        let body_implied: Vec<String> = wire_body
+            .and_then(serde_json::Value::as_object)
+            .map(|body| {
+                crate::beta_withhold::union_body_implied_betas(
+                    body,
+                    implied_lane,
+                    &mut merged_betas,
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
 
         // Display-vs-redaction conflict, after every union so the flag is
         // removed whichever source contributed it. Suppressed on the

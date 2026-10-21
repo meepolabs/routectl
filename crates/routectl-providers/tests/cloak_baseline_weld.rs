@@ -548,8 +548,8 @@ const TIER_TWO: &[TierTwoRow] = &[
     },
     TierTwoRow {
         transform: "effort_beta_union",
-        file: "anthropic_api/extras.rs",
-        anchor: "union_effort_beta",
+        file: "beta_withhold.rs",
+        anchor: "body_implied_betas",
         crate_root: CrateRoot::Providers,
         gate: Gate::CloakLaneBodyCarriesEffort,
         reason: "the adaptive-thinking effort directive is composed only for routectl's own seat, \

@@ -263,7 +263,7 @@ pub const THINKING_TOKEN_COUNT_BETA: &str = "thinking-token-count-2026-05-13";
 /// `STRUCTURED_OUTPUTS_BETA` it is a server-side capability requirement
 /// rather than a client-opted beta: the egress unions it on-demand keyed on
 /// the final body carrying `output_config.effort`
-/// (`extras::union_effort_beta`), scoped to the OAuth own-anthropic lane. It
+/// (`beta_withhold::body_implied_betas`), scoped to the OAuth own-anthropic lane. It
 /// is NOT in the floor, because forcing it on a model that does not support
 /// effort 400s the request.
 pub const EFFORT_BETA: &str = "effort-2025-11-24";
@@ -354,7 +354,7 @@ pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str
 /// flow through as client-driven pass-through (subject to the ingress
 /// allowlist), so a model that rejects them never sees them forced by the
 /// floor. (effort additionally gains an on-demand egress union keyed on
-/// `output_config.effort` in `extras::union_effort_beta`, mirroring
+/// `output_config.effort` in `beta_withhold::body_implied_betas`, mirroring
 /// structured-outputs.)
 pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
     &[
