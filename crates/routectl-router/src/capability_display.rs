@@ -84,10 +84,10 @@ pub fn resolve_display(inputs: DisplayInputs) -> Resolution {
 /// negative is shown over the seed and the prior.
 const fn shown_signal(inputs: DisplayInputs) -> Option<Shown> {
     let ctx = inputs.ctx;
-    if inputs.pinned && ctx.beta_flag {
+    if inputs.pinned && ctx.beta_flag() {
         return Some(shown(Layer::Pin, FORCED_SUPPORTED, true, SOURCE_PIN));
     }
-    if !ctx.representable {
+    if !ctx.representable() {
         return Some(shown(
             Layer::Representability,
             VERDICT_UNREPRESENTABLE,

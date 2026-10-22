@@ -20,6 +20,8 @@
 //! its default and the invalidation paths discard them on a catalog revision
 //! change like any other catalog capability.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use routectl_core::is_safe_token;
 use routectl_core::wire_check::EgressKind;
 use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
@@ -81,6 +83,40 @@ pub fn beta_override_key(key: &str) -> String {
         Some(flag) => format!("{BETA_CAPABILITY_PREFIX}{}", flag.to_ascii_lowercase()),
         None => key.to_string(),
     }
+}
+
+/// Collect the operator-configured `anthropic-beta` floor: the union of
+/// the provider and model `header_extras["anthropic-beta"]` values
+/// (comma-split, trimmed, deduplicated, visit order preserved). Client/
+/// ingress betas are deliberately excluded -- those ride on
+/// `req.anthropic_beta`.
+pub fn operator_betas(
+    provider_extras: Option<&BTreeMap<String, String>>,
+    model_extras: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let provider_val = provider_extras
+        .and_then(|m| {
+            m.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
+                .map(|(_, v)| v.as_str())
+        })
+        .unwrap_or("");
+    let model_val = model_extras
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
+        .map_or("", |(_, v)| v.as_str());
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for raw in [provider_val, model_val] {
+        for piece in raw.split(',') {
+            let t = piece.trim();
+            if !t.is_empty() && seen.insert(t.to_string()) {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Whether a lane can carry no client beta flag at all: a Bedrock Converse

@@ -233,23 +233,25 @@ const fn is_advisory(learned: LearnedInput) -> bool {
     }
 }
 
-/// The facts about a cell every tier reads.
+/// The facts about a cell every tier reads. Built only by [`Self::new`] or
+/// [`Self::for_lane`], so `beta_flag` and `representable` always agree with
+/// the capability key and the lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellContext {
     /// The `[capability] enabled` kill switch. Off, the learned and prior
     /// tiers have no opinion; the operator tiers, representability and the
     /// seed still act.
-    pub capability_enabled: bool,
+    capability_enabled: bool,
     /// Whether the capability is a beta-flag key. A beta key acts on the wire
     /// only and never leaves `Routing::Keep`.
-    pub beta_flag: bool,
+    beta_flag: bool,
     /// Whether the capability is a droppable the operator has not marked
     /// essential, so an F1 negative on it may be stripped in place.
-    pub droppable: bool,
+    droppable: bool,
     /// Whether the lane's wire can carry the capability at all. False only
     /// for a beta flag on a lane that refuses the beta bag key; consulted
     /// after the pin and before every other tier.
-    pub representable: bool,
+    representable: bool,
 }
 
 impl CellContext {
@@ -296,6 +298,34 @@ impl CellContext {
                 .map(ProviderEntry::egress_kind),
             upstream,
         )
+    }
+
+    /// Whether the capability is a beta-flag key.
+    pub(crate) const fn beta_flag(self) -> bool {
+        self.beta_flag
+    }
+
+    /// Whether the lane's wire can carry the capability at all.
+    pub(crate) const fn representable(self) -> bool {
+        self.representable
+    }
+
+    /// A context with arbitrary facts, including combinations no lane
+    /// produces, for exercising each tier in isolation.
+    #[cfg(test)]
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub(crate) const fn from_facts(
+        capability_enabled: bool,
+        beta_flag: bool,
+        droppable: bool,
+        representable: bool,
+    ) -> Self {
+        Self {
+            capability_enabled,
+            beta_flag,
+            droppable,
+            representable,
+        }
     }
 }
 
@@ -756,8 +786,11 @@ pub fn operator_pins_capability(
 
 /// Whether the operator floor pins the beta `flag`: the provider entry's
 /// `anthropic_beta` floor, or a provider or model `header_extras`
-/// `anthropic-beta` contribution. The one floor walk every pin check reads;
-/// [`operator_pins_capability`] is its capability-key form.
+/// `anthropic-beta` contribution. The floor walk under
+/// [`operator_pins_capability`]; a caller holding a capability key asks
+/// that instead. Called directly only for a flag that mints no capability
+/// key, which the floor can still pin because floor entries are not checked
+/// against the flag grammar.
 pub fn operator_pins_flag(
     config: &Config,
     provider_entry: &str,
@@ -769,7 +802,7 @@ pub fn operator_pins_flag(
         .map_or(&[][..], ProviderEntry::anthropic_beta_floor)
         .iter()
         .any(|pinned| pinned == flag)
-        || crate::router::operator_betas(
+        || crate::beta_capability::operator_betas(
             entry.map(ProviderEntry::header_extras),
             model_header_extras,
         )

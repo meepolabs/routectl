@@ -109,7 +109,6 @@ pub use learned_lanes::{LearnedLaneProjection, ResolvedLearnedLane};
 pub use opening_lookup::OpeningLane;
 pub use outcome_rule::class_debits;
 use overlays::apply_layered_overlays;
-pub(crate) use overlays::operator_betas;
 pub use overlays::{merge_header_extras, merge_payload_extras};
 pub use probe_clear_ack::ProbeClearAcknowledgement;
 pub use probe_pass::ProbePassSummary;

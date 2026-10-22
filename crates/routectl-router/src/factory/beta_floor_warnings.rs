@@ -312,7 +312,7 @@ fn egress_reassertions(
     };
     let no_model_extras = std::collections::BTreeMap::new();
     let provider_pins =
-        crate::router::operator_betas(Some(provider.header_extras()), &no_model_extras)
+        crate::beta_capability::operator_betas(Some(provider.header_extras()), &no_model_extras)
             .into_iter()
             .map(|flag| Reassertion {
                 flag,
@@ -323,7 +323,7 @@ fn egress_reassertions(
         .iter()
         .filter_map(|nickname| Some((*nickname, config.models.get(*nickname)?)))
         .flat_map(|(nickname, model)| {
-            crate::router::operator_betas(None, &model.header_extras)
+            crate::beta_capability::operator_betas(None, &model.header_extras)
                 .into_iter()
                 .map(move |flag| Reassertion {
                     flag,

@@ -4198,8 +4198,6 @@ pub type routectl_router::router::EvidencePolicy::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::EvidencePolicy where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::EvidencePolicy::into_shared(self) -> Shared
 pub struct routectl_router::router::EvidenceScope
-impl core::clone::Clone for routectl_router::router::EvidenceScope
-pub fn routectl_router::router::EvidenceScope::clone(&self) -> routectl_router::router::EvidenceScope
 impl core::fmt::Debug for routectl_router::router::EvidenceScope
 pub fn routectl_router::router::EvidenceScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for routectl_router::router::EvidenceScope
@@ -4217,24 +4215,14 @@ pub fn routectl_router::router::EvidenceScope::try_from(U) -> core::result::Resu
 impl<T, U> core::convert::TryInto<U> for routectl_router::router::EvidenceScope where U: core::convert::TryFrom<T>
 pub type routectl_router::router::EvidenceScope::Error = <U as core::convert::TryFrom<T>>::Error
 pub fn routectl_router::router::EvidenceScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_router::router::EvidenceScope where T: core::clone::Clone
-pub type routectl_router::router::EvidenceScope::Owned = T
-pub fn routectl_router::router::EvidenceScope::clone_into(&self, &mut T)
-pub fn routectl_router::router::EvidenceScope::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::EvidenceScope where T: core::clone::Clone
-pub fn routectl_router::router::EvidenceScope::from_ref(&T) -> T
 impl<T> core::any::Any for routectl_router::router::EvidenceScope where T: 'static + ?core::marker::Sized
 pub fn routectl_router::router::EvidenceScope::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for routectl_router::router::EvidenceScope where T: ?core::marker::Sized
 pub fn routectl_router::router::EvidenceScope::borrow(&self) -> &T
 impl<T> core::borrow::BorrowMut<T> for routectl_router::router::EvidenceScope where T: ?core::marker::Sized
 pub fn routectl_router::router::EvidenceScope::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_router::router::EvidenceScope where T: core::clone::Clone
-pub unsafe fn routectl_router::router::EvidenceScope::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for routectl_router::router::EvidenceScope
 pub fn routectl_router::router::EvidenceScope::from(T) -> T
-impl<T> dyn_clone::DynClone for routectl_router::router::EvidenceScope where T: core::clone::Clone
-pub fn routectl_router::router::EvidenceScope::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
 impl<T> either::into_either::IntoEither for routectl_router::router::EvidenceScope
 impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::EvidenceScope where T: ?core::marker::Sized
 pub fn routectl_router::router::EvidenceScope::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
@@ -11924,10 +11912,6 @@ pub type routectl_router::catalog::CatalogRow::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::catalog::CatalogRow where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::catalog::CatalogRow::into_shared(self) -> Shared
 pub struct routectl_router::CellContext
-pub routectl_router::CellContext::beta_flag: bool
-pub routectl_router::CellContext::capability_enabled: bool
-pub routectl_router::CellContext::droppable: bool
-pub routectl_router::CellContext::representable: bool
 impl routectl_router::CellContext
 pub fn routectl_router::CellContext::for_lane(&routectl_router::config::Config, &str, &str, &str) -> Self
 pub fn routectl_router::CellContext::new(&str, &routectl_router::CapabilityConfig, core::option::Option<routectl_core::wire_check::lane::EgressKind>, &str) -> Self
@@ -18497,7 +18481,6 @@ pub fn routectl_router::migrate_v4_to_v5(&mut toml_edit::document::DocumentMut) 
 pub fn routectl_router::models_routed_at(&toml_edit::document::DocumentMut, &str) -> alloc::vec::Vec<alloc::string::String>
 pub fn routectl_router::near_lossless_candidate(&routectl_core::schema::ChatRequest, &[routectl_router::ElisionMark]) -> core::option::Option<routectl_router::PrefixReductionCandidate>
 pub fn routectl_router::operator_pins_capability(&routectl_router::config::Config, &str, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, &str) -> bool
-pub fn routectl_router::operator_pins_flag(&routectl_router::config::Config, &str, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, &str) -> bool
 pub fn routectl_router::overall_exit(&[routectl_router::Finding]) -> i32
 pub fn routectl_router::overlay_default_path() -> std::path::PathBuf
 pub const fn routectl_router::overlay_revision(&routectl_router::CatalogOverlay) -> u64

@@ -107,8 +107,8 @@ pub use capability_matcher::resolve_requested_capability;
 pub use capability_precedence::{
     ACTION_ALLOW, ACTION_DROP, ACTION_MIXED, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY,
     ACTION_STRIP, ACTION_WITHHOLD, CellContext, DisplayInputs, Layer, LearnedInput, OpenCell,
-    Resolution, Routing, SeedCell, Stage, Wire, operator_pins_capability, operator_pins_flag,
-    resolve_open, resolve_operator,
+    Resolution, Routing, SeedCell, Stage, Wire, operator_pins_capability, resolve_open,
+    resolve_operator,
 };
 pub use capability_rebuild::{
     CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, ReplayTombstone,

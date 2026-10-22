@@ -258,6 +258,49 @@ fn the_operator_floor_is_not_withheld_on_a_non_claude_converse_target() {
 }
 
 #[test]
+fn a_pinned_flag_outside_the_key_grammar_is_not_withheld_on_a_non_claude_converse_target() {
+    // Arrange: a dotted flag mints no capability key, but the floor takes it
+    // as written, so the pin check must still match it by spelling.
+    let dotted = "fx.dotted-2025-01-01";
+    assert_eq!(
+        beta_capability_key(dotted),
+        None,
+        "the fixture flag mints no key"
+    );
+    let body = format!(
+        "version = 3\n\
+         [providers.cvdot]\n{CONVERSE_BLOCK}anthropic_beta = [\"{dotted}\"]\n\
+         [providers.cvbare]\n{CONVERSE_BLOCK}\
+         [capability]\nenabled = true\n\
+         [aliases]\ndefault = \"m\"\n"
+    );
+    let router = Router::new(Arc::new(
+        toml::from_str::<Config>(&body).expect("fixture config parses"),
+    ));
+    // (name, provider entry, withheld expected)
+    let rows = [
+        ("floor pins the dotted flag", "cvdot", owned(&[CLIENT_BETA])),
+        (
+            "no floor (positive control)",
+            "cvbare",
+            owned(&[CLIENT_BETA, dotted]),
+        ),
+    ];
+
+    for (name, provider_name, want) in rows {
+        // Act
+        let out = withheld(
+            &router,
+            &target(&router, provider_name, "us.amazon.nova-2-lite-v1:0"),
+            &[CLIENT_BETA, dotted],
+        );
+
+        // Assert
+        assert_eq!(out, want, "row {name}");
+    }
+}
+
+#[test]
 fn a_lapsed_negative_on_a_non_claude_converse_target_claims_no_re_probe_slot() {
     // Arrange: a learned negative whose decay has lapsed would claim its
     // single re-probe slot on any lane that reads it.

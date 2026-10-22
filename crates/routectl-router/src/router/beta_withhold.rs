@@ -139,13 +139,14 @@ impl Router {
         admissions: &mut Vec<ProbeAdmission>,
         now: Instant,
     ) -> BetaVerdict {
-        if self.beta_flag_pinned_for_target(target, flag) {
+        let key = beta_capability_key(flag);
+        if self.client_beta_pinned(target, key.as_deref(), flag) {
             return BetaVerdict::Send;
         }
         if refuses_the_beta_bag_key(target) {
             return BetaVerdict::Withhold;
         }
-        let Some(key) = beta_capability_key(flag) else {
+        let Some(key) = key else {
             return BetaVerdict::Send;
         };
         match self.override_beta_verdict(target, &key) {
@@ -160,6 +161,22 @@ impl Router {
             BetaVerdict::Withhold
         } else {
             BetaVerdict::Send
+        }
+    }
+
+    /// Whether the operator floor pins the client `flag`, asked through its
+    /// capability `key` when the flag mints one. A flag outside the key
+    /// grammar can still be pinned, since floor entries are not checked
+    /// against that grammar, so it is matched on the floor by spelling.
+    fn client_beta_pinned(&self, target: &DispatchTarget, key: Option<&str>, flag: &str) -> bool {
+        match key {
+            Some(key) => self.beta_pinned_for_target(target, key),
+            None => crate::capability_precedence::operator_pins_flag(
+                &self.config,
+                &target.provider_name,
+                &target.model.header_extras,
+                flag,
+            ),
         }
     }
 

@@ -594,12 +594,7 @@ fn new_display(
         learned: learned_entry.and_then(|e| LearnedInput::from_entry(e, now)),
         seed,
         prior,
-        ctx: CellContext {
-            capability_enabled,
-            beta_flag,
-            droppable,
-            representable: true,
-        },
+        ctx: CellContext::from_facts(capability_enabled, beta_flag, droppable, true),
     })
 }
 
@@ -705,12 +700,7 @@ fn display_projections_match_the_previous_display_resolver() {
 #[test]
 #[rustfmt::skip]
 fn display_projections_for_the_tiers_the_previous_resolver_lacked() {
-    let beta = |representable| CellContext {
-        capability_enabled: true,
-        beta_flag: true,
-        droppable: true,
-        representable,
-    };
+    let beta = |representable| CellContext::from_facts(true, true, true, representable);
     let base = |ctx| DisplayInputs {
         pinned: false,
         override_verdict: None,

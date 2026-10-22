@@ -37,7 +37,7 @@
 //! | site | client.rs | adds / removes | condition | advisory |
 //! |---|---|---|---|---|
 //! | S1 provider pin | 620 | adds `header_extras["anthropic-beta"]` of the provider | always, every leg | warns |
-//! | S2 model pin | 630 | adds `operator_betas` (provider + model pins, router/overlays.rs:154) | always, every leg; per model | warns, per model a provider cell reaches |
+//! | S2 model pin | 630 | adds `operator_betas` (provider + model pins, beta_capability.rs `operator_betas`) | always, every leg; per model | warns, per model a provider cell reaches |
 //! | S3 OAuth gate | 651-652 | adds `oauth-2025-04-20` | cloak lane | warns on own oauth-bearer on the host only |
 //! | S4 Claude Code floor | 661-662 | adds the 9-flag floor | cloak lane AND `is_non_cc` (client.rs:1057: cloak.mode always -> true, never -> false, auto -> classified non-Claude-Code: `routectl_internal.originating_claude_code_session` when set, else no Claude Code session header) | warns on own oauth-bearer on the host unless cloak.mode = never |
 //! | S5 context-management strip | 671-672 | removes `context-management-2025-06-27` (exact spelling) | provider `context_management = true`, every leg | that flag is never reported there |

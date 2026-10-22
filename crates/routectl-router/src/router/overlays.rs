@@ -177,7 +177,8 @@ pub(super) fn apply_layered_overlays(
     // `merge_header_extras`) so the Bedrock egress, which withholds only
     // flags outside this floor, and the log-safe summary still see the
     // complete set.
-    internal.operator_betas = operator_betas(provider_headers, &target.model.header_extras);
+    internal.operator_betas =
+        crate::beta_capability::operator_betas(provider_headers, &target.model.header_extras);
     internal.operator_payload_extras = operator_payload;
     internal.declared_edits.extend(operator_edits);
     req.routectl_internal = internal;
@@ -194,40 +195,6 @@ fn operator_payload_extras(
     let mut operator = ChatRequest::default();
     merge_payload_extras(provider_name, provider_extras, model_extras, &mut operator);
     operator.provider_extras.map(std::sync::Arc::new)
-}
-
-/// Collect the operator-configured `anthropic-beta` floor: the union of
-/// the provider and model `header_extras["anthropic-beta"]` values
-/// (comma-split, trimmed, deduplicated, visit order preserved). Client/
-/// ingress betas are deliberately excluded -- those ride on
-/// `req.anthropic_beta`.
-pub fn operator_betas(
-    provider_extras: Option<&BTreeMap<String, String>>,
-    model_extras: &BTreeMap<String, String>,
-) -> Vec<String> {
-    let provider_val = provider_extras
-        .and_then(|m| {
-            m.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
-                .map(|(_, v)| v.as_str())
-        })
-        .unwrap_or("");
-    let model_val = model_extras
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
-        .map_or("", |(_, v)| v.as_str());
-
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut out: Vec<String> = Vec::new();
-    for raw in [provider_val, model_val] {
-        for piece in raw.split(',') {
-            let t = piece.trim();
-            if !t.is_empty() && seen.insert(t.to_string()) {
-                out.push(t.to_string());
-            }
-        }
-    }
-    out
 }
 
 /// Merge per-provider and per-model `header_extras` into the

@@ -3343,8 +3343,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `[calibration]` kill switch the window gate also calls
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays` (which also stamps `routectl_internal.max_output_tokens`
-  on every egress and `fills_max_tokens` from `wire_check::fills_max_tokens`),
-  `operator_betas`, `operator_payload_extras`, the
+  on every egress and `fills_max_tokens` from `wire_check::fills_max_tokens`,
+  and the operator beta floor from `beta_capability::operator_betas`),
+  `operator_payload_extras`, the
   `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
 - `src/router/edit_declare.rs` -- router-side wire-check edit declarations:
   each transform that changes a fidelity-lane body (model rename, operator
@@ -4342,7 +4343,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`beta_capability_key`, `beta_flag_of`, `capability_key_is_beta`) and
   `BetaSeedScope`, plus `beta_override_key` (a beta key with its flag
   ASCII-lowercased, any other key unchanged: the form override cells and their
-  lookups key on, so overrides match client flags case-insensitively); the
+  lookups key on, so overrides match client flags case-insensitively) and
+  `operator_betas` (the provider + model `header_extras["anthropic-beta"]`
+  floor, read by the dispatch overlay, the pin predicate and the factory
+  beta-floor warnings); the
   module is crate-internal, the root re-exports `capability_key_is_beta`,
   `beta_override_key`, `BetaSeedScope`, and (test-utils) the constructor
 - `src/beta_seed.rs` -- `BEDROCK_BETA_SEED` / `BEDROCK_SEED_PROVIDER_KIND`, the
@@ -4911,7 +4915,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `reprobe` action matches the dispatch path's lapse, and
   `lane_strips_capability(config, provider_entry, models, capability)`
   mirrors the filter's strip-vs-route policy (essential list + operator beta
-  floor via `router::operator_betas`)
+  floor via `beta_capability::operator_betas`)
 - `src/capability_precedence.rs` -- the one pure precedence resolution for a
   `(target, capability)` cell, `pin > override > learned > seed > prior`,
   staged so a decided cell never reaches the claiming learned read:

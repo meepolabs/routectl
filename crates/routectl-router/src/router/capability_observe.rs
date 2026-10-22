@@ -139,9 +139,18 @@ pub struct CapabilityObserveEvent {
 /// credential source), so a scope settled after such a reload admits nothing
 /// the new config would refuse.
 ///
-/// [`Router::observe_response_evidence`] takes it by value, so a holder
-/// settles its scope once.
-#[derive(Debug, Clone)]
+/// [`Router::observe_response_evidence`] takes it by value and the type is
+/// not `Clone`, so an attempt's scope settles at most once: two settlements
+/// of one attempt would count as the corroboration of two distinct attempts.
+/// A holder that must itself be cloned shares one take-once slot among its
+/// clones (an `Arc<Mutex<Option<EvidenceScope>>>` settled through
+/// `Option::take`), never a copy of the scope.
+///
+/// ```compile_fail,E0277
+/// fn duplicable<T: Clone>() {}
+/// duplicable::<routectl_router::router::EvidenceScope>();
+/// ```
+#[derive(Debug)]
 pub struct EvidenceScope {
     /// The served target's routing state key (the WARN's `state_key`).
     state_key: String,
