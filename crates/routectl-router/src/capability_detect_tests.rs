@@ -510,3 +510,74 @@ fn degraded_non_strict_prose_yields_zero_on_a_clean_stop() {
     assert!(clean_stop_choice(&resp).is_some());
     assert!(detect(&DetectorContext::default(), &resp).is_empty());
 }
+
+// --- census: the detectable-capability list covers every detector ---
+
+/// A clean response on which every verified detector fires: a JSON body
+/// carrying the required key, a web-search request count, a cache read, and
+/// reasoning tokens.
+fn every_detector_verified() -> (DetectorContext, ChatResponse) {
+    let ctx = DetectorContext {
+        strict_output_requested: true,
+        requested_schema_required_keys: vec!["name".to_string()],
+        reasoning_requested: true,
+        ..Default::default()
+    };
+    let resp = chat_response(json!({
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "{\"name\":\"ok\"}"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+            "cache_read_input_tokens": 64,
+            "reasoning_tokens": 40,
+            "server_tool_use": {"web_search_requests": 1}
+        }
+    }));
+    (ctx, resp)
+}
+
+/// A clean response on which every suspected-absence detector fires: a prose
+/// body under a strict request, and a forced search with no evidence.
+fn every_detector_suspect() -> (DetectorContext, ChatResponse) {
+    let ctx = DetectorContext {
+        strict_output_requested: true,
+        forced_web_search: true,
+        ..Default::default()
+    };
+    (ctx, gate_response(Some("stop")))
+}
+
+/// Every key a detector can emit is in the list an evidence reader keys its
+/// lanes on, and every listed key has a detector: a key missing from the list
+/// would have its evidence silently dropped.
+#[test]
+fn detectable_capabilities_is_exactly_the_set_the_detectors_emit() {
+    // Arrange
+    let (verified_ctx, verified_resp) = every_detector_verified();
+    let (suspect_ctx, suspect_resp) = every_detector_suspect();
+
+    // Act
+    let verified = detect(&verified_ctx, &verified_resp);
+    let suspect = detect(&suspect_ctx, &suspect_resp);
+
+    // Assert: the fixtures cover every detector `detect` runs, so a new
+    // detector fails here until a fixture makes it fire.
+    let detectors = include_str!("capability_detect.rs")
+        .lines()
+        .filter(|line| line.starts_with("fn detect_"))
+        .count();
+    assert_eq!(detectors, 4, "a new detector needs a firing fixture here");
+    assert_eq!(verified.len(), 4, "every verified detector fires once");
+    assert_eq!(suspect.len(), 2, "every suspect detector fires once");
+    let emitted: std::collections::BTreeSet<&str> = verified
+        .iter()
+        .chain(&suspect)
+        .map(|obs| obs.capability_key)
+        .collect();
+    let listed: std::collections::BTreeSet<&str> =
+        DETECTABLE_CAPABILITIES.iter().copied().collect();
+    assert_eq!(emitted, listed);
+}

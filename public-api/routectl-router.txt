@@ -1081,6 +1081,7 @@ pub const fn routectl_router::ProviderEntry::auto_emit_top_level_breakpoint(&sel
 pub fn routectl_router::ProviderEntry::cache_capability(&self) -> routectl_router::CacheCapability
 pub fn routectl_router::ProviderEntry::classifiable_egress_base_url(&self) -> core::option::Option<alloc::borrow::Cow<'_, str>>
 pub fn routectl_router::ProviderEntry::codex_version(&self) -> core::option::Option<&str>
+pub const fn routectl_router::ProviderEntry::egress_kind(&self) -> routectl_core::wire_check::lane::EgressKind
 pub fn routectl_router::ProviderEntry::forwarded_base_url(&self) -> core::option::Option<&str>
 pub fn routectl_router::ProviderEntry::gemini(impl core::convert::Into<alloc::string::String>) -> Self
 pub const fn routectl_router::ProviderEntry::header_extras(&self) -> &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
@@ -5166,7 +5167,7 @@ pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::learned_lane_projection(&self) -> routectl_router::LearnedLaneProjection
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::observe_response_evidence(&self, &routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>)
+pub fn routectl_router::router::Router::observe_response_evidence(&self, routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>)
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
 pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize
@@ -8096,6 +8097,7 @@ pub routectl_router::Layer::Learned
 pub routectl_router::Layer::Override
 pub routectl_router::Layer::Pin
 pub routectl_router::Layer::Prior
+pub routectl_router::Layer::Representability
 pub routectl_router::Layer::Seed
 impl routectl_router::Layer
 pub const fn routectl_router::Layer::as_str(self) -> &'static str
@@ -8164,10 +8166,14 @@ pub fn routectl_router::Layer::into_shared(self) -> Shared
 pub enum routectl_router::LearnedInput
 pub routectl_router::LearnedInput::Acting
 pub routectl_router::LearnedInput::Acting::phase: routectl_core::capability::FailurePhase
-pub routectl_router::LearnedInput::Acting::source: core::option::Option<routectl_core::capability::EvidenceSource>
+pub routectl_router::LearnedInput::Acting::source: routectl_core::capability::EvidenceSource
 pub routectl_router::LearnedInput::Acting::tier: routectl_core::capability::SignalTier
 pub routectl_router::LearnedInput::Lapsed
+pub routectl_router::LearnedInput::Lapsed::source: routectl_core::capability::EvidenceSource
+pub routectl_router::LearnedInput::Uncorroborated
+pub routectl_router::LearnedInput::Uncorroborated::source: routectl_core::capability::EvidenceSource
 pub routectl_router::LearnedInput::Verified
+pub routectl_router::LearnedInput::Verified::source: routectl_core::capability::EvidenceSource
 impl routectl_router::LearnedInput
 pub fn routectl_router::LearnedInput::from_entry(&routectl_router::LearnedRegistryEntry, std::time::Instant) -> core::option::Option<Self>
 impl core::clone::Clone for routectl_router::LearnedInput
@@ -9204,6 +9210,7 @@ pub const fn routectl_router::ProviderEntry::auto_emit_top_level_breakpoint(&sel
 pub fn routectl_router::ProviderEntry::cache_capability(&self) -> routectl_router::CacheCapability
 pub fn routectl_router::ProviderEntry::classifiable_egress_base_url(&self) -> core::option::Option<alloc::borrow::Cow<'_, str>>
 pub fn routectl_router::ProviderEntry::codex_version(&self) -> core::option::Option<&str>
+pub const fn routectl_router::ProviderEntry::egress_kind(&self) -> routectl_core::wire_check::lane::EgressKind
 pub fn routectl_router::ProviderEntry::forwarded_base_url(&self) -> core::option::Option<&str>
 pub fn routectl_router::ProviderEntry::gemini(impl core::convert::Into<alloc::string::String>) -> Self
 pub const fn routectl_router::ProviderEntry::header_extras(&self) -> &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
@@ -11920,8 +11927,10 @@ pub struct routectl_router::CellContext
 pub routectl_router::CellContext::beta_flag: bool
 pub routectl_router::CellContext::capability_enabled: bool
 pub routectl_router::CellContext::droppable: bool
+pub routectl_router::CellContext::representable: bool
 impl routectl_router::CellContext
-pub fn routectl_router::CellContext::new(&str, &[alloc::string::String], bool) -> Self
+pub fn routectl_router::CellContext::for_lane(&routectl_router::config::Config, &str, &str, &str) -> Self
+pub fn routectl_router::CellContext::new(&str, &routectl_router::CapabilityConfig, core::option::Option<routectl_core::wire_check::lane::EgressKind>, &str) -> Self
 impl core::clone::Clone for routectl_router::CellContext
 pub fn routectl_router::CellContext::clone(&self) -> routectl_router::CellContext
 impl core::cmp::Eq for routectl_router::CellContext
@@ -16333,6 +16342,10 @@ pub fn routectl_router::RequestEstimate::into_shared(self) -> Shared
 pub struct routectl_router::Resolution
 impl routectl_router::Resolution
 pub const fn routectl_router::Resolution::as_str(&self) -> &'static str
+pub const fn routectl_router::Resolution::display_layer(&self) -> core::option::Option<routectl_router::Layer>
+pub const fn routectl_router::Resolution::display_source(&self) -> core::option::Option<&'static str>
+pub const fn routectl_router::Resolution::display_supported(&self) -> core::option::Option<bool>
+pub const fn routectl_router::Resolution::display_verdict(&self) -> &'static str
 pub const fn routectl_router::Resolution::hard_exclusion_eligible(&self) -> bool
 pub const fn routectl_router::Resolution::layer(&self) -> core::option::Option<routectl_router::Layer>
 pub const fn routectl_router::Resolution::learned(&self) -> core::option::Option<routectl_router::LearnedInput>
@@ -16846,7 +16859,7 @@ pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::learned_lane_projection(&self) -> routectl_router::LearnedLaneProjection
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::observe_response_evidence(&self, &routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>)
+pub fn routectl_router::router::Router::observe_response_evidence(&self, routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>)
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
 pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize
@@ -18385,10 +18398,20 @@ pub const routectl_router::CATALOG_VERSION: u32
 pub const routectl_router::CONFIG_PROVIDER_KINDS: &[&str]
 pub const routectl_router::CURRENT_CONFIG_VERSION: u32
 pub const routectl_router::CURRENT_VOCAB_VERSION: i64
+pub const routectl_router::FORCED_SUPPORTED: &str
+pub const routectl_router::FORCED_UNSUPPORTED: &str
 pub const routectl_router::K_SESSION_CAPACITY: usize
 pub const routectl_router::MAX_POOL_MEMBERS: usize
 pub const routectl_router::RECHECK_BACKSTOP: core::time::Duration
+pub const routectl_router::SOURCE_LIVE: &str
+pub const routectl_router::SOURCE_OVERRIDE: &str
+pub const routectl_router::SOURCE_PIN: &str
+pub const routectl_router::SOURCE_PRIOR: &str
+pub const routectl_router::SOURCE_PROBE: &str
+pub const routectl_router::SOURCE_REPRESENTABILITY: &str
+pub const routectl_router::SOURCE_SEED: &str
 pub const routectl_router::VERDICT_MIXED: &str
+pub const routectl_router::VERDICT_UNREPRESENTABLE: &str
 pub trait routectl_router::CalibrationLedgerReader: core::marker::Send + core::marker::Sync
 pub fn routectl_router::CalibrationLedgerReader::read_calibration_samples(&self, std::time::SystemTime, usize) -> alloc::vec::Vec<routectl_router::CalibrationLedgerRow>
 pub trait routectl_router::CapabilityLedgerReader: core::marker::Send + core::marker::Sync
@@ -18412,8 +18435,10 @@ pub fn routectl_router::baked_row_map() -> alloc::collections::btree::map::BTree
 pub fn routectl_router::baked_shrink_counts() -> routectl_router::ShrinkCounts
 pub fn routectl_router::baked_table_rows() -> alloc::vec::Vec<routectl_router::catalog::BakedPricingRow>
 pub fn routectl_router::bare_oauth_pool_candidates(&toml_edit::document::DocumentMut) -> alloc::vec::Vec<routectl_router::BareOauthRef>
+pub fn routectl_router::beta_flag_of(&str) -> core::option::Option<&str>
 pub fn routectl_router::beta_override_key(&str) -> alloc::string::String
 pub fn routectl_router::beta_seed_state(routectl_router::BetaSeedScope, &str, &str, impl core::ops::function::FnOnce() -> bool) -> core::option::Option<routectl_router::SeedCell>
+pub fn routectl_router::beta_seed_state_for_key(routectl_router::BetaSeedScope, &str, &str, impl core::ops::function::FnOnce() -> bool) -> core::option::Option<routectl_router::SeedCell>
 pub fn routectl_router::break_even_k(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate) -> core::option::Option<f64>
 pub fn routectl_router::build_import_candidate(routectl_router::CandidateOrigin, &serde_json::value::Value, &serde_json::value::Value, &str) -> routectl_router::ImportCandidate
 pub async fn routectl_router::build_provider(&str, &routectl_router::ProviderEntry, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>) -> routectl_core::error::Result<alloc::sync::Arc<dyn routectl_core::provider::Provider>>
@@ -18471,6 +18496,8 @@ pub fn routectl_router::migrate_v3_to_v4(&mut toml_edit::document::DocumentMut) 
 pub fn routectl_router::migrate_v4_to_v5(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::StepOutcome, routectl_router::Refusal>
 pub fn routectl_router::models_routed_at(&toml_edit::document::DocumentMut, &str) -> alloc::vec::Vec<alloc::string::String>
 pub fn routectl_router::near_lossless_candidate(&routectl_core::schema::ChatRequest, &[routectl_router::ElisionMark]) -> core::option::Option<routectl_router::PrefixReductionCandidate>
+pub fn routectl_router::operator_pins_capability(&routectl_router::config::Config, &str, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, &str) -> bool
+pub fn routectl_router::operator_pins_flag(&routectl_router::config::Config, &str, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, &str) -> bool
 pub fn routectl_router::overall_exit(&[routectl_router::Finding]) -> i32
 pub fn routectl_router::overlay_default_path() -> std::path::PathBuf
 pub const fn routectl_router::overlay_revision(&routectl_router::CatalogOverlay) -> u64
@@ -18489,7 +18516,7 @@ pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::Capabili
 pub fn routectl_router::rebuild_capabilities_with_values(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::LearnedCapabilityRegistry, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ProviderEntry>) -> (routectl_router::CapabilityRebuildSummary, routectl_router::ReplayedFieldValues)
 pub fn routectl_router::rebuild_into(&dyn routectl_router::LedgerReader, &routectl_router::KSessionStore, std::time::SystemTime, usize)
 pub fn routectl_router::refuses_beta_bag_key(core::option::Option<routectl_core::wire_check::lane::EgressKind>, &str) -> bool
-pub const fn routectl_router::resolve_display(routectl_router::DisplayInputs) -> routectl_router::Resolution
+pub fn routectl_router::resolve_display(routectl_router::DisplayInputs) -> routectl_router::Resolution
 pub fn routectl_router::resolve_display_action(routectl_router::ActionInputs) -> &'static str
 pub const fn routectl_router::resolve_display_verdict(core::option::Option<routectl_router::OverrideVerdict>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<routectl_router::SeedCell>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
 pub fn routectl_router::resolve_effective_row(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &routectl_router::CatalogOverlay) -> routectl_router::catalog::EffectiveRow

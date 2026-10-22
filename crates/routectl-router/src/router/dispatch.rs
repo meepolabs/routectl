@@ -717,7 +717,7 @@ impl Router {
                         // admitted.
                         if let Some(scope) = evidence {
                             self.observe_response_evidence(
-                                &scope,
+                                scope,
                                 &resp,
                                 EvidencePolicy {
                                     admit_suspect: true,

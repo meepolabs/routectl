@@ -17,7 +17,6 @@ use routectl_core::wire_check::{
 };
 use serde_json::Value;
 
-use crate::config::ProviderEntry;
 use crate::wire_check_state::WireCheckState;
 
 use super::{DispatchTarget, Router};
@@ -30,40 +29,6 @@ pub(super) const fn fills_max_tokens(egress: EgressKind) -> bool {
         egress,
         EgressKind::AnthropicApi | EgressKind::AnthropicApiMantle | EgressKind::BedrockInvoke
     )
-}
-
-/// The egress kind a provider entry sends with. Bedrock splits by API shape
-/// and every Mantle sub-lane is its own kind, because each sends a different
-/// wire body than its standard sibling.
-pub(super) const fn egress_kind_of(entry: &ProviderEntry) -> EgressKind {
-    match entry {
-        #[cfg(feature = "bedrock")]
-        ProviderEntry::AnthropicApi {
-            bedrock_mantle: Some(_),
-            ..
-        } => EgressKind::AnthropicApiMantle,
-        ProviderEntry::AnthropicApi { .. } => EgressKind::AnthropicApi,
-        #[cfg(feature = "bedrock")]
-        ProviderEntry::OpenaiCompat {
-            bedrock_mantle: Some(_),
-            ..
-        } => EgressKind::OpenaiCompatMantle,
-        ProviderEntry::OpenaiCompat { .. } => EgressKind::OpenaiCompat,
-        #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-        ProviderEntry::OpenaiResponses {
-            bedrock_mantle: Some(_),
-            ..
-        } => EgressKind::OpenaiResponsesMantle,
-        #[cfg(feature = "openai-responses")]
-        ProviderEntry::OpenaiResponses { .. } => EgressKind::OpenaiResponses,
-        #[cfg(feature = "bedrock")]
-        ProviderEntry::Bedrock { api_shape, .. } => match api_shape {
-            crate::config::BedrockApiShapeConfig::Invoke => EgressKind::BedrockInvoke,
-            crate::config::BedrockApiShapeConfig::Converse => EgressKind::BedrockConverse,
-        },
-        #[cfg(feature = "gemini")]
-        ProviderEntry::Gemini { .. } => EgressKind::Gemini,
-    }
 }
 
 impl Router {

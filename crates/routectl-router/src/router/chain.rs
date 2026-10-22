@@ -319,7 +319,7 @@ impl Router {
             // a seat constructor may have already populated).
             target.use_forwarded_credential =
                 provider_entry.is_some_and(|entry| entry.forwarded_base_url().is_some());
-            target.egress_kind = provider_entry.map(super::wire_check::egress_kind_of);
+            target.egress_kind = provider_entry.map(crate::config::ProviderEntry::egress_kind);
             if target.class_overrides.is_empty()
                 && let Some(entry) = provider_entry
             {

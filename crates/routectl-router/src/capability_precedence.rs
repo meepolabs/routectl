@@ -2,23 +2,24 @@
 //!
 //! Every surface that decides or shows what happens to a capability on a
 //! target resolves it here, in the settled order
-//! `pin > override > learned > seed > prior`. The resolution is pure: it
-//! reads already-gathered inputs and never claims a probe slot, flips
-//! `in_flight`, or touches a metric.
+//! `pin > representability > override > learned > seed > prior`. The
+//! resolution is pure: it reads already-gathered inputs and never claims a
+//! probe slot, flips `in_flight`, or touches a metric.
 //!
 //! It is staged so a dispatch caller never runs the claiming learned read
 //! for a cell the operator already decided:
 //!
 //! 1. [`resolve_operator`] applies the operator tiers (the wire pin and the
-//!    override registry). It returns [`Stage::Decided`] when they settle
-//!    both axes, else [`Stage::Open`] carrying an [`OpenCell`].
+//!    override registry) and the representability check between them. It
+//!    returns [`Stage::Decided`] when they settle both axes, else
+//!    [`Stage::Open`] carrying an [`OpenCell`].
 //! 2. [`resolve_open`] applies the learned, seed and prior tiers to an
 //!    [`OpenCell`]. Only the caller holding an `OpenCell` can reach it, so the
 //!    lower tiers can never be resolved without the operator pass.
 //!
-//! [`resolve_display`] is the display mode (doctor, status): it gathers every
-//! tier from snapshot reads, returns the same winner, and also names the next
-//! tier that had an opinion in [`Resolution::overridden`].
+//! The display mode (doctor, status; `capability_display::resolve_display`)
+//! gathers every tier from snapshot reads, returns the same winner, and also
+//! names the next tier that had an opinion in [`Resolution::overridden`].
 //!
 //! A [`Resolution`] has two axes, because the beta path and the feature path
 //! act on different ones: [`Wire`] (send, withhold or strip the capability)
@@ -26,19 +27,42 @@
 //! forces `Wire::Send`: on a beta key that decides the cell outright, and on a
 //! feature key the routing is still decided by the tiers below with strip
 //! ruled out, because a pinned token is re-added after any strip.
+//!
+//! The input gatherers live here too, so dispatch and display cannot gather
+//! differently: [`operator_pins_capability`] is the one pin predicate and
+//! [`CellContext::new`] the one context builder.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
 use routectl_core::wire_check::EgressKind;
-use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
 
-use crate::capability_display::{
-    ACTION_ALLOW, ACTION_DROP, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY, ACTION_STRIP,
-    ACTION_WITHHOLD,
-};
-use crate::learned_capability::{BetaLaneReading, LearnedRegistryEntry};
+use crate::config::{CapabilityConfig, Config, ProviderEntry};
+use crate::learned_capability::{BetaLaneReading, LearnedRegistryEntry, negative_is_advisory};
 use crate::override_registry::OverrideVerdict;
+
+/// Action token: an operator route-away override hard-drops the target.
+pub const ACTION_DROP: &str = "drop";
+/// Action token: the target is demoted to the tail of its chain (an acting
+/// learned negative, or a catalog `prior=false`).
+pub const ACTION_ROUTE_AWAY: &str = "route_away";
+/// Action token: the capability is stripped from the request in place.
+pub const ACTION_STRIP: &str = "strip";
+/// Action token: the negative's decay window has lapsed, so the next request
+/// carrying the capability re-verifies it on this target.
+pub const ACTION_REPROBE: &str = "reprobe";
+/// Action token: a positive signal; the target serves the capability.
+pub const ACTION_ALLOW: &str = "allow";
+/// Action token: the target stays in the chain but does not send the beta
+/// flag (a beta-key negative, a beta-key override, or the shipped seed).
+pub const ACTION_WITHHOLD: &str = "withhold";
+/// Action token: no signal acts on routing for this cell.
+pub const ACTION_NONE: &str = "none";
+/// Action token: the nicknames sharing a lane resolve the cell to different
+/// actions (one carries an override or a pinned beta the other does not), so
+/// no single action describes it; the per-nickname actions ride alongside.
+pub const ACTION_MIXED: &str = "mixed";
 
 /// The shipped beta seed's state on one cell it covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +100,9 @@ pub enum Routing {
 pub enum Layer {
     /// An operator wire floor pins the beta token.
     Pin,
+    /// The lane cannot carry the beta flag at all, so it is withheld whatever
+    /// the tiers below say.
+    Representability,
     /// An operator `[capability.overrides]` entry.
     Override,
     /// The learned capability registry.
@@ -91,6 +118,7 @@ impl Layer {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pin => "pin",
+            Self::Representability => "representability",
             Self::Override => "override",
             Self::Learned => "learned",
             Self::Seed => "seed",
@@ -100,94 +128,117 @@ impl Layer {
 }
 
 /// The learned registry's view of one cell, as the resolution consumes it.
-///
-/// A caller passes `None` for a cell with no entry and for an entry that does
-/// not act (an uncorroborated inferred negative); the resolution does not
-/// re-derive whether an entry acts.
+/// `None` stands for a cell with no resident entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LearnedInput {
-    /// An acting negative inside its decay window.
+    /// An acting negative inside its decay window. A live F3 negative is
+    /// advisory: it carries no opinion, so the tiers below decide.
     Acting {
         /// The detection phase that attributed it.
         phase: FailurePhase,
         /// The signal tier of the negative.
         tier: SignalTier,
-        /// Where the evidence came from, or `None` when the read that
-        /// produced the input already applied the advisory rule for a live
-        /// F3 negative and does not carry the source.
-        source: Option<EvidenceSource>,
+        /// Where the evidence came from.
+        source: EvidenceSource,
     },
     /// A negative whose decay lapsed into a re-probe. A dispatch read that
     /// claimed the re-probe slot maps here.
-    Lapsed,
+    Lapsed {
+        /// Where the negative's evidence came from.
+        source: EvidenceSource,
+    },
     /// A verified-working positive.
-    Verified,
+    Verified {
+        /// Where the positive's evidence came from.
+        source: EvidenceSource,
+    },
+    /// A resident negative that does not act yet: an inferred signal still
+    /// waiting for corroboration. It has no opinion, but a display surface
+    /// still shows it. A dispatch read never produces it.
+    Uncorroborated {
+        /// Where the evidence came from.
+        source: EvidenceSource,
+    },
 }
 
 impl LearnedInput {
     /// The input a dispatch read yields. `ProbeAdmitted` is a lapsed negative
-    /// whose re-probe slot this read claimed. The registry maps a live F3
-    /// negative to `NoVerdict` before the read returns, so an acting reading
-    /// never needs its source to be resolved.
+    /// whose re-probe slot this read claimed.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn from_reading(reading: BetaLaneReading) -> Option<Self> {
         match reading {
-            BetaLaneReading::ActingNegative { phase, tier } => Some(Self::Acting {
+            BetaLaneReading::ActingNegative {
                 phase,
                 tier,
-                source: None,
+                source,
+            } => Some(Self::Acting {
+                phase,
+                tier,
+                source,
             }),
-            BetaLaneReading::ProbeAdmitted => Some(Self::Lapsed),
-            BetaLaneReading::VerifiedPositive => Some(Self::Verified),
+            BetaLaneReading::ProbeAdmitted { source } => Some(Self::Lapsed { source }),
+            BetaLaneReading::VerifiedPositive { source } => Some(Self::Verified { source }),
             BetaLaneReading::NoVerdict => None,
         }
     }
 
     /// The input a snapshot entry yields against `now`, for a display
-    /// surface. `None` for an entry that does not act. A live F3 negative is
-    /// kept as `Acting` whatever its decay, so it carries no opinion rather
-    /// than reading as a re-probe the dispatch path would never admit.
+    /// surface, by the rules the dispatch read applies. A live F3 negative is
+    /// kept as `Acting` whatever its decay: the dispatch path never admits a
+    /// re-probe for it. A positive that does not act (never minted today) has
+    /// no input.
     pub fn from_entry(entry: &LearnedRegistryEntry, now: Instant) -> Option<Self> {
-        if !crate::learned_capability::signal_acts(entry.signal_tier, entry.observations) {
-            return None;
+        let source = entry.source;
+        let acts = crate::learned_capability::signal_acts(entry.signal_tier, entry.observations);
+        match entry.verdict {
+            Verdict::VerifiedWorking => acts.then_some(Self::Verified { source }),
+            Verdict::LearnedBroken(_) if !acts => Some(Self::Uncorroborated { source }),
+            Verdict::LearnedBroken(phase) => {
+                let lapsed = !negative_is_advisory(phase, source)
+                    && crate::learned_capability::negative_lapsed(
+                        entry.expires_at,
+                        entry.recheck_owned,
+                        now,
+                    );
+                Some(if lapsed {
+                    Self::Lapsed { source }
+                } else {
+                    Self::Acting {
+                        phase,
+                        tier: entry.signal_tier,
+                        source,
+                    }
+                })
+            }
+            _ => None,
         }
-        let Verdict::LearnedBroken(phase) = entry.verdict else {
-            return matches!(entry.verdict, Verdict::VerifiedWorking).then_some(Self::Verified);
-        };
-        let acting = Self::Acting {
-            phase,
-            tier: entry.signal_tier,
-            source: Some(entry.source),
-        };
-        if is_advisory(acting) {
-            return Some(acting);
-        }
-        if crate::learned_capability::negative_lapsed(entry.expires_at, entry.recheck_owned, now) {
-            Some(Self::Lapsed)
-        } else {
-            Some(acting)
+    }
+
+    pub(crate) const fn source(self) -> EvidenceSource {
+        match self {
+            Self::Acting { source, .. }
+            | Self::Lapsed { source }
+            | Self::Verified { source }
+            | Self::Uncorroborated { source } => source,
         }
     }
 }
 
-/// Whether an acting negative is the advisory live F3 kind, which is shown
-/// but routes nothing until a probe settles it.
+/// Whether an input is the advisory live F3 kind, which is shown but routes
+/// nothing until a probe settles it.
 const fn is_advisory(learned: LearnedInput) -> bool {
-    matches!(
-        learned,
-        LearnedInput::Acting {
-            phase: FailurePhase::F3,
-            source: Some(EvidenceSource::Live),
-            ..
-        }
-    )
+    match learned {
+        LearnedInput::Acting { phase, source, .. } => negative_is_advisory(phase, source),
+        _ => false,
+    }
 }
 
 /// The facts about a cell every tier reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellContext {
     /// The `[capability] enabled` kill switch. Off, the learned and prior
-    /// tiers have no opinion; the operator tiers and the seed still act.
+    /// tiers have no opinion; the operator tiers, representability and the
+    /// seed still act.
     pub capability_enabled: bool,
     /// Whether the capability is a beta-flag key. A beta key acts on the wire
     /// only and never leaves `Routing::Keep`.
@@ -195,21 +246,67 @@ pub struct CellContext {
     /// Whether the capability is a droppable the operator has not marked
     /// essential, so an F1 negative on it may be stripped in place.
     pub droppable: bool,
+    /// Whether the lane's wire can carry the capability at all. False only
+    /// for a beta flag on a lane that refuses the beta bag key; consulted
+    /// after the pin and before every other tier.
+    pub representable: bool,
 }
 
 impl CellContext {
-    /// The context of `capability_key`, with the operator's
-    /// `[capability] essential` list applied to the droppable check.
-    pub fn new(capability_key: &str, essential: &[String], capability_enabled: bool) -> Self {
+    /// The context of `capability_key` on a lane sending with `egress_kind`
+    /// to `upstream`, under the operator's `[capability]` table (the kill
+    /// switch, and the `essential` list applied to the droppable check).
+    pub fn new(
+        capability_key: &str,
+        capability: &CapabilityConfig,
+        egress_kind: Option<EgressKind>,
+        upstream: &str,
+    ) -> Self {
+        let beta_flag = crate::beta_capability::capability_key_is_beta(capability_key);
         Self {
-            capability_enabled,
-            beta_flag: crate::beta_capability::capability_key_is_beta(capability_key),
+            capability_enabled: capability.enabled,
+            beta_flag,
             droppable: matches!(
-                crate::capability_strip::effective_action_for(capability_key, essential),
+                crate::capability_strip::effective_action_for(
+                    capability_key,
+                    &capability.essential
+                ),
                 crate::capability_strip::CapabilityAction::Strip(_)
             ),
+            representable: !(beta_flag
+                && crate::beta_capability::refuses_beta_bag_key(egress_kind, upstream)),
         }
     }
+
+    /// [`Self::new`] for a lane named by its provider entry, reading the
+    /// egress kind off the entry. An entry absent from `config` has no
+    /// egress kind.
+    pub fn for_lane(
+        config: &Config,
+        provider_entry: &str,
+        upstream: &str,
+        capability_key: &str,
+    ) -> Self {
+        Self::new(
+            capability_key,
+            &config.capability,
+            config
+                .providers
+                .get(provider_entry)
+                .map(ProviderEntry::egress_kind),
+            upstream,
+        )
+    }
+}
+
+/// What a display surface renders for a cell: the strongest tier holding a
+/// signal, whether or not that signal acts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown {
+    pub layer: Layer,
+    pub verdict: &'static str,
+    pub supported: bool,
+    pub source: &'static str,
 }
 
 /// The resolution of one cell.
@@ -222,6 +319,7 @@ pub struct Resolution {
     supported: Option<bool>,
     learned: Option<LearnedInput>,
     pinned: bool,
+    shown: Option<Shown>,
 }
 
 impl Resolution {
@@ -240,7 +338,20 @@ impl Resolution {
             supported,
             learned: None,
             pinned,
+            shown: None,
         }
+    }
+
+    /// This resolution with its display-mode facts: the next tier that had
+    /// an opinion and the signal a display surface renders.
+    pub(crate) const fn with_display(
+        mut self,
+        overridden: Option<Layer>,
+        shown: Option<Shown>,
+    ) -> Self {
+        self.overridden = overridden;
+        self.shown = shown;
+        self
     }
 
     /// The wire axis.
@@ -260,8 +371,8 @@ impl Resolution {
         self.layer
     }
 
-    /// The next tier below the winner that had an opinion. Filled by
-    /// [`resolve_display`] only; always `None` on the dispatch path.
+    /// The next tier below the winner that had an opinion. Filled by the
+    /// display mode only; always `None` on the dispatch path.
     pub const fn overridden(&self) -> Option<Layer> {
         self.overridden
     }
@@ -285,7 +396,7 @@ impl Resolution {
     /// Whether the learned tier admitted a re-probe: the target is kept and
     /// the capability sent so the request re-tests it.
     pub const fn reprobe(&self) -> bool {
-        matches!(self.learned, Some(LearnedInput::Lapsed))
+        matches!(self.learned, Some(LearnedInput::Lapsed { .. }))
     }
 
     /// The cell as one display action token.
@@ -300,6 +411,52 @@ impl Resolution {
                 (Some(Layer::Prior), _) | (_, None | Some(false)) => ACTION_NONE,
                 (_, Some(true)) => ACTION_ALLOW,
             },
+        }
+    }
+
+    /// The layer a display surface renders: the strongest tier holding a
+    /// signal on the cell, whether or not it acts. It differs from
+    /// [`Self::layer`] where a signal is present but has no opinion: an
+    /// advisory live F3 negative, an uncorroborated inferred one, or any
+    /// learned or prior signal with the kill switch off all show `learned`
+    /// (or `prior`) while the action comes from the tier that decided.
+    /// Filled by the display mode only; `None` on the dispatch path and for a
+    /// cell with no signal.
+    pub const fn display_layer(&self) -> Option<Layer> {
+        match self.shown {
+            Some(shown) => Some(shown.layer),
+            None => None,
+        }
+    }
+
+    /// The display verdict token of [`Self::display_layer`]'s signal: the
+    /// core verdict vocabulary for a learned, seed or prior signal, the
+    /// panel-only override tokens (`forced_supported` / `forced_unsupported`),
+    /// `forced_supported` for a pin and `unrepresentable` for a flag the lane
+    /// cannot carry; `unknown` with no signal.
+    pub const fn display_verdict(&self) -> &'static str {
+        match self.shown {
+            Some(shown) => shown.verdict,
+            None => Verdict::Unknown.as_str(),
+        }
+    }
+
+    /// The support polarity of [`Self::display_layer`]'s signal; `None` with
+    /// no signal.
+    pub const fn display_supported(&self) -> Option<bool> {
+        match self.shown {
+            Some(shown) => Some(shown.supported),
+            None => None,
+        }
+    }
+
+    /// The source tag of [`Self::display_layer`]'s signal: `pin`,
+    /// `representability`, `override`, `live`, `probe`, `seed` or `prior`;
+    /// `None` with no signal.
+    pub const fn display_source(&self) -> Option<&'static str> {
+        match self.shown {
+            Some(shown) => Some(shown.source),
+            None => None,
         }
     }
 
@@ -355,8 +512,9 @@ pub enum Stage {
     Open(OpenCell),
 }
 
-/// Apply the operator tiers: the wire pin, then the override registry's
-/// verdict (which carries `force_supported` as
+/// Apply the operator tiers: the wire pin, then representability (a flag
+/// the lane cannot carry is withheld unless pinned), then the override
+/// registry's verdict (which carries `force_supported` as
 /// [`OverrideVerdict::ForceSupported`]). The `ctx` is needed because a
 /// route-away override withholds a beta flag but drops a feature target.
 pub const fn resolve_operator(
@@ -364,12 +522,15 @@ pub const fn resolve_operator(
     override_verdict: Option<OverrideVerdict>,
     ctx: CellContext,
 ) -> Stage {
-    match pin_opinion(pinned, ctx) {
+    if let Some(decided) = pin_opinion(pinned, ctx) {
+        return Stage::Decided(decided);
+    }
+    if let Some(decided) = representability_opinion(pinned, ctx) {
+        return Stage::Decided(decided);
+    }
+    match override_opinion(pinned, override_verdict, ctx) {
         Some(decided) => Stage::Decided(decided),
-        None => match override_opinion(pinned, override_verdict, ctx) {
-            Some(decided) => Stage::Decided(decided),
-            None => Stage::Open(OpenCell { pinned, ctx }),
-        },
+        None => Stage::Open(OpenCell { pinned, ctx }),
     }
 }
 
@@ -392,55 +553,41 @@ pub const fn resolve_open(
     no_opinion(cell.pinned)
 }
 
-/// Every tier's inputs for one cell, for [`resolve_display`].
+/// Every tier's inputs for one cell, for the display mode
+/// (`resolve_display`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayInputs {
-    /// Whether an operator wire floor pins the capability.
+    /// Whether an operator wire floor pins the capability
+    /// ([`operator_pins_capability`]).
     pub pinned: bool,
     /// The override registry's verdict for the cell.
     pub override_verdict: Option<OverrideVerdict>,
-    /// The learned registry's snapshot view of the cell.
+    /// The learned registry's snapshot view of the cell
+    /// ([`LearnedInput::from_entry`]).
     pub learned: Option<LearnedInput>,
     /// The shipped beta seed's state on the cell.
     pub seed: Option<SeedCell>,
     /// The catalog prior for the cell.
     pub prior: Option<bool>,
-    /// The cell's context.
+    /// The cell's context ([`CellContext::new`] or [`CellContext::for_lane`]).
     pub ctx: CellContext,
 }
 
-/// Resolve a cell from snapshot reads and name the next tier below the
-/// winner that had an opinion. The winner is the staged resolution's.
-pub const fn resolve_display(inputs: DisplayInputs) -> Resolution {
+/// Every tier's opinion on a cell, strongest first; `None` where a tier has
+/// none. The display mode walks it to find the winner and the next opinion.
+pub const fn opinions(inputs: DisplayInputs) -> [Option<Resolution>; 6] {
     let cell = OpenCell {
         pinned: inputs.pinned,
         ctx: inputs.ctx,
     };
-    let opinions = [
+    [
         pin_opinion(inputs.pinned, inputs.ctx),
+        representability_opinion(inputs.pinned, inputs.ctx),
         override_opinion(inputs.pinned, inputs.override_verdict, inputs.ctx),
         learned_opinion(inputs.learned, cell),
         seed_opinion(inputs.seed, cell),
         prior_opinion(inputs.prior, cell),
-    ];
-    let mut winner: Option<Resolution> = None;
-    let mut index = 0;
-    while index < opinions.len() {
-        if let Some(opinion) = opinions[index] {
-            match winner {
-                None => winner = Some(opinion),
-                Some(mut won) => {
-                    won.overridden = opinion.layer;
-                    return won;
-                }
-            }
-        }
-        index += 1;
-    }
-    match winner {
-        Some(won) => won,
-        None => no_opinion(inputs.pinned),
-    }
+    ]
 }
 
 /// A pin decides a beta key outright; on a feature key it only rules out
@@ -456,6 +603,22 @@ const fn pin_opinion(pinned: bool, ctx: CellContext) -> Option<Resolution> {
         ))
     } else {
         None
+    }
+}
+
+/// A flag the lane cannot carry is withheld. A pin beats it: the operator
+/// floor re-adds the flag on the wire whatever the router decides.
+const fn representability_opinion(pinned: bool, ctx: CellContext) -> Option<Resolution> {
+    if ctx.representable || (pinned && ctx.beta_flag) {
+        None
+    } else {
+        Some(Resolution::new(
+            Wire::Withhold,
+            Routing::Keep,
+            Layer::Representability,
+            Some(false),
+            pinned,
+        ))
     }
 }
 
@@ -498,8 +661,9 @@ const fn learned_opinion(learned: Option<LearnedInput>, cell: OpenCell) -> Optio
         return None;
     }
     let (wire, routing, supported) = match input {
-        LearnedInput::Verified => (Wire::Send, Routing::Keep, true),
-        LearnedInput::Lapsed => (Wire::Send, Routing::Keep, false),
+        LearnedInput::Uncorroborated { .. } => return None,
+        LearnedInput::Verified { .. } => (Wire::Send, Routing::Keep, true),
+        LearnedInput::Lapsed { .. } => (Wire::Send, Routing::Keep, false),
         LearnedInput::Acting { .. } if cell.ctx.beta_flag => (Wire::Withhold, Routing::Keep, false),
         LearnedInput::Acting {
             phase: FailurePhase::F1,
@@ -557,7 +721,7 @@ const fn prior_opinion(prior: Option<bool>, cell: OpenCell) -> Option<Resolution
     }
 }
 
-const fn no_opinion(pinned: bool) -> Resolution {
+pub const fn no_opinion(pinned: bool) -> Resolution {
     Resolution {
         wire: Wire::Send,
         routing: Routing::Keep,
@@ -566,17 +730,51 @@ const fn no_opinion(pinned: bool) -> Resolution {
         supported: None,
         learned: None,
         pinned,
+        shown: None,
     }
 }
 
-/// Whether a lane can carry no client beta flag at all: a Bedrock Converse
-/// lane to a model that refuses the `anthropic_beta` bag key. An upstream that
-/// proves neither Anthropic nor not-Anthropic (an inference-profile ARN) does
-/// not refuse. A representability check, applied before the precedence
-/// resolution: no tier can make an unrepresentable flag ride the wire.
-pub fn refuses_beta_bag_key(egress_kind: Option<EgressKind>, upstream: &str) -> bool {
-    egress_kind == Some(EgressKind::BedrockConverse)
-        && anthropic_family(upstream) == AnthropicFamily::No
+/// Whether an operator wire floor pins `capability_key` on a target of
+/// `provider_entry` whose model carries `model_header_extras` (an empty map
+/// for a lane no model maps). A beta key is pinned when its flag is; a
+/// feature key when any beta token its strip removes is, because a pinned
+/// token is re-added on the wire after the strip. A key with no beta surface
+/// is never pinned.
+pub fn operator_pins_capability(
+    config: &Config,
+    provider_entry: &str,
+    model_header_extras: &BTreeMap<String, String>,
+    capability_key: &str,
+) -> bool {
+    match crate::beta_capability::beta_flag_of(capability_key) {
+        Some(flag) => operator_pins_flag(config, provider_entry, model_header_extras, flag),
+        None => crate::capability_strip::strip_beta_tokens(capability_key)
+            .iter()
+            .any(|token| operator_pins_flag(config, provider_entry, model_header_extras, token)),
+    }
+}
+
+/// Whether the operator floor pins the beta `flag`: the provider entry's
+/// `anthropic_beta` floor, or a provider or model `header_extras`
+/// `anthropic-beta` contribution. The one floor walk every pin check reads;
+/// [`operator_pins_capability`] is its capability-key form.
+pub fn operator_pins_flag(
+    config: &Config,
+    provider_entry: &str,
+    model_header_extras: &BTreeMap<String, String>,
+    flag: &str,
+) -> bool {
+    let entry = config.providers.get(provider_entry);
+    entry
+        .map_or(&[][..], ProviderEntry::anthropic_beta_floor)
+        .iter()
+        .any(|pinned| pinned == flag)
+        || crate::router::operator_betas(
+            entry.map(ProviderEntry::header_extras),
+            model_header_extras,
+        )
+        .iter()
+        .any(|pinned| pinned == flag)
 }
 
 #[cfg(test)]

@@ -219,6 +219,14 @@ struct LearnedEntry {
     evidence_class: Option<String>,
 }
 
+/// Whether a negative detected in `phase` from `source` is advisory only: a
+/// live F3 suspicion is shown but routes nothing until a probe settles it.
+/// The one advisory rule: the registry's routing decision and the
+/// precedence resolution both read it.
+pub const fn negative_is_advisory(phase: FailurePhase, source: EvidenceSource) -> bool {
+    matches!((phase, source), (FailurePhase::F3, EvidenceSource::Live))
+}
+
 /// Whether an entry with this signal tier and observation count acts: a
 /// self-identifying signal on one observation, an inferred one only once
 /// corroborated.
@@ -277,12 +285,12 @@ impl LearnedEntry {
     const fn acting_decision(&self) -> RoutingDecision {
         match self.verdict {
             EntryVerdict::Verified => RoutingDecision::Allow,
-            EntryVerdict::Negative => match (self.phase, self.source) {
-                (FailurePhase::F3, EvidenceSource::Live) => RoutingDecision::Allow,
-                _ => RoutingDecision::RouteAway {
-                    signal: self.signal,
-                    phase: self.phase,
-                },
+            EntryVerdict::Negative if negative_is_advisory(self.phase, self.source) => {
+                RoutingDecision::Allow
+            }
+            EntryVerdict::Negative => RoutingDecision::RouteAway {
+                signal: self.signal,
+                phase: self.phase,
             },
         }
     }
@@ -366,11 +374,19 @@ pub enum BetaLaneReading {
         /// Signal tier of the negative: only a self-identifying one can
         /// exclude a capability from every lane.
         tier: SignalTier,
+        /// Where the negative's evidence came from.
+        source: EvidenceSource,
     },
     /// A lapsed negative's single re-probe slot was claimed by this read.
-    ProbeAdmitted,
+    ProbeAdmitted {
+        /// Where the lapsed negative's evidence came from.
+        source: EvidenceSource,
+    },
     /// A verified-working positive owns the key.
-    VerifiedPositive,
+    VerifiedPositive {
+        /// Where the positive's evidence came from.
+        source: EvidenceSource,
+    },
     /// Nothing the lane acts on.
     NoVerdict,
 }
@@ -2806,6 +2822,11 @@ impl LearnedCapabilityRegistry {
             provider_kind,
             |entries, _leased| {
                 let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+                // No resident entry decides nothing and claims nothing, so
+                // reading the source first changes no decision.
+                let Some(source) = entries.get(&key).map(|entry| entry.source) else {
+                    return BetaLaneReading::NoVerdict;
+                };
                 let decision = match claim {
                     ProbeClaim::Claim => self.acting_negative_for_in(entries, &key, now),
                     ProbeClaim::Forgo => Self::unclaimed_decision_in(entries, &key),
@@ -2815,11 +2836,12 @@ impl LearnedCapabilityRegistry {
                         BetaLaneReading::ActingNegative {
                             phase,
                             tier: signal,
+                            source,
                         }
                     }
-                    RoutingDecision::ProbeAdmitted => BetaLaneReading::ProbeAdmitted,
+                    RoutingDecision::ProbeAdmitted => BetaLaneReading::ProbeAdmitted { source },
                     RoutingDecision::Allow if Self::is_verified_working_in(entries, &key) => {
-                        BetaLaneReading::VerifiedPositive
+                        BetaLaneReading::VerifiedPositive { source }
                     }
                     RoutingDecision::Allow => BetaLaneReading::NoVerdict,
                 }

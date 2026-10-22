@@ -46,7 +46,7 @@ pub(super) enum BetaVerdict {
 /// Whether `target` is a Converse lane to a model that refuses the
 /// `anthropic_beta` bag key outright, so no client flag can ride it.
 fn refuses_the_beta_bag_key(target: &DispatchTarget) -> bool {
-    crate::capability_precedence::refuses_beta_bag_key(target.egress_kind, &target.upstream)
+    crate::beta_capability::refuses_beta_bag_key(target.egress_kind, &target.upstream)
 }
 
 impl Router {
@@ -201,7 +201,7 @@ impl Router {
             self.beta_reading_with_generation(learned_key, key, provider_kind, claim, now);
         match reading {
             BetaLaneReading::ActingNegative { .. } => BetaVerdict::Withhold,
-            BetaLaneReading::ProbeAdmitted => {
+            BetaLaneReading::ProbeAdmitted { .. } => {
                 self.metrics.incr_probe_attempts();
                 admissions.push(ProbeAdmission {
                     state_key: target.state_key.clone(),
@@ -212,15 +212,19 @@ impl Router {
                 });
                 BetaVerdict::Send
             }
-            BetaLaneReading::VerifiedPositive => BetaVerdict::Send,
+            BetaLaneReading::VerifiedPositive { .. } => BetaVerdict::Send,
             BetaLaneReading::NoVerdict => BetaVerdict::Open,
         }
     }
 
     fn seed_withholds(&self, target: &DispatchTarget, key: &str, flag: &str) -> bool {
-        target.provider_kind == Some(crate::beta_seed::BEDROCK_SEED_PROVIDER_KIND)
-            && self.beta_seed.contains(&flag)
-            && !self.seed_cleared_for_cell(target, key)
+        let scope = crate::beta_capability::BetaSeedScope::new(
+            crate::beta_seed::BEDROCK_SEED_PROVIDER_KIND,
+            self.beta_seed,
+        );
+        crate::beta_seed::seed_state(scope, target.provider_kind.unwrap_or(""), flag, || {
+            self.seed_cleared_for_cell(target, key)
+        }) == Some(crate::capability_precedence::SeedCell::Withhold)
     }
 
     /// Whether the seed has been cleared for this target's (lane, flag) cell.

@@ -1362,14 +1362,25 @@ fn a_rejected_submission_leaves_no_pending_state_and_a_retry_succeeds() {
     // pass to `commit_boundary_transition`, so the compiler prevents it.)
 }
 
-/// The acting-negative reading carries the tier of the entry that acts, so a
-/// caller can tell a self-identifying negative from a corroborated inferred one.
+/// The acting-negative reading carries the tier and source of the entry that
+/// acts, so a caller can tell a self-identifying negative from a corroborated
+/// inferred one and a probe negative from a live one.
 #[test]
-fn an_acting_negative_reading_carries_the_entry_signal_tier() {
+fn an_acting_negative_reading_carries_the_entry_signal_tier_and_source() {
     let now = Instant::now();
-    for (key, tier, observations) in [
-        ("web_search", SignalTier::SelfIdentifying, 1),
-        ("structured_output", SignalTier::Inferred, 2),
+    for (key, tier, observations, source) in [
+        (
+            "web_search",
+            SignalTier::SelfIdentifying,
+            1,
+            EvidenceSource::Live,
+        ),
+        (
+            "structured_output",
+            SignalTier::Inferred,
+            2,
+            EvidenceSource::Probe,
+        ),
     ] {
         // Arrange
         let reg = registry();
@@ -1380,7 +1391,7 @@ fn an_acting_negative_reading_carries_the_entry_signal_tier() {
                 "openai-compat",
                 tier,
                 FailurePhase::F2,
-                EvidenceSource::Live,
+                source,
                 None,
                 now,
             );
@@ -1402,8 +1413,37 @@ fn an_acting_negative_reading_carries_the_entry_signal_tier() {
             Some(BetaLaneReading::ActingNegative {
                 phase: FailurePhase::F2,
                 tier,
+                source,
             }),
-            "{tier:?}",
+            "{tier:?} {source:?}",
+        );
+    }
+}
+
+/// The verified-positive reading carries the source of the positive.
+#[test]
+fn a_verified_positive_reading_carries_the_entry_source() {
+    let now = Instant::now();
+    for source in [EvidenceSource::Live, EvidenceSource::Probe] {
+        // Arrange
+        let reg = registry();
+        reg.observe_positive("nick", "web_search", "openai-compat", source, None, now);
+
+        // Act
+        let reading = reg.beta_reading_in_generation(
+            reg.generation(),
+            "nick",
+            "web_search",
+            "openai-compat",
+            ProbeClaim::Claim,
+            now,
+        );
+
+        // Assert
+        assert_eq!(
+            reading.map(|(reading, _)| reading),
+            Some(BetaLaneReading::VerifiedPositive { source }),
+            "{source:?}",
         );
     }
 }

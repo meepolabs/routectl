@@ -133,11 +133,20 @@ pub struct CapabilityObserveEvent {
 ///
 /// Carries the router generation it was taken under. Admission submits that
 /// generation, so a scope that outlived a reload which dropped the catalog it
-/// describes admits nothing, whichever Router reads it.
+/// describes admits nothing, whichever Router reads it. The reading Router
+/// also re-checks the gates a config-only reload can flip without advancing
+/// the generation (the kill switch, and the served provider entry's kind and
+/// credential source), so a scope settled after such a reload admits nothing
+/// the new config would refuse.
+///
+/// [`Router::observe_response_evidence`] takes it by value, so a holder
+/// settles its scope once.
 #[derive(Debug, Clone)]
 pub struct EvidenceScope {
     /// The served target's routing state key (the WARN's `state_key`).
     state_key: String,
+    /// The served target's provider entry, re-checked at settle time.
+    provider_entry: String,
     /// Learned-registry key per detectable capability; a capability absent
     /// here has no lane on the served target and is never admitted.
     learned_keys: Vec<(&'static str, String)>,
@@ -184,6 +193,7 @@ impl Router {
             .collect();
         Some(EvidenceScope {
             state_key: target.state_key.clone(),
+            provider_entry: target.provider_name.clone(),
             learned_keys,
             provider_kind,
             request_features,
@@ -197,13 +207,16 @@ impl Router {
     /// mirror of the error-arm learn observer. Runs the pure detectors
     /// over `resp`, admits each observation `policy` allows into the registry
     /// (`Live` source, at the scope's generation), and pushes an acting
-    /// observation onto `events`.
+    /// observation onto `events`. Consumes the scope, so an attempt's evidence
+    /// settles once.
     ///
-    /// An observation about a capability the attempt's egress kept off the
-    /// wire is dropped: the response says nothing about it.
+    /// Admits nothing when this Router's config refuses the scope (see
+    /// [`EvidenceScope`]). An observation about a capability the attempt's
+    /// egress kept off the wire is dropped: the response says nothing about
+    /// it.
     pub fn observe_response_evidence(
         &self,
-        scope: &EvidenceScope,
+        scope: EvidenceScope,
         resp: &ChatResponse,
         policy: EvidencePolicy,
         events: &mut Vec<CapabilityObserveEvent>,
@@ -214,15 +227,18 @@ impl Router {
     /// [`Self::observe_response_evidence`] at an explicit `now`.
     pub(super) fn observe_response_evidence_at(
         &self,
-        scope: &EvidenceScope,
+        scope: EvidenceScope,
         resp: &ChatResponse,
         policy: EvidencePolicy,
         events: &mut Vec<CapabilityObserveEvent>,
         now: Instant,
     ) {
+        if !self.admits_scope(&scope) {
+            return;
+        }
         let observations = capability_detect::detect(&scope.detector_context, resp);
-        // One observation per capability per scope: a scope covers one served
-        // target, so the capability key alone dedupes.
+        // One observation per capability: a scope covers one served target and
+        // settles once, so the capability key alone dedupes.
         let mut dedupe: HashSet<&'static str> = HashSet::new();
         for obs in observations {
             if !policy.admit_suspect && obs.direction == ObservationDirection::SuspectAbsence {
@@ -234,8 +250,24 @@ impl Router {
             let Some(learned_key) = scope.learned_key(obs.capability_key) else {
                 continue;
             };
-            self.admit_observation(&obs, learned_key, scope, events, now);
+            self.admit_observation(&obs, learned_key, &scope, events, now);
         }
+    }
+
+    /// Whether this Router's config still admits evidence for `scope`: the
+    /// subsystem is on, and the served provider entry still exists with the
+    /// scope's kind and its own credential. These are the gates
+    /// [`Self::evidence_scope`] applied that a config-only reload can flip
+    /// without advancing the registry generation.
+    fn admits_scope(&self, scope: &EvidenceScope) -> bool {
+        self.config.capability.enabled
+            && self
+                .config
+                .providers
+                .get(&scope.provider_entry)
+                .is_some_and(|entry| {
+                    entry.kind_str() == scope.provider_kind && entry.forwarded_base_url().is_none()
+                })
     }
 
     /// The pre-scope entry the observer tests drive: scope the attempt, then
@@ -254,7 +286,7 @@ impl Router {
             return;
         };
         self.observe_response_evidence_at(
-            &scope,
+            scope,
             resp,
             EvidencePolicy {
                 admit_suspect: true,

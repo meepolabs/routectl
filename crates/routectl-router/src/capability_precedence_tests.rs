@@ -4,14 +4,15 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
-use crate::capability_display::{
-    ActionInputs, LearnedActing, resolve_display_action, resolve_display_verdict,
-};
+use routectl_core::wire_check::EgressKind;
+
+use crate::capability_display::resolve_display;
 
 const FEATURE: CellContext = CellContext {
     capability_enabled: true,
     beta_flag: false,
     droppable: false,
+    representable: true,
 };
 const DROPPABLE: CellContext = CellContext {
     droppable: true,
@@ -21,6 +22,15 @@ const BETA: CellContext = CellContext {
     capability_enabled: true,
     beta_flag: true,
     droppable: true,
+    representable: true,
+};
+const BETA_UNREPRESENTABLE: CellContext = CellContext {
+    representable: false,
+    ..BETA
+};
+const BETA_UNREPRESENTABLE_OFF: CellContext = CellContext {
+    capability_enabled: false,
+    ..BETA_UNREPRESENTABLE
 };
 const FEATURE_OFF: CellContext = CellContext {
     capability_enabled: false,
@@ -38,9 +48,16 @@ const fn acting(phase: FailurePhase, tier: SignalTier, source: EvidenceSource) -
     LearnedInput::Acting {
         phase,
         tier,
-        source: Some(source),
+        source,
     }
 }
+
+const LAPSED: Option<LearnedInput> = Some(LearnedInput::Lapsed {
+    source: EvidenceSource::Live,
+});
+const VERIFIED: Option<LearnedInput> = Some(LearnedInput::Verified {
+    source: EvidenceSource::Live,
+});
 
 const fn self_id(phase: FailurePhase) -> Option<LearnedInput> {
     Some(acting(
@@ -129,7 +146,7 @@ fn precedence_rows() -> Vec<Row> {
         Row { pinned: true, override_verdict: FORCE, operator: Operator::Decided,
               layer: Some(Layer::Pin), action: ACTION_ALLOW,
               ..Row::new("pinned beta beats a force-supported override", BETA) },
-        Row { pinned: true, learned: Some(LearnedInput::Lapsed), operator: Operator::Decided,
+        Row { pinned: true, learned: LAPSED, operator: Operator::Decided,
               layer: Some(Layer::Pin), action: ACTION_ALLOW,
               ..Row::new("pinned beta skips the claiming read of a lapsed negative", BETA) },
         Row { pinned: true, learned: self_id(F1), seed: Some(SeedCell::Withhold),
@@ -141,7 +158,7 @@ fn precedence_rows() -> Vec<Row> {
         Row { pinned: true, learned: self_id(F1), routing: Routing::Tail,
               layer: Some(Layer::Learned), action: ACTION_ROUTE_AWAY,
               ..Row::new("pinned droppable F1 negative routes away, never strips", DROPPABLE) },
-        Row { pinned: true, learned: Some(LearnedInput::Lapsed),
+        Row { pinned: true, learned: LAPSED,
               layer: Some(Layer::Learned), action: ACTION_REPROBE,
               ..Row::new("pinned feature with a lapsed negative stays open to the read", DROPPABLE) },
         Row { pinned: true, prior: Some(false), routing: Routing::Tail,
@@ -149,8 +166,19 @@ fn precedence_rows() -> Vec<Row> {
               ..Row::new("pinned feature with a false prior tails", FEATURE) },
         Row { pinned: true,
               ..Row::new("pinned feature with no other opinion stays open", FEATURE) },
+        // --- pin > representability > override ---
+        Row { pinned: true, learned: self_id(F1), operator: Operator::Decided,
+              layer: Some(Layer::Pin), action: ACTION_ALLOW,
+              ..Row::new("pinned beta on an unrepresentable lane still sends", BETA_UNREPRESENTABLE) },
+        Row { override_verdict: FORCE, learned: VERIFIED, seed: Some(SeedCell::Cleared),
+              operator: Operator::Decided, wire: Wire::Withhold,
+              layer: Some(Layer::Representability), action: ACTION_WITHHOLD,
+              ..Row::new("unrepresentable beta withholds over force-supported", BETA_UNREPRESENTABLE) },
+        Row { operator: Operator::Decided, wire: Wire::Withhold,
+              layer: Some(Layer::Representability), action: ACTION_WITHHOLD,
+              ..Row::new("unrepresentable beta withholds with the kill switch off", BETA_UNREPRESENTABLE_OFF) },
         // --- override > learned ---
-        Row { override_verdict: ROUTE_AWAY, learned: Some(LearnedInput::Verified),
+        Row { override_verdict: ROUTE_AWAY, learned: VERIFIED,
               operator: Operator::Decided, routing: Routing::Drop,
               layer: Some(Layer::Override), action: ACTION_DROP,
               ..Row::new("route-away override drops a feature over a positive", FEATURE) },
@@ -167,10 +195,10 @@ fn precedence_rows() -> Vec<Row> {
         Row { learned: self_id(F1), seed: Some(SeedCell::Cleared), wire: Wire::Withhold,
               layer: Some(Layer::Learned), action: ACTION_WITHHOLD,
               ..Row::new("beta negative withholds over a cleared seed", BETA) },
-        Row { learned: Some(LearnedInput::Verified), seed: Some(SeedCell::Withhold),
+        Row { learned: VERIFIED, seed: Some(SeedCell::Withhold),
               layer: Some(Layer::Learned), action: ACTION_ALLOW,
               ..Row::new("beta positive sends over a withholding seed", BETA) },
-        Row { learned: Some(LearnedInput::Lapsed), seed: Some(SeedCell::Withhold),
+        Row { learned: LAPSED, seed: Some(SeedCell::Withhold),
               layer: Some(Layer::Learned), action: ACTION_REPROBE,
               ..Row::new("lapsed beta negative re-probes over the seed", BETA) },
         // --- seed > prior ---
@@ -191,10 +219,10 @@ fn precedence_rows() -> Vec<Row> {
         Row { learned: self_id(F1), routing: Routing::Tail, layer: Some(Layer::Learned),
               action: ACTION_ROUTE_AWAY,
               ..Row::new("non-droppable F1 negative routes away", FEATURE) },
-        Row { learned: Some(LearnedInput::Verified), prior: Some(false),
+        Row { learned: VERIFIED, prior: Some(false),
               layer: Some(Layer::Learned), action: ACTION_ALLOW,
               ..Row::new("verified positive sends and keeps over a false prior", FEATURE) },
-        Row { learned: Some(LearnedInput::Lapsed), prior: Some(false),
+        Row { learned: LAPSED, prior: Some(false),
               layer: Some(Layer::Learned), action: ACTION_REPROBE,
               ..Row::new("lapsed negative keeps the target and re-probes", DROPPABLE) },
         Row { learned: Some(acting(F3, SignalTier::SelfIdentifying, EvidenceSource::Live)),
@@ -291,11 +319,17 @@ fn display_mode_names_the_next_tier_with_an_opinion() {
         ("pin over an override",
          DisplayInputs { pinned: true, override_verdict: ROUTE_AWAY, learned: self_id(F1), ..inputs(BETA) },
          Some(Layer::Pin), Some(Layer::Override)),
+        ("pin over representability",
+         DisplayInputs { pinned: true, override_verdict: FORCE, ..inputs(BETA_UNREPRESENTABLE) },
+         Some(Layer::Pin), Some(Layer::Override)),
+        ("representability over an override",
+         DisplayInputs { override_verdict: FORCE, learned: VERIFIED, ..inputs(BETA_UNREPRESENTABLE) },
+         Some(Layer::Representability), Some(Layer::Override)),
         ("override over a learned negative",
          DisplayInputs { override_verdict: FORCE, learned: self_id(F1), ..inputs(FEATURE) },
          Some(Layer::Override), Some(Layer::Learned)),
         ("learned over the seed",
-         DisplayInputs { learned: Some(LearnedInput::Verified), seed: Some(SeedCell::Withhold), ..inputs(BETA) },
+         DisplayInputs { learned: VERIFIED, seed: Some(SeedCell::Withhold), ..inputs(BETA) },
          Some(Layer::Learned), Some(Layer::Seed)),
         ("learned over a prior of either polarity",
          DisplayInputs { learned: self_id(F1), prior: Some(true), ..inputs(FEATURE) },
@@ -348,7 +382,7 @@ fn hard_exclusion_counts_only_an_acting_self_identifying_route_away() {
         ("an inferred corroborated negative never counts",
          DisplayInputs { learned: inferred_f2, ..inputs(FEATURE) }, false),
         ("a lapsed negative does not count",
-         DisplayInputs { learned: Some(LearnedInput::Lapsed), ..inputs(FEATURE) }, false),
+         DisplayInputs { learned: LAPSED, ..inputs(FEATURE) }, false),
         ("an F3 probe negative does not count",
          DisplayInputs { learned: Some(acting(F3, SignalTier::SelfIdentifying, EvidenceSource::Probe)),
                          ..inputs(FEATURE) }, false),
@@ -367,7 +401,7 @@ fn hard_exclusion_counts_only_an_acting_self_identifying_route_away() {
         ("a false prior does not count",
          DisplayInputs { prior: Some(false), ..inputs(FEATURE) }, false),
         ("a verified positive does not count",
-         DisplayInputs { learned: Some(LearnedInput::Verified), ..inputs(FEATURE) }, false),
+         DisplayInputs { learned: VERIFIED, ..inputs(FEATURE) }, false),
     ];
     for (name, display_inputs, eligible) in rows {
         let resolution = resolve_display(*display_inputs);
@@ -378,22 +412,27 @@ fn hard_exclusion_counts_only_an_acting_self_identifying_route_away() {
 
 #[test]
 fn learned_input_from_a_dispatch_reading_maps_a_claimed_probe_to_lapsed() {
+    let probe = EvidenceSource::Probe;
     let rows = [
         (
             BetaLaneReading::ActingNegative {
                 phase: FailurePhase::F2,
                 tier: SignalTier::Inferred,
+                source: probe,
             },
             Some(LearnedInput::Acting {
                 phase: FailurePhase::F2,
                 tier: SignalTier::Inferred,
-                source: None,
+                source: probe,
             }),
         ),
-        (BetaLaneReading::ProbeAdmitted, Some(LearnedInput::Lapsed)),
         (
-            BetaLaneReading::VerifiedPositive,
-            Some(LearnedInput::Verified),
+            BetaLaneReading::ProbeAdmitted { source: probe },
+            Some(LearnedInput::Lapsed { source: probe }),
+        ),
+        (
+            BetaLaneReading::VerifiedPositive { source: probe },
+            Some(LearnedInput::Verified { source: probe }),
         ),
         (BetaLaneReading::NoVerdict, None),
     ];
@@ -446,9 +485,9 @@ fn learned_input_from_a_snapshot_entry_applies_the_dispatch_rules() {
             Some(acting(F1, SelfIdentifying, Live)),
         ),
         (
-            "uncorroborated inferred negative does not act",
-            entry(broken, Inferred, 1, Live, false, now),
-            None,
+            "uncorroborated inferred negative is shown but does not act",
+            entry(broken, Inferred, 1, Probe, false, now),
+            Some(LearnedInput::Uncorroborated { source: Probe }),
         ),
         (
             "corroborated inferred negative acts",
@@ -458,7 +497,7 @@ fn learned_input_from_a_snapshot_entry_applies_the_dispatch_rules() {
         (
             "lapsed negative re-probes",
             entry(broken, SelfIdentifying, 1, Live, true, now),
-            Some(LearnedInput::Lapsed),
+            Some(LearnedInput::Lapsed { source: Live }),
         ),
         (
             "lapsed live F3 negative stays advisory",
@@ -482,7 +521,7 @@ fn learned_input_from_a_snapshot_entry_applies_the_dispatch_rules() {
                 true,
                 now,
             ),
-            Some(LearnedInput::Lapsed),
+            Some(LearnedInput::Lapsed { source: Probe }),
         ),
         (
             "verified positive, expiry ignored",
@@ -490,11 +529,11 @@ fn learned_input_from_a_snapshot_entry_applies_the_dispatch_rules() {
                 Verdict::VerifiedWorking,
                 SelfIdentifying,
                 1,
-                Live,
+                Probe,
                 true,
                 now,
             ),
-            Some(LearnedInput::Verified),
+            Some(LearnedInput::Verified { source: Probe }),
         ),
     ];
     for (name, entry, expected) in rows {
@@ -503,43 +542,10 @@ fn learned_input_from_a_snapshot_entry_applies_the_dispatch_rules() {
 }
 
 #[test]
-fn refuses_beta_bag_key_only_for_converse_to_a_provably_non_anthropic_model() {
-    let rows = [
-        (
-            Some(EgressKind::BedrockConverse),
-            "meta.llama3-70b-instruct-v1:0",
-            true,
-        ),
-        (
-            Some(EgressKind::BedrockConverse),
-            "anthropic.claude-haiku-4-5-20251001-v1:0",
-            false,
-        ),
-        (
-            Some(EgressKind::BedrockConverse),
-            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/p",
-            false,
-        ),
-        (
-            Some(EgressKind::BedrockInvoke),
-            "meta.llama3-70b-instruct-v1:0",
-            false,
-        ),
-        (None, "meta.llama3-70b-instruct-v1:0", false),
-    ];
-    for (egress, upstream, refuses) in rows {
-        assert_eq!(
-            refuses_beta_bag_key(egress, upstream),
-            refuses,
-            "{egress:?} {upstream}"
-        );
-    }
-}
-
-#[test]
-fn layer_tokens_match_the_doctor_vocabulary_plus_pin() {
+fn layer_tokens_match_the_doctor_vocabulary_plus_pin_and_representability() {
     let tokens: Vec<&str> = [
         Layer::Pin,
+        Layer::Representability,
         Layer::Override,
         Layer::Learned,
         Layer::Seed,
@@ -548,113 +554,141 @@ fn layer_tokens_match_the_doctor_vocabulary_plus_pin() {
     .iter()
     .map(|layer| layer.as_str())
     .collect();
-    assert_eq!(tokens, ["pin", "override", "learned", "seed", "prior"]);
-}
-
-/// Every learned-entry shape the old display action distinguishes.
-fn entry_grid(now: Instant) -> Vec<Option<LearnedRegistryEntry>> {
-    let mut grid = vec![
-        None,
-        Some(entry(
-            Verdict::VerifiedWorking,
-            SignalTier::SelfIdentifying,
-            1,
-            EvidenceSource::Live,
-            false,
-            now,
-        )),
-    ];
-    for phase in [FailurePhase::F1, FailurePhase::F2, FailurePhase::F3] {
-        for source in [EvidenceSource::Live, EvidenceSource::Probe] {
-            for lapsed in [false, true] {
-                for (tier, observations) in [
-                    (SignalTier::SelfIdentifying, 1),
-                    (SignalTier::Inferred, 1),
-                    (SignalTier::Inferred, 2),
-                ] {
-                    grid.push(Some(entry(
-                        Verdict::LearnedBroken(phase),
-                        tier,
-                        observations,
-                        source,
-                        lapsed,
-                        now,
-                    )));
-                }
-            }
-        }
-    }
-    grid
-}
-
-/// The display action token is unchanged for every unpinned cell the old
-/// display resolver could see, except a catalog prior on a beta key: the
-/// dispatch beta path has no prior tier, so the seam gives it no opinion.
-#[test]
-fn display_action_tokens_match_the_previous_display_resolver() {
-    let now = Instant::now();
-    let mut compared = 0;
-    let mut beta_prior_cells = 0;
-    for learned_entry in entry_grid(now) {
-        for override_verdict in [None, ROUTE_AWAY, FORCE] {
-            for seed in [None, Some(SeedCell::Withhold), Some(SeedCell::Cleared)] {
-                for prior in [None, Some(true), Some(false)] {
-                    for (beta_flag, droppable, capability_enabled) in bool_triples() {
-                        let old = resolve_display_action(ActionInputs {
-                            display: resolve_display_verdict(
-                                override_verdict,
-                                learned_entry.as_ref().map(|e| (e.verdict, e.source)),
-                                seed,
-                                prior,
-                            ),
-                            learned: learned_entry
-                                .as_ref()
-                                .map(|e| LearnedActing::from_entry(e, now)),
-                            prior,
-                            strip_applies: droppable,
-                            capability_enabled,
-                            beta_flag,
-                            seed,
-                        });
-                        let new = resolve_display(DisplayInputs {
-                            pinned: false,
-                            override_verdict,
-                            learned: learned_entry
-                                .as_ref()
-                                .and_then(|e| LearnedInput::from_entry(e, now)),
-                            seed,
-                            prior,
-                            ctx: CellContext {
-                                capability_enabled,
-                                beta_flag,
-                                droppable,
-                            },
-                        })
-                        .as_str();
-                        compared += 1;
-                        if beta_flag && prior == Some(false) && old != new {
-                            assert_eq!((old, new), (ACTION_ROUTE_AWAY, ACTION_NONE));
-                            beta_prior_cells += 1;
-                            continue;
-                        }
-                        assert_eq!(
-                            new, old,
-                            "override {override_verdict:?} learned {learned_entry:?} seed \
-                             {seed:?} prior {prior:?} beta {beta_flag} droppable {droppable} \
-                             enabled {capability_enabled}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-    assert_eq!(compared, 38 * 3 * 3 * 3 * 8);
-    assert!(
-        beta_prior_cells > 0,
-        "the beta-prior exception is exercised"
+    assert_eq!(
+        tokens,
+        [
+            "pin",
+            "representability",
+            "override",
+            "learned",
+            "seed",
+            "prior"
+        ]
     );
 }
 
-fn bool_triples() -> impl Iterator<Item = (bool, bool, bool)> {
-    (0..8u8).map(|bits| (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0))
+/// A config whose `[capability] essential` list holds `essential`.
+fn capability_config(essential: &[&str]) -> crate::config::CapabilityConfig {
+    crate::config::CapabilityConfig {
+        essential: essential.iter().map(|key| (*key).to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn cell_context_applies_the_essential_list_to_a_droppable_key() {
+    use crate::capability_strip::CONTEXT_MANAGEMENT;
+    let self_id_f1 = self_id(FailurePhase::F1);
+    // (name, essential list, droppable, wire, routing, eligible)
+    let rows = [
+        (
+            "not essential: an F1 negative strips in place",
+            capability_config(&[]),
+            true,
+            Wire::Strip,
+            Routing::Keep,
+            false,
+        ),
+        (
+            "essential: the same negative tails and counts",
+            capability_config(&[CONTEXT_MANAGEMENT]),
+            false,
+            Wire::Send,
+            Routing::Tail,
+            true,
+        ),
+    ];
+    for (name, capability, droppable, wire, routing, eligible) in rows {
+        // Arrange
+        let ctx = CellContext::new(CONTEXT_MANAGEMENT, &capability, None, "upstream");
+
+        // Act
+        let resolution = resolve_display(DisplayInputs {
+            learned: self_id_f1,
+            ..inputs(ctx)
+        });
+
+        // Assert
+        assert_eq!(ctx.droppable, droppable, "{name}: droppable");
+        assert!(!ctx.beta_flag, "{name}: a feature key");
+        assert_eq!(resolution.wire(), wire, "{name}: wire");
+        assert_eq!(resolution.routing(), routing, "{name}: routing");
+        assert_eq!(
+            resolution.hard_exclusion_eligible(),
+            eligible,
+            "{name}: eligible"
+        );
+    }
+}
+
+#[test]
+fn cell_context_reads_the_kill_switch_and_the_beta_namespace() {
+    let key = crate::beta_capability::beta_capability_key("fx-flag").expect("a flag");
+    let off = crate::config::CapabilityConfig {
+        enabled: false,
+        ..capability_config(&[])
+    };
+    // (name, key, config, beta, enabled)
+    let rows = [
+        ("beta key", key.as_str(), capability_config(&[]), true, true),
+        (
+            "feature key",
+            "web_search",
+            capability_config(&[]),
+            false,
+            true,
+        ),
+        ("kill switch off", "web_search", off, false, false),
+    ];
+    for (name, capability_key, capability, beta, enabled) in rows {
+        let ctx = CellContext::new(capability_key, &capability, None, "upstream");
+
+        assert_eq!(ctx.beta_flag, beta, "{name}: beta_flag");
+        assert_eq!(ctx.capability_enabled, enabled, "{name}: enabled");
+        assert!(ctx.representable, "{name}: no Converse lane refuses it");
+    }
+}
+
+#[test]
+fn cell_context_marks_only_a_beta_key_on_a_refusing_lane_unrepresentable() {
+    let beta = crate::beta_capability::beta_capability_key("fx-flag").expect("a flag");
+    let llama = "meta.llama3-70b-instruct-v1:0";
+    let claude = "anthropic.claude-haiku-4-5-20251001-v1:0";
+    let converse = Some(EgressKind::BedrockConverse);
+    // (name, key, egress, upstream, representable)
+    let rows = [
+        (
+            "beta key, Converse, non-Claude",
+            beta.as_str(),
+            converse,
+            llama,
+            false,
+        ),
+        (
+            "beta key, Converse, Claude",
+            beta.as_str(),
+            converse,
+            claude,
+            true,
+        ),
+        (
+            "beta key, Invoke, non-Claude",
+            beta.as_str(),
+            Some(EgressKind::BedrockInvoke),
+            llama,
+            true,
+        ),
+        (
+            "feature key, Converse, non-Claude",
+            "web_search",
+            converse,
+            llama,
+            true,
+        ),
+    ];
+    for (name, key, egress, upstream, representable) in rows {
+        let ctx = CellContext::new(key, &capability_config(&[]), egress, upstream);
+
+        assert_eq!(ctx.representable, representable, "{name}");
+    }
 }

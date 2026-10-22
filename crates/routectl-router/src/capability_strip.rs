@@ -61,7 +61,7 @@ use crate::feature_keys::strip_date_suffix;
 /// Feature key for the Anthropic `advisor` server tool.
 const ADVISOR: &str = "advisor";
 /// Feature key for the Anthropic context-management beta.
-const CONTEXT_MANAGEMENT: &str = "context_management";
+pub const CONTEXT_MANAGEMENT: &str = "context_management";
 
 /// What to do with a target that only fails on a given capability.
 #[derive(Debug, Clone, PartialEq, Eq)]

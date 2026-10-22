@@ -10,6 +10,7 @@ use crate::capability_strip::{
 };
 use crate::field_capability::{capability_key_is_catalog_scoped, capability_key_is_field_verdict};
 use crate::key_literal_scan;
+use routectl_core::wire_check::EgressKind;
 
 /// A real dated `anthropic_beta` flag, the shape an upstream rejection names.
 const DATED_FLAG: &str = "context-1m-2025-08-07";
@@ -337,5 +338,38 @@ fn the_override_key_lowercases_only_the_flag_of_a_beta_key() {
 
     for (label, key, want) in rows {
         assert_eq!(beta_override_key(&key), want, "{label}");
+    }
+}
+#[test]
+fn refuses_beta_bag_key_only_for_converse_to_a_provably_non_anthropic_model() {
+    let rows = [
+        (
+            Some(EgressKind::BedrockConverse),
+            "meta.llama3-70b-instruct-v1:0",
+            true,
+        ),
+        (
+            Some(EgressKind::BedrockConverse),
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            false,
+        ),
+        (
+            Some(EgressKind::BedrockConverse),
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/p",
+            false,
+        ),
+        (
+            Some(EgressKind::BedrockInvoke),
+            "meta.llama3-70b-instruct-v1:0",
+            false,
+        ),
+        (None, "meta.llama3-70b-instruct-v1:0", false),
+    ];
+    for (egress, upstream, refuses) in rows {
+        assert_eq!(
+            refuses_beta_bag_key(egress, upstream),
+            refuses,
+            "{egress:?} {upstream}"
+        );
     }
 }

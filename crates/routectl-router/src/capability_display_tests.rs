@@ -9,7 +9,11 @@
 
 use super::*;
 
-use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
+use std::time::{Duration, Instant};
+
+use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
+
+use crate::capability_precedence::{CellContext, DisplayInputs, Layer, LearnedInput, Resolution};
 
 use crate::override_registry::OverrideVerdict;
 
@@ -491,4 +495,263 @@ fn beta_action_rows_mirror_the_withheld_beta_pass() {
     for (name, got, want) in cases {
         assert_eq!(got, want, "{name}");
     }
+}
+
+// --- parity of the display mode with the previous display resolvers ---
+
+const ROUTE_AWAY: Option<OverrideVerdict> = Some(OverrideVerdict::RouteAway);
+const FORCE: Option<OverrideVerdict> = Some(OverrideVerdict::ForceSupported);
+
+/// A snapshot entry with the given shape, lapsed or not against `now` (a
+/// negative lapses at its expiry instant).
+fn entry(
+    verdict: Verdict,
+    tier: SignalTier,
+    observations: u32,
+    source: EvidenceSource,
+    lapsed: bool,
+    now: Instant,
+) -> LearnedRegistryEntry {
+    LearnedRegistryEntry {
+        state_key: "lane#upstream".to_string(),
+        feature_key: "web_search".to_string(),
+        verdict,
+        signal_tier: tier,
+        observations,
+        first_seen: now,
+        last_seen: now,
+        expires_at: if lapsed {
+            now
+        } else {
+            now + Duration::from_hours(1)
+        },
+        evidence_class: None,
+        phase: match verdict {
+            Verdict::LearnedBroken(phase) => phase,
+            _ => FailurePhase::F3,
+        },
+        source,
+        recheck_owned: false,
+    }
+}
+
+/// Every learned-entry shape the old display action distinguishes.
+fn entry_grid(now: Instant) -> Vec<Option<LearnedRegistryEntry>> {
+    let mut grid = vec![
+        None,
+        Some(entry(
+            Verdict::VerifiedWorking,
+            SignalTier::SelfIdentifying,
+            1,
+            EvidenceSource::Live,
+            false,
+            now,
+        )),
+    ];
+    for phase in [FailurePhase::F1, FailurePhase::F2, FailurePhase::F3] {
+        for source in [EvidenceSource::Live, EvidenceSource::Probe] {
+            for lapsed in [false, true] {
+                for (tier, observations) in [
+                    (SignalTier::SelfIdentifying, 1),
+                    (SignalTier::Inferred, 1),
+                    (SignalTier::Inferred, 2),
+                ] {
+                    grid.push(Some(entry(
+                        Verdict::LearnedBroken(phase),
+                        tier,
+                        observations,
+                        source,
+                        lapsed,
+                        now,
+                    )));
+                }
+            }
+        }
+    }
+    grid
+}
+
+/// The doctor's layer tag for an old display verdict, by its source.
+fn old_layer(display: DisplayVerdict) -> Option<&'static str> {
+    display.source.map(|source| match source {
+        SOURCE_OVERRIDE | SOURCE_PRIOR | SOURCE_SEED => source,
+        _ => "learned",
+    })
+}
+
+/// The new display resolution of an unpinned cell on a representable lane.
+fn new_display(
+    override_verdict: Option<OverrideVerdict>,
+    learned_entry: Option<&LearnedRegistryEntry>,
+    seed: Option<SeedCell>,
+    prior: Option<bool>,
+    (beta_flag, droppable, capability_enabled): (bool, bool, bool),
+    now: Instant,
+) -> Resolution {
+    resolve_display(DisplayInputs {
+        pinned: false,
+        override_verdict,
+        learned: learned_entry.and_then(|e| LearnedInput::from_entry(e, now)),
+        seed,
+        prior,
+        ctx: CellContext {
+            capability_enabled,
+            beta_flag,
+            droppable,
+            representable: true,
+        },
+    })
+}
+
+/// The display action, verdict, supported, source and layer are unchanged
+/// for every unpinned cell on a representable lane the old display resolvers
+/// could see, except the action of a false catalog prior on a beta key: the
+/// dispatch beta path has no prior tier, so the seam gives it no opinion
+/// (the verdict, source and layer still show the prior). The layer stays
+/// `learned` for a resident entry with no opinion (an advisory live F3
+/// negative, an uncorroborated inferred one, or any entry with the kill
+/// switch off), as the doctor showed it before.
+#[test]
+fn display_projections_match_the_previous_display_resolver() {
+    let now = Instant::now();
+    let mut compared = 0;
+    let mut beta_prior_cells = 0;
+    let mut learned_without_opinion = 0;
+    for learned_entry in entry_grid(now) {
+        for override_verdict in [None, ROUTE_AWAY, FORCE] {
+            for seed in [None, Some(SeedCell::Withhold), Some(SeedCell::Cleared)] {
+                for prior in [None, Some(true), Some(false)] {
+                    for (beta_flag, droppable, capability_enabled) in bool_triples() {
+                        let old_display = resolve_display_verdict(
+                            override_verdict,
+                            learned_entry.as_ref().map(|e| (e.verdict, e.source)),
+                            seed,
+                            prior,
+                        );
+                        let old_action = resolve_display_action(ActionInputs {
+                            display: old_display,
+                            learned: learned_entry
+                                .as_ref()
+                                .map(|e| LearnedActing::from_entry(e, now)),
+                            prior,
+                            strip_applies: droppable,
+                            capability_enabled,
+                            beta_flag,
+                            seed,
+                        });
+                        let new = new_display(
+                            override_verdict,
+                            learned_entry.as_ref(),
+                            seed,
+                            prior,
+                            (beta_flag, droppable, capability_enabled),
+                            now,
+                        );
+                        let cell = format!(
+                            "override {override_verdict:?} learned {learned_entry:?} seed \
+                             {seed:?} prior {prior:?} beta {beta_flag} droppable {droppable} \
+                             enabled {capability_enabled}"
+                        );
+                        compared += 1;
+                        assert_eq!(
+                            (
+                                new.display_verdict(),
+                                new.display_supported(),
+                                new.display_source(),
+                                new.display_layer().map(Layer::as_str),
+                            ),
+                            (
+                                old_display.verdict,
+                                old_display.supported,
+                                old_display.source,
+                                old_layer(old_display),
+                            ),
+                            "{cell}"
+                        );
+                        if new.display_layer() == Some(Layer::Learned)
+                            && new.layer() != Some(Layer::Learned)
+                        {
+                            learned_without_opinion += 1;
+                        }
+                        if beta_flag && prior == Some(false) && old_action != new.as_str() {
+                            assert_eq!(
+                                (old_action, new.as_str()),
+                                (ACTION_ROUTE_AWAY, ACTION_NONE),
+                                "{cell}"
+                            );
+                            beta_prior_cells += 1;
+                            continue;
+                        }
+                        assert_eq!(new.as_str(), old_action, "{cell}");
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(compared, 38 * 3 * 3 * 3 * 8);
+    // Kill switch on, no override, no seed, and an entry with no learned
+    // action (no entry, 12 uncorroborated inferred, 4 live F3), on either
+    // droppable value: 17 * 2.
+    assert_eq!(
+        beta_prior_cells, 34,
+        "the beta-prior action exception is exactly the cells with no stronger opinion"
+    );
+    assert!(
+        learned_without_opinion > 0,
+        "a resident entry with no opinion still shows learned"
+    );
+}
+
+#[test]
+#[rustfmt::skip]
+fn display_projections_for_the_tiers_the_previous_resolver_lacked() {
+    let beta = |representable| CellContext {
+        capability_enabled: true,
+        beta_flag: true,
+        droppable: true,
+        representable,
+    };
+    let base = |ctx| DisplayInputs {
+        pinned: false,
+        override_verdict: None,
+        learned: None,
+        seed: Some(SeedCell::Withhold),
+        prior: None,
+        ctx,
+    };
+    // (name, inputs, verdict, supported, source, layer, action)
+    let rows = [
+        ("a pinned beta flag shows the pin",
+         DisplayInputs { pinned: true, ..base(beta(true)) },
+         FORCED_SUPPORTED, Some(true), Some(SOURCE_PIN), Some(Layer::Pin), ACTION_ALLOW),
+        ("an unrepresentable beta flag shows representability",
+         DisplayInputs { override_verdict: FORCE, ..base(beta(false)) },
+         VERDICT_UNREPRESENTABLE, Some(false), Some(SOURCE_REPRESENTABILITY),
+         Some(Layer::Representability), ACTION_WITHHOLD),
+        ("a pin beats representability",
+         DisplayInputs { pinned: true, ..base(beta(false)) },
+         FORCED_SUPPORTED, Some(true), Some(SOURCE_PIN), Some(Layer::Pin), ACTION_ALLOW),
+        ("no signal at all",
+         DisplayInputs { seed: None, ..base(beta(true)) },
+         "unknown", None, None, None, ACTION_NONE),
+    ];
+    for (name, inputs, verdict, supported, source, layer, action) in rows {
+        let resolution = resolve_display(inputs);
+
+        assert_eq!(
+            (
+                resolution.display_verdict(),
+                resolution.display_supported(),
+                resolution.display_source(),
+                resolution.display_layer(),
+                resolution.as_str(),
+            ),
+            (verdict, supported, source, layer, action),
+            "{name}"
+        );
+    }
+}
+
+fn bool_triples() -> impl Iterator<Item = (bool, bool, bool)> {
+    (0..8u8).map(|bits| (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0))
 }

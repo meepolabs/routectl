@@ -953,21 +953,24 @@ fn a_policy_without_suspects_admits_verified_evidence_only() {
         // Arrange
         let router = router_with(OPENAI_P1, NoopProvider::new());
         let target = openai_target(&router);
-        let scope = router
-            .evidence_scope(
-                &forced_search_request(),
-                &target,
-                &UntranslatedCapabilities::default(),
-            )
-            .expect("an own-credential lane with the subsystem on yields a scope");
+        let scope = || {
+            router
+                .evidence_scope(
+                    &forced_search_request(),
+                    &target,
+                    &UntranslatedCapabilities::default(),
+                )
+                .expect("an own-credential lane with the subsystem on yields a scope")
+        };
         let resp = clean_response(assistant_text("no search happened"), None);
         let policy = EvidencePolicy { admit_suspect };
         let now = Instant::now();
         let mut events = Vec::new();
 
-        // Act: two reads, since an inferred suspect acts only once corroborated.
-        router.observe_response_evidence_at(&scope, &resp, policy, &mut events, now);
-        router.observe_response_evidence_at(&scope, &resp, policy, &mut events, now);
+        // Act: two attempts, each settling its own scope, since an inferred
+        // suspect acts only once corroborated.
+        router.observe_response_evidence_at(scope(), &resp, policy, &mut events, now);
+        router.observe_response_evidence_at(scope(), &resp, policy, &mut events, now);
 
         // Assert
         let suspects = events
@@ -1002,7 +1005,7 @@ fn a_verified_only_policy_still_admits_a_verified_positive() {
 
     // Act
     router.observe_response_evidence(
-        &scope,
+        scope,
         &resp,
         EvidencePolicy {
             admit_suspect: false,
@@ -1048,7 +1051,104 @@ fn a_scope_taken_before_a_reload_admits_nothing() {
         // Act: the live router reads the response, as a settle after the
         // reload would.
         live.observe_response_evidence(
-            &scope,
+            scope,
+            &resp,
+            EvidencePolicy {
+                admit_suspect: true,
+            },
+            &mut events,
+        );
+
+        // Assert
+        assert_eq!(events.len(), want, "{name}: events");
+        assert_eq!(
+            live.learned_capabilities.snapshot().len(),
+            want,
+            "{name}: resident entries"
+        );
+        assert_eq!(
+            live.metrics.verified_working_total(),
+            want as u64,
+            "{name}: counter"
+        );
+    }
+}
+
+/// A config-only reload (no catalog or overlay revision change) does not
+/// advance the registry generation, so the generation barrier cannot refuse a
+/// scope taken before it. The reading Router re-checks its own config.
+#[test]
+fn a_scope_taken_before_a_config_only_reload_obeys_the_new_config() {
+    const ANTHROPIC_P1: &str = r#"
+[providers.p1]
+kind = "anthropic-api"
+base_url = "https://example.test"
+api_key_ref = "literal:k"
+"#;
+    const ANTHROPIC_P1_FORWARDED: &str = r#"
+[providers.p1]
+kind = "anthropic-api"
+base_url = "https://example.test"
+credential_source = "forwarded"
+"#;
+    const OPENAI_P2: &str = r#"
+[providers.p2]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+"#;
+    // (name, config before, config after, events expected)
+    let rows = [
+        (
+            "unchanged config (positive control)",
+            OPENAI_P1,
+            OPENAI_P1,
+            1,
+        ),
+        (
+            "unchanged anthropic config (positive control)",
+            ANTHROPIC_P1,
+            ANTHROPIC_P1,
+            1,
+        ),
+        ("kill switch turned off", OPENAI_P1, OPENAI_P1_DISABLED, 0),
+        (
+            "credential now forwarded",
+            ANTHROPIC_P1,
+            ANTHROPIC_P1_FORWARDED,
+            0,
+        ),
+        ("provider kind changed", ANTHROPIC_P1, OPENAI_P1, 0),
+        ("provider entry removed", OPENAI_P1, OPENAI_P2, 0),
+    ];
+    for (name, before, after, want) in rows {
+        // Arrange: the scope is taken on the outgoing Router, then a reload
+        // that changes only the config publishes the live Router.
+        let old = Router::new(Arc::new(
+            toml::from_str::<Config>(before).expect("valid test toml"),
+        ));
+        let mut live = Router::new(Arc::new(
+            toml::from_str::<Config>(after).expect("valid test toml"),
+        ));
+        live.carry_over_learned_from(&old);
+        assert_eq!(
+            live.registry_generation(),
+            old.registry_generation(),
+            "{name}: a config-only reload keeps the generation"
+        );
+        let scope = old
+            .evidence_scope(
+                &structured_output_request(&["name"]),
+                &openai_target(&old),
+                &UntranslatedCapabilities::default(),
+            )
+            .expect("the outgoing config admits evidence");
+        let resp = clean_response(assistant_text(r#"{"name":"ok"}"#), None);
+        let mut events = Vec::new();
+
+        // Act
+        live.observe_response_evidence(
+            scope,
             &resp,
             EvidencePolicy {
                 admit_suspect: true,

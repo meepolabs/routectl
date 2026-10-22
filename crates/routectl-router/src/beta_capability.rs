@@ -21,6 +21,8 @@
 //! change like any other catalog capability.
 
 use routectl_core::is_safe_token;
+use routectl_core::wire_check::EgressKind;
+use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
 
 /// The permanent prefix of every beta-flag capability key.
 ///
@@ -54,7 +56,7 @@ fn is_beta_flag(flag: &str) -> bool {
 }
 
 /// The flag inside a beta capability key, or `None` for a key outside the
-/// namespace. The exact inverse of [`beta_capability_key`]'s append, so a
+/// namespace. The exact inverse of `beta_capability_key`'s append, so a
 /// round trip is lossless.
 ///
 /// A namespace read, not a validity check: a key persisted by an earlier
@@ -79,6 +81,20 @@ pub fn beta_override_key(key: &str) -> String {
         Some(flag) => format!("{BETA_CAPABILITY_PREFIX}{}", flag.to_ascii_lowercase()),
         None => key.to_string(),
     }
+}
+
+/// Whether a lane can carry no client beta flag at all: a Bedrock Converse
+/// lane to a model that refuses the `anthropic_beta` bag key. An upstream that
+/// proves neither Anthropic nor not-Anthropic (an inference-profile ARN) does
+/// not refuse.
+///
+/// A representability check, not a precedence tier of its own: the
+/// resolution applies it after the pin tier and before the override, learned
+/// and seed tiers (`CellContext::representable`), so an operator floor still
+/// sends the flag and nothing below the pin can make it ride the wire.
+pub fn refuses_beta_bag_key(egress_kind: Option<EgressKind>, upstream: &str) -> bool {
+    egress_kind == Some(EgressKind::BedrockConverse)
+        && anthropic_family(upstream) == AnthropicFamily::No
 }
 
 /// The beta flags a shipped seed withholds on one provider kind.

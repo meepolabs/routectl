@@ -17,7 +17,7 @@ use routectl_core::{
 };
 use serde_json::{Value, json};
 
-use super::{egress_kind_of, fills_max_tokens};
+use super::fills_max_tokens;
 use crate::config::{Config, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::Router;
@@ -673,7 +673,7 @@ fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
     }
 
     for (name, body, expected, fills) in rows {
-        let derived = egress_kind_of(&only_entry(&body));
+        let derived = only_entry(&body).egress_kind();
 
         assert_eq!(derived, expected, "{name}");
         assert_eq!(fills_max_tokens(derived), fills, "{name}: fills max_tokens");

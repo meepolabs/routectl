@@ -45,6 +45,18 @@ pub fn seed_state(
     })
 }
 
+/// [`seed_state`] for a capability key: `None` for a key outside the
+/// beta-flag namespace, which no seed covers.
+pub fn seed_state_for_key(
+    scope: crate::beta_capability::BetaSeedScope,
+    provider_kind: &str,
+    capability_key: &str,
+    marker_present: impl FnOnce() -> bool,
+) -> Option<crate::capability_precedence::SeedCell> {
+    let flag = crate::beta_capability::beta_flag_of(capability_key)?;
+    seed_state(scope, provider_kind, flag, marker_present)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +92,29 @@ mod tests {
         for (name, kind, flag, marker, expected) in rows {
             assert_eq!(
                 seed_state(scope(), kind, flag, || *marker),
+                *expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn seed_state_for_key_reads_the_flag_inside_a_beta_key() {
+        let seeded = crate::beta_capability::beta_capability_key("fx-seeded").expect("a flag");
+        let rows: &[(&str, &str, bool, Option<SeedCell>)] = &[
+            ("seeded beta key", &seeded, false, Some(SeedCell::Withhold)),
+            (
+                "seeded beta key, marker",
+                &seeded,
+                true,
+                Some(SeedCell::Cleared),
+            ),
+            ("the bare flag is not a key", "fx-seeded", false, None),
+            ("a feature key", "web_search", false, None),
+        ];
+        for (name, key, marker, expected) in rows {
+            assert_eq!(
+                seed_state_for_key(scope(), KIND, key, || *marker),
                 *expected,
                 "{name}"
             );

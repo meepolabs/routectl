@@ -1,23 +1,29 @@
-//! Read-only display resolver for a single capability matrix cell.
+//! The display mode of the capability precedence resolution, plus the
+//! previous display resolvers it replaces.
 //!
-//! ONE pure function that pins the within-target precedence order
-//! `override > learned > verified-working > seed > prior > unknown` for a
-//! DISPLAY surface (the doctor capability matrix panel). It is an
-//! EXTRACTION of the order the dispatch-path
-//! `Router::unsupported_feature_for_target` enforces, NOT a reuse: that
-//! seam is side-effecting (it claims probe slots, flips `in_flight`, and
-//! bumps metrics), so it can never run from a read-only diagnostic. This
-//! resolver reads already-gathered inputs and returns a display verdict; a
-//! sibling drift test asserts its order agrees with the router's
-//! consolidated precedence matrix. The seed layer mirrors the withheld-beta
-//! pass instead: the shipped beta seed sits below every learned verdict.
+//! [`resolve_display`] resolves one cell for a read-only surface (the doctor
+//! capability matrix, the status surface) through the same tier opinions the
+//! dispatch path uses, then names the next tier that had an opinion and the
+//! signal the surface renders. It is pure: it admits no probe, flips no
+//! `in_flight` flag, and touches no metric.
+//!
+//! [`resolve_display_verdict`] and [`resolve_display_action`] are the
+//! previous display resolvers, kept until every display surface reads
+//! [`resolve_display`]; a parity test pins the two to the same answers.
 
 use std::time::Instant;
 
 use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 
-pub use crate::capability_precedence::SeedCell;
-use crate::config::{Config, ModelEntry, ProviderEntry};
+pub use crate::capability_precedence::{
+    ACTION_ALLOW, ACTION_DROP, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY, ACTION_STRIP,
+    ACTION_WITHHOLD, SeedCell,
+};
+use crate::capability_precedence::{
+    DisplayInputs, Layer, LearnedInput, Resolution, Shown, no_opinion, operator_pins_capability,
+    opinions,
+};
+use crate::config::{Config, ModelEntry};
 use crate::learned_capability::LearnedRegistryEntry;
 use crate::override_registry::OverrideVerdict;
 
@@ -48,6 +54,120 @@ pub const SOURCE_PROBE: &str = "probe";
 pub const SOURCE_PRIOR: &str = "prior";
 /// Source tag: the shipped beta seed.
 pub const SOURCE_SEED: &str = "seed";
+
+/// Display verdict token for a beta flag the lane cannot carry at all.
+/// PANEL-ONLY, like the override tokens.
+pub const VERDICT_UNREPRESENTABLE: &str = "unrepresentable";
+
+/// Source tag: an operator wire floor pins the capability.
+pub const SOURCE_PIN: &str = "pin";
+/// Source tag: the lane cannot represent the capability on its wire.
+pub const SOURCE_REPRESENTABILITY: &str = "representability";
+
+/// Resolve a cell from snapshot reads and name the next tier below the
+/// winner that had an opinion. The winner is the staged resolution's. The
+/// display projections ([`Resolution::display_layer`] and its siblings) are
+/// filled here too. Gather `pinned` with
+/// [`operator_pins_capability`](crate::capability_precedence::operator_pins_capability),
+/// `learned` with [`LearnedInput::from_entry`] and `ctx` with
+/// [`CellContext::for_lane`](crate::capability_precedence::CellContext::for_lane).
+pub fn resolve_display(inputs: DisplayInputs) -> Resolution {
+    let mut ranked = opinions(inputs).into_iter().flatten();
+    let winner = ranked.next().unwrap_or_else(|| no_opinion(inputs.pinned));
+    let overridden = ranked.next().and_then(|next| next.layer());
+    winner.with_display(overridden, shown_signal(inputs))
+}
+
+/// The strongest tier holding a signal on the cell, in precedence order, but
+/// ignoring whether the signal acts: a resident learned entry and a prior are
+/// shown with the kill switch off, and an advisory or uncorroborated learned
+/// negative is shown over the seed and the prior.
+const fn shown_signal(inputs: DisplayInputs) -> Option<Shown> {
+    let ctx = inputs.ctx;
+    if inputs.pinned && ctx.beta_flag {
+        return Some(shown(Layer::Pin, FORCED_SUPPORTED, true, SOURCE_PIN));
+    }
+    if !ctx.representable {
+        return Some(shown(
+            Layer::Representability,
+            VERDICT_UNREPRESENTABLE,
+            false,
+            SOURCE_REPRESENTABILITY,
+        ));
+    }
+    match inputs.override_verdict {
+        Some(OverrideVerdict::RouteAway) => {
+            return Some(shown(
+                Layer::Override,
+                FORCED_UNSUPPORTED,
+                false,
+                SOURCE_OVERRIDE,
+            ));
+        }
+        Some(OverrideVerdict::ForceSupported) => {
+            return Some(shown(
+                Layer::Override,
+                FORCED_SUPPORTED,
+                true,
+                SOURCE_OVERRIDE,
+            ));
+        }
+        None => {}
+    }
+    if let Some(learned) = inputs.learned {
+        let source = match learned.source() {
+            EvidenceSource::Live => SOURCE_LIVE,
+            EvidenceSource::Probe => SOURCE_PROBE,
+        };
+        return Some(match learned {
+            LearnedInput::Verified { .. } => shown(
+                Layer::Learned,
+                Verdict::VerifiedWorking.as_str(),
+                true,
+                source,
+            ),
+            _ => shown(Layer::Learned, BROKEN, false, source),
+        });
+    }
+    match inputs.seed {
+        Some(SeedCell::Withhold) => return Some(shown(Layer::Seed, BROKEN, false, SOURCE_SEED)),
+        Some(SeedCell::Cleared) => {
+            return Some(shown(
+                Layer::Seed,
+                Verdict::Cleared.as_str(),
+                true,
+                SOURCE_SEED,
+            ));
+        }
+        None => {}
+    }
+    match inputs.prior {
+        Some(supported) => Some(shown(
+            Layer::Prior,
+            Verdict::Assumed(supported).as_str(),
+            supported,
+            SOURCE_PRIOR,
+        )),
+        None => None,
+    }
+}
+
+/// The display verdict token of a negative signal.
+const BROKEN: &str = Verdict::LearnedBroken(FailurePhase::F1).as_str();
+
+const fn shown(
+    layer: Layer,
+    verdict: &'static str,
+    supported: bool,
+    source: &'static str,
+) -> Shown {
+    Shown {
+        layer,
+        verdict,
+        supported,
+        source,
+    }
+}
 
 /// The resolved display verdict for one capability matrix cell.
 ///
@@ -173,28 +293,6 @@ const fn seed_display(seed: SeedCell) -> DisplayVerdict {
     }
 }
 
-/// Action token: an operator route-away override hard-drops the target.
-pub const ACTION_DROP: &str = "drop";
-/// Action token: the target is demoted to the tail of its chain (an acting
-/// learned negative, or a catalog `prior=false`).
-pub const ACTION_ROUTE_AWAY: &str = "route_away";
-/// Action token: the capability is stripped from the request in place.
-pub const ACTION_STRIP: &str = "strip";
-/// Action token: the negative's decay window has lapsed, so the next request
-/// carrying the capability re-verifies it on this target.
-pub const ACTION_REPROBE: &str = "reprobe";
-/// Action token: a positive signal; the target serves the capability.
-pub const ACTION_ALLOW: &str = "allow";
-/// Action token: the target stays in the chain but does not send the beta
-/// flag (a beta-key negative, a beta-key override, or the shipped seed).
-pub const ACTION_WITHHOLD: &str = "withhold";
-/// Action token: no signal acts on routing for this cell.
-pub const ACTION_NONE: &str = "none";
-/// Action token: the nicknames sharing a lane resolve the cell to different
-/// actions (one carries an override or a pinned beta the other does not), so
-/// no single action describes it; the per-nickname actions ride alongside.
-pub const ACTION_MIXED: &str = "mixed";
-
 /// The learned-entry facts the display action needs beyond its verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LearnedActing {
@@ -305,10 +403,7 @@ const fn learned_action(
     if learned.verified {
         return Some(ACTION_ALLOW);
     }
-    if matches!(
-        (learned.phase, learned.source),
-        (FailurePhase::F3, EvidenceSource::Live)
-    ) {
+    if crate::learned_capability::negative_is_advisory(learned.phase, learned.source) {
         return None;
     }
     if learned.lapsed {
@@ -326,10 +421,9 @@ const fn learned_action(
 
 /// Whether an acting F1 negative on `capability` is stripped in place for a
 /// lane rather than routed away: the capability is a droppable the operator
-/// has not marked essential, and no operator beta floor -- the provider
-/// entry's own or any mapped model's `header_extras` -- pins its beta token
-/// to the wire (a pinned token is re-added after the strip, so the filter
-/// routes away instead).
+/// has not marked essential, and no operator beta floor pins it for the
+/// provider entry or any mapped model ([`operator_pins_capability`]; a pinned
+/// token is re-added after the strip, so the filter routes away instead).
 pub fn lane_strips_capability(
     config: &Config,
     provider_entry: &str,
@@ -342,28 +436,13 @@ pub fn lane_strips_capability(
     ) {
         return false;
     }
-    let tokens = crate::capability_strip::strip_beta_tokens(capability);
-    if tokens.is_empty() {
-        return true;
-    }
-    let entry = config.providers.get(provider_entry);
-    let provider_floor = entry.map_or(&[][..], ProviderEntry::anthropic_beta_floor);
-    let provider_headers = entry.map(ProviderEntry::header_extras);
     let empty = std::collections::BTreeMap::new();
-    let header_floors: Vec<Vec<String>> = if models.is_empty() {
-        vec![crate::router::operator_betas(provider_headers, &empty)]
+    let pins = |headers| operator_pins_capability(config, provider_entry, headers, capability);
+    if models.is_empty() {
+        !pins(&empty)
     } else {
-        models
-            .iter()
-            .map(|model| crate::router::operator_betas(provider_headers, &model.header_extras))
-            .collect()
-    };
-    !tokens.iter().any(|token| {
-        provider_floor.iter().any(|pinned| pinned == token)
-            || header_floors
-                .iter()
-                .any(|floor| floor.iter().any(|pinned| pinned == token))
-    })
+        !models.iter().any(|model| pins(&model.header_extras))
+    }
 }
 
 #[cfg(test)]

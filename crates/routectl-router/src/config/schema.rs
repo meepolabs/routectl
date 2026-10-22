@@ -1962,6 +1962,41 @@ pub fn is_config_provider_kind(kind: &str) -> bool {
 }
 
 impl ProviderEntry {
+    /// The egress kind this entry sends with. Bedrock splits by API shape
+    /// and every Mantle sub-lane is its own kind, because each sends a
+    /// different wire body than its standard sibling.
+    pub const fn egress_kind(&self) -> routectl_core::wire_check::EgressKind {
+        use routectl_core::wire_check::EgressKind;
+        match self {
+            #[cfg(feature = "bedrock")]
+            Self::AnthropicApi {
+                bedrock_mantle: Some(_),
+                ..
+            } => EgressKind::AnthropicApiMantle,
+            Self::AnthropicApi { .. } => EgressKind::AnthropicApi,
+            #[cfg(feature = "bedrock")]
+            Self::OpenaiCompat {
+                bedrock_mantle: Some(_),
+                ..
+            } => EgressKind::OpenaiCompatMantle,
+            Self::OpenaiCompat { .. } => EgressKind::OpenaiCompat,
+            #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
+            Self::OpenaiResponses {
+                bedrock_mantle: Some(_),
+                ..
+            } => EgressKind::OpenaiResponsesMantle,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses { .. } => EgressKind::OpenaiResponses,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { api_shape, .. } => match api_shape {
+                BedrockApiShapeConfig::Invoke => EgressKind::BedrockInvoke,
+                BedrockApiShapeConfig::Converse => EgressKind::BedrockConverse,
+            },
+            #[cfg(feature = "gemini")]
+            Self::Gemini { .. } => EgressKind::Gemini,
+        }
+    }
+
     /// Stable config-key token naming this entry's provider kind. Matches
     /// the `kind = "..."` discriminant in the TOML provider table, so the
     /// returned value round-trips with operator configuration and is safe

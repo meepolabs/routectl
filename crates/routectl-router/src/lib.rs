@@ -88,19 +88,27 @@ pub use activation::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use beta_capability::beta_capability_key;
-pub use beta_capability::{BetaSeedScope, beta_override_key, capability_key_is_beta};
-pub use beta_seed::{seed_state as beta_seed_state, shipped_scope as shipped_beta_seed_scope};
+pub use beta_capability::{
+    BetaSeedScope, beta_flag_of, beta_override_key, capability_key_is_beta, refuses_beta_bag_key,
+};
+pub use beta_seed::{
+    seed_state as beta_seed_state, seed_state_for_key as beta_seed_state_for_key,
+    shipped_scope as shipped_beta_seed_scope,
+};
 pub use calibration::{CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary};
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};
 pub use capability_display::{
-    ACTION_ALLOW, ACTION_DROP, ACTION_MIXED, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY,
-    ACTION_STRIP, ACTION_WITHHOLD, ActionInputs, DisplayVerdict, LearnedActing, SeedCell,
-    VERDICT_MIXED, lane_strips_capability, resolve_display_action, resolve_display_verdict,
+    ActionInputs, DisplayVerdict, FORCED_SUPPORTED, FORCED_UNSUPPORTED, LearnedActing, SOURCE_LIVE,
+    SOURCE_OVERRIDE, SOURCE_PIN, SOURCE_PRIOR, SOURCE_PROBE, SOURCE_REPRESENTABILITY, SOURCE_SEED,
+    VERDICT_MIXED, VERDICT_UNREPRESENTABLE, lane_strips_capability, resolve_display,
+    resolve_display_action, resolve_display_verdict,
 };
 pub use capability_matcher::resolve_requested_capability;
 pub use capability_precedence::{
-    CellContext, DisplayInputs, Layer, LearnedInput, OpenCell, Resolution, Routing, Stage, Wire,
-    refuses_beta_bag_key, resolve_display, resolve_open, resolve_operator,
+    ACTION_ALLOW, ACTION_DROP, ACTION_MIXED, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY,
+    ACTION_STRIP, ACTION_WITHHOLD, CellContext, DisplayInputs, Layer, LearnedInput, OpenCell,
+    Resolution, Routing, SeedCell, Stage, Wire, operator_pins_capability, operator_pins_flag,
+    resolve_open, resolve_operator,
 };
 pub use capability_rebuild::{
     CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, ReplayTombstone,
