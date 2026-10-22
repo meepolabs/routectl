@@ -428,9 +428,11 @@ impl<'a> AttemptLearning<'a> {
     /// proposer reads it, and the first proposal in [`ARBITRATION_ORDER`] that
     /// takes decides it -- replay strip, envelope field (the canary's repaired
     /// retry answering the same proposal when the reactive repair does not),
-    /// beta withhold, then the generic capability learner. Each repair fires at most
-    /// once per target and never nests inside the per-target retry or the
-    /// fallback walk, so the call count stays additive.
+    /// beta withhold, then the generic capability learner. The field repair
+    /// fires once per field and every other repair at most once per target;
+    /// none nests inside the per-target retry or the fallback walk, so the
+    /// call count stays additive. Before the proposers, a repaired retry
+    /// refused for a different field commits the field steps it proves.
     ///
     /// On `Proceed` the generic capability proposal is held for
     /// [`Self::observe_generic`]; a `Retry` never reaches it, because the walk
@@ -469,6 +471,7 @@ impl<'a> AttemptLearning<'a> {
         if self.transcript_rejection {
             return FailureDecision::Proceed;
         }
+        self.settle_field_moved_on(&rejection, meta);
         self.arbitrate_proposers(rejection, attempt_req, meta, budget)
     }
 
@@ -626,9 +629,6 @@ impl<'a> AttemptLearning<'a> {
         let Some(plan) = self.field_plan.as_mut() else {
             return false;
         };
-        if plan.has_pending() {
-            return false;
-        }
         if plan
             .apply_named(named, attempt_req, meta, budget, err)
             .is_none()

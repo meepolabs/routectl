@@ -2934,14 +2934,23 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_repair_step.rs` -- child module of `field_repair.rs`:
   `FieldRepairPlan` and its `pending: Vec<RepairStep>`, one step per applied
   repair (row, edit, kind, tier, fill_clamped, repair handle, reject status,
-  guard). `apply_named` adds a step for a field no pending step repaired
-  (`FieldIdentity::of_row`; `rerepairs_same_field` is false for every row);
+  guard). `apply_named` adds a step for a field this target has not
+  repaired, pending or committed (`FieldIdentity::of_row`;
+  `rerepairs_same_field` is false for every row);
   a later step re-claims a released row's guard through `admit_provisional`
   with the admission inputs the plan keeps (`GuardAdmission`), and a
   sibling-held claim refuses the step. `commit_pending` settles every step
-  with its own tier / value / status and returns one `SettledStep` (handle +
-  event) each; every other exit releases by drop. Coverage in
-  `field_repair_step_tests.rs`
+  with its own tier / value / status, remembers each committed field for the
+  rest of the target, and returns one `SettledStep` (handle + event) each;
+  every other exit releases by drop. `moved_on_by` is the moved-on proof: a
+  repaired retry refused, by its NATIVE class, self-identifyingly for a field
+  no pending step repaired (`localized_field`). `has_applied` stays true
+  after a moved-on commit drains the steps, so a later success commits and
+  never takes the `settle_success` clear path. The engine calls the moved-on
+  check once per rejection (`learn_settle.rs` `settle_field_moved_on`, after
+  the declared-edit undo, skipped for a path the sent body lacked). Coverage
+  in `field_repair_step_tests.rs` and the walk-level
+  `field_repair_chain_tests.rs`
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,

@@ -11,13 +11,15 @@
 //!
 //! Each step settles on its own evidence: [`FieldRepairPlan::commit_pending`]
 //! commits every pending step with that step's own tier, value and status,
-//! and every other exit releases each step's guard by drop. The learning
-//! engine still admits one step per target; lifting that gate is what lets a
-//! repaired retry rejected for a DIFFERENT field commit the earlier steps and
-//! repair the new field.
+//! and every other exit releases each step's guard by drop. Two things prove
+//! the pending steps: a success of the repaired request, and a repaired
+//! retry the upstream refuses for a DIFFERENT field
+//! ([`FieldRepairPlan::moved_on_by`]), since an upstream that moved on to
+//! another field accepted the fields it passed.
 //!
-//! A field a pending step already repaired is not repaired again unless its
-//! row says so ([`rerepairs_same_field`], false for every row). The type
+//! A field this target already repaired, pending or committed, is not
+//! repaired again unless its row says so ([`rerepairs_same_field`], false for
+//! every row). The type
 //! keeps no one-step-per-field invariant on purpose: a rewrite row that
 //! re-repairs the same field within the request's budget, then maps every
 //! refused value it sent to the one that succeeded, needs two pending steps on
@@ -27,7 +29,6 @@ use std::borrow::Cow;
 use std::time::Instant;
 
 use routectl_core::capability::SignalTier;
-#[cfg(test)]
 use routectl_core::failure_class::FailureClass;
 use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{ChatRequest, Error};
@@ -37,7 +38,7 @@ use crate::field_verdict_value::VerdictValue;
 
 use super::super::edit_declare::declare_field_edit;
 use super::super::rejection_parser::{
-    FieldIdentity, NamedRejection, RejectionKind, RejectionValue,
+    FieldIdentity, NamedRejection, RejectionKind, RejectionValue, localized_field,
 };
 use super::super::repair_budget::RepairBudget;
 use super::super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta};
@@ -74,11 +75,13 @@ pub(super) const fn rerepairs_same_field(_row: &FieldRepairRow) -> bool {
 /// the admission's inputs.
 ///
 /// Holding this is the PROVISIONAL phase -- nothing is persisted while it
-/// lives. The dispatch arm settles it exactly once: [`Self::commit_pending`]
-/// when the repaired retry succeeded, [`Self::settle_success`] when the
-/// unrepaired attempt succeeded outright, and release-by-drop on every other
-/// exit (a repeat rejection, an unrelated error, a fallback hop, a client
-/// disconnect), which learns nothing and strands no slot.
+/// lives. The dispatch arm settles each step exactly once:
+/// [`Self::commit_pending`] when the repaired retry succeeded or was refused
+/// for a different field, and release-by-drop on every other exit (a
+/// same-field rejection, an unrelated error, a fallback hop, a client
+/// disconnect), which learns nothing and strands no slot. A plan that never
+/// applied a repair settles through [`Self::settle_success`] when its
+/// attempt succeeded outright.
 pub(in crate::router) struct FieldRepairPlan<'a> {
     /// The table the candidates were admitted from, and so the only rows a
     /// rejection may name for this plan.
@@ -87,6 +90,14 @@ pub(in crate::router) struct FieldRepairPlan<'a> {
     candidates: Vec<FieldRepairCandidate<'a>>,
     /// The repairs applied and not yet settled, in the order they were made.
     pending: Vec<RepairStep<'a>>,
+    /// The fields whose steps already committed on this target. A committed
+    /// field is never repaired again in the request, so this outlives the
+    /// pending list it drains from.
+    committed: Vec<FieldIdentity>,
+    /// Whether any repair was applied on this target. Once one was, the
+    /// request that reaches the upstream is not the unrepaired one, so its
+    /// success can never prove the carried fields accepted.
+    applied: bool,
     /// The wire dialect the attempt shares with its client, for declaring the
     /// repair's edit; `None` on a translation lane.
     wire: Option<IngressDialect>,
@@ -311,14 +322,53 @@ impl<'a> FieldRepairPlan<'a> {
             table,
             candidates,
             pending: Vec::new(),
+            committed: Vec::new(),
+            applied: false,
             wire,
             reclaim,
         }
     }
 
     /// Whether any repair is awaiting settlement.
+    #[cfg(test)]
     pub(in crate::router) const fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Whether this plan applied any repair, settled or not.
+    pub(in crate::router) const fn has_applied(&self) -> bool {
+        self.applied
+    }
+
+    /// Whether `rejection` of a repaired retry proves every pending step: its
+    /// NATIVE class can name a field, it names one self-identifyingly, and
+    /// that field is none a pending step repaired. The upstream then read
+    /// past each pending field to refuse another, so each was accepted.
+    ///
+    /// An operator remap of the class is not read: it says how a status is
+    /// routed, not what the upstream refused. The field is compared by
+    /// identity, so a refused rewrite value (`thinking.type.<token>`) reads
+    /// as the field it rewrote. The caller still owes the check that the body
+    /// that went out carried the named path.
+    pub(in crate::router) fn moved_on_by(
+        &self,
+        native_class: &FailureClass,
+        rejection: &Error,
+        provider_kind: &str,
+    ) -> bool {
+        if self.pending.is_empty() || !super::class_can_name_a_field(native_class, provider_kind) {
+            return false;
+        }
+        let Some(status) = super::super::class_observe::upstream_facts(rejection).status else {
+            return false;
+        };
+        localized_field(provider_kind, status, rejection.parsed_body()).is_some_and(|field| {
+            field.tier == SignalTier::SelfIdentifying
+                && self
+                    .pending
+                    .iter()
+                    .all(|step| FieldIdentity::of_row(&step.row) != field.identity)
+        })
     }
 
     /// The closed-table path the latest repair acted on, or `None` when this
@@ -389,9 +439,9 @@ impl<'a> FieldRepairPlan<'a> {
     /// Repair for a rejection already resolved to its closed-table row: the
     /// admitted candidate whose SURFACE that row names.
     ///
-    /// A row whose field identity a pending step already repaired is refused
-    /// unless [`rerepairs_same_field`] holds for it; a DIFFERENT field adds a
-    /// step beside the earlier ones.
+    /// A row whose field identity this target already repaired, pending or
+    /// committed, is refused unless [`rerepairs_same_field`] holds for it; a
+    /// DIFFERENT field adds a step beside the earlier ones.
     pub(in crate::router) fn apply_named(
         &mut self,
         named: NamedRejection,
@@ -400,7 +450,7 @@ impl<'a> FieldRepairPlan<'a> {
         budget: &mut RepairBudget,
         rejection: &Error,
     ) -> Option<u16> {
-        if self.repairs_pending_field(named.row) {
+        if self.repaired_field(named.row) {
             return None;
         }
         // WHICH row: the one the upstream named. Refusing here is
@@ -419,16 +469,19 @@ impl<'a> FieldRepairPlan<'a> {
         self.apply_candidate(idx, repair, attempt_req, meta, budget, rejection)
     }
 
-    /// Whether a pending step already repaired the field `row` names, and the
-    /// row does not re-repair a field.
-    fn repairs_pending_field(&self, row: &FieldRepairRow) -> bool {
+    /// Whether this target already repaired the field `row` names, in a step
+    /// still pending or one already committed, and the row does not re-repair
+    /// a field.
+    fn repaired_field(&self, row: &FieldRepairRow) -> bool {
         if rerepairs_same_field(row) {
             return false;
         }
         let identity = FieldIdentity::of_row(row);
-        self.pending
-            .iter()
-            .any(|step| FieldIdentity::of_row(&step.row) == identity)
+        self.committed.contains(&identity)
+            || self
+                .pending
+                .iter()
+                .any(|step| FieldIdentity::of_row(&step.row) == identity)
     }
 
     /// The guard a step on candidate `idx` settles through. A row the first
@@ -569,6 +622,7 @@ impl<'a> FieldRepairPlan<'a> {
             reject_status,
             guard,
         });
+        self.applied = true;
         Some(reject_status)
     }
 
@@ -622,9 +676,10 @@ impl<'a> FieldRepairPlan<'a> {
         self.apply_candidate(0, repair, attempt_req, meta, budget, rejection)
     }
 
-    /// Phase two after a repaired retry succeeded: settle every pending step,
-    /// oldest first, each with its own tier, written value and rejection
-    /// status, and return one entry per step.
+    /// Phase two once the pending steps are proven -- the repaired retry
+    /// succeeded, or was refused for a different field: settle every pending
+    /// step, oldest first, each with its own tier, written value and
+    /// rejection status, and return one entry per step.
     ///
     /// Each step's commit speaks for its own row alone: the rejection named
     /// that row, and the retry that succeeded is evidence about it. A step
@@ -632,14 +687,18 @@ impl<'a> FieldRepairPlan<'a> {
     /// releases its guard and persists nothing, and a non-settling plan holds
     /// no guard, so neither yields a verdict row.
     ///
-    /// The pending list is empty afterwards.
+    /// The pending list is empty afterwards, and each committed field is
+    /// remembered so the rest of the target never repairs it again.
     pub(in crate::router) fn commit_pending(
         &mut self,
         request_features: &[String],
         now: Instant,
     ) -> Vec<SettledStep> {
-        self.pending
-            .drain(..)
+        let steps: Vec<RepairStep<'a>> = self.pending.drain(..).collect();
+        self.committed
+            .extend(steps.iter().map(|step| FieldIdentity::of_row(&step.row)));
+        steps
+            .into_iter()
             .map(|step| step.commit(request_features, now))
             .collect()
     }

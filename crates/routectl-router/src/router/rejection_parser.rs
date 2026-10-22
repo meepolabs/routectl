@@ -301,7 +301,6 @@ impl fmt::Debug for FieldIdentity {
 
 /// A localized rejection's field identity and the tier its attribution earns,
 /// whether or not the closed table has a row for the field.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LocalizedField {
     pub(super) identity: FieldIdentity,
@@ -310,7 +309,6 @@ pub(super) struct LocalizedField {
 
 /// The field a rejection names and its tier. Reads only; `None` exactly when
 /// [`rejected_wire_path`] is.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn localized_field(
     provider_kind: &str,
     status: u16,
