@@ -1,14 +1,18 @@
 //! The per-request reactive-repair ceiling shared by every dispatch walk.
 //!
 //! A repair re-dispatches one target with a corrected request after the
-//! upstream rejected the original. Each repair kind is at most once per
-//! target by its own gate; this budget is the SECOND, request-scoped
-//! bound: it is declared above a walk's chain loop, threaded into every
-//! per-target arm that can repair, and never reset by a fallback hop. Two
-//! bounds are needed because they answer different questions -- the
-//! per-target gate stops a repair nesting inside one target's retries,
-//! while this one stops an N-target chain from paying N repairs for ONE
-//! logical client request.
+//! upstream rejected the original. Envelope-field repairs chain on one
+//! target: a repaired retry refused for a different field repairs that
+//! field too, each field at most once per target. The other kinds (replay,
+//! beta, edit revert) stay at most once per target by their own gates. This
+//! budget is the request-scoped bound over all of them: it is declared
+//! above a walk's chain loop, threaded into every per-target arm that can
+//! repair, and never reset by a fallback hop, so its
+//! [`REPAIRS_PER_REQUEST`] repairs are shared across kinds, across the
+//! chained field steps on one target, and across every target the request
+//! falls back to. The per-target gates stop a repair repeating inside one
+//! target's retries; this one bounds the total upstream calls repair adds
+//! for ONE logical client request.
 //!
 //! The budget is drawn LAST, after a repair arm's own conditions already
 //! hold, so a request that never had a repairable rejection spends

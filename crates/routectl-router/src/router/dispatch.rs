@@ -1376,9 +1376,11 @@ impl Router {
                 // the auth-401 retry is gated + RPM-debited exactly like
                 // the first attempt -- per-attempt accounting is uniform
                 // across all three dispatch sites. Streams don't retry on
-                // ordinary errors, so the only second iteration is the
-                // auth-recovery retry; the gate runs once per attempt, so
-                // the first attempt is debited exactly once.
+                // ordinary errors: a later iteration is the auth-recovery
+                // retry or a pre-content repaired retry (field repairs may
+                // chain, each a further iteration, within the request's
+                // shared repair budget). The gate runs once per attempt, so
+                // each attempt is debited exactly once.
                 //
                 // The returned guard OWNS the half-open claim this admission
                 // took (see `complete_inner`).
