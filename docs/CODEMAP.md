@@ -378,7 +378,7 @@ license.
   `ide_version`/`ide_name` metadata) and seeded into
   `GeminiConfig.user_agent` by `new_cloud_code`
 - `src/error.rs` -- `Error` enum
-  (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Credential/Config/NotImplemented/...)
+  (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Credential/Config/NotImplemented/CapabilityUnsupportedEverywhere/...)
   and `Result` alias; `Error::Credential{detail, reason, parked_until_ms}` is a local
   credential-unusable error (terminal OAuth refresh, or every reachable seat parked); `Error::LocalRefusal{provider, detail, reason}`,
   `Error::Validation` and `Error::NormalizeRequest` each carry a
@@ -1511,6 +1511,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   cloud_project_id, ... }`;
   constructor `ProviderEntry::gemini`, `with_gemini_auth_mode` sets
   `GeminiAuthMode` {ApiKey default, CloudCode}, `kind_str() == "gemini"`;
+  `ProviderEntry::egress_kind` (entry -> `EgressKind`, Bedrock shape and
+  Mantle sub-lanes distinct; stamped on each `DispatchTarget` at chain
+  expansion);
   the `CONFIG_PROVIDER_KINDS` slice + `is_config_provider_kind` predicate name
   the whole `kind = "..."` vocabulary under the build's feature set (welded to
   the `kind_str()` discriminants by a drift test), for callers that must bound
@@ -2505,8 +2508,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   non-dispatch impls (`DispatchTarget.capability_prior`, the metric counters,
   `DispatchMeta::for_alias`/`mark_target`; `DispatchMeta` carries the additive
   capability ride-alongs `learned_capabilities` / `capability_observations` /
-  `cleared_capabilities` plus the `replay_degradation` reasoning-replay
-  degradation record read once by the per-request WARN, `prefix_epoch_event` --
+  `cleared_capabilities` plus the `replay_degradations` reasoning-replay
+  degradation records (one per strip-repair) read by the degradation WARN, `prefix_epoch_event` --
   the prefix-rewrite detector's per-request classification (0 stable / 1
   rewritten / 2 reseeded, `None` for a first-seen session or a request with no
   session key) -- and `served_seat` --
@@ -2714,8 +2717,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   replay rejection admits via `replay_repair`, swaps to the stripped variant,
   and retries once; `replay_rejection_body_free` rebuilds the rejection with
   no upstream body before generic logging, and `emit_replay_degradation`
-  (`pub(super)`, also called by the token-count walk) fires the single
-  per-request degradation WARN. Within `complete_inner` and `stream_inner`
+  (`pub(super)`, also called by the token-count walk) fires one degradation
+  WARN per recorded repair, each carrying the request's `repair_count`. Within `complete_inner` and `stream_inner`
   the per-target learner state and the replay / field / canary / generic
   arbitration live in `learn_engine::AttemptLearning` (one instance per target,
   handling each rejection and the eventual success), the same engine each `count_tokens_try_seat` seat
@@ -2741,7 +2744,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   two-phase learn (`commit` on stripped-repair success, `settle_success` ->
   clear-on-carried-success returning the `CapabilityClearedEvent` rows for
   `DispatchMeta.cleared_capabilities`, unsettled `Drop` on an unrelated error)
-  and records the `DispatchMeta.replay_degradation` summary; owns
+  and records each repair in `DispatchMeta.replay_degradations` through
+  `record_replay_repair` -> `ReplayRepairHandle`, settled by
+  `settle_replay_repair`; owns
   `strip_replay_artifacts_recalibrating`, THE dispatch-path strip entry point,
   which re-stamps `DispatchMeta.calib_estimated_tokens` whenever a strip
   actually shrank the payload. The raw lane-directional strip it wraps is
@@ -2897,15 +2902,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   that wrote a value (rewrite or ceiling, carried as the verdict's value) or
   dropped an unsupported field. The WARN action token is closed:
   `field_drop_repair`, `field_lossy_drop_repair` (a value-refused drop),
-  `field_rewrite_repair`, `field_ceiling_repair` (a client limit lowered,
-  lossy) and `field_ceiling_fill_repair` (a limit routectl filled for a client
-  that sent none, `clamp_writes_fill`; lossless, and it declares no
+  `field_rewrite_repair`, `field_ceiling_repair` (a client limit lowered)
+  and `field_ceiling_fill_repair` (a limit routectl filled for a client
+  that sent none, `clamp_writes_fill`; it declares no
   `FieldRepair` edit because the egress already declares that field as its
-  required default).
-  `note_field_repair` / `note_field_repair_succeeded` record the
-  `DispatchMeta.field_repairs` records and bump the attempted / lossy /
-  succeeded / learned counters, and `emit_field_repair` fires one content-free
-  WARN per repair. `rejected_field` reads the class first
+  required default); `repair_action_is_lossy` is the one lossy predicate
+  over those tokens.
+  `note_field_repair` and the canary's refused-value repair both record
+  through `note_field_repair_at` (the one `DispatchMeta.field_repairs`
+  recorder, bumping the attempted and per-lane lossy counters);
+  `note_field_repair_succeeded` bumps succeeded / learned, and
+  `emit_field_repair` fires one content-free WARN per repair. `rejected_field` reads the class first
   (`class_can_name_a_field`: `BadRequest`, or the lifted openai
   `unsupported_parameter` on `openai-compat`) and then
   `rejection_parser::parse_rejection` over the error's carried parse. Under
@@ -3140,7 +3147,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/forced_tool_choice_tests.rs` -- forced-`tool_choice` route-away
   through real dispatches on a two-lane chain, driven by the captured 400s in
   `tests/fixtures/forced_tool_choice_capture.json`: Bedrock (Converse and
-  Invoke) learns on one rejection, first-party on corroboration, the next
+  Invoke) and first-party each learn on one rejection, the next
   forced request skips the lane, an unforced one does not, the directive
   reaches every lane unchanged, and an `unsupported` override routes away
   before dispatch
@@ -3216,7 +3223,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Proceed` the capability proposal is held and
   `observe_generic` (still after the class observability) applies only it via
   `observe_for_learning`; `on_success` settles the repaired betas (none on
-  the `CountTokens` surface), a pending revert, replay, field and canary (the
+  the `CountTokens` surface), a pending revert, replay, field and canary, and
+  returns the attempt's `Option<EvidenceScope>` (`None` on the count surface) (the
   carry settlements live in `learn_settle.rs`, the beta sink in
   `learn_beta_repair.rs`). `admit_carries` takes the caller's
   `FieldSettlementMode`. On the `CountTokens` surface (derived once in `new`)
@@ -3358,9 +3366,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `*_declare_tests.rs` fragments of the repair, pre-flight, canary and strip
   suites
 - `src/router/wire_check.rs` -- the live request-leg wire check on a successful
-  attempt: `egress_kind_of` (provider entry -> `EgressKind`, Bedrock shape and
-  Mantle sub-lanes distinct; set once on each `DispatchTarget` at chain
-  expansion), `fills_max_tokens(EgressKind)` (whether the egress sends
+  attempt: `fills_max_tokens(EgressKind)` (whether the egress sends
   `max_tokens` when the client sent none: `AnthropicApi`, `AnthropicApiMantle`,
   `BedrockInvoke`), `install_wire_tap` (a fresh `WireTap` per provider call on both
   surfaces, only when the request carries an ingress body; the sampler decides
@@ -3428,7 +3434,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   routing away on its own. An F3 negative sourced from a probe carries
   routing authority and is included like any other acting negative. Matching
   rows map to the public `ActingFieldVerdict { state_key, feature_key, phase,
-  source }`.
+  source }`. Also owns the lossy-repair tally: crate-internal
+  `LossyRepairTally` (total plus a capped per-lane map and an `other`
+  bucket under one lock) and its public projection `LaneLossyRepairs { lane,
+  lossy }` via `Router::lossy_repairs_by_lane`.
   `Router::field_repair_counters() -> FieldRepairCounters` reads the same
   three atomics the repair WARN section of LOGGING.md documents
   (`repair_attempted`/`repair_succeeded`/`verdicts_learned`) without the
@@ -3452,8 +3461,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/fidelity_status.rs` -- the router-owned fidelity read.
   `Router::fidelity_snapshot() -> FidelitySnapshot` is the coherent entry point:
   ONE learned-registry read feeds BOTH the acting-verdict derivation and the
-  detailed rows, plus the repair counters and the existing
-  `ProbeSchedulerSnapshot`. That coherence is the reason the type exists -- four
+  detailed rows, plus the repair counters, the per-lane lossy rows
+  (`lossy_by_lane`) and the existing `ProbeSchedulerSnapshot`. That coherence is the reason the type exists -- four
   separate reads meant four moments, so an acting count could describe one
   registry state while the rows described another and a reader reconciling them
   could not tell a documented filter from a race. Its `PreflightBlockedReason`
@@ -3866,14 +3875,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/capability_observe.rs` -- response-evidence observer: the
   SUCCESS-arm mirror of `observe_for_learning`, run inline on the terminal
   successful NON-STREAMING response (the streaming arm hands its scope to
-  `stream_evidence.rs` instead). `CapabilityObserveEvent` (the additive
+  `stream_evidence.rs` instead). `Router::evidence_scope` builds the
+  attempt's `EvidenceScope` (public, not `Clone`: settles at most once);
+  `Router::observe_response_evidence(scope, resp, EvidencePolicy { admit_suspect
+  }, events) -> bool` reads a response against it (`false` when this
+  Router's config refuses the scope). `CapabilityObserveEvent` (the additive
   `DispatchMeta.capability_observations` ride-along row: capability_key,
   evidence_class, direction, tier, source + state_key, provider_kind,
   request_features -- the columns a later warm-rebuild replays; NO ledger
-  write, mirroring `CapabilityLearnEvent`), `observe_capabilities`
-  (kill-switch + no-provider-kind short-circuits, builds the `DetectorContext`
-  from the request, runs the pure `capability_detect::detect` slice, dedupes
-  one observation per `(state_key, capability)` per request),
+  write, mirroring `CapabilityLearnEvent`), `observe_capabilities` (the
+  `cfg(test)` scope-then-read entry the observer tests drive),
   `admit_observation` (stage-two admission with `now` +
   `EvidenceSource::Live`: `observe_positive` for a Verified positive,
   `observe` at `FailurePhase::F3`/`SignalTier::Inferred` for a suspected
@@ -4386,7 +4397,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   shipped prior of client beta flags a `bedrock` target withholds absent a
   stronger verdict; `shipped_scope` (root: `shipped_beta_seed_scope`);
   `seed_state(scope, provider_kind, flag, marker_present) -> Option<SeedCell>`
-  (root: `beta_seed_state`) decides a cell's seed state once
+  (root: `beta_seed_state`) decides a cell's seed state once, and
+  `seed_state_for_key` (root: `beta_seed_state_for_key`) is the same for a
+  capability key
 - `src/field_capability.rs` -- sole owner of the envelope-field capability
   namespace (crate-internal): `field_capability_key` mints a bounded key from a
   qualified dotted path, `capability_key_is_catalog_scoped` classifies any key
@@ -4826,8 +4839,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   keys on the code token itself). `OPENAI_PARAM_TRANSLATIONS` is the extension
   point for new provider body surfaces. Other providers (Bedrock) carry a
   field path in the token and normalize it directly. The `anthropic-api`
-  `BadRequest` arm runs the body's `error.message` through a whole-phrase
-  table to yield an inferred signal; the `openai-responses` arm has its own
+  `BadRequest` arm, after the feature-naming arm, tries
+  `match_anthropic_tool_rejection` (the Bedrock `extract_unsupported_tool_type`
+  extractor keyed through `rejected_tool_type_capability`), then
+  `match_anthropic_exact_phrase` (`ANTHROPIC_EXACT_PHRASES`, byte-exact,
+  both `SelfIdentifying` F1), then the inferred whole-phrase table
+  (`ANTHROPIC_INFERRED`); the `openai-responses` arm has its own
   table whose replay-rejection row is PREFIX-anchored (the real message ends
   in a variable enumeration of accepted content prefixes) and resolves to
   `REASONING_REPLAY`, never `THINKING` -- the lane rejects a replayed
@@ -4869,7 +4886,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   When neither matches, `BEDROCK_VALIDATION_PHRASES` is
   checked by exact equality on the whole unwrapped message; one row maps
   the forced-`tool_choice` rejection to `forced_tool_choice` (the same phrase
-  is an `ANTHROPIC_INFERRED` row for the first-party lane), another maps
+  is an `ANTHROPIC_EXACT_PHRASES` row for the first-party lane), another maps
   `output_config.format: Extra inputs are not permitted` to
   `structured_output` (a phrase, not a field row, because Bedrock
   normalization collapses every `output_config.*` path to `output_config`).
@@ -6081,8 +6098,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   copies, and a source guard asserts `reload.rs` performs no store of its own and
   that this helper routes through the router's callback protocol
 - `src/server/metrics_driver.rs` -- the periodic router-metrics snapshot driver
-  and its `ROUTER_METRICS_SNAPSHOT_INTERVAL`; flushes once more at shutdown so a
-  session shorter than one interval still surfaces its totals
+  and its `ROUTER_METRICS_SNAPSHOT_INTERVAL`; each tick logs the router
+  metrics and the `stream_evidence_settle` counter, and flushes once more at
+  shutdown so a session shorter than one interval still surfaces its totals
 - `src/server/reload_failure.rs` -- `ReloadFailure`, the closed path-free
   class a rejected config / overlay reload returns and the daemon records
   (`config_load_failed`, `overlay_load_failed`, `loader_panicked`,
@@ -6516,7 +6534,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   from the event, no evidence class), `capability_observations` -> `verified`
   / `suspect` rows (phase `f3`, the pinned evidence-class token),
   `cleared_capabilities` -> `cleared` rows (`live` source). Empty on the
-  common non-capability path, best-effort like every usage write. The legacy
+  common non-capability path, best-effort like every usage write.
+  `drain_observation_events` writes the same observation rows for a streamed
+  reply's evidence settled after the meta drained, and
+  `stamp_capability_refusal` records an all-lanes capability refusal under
+  `extra.unsupported_capability` / `extra.unsupported_lanes`. The legacy
   `capability_learn_events` table takes no writes from any path (the table
   remains as retained history, no DROP). Also
   owns the token-estimate calibration pair's capture side: `observe_meta`
@@ -6667,11 +6689,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
   loads a snapshot into `StatusRouterView` (also private inner `Arc<Router>`)
-  which exposes ONLY seven read methods -- `route_targets(now)`,
-  `learned_capabilities()`, `field_repair_counters()` (the live Stage-1
+  which exposes ONLY read methods -- `route_targets(now)`,
+  `learned_capabilities(now)` (each resident entry with its cell resolved
+  through `lane_cell::resolve_entries` -> `ResolvedEntry`),
+  `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
-  see `field_verdict_log.rs`), `field_verdict_status()` (the per-verdict
-  fidelity rows, a PURE router-side read -- see
+  see `field_verdict_log.rs`), `lossy_repairs_by_lane()` (for the doctor
+  panel), `fidelity_snapshot()` (the coherent fidelity read, a PURE
+  router-side read -- see
   `routectl-router/src/router/fidelity_status.rs`), `wire_check_snapshot()`
   (the live wire check's counters and findings ring, read-only),
   `effective_view()` (runs
@@ -6731,13 +6756,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   deadline inside the blocking closure and `collect` installs a single
   `DeadlineGuard` on the per-request connection, so all four reads share one
   budget and an overrun sheds `query_timeout` instead of starving a worker
-- `src/handlers/status/health.rs` -- `/status/health` (schema_version 6).
+- `src/handlers/status/health.rs` -- `/status/health` (schema_version 7).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
   reads `route_targets` + `learned_capabilities` from that single view,
   mapping to `HealthPanel` (per-target
   `state_key`/`learned_lane`/`nickname`/`provider_name`/`upstream`/`seat_label`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`/`park_reason`/`parked_until_ms`
   + learned rows keyed by lane, joined to targets on `learned_lane`
-  `state_key`/`capability_key`/`verdict`/`signal_tier`/`observations`/`phase`/`source`/`last_seen_ms`
+  `state_key`/`capability_key`/`verdict`/`signal_tier`/`observations`/`phase`/`source`/`last_seen_ms`/`action`/`layer`/`overrode_layer`/`age_ms`/`expires_at_ms`,
+  each resolved through `lane_cell::{ResolvedEntry, lapse_deadline_ms}`
   (epoch-ms of the last observation from the single pinned snapshot clock,
   future-dated clamps to a zero age), where the `verdict` token -- `verified`
   vs `broken` from the core `Verdict` -- distinguishes a VerifiedWorking
@@ -6747,8 +6773,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `open_since_ms`/`last_outcome_at_ms` are epoch-ms converted from the gate's
   monotonic elapsed ages (`None` == closed/never-seen, never a 0/epoch
   sentinel); `park_reason`/`parked_until_ms` come off the gate's credential
-  park (reason token and epoch-ms lapse, both null when unparked, additive so
-  schema_version stays 6); `last_outcome` renders the derived `circuit_open` when the phase
+  park (reason token and epoch-ms lapse, both null when unparked);
+  `last_outcome` renders the derived `circuit_open` when the phase
   is open, else the stored outcome token; `feature_key` is renamed to the
   contract token `capability_key`. Adds the `wire_check` section (see
   `wire_check_rows.rs`) from the same view. No dial, no mutation. Also calls the
@@ -6772,7 +6798,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `rc_field_disproved_requests_total`, lifetime-monotonic),
   `rc_field_preflight_actions_total` and `rc_parser_unlocalized_total` --
   `rc_acting_field_verdicts{,_total}`, the per-verdict
-  `rc_field_verdict_rows{,_total,_omitted}`, the process-global
+  `rc_field_verdict_rows{,_total,_omitted}`, the per-lane
+  `rc_field_repair_lossy_by_lane` (with `_lanes_total` / `_lanes_omitted`),
+  the process-global
   `rc_usage_writer_degraded`, and the
   probe scheduler's `rc_probe_*` state (including the probe-health
   `rc_probe_clear_persistence_failures_total` and `rc_probe_oldest_due_ms`). ONE line because the facts are only
@@ -6814,7 +6842,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   locating a real construction rather than matching nothing
 - `src/handlers/status/fidelity_log.rs` -- the RENDERING under that emitter:
   `rendered_verdicts` flattens each verdict DTO to tokens, counts,
-  and booleans. Split from the emitter because the judgement lives here -- several
+  and booleans; `rendered_lossy_lanes` bounds the per-lane lossy rows. Split from the emitter because the judgement lives here -- several
   DTO fields are `Option`s whose absent case is a real operator-facing state
   rather than missing data, and each gets its own literal: `unknown` for a
   transform class this build's table does not carry (and for the quorum only a
@@ -6900,7 +6928,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   re-dial -- and `capability_writes`, the three live capability-persistence
   failure counters (`capability_events_dropped_full` / `write_errors` /
   `capability_writer_unavailable`) read once through
-  `UsageHealthView::capability_writes`. Config-load errors are already redacted inside the gather (no
+  `UsageHealthView::capability_writes`, and `lossy_repairs_by_lane` (the
+  facade's per-lane lossy field-repair rows). Config-load errors are already redacted inside the gather (no
   second copy). `config_path: None` -> `no_config_path` unavailable; a gather
   failure -> `doctor_unavailable`
 - `src/handlers/status/doctor_tests.rs` -- `#[path]` sidecar coverage of the
@@ -7720,8 +7749,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   active runtime behavior yet) and `[pools]` as high-consequence
   beside `[providers]`
 - `src/lane_cell.rs` -- the one `(learned lane, capability)` cell builder for
-  the read-only surfaces (used by the doctor capability matrix; the status
-  learned projection is its intended next consumer). `lane_metas(&Config, entries)` builds the
+  the read-only surfaces (the doctor capability matrix and the `/status/health`
+  learned rows). `lane_metas(&Config, entries)` builds the
   lane rows sorted by lane key (the router's `LearnedLaneProjection` together
   with unrouted learned keys, each `LaneMeta` carrying its provider entry, upstream, kind and mapped
   models); `resolve_cell(meta, capability, &CellSources) -> LaneCell` gathers
@@ -7731,9 +7760,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   caller's prior lookup, `CellContext::for_lane`) and runs the router's
   `resolve_display` once per nickname. `LaneCell::{shown, layer, action,
   overrode_layer, nicknames_agree}` give the lane-wide view, each `None` when
-  the nicknames disagree; `entry_stamps` maps a learned entry's instants to
-  epoch ms through the pinned `(now, now_ms)` anchor (the one place the expiry
-  rule lives for both surfaces)
+  the nicknames disagree. `resolve_entries(&CellSources) -> Vec<ResolvedEntry>`
+  resolves every resident entry on its own lane row (entry plus lane-wide
+  action, layer, overrode_layer). `entry_stamps` maps a learned entry's
+  instants to epoch ms through the pinned `(now, now_ms)` anchor, and
+  `lapse_deadline_ms` gives a negative's runtime lapse instant (decay
+  deadline, or `RECHECK_BACKSTOP` past it when re-check owned)
 - `src/log_sink.rs` -- the production tracing sink: `subscriber` (the one
   builder `main` installs via `init`) and `EscapingFields`, the field
   formatter that escapes control, format, separator and default-ignorable
