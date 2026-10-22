@@ -47,9 +47,9 @@ pub struct LaneMeta<'a> {
 }
 
 /// The lane rows, sorted by lane key: the router's learned-lane projection of
-/// `config` (a pooled model contributes one lane per member entry), then every
-/// learned key in `entries` the config no longer maps, surfaced unrouted
-/// rather than dropped.
+/// `config` (a pooled model contributes one lane per member entry) together
+/// with every learned key in `entries` the config no longer maps, surfaced
+/// unrouted rather than dropped.
 pub fn lane_metas<'a>(config: &'a Config, entries: &[LearnedRegistryEntry]) -> Vec<LaneMeta<'a>> {
     let projection = LearnedLaneProjection::from_config(config);
     let mut metas: Vec<LaneMeta<'a>> = projection
@@ -81,6 +81,7 @@ pub fn lane_metas<'a>(config: &'a Config, entries: &[LearnedRegistryEntry]) -> V
         .filter(|key| !projected.contains(key))
         .collect();
     metas.extend(unrouted.into_iter().map(|key| unrouted_meta(config, key)));
+    metas.sort_by(|a, b| a.lane.cmp(&b.lane));
     metas
 }
 

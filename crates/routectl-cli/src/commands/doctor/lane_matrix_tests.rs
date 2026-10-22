@@ -227,6 +227,43 @@ fn an_entry_on_a_lane_no_model_maps_is_unrouted_with_its_kind() {
 }
 
 #[test]
+fn unrouted_rows_interleave_with_configured_rows_by_lane_key() {
+    // Arrange: a configured lane sorting last and an unrouted one sorting
+    // first, so appending unrouted rows after configured ones is visible.
+    let mut config = lane_config();
+    config.providers.insert(
+        "z".to_string(),
+        ProviderEntry::openai_compat("https://example.invalid", "env://KEY"),
+    );
+    config
+        .models
+        .insert("zeta".to_string(), ModelEntry::new("z", "late"));
+    let now = Instant::now();
+    let early = negative("a#retired", "web_search", FailurePhase::F2, now, now);
+
+    // Act
+    let panel = build_capability_matrix_panel(&context(config, available(vec![early], now, 0)));
+
+    // Assert
+    let rows: Vec<(&str, bool)> = panel
+        .lanes
+        .iter()
+        .map(|l| (l.lane.as_str(), l.routed))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("a#retired", false),
+            ("m1#seat-up", true),
+            ("m2#seat-up", true),
+            ("p#other", true),
+            ("p#up", true),
+            ("z#late", true),
+        ]
+    );
+}
+
+#[test]
 fn a_learned_cell_carries_action_and_epoch_timestamps() {
     let now = Instant::now();
     let now_ms = 1_800_000_000_000;
