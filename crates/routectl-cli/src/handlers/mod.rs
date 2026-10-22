@@ -16,6 +16,7 @@ mod reason_detail;
 mod response_wire;
 pub mod responses;
 pub mod status;
+pub mod stream_evidence_settle;
 pub mod usage_capture;
 
 #[cfg(test)]

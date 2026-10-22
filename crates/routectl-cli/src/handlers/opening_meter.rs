@@ -38,6 +38,8 @@ use std::time::Instant;
 use routectl_core::{ChatChunk, ChatRequest, OpeningUsage, OpeningUsageOrigin, UsageInputSource};
 use routectl_router::{DispatchMeta, Router, estimate_request};
 
+use crate::handlers::stream_evidence_settle::StreamEvidenceSlot;
+
 use crate::handlers::opening_diagnostics::{
     OpeningDiagnostics, OpeningFacts, TerminalReport, UPSTREAM_OPENER_REASON, source,
 };
@@ -439,16 +441,18 @@ pub struct StreamTurn {
     pub session_key: Option<String>,
     pub ctx: StreamRequestContext,
     pub meter: Option<OpeningMeter>,
+    pub evidence: StreamEvidenceSlot,
 }
 
 impl StreamTurn {
     /// A turn whose dialect reports no opening count.
     #[cfg(test)]
-    pub const fn unmetered(session_key: Option<String>, ctx: StreamRequestContext) -> Self {
+    pub fn unmetered(session_key: Option<String>, ctx: StreamRequestContext) -> Self {
         Self {
             session_key,
             ctx,
             meter: None,
+            evidence: StreamEvidenceSlot::default(),
         }
     }
 

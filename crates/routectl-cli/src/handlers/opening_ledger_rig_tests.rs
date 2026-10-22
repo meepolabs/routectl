@@ -93,6 +93,7 @@ pub(super) fn metered_turn(
             model: req.model.clone(),
         },
         meter: Some(meter),
+        evidence: crate::handlers::stream_evidence_settle::StreamEvidenceSlot::default(),
     };
     let capture = UsageCapture::new(
         build_usage_draft("anthropic", &req, id.to_string()),

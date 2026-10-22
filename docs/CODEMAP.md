@@ -6366,6 +6366,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   emits one WARN carrying only safe dimensions (reason, status, a fixed
   `credential_source = "forwarded"` token, and the session-id-presence
   boolean) -- never the forwarded token itself
+- `src/handlers/stream_evidence_settle.rs` -- settles a streamed reply's
+  response evidence. `StreamEvidenceSlot` holds the router's
+  `StreamEvidence` carrier taken off the dispatch meta at first content;
+  `drive_stream` turns it into a `PendingStreamEvidence` and calls `settle`
+  only at the natural, fully delivered end (after `render_eos`, beside
+  `finalize(Outcome::Ok)`), reading verified observations only through the
+  router published at settle time (`StreamEvidenceSettler` over the daemon's
+  `ArcSwap<Router>`) and draining them via
+  `usage_capture::drain_observation_events`. Dropped unsettled it writes
+  nothing and counts the exit. `rc_stream_evidence_total{result,exit}` is a
+  process-global counter flushed by the router-metrics driver.
+  Tests: unit tests inline; the exit table, the complete-vs-stream parity
+  fixture and the openai-compat truncation case through the real
+  `warm_render_task` / `drive_stream` in `stream_evidence_settle_tests.rs`
 - `src/handlers/opening_meter.rs` -- `OpeningMeter`: the Anthropic stream's
   opening context count. `admit` reserves the session-anchor turn BEFORE
   measuring the request (bounded `AnchorKey`; no key -> unanchored) and reads
@@ -6389,7 +6403,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   input, head-vs-served lane switch, the serving attempt's first-event time
   and vendor flag, and the accepted terminal's `UsageInputSource` (any
   variant, or missing) for the usage row. `StreamTurn` bundles session key,
-  stream context and meter.
+  stream context, meter and the stream-evidence slot.
   Tests: `opening_meter_tests.rs`; end-to-end through `ingress_handle` in
   `opening_e2e_tests.rs` (fast/slow openings, fallback, other dialects) and
   `opening_anchor_e2e_tests.rs` (anchor hits, invalidations, publication),

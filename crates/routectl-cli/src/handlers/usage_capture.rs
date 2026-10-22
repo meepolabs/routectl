@@ -18,7 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use routectl_core::Error;
 use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 use routectl_core::failure_class::classify;
-use routectl_router::router::CapabilityClearedEvent;
+use routectl_router::router::{CapabilityClearedEvent, CapabilityObserveEvent};
 use routectl_router::{CURRENT_VOCAB_VERSION, DispatchMeta, ObservationDirection};
 use routectl_usage::{CapabilityEvent, Outcome, UsageHandle, UsageRecord};
 use serde_json::Value;
@@ -506,6 +506,16 @@ impl UsageCapture {
         drain_capability_events(&self.usage, meta, catalog_version, overlay_revision);
     }
 
+    /// [`drain_observation_events`] into this capture's usage handle.
+    pub(crate) fn drain_observation_events(
+        &self,
+        events: &[CapabilityObserveEvent],
+        catalog_version: u32,
+        overlay_revision: u64,
+    ) {
+        drain_observation_events(&self.usage, events, catalog_version, overlay_revision);
+    }
+
     /// Admit this walk's FIELD-VERDICT events through the acknowledged path and hand
     /// each admitted row to the daemon's confirmation tracker.
     ///
@@ -633,7 +643,72 @@ pub(crate) fn drain_capability_events(
             ev.incarnation,
         );
     }
-    for ev in &meta.capability_observations {
+    push_observation_rows(
+        usage,
+        &meta.capability_observations,
+        ts,
+        catalog_version,
+        overlay_revision,
+    );
+    for ev in &meta.cleared_capabilities {
+        usage.try_send_capability_event_at(
+            cleared_row_at(
+                ev,
+                ts,
+                catalog_version,
+                overlay_revision,
+                EvidenceSource::Live,
+            ),
+            ev.persistence_generation,
+            // The event's OWN incarnation, from the guarded mutation that
+            // produced it: the writer compares it against the key's purge
+            // floor, so a row delayed past a purge of the same key is dropped
+            // while a genuine post-purge relearn still lands.
+            ev.incarnation,
+        );
+    }
+}
+
+/// Drain response-evidence observations that rode out on their own rather than
+/// on a [`DispatchMeta`] (a stream settles its evidence after the meta was
+/// drained). The same rows, and the same unstamped-generation refusal, as
+/// [`drain_capability_events`] applies to `meta.capability_observations`.
+pub(crate) fn drain_observation_events(
+    usage: &UsageHandle,
+    events: &[CapabilityObserveEvent],
+    catalog_version: u32,
+    overlay_revision: u64,
+) {
+    if events.iter().any(|ev| ev.persistence_generation == 0) {
+        debug_assert!(
+            false,
+            "observation events were not stamped with a registry generation"
+        );
+        tracing::error!(
+            observed = events.len(),
+            "capability events carried no registry generation; dropping them \
+                 rather than persisting rows the replay boundary would discard"
+        );
+        return;
+    }
+    push_observation_rows(
+        usage,
+        events,
+        epoch_ms_now(),
+        i64::from(catalog_version),
+        i64::try_from(overlay_revision).unwrap_or(i64::MAX),
+    );
+}
+
+/// One `verified` / `suspect` row per observation, phase `f3`.
+fn push_observation_rows(
+    usage: &UsageHandle,
+    events: &[CapabilityObserveEvent],
+    ts: i64,
+    catalog_version: i64,
+    overlay_revision: i64,
+) {
+    for ev in events {
         let verdict = match ev.direction {
             ObservationDirection::Verified => Verdict::VerifiedWorking,
             ObservationDirection::SuspectAbsence => Verdict::SuspectIgnored,
@@ -654,23 +729,6 @@ pub(crate) fn drain_capability_events(
                 provider_kind: persisted_provider_kind(&ev.provider_kind),
                 vocab_version: Some(CURRENT_VOCAB_VERSION),
             },
-            ev.persistence_generation,
-            // The event's OWN incarnation, from the guarded mutation that
-            // produced it: the writer compares it against the key's purge
-            // floor, so a row delayed past a purge of the same key is dropped
-            // while a genuine post-purge relearn still lands.
-            ev.incarnation,
-        );
-    }
-    for ev in &meta.cleared_capabilities {
-        usage.try_send_capability_event_at(
-            cleared_row_at(
-                ev,
-                ts,
-                catalog_version,
-                overlay_revision,
-                EvidenceSource::Live,
-            ),
             ev.persistence_generation,
             // The event's OWN incarnation, from the guarded mutation that
             // produced it: the writer compares it against the key's purge

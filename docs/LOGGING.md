@@ -1544,6 +1544,42 @@ WARN routectl_router::router::capability_observe event=observe state_key=sonnet
   "response-evidence capability observation acted"
 ```
 
+#### Streamed replies: settled at the natural end
+
+A streamed reply's response evidence is read once the whole stream,
+end-of-stream frames included, has reached the client, never at first
+content. Only `direction=verified` observations are admitted from a stream:
+the streamed reading may miss an evidence shape a complete body carries, so
+it never produces a `suspect_absence`. Any other end (an upstream error, a
+render failure, a client disconnect, including one during the end-of-stream
+frames, or a cancelled task) reads nothing and writes nothing. The read goes
+through the configuration live at that moment, so a reload mid-stream that
+turns the capability subsystem off, or that crosses a catalog boundary,
+admits nothing.
+
+The counter `rc_stream_evidence_total{result,exit}` counts every stream that
+carried evidence, once, when it ends. It rides its own DEBUG line beside the
+router metrics snapshot (target `routectl_cli::handlers::stream_evidence_settle`,
+message `stream evidence snapshot`, flushed on the same interval and at
+shutdown), Debug-rendered as a list of non-zero `(result, exit, count)` cells:
+
+| Label | Values |
+|---|---|
+| `result` | `settled` (the evidence was read at the natural end; it does not mean an observation acted) or `abandoned` (dropped unread) |
+| `exit` | `ended`, `disconnect`, `cancelled`, `render_failure`, `upstream_error` |
+
+`settled` only ever pairs with `ended`. A stream carries no evidence, and is
+not counted, when the dispatch failed before content, the client left before
+first content, the capability subsystem is off, or the lane uses a forwarded
+credential. A high `abandoned`/`disconnect` share is clients stopping early,
+not a fault.
+
+```
+DEBUG routectl_cli::handlers::stream_evidence_settle
+  rc_stream_evidence_total=[("settled", "ended", 412), ("abandoned", "disconnect", 9)]
+  "stream evidence snapshot"
+```
+
 ### `clear` (INFO)
 
 Emitted when a successful re-probe clears a resident learned negative.

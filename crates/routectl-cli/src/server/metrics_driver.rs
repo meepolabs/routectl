@@ -34,12 +34,19 @@ pub(super) async fn run_router_metrics_snapshot_driver(
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
-                router_swap.load().log_metrics_snapshot();
+                log_snapshots(&router_swap);
                 return;
             }
             _ = snapshot_tick.tick() => {
-                router_swap.load().log_metrics_snapshot();
+                log_snapshots(&router_swap);
             }
         }
     }
+}
+
+/// One snapshot of the router's metrics and of the stream-evidence counter
+/// the ingress keeps beside them.
+fn log_snapshots(router_swap: &ArcSwap<Router>) {
+    router_swap.load().log_metrics_snapshot();
+    crate::handlers::stream_evidence_settle::log_stream_evidence_snapshot();
 }

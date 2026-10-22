@@ -34,6 +34,7 @@ use crate::handlers::pure_proxy_admission::enforce_pure_proxy_admission;
 use crate::handlers::response_wire::{
     CheckedBody, ClientSink, abandon_unrendered, response_edits_for,
 };
+use crate::handlers::stream_evidence_settle::{StreamEvidenceSettler, StreamEvidenceSlot};
 use crate::handlers::usage_capture::{
     StreamStage, UsageCapture, build_usage_draft, outcome_for_dispatch_err,
 };
@@ -189,6 +190,8 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // `state` across the dispatch await.
     let confirmations = Arc::clone(&state.confirmation_advances);
     if streaming {
+        let evidence =
+            StreamEvidenceSlot::new(StreamEvidenceSettler::new(Arc::clone(&state.router)));
         stream_response(
             router,
             req,
@@ -198,6 +201,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
             confirmations,
             draft,
             meter,
+            evidence,
         )
         .await
     } else {
@@ -623,6 +627,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
     confirmations: Arc<ConfirmationTracker>,
     draft: UsageRecord,
     meter: Option<OpeningMeter>,
+    evidence: StreamEvidenceSlot,
 ) -> Response {
     let capture = UsageCapture::new(draft, usage, adapter.id().to_string());
     // Extract the canonical live session key BEFORE dispatch moves `req`
@@ -645,6 +650,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
         session_key,
         ctx: stream_ctx,
         meter,
+        evidence,
     };
     // Hold the dispatch UN-AWAITED. `stream_with_options` borrows `&self`
     // for the returned future's life, so an `Arc` clone is MOVED into the
@@ -732,6 +738,7 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
             match dispatched.result {
                 Ok(upstream) => {
                     turn.seed_served(&dispatched.meta, &router);
+                    turn.evidence.hold(dispatched.meta.stream_evidence.take());
                     // `adapter` + `capture` move INTO the render task, which
                     // finalizes on every stream exit (see `drive_stream`).
                     tokio::spawn(
@@ -898,6 +905,7 @@ async fn warm_render_task<A: IngressAdapter>(
             if let Some(meter) = turn.meter.as_mut() {
                 meter.bind_served(&dispatched.meta);
             }
+            turn.evidence.hold(dispatched.meta.stream_evidence.take());
             stamp_opening(&mut capture, turn.meter.as_ref());
             let mut client = ClientSink::new(tx, response_check, adapter.id());
             // The early frame went out before the check existed; the
@@ -1005,8 +1013,12 @@ async fn drive_stream<A: IngressAdapter>(
     let StreamTurn {
         session_key,
         mut meter,
+        evidence,
         ..
     } = turn;
+    // Response evidence settles only at the natural, fully delivered end
+    // below; every earlier exit drops it unread and counts the exit.
+    let mut evidence = evidence.into_pending();
     // The capture guard is the RAII summary + usage row for this
     // stream. It fires on EVERY exit path (clean close, render error,
     // upstream mid-stream error, client disconnect, runtime task
@@ -1028,6 +1040,7 @@ async fn drive_stream<A: IngressAdapter>(
                     "client disconnected mid-stream; cancelling upstream"
                 );
                 client_check.end(StreamExit::Disconnect);
+                evidence.end(StreamExit::Disconnect);
                 return;
             }
             item = upstream.next() => item,
@@ -1061,6 +1074,7 @@ async fn drive_stream<A: IngressAdapter>(
                                 // stamps `client_disconnect` -- no
                                 // explicit call needed.
                                 client_check.end(StreamExit::Disconnect);
+                                evidence.end(StreamExit::Disconnect);
                                 return;
                             }
                             // First successful body send: the SSE head is
@@ -1098,6 +1112,7 @@ async fn drive_stream<A: IngressAdapter>(
                         capture.observe_error(&render_err);
                         capture.finalize(Outcome::UpstreamError);
                         client_check.end(StreamExit::RenderFailure);
+                        evidence.end(StreamExit::RenderFailure);
                         for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                             let _ = tx.send(ev).await;
                         }
@@ -1130,6 +1145,7 @@ async fn drive_stream<A: IngressAdapter>(
                 capture.mark_stream_stage(StreamStage::MidStream);
                 capture.finalize(Outcome::UpstreamError);
                 client_check.end(StreamExit::UpstreamError);
+                evidence.end(StreamExit::UpstreamError);
                 for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                     if tx.send(ev).await.is_err() {
                         // Client disconnected before we could deliver the
@@ -1148,6 +1164,7 @@ async fn drive_stream<A: IngressAdapter>(
             // Client disconnected during EOS render. The guard stays
             // un-finalized, so Drop stamps `client_disconnect`.
             client_check.end(StreamExit::Disconnect);
+            evidence.end(StreamExit::Disconnect);
             return;
         }
         // Covers an EOS-only stream (no content chunk ever sent): the
@@ -1168,6 +1185,7 @@ async fn drive_stream<A: IngressAdapter>(
         meter.settle_completed();
     }
     capture.finalize(Outcome::Ok);
+    evidence.settle(&capture);
     client_check.end(StreamExit::Ended);
 }
 
@@ -1868,3 +1886,7 @@ mod refusal_reason_matrix_tests;
 #[cfg(test)]
 #[path = "upstream_parse_cap_tests.rs"]
 mod upstream_parse_cap_tests;
+
+#[cfg(test)]
+#[path = "stream_evidence_settle_tests.rs"]
+mod stream_evidence_settle_tests;
