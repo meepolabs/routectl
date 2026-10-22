@@ -1,7 +1,7 @@
 //! One `(learned lane, capability)` cell as the read-only surfaces show it.
 //!
 //! The read-only surfaces that describe learned lanes (the doctor capability
-//! matrix today, the status learned projection next) key them by the
+//! matrix and the status learned projection) key them by the
 //! `provider_entry#upstream` lane the learned store shares with `capability
 //! purge` and `provider probe`. This module builds the lane rows from the
 //! config and resolves a cell through the router's precedence seam in display
@@ -18,9 +18,10 @@ use std::time::Instant;
 
 use routectl_core::capability::Verdict;
 use routectl_router::{
-    BetaSeedScope, CellContext, Config, DisplayInputs, Layer, LearnedInput, LearnedLaneProjection,
-    LearnedRegistryEntry, ModelEntry, OverrideRegistry, ProviderEntry, Resolution, SeedCell,
-    SeedClearMarker, StateKey, beta_seed_state_for_key, operator_pins_capability, resolve_display,
+    ACTION_MIXED, BetaSeedScope, CellContext, Config, DisplayInputs, Layer, LearnedInput,
+    LearnedLaneProjection, LearnedRegistryEntry, ModelEntry, OverrideRegistry, ProviderEntry,
+    RECHECK_BACKSTOP, Resolution, SeedCell, SeedClearMarker, StateKey, beta_seed_state_for_key,
+    operator_pins_capability, resolve_display,
 };
 
 /// One configured model that dispatches to a lane.
@@ -247,6 +248,40 @@ pub fn resolve_cell<'a>(
     LaneCell { entry, resolved }
 }
 
+/// One resident learned entry with the lane-wide view of its own cell.
+pub struct ResolvedEntry {
+    pub entry: LearnedRegistryEntry,
+    /// The action every nickname resolves, or `mixed` when any two differ.
+    pub action: &'static str,
+    pub layer: Option<&'static str>,
+    pub overrode_layer: Option<&'static str>,
+}
+
+/// Resolve the cell of every entry in `sources.learned`, in entry order:
+/// each on its own lane row and capability, as [`resolve_cell`] does.
+pub fn resolve_entries(sources: &CellSources) -> Vec<ResolvedEntry> {
+    let metas = lane_metas(sources.config, sources.learned.entries);
+    let by_lane: BTreeMap<&str, &LaneMeta> = metas
+        .iter()
+        .map(|meta| (meta.lane.as_str(), meta))
+        .collect();
+    sources
+        .learned
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let meta = by_lane.get(entry.state_key.as_str())?;
+            let cell = resolve_cell(meta, &entry.feature_key, sources);
+            Some(ResolvedEntry {
+                entry: entry.clone(),
+                action: cell.action().unwrap_or(ACTION_MIXED),
+                layer: cell.layer(),
+                overrode_layer: cell.overrode_layer(),
+            })
+        })
+        .collect()
+}
+
 /// The lane-wide tier inputs every nickname on the lane shares.
 #[derive(Clone, Copy)]
 struct LaneInputs {
@@ -345,6 +380,27 @@ pub fn entry_stamps(entry: &LearnedRegistryEntry, (now, now_ms): (Instant, i64))
         last_seen: epoch_ms(entry.last_seen, now, now_ms),
         expires_at: negative.then(|| epoch_ms(entry.expires_at, now, now_ms)),
     }
+}
+
+/// The epoch-ms instant a negative lapses into a re-verification under the
+/// runtime lapse rule: its decay deadline, or [`RECHECK_BACKSTOP`] past it
+/// for a negative the free re-check owns. `None` for a positive, which never
+/// decays, and for a backstop past the monotonic clock's range, which the
+/// runtime never reaches either. [`EntryStamps::expires_at`] stays the raw
+/// deadline.
+pub fn lapse_deadline_ms(
+    entry: &LearnedRegistryEntry,
+    (now, now_ms): (Instant, i64),
+) -> Option<i64> {
+    if matches!(entry.verdict, Verdict::VerifiedWorking) {
+        return None;
+    }
+    let deadline = if entry.recheck_owned {
+        entry.expires_at.checked_add(RECHECK_BACKSTOP)?
+    } else {
+        entry.expires_at
+    };
+    Some(epoch_ms(deadline, now, now_ms))
 }
 
 /// Map a monotonic instant onto the wall clock through the pinned anchor

@@ -4737,6 +4737,24 @@ Two structured panels render after the sections:
   it for that lane. A learned verdict on the flag outranks the seed, and a
   learned `beta:` negative shows action `withhold` rather than `strip` or
   `route_away`.
+
+  The running daemon's `/status/health` (schema 7) lists the same resident
+  learned entries under `learned_negatives`, one row per entry (a
+  `verified` positive included), each resolved the same way against the
+  served config. Beside `state_key`, `capability_key`, `verdict`,
+  `signal_tier`, `observations`, `phase`, `source` and `last_seen_ms`, a
+  row carries `action`, `layer` and `overrode_layer` in the matrix's own
+  vocabulary (`mixed` action and null layer when the lane's nicknames
+  disagree), `age_ms` (time since the entry was FIRST seen; the matrix's
+  `age_ms` counts from the last sighting), and `expires_at_ms`: when the
+  negative lapses into a re-verification under the runtime rule, its decay
+  deadline or, for a negative only the free token-count re-check can
+  clear, that deadline plus a 48-hour backstop; null for a `verified`
+  positive. The matrix's `expires_at_ms` stays the raw decay deadline. The
+  health rows consult no catalog priors, so where a learned verdict has no
+  opinion (an inferred negative awaiting corroboration, an advisory live
+  F3 negative) or beat a prior, the matrix can show a `prior` layer the
+  health row lacks.
 - **`panels.would_trim`** -- the steady-state would-trim opportunity,
   read-only over all recorded history. Its fields are documented under
   [Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)

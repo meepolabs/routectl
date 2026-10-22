@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-12T17:52:47Z",
+  "as_of": "2026-10-22T07:31:33Z",
   "data": {
     "learned_negatives": [],
     "targets": [
@@ -7,10 +7,12 @@
         "circuit": "closed",
         "half_open_probe_in_flight": false,
         "last_outcome": "ok",
-        "last_outcome_at_ms": 1791827567561,
+        "last_outcome_at_ms": 1792654293652,
         "learned_lane": "mock#planted-upstream",
         "nickname": "planted",
         "open_since_ms": null,
+        "park_reason": null,
+        "parked_until_ms": null,
         "provider_name": "mock",
         "rpm_available": null,
         "seat_label": null,
@@ -23,13 +25,13 @@
         {
           "count": 1,
           "lane": "chat->openai-compat",
-          "last_seen_unix_secs": 1791827567,
+          "last_seen_unix_secs": 1792654293,
           "outcome": "clean"
         },
         {
           "count": 1,
           "lane": "chat->openai-compat",
-          "last_seen_unix_secs": 1791827567,
+          "last_seen_unix_secs": 1792654293,
           "outcome": "loss"
         }
       ],
@@ -38,7 +40,7 @@
         {
           "count": 1,
           "lane": "chat->openai-compat",
-          "last_seen_unix_secs": 1791827567,
+          "last_seen_unix_secs": 1792654293,
           "path_class": "missing"
         }
       ],
@@ -48,13 +50,13 @@
           "leg": "response",
           "path": "/system_fingerprint",
           "path_class": "missing",
-          "ts_unix_secs": 1791827567
+          "ts_unix_secs": 1792654293
         }
       ],
       "unrepaired_rejections": [],
       "window_secs": 86400
     }
   },
-  "schema_version": 6,
+  "schema_version": 7,
   "unavailable": null
 }

@@ -18,13 +18,14 @@ use arc_swap::ArcSwap;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
-    EffectiveView, FidelitySnapshot, FieldRepairCounters, LearnedRegistryEntry, Router,
-    derive_effective_view,
+    EffectiveView, FidelitySnapshot, FieldRepairCounters, Router, derive_effective_view,
+    shipped_beta_seed_scope,
 };
 use routectl_usage::{AggRow, RowCost};
 
 use crate::commands::doctor::{ParkedSeat, ResidentLearned, ServedInputs};
 use crate::commands::usage::cost_for_row;
+use crate::lane_cell::{CellSources, LearnedSnapshot, ResolvedEntry, resolve_entries};
 use crate::server::capability_rebuild::WarmReport;
 
 /// Owns the live-router read handle for the status surface. Loads a fresh
@@ -97,9 +98,24 @@ impl StatusRouterView {
         self.router.status_targets(now)
     }
 
-    /// The learned-capability registry snapshot for the health panel.
-    pub fn learned_capabilities(&self) -> Vec<LearnedRegistryEntry> {
-        self.router.learned_capability_snapshot()
+    /// Every resident learned-capability entry for the health panel, each with
+    /// its cell resolved at `now` through the shared lane-cell helper, the
+    /// way the doctor matrix resolves it: same config, overrides, seed-clear
+    /// markers and shipped beta seed, but no catalog priors.
+    pub fn learned_capabilities(&self, now: (Instant, i64)) -> Vec<ResolvedEntry> {
+        let entries = self.router.learned_capability_snapshot();
+        let seed_clears = self.router.learned_seed_clear_snapshot();
+        resolve_entries(&CellSources {
+            config: &self.router.config,
+            overrides: self.router.override_registry(),
+            learned: LearnedSnapshot {
+                entries: &entries,
+                now: Some(now),
+                seed_clears: &seed_clears,
+            },
+            beta_seed: shipped_beta_seed_scope(),
+            prior: &|_, _| None,
+        })
     }
 
     /// The live process-lifetime envelope-field repair counters, for the
@@ -218,7 +234,8 @@ mod tests {
         // lands here in review against a facade whose contract is these seven
         // calls.
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
-        let _learned: Vec<LearnedRegistryEntry> = view.learned_capabilities();
+        let _learned: Vec<ResolvedEntry> =
+            view.learned_capabilities((Instant::now(), chrono::Utc::now().timestamp_millis()));
         let _counters: FieldRepairCounters = view.field_repair_counters();
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
         let _wire_check: WireCheckSnapshot = view.wire_check_snapshot();

@@ -17,7 +17,6 @@ use axum::extract::State;
 use serde::Serialize;
 
 use routectl_core::failure_class::LastOutcome;
-use routectl_router::LearnedRegistryEntry;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::CircuitPhase;
 
@@ -26,9 +25,10 @@ use super::router_view::StatusRouterView;
 use super::vocabulary::codes;
 use super::wire_check_rows::{WireCheckRows, project as project_wire_check};
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
+use crate::lane_cell::{ResolvedEntry, lapse_deadline_ms};
 
 /// Wire-shape version of the health panel payload.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Per-target health plus learned negatives for the routing surface, and the
 /// live wire check's rows inside the status window.
@@ -111,6 +111,20 @@ struct LearnedNegative {
     /// last-seen age against the single pinned build clock; a future-dated
     /// last-seen clamps the age to zero, never yielding a negative age.
     last_seen_ms: Option<i64>,
+    /// The routing action dispatch takes on the row's cell, in the doctor
+    /// matrix's action vocabulary (`mixed` when the lane's nicknames differ).
+    action: &'static str,
+    /// The tier that decides the cell, in the doctor matrix's layer
+    /// vocabulary; `None` when the nicknames differ or no tier holds one.
+    layer: Option<&'static str>,
+    /// The next tier below `layer` that had an opinion, when every nickname
+    /// agrees on it.
+    overrode_layer: Option<&'static str>,
+    /// Milliseconds since the row was first observed, never negative.
+    age_ms: i64,
+    /// Epoch-ms the negative lapses into a re-verification under the runtime
+    /// lapse rule; `None` for a verified positive, which never decays.
+    expires_at_ms: Option<i64>,
 }
 
 /// Map the internal `CircuitPhase` to its snake_case wire token. Owned by
@@ -190,7 +204,15 @@ fn map_target(target: RouteTargetStatus, now_ms: i64) -> TargetHealth {
     }
 }
 
-fn map_learned(entry: LearnedRegistryEntry, now: Instant, now_ms: i64) -> LearnedNegative {
+fn map_learned(resolved: ResolvedEntry, now: Instant, now_ms: i64) -> LearnedNegative {
+    let ResolvedEntry {
+        entry,
+        action,
+        layer,
+        overrode_layer,
+    } = resolved;
+    let expires_at_ms = lapse_deadline_ms(&entry, (now, now_ms));
+    let age = now.saturating_duration_since(entry.first_seen);
     LearnedNegative {
         state_key: entry.state_key,
         capability_key: entry.feature_key,
@@ -203,6 +225,11 @@ fn map_learned(entry: LearnedRegistryEntry, now: Instant, now_ms: i64) -> Learne
             now_ms,
             now.saturating_duration_since(entry.last_seen),
         )),
+        action,
+        layer,
+        overrode_layer,
+        age_ms: i64::try_from(age.as_millis()).unwrap_or(i64::MAX),
+        expires_at_ms,
     }
 }
 
@@ -227,7 +254,7 @@ fn build_from_view(
         .into_iter()
         .map(|target| map_target(target, now_ms))
         .collect();
-    let entries = view.learned_capabilities();
+    let entries = view.learned_capabilities((now, now_ms));
     log_field_verdict_snapshot(view, writer_degraded, emission, gate);
     let learned_negatives = entries
         .into_iter()

@@ -76,6 +76,17 @@ SCRUB = os.path.join(rc.REPO, "scripts", "scrub-fixture.sh")
 GENERATED = "2026-10-12T18:00:00Z"
 CORE_WIRE_CHECK = os.path.join(rc.REPO, "crates", "routectl-core", "src", "wire_check")
 CAPTURE_FIXTURES = os.path.join(rc.REPO, "scripts", "capture_fixtures.sh")
+STATUS_HEALTH = os.path.join(rc.REPO, "crates", "routectl-cli", "src", "handlers", "status", "health.rs")
+
+# One /status/health learned row in the daemon's current shape. The recorded
+# snapshots learn nothing, so this is the only row the classifier reads; its
+# key set is welded to the daemon's DTO below.
+LEARNED_ROW = {
+    "state_key": "mock#planted-upstream", "capability_key": "web_search", "verdict": "broken",
+    "signal_tier": "self-identifying", "observations": 1, "phase": "f1", "source": "live",
+    "last_seen_ms": 1, "action": "route_away", "layer": "learned", "overrode_layer": None,
+    "age_ms": 0, "expires_at_ms": 2,
+}
 
 DETAIL_STRINGS = os.path.join(rc.REPO, "crates", "routectl-providers", "tests", "fixtures",
                               "bedrock_403_detail_strings.json")
@@ -427,6 +438,13 @@ class RingOverflowTests(RunCase):
 class FindingTests(RunCase):
     def test_a_newly_learned_verdict_is_a_finding(self) -> None:
         self.assertEqual(self.one(plant("clean-control", learned=1)).outcome, Outcome.FINDING)
+
+    def test_a_learned_health_row_is_a_finding(self) -> None:
+        def learned(data: dict) -> None:
+            data["learned_negatives"] = [dict(LEARNED_ROW)]
+
+        self.assertEqual(self.one(plant("clean-control", health=rc.edited_health("clean-control", learned))).outcome,
+                         Outcome.FINDING)
 
     def test_a_nonzero_parser_unlocalized_counter_is_a_finding(self) -> None:
         self.assertEqual(self.one(plant("clean-control", unlocalized=2)).outcome, Outcome.FINDING)
@@ -1165,6 +1183,13 @@ def _rust_labels(path: str, enum: str) -> List[str]:
 @unittest.skipUnless(os.path.isdir(CORE_WIRE_CHECK), "crates/ absent: no source to weld against")
 class WeldTests(unittest.TestCase):
     """The classifier's replicas of the daemon's closed labels."""
+
+    def test_the_learned_row_fixture_has_the_daemon_fields(self) -> None:
+        with open(STATUS_HEALTH, encoding="utf-8") as handle:
+            body = re.search(r"struct LearnedNegative \{(.*?)\n\}", handle.read(), re.DOTALL)
+        assert body is not None, "struct LearnedNegative not found"
+        fields = re.findall(r"^\s+([a-z_]+):", body.group(1), re.MULTILINE)
+        self.assertEqual(sorted(LEARNED_ROW), sorted(fields))
 
     def test_path_classes_match_the_daemon(self) -> None:
         self.assertEqual(list(classify.PATH_CLASSES), _rust_labels(os.path.join(CORE_WIRE_CHECK, "edits.rs"), "PathClass"))

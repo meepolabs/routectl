@@ -11,7 +11,7 @@ use futures::stream::BoxStream;
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, UpstreamReason};
 use routectl_router::runtime_state::{CredentialParkStatus, ProviderGateStatus};
-use routectl_router::{Config, Router, StateKey};
+use routectl_router::{Config, LearnedRegistryEntry, RECHECK_BACKSTOP, Router, StateKey};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -333,7 +333,7 @@ fn map_learned_renames_feature_key_to_capability_key() {
         source: EvidenceSource::Live,
         recheck_owned: false,
     };
-    let mapped = map_learned(entry, Instant::now(), 10_000);
+    let mapped = map_learned(resolved(entry), Instant::now(), 10_000);
     assert_eq!(mapped.state_key, "anthropic#claude-opus-wire");
     assert_eq!(mapped.capability_key, "structured_output");
     assert_eq!(mapped.verdict, "broken");
@@ -362,9 +362,20 @@ fn map_learned_surfaces_verified_verdict() {
         source: EvidenceSource::Live,
         recheck_owned: false,
     };
-    let mapped = map_learned(entry, Instant::now(), 10_000);
+    let mapped = map_learned(resolved(entry), Instant::now(), 10_000);
     assert_eq!(mapped.verdict, "verified");
     assert_eq!(mapped.phase, "f3");
+}
+
+/// An entry with a fixed lane-wide resolution, for the tests that pin the
+/// entry's own fields rather than the resolved cell.
+fn resolved(entry: LearnedRegistryEntry) -> ResolvedEntry {
+    ResolvedEntry {
+        entry,
+        action: "route_away",
+        layer: Some("learned"),
+        overrode_layer: None,
+    }
 }
 
 fn learned_entry(last_seen: Instant) -> LearnedRegistryEntry {
@@ -394,14 +405,93 @@ fn map_learned_derives_last_seen_ms_and_clamps_future() {
     let past = now
         .checked_sub(Duration::from_millis(400))
         .expect("test clock is well past boot");
-    let mapped = map_learned(learned_entry(past), now, 10_000);
+    let mapped = map_learned(resolved(learned_entry(past)), now, 10_000);
     assert_eq!(mapped.last_seen_ms, Some(9_600));
 
     let future = now
         .checked_add(Duration::from_millis(400))
         .expect("no monotonic-clock overflow");
-    let clamped = map_learned(learned_entry(future), now, 10_000);
+    let clamped = map_learned(resolved(learned_entry(future)), now, 10_000);
     assert_eq!(clamped.last_seen_ms, Some(10_000));
+}
+
+/// `expires_at_ms` is the instant the runtime lapse rule hands the row to a
+/// re-verification: the decay deadline for an ordinary negative, the deadline
+/// plus the re-check backstop for one the free re-check owns, and never for a
+/// verified positive.
+///
+/// Mutation check: drop the `recheck_owned` arm from `lapse_deadline_ms` ->
+/// red at the re-check-owned row; drop the positive guard -> red at the
+/// verified row.
+#[test]
+fn map_learned_expiry_follows_the_runtime_lapse_rule() {
+    // Arrange
+    let now = Instant::now();
+    let now_ms = 50_000_000_000;
+    let deadline = now + Duration::from_secs(30);
+    let deadline_ms = now_ms + 30_000;
+    let backstop_ms = deadline_ms + i64::try_from(RECHECK_BACKSTOP.as_millis()).unwrap();
+    let negative = LearnedRegistryEntry {
+        expires_at: deadline,
+        ..learned_entry(now)
+    };
+    let rows = [
+        ("ordinary negative", negative.clone(), Some(deadline_ms)),
+        (
+            "re-check-owned negative",
+            LearnedRegistryEntry {
+                recheck_owned: true,
+                ..negative.clone()
+            },
+            Some(backstop_ms),
+        ),
+        (
+            "verified positive",
+            LearnedRegistryEntry {
+                verdict: Verdict::VerifiedWorking,
+                ..negative
+            },
+            None,
+        ),
+    ];
+
+    for (name, entry, expected) in rows {
+        // Act
+        let mapped = map_learned(resolved(entry), now, now_ms);
+
+        // Assert
+        assert_eq!(mapped.expires_at_ms, expected, "{name}");
+    }
+}
+
+/// `age_ms` counts from the row's first observation, not its last, and a
+/// future-dated first-seen clamps to zero.
+///
+/// Mutation check: read `entry.last_seen` for the age -> red.
+#[test]
+fn map_learned_age_counts_from_first_seen() {
+    // Arrange
+    let now = Instant::now();
+    let first_seen = now
+        .checked_sub(Duration::from_secs(9))
+        .expect("test clock is well past boot");
+    let entry = LearnedRegistryEntry {
+        first_seen,
+        last_seen: first_seen + Duration::from_secs(8),
+        ..learned_entry(now)
+    };
+    let future = LearnedRegistryEntry {
+        first_seen: now + Duration::from_millis(400),
+        ..learned_entry(now)
+    };
+
+    // Act
+    let mapped = map_learned(resolved(entry), now, 10_000);
+    let clamped = map_learned(resolved(future), now, 10_000);
+
+    // Assert
+    assert_eq!(mapped.age_ms, 9_000);
+    assert_eq!(clamped.age_ms, 0);
 }
 
 /// Wire-shape golden: `last_seen_ms` serializes under its exact snake_case
@@ -412,7 +502,8 @@ fn last_seen_ms_serializes_under_stable_key() {
     let past = now
         .checked_sub(Duration::from_millis(250))
         .expect("test clock is well past boot");
-    let value = serde_json::to_value(map_learned(learned_entry(past), now, 5_000)).unwrap();
+    let value =
+        serde_json::to_value(map_learned(resolved(learned_entry(past)), now, 5_000)).unwrap();
     assert_eq!(value["last_seen_ms"], Value::from(4_750));
 }
 
@@ -430,6 +521,11 @@ fn learned_negative_field_names_match_logging_contract() {
         phase: "f1",
         source: "live",
         last_seen_ms: Some(1_000),
+        action: "route_away",
+        layer: Some("learned"),
+        overrode_layer: None,
+        age_ms: 0,
+        expires_at_ms: Some(2_000),
     })
     .unwrap();
     let obj = value.as_object().unwrap();
@@ -448,6 +544,16 @@ fn learned_negative_field_names_match_logging_contract() {
     assert_eq!(obj["verdict"], Value::from("broken"));
     // The last-observation timestamp surfaces under its own stable key.
     assert!(obj.contains_key("last_seen_ms"));
+    // The resolved-cell fields share the doctor matrix's key names.
+    for key in [
+        "action",
+        "layer",
+        "overrode_layer",
+        "age_ms",
+        "expires_at_ms",
+    ] {
+        assert!(obj.contains_key(key), "missing `{key}`");
+    }
     // The pre-rename token must NOT surface on the wire.
     assert!(!obj.contains_key("feature_key"));
 }
@@ -505,6 +611,11 @@ fn dto_vocabulary_matches_logging_contract_section() {
         phase: "f1",
         source: "live",
         last_seen_ms: Some(1_000),
+        action: "route_away",
+        layer: Some("learned"),
+        overrode_layer: None,
+        age_ms: 0,
+        expires_at_ms: Some(2_000),
     })
     .unwrap();
     let obj = wire.as_object().unwrap();
@@ -587,7 +698,7 @@ fn payload_carries_only_stable_identifiers_and_fixed_vocabulary() {
     let panel = HealthPanel {
         targets: vec![map_target(sample_target(CircuitPhase::Open), 1_000)],
         learned_negatives: vec![map_learned(
-            LearnedRegistryEntry {
+            resolved(LearnedRegistryEntry {
                 state_key: "anthropic#claude-opus-wire".into(),
                 feature_key: "web_search".into(),
                 verdict: Verdict::LearnedBroken(FailurePhase::F1),
@@ -600,7 +711,7 @@ fn payload_carries_only_stable_identifiers_and_fixed_vocabulary() {
                 phase: FailurePhase::F1,
                 source: EvidenceSource::Live,
                 recheck_owned: false,
-            },
+            }),
             Instant::now(),
             1_000,
         )],
