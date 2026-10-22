@@ -32,7 +32,11 @@
 //!   (a geo/region block), for which the code token itself is the canonical
 //!   key. For other providers (Bedrock, as its token table grows) the class
 //!   carries a field path and is normalized directly. One observation is
-//!   trustworthy.
+//!   trustworthy. A whole `error.message` that equals, byte for byte, a
+//!   captured rejection naming one capability is self-identifying too: the
+//!   exact-phrase tables ([`BEDROCK_VALIDATION_PHRASES`],
+//!   [`ANTHROPIC_EXACT_PHRASES`]) compare case-sensitively, so only the
+//!   captured wording matches.
 //! - INFERRED: a generic [`FailureClass::BadRequest`] whose free-text
 //!   `error.message` names a capability only in prose. Matched by
 //!   whole-phrase equality (case-insensitive) against a small per-provider
@@ -164,18 +168,19 @@ const FORCED_TOOL_CHOICE_REJECTION: &str =
 /// Anthropic Messages API inferred-rejection phrases. Small by design;
 /// each phrase is grounded in a real captured / documented 400 envelope
 /// (sources cited in the module tests). Unverified capabilities wait.
-const ANTHROPIC_INFERRED: &[InferredPhrase] = &[
-    InferredPhrase {
-        phrase: "Prefilling assistant messages is not supported for this model.",
-        prefix_anchored: false,
-        capability: PREFILL,
-    },
-    InferredPhrase {
-        phrase: FORCED_TOOL_CHOICE_REJECTION,
-        prefix_anchored: false,
-        capability: FORCED_TOOL_CHOICE,
-    },
-];
+const ANTHROPIC_INFERRED: &[InferredPhrase] = &[InferredPhrase {
+    phrase: "Prefilling assistant messages is not supported for this model.",
+    prefix_anchored: false,
+    capability: PREFILL,
+}];
+
+/// Anthropic Messages API rejections whose whole `error.message` names one
+/// capability and is pinned against a committed capture, so equality is
+/// case-sensitive and byte-exact. A row belongs here only while a test welds
+/// its phrase to the captured body; a phrase without that weld stays in
+/// [`ANTHROPIC_INFERRED`].
+const ANTHROPIC_EXACT_PHRASES: &[(&str, &str)] =
+    &[(FORCED_TOOL_CHOICE_REJECTION, FORCED_TOOL_CHOICE)];
 
 /// OpenAI Responses inferred-rejection phrases. The content-validating lane
 /// family checks the encrypted-content PREFIX and rejects a blob minted by
@@ -244,6 +249,7 @@ pub fn resolve_requested_capability(
         // falls through on real traffic.
         FailureClass::BadRequest => match_feature_naming(provider_kind, err)
             .or_else(|| match_anthropic_tool_rejection(provider_kind, err))
+            .or_else(|| match_anthropic_exact_phrase(provider_kind, err))
             .or_else(|| match_inferred(provider_kind, err)),
         _ => None,
     }
@@ -578,6 +584,28 @@ fn match_anthropic_tool_rejection(
     rejected_tool_type_capability(extract_unsupported_tool_type(message.trim())?)
 }
 
+/// The first-party Messages API arm for a whole-message rejection pinned
+/// against a capture: the nested `error.message`, untrimmed, must equal a row
+/// of [`ANTHROPIC_EXACT_PHRASES`] byte for byte. The first-party surface
+/// never wraps the message, so no Converse prefix is removed.
+fn match_anthropic_exact_phrase(
+    provider_kind: &str,
+    err: &Error,
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
+    if provider_kind != routectl_core::provider_kind::config::ANTHROPIC_API {
+        return None;
+    }
+    let message = upstream_error_field(err, "message")?;
+    let (_, capability) = ANTHROPIC_EXACT_PHRASES
+        .iter()
+        .find(|(phrase, _)| *phrase == message)?;
+    Some((
+        (*capability).to_string(),
+        SignalTier::SelfIdentifying,
+        FailurePhase::F1,
+    ))
+}
+
 /// A tool type an upstream named as refused, keyed through [`tool_type_key`].
 /// The upstream named the wire tool type, so the match is self-identifying
 /// [`FailurePhase::F1`] evidence.
@@ -753,8 +781,9 @@ mod tests {
     use super::resolve_requested_capability;
     use super::upstream_param;
     use super::{
-        BEDROCK_TOKEN_TRANSLATIONS, BEDROCK_VALIDATION_EXCEPTION_TYPE, BEDROCK_VALIDATION_PHRASES,
-        BEDROCK_VALIDATION_TEMPLATES, BedrockTemplate, TokenKey, bedrock_validation_message,
+        ANTHROPIC_EXACT_PHRASES, BEDROCK_TOKEN_TRANSLATIONS, BEDROCK_VALIDATION_EXCEPTION_TYPE,
+        BEDROCK_VALIDATION_PHRASES, BEDROCK_VALIDATION_TEMPLATES, BedrockTemplate,
+        FORCED_TOOL_CHOICE_REJECTION, TokenKey, bedrock_validation_message,
         extract_bedrock_capability, extract_feature_naming_capability,
         is_bedrock_validation_exception, tool_type_key,
     };
@@ -2225,7 +2254,7 @@ mod tests {
         );
     }
 
-    // --- Forced tool_choice rejection: Bedrock exact phrase + first-party row ---
+    // --- Forced tool_choice rejection: Bedrock and first-party exact phrase ---
 
     /// Real captured forced-`tool_choice` 400s from the first-party Messages
     /// API and from bedrock-runtime (Converse prefixed, InvokeModel bare).
@@ -2305,7 +2334,30 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_forced_tool_choice_rejection_resolves_inferred() {
+    fn anthropic_forced_tool_choice_row_is_the_captured_message_byte_for_byte() {
+        // Arrange: the message exactly as the captured first-party body
+        // carries it.
+        let fx = forced_tool_choice_fixture();
+        let body: serde_json::Value =
+            serde_json::from_str(fixture_str(&fx, &["anthropic_api", "body"]))
+                .expect("anthropic body json");
+        let captured = body["error"]["message"]
+            .as_str()
+            .expect("captured error.message");
+
+        // Act
+        let row = ANTHROPIC_EXACT_PHRASES
+            .iter()
+            .find(|(_, capability)| *capability == FORCED_TOOL_CHOICE)
+            .map(|(phrase, _)| *phrase)
+            .expect("forced tool_choice exact-phrase row");
+
+        // Assert
+        assert_eq!(row.as_bytes(), captured.as_bytes());
+    }
+
+    #[test]
+    fn anthropic_forced_tool_choice_rejection_resolves_self_identifying() {
         // Arrange: the captured first-party body, classified for real.
         let fx = forced_tool_choice_fixture();
         let body = fixture_str(&fx, &["anthropic_api", "body"]);
@@ -2321,9 +2373,50 @@ mod tests {
             got,
             Some((
                 "forced_tool_choice".to_string(),
-                SignalTier::Inferred,
+                SignalTier::SelfIdentifying,
                 FailurePhase::F1
             ))
+        );
+    }
+
+    #[test]
+    fn anthropic_forced_tool_choice_case_or_padding_variants_do_not_resolve() {
+        // The row is byte-exact: a re-cased or padded rendering is not the
+        // captured message, so it learns nothing at any tier.
+        let captured = FORCED_TOOL_CHOICE_REJECTION;
+        let capitalized = format!("T{}", &captured[1..]);
+        for (name, message) in [
+            ("upper", captured.to_ascii_uppercase()),
+            ("capitalized", capitalized),
+            ("padded", format!("  {captured}  ")),
+            ("trailing_newline", format!("{captured}\n")),
+        ] {
+            let body = anthropic_body(&message);
+            assert_eq!(
+                resolve_requested_capability(
+                    "anthropic-api",
+                    &upstream(400, &body, None, None),
+                    &cf(FailureClass::BadRequest),
+                ),
+                None,
+                "variant {name} must not learn"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_exact_phrase_is_scoped_to_its_provider_kind() {
+        // The captured first-party body on an openai-responses lane: the
+        // exact-phrase table is keyed by provider kind.
+        let fx = forced_tool_choice_fixture();
+        let body = fixture_str(&fx, &["anthropic_api", "body"]);
+        assert_eq!(
+            resolve_requested_capability(
+                "openai-responses",
+                &upstream(400, body, None, None),
+                &cf(FailureClass::BadRequest),
+            ),
+            None
         );
     }
 

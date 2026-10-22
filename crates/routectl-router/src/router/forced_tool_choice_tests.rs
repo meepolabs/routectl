@@ -10,9 +10,7 @@ use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
-#[cfg(feature = "bedrock")]
-use routectl_core::capability::FailurePhase;
-use routectl_core::capability::SignalTier;
+use routectl_core::capability::{FailurePhase, SignalTier};
 use routectl_core::{ChatChunk, ChatResponse, Provider, Result, ToolDef};
 use serde_json::{Value, json};
 
@@ -234,7 +232,7 @@ async fn bedrock_rejection_learns_and_next_forced_request_skips_the_lane() {
 }
 
 #[tokio::test]
-async fn anthropic_rejection_learns_once_corroborated_and_then_skips_the_lane() {
+async fn anthropic_rejection_learns_on_first_sight_and_skips_the_lane() {
     // Arrange
     let fx = fixture();
     let m1 = RecordingLane::rejecting("p1", anthropic_rejection(&fx));
@@ -242,32 +240,26 @@ async fn anthropic_rejection_learns_once_corroborated_and_then_skips_the_lane() 
     let router = two_lane_router(ANTHROPIC_KIND_BLOCK, "", m1.clone(), m2.clone());
     let tool_choice = json!({"type": "any"});
 
-    // Act: two forced requests; the inferred phrase acts on corroboration.
+    // Act: the first forced request hits the rejecting lane and falls back.
     let first = router
         .complete_with_options(
             forced_request(tool_choice.clone()),
             RouterOptions::default(),
         )
         .await;
-    let second = router
-        .complete_with_options(
-            forced_request(tool_choice.clone()),
-            RouterOptions::default(),
-        )
-        .await;
 
-    // Assert: the first observation is pending, the second acts.
-    assert!(first.result.is_ok());
-    assert!(first.meta.learned_capabilities.is_empty());
-    assert!(second.result.is_ok());
-    let learned = &second.meta.learned_capabilities;
+    // Assert: the captured message is an exact match, so one observation
+    // learns a self-identifying negative on the rejecting lane.
+    assert!(first.result.is_ok(), "the fallback lane serves it");
+    let learned = &first.meta.learned_capabilities;
     assert_eq!(learned.len(), 1);
     assert_eq!(learned[0].state_key, "p1#wire-model-1");
     assert_eq!(learned[0].capability_key, FORCED_TOOL_CHOICE);
-    assert_eq!(learned[0].signal_tier, SignalTier::Inferred);
+    assert_eq!(learned[0].signal_tier, SignalTier::SelfIdentifying);
+    assert_eq!(learned[0].phase, FailurePhase::F1);
 
-    // Act: a third forced request.
-    let third = router
+    // Act: the next forced request.
+    let second = router
         .complete_with_options(
             forced_request(tool_choice.clone()),
             RouterOptions::default(),
@@ -276,9 +268,9 @@ async fn anthropic_rejection_learns_once_corroborated_and_then_skips_the_lane() 
 
     // Assert: the rejecting lane is no longer reached and the directive was
     // never removed on the way to either lane.
-    assert!(third.result.is_ok());
-    assert_eq!(m1.calls(), 2);
-    assert_eq!(m2.calls(), 3);
+    assert!(second.result.is_ok());
+    assert_eq!(m1.calls(), 1);
+    assert_eq!(m2.calls(), 2);
     assert_eq!(router.metrics.strip_total(), 0);
     for seen in m1.seen().into_iter().chain(m2.seen()) {
         assert_eq!(seen.as_ref(), Some(&tool_choice));
@@ -287,7 +279,8 @@ async fn anthropic_rejection_learns_once_corroborated_and_then_skips_the_lane() 
 
 #[tokio::test]
 async fn an_unforced_request_on_a_learned_lane_still_reaches_it() {
-    // Arrange: learn the negative on m1 from two forced requests.
+    // Arrange: learn the negative on m1 from one forced request, then
+    // confirm a second forced request skips it.
     let fx = fixture();
     let m1 = RecordingLane::rejecting("p1", anthropic_rejection(&fx));
     let m2 = RecordingLane::accepting("p2");
@@ -300,7 +293,7 @@ async fn an_unforced_request_on_a_learned_lane_still_reaches_it() {
             )
             .await;
     }
-    assert_eq!(m1.calls(), 2);
+    assert_eq!(m1.calls(), 1, "premise: the forced negative was learned");
 
     // Act: an auto request derives no forced key.
     let _ = router
@@ -309,7 +302,7 @@ async fn an_unforced_request_on_a_learned_lane_still_reaches_it() {
 
     // Assert: the learned negative does not demote a request that forces
     // nothing, so m1 is tried first again.
-    assert_eq!(m1.calls(), 3);
+    assert_eq!(m1.calls(), 2);
 }
 
 #[tokio::test]
