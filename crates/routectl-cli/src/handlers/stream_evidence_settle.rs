@@ -62,8 +62,10 @@ pub(crate) const fn exit_label(exit: StreamExit) -> &'static str {
 }
 
 /// `rc_stream_evidence_total{result,exit}`: carriers settled at the natural
-/// end versus dropped unsettled, by how the stream left. `settled` means the
-/// carrier was read, not that an observation acted.
+/// end versus abandoned, by how the stream left. `settled` means the detectors
+/// read a folded response, not that an observation acted; a carrier settled at
+/// the natural end whose fold was spoiled, or whose scope the published
+/// router's config refuses, is `abandoned` under `ended`.
 #[derive(Debug, Default)]
 pub(crate) struct StreamEvidenceCounters {
     settled: [AtomicU64; EXITS.len()],
@@ -195,13 +197,17 @@ impl PendingStreamEvidence {
         };
         let router = settler.live.load();
         let mut events = Vec::new();
-        carrier.settle(&router, STREAM_POLICY, &mut events);
+        let read = carrier.settle(&router, STREAM_POLICY, &mut events);
         capture.drain_observation_events(
             &events,
             router.catalog_version(),
             router.overlay_revision(),
         );
-        settler.counters.record_settled(StreamExit::Ended);
+        if read {
+            settler.counters.record_settled(StreamExit::Ended);
+        } else {
+            settler.counters.record_abandoned(StreamExit::Ended);
+        }
     }
 }
 

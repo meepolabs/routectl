@@ -95,9 +95,11 @@ impl StreamEvidence {
     /// Read the attempt's evidence against `router` under `policy`, pushing
     /// each acting observation onto `events`. Takes the scope out of the
     /// shared slot, so this reads at most once across every clone. Returns
-    /// whether a response was read: `false` when the scope was already taken,
-    /// the stream did not end naturally, or the fold was spoiled. In each
-    /// `false` case the scope is consumed and nothing is admitted.
+    /// whether the detectors read a folded response: `false` when the scope
+    /// was already taken, the stream did not end naturally, the fold was
+    /// spoiled, or `router`'s config refuses the scope (see
+    /// [`Router::observe_response_evidence`]). In each `false` case the scope
+    /// is consumed and nothing is admitted.
     pub fn settle(
         &self,
         router: &Router,
@@ -111,8 +113,7 @@ impl StreamEvidence {
         let Some(response) = natural_end.as_ref().and_then(|end| end.response.as_ref()) else {
             return false;
         };
-        router.observe_response_evidence(scope, response, policy, events);
-        true
+        router.observe_response_evidence(scope, response, policy, events)
     }
 
     /// Wrap `inner` so each Ok chunk is folded, and the natural end is

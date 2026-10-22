@@ -223,14 +223,19 @@ impl Router {
     /// [`EvidenceScope`]). An observation about a capability the attempt's
     /// egress kept off the wire is dropped: the response says nothing about
     /// it.
+    ///
+    /// Returns whether the detectors read `resp`: `false` only when this
+    /// Router's config refused the scope. A read whose observations were all
+    /// refused at admission (a stale generation, a resident negative) still
+    /// returns `true`.
     pub fn observe_response_evidence(
         &self,
         scope: EvidenceScope,
         resp: &ChatResponse,
         policy: EvidencePolicy,
         events: &mut Vec<CapabilityObserveEvent>,
-    ) {
-        self.observe_response_evidence_at(scope, resp, policy, events, Instant::now());
+    ) -> bool {
+        self.observe_response_evidence_at(scope, resp, policy, events, Instant::now())
     }
 
     /// [`Self::observe_response_evidence`] at an explicit `now`.
@@ -241,9 +246,9 @@ impl Router {
         policy: EvidencePolicy,
         events: &mut Vec<CapabilityObserveEvent>,
         now: Instant,
-    ) {
+    ) -> bool {
         if !self.admits_scope(&scope) {
-            return;
+            return false;
         }
         let observations = capability_detect::detect(&scope.detector_context, resp);
         // One observation per capability: a scope covers one served target and
@@ -261,6 +266,7 @@ impl Router {
             };
             self.admit_observation(&obs, learned_key, &scope, events, now);
         }
+        true
     }
 
     /// Whether this Router's config still admits evidence for `scope`: the

@@ -528,10 +528,12 @@ fn rows() -> Vec<Row> {
                 chunk(0, None, Some("stop")),
                 chunk(1, None, Some("stop")),
             ],
+            counted: vec![("abandoned", "ended", 1)],
             ..Row::new("two choices")
         },
         Row {
             chunks: over_byte_cap(),
+            counted: vec![("abandoned", "ended", 1)],
             ..Row::new("fold over the byte cap")
         },
         Row {
@@ -558,6 +560,7 @@ fn rows() -> Vec<Row> {
         },
         Row {
             client: Client::ReloadAfterFirst(Reload::KillSwitchOff),
+            counted: vec![("abandoned", "ended", 1)],
             ..Row::new("kill switch turned off by a reload mid-stream")
         },
         Row {

@@ -5217,7 +5217,7 @@ pub fn routectl_router::router::Router::lossy_repairs_by_lane(&self) -> alloc::v
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::learned_lane_projection(&self) -> routectl_router::LearnedLaneProjection
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::observe_response_evidence(&self, routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>)
+pub fn routectl_router::router::Router::observe_response_evidence(&self, routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>) -> bool
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
 pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize
@@ -16831,7 +16831,7 @@ pub fn routectl_router::router::Router::lossy_repairs_by_lane(&self) -> alloc::v
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::learned_lane_projection(&self) -> routectl_router::LearnedLaneProjection
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::observe_response_evidence(&self, routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>)
+pub fn routectl_router::router::Router::observe_response_evidence(&self, routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>) -> bool
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
 pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize

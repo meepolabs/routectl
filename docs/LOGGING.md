@@ -1580,10 +1580,16 @@ shutdown), Debug-rendered as a list of non-zero `(result, exit, count)` cells:
 
 | Label | Values |
 |---|---|
-| `result` | `settled` (the evidence was read at the natural end; it does not mean an observation acted) or `abandoned` (dropped unread) |
+| `result` | `settled` (a folded response was read by the detectors at the natural end; it does not mean an observation acted) or `abandoned` (nothing was read) |
 | `exit` | `ended`, `disconnect`, `cancelled`, `render_failure`, `upstream_error` |
 
-`settled` only ever pairs with `ended`. A stream carries no evidence, and is
+`settled` only ever pairs with `ended`. `abandoned` pairs with `ended` when
+the stream ended naturally but its fold could not be read: the reply carried
+more than one choice or ran past the fold's byte cap, or a reload mid-stream
+turned the capability subsystem off or dropped the served provider entry. A
+reload that crosses a catalog boundary still counts `settled`: the detectors
+read the reply and the stale observations are refused at admission. A stream
+carries no evidence, and is
 not counted, when the dispatch failed before content, the client left before
 first content, the capability subsystem is off, or the lane uses a forwarded
 credential. A high `abandoned`/`disconnect` share is clients stopping early,
