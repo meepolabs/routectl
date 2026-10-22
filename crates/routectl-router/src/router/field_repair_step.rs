@@ -23,10 +23,10 @@
 //! pending step wrote was refused too, so the new step SUPERSEDES that step:
 //! it takes over the pending step's guard (the field's single-flight claim is
 //! still held by it, so claiming again would refuse) and the superseded step
-//! settles as dropped, never committing on its own. The type keeps no
-//! one-step-per-field invariant on purpose: a row that later maps every
-//! refused value it sent to the one that succeeded needs two pending steps on
-//! one field.
+//! settles as dropped, never committing on its own, so the repair path holds
+//! one pending step per field. The type itself keeps no one-step-per-field
+//! invariant, so a later consumer that retains each refused value beside the
+//! one that succeeded can hold two.
 
 use std::borrow::Cow;
 use std::time::Instant;
