@@ -56,7 +56,7 @@ fn runtime_state(router: &Router, feature_key: &str, at: Instant) -> NegativeSta
         .0
 }
 
-/// Mutation check: read `lapsed` in `LearnedActing::from_entry` as
+/// Mutation check: read `lapsed` in `LearnedInput::from_entry` as
 /// `now >= entry.expires_at` again -> red at the decay-deadline row: the doctor
 /// reports a re-probe the runtime does not take.
 #[test]

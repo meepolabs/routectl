@@ -434,6 +434,7 @@ fn nicknames_on_one_lane_with_different_overrides_render_a_mixed_cell() {
             "nickname": "beta",
             "verdict": "forced_unsupported",
             "layer": "override",
+            "overrode_layer": null,
             "action": "drop",
         })
     );
@@ -593,8 +594,10 @@ fn nicknames_on_one_lane_with_opposing_priors_render_a_mixed_cell() {
     assert_eq!(
         lane["cells"][column]["nickname_actions"],
         serde_json::json!([
-            {"nickname": "alpha", "verdict": "assumed", "layer": "prior", "action": "none"},
-            {"nickname": "beta", "verdict": "assumed", "layer": "prior", "action": "route_away"},
+            {"nickname": "alpha", "verdict": "assumed", "layer": "prior",
+             "overrode_layer": null, "action": "none"},
+            {"nickname": "beta", "verdict": "assumed", "layer": "prior",
+             "overrode_layer": null, "action": "route_away"},
         ])
     );
     let human = render_capability_matrix_panel(&panel);

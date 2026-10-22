@@ -139,6 +139,15 @@ fn the_dispatch_walk_acts_on_the_seam_resolution_for_every_tier() {
             Some(Layer::Prior),
         ),
         (
+            "live F3 negative is advisory; the prior decides",
+            "",
+            true,
+            "web_search",
+            Some(false),
+            Seed::Acting(FailurePhase::F3),
+            Some(Layer::Prior),
+        ),
+        (
             "kill switch off ignores learned and prior",
             "",
             false,

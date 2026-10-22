@@ -95,17 +95,24 @@ pub enum MatrixAvailability {
 /// One resolved cell of the capability matrix: the display verdict for a
 /// `(lane, capability)` pair. `verdict` is a stable token (the core
 /// `Verdict::as_str` vocabulary plus the panel-only `forced_supported` /
-/// `forced_unsupported` override tokens, or `mixed` when the nicknames on the
-/// lane resolve different verdicts); `supported` carries the polarity
-/// the token alone omits for a prior `assumed` cell (`None` for an
-/// `unknown` or `mixed` cell); `source` is the winning layer's evidence tag
-/// (`override` / `live` / `probe` / `seed` / `prior`) and `layer` the layer
-/// itself (`override` / `learned` / `seed` / `prior`), both `None` for
-/// `unknown` or `mixed`. A `seed` cell is the shipped beta seed: `broken`
-/// while it withholds the flag, `cleared` once a seed-clear marker lifts it.
-/// `action` is what the dispatch filter does with the cell (`drop` /
-/// `route_away` / `strip` / `withhold` / `reprobe` / `allow` / `none`), or
-/// `mixed` when the nicknames on the lane resolve it to different actions.
+/// `forced_unsupported` tokens for an override or an operator wire pin,
+/// `unrepresentable` for a beta flag the lane cannot carry, or `mixed` when
+/// the nicknames on the lane resolve different verdicts); `supported` carries
+/// the polarity the token alone omits for a prior `assumed` cell (`None` for
+/// an `unknown` or `mixed` cell); `source` is the shown layer's evidence tag
+/// (`pin` / `representability` / `override` / `live` / `probe` / `seed` /
+/// `prior`) and `layer` the layer itself (`pin` / `representability` /
+/// `override` / `learned` / `seed` / `prior`), both `None` for `unknown` or
+/// `mixed`. The shown layer is the strongest one holding a signal, so a
+/// learned signal that does not act (an advisory or uncorroborated negative,
+/// or any learned signal with the kill switch off) still shows `learned`.
+/// `overrode_layer` is the next tier below the deciding one that had an
+/// opinion, `None` when no lower tier had one or the nicknames disagree.
+/// A `seed` cell is the shipped beta seed: `broken` while it withholds the
+/// flag, `cleared` once a seed-clear marker lifts it.
+/// `action` is what dispatch does with the cell (`drop` / `route_away` /
+/// `strip` / `withhold` / `reprobe` / `allow` / `none`), or `mixed` when the
+/// nicknames on the lane resolve it to different actions.
 /// `nickname_actions` carries each nickname's own verdict, layer and action
 /// whenever the verdict or the action is `mixed`, and is empty otherwise.
 ///
@@ -113,7 +120,7 @@ pub enum MatrixAvailability {
 /// entry, so they are present only when one exists -- including when an
 /// override or prior wins the cell, since the learned entry still exists
 /// underneath. `expires_at_ms` is a negative's decay deadline and is `None`
-/// for a positive, which never decays. `age_ms` is the winning learned
+/// for a positive, which never decays. `age_ms` is the shown learned
 /// cell's age since last seen; `stale` flags a verified cell older than the
 /// operator staleness hint or a prior stamp past the same threshold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -124,8 +131,10 @@ pub struct MatrixCell {
     pub supported: Option<bool>,
     /// The winning layer's source tag; `None` only for an `unknown` cell.
     pub source: Option<&'static str>,
-    /// The winning layer; `None` only for an `unknown` cell.
+    /// The shown layer; `None` only for an `unknown` cell.
     pub layer: Option<&'static str>,
+    /// The next tier below the deciding one that had an opinion.
+    pub overrode_layer: Option<&'static str>,
     /// The routing action the dispatch filter takes for this cell.
     pub action: &'static str,
     /// Age since last seen in ms for a learned/verified cell; else `None`.
@@ -150,8 +159,10 @@ pub struct MatrixNicknameAction {
     pub nickname: String,
     /// The display verdict token for this nickname's target.
     pub verdict: &'static str,
-    /// The layer that decided this nickname's verdict; `None` for `unknown`.
+    /// The layer this nickname's verdict shows; `None` for `unknown`.
     pub layer: Option<&'static str>,
+    /// The next tier below this nickname's deciding one that had an opinion.
+    pub overrode_layer: Option<&'static str>,
     /// The action the dispatch filter takes for this nickname's target.
     pub action: &'static str,
 }

@@ -1465,7 +1465,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `MatrixReplaySummary` (rows = learned lanes `provider_entry#upstream` with
   their mapped nicknames and provider kind; cells = verdict + source + layer +
   routing action + age + the resident learned entry's epoch-ms first-seen /
-  last-seen / expiry, resolved through `capability_display`, with
+  last-seen / expiry, plus `overrode_layer`, resolved through the
+  precedence seam's display mode, with
   `MatrixNicknameAction` (nickname, verdict, layer, action) listed whenever the
   lane's nicknames disagree on the verdict or the action; availability
   tri-state available/empty/unavailable so a read failure can never render as
@@ -4276,7 +4277,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   re-check that never answers cannot pin it forever.
   `LearnedEntry::has_lapsed` applies it on every read, and every snapshot row
   carries the key's ownership as `LearnedRegistryEntry.recheck_owned` so
-  display surfaces (`capability_display::LearnedActing`) apply the same rule.
+  display surfaces (`capability_precedence::LearnedInput::from_entry`) apply
+  the same rule.
   Also: `retune` / `decay` /
   `inferred_window` / `max_entries` (hot-reloadable behind the same lock; applied
   in `carry_over_learned_from` for a config-only reload, and deferred to
@@ -4899,36 +4901,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `factory::validate::validate_prefix_impact_target_spec` (the `[fidelity]
   prefix_impact_opt_in` directory-membership check) both delegate to it so
   the two sites can never read a spec differently
-- `src/capability_display.rs` -- ONE pure read-only display resolver
-  `resolve_display_verdict(override_cell, learned, prior) -> DisplayVerdict`
-  pinning the within-target precedence `override > learned > verified-working
-  > seed > prior > unknown` for the doctor capability matrix panel (a
-  `SeedCell` input: `Withhold` renders `broken`, `Cleared` renders `cleared`,
-  both source `SOURCE_SEED`). An EXTRACTION of
-  the order `Router::unsupported_feature_for_target` enforces (that seam is
-  side-effecting -- probe admission, `in_flight`, metrics -- so it cannot run
-  from a read-only diagnostic). `DisplayVerdict { verdict, supported, source
-  }` carries a stable token (the core `Verdict::as_str` vocabulary plus the
-  PANEL-ONLY override tokens `FORCED_SUPPORTED` / `FORCED_UNSUPPORTED`, and
-  `VERDICT_MIXED` for a matrix cell whose nicknames resolve different verdicts), a
-  support polarity (`None` only for `unknown`), and a source tag (`override` /
-  `live` / `probe` / `prior`, `None` for `unknown`). A sibling drift test
-  asserts the order agrees with `router::capability_precedence_matrix_tests`.
-  `resolve_display_action(ActionInputs) -> &'static str` is the matching
-  read-only extraction of the filter's ACTION for a cell (`ACTION_DROP` /
-  `ROUTE_AWAY` / `STRIP` / `WITHHOLD` / `REPROBE` / `ALLOW` / `NONE`): an
-  override and the seed act regardless of the `[capability] enabled` kill
-  switch, a learned or prior cell only while it is on, a negative or
-  route-away override on a `beta:` key withholds the flag, and a learned
-  entry that does not act on routing (uncorroborated inferred, advisory live
-  F3) falls through to the seed, then the prior;
-  `LearnedActing::from_entry` reads a snapshot entry's acting facts through
-  the registry's own `signal_acts` predicate and its `lapsed` flag through
-  `learned_capability::negative_lapsed` over the row's `recheck_owned`, so a
-  `reprobe` action matches the dispatch path's lapse, and
-  `lane_strips_capability(config, provider_entry, models, capability)`
-  mirrors the filter's strip-vs-route policy (essential list + operator beta
-  floor via `beta_capability::operator_betas`)
+- `src/capability_display.rs` -- the display mode of the precedence seam:
+  `resolve_display(DisplayInputs) -> Resolution` walks the same tier opinions
+  dispatch uses (`capability_precedence::opinions`), returns the same winner,
+  fills `overridden` (the next tier with an opinion), and records the signal a
+  read-only surface shows (`Resolution::display_{layer, verdict, supported,
+  source}`: the strongest tier HOLDING a signal, so an advisory or
+  uncorroborated learned negative, or any learned / prior signal with the kill
+  switch off, still shows while the action comes from the deciding tier).
+  Owns the panel-only display tokens `FORCED_SUPPORTED` /
+  `FORCED_UNSUPPORTED` / `VERDICT_MIXED` / `VERDICT_UNREPRESENTABLE` and the
+  source tags `SOURCE_{PIN, REPRESENTABILITY, OVERRIDE, LIVE, PROBE, SEED,
+  PRIOR}`. Pure: no probe admission, no `in_flight`, no metric. A sibling
+  table test pins each tier's projection
 - `src/capability_precedence.rs` -- the one pure precedence resolution for a
   `(target, capability)` cell, `pin > override > learned > seed > prior`,
   staged so a decided cell never reaches the claiming learned read:
@@ -4943,8 +4928,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   outright (send) and on a feature key only rules out strip.
   `LearnedInput::{from_reading, from_entry}` adapt a dispatch read or a
   snapshot entry. `refuses_beta_bag_key(egress_kind, upstream)` is the
-  Converse representability pre-check. Owns `SeedCell` (re-exported by
-  `capability_display`)
+  Converse representability pre-check. Owns `SeedCell` and the `ACTION_*`
+  tokens
 - `src/capability_vocab.rs` -- map-on-read for the persisted capability-event
   vocabulary: stored rows are never rewritten; replay maps each row's tokens
   forward from its `vocab_version` (NULL = `LEGACY_VOCAB_VERSION` 1) to
@@ -7686,6 +7671,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (neither restart-required nor high-consequence -- `[fidelity]` has no
   active runtime behavior yet) and `[pools]` as high-consequence
   beside `[providers]`
+- `src/lane_cell.rs` -- the one `(learned lane, capability)` cell builder for
+  the read-only surfaces (used by the doctor capability matrix; the status
+  learned projection is its intended next consumer). `lane_metas(&Config, entries)` builds the
+  lane rows (the router's `LearnedLaneProjection`, then unrouted learned keys,
+  each `LaneMeta` carrying its provider entry, upstream, kind and mapped
+  models); `resolve_cell(meta, capability, &CellSources) -> LaneCell` gathers
+  every tier's inputs (`operator_pins_capability` per nickname,
+  `OverrideRegistry::resolve`, `LearnedInput::from_entry`,
+  `beta_seed_state_for_key` over the snapshot's seed-clear markers, the
+  caller's prior lookup, `CellContext::for_lane`) and runs the router's
+  `resolve_display` once per nickname. `LaneCell::{shown, layer, action,
+  overrode_layer, nicknames_agree}` give the lane-wide view, each `None` when
+  the nicknames disagree; `entry_stamps` maps a learned entry's instants to
+  epoch ms through the pinned `(now, now_ms)` anchor (the one place the expiry
+  rule lives for both surfaces)
 - `src/log_sink.rs` -- the production tracing sink: `subscriber` (the one
   builder `main` installs via `init`) and `EscapingFields`, the field
   formatter that escapes control, format, separator and default-ignorable
@@ -8207,11 +8207,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   keys then every observed other key, uncapped (an override naming a beta flag
   in another letter case folds into that flag's existing column via
   `beta_override_key`). Each cell
-  runs the shared `resolve_display_verdict` + `resolve_display_action` once
-  per nickname on the lane; when the nicknames disagree on the verdict the
+  resolves through `crate::lane_cell::resolve_cell` (the router's
+  `resolve_display` once per nickname on the lane, so the operator wire pin
+  and the Converse representability check reach the matrix as they reach
+  dispatch); when the nicknames disagree on the shown verdict the
   cell's verdict is `mixed` with no lane-wide source, layer or age, when they
   disagree on the action it is `mixed`, and either way the cell lists each
-  nickname's verdict, layer and action. It then layers on the winning layer,
+  nickname's verdict, layer, `overrode_layer` and action. A cell carries its
+  shown layer (`pin` / `representability` / `override` / `learned` / `seed` /
+  `prior`) and `overrode_layer` (`Resolution::overridden`, the tier the
+  winner beat). It then layers on
   the display-only age and stale flag (a prior-layer cell is stale when any
   nickname on the lane has a stale prior), and the
   learned entry's epoch-ms timestamps mapped through the reader's pinned
@@ -8222,7 +8227,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lives in the `#[path]`-included `lane_matrix_tests.rs`, the seed layer's in
   `seed_matrix_tests.rs`, and the re-check backstop's (doctor action equals
   the runtime decision on both sides of `RECHECK_BACKSTOP`) in
-  `recheck_backstop_matrix_tests.rs`
+  `recheck_backstop_matrix_tests.rs`, and the seam tiers dispatch applies
+  ahead of the learned layer (a pinned beta flag, a Converse lane that cannot
+  carry a client flag, the tier each winner beat) in
+  `precedence_matrix_tests.rs`
 - `src/commands/doctor/served.rs` -- the served gather's inputs.
   `GatherSources::{Disk, Served(Box<ServedInputs>)}` selects the layers;
   `ServedInputs` (built only by the status facade's `served_doctor_inputs`)

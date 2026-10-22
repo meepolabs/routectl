@@ -1,732 +1,186 @@
-//! Drift guard: the pure display resolver's precedence order must agree
-//! with the router's consolidated within-target precedence matrix
-//! (`capability_precedence_matrix_tests`). One test per rule of the
-//! settled chain `override > learned > verified-working > seed > prior >
-//! unknown`, phrased over the resolver's read-only inputs. The
-//! router matrix pins the SIDE-EFFECTING dispatch seam; this pins the
-//! EXTRACTED read-only resolver against the same rules, so the display
-//! surface can never silently diverge from routing behavior.
+//! The display projections of the seam's display mode: one row per tier and
+//! polarity, pinning the verdict token, polarity, source tag and shown layer
+//! a read-only surface renders next to the action the seam decided. The
+//! action itself is pinned against dispatch by the walk and withheld-beta
+//! parity tests; here it rides along so a shown signal that does not act (an
+//! advisory or uncorroborated negative, the kill switch off) is visibly
+//! distinct from the tier that decided.
 
 use super::*;
 
-use std::time::{Duration, Instant};
-
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
 
-use crate::capability_precedence::{CellContext, DisplayInputs, Layer, LearnedInput, Resolution};
-
+use crate::capability_precedence::{
+    ACTION_ALLOW, ACTION_DROP, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY, ACTION_STRIP,
+    ACTION_WITHHOLD, CellContext, DisplayInputs, Layer, LearnedInput, SeedCell,
+};
 use crate::override_registry::OverrideVerdict;
-
-/// A learned negative seen on live traffic, in the given phase.
-fn learned_negative(phase: FailurePhase) -> Option<(Verdict, EvidenceSource)> {
-    Some((Verdict::LearnedBroken(phase), EvidenceSource::Live))
-}
-
-/// A resident verified-working positive seen on live traffic.
-fn verified() -> Option<(Verdict, EvidenceSource)> {
-    Some((Verdict::VerifiedWorking, EvidenceSource::Live))
-}
-
-const fn route_away() -> Option<OverrideVerdict> {
-    Some(OverrideVerdict::RouteAway)
-}
-
-const fn force_supported() -> Option<OverrideVerdict> {
-    Some(OverrideVerdict::ForceSupported)
-}
-
-// --- override hard-drop > learned ---
-
-#[test]
-fn override_route_away_beats_acting_learned_negative() {
-    // Router rule: an override RouteAway hard-drops ahead of any learned
-    // signal (FilterSource::Override wins).
-    let dv = resolve_display_verdict(route_away(), learned_negative(FailurePhase::F1), None, None);
-    assert_eq!(dv.verdict, FORCED_UNSUPPORTED);
-    assert_eq!(dv.supported, Some(false));
-    assert_eq!(dv.source, Some(SOURCE_OVERRIDE));
-}
-
-// --- force_supported masks learned AND prior ---
-
-#[test]
-fn force_supported_masks_both_learned_negative_and_catalog_prior() {
-    // Router rule: force_supported short-circuits the cell to allow before
-    // the learned consult, and the prior pass skips it too (router returns
-    // None). The display side asserts it supported via the override.
-    let dv = resolve_display_verdict(
-        force_supported(),
-        learned_negative(FailurePhase::F1),
-        None,
-        Some(false),
-    );
-    assert_eq!(dv.verdict, FORCED_SUPPORTED);
-    assert_eq!(dv.supported, Some(true));
-    assert_eq!(dv.source, Some(SOURCE_OVERRIDE));
-}
-
-// --- learned (F1 and F2) > prior ---
-
-#[test]
-fn learned_f1_negative_outranks_catalog_prior() {
-    let dv = resolve_display_verdict(None, learned_negative(FailurePhase::F1), None, Some(false));
-    assert_eq!(
-        dv.verdict,
-        Verdict::LearnedBroken(FailurePhase::F1).as_str()
-    );
-    assert_eq!(dv.supported, Some(false));
-    assert_eq!(dv.source, Some(SOURCE_LIVE));
-}
-
-#[test]
-fn learned_f2_negative_outranks_catalog_prior() {
-    let dv = resolve_display_verdict(None, learned_negative(FailurePhase::F2), None, Some(false));
-    assert_eq!(
-        dv.verdict,
-        Verdict::LearnedBroken(FailurePhase::F2).as_str()
-    );
-    assert_eq!(dv.supported, Some(false));
-    assert_eq!(dv.source, Some(SOURCE_LIVE));
-}
-
-// --- prior=false soft-tails; prior=true allows; None permissive ---
-
-#[test]
-fn prior_false_alone_resolves_to_prior_source() {
-    // Router rule: a Some(false) prior with no higher signal soft-tails
-    // with FilterSource::Prior. The display cell carries the prior source
-    // and unsupported polarity.
-    let dv = resolve_display_verdict(None, None, None, Some(false));
-    assert_eq!(dv.verdict, Verdict::Assumed(false).as_str());
-    assert_eq!(dv.supported, Some(false));
-    assert_eq!(dv.source, Some(SOURCE_PRIOR));
-}
-
-#[test]
-fn prior_true_resolves_supported_from_prior() {
-    let dv = resolve_display_verdict(None, None, None, Some(true));
-    assert_eq!(dv.verdict, Verdict::Assumed(true).as_str());
-    assert_eq!(dv.supported, Some(true));
-    assert_eq!(dv.source, Some(SOURCE_PRIOR));
-}
-
-#[test]
-fn absent_prior_resolves_unknown_with_no_source() {
-    let dv = resolve_display_verdict(None, None, None, None);
-    assert_eq!(dv.verdict, Verdict::Unknown.as_str());
-    assert_eq!(dv.supported, None);
-    assert_eq!(dv.source, None);
-}
-
-// --- verified-working > prior ---
-
-#[test]
-fn verified_working_masks_catalog_prior() {
-    // Router rule: a resident VerifiedWorking positive masks a Some(false)
-    // prior (the prior pass skips a verified cell). The display cell is
-    // supported from the learned layer, never the prior.
-    let dv = resolve_display_verdict(None, verified(), None, Some(false));
-    assert_eq!(dv.verdict, Verdict::VerifiedWorking.as_str());
-    assert_eq!(dv.supported, Some(true));
-    assert_eq!(dv.source, Some(SOURCE_LIVE));
-}
-
-// --- override hard-drop > verified-working ---
-
-#[test]
-fn override_route_away_beats_resident_verified_working() {
-    let dv = resolve_display_verdict(route_away(), verified(), None, None);
-    assert_eq!(dv.verdict, FORCED_UNSUPPORTED);
-    assert_eq!(dv.supported, Some(false));
-    assert_eq!(dv.source, Some(SOURCE_OVERRIDE));
-}
-
-// --- verified-working > unknown ---
-
-#[test]
-fn verified_working_with_no_prior_is_supported() {
-    let dv = resolve_display_verdict(None, verified(), None, None);
-    assert_eq!(dv.verdict, Verdict::VerifiedWorking.as_str());
-    assert_eq!(dv.supported, Some(true));
-    assert_eq!(dv.source, Some(SOURCE_LIVE));
-}
-
-// --- evidence source flows through to the tag ---
-
-#[test]
-fn probe_evidence_tags_the_cell_probe() {
-    let dv = resolve_display_verdict(
-        None,
-        Some((Verdict::VerifiedWorking, EvidenceSource::Probe)),
-        None,
-        None,
-    );
-    assert_eq!(dv.source, Some(SOURCE_PROBE));
-}
-
-// --- the routing action mirrors the dispatch filter ---
-
-fn negative(phase: FailurePhase, source: EvidenceSource) -> LearnedActing {
-    LearnedActing {
-        verified: false,
-        acting: true,
-        lapsed: false,
-        phase,
-        source,
-    }
-}
-
-fn action(
-    override_cell: Option<OverrideVerdict>,
-    learned: Option<LearnedActing>,
-    prior: Option<bool>,
-    strip_applies: bool,
-    capability_enabled: bool,
-) -> &'static str {
-    let display = resolve_display_verdict(
-        override_cell,
-        learned.map(|l| {
-            let verdict = if l.verified {
-                Verdict::VerifiedWorking
-            } else {
-                Verdict::LearnedBroken(l.phase)
-            };
-            (verdict, l.source)
-        }),
-        None,
-        prior,
-    );
-    resolve_display_action(ActionInputs {
-        display,
-        learned,
-        prior,
-        strip_applies,
-        capability_enabled,
-        beta_flag: false,
-        seed: None,
-    })
-}
-
-#[test]
-fn display_action_rows_mirror_the_dispatch_filter() {
-    let live_f1 = negative(FailurePhase::F1, EvidenceSource::Live);
-    let live_f2 = negative(FailurePhase::F2, EvidenceSource::Live);
-    let live_f3 = negative(FailurePhase::F3, EvidenceSource::Live);
-    let probe_f3 = negative(FailurePhase::F3, EvidenceSource::Probe);
-    let lapsed = LearnedActing {
-        lapsed: true,
-        ..live_f1
-    };
-    let uncorroborated = LearnedActing {
-        acting: false,
-        ..live_f1
-    };
-    let positive = LearnedActing {
-        verified: true,
-        ..live_f1
-    };
-    let cases: &[(&str, &'static str, &'static str)] = &[
-        (
-            "override route-away drops",
-            action(route_away(), Some(live_f1), None, true, true),
-            ACTION_DROP,
-        ),
-        (
-            "override drops with the kill switch off",
-            action(route_away(), None, None, false, false),
-            ACTION_DROP,
-        ),
-        (
-            "force-supported allows",
-            action(force_supported(), Some(live_f1), Some(false), true, true),
-            ACTION_ALLOW,
-        ),
-        (
-            "droppable F1 negative strips",
-            action(None, Some(live_f1), None, true, true),
-            ACTION_STRIP,
-        ),
-        (
-            "essential F1 negative routes away",
-            action(None, Some(live_f1), None, false, true),
-            ACTION_ROUTE_AWAY,
-        ),
-        (
-            "F2 negative never strips",
-            action(None, Some(live_f2), None, true, true),
-            ACTION_ROUTE_AWAY,
-        ),
-        (
-            "probe F3 negative routes away",
-            action(None, Some(probe_f3), None, true, true),
-            ACTION_ROUTE_AWAY,
-        ),
-        (
-            "live F3 negative is advisory",
-            action(None, Some(live_f3), None, true, true),
-            ACTION_NONE,
-        ),
-        (
-            "advisory negative falls to a false prior",
-            action(None, Some(live_f3), Some(false), true, true),
-            ACTION_ROUTE_AWAY,
-        ),
-        (
-            "lapsed negative re-probes",
-            action(None, Some(lapsed), None, true, true),
-            ACTION_REPROBE,
-        ),
-        (
-            "uncorroborated negative falls to the prior",
-            action(None, Some(uncorroborated), Some(false), true, true),
-            ACTION_ROUTE_AWAY,
-        ),
-        (
-            "verified positive allows",
-            action(None, Some(positive), Some(false), true, true),
-            ACTION_ALLOW,
-        ),
-        (
-            "false prior routes away",
-            action(None, None, Some(false), true, true),
-            ACTION_ROUTE_AWAY,
-        ),
-        (
-            "true prior takes no action",
-            action(None, None, Some(true), true, true),
-            ACTION_NONE,
-        ),
-        (
-            "kill switch off silences learned",
-            action(None, Some(live_f1), None, true, false),
-            ACTION_NONE,
-        ),
-        (
-            "kill switch off silences prior",
-            action(None, None, Some(false), true, false),
-            ACTION_NONE,
-        ),
-        (
-            "no signal takes no action",
-            action(None, None, None, true, true),
-            ACTION_NONE,
-        ),
-    ];
-    for (name, got, want) in cases {
-        assert_eq!(got, want, "{name}");
-    }
-}
-
-// --- the shipped beta seed sits below learned and above the prior ---
-
-#[test]
-fn seed_precedence_rows_mirror_the_withheld_beta_pass() {
-    let withhold = Some(SeedCell::Withhold);
-    let cleared = Some(SeedCell::Cleared);
-    let cases: &[(&str, DisplayVerdict, &str, Option<&str>)] = &[
-        (
-            "override beats the seed",
-            resolve_display_verdict(force_supported(), None, withhold, None),
-            FORCED_SUPPORTED,
-            Some(SOURCE_OVERRIDE),
-        ),
-        (
-            "a learned positive beats the seed",
-            resolve_display_verdict(None, verified(), withhold, None),
-            Verdict::VerifiedWorking.as_str(),
-            Some(SOURCE_LIVE),
-        ),
-        (
-            "a learned negative beats a cleared seed",
-            resolve_display_verdict(None, learned_negative(FailurePhase::F1), cleared, None),
-            Verdict::LearnedBroken(FailurePhase::F1).as_str(),
-            Some(SOURCE_LIVE),
-        ),
-        (
-            "the seed beats a supporting prior",
-            resolve_display_verdict(None, None, withhold, Some(true)),
-            Verdict::LearnedBroken(FailurePhase::F1).as_str(),
-            Some(SOURCE_SEED),
-        ),
-        (
-            "a cleared seed beats an opposing prior",
-            resolve_display_verdict(None, None, cleared, Some(false)),
-            Verdict::Cleared.as_str(),
-            Some(SOURCE_SEED),
-        ),
-        (
-            "no seed leaves the prior",
-            resolve_display_verdict(None, None, None, Some(false)),
-            Verdict::Assumed(false).as_str(),
-            Some(SOURCE_PRIOR),
-        ),
-        (
-            "no signal at all is unknown",
-            resolve_display_verdict(None, None, None, None),
-            Verdict::Unknown.as_str(),
-            None,
-        ),
-    ];
-    for (name, got, verdict, source) in cases {
-        assert_eq!(got.verdict, *verdict, "{name}");
-        assert_eq!(got.source, *source, "{name}");
-    }
-}
-
-#[test]
-fn a_seed_cell_is_unsupported_and_a_cleared_seed_is_supported() {
-    let seeded = resolve_display_verdict(None, None, Some(SeedCell::Withhold), None);
-    let cleared = resolve_display_verdict(None, None, Some(SeedCell::Cleared), None);
-
-    assert_eq!(seeded.supported, Some(false));
-    assert_eq!(cleared.supported, Some(true));
-}
-
-/// The action for a beta-key cell, resolving the display from the same inputs.
-fn beta_action(
-    override_cell: Option<OverrideVerdict>,
-    learned: Option<LearnedActing>,
-    seed: Option<SeedCell>,
-    capability_enabled: bool,
-) -> &'static str {
-    let display = resolve_display_verdict(
-        override_cell,
-        learned.map(|l| {
-            let verdict = if l.verified {
-                Verdict::VerifiedWorking
-            } else {
-                Verdict::LearnedBroken(l.phase)
-            };
-            (verdict, l.source)
-        }),
-        seed,
-        None,
-    );
-    resolve_display_action(ActionInputs {
-        display,
-        learned,
-        prior: None,
-        strip_applies: true,
-        capability_enabled,
-        beta_flag: true,
-        seed,
-    })
-}
-
-#[test]
-fn beta_action_rows_mirror_the_withheld_beta_pass() {
-    let live_f1 = negative(FailurePhase::F1, EvidenceSource::Live);
-    let lapsed = LearnedActing {
-        lapsed: true,
-        ..live_f1
-    };
-    let uncorroborated = LearnedActing {
-        acting: false,
-        ..live_f1
-    };
-    let positive = LearnedActing {
-        verified: true,
-        ..live_f1
-    };
-    let withhold = Some(SeedCell::Withhold);
-    let cleared = Some(SeedCell::Cleared);
-    let cases: &[(&str, &'static str, &'static str)] = &[
-        (
-            "a learned beta negative withholds, never strips",
-            beta_action(None, Some(live_f1), None, true),
-            ACTION_WITHHOLD,
-        ),
-        (
-            "a route-away override on a beta key withholds, never drops",
-            beta_action(route_away(), None, None, true),
-            ACTION_WITHHOLD,
-        ),
-        (
-            "a force-supported override sends over the seed",
-            beta_action(force_supported(), None, withhold, true),
-            ACTION_ALLOW,
-        ),
-        (
-            "a learned positive sends over the seed",
-            beta_action(None, Some(positive), withhold, true),
-            ACTION_ALLOW,
-        ),
-        (
-            "a lapsed negative re-probes over the seed",
-            beta_action(None, Some(lapsed), withhold, true),
-            ACTION_REPROBE,
-        ),
-        (
-            "an uncorroborated negative falls to the seed",
-            beta_action(None, Some(uncorroborated), withhold, true),
-            ACTION_WITHHOLD,
-        ),
-        (
-            "the seed alone withholds",
-            beta_action(None, None, withhold, true),
-            ACTION_WITHHOLD,
-        ),
-        (
-            "the seed withholds with the kill switch off",
-            beta_action(None, None, withhold, false),
-            ACTION_WITHHOLD,
-        ),
-        (
-            "the kill switch off silences learned and leaves the seed",
-            beta_action(None, Some(positive), withhold, false),
-            ACTION_WITHHOLD,
-        ),
-        (
-            "a cleared seed sends",
-            beta_action(None, None, cleared, true),
-            ACTION_ALLOW,
-        ),
-        (
-            "a learned negative over a cleared seed withholds",
-            beta_action(None, Some(live_f1), cleared, true),
-            ACTION_WITHHOLD,
-        ),
-        (
-            "an unseeded beta key with no signal takes no action",
-            beta_action(None, None, None, true),
-            ACTION_NONE,
-        ),
-    ];
-    for (name, got, want) in cases {
-        assert_eq!(got, want, "{name}");
-    }
-}
-
-// --- parity of the display mode with the previous display resolvers ---
 
 const ROUTE_AWAY: Option<OverrideVerdict> = Some(OverrideVerdict::RouteAway);
 const FORCE: Option<OverrideVerdict> = Some(OverrideVerdict::ForceSupported);
+const WITHHOLD: Option<SeedCell> = Some(SeedCell::Withhold);
+const CLEARED: Option<SeedCell> = Some(SeedCell::Cleared);
 
-/// A snapshot entry with the given shape, lapsed or not against `now` (a
-/// negative lapses at its expiry instant).
-fn entry(
-    verdict: Verdict,
-    tier: SignalTier,
-    observations: u32,
-    source: EvidenceSource,
-    lapsed: bool,
-    now: Instant,
-) -> LearnedRegistryEntry {
-    LearnedRegistryEntry {
-        state_key: "lane#upstream".to_string(),
-        feature_key: "web_search".to_string(),
-        verdict,
-        signal_tier: tier,
-        observations,
-        first_seen: now,
-        last_seen: now,
-        expires_at: if lapsed {
-            now
-        } else {
-            now + Duration::from_hours(1)
-        },
-        evidence_class: None,
-        phase: match verdict {
-            Verdict::LearnedBroken(phase) => phase,
-            _ => FailurePhase::F3,
-        },
+const FEATURE: CellContext = CellContext::from_facts(true, false, false, true);
+const DROPPABLE: CellContext = CellContext::from_facts(true, false, true, true);
+const FEATURE_OFF: CellContext = CellContext::from_facts(false, false, false, true);
+const BETA: CellContext = CellContext::from_facts(true, true, true, true);
+const BETA_OFF: CellContext = CellContext::from_facts(false, true, true, true);
+const BETA_UNREPRESENTABLE: CellContext = CellContext::from_facts(true, true, true, false);
+
+const fn acting(phase: FailurePhase, source: EvidenceSource) -> Option<LearnedInput> {
+    Some(LearnedInput::Acting {
+        phase,
+        tier: SignalTier::SelfIdentifying,
         source,
-        recheck_owned: false,
-    }
-}
-
-/// Every learned-entry shape the old display action distinguishes.
-fn entry_grid(now: Instant) -> Vec<Option<LearnedRegistryEntry>> {
-    let mut grid = vec![
-        None,
-        Some(entry(
-            Verdict::VerifiedWorking,
-            SignalTier::SelfIdentifying,
-            1,
-            EvidenceSource::Live,
-            false,
-            now,
-        )),
-    ];
-    for phase in [FailurePhase::F1, FailurePhase::F2, FailurePhase::F3] {
-        for source in [EvidenceSource::Live, EvidenceSource::Probe] {
-            for lapsed in [false, true] {
-                for (tier, observations) in [
-                    (SignalTier::SelfIdentifying, 1),
-                    (SignalTier::Inferred, 1),
-                    (SignalTier::Inferred, 2),
-                ] {
-                    grid.push(Some(entry(
-                        Verdict::LearnedBroken(phase),
-                        tier,
-                        observations,
-                        source,
-                        lapsed,
-                        now,
-                    )));
-                }
-            }
-        }
-    }
-    grid
-}
-
-/// The doctor's layer tag for an old display verdict, by its source.
-fn old_layer(display: DisplayVerdict) -> Option<&'static str> {
-    display.source.map(|source| match source {
-        SOURCE_OVERRIDE | SOURCE_PRIOR | SOURCE_SEED => source,
-        _ => "learned",
     })
 }
 
-/// The new display resolution of an unpinned cell on a representable lane.
-fn new_display(
-    override_verdict: Option<OverrideVerdict>,
-    learned_entry: Option<&LearnedRegistryEntry>,
-    seed: Option<SeedCell>,
-    prior: Option<bool>,
-    (beta_flag, droppable, capability_enabled): (bool, bool, bool),
-    now: Instant,
-) -> Resolution {
-    resolve_display(DisplayInputs {
-        pinned: false,
-        override_verdict,
-        learned: learned_entry.and_then(|e| LearnedInput::from_entry(e, now)),
-        seed,
-        prior,
-        ctx: CellContext::from_facts(capability_enabled, beta_flag, droppable, true),
-    })
-}
+const LIVE_F1: Option<LearnedInput> = acting(FailurePhase::F1, EvidenceSource::Live);
+const LIVE_F2: Option<LearnedInput> = acting(FailurePhase::F2, EvidenceSource::Live);
+const LIVE_F3: Option<LearnedInput> = acting(FailurePhase::F3, EvidenceSource::Live);
+const PROBE_F1: Option<LearnedInput> = acting(FailurePhase::F1, EvidenceSource::Probe);
+const LAPSED: Option<LearnedInput> = Some(LearnedInput::Lapsed {
+    source: EvidenceSource::Live,
+});
+const VERIFIED: Option<LearnedInput> = Some(LearnedInput::Verified {
+    source: EvidenceSource::Live,
+});
+const VERIFIED_PROBE: Option<LearnedInput> = Some(LearnedInput::Verified {
+    source: EvidenceSource::Probe,
+});
+const UNCORROBORATED: Option<LearnedInput> = Some(LearnedInput::Uncorroborated {
+    source: EvidenceSource::Live,
+});
 
-/// The display action, verdict, supported, source and layer are unchanged
-/// for every unpinned cell on a representable lane the old display resolvers
-/// could see, except the action of a false catalog prior on a beta key: the
-/// dispatch beta path has no prior tier, so the seam gives it no opinion
-/// (the verdict, source and layer still show the prior). The layer stays
-/// `learned` for a resident entry with no opinion (an advisory live F3
-/// negative, an uncorroborated inferred one, or any entry with the kill
-/// switch off), as the doctor showed it before.
-#[test]
-fn display_projections_match_the_previous_display_resolver() {
-    let now = Instant::now();
-    let mut compared = 0;
-    let mut beta_prior_cells = 0;
-    let mut learned_without_opinion = 0;
-    for learned_entry in entry_grid(now) {
-        for override_verdict in [None, ROUTE_AWAY, FORCE] {
-            for seed in [None, Some(SeedCell::Withhold), Some(SeedCell::Cleared)] {
-                for prior in [None, Some(true), Some(false)] {
-                    for (beta_flag, droppable, capability_enabled) in bool_triples() {
-                        let old_display = resolve_display_verdict(
-                            override_verdict,
-                            learned_entry.as_ref().map(|e| (e.verdict, e.source)),
-                            seed,
-                            prior,
-                        );
-                        let old_action = resolve_display_action(ActionInputs {
-                            display: old_display,
-                            learned: learned_entry
-                                .as_ref()
-                                .map(|e| LearnedActing::from_entry(e, now)),
-                            prior,
-                            strip_applies: droppable,
-                            capability_enabled,
-                            beta_flag,
-                            seed,
-                        });
-                        let new = new_display(
-                            override_verdict,
-                            learned_entry.as_ref(),
-                            seed,
-                            prior,
-                            (beta_flag, droppable, capability_enabled),
-                            now,
-                        );
-                        let cell = format!(
-                            "override {override_verdict:?} learned {learned_entry:?} seed \
-                             {seed:?} prior {prior:?} beta {beta_flag} droppable {droppable} \
-                             enabled {capability_enabled}"
-                        );
-                        compared += 1;
-                        assert_eq!(
-                            (
-                                new.display_verdict(),
-                                new.display_supported(),
-                                new.display_source(),
-                                new.display_layer().map(Layer::as_str),
-                            ),
-                            (
-                                old_display.verdict,
-                                old_display.supported,
-                                old_display.source,
-                                old_layer(old_display),
-                            ),
-                            "{cell}"
-                        );
-                        if new.display_layer() == Some(Layer::Learned)
-                            && new.layer() != Some(Layer::Learned)
-                        {
-                            learned_without_opinion += 1;
-                        }
-                        if beta_flag && prior == Some(false) && old_action != new.as_str() {
-                            assert_eq!(
-                                (old_action, new.as_str()),
-                                (ACTION_ROUTE_AWAY, ACTION_NONE),
-                                "{cell}"
-                            );
-                            beta_prior_cells += 1;
-                            continue;
-                        }
-                        assert_eq!(new.as_str(), old_action, "{cell}");
-                    }
-                }
-            }
-        }
-    }
-    assert_eq!(compared, 38 * 3 * 3 * 3 * 8);
-    // Kill switch on, no override, no seed, and an entry with no learned
-    // action (no entry, 12 uncorroborated inferred, 4 live F3), on either
-    // droppable value: 17 * 2.
-    assert_eq!(
-        beta_prior_cells, 34,
-        "the beta-prior action exception is exactly the cells with no stronger opinion"
-    );
-    assert!(
-        learned_without_opinion > 0,
-        "a resident entry with no opinion still shows learned"
-    );
-}
-
-#[test]
-#[rustfmt::skip]
-fn display_projections_for_the_tiers_the_previous_resolver_lacked() {
-    let beta = |representable| CellContext::from_facts(true, true, true, representable);
-    let base = |ctx| DisplayInputs {
+const fn inputs(ctx: CellContext) -> DisplayInputs {
+    DisplayInputs {
         pinned: false,
         override_verdict: None,
         learned: None,
-        seed: Some(SeedCell::Withhold),
+        seed: None,
         prior: None,
         ctx,
-    };
-    // (name, inputs, verdict, supported, source, layer, action)
-    let rows = [
-        ("a pinned beta flag shows the pin",
-         DisplayInputs { pinned: true, ..base(beta(true)) },
-         FORCED_SUPPORTED, Some(true), Some(SOURCE_PIN), Some(Layer::Pin), ACTION_ALLOW),
-        ("an unrepresentable beta flag shows representability",
-         DisplayInputs { override_verdict: FORCE, ..base(beta(false)) },
-         VERDICT_UNREPRESENTABLE, Some(false), Some(SOURCE_REPRESENTABILITY),
-         Some(Layer::Representability), ACTION_WITHHOLD),
+    }
+}
+
+const BROKEN_TOKEN: &str = Verdict::LearnedBroken(FailurePhase::F1).as_str();
+const VERIFIED_TOKEN: &str = Verdict::VerifiedWorking.as_str();
+const CLEARED_TOKEN: &str = Verdict::Cleared.as_str();
+const ASSUMED_FALSE: &str = Verdict::Assumed(false).as_str();
+const ASSUMED_TRUE: &str = Verdict::Assumed(true).as_str();
+const UNKNOWN: &str = Verdict::Unknown.as_str();
+
+type Projection = (
+    &'static str,
+    Option<bool>,
+    Option<&'static str>,
+    Option<Layer>,
+    &'static str,
+);
+
+#[test]
+#[rustfmt::skip]
+fn each_tier_projects_its_verdict_source_and_layer() {
+    let rows: &[(&str, DisplayInputs, Projection)] = &[
+        // --- operator tiers ---
+        ("a pinned beta flag shows the pin over a learned negative",
+         DisplayInputs { pinned: true, learned: LIVE_F1, seed: WITHHOLD, ..inputs(BETA) },
+         (FORCED_SUPPORTED, Some(true), Some(SOURCE_PIN), Some(Layer::Pin), ACTION_ALLOW)),
         ("a pin beats representability",
-         DisplayInputs { pinned: true, ..base(beta(false)) },
-         FORCED_SUPPORTED, Some(true), Some(SOURCE_PIN), Some(Layer::Pin), ACTION_ALLOW),
-        ("no signal at all",
-         DisplayInputs { seed: None, ..base(beta(true)) },
-         "unknown", None, None, None, ACTION_NONE),
+         DisplayInputs { pinned: true, ..inputs(BETA_UNREPRESENTABLE) },
+         (FORCED_SUPPORTED, Some(true), Some(SOURCE_PIN), Some(Layer::Pin), ACTION_ALLOW)),
+        ("an unrepresentable beta flag shows representability over force_supported",
+         DisplayInputs { override_verdict: FORCE, ..inputs(BETA_UNREPRESENTABLE) },
+         (VERDICT_UNREPRESENTABLE, Some(false), Some(SOURCE_REPRESENTABILITY),
+          Some(Layer::Representability), ACTION_WITHHOLD)),
+        ("a route-away override beats an acting negative",
+         DisplayInputs { override_verdict: ROUTE_AWAY, learned: LIVE_F1, ..inputs(FEATURE) },
+         (FORCED_UNSUPPORTED, Some(false), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_DROP)),
+        ("a route-away override beats a verified positive",
+         DisplayInputs { override_verdict: ROUTE_AWAY, learned: VERIFIED, ..inputs(FEATURE) },
+         (FORCED_UNSUPPORTED, Some(false), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_DROP)),
+        ("a route-away override acts with the kill switch off",
+         DisplayInputs { override_verdict: ROUTE_AWAY, ..inputs(FEATURE_OFF) },
+         (FORCED_UNSUPPORTED, Some(false), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_DROP)),
+        ("a route-away override withholds a beta flag",
+         DisplayInputs { override_verdict: ROUTE_AWAY, ..inputs(BETA) },
+         (FORCED_UNSUPPORTED, Some(false), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_WITHHOLD)),
+        ("force_supported masks a negative and a false prior",
+         DisplayInputs { override_verdict: FORCE, learned: LIVE_F1, prior: Some(false), ..inputs(FEATURE) },
+         (FORCED_SUPPORTED, Some(true), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_ALLOW)),
+        ("force_supported sends over the seed",
+         DisplayInputs { override_verdict: FORCE, seed: WITHHOLD, ..inputs(BETA) },
+         (FORCED_SUPPORTED, Some(true), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_ALLOW)),
+        // --- learned ---
+        ("an F1 negative outranks a false prior",
+         DisplayInputs { learned: LIVE_F1, prior: Some(false), ..inputs(FEATURE) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ROUTE_AWAY)),
+        ("an F2 negative outranks a true prior and never strips",
+         DisplayInputs { learned: LIVE_F2, prior: Some(true), ..inputs(DROPPABLE) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ROUTE_AWAY)),
+        ("a droppable F1 negative strips",
+         DisplayInputs { learned: LIVE_F1, ..inputs(DROPPABLE) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_STRIP)),
+        ("a probe negative is tagged probe",
+         DisplayInputs { learned: PROBE_F1, ..inputs(FEATURE) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_PROBE), Some(Layer::Learned), ACTION_ROUTE_AWAY)),
+        ("a verified positive masks a false prior",
+         DisplayInputs { learned: VERIFIED, prior: Some(false), ..inputs(FEATURE) },
+         (VERIFIED_TOKEN, Some(true), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ALLOW)),
+        ("a probe positive is tagged probe",
+         DisplayInputs { learned: VERIFIED_PROBE, ..inputs(FEATURE) },
+         (VERIFIED_TOKEN, Some(true), Some(SOURCE_PROBE), Some(Layer::Learned), ACTION_ALLOW)),
+        ("a lapsed negative re-probes",
+         DisplayInputs { learned: LAPSED, prior: Some(false), ..inputs(DROPPABLE) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_REPROBE)),
+        ("a learned beta negative withholds over a cleared seed",
+         DisplayInputs { learned: LIVE_F1, seed: CLEARED, ..inputs(BETA) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_WITHHOLD)),
+        ("a learned beta positive sends over the seed",
+         DisplayInputs { learned: VERIFIED, seed: WITHHOLD, ..inputs(BETA) },
+         (VERIFIED_TOKEN, Some(true), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ALLOW)),
+        // --- a shown learned signal with no opinion ---
+        ("an advisory live F3 negative is shown while the prior decides",
+         DisplayInputs { learned: LIVE_F3, prior: Some(false), ..inputs(FEATURE) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ROUTE_AWAY)),
+        ("an uncorroborated negative is shown while the seed decides",
+         DisplayInputs { learned: UNCORROBORATED, seed: WITHHOLD, ..inputs(BETA) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_WITHHOLD)),
+        ("the kill switch off shows a negative that takes no action",
+         DisplayInputs { learned: LIVE_F1, ..inputs(FEATURE_OFF) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_NONE)),
+        // --- seed ---
+        ("the seed withholds over a true prior",
+         DisplayInputs { seed: WITHHOLD, prior: Some(true), ..inputs(BETA) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_SEED), Some(Layer::Seed), ACTION_WITHHOLD)),
+        ("a cleared seed sends over a false prior",
+         DisplayInputs { seed: CLEARED, prior: Some(false), ..inputs(BETA) },
+         (CLEARED_TOKEN, Some(true), Some(SOURCE_SEED), Some(Layer::Seed), ACTION_ALLOW)),
+        ("the seed withholds with the kill switch off",
+         DisplayInputs { seed: WITHHOLD, learned: VERIFIED, ..inputs(BETA_OFF) },
+         (VERIFIED_TOKEN, Some(true), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_WITHHOLD)),
+        // --- prior ---
+        ("a false prior routes away",
+         DisplayInputs { prior: Some(false), ..inputs(FEATURE) },
+         (ASSUMED_FALSE, Some(false), Some(SOURCE_PRIOR), Some(Layer::Prior), ACTION_ROUTE_AWAY)),
+        ("a true prior takes no action",
+         DisplayInputs { prior: Some(true), ..inputs(FEATURE) },
+         (ASSUMED_TRUE, Some(true), Some(SOURCE_PRIOR), Some(Layer::Prior), ACTION_NONE)),
+        ("the kill switch off shows a prior that takes no action",
+         DisplayInputs { prior: Some(false), ..inputs(FEATURE_OFF) },
+         (ASSUMED_FALSE, Some(false), Some(SOURCE_PRIOR), Some(Layer::Prior), ACTION_NONE)),
+        ("a prior on a beta key is shown with no action",
+         DisplayInputs { prior: Some(false), ..inputs(BETA) },
+         (ASSUMED_FALSE, Some(false), Some(SOURCE_PRIOR), Some(Layer::Prior), ACTION_NONE)),
+        // --- no signal ---
+        ("no signal is unknown", inputs(FEATURE),
+         (UNKNOWN, None, None, None, ACTION_NONE)),
+        ("an unseeded beta key with no signal is unknown", inputs(BETA),
+         (UNKNOWN, None, None, None, ACTION_NONE)),
     ];
-    for (name, inputs, verdict, supported, source, layer, action) in rows {
-        let resolution = resolve_display(inputs);
+    for (name, display_inputs, expected) in rows {
+        let resolution = resolve_display(*display_inputs);
 
         assert_eq!(
             (
@@ -736,12 +190,8 @@ fn display_projections_for_the_tiers_the_previous_resolver_lacked() {
                 resolution.display_layer(),
                 resolution.as_str(),
             ),
-            (verdict, supported, source, layer, action),
+            *expected,
             "{name}"
         );
     }
-}
-
-fn bool_triples() -> impl Iterator<Item = (bool, bool, bool)> {
-    (0..8u8).map(|bits| (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0))
 }

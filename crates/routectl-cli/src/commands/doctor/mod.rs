@@ -34,6 +34,10 @@ mod seed_matrix_tests;
 #[path = "recheck_backstop_matrix_tests.rs"]
 mod recheck_backstop_matrix_tests;
 
+#[cfg(test)]
+#[path = "precedence_matrix_tests.rs"]
+mod precedence_matrix_tests;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -147,7 +151,15 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// <state_key>` Warn per credential-parked dispatch seat, naming the reason
 /// and the park deadline. The CLI report, which cannot see daemon state,
 /// carries none.
-const SCHEMA_VERSION: u32 = 17;
+///
+/// v17 -> v18: additive. Every capability matrix cell, and each
+/// `nickname_actions` entry, gains `overrode_layer`, the next tier below the
+/// deciding one that had an opinion. The cells resolve through the same
+/// precedence dispatch applies, so `layer` and `source` gain the values `pin`
+/// (an operator wire floor pins the flag, verdict `forced_supported`) and
+/// `representability` (a lane that cannot carry the flag, verdict
+/// `unrepresentable`, action `withhold`).
+const SCHEMA_VERSION: u32 = 18;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

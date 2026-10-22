@@ -1368,6 +1368,13 @@ fn the_withheld_set_equals_the_display_resolution_of_the_same_inputs() {
         seed_cell(&router, &target, flag, seed);
         let expected = displayed_resolution(&router, &target, flag);
         assert_eq!(expected.layer(), want_layer, "{name}: the row's tier");
+        if want_layer.is_none() {
+            assert_eq!(
+                expected.as_str(),
+                crate::capability_precedence::ACTION_NONE,
+                "{name}: no tier, no action"
+            );
+        }
 
         // Act
         let (out, admissions) = withheld_and_admissions(&router, &target, flag);

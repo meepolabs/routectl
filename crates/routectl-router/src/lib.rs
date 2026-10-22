@@ -98,10 +98,9 @@ pub use beta_seed::{
 pub use calibration::{CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary};
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};
 pub use capability_display::{
-    ActionInputs, DisplayVerdict, FORCED_SUPPORTED, FORCED_UNSUPPORTED, LearnedActing, SOURCE_LIVE,
-    SOURCE_OVERRIDE, SOURCE_PIN, SOURCE_PRIOR, SOURCE_PROBE, SOURCE_REPRESENTABILITY, SOURCE_SEED,
-    VERDICT_MIXED, VERDICT_UNREPRESENTABLE, lane_strips_capability, resolve_display,
-    resolve_display_action, resolve_display_verdict,
+    FORCED_SUPPORTED, FORCED_UNSUPPORTED, SOURCE_LIVE, SOURCE_OVERRIDE, SOURCE_PIN, SOURCE_PRIOR,
+    SOURCE_PROBE, SOURCE_REPRESENTABILITY, SOURCE_SEED, VERDICT_MIXED, VERDICT_UNREPRESENTABLE,
+    resolve_display,
 };
 pub use capability_matcher::resolve_requested_capability;
 pub use capability_precedence::{

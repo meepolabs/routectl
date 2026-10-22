@@ -4688,14 +4688,21 @@ Two structured panels render after the sections:
   that map to it (two nicknames on one upstream of one provider entry share
   a lane, and a pooled model has one lane per member entry). A learned lane
   the loaded config no longer maps is marked `(unrouted)`. Every cell merges
-  the signal layers -- operator overrides, the learned ledger-replay
-  registry, the shipped beta seed, and catalog priors -- through the same
-  resolver the router uses, so the panel cannot drift from dispatch
-  precedence; each cell carries its winning layer (`override` / `learned` /
-  `seed` / `prior`) and evidence source, the routing action the dispatch
-  filter takes (`drop` / `route_away` / `strip` / `withhold` / `reprobe` /
-  `allow` / `none`), the learned entry's first-seen /
-  last-seen / expiry times, its age, and a staleness flag. The ledger source
+  the signal layers -- an operator `anthropic_beta` / `anthropic-beta`
+  wire pin, whether the lane can carry the flag at all, operator overrides,
+  the learned ledger-replay registry, the shipped beta seed, and catalog
+  priors -- through the same precedence resolution dispatch uses, so the
+  panel cannot drift from dispatch; each cell carries its shown layer
+  (`pin` / `representability` / `override` / `learned` / `seed` / `prior`)
+  and evidence source, `overrode_layer` (the next layer below the deciding
+  one that had an opinion, or null), the routing action dispatch takes
+  (`drop` / `route_away` / `strip` / `withhold` / `reprobe` / `allow` /
+  `none`), the learned entry's first-seen / last-seen / expiry times, its
+  age, and a staleness flag. A pinned beta flag reads `forced_supported`
+  from layer `pin` with action `allow` whatever the learned layer holds; a
+  client beta flag on a Converse lane whose model refuses the beta field
+  reads `unrepresentable` from layer `representability` with action
+  `withhold`. The ledger source
   reports a first-class tri-state (available / an honest empty / unavailable
   with a path-free class code, including `open_failed` / `query_failed`
   when the slice after the replay boundary could not be read) so "could not
