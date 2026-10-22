@@ -212,8 +212,13 @@ impl Provider for Recorder {
 
 /// A servable config on a remote-looking base URL, with its ledger in a tempdir.
 fn daemon_config() -> (Arc<Config>, tempfile::TempDir) {
+    daemon_config_on(REMOTE_BASE)
+}
+
+/// [`daemon_config`] with `p0` configured at `base_url`.
+fn daemon_config_on(base_url: &str) -> (Arc<Config>, tempfile::TempDir) {
     let toml_text = format!(
-        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"{REMOTE_BASE}\"\n"
+        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"{base_url}\"\n"
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.models.insert(
@@ -482,3 +487,4 @@ include!("preflight_daemon_tier_tests.rs");
 include!("preflight_daemon_probe_clear_tests.rs");
 include!("preflight_daemon_thinking_disabled_tests.rs");
 include!("preflight_daemon_ceiling_tests.rs");
+include!("preflight_daemon_chain_tests.rs");

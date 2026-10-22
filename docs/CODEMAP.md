@@ -8669,7 +8669,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   incarnation/confirmation guards), and `preflight_daemon_probe_clear_tests.rs`
   (a re-check probe the upstream accepts, after a router rebuild, writes one
   durable `cleared` row through the daemon's own writer, and a warm rebuild from
-  that ledger does not resurrect the negative)
+  that ledger does not resurrect the negative), and
+  `preflight_daemon_chain_tests.rs` (two refused fields in one client request
+  over a real anthropic-api egress: both repairs converge and both verdicts
+  land on the ledger; a loopback base URL repairs nothing; a refused verdict
+  write still serves, is reported on `capability_writes`, and lands no row)
 - `tests/preflight_observability_e2e.rs` -- hermetic runtime acceptance for the
   pre-flight observability floor: a real `serve_on_listener` daemon on an
   OS-assigned loopback port, a per-test tempdir usage ledger, and a provider
