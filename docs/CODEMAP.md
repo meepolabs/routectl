@@ -3273,6 +3273,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   without `learned`. Field: a repaired success commits (persisted claim
   derived from the commit), an unrepaired one clears. Canary: an unrepaired
   success disproves the verdict, one after its repaired retry re-confirms it
+- `src/router/learn_rejection.rs` -- child module of `learn_engine.rs`:
+  `AttemptLearning::on_rejection` and its body: the declared-edit answer
+  (undo, `Proceed`, or a required-field default left to the proposers), the
+  transcript stop, the moved-on field settlement, and the arbitration over
+  the proposers; the wrapper clears the budget's refusal mark on entry and
+  counts it once per rejection on the target's lane
 - `src/router/learn_beta_repair.rs` -- child module of `learn_engine.rs`:
   `EngineSink`, the `RepairSink` the arbitration applies every repair
   through, and the beta repair, `try_beta_repair`: once per target, draws
