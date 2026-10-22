@@ -253,7 +253,14 @@ impl Router {
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn complete_with_options(&self, req: ChatRequest, opts: RouterOptions) -> Dispatched {
         let mut meta = DispatchMeta::for_alias(&req.model);
-        let result = self.complete_inner(req, opts, &mut meta).await;
+        // Reactive-repair ceiling for THIS client request, declared outside the
+        // walk so the draws it spent are read once on every exit of it.
+        let mut repair_budget = RepairBudget::per_request();
+        let result = self
+            .complete_inner(req, opts, &mut meta, &mut repair_budget)
+            .await;
+        self.metrics
+            .record_repairs_per_request(repair_budget.spent());
         emit_replay_degradation(&meta);
         emit_field_repair(&meta);
         self.emit_wire_rejections(&meta);
@@ -271,6 +278,7 @@ impl Router {
         mut req: ChatRequest,
         opts: RouterOptions,
         meta: &mut DispatchMeta,
+        repair_budget: &mut RepairBudget,
     ) -> Result<ChatResponse> {
         let pairing = record_transcript_defect(&mut req);
         let (chain, probe_admissions) =
@@ -332,14 +340,13 @@ impl Router {
         // target-accurate, and this flag stops a same-provider retry or a
         // later fallback hop from repeating it.
         let mut reasoning_drop_warned = false;
-        // Reactive-repair ceiling for THIS client request, declared above the
-        // chain loop beside the other request-scoped locals: each repair kind
-        // gates itself to at most once per target, and this bounds their SUM
-        // across every target the fallback walk reaches. Never declared inside
-        // the loop -- a per-target budget lets an N-target chain pay N repairs
-        // for one logical request. `stream_inner` and `count_tokens` draw from
-        // the same ceiling (see `repair_budget`).
-        let mut repair_budget = RepairBudget::per_request();
+        // `repair_budget` is the reactive-repair ceiling for THIS client
+        // request, declared by the caller above the chain loop: each repair
+        // kind gates itself to at most once per target, and this bounds their
+        // SUM across every target the fallback walk reaches. Never declared
+        // inside the loop -- a per-target budget lets an N-target chain pay N
+        // repairs for one logical request. `stream_inner` and `count_tokens`
+        // draw from the same ceiling (see `repair_budget`).
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
@@ -875,8 +882,8 @@ impl Router {
                             transcript_rejection,
                             beta_assembly: assembly.as_ref(),
                         };
-                        if let FailureDecision::Retry { last_err_body_free } = learning
-                            .on_rejection(rejection, &mut attempt_req, meta, &mut repair_budget)
+                        if let FailureDecision::Retry { last_err_body_free } =
+                            learning.on_rejection(rejection, &mut attempt_req, meta, repair_budget)
                         {
                             probe_guard.release();
                             // Preserve the genuine rejection as last_err before
@@ -1118,7 +1125,14 @@ impl Router {
         opts: RouterOptions,
     ) -> DispatchedStream {
         let mut meta = DispatchMeta::for_alias(&req.model);
-        let result = self.stream_inner(req, opts, &mut meta).await;
+        // See `complete_with_options`: the ceiling outlives the walk so its
+        // spend is read once on every exit.
+        let mut repair_budget = RepairBudget::per_request();
+        let result = self
+            .stream_inner(req, opts, &mut meta, &mut repair_budget)
+            .await;
+        self.metrics
+            .record_repairs_per_request(repair_budget.spent());
         emit_replay_degradation(&meta);
         emit_field_repair(&meta);
         self.emit_wire_rejections(&meta);
@@ -1135,6 +1149,7 @@ impl Router {
         mut req: ChatRequest,
         opts: RouterOptions,
         meta: &mut DispatchMeta,
+        repair_budget: &mut RepairBudget,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let pairing = record_transcript_defect(&mut req);
         let (chain, probe_admissions) =
@@ -1180,11 +1195,10 @@ impl Router {
         // `complete_inner`. Same stack-local once-flag over the dispatch-point
         // emit, so the streaming path is not a second site that repeats it.
         let mut reasoning_drop_warned = false;
-        // Reactive-repair ceiling for THIS client request -- see
-        // `complete_inner`. Same above-the-loop position and the same shared
-        // ceiling, so the streaming path is not a second walk with its own
-        // allowance.
-        let mut repair_budget = RepairBudget::per_request();
+        // `repair_budget`: the reactive-repair ceiling for THIS client request
+        // -- see `complete_inner`. Same above-the-loop position and the same
+        // shared ceiling, so the streaming path is not a second walk with its
+        // own allowance.
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
@@ -1649,8 +1663,8 @@ impl Router {
                             transcript_rejection,
                             beta_assembly: assembly.as_ref(),
                         };
-                        if let FailureDecision::Retry { last_err_body_free } = learning
-                            .on_rejection(rejection, &mut attempt_req, meta, &mut repair_budget)
+                        if let FailureDecision::Retry { last_err_body_free } =
+                            learning.on_rejection(rejection, &mut attempt_req, meta, repair_budget)
                         {
                             probe_guard.release();
                             // Preserve the genuine rejection as last_err before

@@ -18,8 +18,8 @@ use arc_swap::ArcSwap;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
-    EffectiveView, FidelitySnapshot, FieldRepairCounters, LaneLossyRepairs, Router,
-    derive_effective_view, shipped_beta_seed_scope,
+    EffectiveView, FidelitySnapshot, FieldRepairCounters, LaneBudgetExhaustions, LaneLossyRepairs,
+    Router, derive_effective_view, shipped_beta_seed_scope,
 };
 use routectl_usage::{AggRow, RowCost};
 
@@ -127,6 +127,12 @@ impl StatusRouterView {
     /// The lossy field-repair count split by learned lane, for the doctor panel.
     pub fn lossy_repairs_by_lane(&self) -> Vec<LaneLossyRepairs> {
         self.router.lossy_repairs_by_lane()
+    }
+
+    /// The repair-budget exhaustion count split by learned lane, for the
+    /// doctor panel.
+    pub fn budget_exhaustions_by_lane(&self) -> Vec<LaneBudgetExhaustions> {
+        self.router.budget_exhaustions_by_lane()
     }
 
     /// The WHOLE fidelity surface in one coherent router read: counters, acting

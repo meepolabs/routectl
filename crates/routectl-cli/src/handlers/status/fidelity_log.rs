@@ -25,7 +25,7 @@
 //! Deliberately NO request value, response body, credential, session key, or
 //! upstream text at any verbosity.
 
-use routectl_router::{FieldVerdictStatus, LaneLossyRepairs};
+use routectl_router::{FieldVerdictStatus, LaneBudgetExhaustions, LaneLossyRepairs};
 
 /// Rendered class for a verdict whose path this build's closed table does not
 /// carry -- what a verdict persisted by a build with a wider table looks like.
@@ -143,6 +143,14 @@ pub(super) fn rendered_verdicts(rows: &[FieldVerdictStatus]) -> Bounded<Rendered
 /// Render the per-lane lossy-repair rows, in the order the router reported
 /// them, BOUNDED like every other row-carrying field on the line.
 pub(super) fn rendered_lossy_lanes(rows: &[LaneLossyRepairs]) -> Bounded<LaneLossyRepairs> {
+    bounded(rows.to_vec())
+}
+
+/// Render the per-lane budget-exhaustion rows, in the order the router
+/// reported them, BOUNDED like the lossy rows.
+pub(super) fn rendered_exhausted_lanes(
+    rows: &[LaneBudgetExhaustions],
+) -> Bounded<LaneBudgetExhaustions> {
     bounded(rows.to_vec())
 }
 

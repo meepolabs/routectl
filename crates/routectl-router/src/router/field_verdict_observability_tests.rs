@@ -423,13 +423,13 @@ fn lossy_repairs_count_on_the_lane_they_repaired() {
 /// The tally names at most 256 lanes: the 257th distinct lane counts under
 /// `other`, while a lane already named keeps counting on its own row.
 ///
-/// Mutation checks: drop the cap check in `LossyRepairTally::record` -> red
+/// Mutation checks: drop the cap check in `LaneTally::record` -> red
 /// (257 named rows, no `other`); route a named lane to `other` once the cap is
 /// reached -> red on the first lane's count.
 #[test]
 fn the_lane_past_the_cap_counts_under_other() {
     let router = bare_router();
-    let lanes: Vec<_> = (0..=super::field_verdict_observability::LOSSY_REPAIR_LANE_CAP)
+    let lanes: Vec<_> = (0..=super::field_verdict_observability::LANE_TALLY_CAP)
         .map(|n| lane(&format!("lane{n:03}")))
         .collect();
     for lane in &lanes {
@@ -440,7 +440,7 @@ fn the_lane_past_the_cap_counts_under_other() {
     let rows = lane_rows(&router);
     assert_eq!(
         rows.len(),
-        super::field_verdict_observability::LOSSY_REPAIR_LANE_CAP + 1,
+        super::field_verdict_observability::LANE_TALLY_CAP + 1,
         "256 named lanes plus the overflow bucket",
     );
     assert_eq!(
@@ -529,4 +529,93 @@ fn every_repair_warn_carries_the_repaired_lane() {
         assert_eq!(warns.len(), 1, "{name}: one WARN per repair");
         assert_eq!(warns[0].field("lane"), Some(expected), "{name}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The per-lane budget-exhaustion tally
+// ---------------------------------------------------------------------------
+
+/// `(lane, exhausted)` pairs of the router's per-lane exhaustion rows.
+fn exhaustion_rows(router: &Router) -> Vec<(String, u64)> {
+    router
+        .budget_exhaustions_by_lane()
+        .into_iter()
+        .map(|row| (row.lane, row.exhausted))
+        .collect()
+}
+
+/// The exhaustion tally names at most 256 lanes like the lossy one: the 257th
+/// distinct lane and a lane-less target count under `other`, a lane named
+/// before the cap keeps its own row, and the rows sum to the total.
+///
+/// Mutation checks: drop the cap check in `LaneTally::record` -> red (257
+/// named rows); report the lossy tally's total as `budget_exhausted` -> red on
+/// the total.
+#[test]
+fn budget_exhaustion_past_the_lane_cap_counts_under_other_and_sums_to_the_total() {
+    let router = bare_router();
+    let lanes: Vec<_> = (0..=super::field_verdict_observability::LANE_TALLY_CAP)
+        .map(|n| lane(&format!("lane{n:03}")))
+        .collect();
+    for lane in &lanes {
+        router.metrics.incr_repair_budget_exhausted(Some(lane));
+    }
+    router.metrics.incr_repair_budget_exhausted(Some(&lanes[0]));
+    router.metrics.incr_repair_budget_exhausted(None);
+
+    let rows = exhaustion_rows(&router);
+    assert_eq!(
+        rows.len(),
+        super::field_verdict_observability::LANE_TALLY_CAP + 1,
+        "256 named lanes plus the overflow bucket",
+    );
+    assert_eq!(
+        rows.last(),
+        Some(&("other".to_string(), 2)),
+        "the 257th distinct lane and the lane-less target land in other",
+    );
+    assert_eq!(rows[0], ("lane000#fixture-upstream".to_string(), 2));
+    let total = router.field_repair_counters().budget_exhausted;
+    assert_eq!(total, 259);
+    assert_eq!(rows.iter().map(|(_, n)| n).sum::<u64>(), total);
+    assert!(
+        router.lossy_repairs_by_lane().is_empty(),
+        "the two tallies are separate maps",
+    );
+}
+
+/// Each finished request lands in the bucket of the draws it spent, and the
+/// snapshot carries every bucket from zero to the whole allowance.
+///
+/// Mutation check: index the bucket by `draws + 1` -> red.
+#[test]
+fn repairs_per_request_counts_each_request_in_its_draw_bucket() {
+    let router = bare_router();
+
+    for draws in [0, 2, 2, 5] {
+        router.metrics.record_repairs_per_request(draws);
+    }
+
+    assert_eq!(
+        router.field_repair_counters().repairs_per_request,
+        [1, 0, 2, 0, 0, 1],
+    );
+}
+
+/// The chain-step exits and the histogram start at zero, so a later nonzero
+/// reading is the walk's and not the fixture's.
+#[test]
+fn the_chain_exit_counters_start_at_zero() {
+    let counters = bare_router().field_repair_counters();
+
+    assert_eq!(
+        (
+            counters.chain_steps_committed,
+            counters.chain_steps_dropped,
+            counters.budget_exhausted,
+            counters.repairs_per_request,
+        ),
+        (0, 0, 0, [0; 6]),
+    );
+    assert!(bare_router().budget_exhaustions_by_lane().is_empty());
 }

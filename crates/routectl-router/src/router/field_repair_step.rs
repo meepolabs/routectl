@@ -37,6 +37,7 @@ use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey, FieldVerdictRegist
 use crate::field_verdict_value::VerdictValue;
 
 use super::super::edit_declare::declare_field_edit;
+use super::super::field_verdict_observability::ChainStepTally;
 use super::super::rejection_parser::{
     FieldIdentity, NamedRejection, RejectionKind, RejectionValue, localized_field,
 };
@@ -104,6 +105,9 @@ pub(in crate::router) struct FieldRepairPlan<'a> {
     /// What a later step needs to claim a released row's guard again. `None`
     /// for a non-settling plan, which holds no guard and claims none.
     reclaim: Option<GuardAdmission<'a>>,
+    /// Where this plan counts how its steps ended; `None` for a non-settling
+    /// plan, whose steps can prove nothing it keeps.
+    exits: Option<&'a ChainStepTally>,
 }
 
 /// The inputs the plan's admission claimed each guard with.
@@ -111,6 +115,8 @@ pub(super) struct GuardAdmission<'a> {
     pub(super) registry: &'a FieldVerdictRegistry,
     pub(super) base_url: Cow<'a, str>,
     pub(super) generation: u64,
+    /// The tally the plan's step exits are counted on.
+    pub(super) exits: &'a ChainStepTally,
 }
 
 /// One admitted row, plus the guard whose settlement this row owes and the
@@ -325,6 +331,10 @@ impl<'a> FieldRepairPlan<'a> {
             committed: Vec::new(),
             applied: false,
             wire,
+            exits: match &reclaim {
+                Some(admission) => Some(admission.exits),
+                None => None,
+            },
             reclaim,
         }
     }
@@ -699,6 +709,9 @@ impl<'a> FieldRepairPlan<'a> {
                 .iter()
                 .map(|step| FieldIdentity::of_row(&step.row)),
         );
+        if let Some(exits) = self.exits {
+            exits.add_committed(self.pending.len());
+        }
         self.pending
             .drain(..)
             .map(|step| step.commit(request_features, now))
@@ -720,6 +733,18 @@ impl<'a> FieldRepairPlan<'a> {
             .iter_mut()
             .filter_map(|candidate| candidate.guard.take()?.clear())
             .collect()
+    }
+}
+
+/// Every step still pending when the plan goes is dropped unproven: the same
+/// field refused again, an unrelated error, a fallback to another target, or
+/// the end of the request. [`FieldRepairPlan::commit_pending`] drains the
+/// steps it proves first, so none is counted twice.
+impl Drop for FieldRepairPlan<'_> {
+    fn drop(&mut self) {
+        if let Some(exits) = self.exits {
+            exits.add_dropped(self.pending.len());
+        }
     }
 }
 

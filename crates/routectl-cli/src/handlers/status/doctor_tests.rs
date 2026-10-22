@@ -184,7 +184,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 18);
+    assert_eq!(panel.schema_version, 19);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -240,12 +240,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 18);
+    assert_eq!(json["schema_version"], 19);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 18);
+    assert_eq!(json["data"]["report"]["schema_version"], 19);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),
@@ -407,6 +407,56 @@ async fn the_doctor_panel_carries_the_lossy_repairs_by_lane() {
     assert_eq!(
         after["data"]["lossy_repairs_by_lane"],
         serde_json::json!([{ "lane": lane, "lossy": seeded.repair_lossy }]),
+    );
+}
+
+/// The `/status/doctor` payload carries the budget-exhaustion count per
+/// learned lane and the repairs-per-request buckets, read from the live
+/// router on every build.
+///
+/// Mutation checks: build `budget_exhaustions_by_lane` from the lossy rows ->
+/// red on the lane row; build `repairs_per_request` as an empty list -> red on
+/// the buckets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_doctor_panel_carries_the_budget_exhaustions_and_repair_buckets() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+    )
+    .unwrap();
+    let state = state_with_config(Some(config_path.clone()));
+    let before = doctor_json(&state).await;
+    assert_eq!(
+        before["data"]["budget_exhaustions_by_lane"],
+        serde_json::json!([]),
+        "control: no exhaustion yet"
+    );
+    assert_eq!(
+        before["data"]["repairs_per_request"],
+        serde_json::json!([0, 0, 0, 0, 0, 0]),
+        "control: every bucket is present at zero"
+    );
+
+    let router = Router::new(Arc::new(Config::default()));
+    let seeded = routectl_router::seed_distinct_fidelity_counters_for_tests(&router);
+    let lane = router.budget_exhaustions_by_lane()[0].lane.clone();
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = Arc::new(StatusState::from_app(
+        &app,
+        Some(config_path),
+        DaemonMeta::for_test(),
+    ));
+
+    let after = doctor_json(&state).await;
+    assert_eq!(
+        after["data"]["budget_exhaustions_by_lane"],
+        serde_json::json!([{ "lane": lane, "exhausted": seeded.budget_exhausted }]),
+    );
+    assert_eq!(
+        after["data"]["repairs_per_request"],
+        serde_json::json!(seeded.repairs_per_request),
     );
 }
 

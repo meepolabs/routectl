@@ -44,7 +44,7 @@ use crate::learned_capability::LearnedRegistryEntry;
 
 use super::Router;
 use super::field_repair::TransformClass;
-use super::{ActingFieldVerdict, FieldRepairCounters, LaneLossyRepairs};
+use super::{ActingFieldVerdict, FieldRepairCounters, LaneBudgetExhaustions, LaneLossyRepairs};
 
 /// Why an otherwise-resident verdict is not currently acting pre-flight.
 ///
@@ -322,6 +322,7 @@ impl Router {
         FidelitySnapshot {
             counters: self.field_repair_counters(),
             lossy_by_lane: self.lossy_repairs_by_lane(),
+            exhausted_by_lane: self.budget_exhaustions_by_lane(),
             acting: super::acting_field_verdicts(&learned),
             verdicts: self.verdict_rows_from(learned),
             probes: self.probe_scheduler_snapshot(),
@@ -684,6 +685,10 @@ pub struct FidelitySnapshot {
     /// most 256 named lanes plus an `other` overflow bucket. Sampled at its own
     /// instant, like the counters.
     pub lossy_by_lane: Vec<LaneLossyRepairs>,
+    /// `counters.budget_exhausted` split by learned lane, from the same tally:
+    /// at most 256 named lanes plus an `other` overflow bucket. Sampled at its
+    /// own instant, like the counters.
+    pub exhausted_by_lane: Vec<LaneBudgetExhaustions>,
     /// Every currently ACTING field verdict, derived from the same learned
     /// snapshot as `verdicts` below.
     pub acting: Vec<ActingFieldVerdict>,

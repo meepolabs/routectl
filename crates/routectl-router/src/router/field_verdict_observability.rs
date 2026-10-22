@@ -4,6 +4,7 @@
 //! any response-body change.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use routectl_core::{EvidenceSource, FailurePhase, Verdict, sanitize_for_log};
@@ -14,6 +15,7 @@ use crate::learned_capability::LearnedRegistryEntry;
 use crate::state_key::StateKey;
 
 use super::Router;
+use super::repair_budget::REPAIRS_PER_REQUEST;
 
 /// Snapshot of the process-lifetime envelope-field repair counters.
 ///
@@ -73,32 +75,59 @@ pub struct FieldRepairCounters {
     /// its ratio against the learned and repaired counts above, which is why it
     /// is reported beside them.
     pub parser_unlocalized: u64,
+    /// Chained repair steps settled as PROVEN: the repaired retry succeeded, or
+    /// was refused for a different field the body carried. One per step, on a
+    /// walk that can settle; a non-settling token count proves nothing it can
+    /// keep and is not counted.
+    ///
+    /// Not the same count as `verdicts_learned`, and not a subset of it either
+    /// way round: a proven step whose repair teaches nothing (a refused VALUE
+    /// repaired by a drop) is committed here and persists no verdict, while
+    /// `verdicts_learned` counts only the steps whose commit put a verdict in
+    /// the learned registry. Neither claims durability: a verdict counted there
+    /// can still fail its durable write, which is reported on the capability
+    /// write counters, never here.
+    pub chain_steps_committed: u64,
+    /// Chained repair steps still pending when their plan ended unproven: the
+    /// same field refused again, an unrelated error, a fallback to another
+    /// target, or a request that ended there. Each learned nothing. Settling
+    /// walks only, like `chain_steps_committed`; the two sum to the steps
+    /// applied on settling walks.
+    pub chain_steps_dropped: u64,
+    /// Rejections a repair proposal answered but the request's shared repair
+    /// allowance could not pay for, counted once per rejection. A rejection no
+    /// repair proposed for is not counted, empty allowance or not.
+    pub budget_exhausted: u64,
+    /// Finished requests by how many repairs each spent: index `n` counts the
+    /// requests that drew exactly `n`, from zero up to the whole per-request
+    /// allowance. Recorded once per request on every walk.
+    pub repairs_per_request: [u64; REPAIR_DRAW_BUCKETS],
 }
 
-/// Most learned lanes the lossy-repair tally names individually. A lane first
-/// seen once this many are named is counted under [`LOSSY_REPAIR_OTHER_LANE`].
+/// Most learned lanes a per-lane tally names individually. A lane first seen
+/// once this many are named is counted under [`LANE_TALLY_OTHER`].
 ///
 /// The lane set is operator configuration, but a reload that renames provider
 /// entries or upstreams mints new lanes for the life of the process, so the map
 /// needs a ceiling of its own. A code constant, never a config knob.
-pub(super) const LOSSY_REPAIR_LANE_CAP: usize = 256;
+pub(super) const LANE_TALLY_CAP: usize = 256;
 
-/// The overflow bucket of the lossy-repair tally: lanes past
-/// [`LOSSY_REPAIR_LANE_CAP`], and a target with no learned lane. Cannot collide
-/// with a real lane, every serialized one of which carries the `#` separator.
-pub(super) const LOSSY_REPAIR_OTHER_LANE: &str = "other";
+/// The overflow bucket of a per-lane tally: lanes past [`LANE_TALLY_CAP`], and
+/// a target with no learned lane. Cannot collide with a real lane, every
+/// serialized one of which carries the `#` separator.
+pub(super) const LANE_TALLY_OTHER: &str = "other";
 
-/// The process-lifetime lossy field-repair count, in total and per learned lane.
+/// A process-lifetime count, in total and per learned lane.
 ///
 /// Total and map move under ONE lock, so a quiescent read always has the
 /// per-lane rows summing to the total.
 #[derive(Debug, Default)]
-pub(super) struct LossyRepairTally {
-    inner: Mutex<LossyRepairCounts>,
+pub(super) struct LaneTally {
+    inner: Mutex<LaneCounts>,
 }
 
 #[derive(Debug, Default)]
-struct LossyRepairCounts {
+struct LaneCounts {
     total: u64,
     /// Keyed by the serialized lane, unsanitized: the raw form is injective,
     /// a sanitized one is not. Sanitized when projected into rows.
@@ -106,8 +135,8 @@ struct LossyRepairCounts {
     other: u64,
 }
 
-impl LossyRepairTally {
-    /// Count one lossy repair on `lane`.
+impl LaneTally {
+    /// Count one event on `lane`.
     pub(super) fn record(&self, lane: Option<&StateKey>) {
         let mut counts = self.inner.lock();
         counts.total += 1;
@@ -117,7 +146,7 @@ impl LossyRepairTally {
         };
         if let Some(count) = counts.by_lane.get_mut(lane.as_lane_key()) {
             *count += 1;
-        } else if counts.by_lane.len() < LOSSY_REPAIR_LANE_CAP {
+        } else if counts.by_lane.len() < LANE_TALLY_CAP {
             counts.by_lane.insert(lane.as_lane_key().to_string(), 1);
         } else {
             counts.other += 1;
@@ -128,25 +157,67 @@ impl LossyRepairTally {
         self.inner.lock().total
     }
 
-    /// One row per named lane in lane order, then the overflow bucket when it
-    /// has counted anything.
-    fn rows(&self) -> Vec<LaneLossyRepairs> {
+    /// One `(sanitized lane, count)` per named lane in lane order, then the
+    /// overflow bucket when it has counted anything.
+    fn rows(&self) -> Vec<(String, u64)> {
         let counts = self.inner.lock();
-        let mut rows: Vec<LaneLossyRepairs> = counts
+        let mut rows: Vec<(String, u64)> = counts
             .by_lane
             .iter()
-            .map(|(lane, &lossy)| LaneLossyRepairs {
-                lane: sanitize_for_log(lane),
-                lossy,
-            })
+            .map(|(lane, &count)| (sanitize_for_log(lane), count))
             .collect();
         if counts.other > 0 {
-            rows.push(LaneLossyRepairs {
-                lane: LOSSY_REPAIR_OTHER_LANE.to_string(),
-                lossy: counts.other,
-            });
+            rows.push((LANE_TALLY_OTHER.to_string(), counts.other));
         }
         rows
+    }
+}
+
+/// The settlement exits of chained field-repair steps, counted on settling
+/// plans only.
+#[derive(Debug, Default)]
+pub(super) struct ChainStepTally {
+    committed: AtomicU64,
+    dropped: AtomicU64,
+}
+
+impl ChainStepTally {
+    pub(super) fn add_committed(&self, steps: usize) {
+        self.committed.fetch_add(steps as u64, Ordering::Relaxed);
+    }
+
+    pub(super) fn add_dropped(&self, steps: usize) {
+        self.dropped.fetch_add(steps as u64, Ordering::Relaxed);
+    }
+
+    fn committed(&self) -> u64 {
+        self.committed.load(Ordering::Relaxed)
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+/// Buckets of the repairs-per-request histogram: one per possible draw count,
+/// zero through the whole per-request allowance.
+pub(super) const REPAIR_DRAW_BUCKETS: usize = REPAIRS_PER_REQUEST as usize + 1;
+
+/// How many repair draws each finished request spent, one bucket per count.
+#[derive(Debug, Default)]
+pub(super) struct RepairDrawHistogram {
+    buckets: [AtomicU64; REPAIR_DRAW_BUCKETS],
+}
+
+impl RepairDrawHistogram {
+    /// Count one finished request that spent `draws` repairs.
+    pub(super) fn record(&self, draws: u8) {
+        let bucket = usize::from(draws).min(REPAIR_DRAW_BUCKETS - 1);
+        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> [u64; REPAIR_DRAW_BUCKETS] {
+        std::array::from_fn(|bucket| self.buckets[bucket].load(Ordering::Relaxed))
     }
 }
 
@@ -164,13 +235,45 @@ pub struct LaneLossyRepairs {
     pub lossy: u64,
 }
 
+/// One learned lane's share of the repair-budget exhaustion count.
+///
+/// `lane` is sanitized at construction like [`LaneLossyRepairs::lane`], or the
+/// overflow token `other`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct LaneBudgetExhaustions {
+    /// The sanitized learned lane key, or `other`.
+    pub lane: String,
+    /// Rejections on the lane a repair was proposed for and the request's
+    /// allowance could not pay, over the process lifetime.
+    pub exhausted: u64,
+}
+
 impl Router {
     /// The lossy field-repair count split by learned lane: at most
     /// 256 named lanes plus the `other` bucket, whose
     /// counts sum to [`FieldRepairCounters::repair_lossy`] when no repair lands
     /// between the two reads.
     pub fn lossy_repairs_by_lane(&self) -> Vec<LaneLossyRepairs> {
-        self.metrics.field_repair_lossy.rows()
+        self.metrics
+            .field_repair_lossy
+            .rows()
+            .into_iter()
+            .map(|(lane, lossy)| LaneLossyRepairs { lane, lossy })
+            .collect()
+    }
+
+    /// The repair-budget exhaustion count split by learned lane: at most 256
+    /// named lanes plus the `other` bucket, whose counts sum to
+    /// [`FieldRepairCounters::budget_exhausted`] when no rejection lands
+    /// between the two reads.
+    pub fn budget_exhaustions_by_lane(&self) -> Vec<LaneBudgetExhaustions> {
+        self.metrics
+            .repair_budget_exhausted
+            .rows()
+            .into_iter()
+            .map(|(lane, exhausted)| LaneBudgetExhaustions { lane, exhausted })
+            .collect()
     }
 
     /// Read the live envelope-field repair counters, for the status/doctor
@@ -187,6 +290,10 @@ impl Router {
             disproved_requests: canaries.disproved_requests_total(),
             preflight_actions: self.metrics.field_preflight_actions_total(),
             parser_unlocalized: self.metrics.parser_unlocalized_total(),
+            chain_steps_committed: self.metrics.field_chain_steps.committed(),
+            chain_steps_dropped: self.metrics.field_chain_steps.dropped(),
+            budget_exhausted: self.metrics.repair_budget_exhausted.total(),
+            repairs_per_request: self.metrics.repairs_per_request.snapshot(),
         }
     }
 }

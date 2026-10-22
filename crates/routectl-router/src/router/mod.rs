@@ -104,7 +104,8 @@ pub use field_repair::{
     TEST_REWRITE_PATH,
 };
 pub use field_verdict_observability::{
-    ActingFieldVerdict, FieldRepairCounters, LaneLossyRepairs, acting_field_verdicts,
+    ActingFieldVerdict, FieldRepairCounters, LaneBudgetExhaustions, LaneLossyRepairs,
+    acting_field_verdicts,
 };
 pub use learned_lanes::{LearnedLaneProjection, ResolvedLearnedLane};
 pub use opening_lookup::OpeningLane;
@@ -702,7 +703,7 @@ struct RouterMetrics {
     /// for, and learned nothing. A rising count says a lane is serving
     /// requests on a weaker contract than the client set. Split by learned
     /// lane under the same lock as the total.
-    field_repair_lossy: field_verdict_observability::LossyRepairTally,
+    field_repair_lossy: field_verdict_observability::LaneTally,
     /// The subset of [`field_repair_attempted_total`](Self::field_repair_attempted_total)
     /// whose repaired re-dispatch actually succeeded. The pair is what makes
     /// the arm answerable: a rising attempted count with a flat succeeded
@@ -742,6 +743,14 @@ struct RouterMetrics {
     /// RATIO against the localized counts that carries the signal, which is why
     /// it is reported beside them rather than alone.
     parser_unlocalized_total: AtomicU64,
+    /// Chained field-repair steps by how their settling plan ended them:
+    /// committed as proven, or dropped still pending.
+    field_chain_steps: field_verdict_observability::ChainStepTally,
+    /// Rejections a repair was proposed for that the request's shared repair
+    /// allowance could not pay, split by learned lane.
+    repair_budget_exhausted: field_verdict_observability::LaneTally,
+    /// Finished requests by the number of repairs each drew.
+    repairs_per_request: field_verdict_observability::RepairDrawHistogram,
 }
 
 /// Running quota-placement totals, partitioned by the partition's arms.
@@ -924,6 +933,17 @@ impl RouterMetrics {
     /// Read the cumulative lossy-field-repair count.
     fn field_repair_lossy_total(&self) -> u64 {
         self.field_repair_lossy.total()
+    }
+
+    /// Count one rejection on `lane` whose proposed repair the request's
+    /// allowance could not pay for.
+    fn incr_repair_budget_exhausted(&self, lane: Option<&crate::state_key::StateKey>) {
+        self.repair_budget_exhausted.record(lane);
+    }
+
+    /// Count one finished request that drew `draws` repairs.
+    fn record_repairs_per_request(&self, draws: u8) {
+        self.repairs_per_request.record(draws);
     }
 
     /// Count one fired repair whose re-dispatch succeeded.

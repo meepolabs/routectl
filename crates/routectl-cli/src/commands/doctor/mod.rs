@@ -162,7 +162,14 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// gains `lossy_repairs_by_lane`: one `{lane, lossy}` row per learned lane a
 /// lossy field repair landed on (at most 256), plus an `other` row for lanes
 /// past that cap and targets with no learned lane.
-const SCHEMA_VERSION: u32 = 18;
+///
+/// v18 -> v19: additive, served panel only. The `/status/doctor` panel gains
+/// `budget_exhaustions_by_lane`: one `{lane, exhausted}` row per learned lane
+/// where a rejection's proposed repair found the request's repair allowance
+/// spent (at most 256, plus `other`), and `repairs_per_request`: requests by
+/// the number of repairs each drew, one bucket per count from zero to the
+/// per-request allowance. The report itself is unchanged.
+const SCHEMA_VERSION: u32 = 19;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

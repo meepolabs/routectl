@@ -155,6 +155,18 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
         ),
         ("rc_field_preflight_actions_total", seeded.preflight_actions),
         ("rc_parser_unlocalized_total", seeded.parser_unlocalized),
+        (
+            "rc_field_chain_steps_committed_total",
+            seeded.chain_steps_committed,
+        ),
+        (
+            "rc_field_chain_steps_dropped_total",
+            seeded.chain_steps_dropped,
+        ),
+        (
+            "rc_field_repair_budget_exhausted_total",
+            seeded.budget_exhausted,
+        ),
     ] {
         assert_eq!(
             info.field(field),
@@ -174,7 +186,16 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
         seeded.disproved_requests,
         seeded.preflight_actions,
         seeded.parser_unlocalized,
+        seeded.chain_steps_committed,
+        seeded.chain_steps_dropped,
+        seeded.budget_exhausted,
     ];
+    values.extend(seeded.repairs_per_request);
+    assert_eq!(
+        info.field("rc_field_repairs_per_request"),
+        Some(format!("{:?}", seeded.repairs_per_request).as_str()),
+        "the histogram renders its buckets in draw order",
+    );
     assert!(
         values.iter().all(|value| *value != 0),
         "premise: every seeded counter projects a nonzero value, or a counter the \
@@ -256,6 +277,11 @@ fn every_count_is_reported_even_at_zero() {
         "rc_field_disproved_requests_total",
         "rc_field_preflight_actions_total",
         "rc_parser_unlocalized_total",
+        "rc_field_chain_steps_committed_total",
+        "rc_field_chain_steps_dropped_total",
+        "rc_field_repair_budget_exhausted_total",
+        "rc_field_repair_budget_exhausted_lanes_total",
+        "rc_field_repair_budget_exhausted_lanes_omitted",
         "rc_acting_field_verdicts_total",
         "rc_acting_field_verdicts_omitted",
         "rc_field_verdict_rows_total",
@@ -510,6 +536,91 @@ fn the_lossy_lane_map_is_bounded_on_the_line() {
 }
 
 // ---------------------------------------------------------------------------
+// The per-lane budget-exhaustion map
+// ---------------------------------------------------------------------------
+
+/// The exhaustion map on the line names the lane each exhausted rejection
+/// landed on, with its count, beside the map's own row total.
+///
+/// Mutation checks: emit the map from the lossy rows -> red on the row; emit
+/// `rc_field_repair_budget_exhausted_lanes_total` from `omitted` -> red on the
+/// total.
+#[test]
+fn the_exhausted_lane_map_names_each_lane_with_its_count() {
+    let router = fixture_router();
+    let seeded = routectl_router::seed_distinct_fidelity_counters_for_tests(&router);
+    let lanes = router.budget_exhaustions_by_lane();
+    let view = view_over(router);
+
+    let info = captured_snapshot(|| {
+        log_field_verdict_snapshot(
+            &view,
+            WRITER_HEALTHY,
+            FidelityEmission::always(),
+            &FidelityGate::default(),
+        );
+    });
+
+    assert_eq!(lanes.len(), 1, "premise: the seed lands on one lane");
+    assert_eq!(lanes[0].exhausted, seeded.budget_exhausted, "premise");
+    let map = info
+        .field("rc_field_repair_budget_exhausted_by_lane")
+        .expect("the map field is emitted");
+    assert!(
+        map.contains(&format!("lane: {:?}", lanes[0].lane))
+            && map.contains(&format!("exhausted: {}", seeded.budget_exhausted)),
+        "the map names the seeded lane and its count, got {map}",
+    );
+    assert_eq!(
+        info.field("rc_field_repair_budget_exhausted_lanes_total"),
+        Some("1")
+    );
+    assert_eq!(
+        info.field("rc_field_repair_budget_exhausted_lanes_omitted"),
+        Some("0")
+    );
+}
+
+/// Past the render ceiling the exhaustion map is truncated, and the line says
+/// by how much.
+///
+/// Mutation check: render the map unbounded -> red on the row count.
+#[test]
+fn the_exhausted_lane_map_is_bounded_on_the_line() {
+    const CEILING: usize = super::super::fidelity_log::MAX_RENDERED_ROWS;
+    let mut snapshot = fresh_view().fidelity_snapshot();
+    seeded_exhausted_lanes(&mut snapshot, CEILING + 3);
+
+    let info = captured_snapshot(|| {
+        emit_if_admitted(
+            &snapshot,
+            WRITER_HEALTHY,
+            &FidelityEmission::always(),
+            &FidelityGate::default(),
+            Instant::now(),
+        );
+    });
+
+    let total = (CEILING + 3).to_string();
+    assert_eq!(
+        info.field("rc_field_repair_budget_exhausted_lanes_total"),
+        Some(total.as_str())
+    );
+    assert_eq!(
+        info.field("rc_field_repair_budget_exhausted_lanes_omitted"),
+        Some("3")
+    );
+    let map = info
+        .field("rc_field_repair_budget_exhausted_by_lane")
+        .expect("the map field is emitted");
+    assert_eq!(
+        map.matches("exhausted:").count(),
+        CEILING,
+        "only the rows under the ceiling render, got {map}",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // One line per request
 // ---------------------------------------------------------------------------
 
@@ -609,6 +720,11 @@ fn every_count_renders_as_a_bare_integer() {
         "rc_field_repair_lossy_lanes_omitted",
         "rc_field_preflight_actions_total",
         "rc_parser_unlocalized_total",
+        "rc_field_chain_steps_committed_total",
+        "rc_field_chain_steps_dropped_total",
+        "rc_field_repair_budget_exhausted_total",
+        "rc_field_repair_budget_exhausted_lanes_total",
+        "rc_field_repair_budget_exhausted_lanes_omitted",
         "rc_acting_field_verdicts_total",
         "rc_acting_field_verdicts_omitted",
         "rc_field_verdict_rows_total",
@@ -990,6 +1106,14 @@ fn seeded_lossy_lanes(snapshot: &mut FidelitySnapshot, count: usize) {
     snapshot.lossy_by_lane = vec![row; count];
 }
 
+/// `count` copies of the seeded lane's budget-exhaustion row.
+fn seeded_exhausted_lanes(snapshot: &mut FidelitySnapshot, count: usize) {
+    let router = fixture_router();
+    let _seeded = routectl_router::seed_distinct_fidelity_counters_for_tests(&router);
+    let row = router.budget_exhaustions_by_lane()[0].clone();
+    snapshot.exhausted_by_lane = vec![row; count];
+}
+
 /// A provider that answers every free `count_tokens` validator, so a probe pass
 /// settles the job the admitted request queued.
 struct CountingProvider;
@@ -1085,7 +1209,8 @@ fn settled_probe_state() -> routectl_router::ProbeSchedulerSnapshot {
 /// settlement token, or one of the two `hash_debug` row renderings from
 /// `line_fingerprint` -> red on its row.
 ///
-/// The `total` and `omitted` counts of the acting, verdict and lossy-lane fields have no
+/// The `total` and `omitted` counts of the acting, verdict, lossy-lane and
+/// exhausted-lane fields have no
 /// single-input row, because none can exist: within each field, `total` equals the
 /// rendered row count plus `omitted`, and `omitted` is `total` minus the render
 /// ceiling, so dropping either count alone leaves the other carrying the same
@@ -1135,6 +1260,26 @@ fn a_change_to_any_reported_input_emits_a_line() {
             name: "parser unlocalized",
             setup: no_setup,
             change: |i| i.snapshot.counters.parser_unlocalized += 1,
+        },
+        FingerprintRow {
+            name: "chain steps committed",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.chain_steps_committed += 1,
+        },
+        FingerprintRow {
+            name: "chain steps dropped",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.chain_steps_dropped += 1,
+        },
+        FingerprintRow {
+            name: "budget exhausted",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.budget_exhausted += 1,
+        },
+        FingerprintRow {
+            name: "repairs per request",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.repairs_per_request[2] += 1,
         },
         FingerprintRow {
             name: "probe activations",
@@ -1192,6 +1337,19 @@ fn a_change_to_any_reported_input_emits_a_line() {
             change: |i| {
                 let extra = i.snapshot.lossy_by_lane[0].clone();
                 i.snapshot.lossy_by_lane.push(extra);
+            },
+        },
+        FingerprintRow {
+            name: "exhausted lane row content",
+            setup: |i| seeded_exhausted_lanes(&mut i.snapshot, 1),
+            change: |i| i.snapshot.exhausted_by_lane[0].exhausted += 1,
+        },
+        FingerprintRow {
+            name: "exhausted lane rows beyond the ceiling",
+            setup: |i| seeded_exhausted_lanes(&mut i.snapshot, CEILING + 1),
+            change: |i| {
+                let extra = i.snapshot.exhausted_by_lane[0].clone();
+                i.snapshot.exhausted_by_lane.push(extra);
             },
         },
         FingerprintRow {

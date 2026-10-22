@@ -48,3 +48,39 @@ fn the_allowance_is_five_repairs_per_logical_request() {
     // so it is pinned here rather than left to drift silently.
     assert_eq!(REPAIRS_PER_REQUEST, 5);
 }
+
+/// A refused draw or availability check marks the budget once; reading the
+/// mark clears it, and a granted draw never sets it.
+///
+/// Mutation checks: drop the mark in `draw` -> red on `a refused draw`; drop it
+/// in `can_draw` -> red on `a refused check`; set it on a granted draw -> red
+/// on `granted`.
+#[test]
+fn only_a_refusal_marks_the_budget_and_reading_the_mark_clears_it() {
+    let mut budget = RepairBudget::per_request();
+    assert!(budget.can_draw() && budget.draw());
+    assert!(!budget.take_refusal(), "granted: no mark");
+    for _ in 1..REPAIRS_PER_REQUEST {
+        assert!(budget.draw());
+    }
+
+    assert!(!budget.draw());
+    assert!(budget.take_refusal(), "a refused draw marks the budget");
+    assert!(!budget.take_refusal(), "reading the mark clears it");
+    assert!(!budget.can_draw());
+    assert!(budget.take_refusal(), "a refused check marks the budget");
+}
+
+/// `spent` counts the draws granted so far and stops at the allowance.
+#[test]
+fn spent_counts_the_granted_draws() {
+    let mut budget = RepairBudget::per_request();
+    assert_eq!(budget.spent(), 0);
+    budget.draw();
+    budget.draw();
+    assert_eq!(budget.spent(), 2);
+    for _ in 0..REPAIRS_PER_REQUEST {
+        budget.draw();
+    }
+    assert_eq!(budget.spent(), REPAIRS_PER_REQUEST);
+}

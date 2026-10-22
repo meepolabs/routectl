@@ -40,9 +40,15 @@ pub(super) const REPAIRS_PER_REQUEST: u8 = 5;
 /// request-scoped dispatch locals. Threaded by `&mut` into per-seat
 /// helpers rather than re-created there: a fresh budget per seat is
 /// exactly the per-target reset this type exists to remove.
+///
+/// It also remembers whether a repair arm was REFUSED for want of allowance
+/// since the walk last asked ([`Self::take_refusal`]): the refusal happens
+/// inside whichever arm proposed the repair, and the walk counts it once per
+/// rejection however many arms were refused.
 #[derive(Debug)]
 pub(super) struct RepairBudget {
     remaining: u8,
+    refused: bool,
 }
 
 impl RepairBudget {
@@ -50,6 +56,7 @@ impl RepairBudget {
     pub(super) const fn per_request() -> Self {
         Self {
             remaining: REPAIRS_PER_REQUEST,
+            refused: false,
         }
     }
 
@@ -61,23 +68,43 @@ impl RepairBudget {
     /// is a charge for a repair the wire never saw. Pairing this read with a
     /// later draw keeps the check cheap and the charge truthful.
     ///
-    /// Read-only, so nothing about it can be forgotten or double-counted; the
-    /// draw remains the only mutating operation.
-    pub(super) const fn can_draw(&self) -> bool {
-        self.remaining > 0
+    /// Spends nothing, but a `false` answer is recorded as a refusal: only a
+    /// repair arm whose own conditions already hold asks, so an empty
+    /// allowance here is a repair the request could not pay for.
+    pub(super) const fn can_draw(&mut self) -> bool {
+        if self.remaining == 0 {
+            self.refused = true;
+            return false;
+        }
+        true
     }
 
     /// Spend one repair, or refuse when the request's allowance is gone.
     ///
     /// Call it as the LAST condition of a repair arm: it mutates, so a
     /// caller that draws before checking its own gates silently charges
-    /// requests that never repair.
+    /// requests that never repair, and records a refusal for a repair
+    /// nothing proposed.
     pub(super) const fn draw(&mut self) -> bool {
         if self.remaining == 0 {
+            self.refused = true;
             return false;
         }
         self.remaining -= 1;
         true
+    }
+
+    /// Whether a repair arm was refused for want of allowance since the last
+    /// call, clearing the mark.
+    pub(super) const fn take_refusal(&mut self) -> bool {
+        let refused = self.refused;
+        self.refused = false;
+        refused
+    }
+
+    /// The repairs this request has drawn so far.
+    pub(super) const fn spent(&self) -> u8 {
+        REPAIRS_PER_REQUEST - self.remaining
     }
 
     /// The remaining allowance, read WITHOUT spending it.

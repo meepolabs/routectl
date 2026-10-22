@@ -108,7 +108,7 @@ impl FieldVerdictStatus {
 /// counter carries a different number, because equal values make any permutation
 /// pass.
 ///
-/// So this sets eight distinct counts. The counters are private to this crate and
+/// So this sets every counter to a distinct count, and each histogram bucket too. The counters are private to this crate and
 /// the consumer is `routectl-cli`, hence the seam; it is gated to test builds, so no
 /// release build can forge a counter.
 ///
@@ -139,6 +139,20 @@ pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepair
     }
     for _ in 0..17 {
         router.metrics.incr_parser_unlocalized();
+    }
+    router.metrics.field_chain_steps.add_committed(19);
+    router.metrics.field_chain_steps.add_dropped(29);
+    for _ in 0..31 {
+        router
+            .metrics
+            .incr_repair_budget_exhausted(Some(&seeded_lane));
+    }
+    // One distinct count per histogram bucket, so a bucket rendered in another's
+    // position cannot pass.
+    for (draws, requests) in (0..).zip([37, 41, 43, 47, 53, 59]) {
+        for _ in 0..requests {
+            router.metrics.record_repairs_per_request(draws);
+        }
     }
     // The two alarm halves live on the shared canary registry rather than the
     // metrics atomics, so they are seeded through it -- and to two MORE distinct

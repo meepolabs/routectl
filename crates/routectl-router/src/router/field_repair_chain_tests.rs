@@ -13,6 +13,7 @@ mod repair_chain {
     use super::*;
 
     include!("field_repair_chain_support_tests.rs");
+    include!("field_repair_chain_exit_tests.rs");
 
     // -----------------------------------------------------------------------
     // Two keys, one request, every walk

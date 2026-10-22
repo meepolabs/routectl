@@ -2952,7 +2952,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   carry; unknown presence commits nothing). Coverage
   in `field_repair_step_tests.rs` and the walk-level
   `field_repair_chain_tests.rs` (its chain seat, rejections and requests in
-  the `include!`d fragment `src/router/field_repair_chain_support_tests.rs`)
+  the `include!`d fragment `src/router/field_repair_chain_support_tests.rs`;
+  the counted step exits, budget exhaustion and repairs-per-request buckets
+  in the fragment `src/router/field_repair_chain_exit_tests.rs`). A settling
+  plan counts its steps committed in `commit_pending` and still-pending steps
+  dropped in its `Drop`
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
@@ -3360,7 +3364,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   replay kind (behavioral on `complete` and `stream`; that kind cannot reach
   `count_tokens`), and `src/router/field_repair_tests.rs` for the field
   kind, which IS behavioral on all three walks and carries the N-seat
-  token-count ceiling test
+  token-count ceiling test. Each walk's wrapper (`complete_with_options`,
+  `stream_with_options`, `count_tokens_settling`) owns the budget and records
+  `spent()` in the repairs-per-request histogram once per request; a repair
+  arm refused for want of allowance marks the budget, and
+  `AttemptLearning::on_rejection` counts that mark once per rejection on the
+  target's lane (`take_refusal`)
 - `src/router/opening_lookup.rs` -- read-only pre-dispatch lookups for a
   client-facing opening count: `Router::publication_generation` (the
   per-Router probe incarnation, which advances on EVERY `publish_router`,
@@ -3457,10 +3466,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   routing away on its own. An F3 negative sourced from a probe carries
   routing authority and is included like any other acting negative. Matching
   rows map to the public `ActingFieldVerdict { state_key, feature_key, phase,
-  source }`. Also owns the lossy-repair tally: crate-internal
-  `LossyRepairTally` (total plus a capped per-lane map and an `other`
-  bucket under one lock) and its public projection `LaneLossyRepairs { lane,
-  lossy }` via `Router::lossy_repairs_by_lane`.
+  source }`. Also owns the per-lane tallies: crate-internal `LaneTally`
+  (total plus a capped per-lane map and an `other` bucket under one lock),
+  projected as `LaneLossyRepairs { lane, lossy }` via
+  `Router::lossy_repairs_by_lane` and as `LaneBudgetExhaustions { lane,
+  exhausted }` via `Router::budget_exhaustions_by_lane`; plus
+  `ChainStepTally` (chained repair steps a settling plan committed or
+  dropped) and `RepairDrawHistogram` (requests by draws spent, one bucket
+  per count up to `REPAIRS_PER_REQUEST`).
   `Router::field_repair_counters() -> FieldRepairCounters` reads the same
   three atomics the repair WARN section of LOGGING.md documents
   (`repair_attempted`/`repair_succeeded`/`verdicts_learned`) without the

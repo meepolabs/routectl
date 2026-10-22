@@ -83,7 +83,9 @@ pub(crate) struct FidelityEvent {
 #[cfg(test)]
 type EventObserver = std::sync::Mutex<Option<tokio::sync::oneshot::Sender<FidelityEvent>>>;
 
-use super::fidelity_log::{Bounded, RenderedVerdict, rendered_lossy_lanes, rendered_verdicts};
+use super::fidelity_log::{
+    Bounded, RenderedVerdict, rendered_exhausted_lanes, rendered_lossy_lanes, rendered_verdicts,
+};
 use super::router_view::StatusRouterView;
 
 /// Message of the snapshot line. Stable and greppable, and named so a test can
@@ -234,7 +236,12 @@ fn emit_if_admitted(
 ) {
     let verdicts = rendered_verdicts(&snapshot.verdicts);
     let lossy_lanes = rendered_lossy_lanes(&snapshot.lossy_by_lane);
-    let fingerprint = line_fingerprint(snapshot, &verdicts, &lossy_lanes, writer_degraded);
+    let exhausted_lanes = rendered_exhausted_lanes(&snapshot.exhausted_by_lane);
+    let lanes = LaneRenders {
+        lossy: &lossy_lanes,
+        exhausted: &exhausted_lanes,
+    };
+    let fingerprint = line_fingerprint(snapshot, &verdicts, &lanes, writer_degraded);
     if !gate.admit(fingerprint, now) {
         return;
     }
@@ -261,6 +268,13 @@ fn emit_if_admitted(
         rc_field_disproved_requests_total = snapshot.counters.disproved_requests,
         rc_field_preflight_actions_total = snapshot.counters.preflight_actions,
         rc_parser_unlocalized_total = snapshot.counters.parser_unlocalized,
+        rc_field_chain_steps_committed_total = snapshot.counters.chain_steps_committed,
+        rc_field_chain_steps_dropped_total = snapshot.counters.chain_steps_dropped,
+        rc_field_repair_budget_exhausted_total = snapshot.counters.budget_exhausted,
+        rc_field_repair_budget_exhausted_lanes_total = exhausted_lanes.total,
+        rc_field_repair_budget_exhausted_lanes_omitted = exhausted_lanes.omitted,
+        rc_field_repair_budget_exhausted_by_lane = ?exhausted_lanes.rows,
+        rc_field_repairs_per_request = ?snapshot.counters.repairs_per_request,
         rc_acting_field_verdicts_total = snapshot.acting.len(),
         rc_acting_field_verdicts = ?bounded_acting(snapshot),
         rc_acting_field_verdicts_omitted = acting_omitted(snapshot),
@@ -326,6 +340,12 @@ impl FidelityGate {
     }
 }
 
+/// The two bounded per-lane renders the line carries.
+struct LaneRenders<'a> {
+    lossy: &'a Bounded<routectl_router::LaneLossyRepairs>,
+    exhausted: &'a Bounded<routectl_router::LaneBudgetExhaustions>,
+}
+
 /// Fingerprint of everything the line carries EXCEPT the two clock-derived fields,
 /// `rc_probe_next_retry_ms` and `rc_probe_oldest_due_ms`.
 ///
@@ -338,7 +358,7 @@ impl FidelityGate {
 fn line_fingerprint(
     snapshot: &FidelitySnapshot,
     verdicts: &Bounded<RenderedVerdict>,
-    lossy_lanes: &Bounded<routectl_router::LaneLossyRepairs>,
+    lanes: &LaneRenders<'_>,
     writer_degraded: bool,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -352,6 +372,9 @@ fn line_fingerprint(
         counters.disproved_requests,
         counters.preflight_actions,
         counters.parser_unlocalized,
+        counters.chain_steps_committed,
+        counters.chain_steps_dropped,
+        counters.budget_exhausted,
         snapshot.probes.activations_total,
         snapshot.probes.clear_persistence_failures_total,
     ] {
@@ -362,8 +385,10 @@ fn line_fingerprint(
         acting_omitted(snapshot),
         verdicts.total,
         verdicts.omitted,
-        lossy_lanes.total,
-        lossy_lanes.omitted,
+        lanes.lossy.total,
+        lanes.lossy.omitted,
+        lanes.exhausted.total,
+        lanes.exhausted.omitted,
         snapshot.probes.queued,
         snapshot.probes.in_flight,
         snapshot.probes.backing_off,
@@ -374,7 +399,9 @@ fn line_fingerprint(
     probe_settlement_token(&snapshot.probes).hash(&mut hasher);
     hash_debug(&mut hasher, bounded_acting(snapshot));
     hash_debug(&mut hasher, &verdicts.rows);
-    hash_debug(&mut hasher, &lossy_lanes.rows);
+    hash_debug(&mut hasher, &lanes.lossy.rows);
+    hash_debug(&mut hasher, &lanes.exhausted.rows);
+    hash_debug(&mut hasher, &counters.repairs_per_request);
     hasher.finish()
 }
 

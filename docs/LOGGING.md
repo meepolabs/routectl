@@ -455,6 +455,13 @@ every row-carrying field on that line: when the tally has more,
 rendered rows then sum to less than the total. There is no `field_path`
 split: the WARN already names the path.
 
+Budget exhaustion is kept per learned lane by the same tally rules, surfaced
+as `rc_field_repair_budget_exhausted_by_lane` and on the `/status/doctor`
+panel as `budget_exhaustions_by_lane`, beside the `repairs_per_request`
+bucket array. A rejection counts once when a repair was proposed for it and
+the request's shared allowance could not pay; a refusal no repair proposed
+for, on an empty allowance, is not exhaustion.
+
 Only the lossy drop never commits a verdict, so the same rejection is
 repaired again on every request that carries the value; a lossy count
 rising with the attempted count and a flat learned count is that steady
@@ -729,6 +736,13 @@ consume the slots real traffic needs.
 | `rc_field_disproved_requests_total` | LIFETIME: requests that applied a repair a canary later DISPROVED. Monotonic, never falls (including across a clear or reload), and counts requests AFFECTED rather than canary attempts -- one disproof of a verdict that repaired forty requests charges forty |
 | `rc_field_preflight_actions_total` | ADOPTED ROW REWRITES: one per closed-table row whose transform was applied before dispatch, NOT one per request. A request carrying rows of two classes rewrites two surfaces and exposes two identities, so it counts two. Read alongside the per-REQUEST WARN below, whose unit is deliberately the other one -- this counter measures exposure, that line reports an event. The count that answers "is pre-flight acting at all", which no log level can. Rising here while `rc_field_repair_attempted_total` stays flat is the feature working: the upstream no longer sees the field, so the reactive arm has nothing to repair |
 | `rc_parser_unlocalized_total` | Upstream rejections eligible to name a field whose envelope the parser localized NO field path from -- the am-I-flying-blind metric, modeled on `rc_bedrock_validation_unmatched_total`. Expected NON-ZERO on real traffic even when everything is healthy, since most caller-shaped 4xxs are not field rejections; the signal is its RATIO against the learned and repaired counts, which is why it is reported beside them. Deduped once per request per target |
+| `rc_field_chain_steps_committed_total` | Chained field-repair steps settled as PROVEN: the repaired retry succeeded, or was refused for a different field the sent body carried. One per step, on walks that can settle (a non-settling token count is not counted). Not `rc_field_verdicts_learned_total`: a proven step whose repair teaches nothing (a refused value repaired by a drop) is committed here and persists no verdict. Neither claims durability; a failed durable write shows on the doctor panel's `capability_writes` |
+| `rc_field_chain_steps_dropped_total` | Chained field-repair steps still pending when their plan ended unproven: the same field refused again, an unrelated error, a fallback to another target, or the request ending there. The reason is on the repair WARN above, not a label here. With the committed count, sums to the steps applied on settling walks |
+| `rc_field_repair_budget_exhausted_total` | Rejections a repair (field, canary, replay, beta, or declared-edit revert) was proposed for that the request's shared repair allowance could not pay, once per rejection. A rejection no repair proposed for is not counted, empty allowance or not |
+| `rc_field_repair_budget_exhausted_lanes_total` | Count of lanes the exhaustion map HAS, before the render ceiling: at most 256 named lanes plus `other`, by the same rules as the lossy map |
+| `rc_field_repair_budget_exhausted_lanes_omitted` | Lane rows the render ceiling dropped; non-zero says the map field is a SUBSET |
+| `rc_field_repair_budget_exhausted_by_lane` | The exhaustion map rows that fit, one `{ lane, exhausted }` per lane in lane-key order then `other`, each its share of `rc_field_repair_budget_exhausted_total`. Capped at the same 32-row code constant |
+| `rc_field_repairs_per_request` | Finished requests by repairs drawn: a six-entry array whose index `n` counts the requests that spent exactly `n` repairs, zero through the per-request allowance of five. Recorded once per request on complete, stream and token-count walks, whatever the outcome |
 | `rc_acting_field_verdicts_total` | Count of learned rows currently steering dispatch (field-scoped, not cleared, not catalog-scoped) |
 | `rc_acting_field_verdicts` | One entry per acting row: `state_key`, `feature_key`, `phase`, `source` |
 | `rc_field_verdict_rows_total` | Count of resident field verdicts the surface HAS, before the render ceiling. Rows are produced for every resident verdict, ACTING OR NOT: an operator debugging why pre-flight is not firing needs the row whose `blocked_reason` explains it |

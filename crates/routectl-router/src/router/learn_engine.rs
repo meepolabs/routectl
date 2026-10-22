@@ -456,7 +456,30 @@ impl<'a> AttemptLearning<'a> {
     /// [`Rejection::transcript_rejection`]) proceeds without consulting any
     /// proposer, after the declared-edit undo, and is held for
     /// [`Self::observe_generic`] so the generic learner skips it too.
+    ///
+    /// A rejection whose proposed repair the request's allowance could not pay
+    /// for is counted once on the target's lane, whichever arm was refused.
     pub(super) fn on_rejection(
+        &mut self,
+        rejection: Rejection<'_>,
+        attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
+        budget: &mut RepairBudget,
+    ) -> FailureDecision {
+        let target = rejection.target;
+        budget.take_refusal();
+        let decision = self.decide_rejection(rejection, attempt_req, meta, budget);
+        if budget.take_refusal() {
+            self.router
+                .metrics
+                .incr_repair_budget_exhausted(target.learned_lane.as_ref());
+        }
+        decision
+    }
+
+    /// The body of [`Self::on_rejection`], every exit of which the caller
+    /// reads the budget's refusal mark after.
+    fn decide_rejection(
         &mut self,
         rejection: Rejection<'_>,
         attempt_req: &mut ChatRequest,

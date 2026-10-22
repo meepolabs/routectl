@@ -29,7 +29,7 @@ use serde::Serialize;
 
 use routectl_core::failure_class::LastOutcome;
 use routectl_router::router::RouteTargetStatus;
-use routectl_router::{DoctorReport, LaneLossyRepairs};
+use routectl_router::{DoctorReport, LaneBudgetExhaustions, LaneLossyRepairs};
 
 use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
 use super::router_view::StatusRouterView;
@@ -39,11 +39,12 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::commands::doctor::{GatherSources, build_report_no_network, gather_context_no_network};
 
 /// Wire-shape version of the doctor panel payload. Reuses the no-network
-/// [`DoctorReport`]'s own `schema_version` (18): the panel embeds that report
+/// [`DoctorReport`]'s own `schema_version` (19): the panel embeds that report
 /// verbatim, so it must not invent a parallel number. The panel's own
 /// `capability_writes` block joined at 13 alongside the report's matrix
-/// change, and its `lossy_repairs_by_lane` list at 18.
-pub const DOCTOR_SCHEMA_VERSION: u32 = 18;
+/// change, its `lossy_repairs_by_lane` list at 18, and its
+/// `budget_exhaustions_by_lane` list and `repairs_per_request` buckets at 19.
+pub const DOCTOR_SCHEMA_VERSION: u32 = 19;
 
 /// The no-network doctor report plus the circuit-derived reachability summary
 /// and the live capability-write counters.
@@ -60,6 +61,14 @@ pub(super) struct DoctorPanel {
     /// The process-lifetime lossy field-repair count per learned lane: at
     /// most 256 named lanes plus the `other` overflow bucket.
     lossy_repairs_by_lane: Vec<LaneLossyRepairs>,
+    /// The process-lifetime count of rejections whose proposed repair the
+    /// request's repair allowance could not pay, per learned lane: at most 256
+    /// named lanes plus the `other` overflow bucket.
+    budget_exhaustions_by_lane: Vec<LaneBudgetExhaustions>,
+    /// Finished requests by the number of repairs each spent: index `n`
+    /// counts the requests that drew exactly `n`, from zero to the whole
+    /// per-request allowance.
+    repairs_per_request: Vec<u64>,
 }
 
 /// One dispatch target's reachability, derived from its last settled outcome.
@@ -114,6 +123,8 @@ fn build_panel_data(
         reachability,
         capability_writes,
         lossy_repairs_by_lane: view.lossy_repairs_by_lane(),
+        budget_exhaustions_by_lane: view.budget_exhaustions_by_lane(),
+        repairs_per_request: view.field_repair_counters().repairs_per_request.to_vec(),
     }
 }
 

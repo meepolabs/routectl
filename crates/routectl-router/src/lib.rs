@@ -226,10 +226,10 @@ pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CanaryPosture, CapabilityPersistenceHealth,
     DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot, FieldPreflight,
-    FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus, LaneLossyRepairs,
-    LearnedLaneProjection, OpeningLane, PreflightBlockedReason, ProbeClearAcknowledgement,
-    ResolvedLearnedLane, ResponseCheck, Router, RouterOptions, StreamEvidence,
-    acting_field_verdicts, class_debits,
+    FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
+    LaneBudgetExhaustions, LaneLossyRepairs, LearnedLaneProjection, OpeningLane,
+    PreflightBlockedReason, ProbeClearAcknowledgement, ResolvedLearnedLane, ResponseCheck, Router,
+    RouterOptions, StreamEvidence, acting_field_verdicts, class_debits,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{

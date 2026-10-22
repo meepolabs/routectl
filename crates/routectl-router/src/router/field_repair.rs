@@ -1673,6 +1673,7 @@ impl Router {
             registry: self.field_verdicts(),
             base_url: lane.base_url,
             generation,
+            exits: &self.metrics.field_chain_steps,
         });
         Some(FieldRepairPlan::admitted(
             table,
@@ -1776,7 +1777,7 @@ impl Router {
             action,
             state_key: sanitize_for_log(target.state_key),
             lane: target.lane.map_or_else(
-                || super::field_verdict_observability::LOSSY_REPAIR_OTHER_LANE.to_string(),
+                || super::field_verdict_observability::LANE_TALLY_OTHER.to_string(),
                 StateKey::for_log,
             ),
             field_path,

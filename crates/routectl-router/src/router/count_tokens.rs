@@ -218,7 +218,18 @@ impl Router {
         mode: FieldSettlementMode,
     ) -> CountedTokens {
         let mut meta = DispatchMeta::for_alias(&req.model);
-        let result = self.count_tokens_inner(req, mode, &mut meta).await;
+        // Reactive-repair ceiling for THIS client request, declared above the
+        // per-seat walk exactly as `complete_with_options` declares it, and
+        // threaded by `&mut` into every seat. Constructing it inside
+        // `count_tokens_try_seat` would be the per-seat reset the shared
+        // ceiling exists to remove; holding it here reads its spend once on
+        // every exit of the walk.
+        let mut repair_budget = RepairBudget::per_request();
+        let result = self
+            .count_tokens_inner(req, mode, &mut meta, &mut repair_budget)
+            .await;
+        self.metrics
+            .record_repairs_per_request(repair_budget.spent());
         emit_replay_degradation(&meta);
         emit_field_repair(&meta);
         emit_field_preflight(&meta);
@@ -233,6 +244,7 @@ impl Router {
         mut req: ChatRequest,
         mode: FieldSettlementMode,
         meta: &mut DispatchMeta,
+        repair_budget: &mut RepairBudget,
     ) -> Result<TokenCount> {
         // No seat this walk admits is a Gemini egress, so a defect is only
         // recorded and the transcript forwarded.
@@ -273,21 +285,8 @@ impl Router {
             }
         }
         let mut saw_capable = false;
-        // Reactive-repair ceiling for THIS client request, declared above the
-        // per-seat walk exactly as `complete_inner` declares it above its
-        // chain loop, and threaded by `&mut` into every seat. Constructing it
-        // inside `count_tokens_try_seat` would be the per-seat reset the shared
-        // ceiling exists to remove.
-        let mut repair_budget = RepairBudget::per_request();
         let outcome = self
-            .count_tokens_walk(
-                &req,
-                chain,
-                &mut saw_capable,
-                &mut repair_budget,
-                mode,
-                meta,
-            )
+            .count_tokens_walk(&req, chain, &mut saw_capable, repair_budget, mode, meta)
             .await;
         if let Some(result) = outcome {
             return result;
