@@ -19,8 +19,8 @@
 //! requested, for the schema check) and never logs it; the carrier's `Debug`
 //! prints state flags only.
 
-use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::{fmt, io};
 
 use futures::stream::{BoxStream, StreamExt as _};
 use routectl_core::{
@@ -33,9 +33,11 @@ use super::Router;
 use super::capability_observe::{CapabilityObserveEvent, EvidencePolicy, EvidenceScope};
 use crate::capability_detect::SEARCH_EVIDENCE_TYPE_TAGS;
 
-/// Most response bytes one fold retains. Only strict-output text is retained
-/// in proportion to the response; a reply past this size spoils the fold, so
-/// its evidence is not read rather than read from a truncated body.
+/// Most variable-length bytes one fold retains, summed over the kept
+/// strict-output text, the last `finish_reason`, and the serialized usage
+/// `server_tool_use` object. A reply that would take the fold past this size
+/// spoils it, so its evidence is not read rather than read from a truncated
+/// body.
 pub(super) const STREAM_EVIDENCE_BYTE_CAP: usize = 1024 * 1024;
 
 /// The response evidence of one streamed attempt: its [`EvidenceScope`] and,
@@ -163,6 +165,10 @@ pub(super) struct EvidenceFold {
     has_tool_call: bool,
     has_search_evidence: bool,
     text: String,
+    /// Bytes of `server_tool_use` as serialized, charged to the budget.
+    server_tool_use_bytes: usize,
+    /// Variable-length bytes retained across every field the budget covers.
+    retained: usize,
     spoiled: bool,
 }
 
@@ -189,6 +195,13 @@ impl EvidenceFold {
             )
         });
         if let Some(delta) = &chunk.usage {
+            if let Some(server_tool_use) = &delta.server_tool_use {
+                let bytes = serialized_len(server_tool_use);
+                if !self.recharge(self.server_tool_use_bytes, bytes) {
+                    return;
+                }
+                self.server_tool_use_bytes = bytes.unwrap_or(0);
+            }
             merge_usage(self.usage.get_or_insert_with(Usage::default), delta);
         }
         for choice in &chunk.choices {
@@ -197,6 +210,10 @@ impl EvidenceFold {
                 return;
             }
             if let Some(reason) = &choice.finish_reason {
+                let held = self.finish_reason.as_ref().map_or(0, String::len);
+                if !self.recharge(held, Some(reason.len())) {
+                    return;
+                }
                 self.finish_reason = Some(reason.clone());
             }
             let delta = &choice.delta;
@@ -265,16 +282,57 @@ impl EvidenceFold {
     }
 
     fn push_text(&mut self, text: &str) {
-        if self.text.len().saturating_add(text.len()) > STREAM_EVIDENCE_BYTE_CAP {
-            self.spoil();
-            return;
+        if self.recharge(0, Some(text.len())) {
+            self.text.push_str(text);
         }
-        self.text.push_str(text);
+    }
+
+    /// Replace `released` retained bytes with `charged` ones, spoiling the
+    /// fold instead when the result would pass [`STREAM_EVIDENCE_BYTE_CAP`]
+    /// or the size is unknown (`None`). Call before retaining the new value.
+    fn recharge(&mut self, released: usize, charged: Option<usize>) -> bool {
+        let next = charged.and_then(|bytes| (self.retained - released).checked_add(bytes));
+        match next {
+            Some(next) if next <= STREAM_EVIDENCE_BYTE_CAP => {
+                self.retained = next;
+                true
+            }
+            _ => {
+                self.spoil();
+                false
+            }
+        }
     }
 
     fn spoil(&mut self) {
         self.spoiled = true;
         self.text = String::new();
+        self.finish_reason = None;
+        self.usage = None;
+        self.retained = 0;
+        self.server_tool_use_bytes = 0;
+    }
+}
+
+/// The byte length of `value` serialized as JSON, or `None` when it does not
+/// serialize.
+fn serialized_len(value: &Value) -> Option<usize> {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, value).ok()?;
+    Some(counter.0)
+}
+
+/// An `io::Write` that keeps only the number of bytes written to it.
+struct ByteCounter(usize);
+
+impl io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

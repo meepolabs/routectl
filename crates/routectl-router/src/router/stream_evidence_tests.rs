@@ -388,34 +388,87 @@ fn a_second_choice_spoils_the_fold() {
     }
 }
 
+/// A reply whose text arrives in two pieces, so the cap is crossed by the
+/// running total rather than by one chunk, closed by `reason`.
+fn split_text_reply(text: &str, reason: &str) -> Vec<ChatChunk> {
+    let (head, tail) = text.split_at(text.len() / 2);
+    vec![text_chunk(head), text_chunk(tail), stop_chunk(reason)]
+}
+
+/// A usage update whose `server_tool_use` serializes to exactly `bytes`
+/// bytes: a JSON string of `bytes - 2` characters plus its quotes.
+fn server_tool_use_chunk(bytes: usize) -> ChatChunk {
+    usage_chunk(UsageDelta {
+        server_tool_use: Some(json!("x".repeat(bytes - 2))),
+        ..UsageDelta::default()
+    })
+}
+
 #[test]
-fn text_past_the_byte_cap_spoils_the_fold() {
-    let at_cap = "x".repeat(STREAM_EVIDENCE_BYTE_CAP);
+fn a_fold_past_the_byte_cap_spoils() {
+    let cap = STREAM_EVIDENCE_BYTE_CAP;
+    let half_reason = "r".repeat(cap / 2 + 1);
+    // (name, chunks, the reply text the fold keeps, folds)
     let rows = [
         (
             "exactly at the cap (positive control)",
-            at_cap.clone(),
+            split_text_reply(&"x".repeat(cap - "stop".len()), "stop"),
+            "x".repeat(cap - "stop".len()),
             true,
         ),
-        ("one byte past the cap", format!("{at_cap}x"), false),
+        (
+            "one byte past the cap",
+            split_text_reply(&"x".repeat(cap - "stop".len() + 1), "stop"),
+            String::new(),
+            false,
+        ),
+        (
+            "an oversized finish_reason",
+            vec![text_chunk("ok"), stop_chunk(&"r".repeat(cap))],
+            String::new(),
+            false,
+        ),
+        (
+            "a replaced finish_reason is charged once (positive control)",
+            vec![stop_chunk(&half_reason), stop_chunk(&half_reason)],
+            String::new(),
+            true,
+        ),
+        (
+            "an oversized server_tool_use",
+            vec![
+                text_chunk("ok"),
+                server_tool_use_chunk(cap),
+                stop_chunk("stop"),
+            ],
+            String::new(),
+            false,
+        ),
+        (
+            "a replaced server_tool_use is charged once (positive control)",
+            vec![
+                server_tool_use_chunk(cap - "stop".len()),
+                server_tool_use_chunk(cap - "stop".len()),
+                stop_chunk("stop"),
+            ],
+            String::new(),
+            true,
+        ),
     ];
-    for (name, text, folds) in rows {
-        // Arrange: the reply arrives in two pieces, so the cap is crossed by
-        // the running total rather than by one chunk.
-        let (head, tail) = text.split_at(text.len() / 2);
-        let chunks = [text_chunk(head), text_chunk(tail), stop_chunk("stop")];
-
+    for (name, chunks, kept_text, folds) in rows {
         // Act
         let folded = fold_all(true, &chunks);
 
         // Assert
         assert_eq!(folded.is_some(), folds, "{name}");
-        if let Some(resp) = folded {
+        if let Some(resp) = folded
+            && !kept_text.is_empty()
+        {
             let MessageContent::Parts(parts) = &resp.choices[0].message.content else {
                 panic!("{name}: kept text folds into parts");
             };
             assert!(
-                matches!(&parts[0], ContentPart::Known(KnownContentPart::Text { text: kept, .. }) if *kept == text),
+                matches!(&parts[0], ContentPart::Known(KnownContentPart::Text { text: kept, .. }) if *kept == kept_text),
                 "{name}: the whole reply is kept"
             );
         }
