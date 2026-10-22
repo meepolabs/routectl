@@ -2,8 +2,9 @@
 //!
 //! Every surface that decides or shows what happens to a capability on a
 //! target resolves it here, in the settled order
-//! `pin > representability > override > learned > seed > prior`. The
-//! resolution is pure: it reads already-gathered inputs and never claims a
+//! `pin > representability > override > learned > seed > prior` held once in
+//! [`PRECEDENCE`]: the dispatch stages and the display mode both walk that
+//! list, so no caller orders the tiers itself. The resolution is pure: it reads already-gathered inputs and never claims a
 //! probe slot, flips `in_flight`, or touches a metric.
 //!
 //! It is staged so a dispatch caller never runs the claiming learned read
@@ -17,9 +18,10 @@
 //!    [`OpenCell`]. Only the caller holding an `OpenCell` can reach it, so the
 //!    lower tiers can never be resolved without the operator pass.
 //!
-//! The display mode (doctor, status; `capability_display::resolve_display`)
-//! gathers every tier from snapshot reads, returns the same winner, and also
-//! names the next tier that had an opinion in [`Resolution::overridden`].
+//! The display mode (doctor, status; [`resolve_display`], in the `display`
+//! submodule) gathers every tier from snapshot reads, returns the same winner,
+//! names the next tier that had an opinion in [`Resolution::overridden`], and
+//! picks the signal a read-only surface shows by walking the same list.
 //!
 //! A [`Resolution`] has two axes, because the beta path and the feature path
 //! act on different ones: [`Wire`] (send, withhold or strip the capability)
@@ -41,6 +43,11 @@ use routectl_core::wire_check::EgressKind;
 use crate::config::{CapabilityConfig, Config, ProviderEntry};
 use crate::learned_capability::{BetaLaneReading, LearnedRegistryEntry, negative_is_advisory};
 use crate::override_registry::OverrideVerdict;
+
+mod display;
+
+use display::Shown;
+pub use display::{DisplayInputs, resolve_display};
 
 /// Action token: an operator route-away override hard-drops the target.
 pub const ACTION_DROP: &str = "drop";
@@ -125,7 +132,39 @@ impl Layer {
             Self::Prior => "prior",
         }
     }
+
+    /// Whether the operator stage ([`resolve_operator`]) applies this tier.
+    const fn is_operator(self) -> bool {
+        matches!(self, Self::Pin | Self::Representability | Self::Override)
+    }
 }
+
+/// The tiers, strongest first: the one ordering every resolution walks.
+const PRECEDENCE: [Layer; 6] = [
+    Layer::Pin,
+    Layer::Representability,
+    Layer::Override,
+    Layer::Learned,
+    Layer::Seed,
+    Layer::Prior,
+];
+
+/// The staged dispatch path applies every operator tier before any other, so
+/// the operator tiers must lead [`PRECEDENCE`] or dispatch and display would
+/// rank differently.
+const _: () = {
+    let mut i = 0;
+    let mut open_seen = false;
+    while i < PRECEDENCE.len() {
+        let operator = PRECEDENCE[i].is_operator();
+        assert!(
+            !(open_seen && operator),
+            "an operator tier follows a lower tier in PRECEDENCE"
+        );
+        open_seen |= !operator;
+        i += 1;
+    }
+};
 
 /// The learned registry's view of one cell, as the resolution consumes it.
 /// `None` stands for a cell with no resident entry.
@@ -337,16 +376,6 @@ impl CellContext {
     }
 }
 
-/// What a display surface renders for a cell: the strongest tier holding a
-/// signal, whether or not that signal acts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Shown {
-    pub layer: Layer,
-    pub verdict: &'static str,
-    pub supported: bool,
-    pub source: &'static str,
-}
-
 /// The resolution of one cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolution {
@@ -378,18 +407,6 @@ impl Resolution {
             pinned,
             shown: None,
         }
-    }
-
-    /// This resolution with its display-mode facts: the next tier that had
-    /// an opinion and the signal a display surface renders.
-    pub(crate) const fn with_display(
-        mut self,
-        overridden: Option<Layer>,
-        shown: Option<Shown>,
-    ) -> Self {
-        self.overridden = overridden;
-        self.shown = shown;
-        self
     }
 
     /// The wire axis.
@@ -449,52 +466,6 @@ impl Resolution {
                 (Some(Layer::Prior), _) | (_, None | Some(false)) => ACTION_NONE,
                 (_, Some(true)) => ACTION_ALLOW,
             },
-        }
-    }
-
-    /// The layer a display surface renders: the strongest tier holding a
-    /// signal on the cell, whether or not it acts. It differs from
-    /// [`Self::layer`] where a signal is present but has no opinion: an
-    /// advisory live F3 negative, an uncorroborated inferred one, or any
-    /// learned or prior signal with the kill switch off all show `learned`
-    /// (or `prior`) while the action comes from the tier that decided.
-    /// Filled by the display mode only; `None` on the dispatch path and for a
-    /// cell with no signal.
-    pub const fn display_layer(&self) -> Option<Layer> {
-        match self.shown {
-            Some(shown) => Some(shown.layer),
-            None => None,
-        }
-    }
-
-    /// The display verdict token of [`Self::display_layer`]'s signal: the
-    /// core verdict vocabulary for a learned, seed or prior signal, the
-    /// panel-only override tokens (`forced_supported` / `forced_unsupported`),
-    /// `forced_supported` for a pin and `unrepresentable` for a flag the lane
-    /// cannot carry; `unknown` with no signal.
-    pub const fn display_verdict(&self) -> &'static str {
-        match self.shown {
-            Some(shown) => shown.verdict,
-            None => Verdict::Unknown.as_str(),
-        }
-    }
-
-    /// The support polarity of [`Self::display_layer`]'s signal; `None` with
-    /// no signal.
-    pub const fn display_supported(&self) -> Option<bool> {
-        match self.shown {
-            Some(shown) => Some(shown.supported),
-            None => None,
-        }
-    }
-
-    /// The source tag of [`Self::display_layer`]'s signal: `pin`,
-    /// `representability`, `override`, `live`, `probe`, `seed` or `prior`;
-    /// `None` with no signal.
-    pub const fn display_source(&self) -> Option<&'static str> {
-        match self.shown {
-            Some(shown) => Some(shown.source),
-            None => None,
         }
     }
 
@@ -560,13 +531,15 @@ pub const fn resolve_operator(
     override_verdict: Option<OverrideVerdict>,
     ctx: CellContext,
 ) -> Stage {
-    if let Some(decided) = pin_opinion(pinned, ctx) {
-        return Stage::Decided(decided);
-    }
-    if let Some(decided) = representability_opinion(pinned, ctx) {
-        return Stage::Decided(decided);
-    }
-    match override_opinion(pinned, override_verdict, ctx) {
+    let inputs = DisplayInputs {
+        pinned,
+        override_verdict,
+        learned: None,
+        seed: None,
+        prior: None,
+        ctx,
+    };
+    match first_opinion(inputs, true) {
         Some(decided) => Stage::Decided(decided),
         None => Stage::Open(OpenCell { pinned, ctx }),
     }
@@ -579,53 +552,50 @@ pub const fn resolve_open(
     prior: Option<bool>,
     cell: OpenCell,
 ) -> Resolution {
-    if let Some(decided) = learned_opinion(learned, cell) {
-        return decided;
+    let inputs = DisplayInputs {
+        pinned: cell.pinned,
+        override_verdict: None,
+        learned,
+        seed,
+        prior,
+        ctx: cell.ctx,
+    };
+    match first_opinion(inputs, false) {
+        Some(decided) => decided,
+        None => no_opinion(cell.pinned),
     }
-    if let Some(decided) = seed_opinion(seed, cell) {
-        return decided;
-    }
-    if let Some(decided) = prior_opinion(prior, cell) {
-        return decided;
-    }
-    no_opinion(cell.pinned)
 }
 
-/// Every tier's inputs for one cell, for the display mode
-/// (`resolve_display`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DisplayInputs {
-    /// Whether an operator wire floor pins the capability
-    /// ([`operator_pins_capability`]).
-    pub pinned: bool,
-    /// The override registry's verdict for the cell.
-    pub override_verdict: Option<OverrideVerdict>,
-    /// The learned registry's snapshot view of the cell
-    /// ([`LearnedInput::from_entry`]).
-    pub learned: Option<LearnedInput>,
-    /// The shipped beta seed's state on the cell.
-    pub seed: Option<SeedCell>,
-    /// The catalog prior for the cell.
-    pub prior: Option<bool>,
-    /// The cell's context ([`CellContext::new`] or [`CellContext::for_lane`]).
-    pub ctx: CellContext,
+/// The opinion of the first tier in [`PRECEDENCE`] that has one, among the
+/// operator tiers (`operator`) or the lower ones.
+const fn first_opinion(inputs: DisplayInputs, operator: bool) -> Option<Resolution> {
+    let mut i = 0;
+    while i < PRECEDENCE.len() {
+        let layer = PRECEDENCE[i];
+        if layer.is_operator() == operator
+            && let Some(decided) = opinion(layer, inputs)
+        {
+            return Some(decided);
+        }
+        i += 1;
+    }
+    None
 }
 
-/// Every tier's opinion on a cell, strongest first; `None` where a tier has
-/// none. The display mode walks it to find the winner and the next opinion.
-pub const fn opinions(inputs: DisplayInputs) -> [Option<Resolution>; 6] {
+/// One tier's opinion on a cell; `None` when the tier has none.
+const fn opinion(layer: Layer, inputs: DisplayInputs) -> Option<Resolution> {
     let cell = OpenCell {
         pinned: inputs.pinned,
         ctx: inputs.ctx,
     };
-    [
-        pin_opinion(inputs.pinned, inputs.ctx),
-        representability_opinion(inputs.pinned, inputs.ctx),
-        override_opinion(inputs.pinned, inputs.override_verdict, inputs.ctx),
-        learned_opinion(inputs.learned, cell),
-        seed_opinion(inputs.seed, cell),
-        prior_opinion(inputs.prior, cell),
-    ]
+    match layer {
+        Layer::Pin => pin_opinion(inputs.pinned, inputs.ctx),
+        Layer::Representability => representability_opinion(inputs.pinned, inputs.ctx),
+        Layer::Override => override_opinion(inputs.pinned, inputs.override_verdict, inputs.ctx),
+        Layer::Learned => learned_opinion(inputs.learned, cell),
+        Layer::Seed => seed_opinion(inputs.seed, cell),
+        Layer::Prior => prior_opinion(inputs.prior, cell),
+    }
 }
 
 /// A pin decides a beta key outright; on a feature key it only rules out
@@ -759,7 +729,7 @@ const fn prior_opinion(prior: Option<bool>, cell: OpenCell) -> Option<Resolution
     }
 }
 
-pub const fn no_opinion(pinned: bool) -> Resolution {
+const fn no_opinion(pinned: bool) -> Resolution {
     Resolution {
         wire: Wire::Send,
         routing: Routing::Keep,

@@ -4913,35 +4913,39 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `factory::validate::validate_prefix_impact_target_spec` (the `[fidelity]
   prefix_impact_opt_in` directory-membership check) both delegate to it so
   the two sites can never read a spec differently
-- `src/capability_display.rs` -- the display mode of the precedence seam:
-  `resolve_display(DisplayInputs) -> Resolution` walks the same tier opinions
-  dispatch uses (`capability_precedence::opinions`), returns the same winner,
-  fills `overridden` (the next tier with an opinion), and records the signal a
-  read-only surface shows (`Resolution::display_{layer, verdict, supported,
-  source}`: the strongest tier HOLDING a signal, so an advisory or
-  uncorroborated learned negative, or any learned / prior signal with the kill
-  switch off, still shows while the action comes from the deciding tier).
-  Owns the panel-only display tokens `FORCED_SUPPORTED` /
+- `src/capability_display.rs` -- the panel-only display tokens a read-only
+  surface renders for a capability cell: `FORCED_SUPPORTED` /
   `FORCED_UNSUPPORTED` / `VERDICT_MIXED` / `VERDICT_UNREPRESENTABLE` and the
   source tags `SOURCE_{PIN, REPRESENTABILITY, OVERRIDE, LIVE, PROBE, SEED,
-  PRIOR}`. Pure: no probe admission, no `in_flight`, no metric. A sibling
-  table test pins each tier's projection
+  PRIOR}`; re-exports `resolve_display` beside them. A sibling table test
+  pins each tier's display projection
 - `src/capability_precedence.rs` -- the one pure precedence resolution for a
-  `(target, capability)` cell, `pin > override > learned > seed > prior`,
-  staged so a decided cell never reaches the claiming learned read:
-  `resolve_operator(pinned, override_verdict, CellContext) -> Stage {
-  Decided(Resolution) | Open(OpenCell) }`, then `resolve_open(learned:
-  Option<LearnedInput>, seed, prior, OpenCell) -> Resolution`;
-  `resolve_display(DisplayInputs)` is the display mode and also fills
-  `overridden`. `Resolution` has two axes, `Wire { Send | Withhold | Strip }`
-  and `Routing { Keep | Tail | Drop }`, plus `layer` (`Layer::as_str`: `pin` /
-  `override` / `learned` / `seed` / `prior`), `supported`, `as_str` (the
-  `ACTION_*` tokens) and `hard_exclusion_eligible`. A pin decides a beta key
-  outright (send) and on a feature key only rules out strip.
-  `LearnedInput::{from_reading, from_entry}` adapt a dispatch read or a
-  snapshot entry. `refuses_beta_bag_key(egress_kind, upstream)` is the
-  Converse representability pre-check. Owns `SeedCell` and the `ACTION_*`
-  tokens
+  `(target, capability)` cell. The tier order `pin > representability >
+  override > learned > seed > prior` lives once, in the private `PRECEDENCE`
+  list; the dispatch stages and the display mode both walk it, and a const
+  assertion keeps the operator tiers leading it. Staged so a decided cell
+  never reaches the claiming learned read: `resolve_operator(pinned,
+  override_verdict, CellContext) -> Stage { Decided(Resolution) |
+  Open(OpenCell) }`, then `resolve_open(learned: Option<LearnedInput>, seed,
+  prior, OpenCell) -> Resolution`. `Resolution` has two axes, `Wire { Send |
+  Withhold | Strip }` and `Routing { Keep | Tail | Drop }`, plus `layer`
+  (`Layer::as_str`: `pin` / `representability` / `override` / `learned` /
+  `seed` / `prior`), `supported`, `as_str` (the `ACTION_*` tokens) and
+  `hard_exclusion_eligible`. A pin decides a beta key outright (send) and on
+  a feature key only rules out strip. `LearnedInput::{from_reading,
+  from_entry}` adapt a dispatch read or a snapshot entry;
+  `CellContext::{new, for_lane}` build the cell facts (kill switch, beta key,
+  droppable, representable); `operator_pins_capability` is the one pin
+  predicate. Owns `SeedCell` and the `ACTION_*` tokens
+- `src/capability_precedence/display.rs` -- the display mode of the seam:
+  `resolve_display(DisplayInputs) -> Resolution` walks `PRECEDENCE` once,
+  returns the same winner as the staged resolution, fills `overridden` (the
+  next tier with an opinion), and picks the signal a read-only surface shows
+  (`Resolution::display_{layer, verdict, supported, source}`: the strongest
+  tier HOLDING a signal, so an advisory or uncorroborated learned negative,
+  or any learned / prior signal with the kill switch off, still shows while
+  the action comes from the deciding tier). Pure: no probe admission, no
+  `in_flight`, no metric
 - `src/capability_vocab.rs` -- map-on-read for the persisted capability-event
   vocabulary: stored rows are never rewritten; replay maps each row's tokens
   forward from its `vocab_version` (NULL = `LEGACY_VOCAB_VERSION` 1) to
