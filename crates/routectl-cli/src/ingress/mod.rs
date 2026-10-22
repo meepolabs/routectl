@@ -178,7 +178,7 @@ impl StreamErrorClass {
                     openai_code,
                 }
             }
-            Error::LocalRefusal { .. } => {
+            Error::LocalRefusal { .. } | Error::CapabilityUnsupportedEverywhere { .. } => {
                 let local = crate::handlers::ingress_handle::LOCAL_REFUSAL_TYPE.to_string();
                 Self {
                     anthropic_type: local.clone(),

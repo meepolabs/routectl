@@ -700,6 +700,9 @@ pub fn routectl_core::context_reduction::minify_json_whitespace(&str) -> core::o
 pub mod routectl_core::error
 pub enum routectl_core::error::Error
 pub routectl_core::error::Error::Auth(alloc::string::String)
+pub routectl_core::error::Error::CapabilityUnsupportedEverywhere
+pub routectl_core::error::Error::CapabilityUnsupportedEverywhere::capability: alloc::boxed::Box<str>
+pub routectl_core::error::Error::CapabilityUnsupportedEverywhere::lanes: alloc::boxed::Box<[alloc::boxed::Box<str>]>
 pub routectl_core::error::Error::Config(alloc::string::String)
 pub routectl_core::error::Error::Credential
 pub routectl_core::error::Error::Credential::detail: alloc::string::String
@@ -728,6 +731,7 @@ pub routectl_core::error::Error::Upstream::upstream_code: core::option::Option<a
 pub routectl_core::error::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::error::Error::Validation(alloc::string::String, routectl_core::refusal_reason::RefusalReason)
 impl routectl_core::error::Error
+pub fn routectl_core::error::Error::capability_unsupported_everywhere(impl core::convert::Into<alloc::string::String>, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
 pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, routectl_core::refusal_reason::RefusalReason) -> Self
 pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>
@@ -4654,6 +4658,9 @@ impl<T> tracing::instrument::Instrument for routectl_core::CoreReasoningDialect
 impl<T> tracing::instrument::WithSubscriber for routectl_core::CoreReasoningDialect
 pub enum routectl_core::Error
 pub routectl_core::Error::Auth(alloc::string::String)
+pub routectl_core::Error::CapabilityUnsupportedEverywhere
+pub routectl_core::Error::CapabilityUnsupportedEverywhere::capability: alloc::boxed::Box<str>
+pub routectl_core::Error::CapabilityUnsupportedEverywhere::lanes: alloc::boxed::Box<[alloc::boxed::Box<str>]>
 pub routectl_core::Error::Config(alloc::string::String)
 pub routectl_core::Error::Credential
 pub routectl_core::Error::Credential::detail: alloc::string::String
@@ -4682,6 +4689,7 @@ pub routectl_core::Error::Upstream::upstream_code: core::option::Option<alloc::b
 pub routectl_core::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::Error::Validation(alloc::string::String, routectl_core::refusal_reason::RefusalReason)
 impl routectl_core::error::Error
+pub fn routectl_core::error::Error::capability_unsupported_everywhere(impl core::convert::Into<alloc::string::String>, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
 pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, routectl_core::refusal_reason::RefusalReason) -> Self
 pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::parsed_body(&self) -> core::option::Option<&routectl_core::parsed_error_body::ParsedErrorBody>

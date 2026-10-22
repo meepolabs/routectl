@@ -359,3 +359,23 @@ fn with_upstream_request_id_defaults_none_and_is_noop_off_variant() {
         .with_upstream_request_id(Some("x".into()));
     assert_eq!(format!("{other:?}"), "Validation(\"bad\", \"field-type\")");
 }
+
+#[test]
+fn capability_unsupported_everywhere_displays_the_capability_and_no_lane() {
+    let err =
+        Error::capability_unsupported_everywhere("advisor", ["lane-alpha#up-1", "lane-beta#up-2"]);
+
+    let Error::CapabilityUnsupportedEverywhere { capability, lanes } = &err else {
+        panic!("expected CapabilityUnsupportedEverywhere, got {err:?}");
+    };
+    assert_eq!(&**capability, "advisor");
+    let lanes: Vec<&str> = lanes.iter().map(|l| &**l).collect();
+    assert_eq!(lanes, ["lane-alpha#up-1", "lane-beta#up-2"]);
+
+    let display = err.to_string();
+    assert!(display.contains("`advisor`"), "{display}");
+    assert!(!display.contains("lane-alpha"), "{display}");
+    assert!(!display.contains("lane-beta"), "{display}");
+    assert!(format!("{err:?}").contains("lane-beta#up-2"));
+    assert_eq!(err.refusal_reason(), None);
+}

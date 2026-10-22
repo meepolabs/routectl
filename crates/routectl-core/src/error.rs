@@ -181,6 +181,21 @@ pub enum Error {
     #[error("not implemented for provider `{0}`: {1}")]
     NotImplemented(String, String),
 
+    /// Every lane in the request's chain holds a confirmed negative for a
+    /// capability the request needs, so routectl refuses before any upstream
+    /// contact rather than walking the chain into the same rejection on each
+    /// lane. Surfaces as HTTP 400 `invalid_request_error` naming only the
+    /// capability key; the lanes are operator detail (logs and the usage
+    /// row) and stay out of both the client body and the Display string.
+    /// Build it with [`Error::capability_unsupported_everywhere`].
+    #[error("capability `{capability}` is unsupported on every lane")]
+    CapabilityUnsupportedEverywhere {
+        /// The canonical capability key the request needs.
+        capability: Box<str>,
+        /// The learned lane keys that all refuse the capability.
+        lanes: Box<[Box<str>]>,
+    },
+
     /// A bare `std::io::Error` carried verbatim.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -276,6 +291,11 @@ impl fmt::Debug for Error {
             Self::NotImplemented(a, b) => {
                 f.debug_tuple("NotImplemented").field(a).field(b).finish()
             }
+            Self::CapabilityUnsupportedEverywhere { capability, lanes } => f
+                .debug_struct("CapabilityUnsupportedEverywhere")
+                .field("capability", capability)
+                .field("lanes", lanes)
+                .finish(),
             Self::Io(e) => f.debug_tuple("Io").field(e).finish(),
             Self::Json(e) => f.debug_tuple("Json").field(e).finish(),
         }
@@ -572,6 +592,21 @@ impl Error {
         reason: RefusalReason,
     ) -> Self {
         Self::NormalizeRequest(provider.into(), msg.into(), reason)
+    }
+
+    /// Construct a [`Error::CapabilityUnsupportedEverywhere`] for
+    /// `capability`, refused by every one of `lanes`.
+    pub fn capability_unsupported_everywhere(
+        capability: impl Into<String>,
+        lanes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::CapabilityUnsupportedEverywhere {
+            capability: capability.into().into_boxed_str(),
+            lanes: lanes
+                .into_iter()
+                .map(|lane| lane.into().into_boxed_str())
+                .collect(),
+        }
     }
 
     /// Construct a `NormalizeResponse` error for the named provider.

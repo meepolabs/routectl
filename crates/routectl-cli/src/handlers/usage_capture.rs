@@ -280,6 +280,7 @@ pub(crate) const fn error_class_of(e: &Error) -> &'static str {
         Error::Config(_) => "config",
         Error::Internal(_) => "internal",
         Error::NotImplemented(_, _) => "not_implemented",
+        Error::CapabilityUnsupportedEverywhere { .. } => "capability_unsupported",
         Error::UnknownAlias(_) => "unknown_alias",
         Error::UnknownProvider(_) => "unknown_provider",
         Error::NormalizeRequest(..) => "normalize_request",
@@ -917,7 +918,8 @@ impl UsageCapture {
     /// dispatch attempt -- the canonical `resolved_class` failure token.
     /// Never the Display string. A typed upstream reason lands in
     /// `extra.upstream_reason`; only the terminal error reaches here, so a
-    /// rejection a fallback recovered from leaves no key.
+    /// rejection a fallback recovered from leaves no key. A capability
+    /// every lane refuses records the capability and its lanes in `extra`.
     ///
     /// `http_status` is the transport status the CLIENT received. Once the
     /// SSE head has committed (`mark_stream_http_committed` stamped 200), a
@@ -946,6 +948,9 @@ impl UsageCapture {
         if let Some(reason) = e.upstream_reason() {
             self.stamp_extra("upstream_reason", reason.as_str());
         }
+        if let Error::CapabilityUnsupportedEverywhere { capability, lanes } = e {
+            self.stamp_capability_refusal(capability, lanes);
+        }
         if let Some(provider_kind) = self.record.provider_kind.as_deref() {
             self.record.resolved_class = classify(e, Some(provider_kind))
                 .class
@@ -972,6 +977,21 @@ impl UsageCapture {
         if self.first_enqueue.is_none() {
             self.first_enqueue = Some(Instant::now());
         }
+    }
+
+    /// Record which capability every lane refused and the refusing lanes
+    /// under `extra.unsupported_capability` / `extra.unsupported_lanes`,
+    /// each value log-sanitized.
+    fn stamp_capability_refusal(&mut self, capability: &str, lanes: &[Box<str>]) {
+        self.stamp_extra(
+            "unsupported_capability",
+            &routectl_core::sanitize_for_log(capability),
+        );
+        let lanes = lanes
+            .iter()
+            .map(|lane| Value::String(routectl_core::sanitize_for_log(lane)))
+            .collect();
+        self.stamp_extra_value("unsupported_lanes", Value::Array(lanes));
     }
 
     /// Merge one string key into the record's `extra` JSON object,

@@ -5598,3 +5598,94 @@ mod cc_pin_drift_observation {
         );
     }
 }
+
+const REFUSED_CAPABILITY: &str = "advisor";
+const REFUSED_LANES: [&str; 2] = ["leak-lane-one#leak-up-a", "leak-lane-two#leak-up-b"];
+
+fn capability_refusal() -> Error {
+    Error::capability_unsupported_everywhere(REFUSED_CAPABILITY, REFUSED_LANES)
+}
+
+/// Every ingress dialect renders a capability every lane refuses as a 400
+/// `invalid_request_error` naming the capability, while the refusing lanes
+/// reach only the server-side WARN (the positive control that the fixture
+/// would surface them).
+#[tokio::test]
+async fn map_error_capability_unsupported_everywhere_names_only_the_capability() {
+    use crate::ingress::IngressAdapter;
+    use crate::ingress::anthropic::AnthropicIngress;
+    use crate::ingress::openai::OpenAiIngress;
+    use crate::ingress::openai_responses::ResponsesIngress;
+
+    let dialects: [(&str, ErrorEnvelopeShape); 3] = [
+        ("anthropic", AnthropicIngress.error_envelope_shape()),
+        ("chat", OpenAiIngress.error_envelope_shape()),
+        ("responses", ResponsesIngress.error_envelope_shape()),
+    ];
+    for (dialect, shape) in dialects {
+        let mut resp = None;
+        let events = routectl_testkit::capture_events(|| {
+            resp = Some(map_error(shape, capability_refusal()));
+        });
+        let resp = resp.expect("map_error ran");
+
+        let status = resp.status();
+        let body = body_to_value(resp).await;
+        let rendered = body.to_string();
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{dialect}");
+        assert_eq!(body["error"]["type"], "invalid_request_error", "{dialect}");
+        if shape == ErrorEnvelopeShape::OpenAi {
+            assert_eq!(body["error"]["code"], "invalid_request_error", "{dialect}");
+        } else {
+            assert_eq!(body["type"], "error", "{dialect}");
+        }
+        let message = body["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains(&format!("`{REFUSED_CAPABILITY}`")),
+            "{dialect}: {message}"
+        );
+        for lane in REFUSED_LANES {
+            for part in lane.split('#') {
+                assert!(
+                    !rendered.contains(part),
+                    "{dialect} leaked {part}: {rendered}"
+                );
+            }
+        }
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("the refusal logs a WARN");
+        assert_eq!(
+            warn.field("capability"),
+            Some(REFUSED_CAPABILITY),
+            "{dialect}"
+        );
+        assert_eq!(
+            warn.field("lanes"),
+            Some(REFUSED_LANES.join(",").as_str()),
+            "{dialect}"
+        );
+    }
+}
+
+/// A capability refusal that lands after the stream head committed renders
+/// the same classifier and the same lane-free sentence as the non-stream
+/// envelope.
+#[tokio::test]
+async fn stream_terminal_capability_refusal_matches_the_envelope() {
+    let class = crate::ingress::StreamErrorClass::from_error(&capability_refusal());
+    let message = sanitize_stream_error_for_client(&capability_refusal());
+    let body = body_to_value(map_error(
+        ErrorEnvelopeShape::Anthropic,
+        capability_refusal(),
+    ))
+    .await;
+
+    assert_eq!(class.anthropic_type, "invalid_request_error");
+    assert_eq!(class.openai_type, "invalid_request_error");
+    assert_eq!(class.openai_code, "invalid_request_error");
+    assert_eq!(body["error"]["message"].as_str(), Some(message.as_str()));
+    assert!(!message.contains("leak-lane"), "{message}");
+}

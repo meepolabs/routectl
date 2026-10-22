@@ -1211,6 +1211,9 @@ fn sanitize_stream_error_for_client(e: &Error) -> String {
         Error::LocalRefusal { detail, .. } => {
             local_refusal_message(detail, "upstream stream error")
         }
+        Error::CapabilityUnsupportedEverywhere { capability, .. } => {
+            capability_unsupported_message(capability)
+        }
         Error::Credential {
             reason,
             parked_until_ms,
@@ -1233,6 +1236,25 @@ fn local_refusal_message(detail: &str, prefix: &str) -> String {
         "routectl refused the request before egress: {detail}"
     ));
     format!("{prefix} (HTTP 400): {detail}")
+}
+
+/// The client message for a capability every lane refuses. Names the
+/// capability key only: the lanes are routing topology and stay in logs and
+/// the usage row.
+fn capability_unsupported_message(capability: &str) -> String {
+    format!(
+        "no provider configured for this route supports the requested capability `{}`",
+        routectl_core::sanitize_for_log(capability)
+    )
+}
+
+/// The lane keys of a capability refusal as one log-safe field value.
+fn sanitized_lane_list(lanes: &[Box<str>]) -> String {
+    lanes
+        .iter()
+        .map(|lane| routectl_core::sanitize_for_log(lane))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn sse_to_axum(ev: SseEvent) -> Event {
@@ -1437,6 +1459,16 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             );
             local_refusal_message(detail, "upstream error")
         }
+        // The lanes name configured providers (routing topology), so only
+        // the capability key reaches the client.
+        Error::CapabilityUnsupportedEverywhere { capability, lanes } => {
+            tracing::warn!(
+                capability = %routectl_core::sanitize_for_log(capability),
+                lanes = %sanitized_lane_list(lanes),
+                "capability unsupported on every lane; refused before dispatch"
+            );
+            capability_unsupported_message(capability)
+        }
         // Caller-actionable classes: their Display string carries only
         // caller-derived input, so the verbose message stays. Kept as
         // explicit arms (no wildcard) so a new core Error variant fails
@@ -1463,7 +1495,9 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             *retry_after,
             extras.request_id(),
         ),
-        Error::LocalRefusal { .. } => (Some(LOCAL_REFUSAL_TYPE), None, None, None),
+        Error::LocalRefusal { .. } | Error::CapabilityUnsupportedEverywhere { .. } => {
+            (Some(LOCAL_REFUSAL_TYPE), None, None, None)
+        }
         _ => (None, None, None, None),
     };
     // Surface the upstream's own `error.param` (the offending request
@@ -1584,7 +1618,9 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
         Error::NormalizeRequest(..) => (StatusCode::BAD_REQUEST, "bad_request"),
         Error::NormalizeResponse(_, _) => (StatusCode::BAD_GATEWAY, "bad_gateway"),
         Error::Validation(..) => (StatusCode::BAD_REQUEST, "validation_error"),
-        Error::LocalRefusal { .. } => (StatusCode::BAD_REQUEST, "bad_request"),
+        Error::LocalRefusal { .. } | Error::CapabilityUnsupportedEverywhere { .. } => {
+            (StatusCode::BAD_REQUEST, "bad_request")
+        }
         Error::Auth(_) | Error::Credential { .. } => {
             (StatusCode::SERVICE_UNAVAILABLE, "auth_error")
         }

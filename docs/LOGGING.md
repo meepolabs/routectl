@@ -982,6 +982,15 @@ schema column). A reasonless error leaves the key absent, and a rejection the
 fallback chain recovered from is not the terminal error, so its row carries
 none. Treat an unrecognized token as unknown.
 
+A request refused because every lane in its chain has a confirmed negative
+for a capability it needs records `error_class = capability_unsupported`
+(distinct from `not_implemented`, which means capability overrides emptied
+the chain). The refusal happens before any upstream contact, so the row's
+`outcome` is `gate_blocked` with `attempt_count` 0. The same `extra` JSON
+carries `unsupported_capability` (the capability key) and
+`unsupported_lanes` (the refusing lane keys, each log-sanitized); the client
+body names only the capability, never a lane.
+
 An Anthropic-ingress streaming row also carries its context meter opening in
 the same `extra` JSON (no schema column): `opening_present` (`false`, and no
 other opening key, when no opening event was enqueued for the client -- a
@@ -1988,6 +1997,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_cli::handlers::ingress_handle` | `upstream stream error -- emitting terminal error event` | An upstream stream failed after the response head (overload and the like); the client got a terminal error event. If one provider repeats, check its status and capacity. |
 | ERROR | `routectl_cli::handlers::ingress_handle` | `{auth,config,internal,I/O,JSON} error suppressed in HTTP response` | A routectl-side failure was hidden from the client behind a generic error. Auth: re-login or fix the provider credential. Config: fix config.toml per the error. I/O: check the disk or filesystem. Internal or JSON: file a bug with the `request_id`. |
 | ERROR / WARN | `routectl_cli::handlers::ingress_handle` | `request normalization failed; suppressed`, `response normalization failed; suppressed`, `unknown provider suppressed in HTTP response` (ERROR); `capability not implemented; suppressed`, `local refusal before egress sanitized` (WARN) | Normalization failures are translation bugs or an upstream shape routectl does not know: file a bug with `detail`. Unknown provider: routing names an unconfigured provider, fix the config. Capability or local refusal: the request has no legal shape on that egress, route the alias or client to a capable provider; `rc_request_refused_local_total{lane,reason}` and the `wire_check.local_refusals` rows in `/status/health` name the refusing lane and reason. |
+| WARN | `routectl_cli::handlers::ingress_handle` | `capability unsupported on every lane; refused before dispatch` | Every lane the route can reach has a confirmed negative for `capability`; `lanes` lists them. The client got a 400 `invalid_request_error` naming only the capability, and the usage row records `error_class = capability_unsupported`. Route the alias to a lane that supports the capability, or wait for the learned negatives to lapse and re-probe. |
 | ERROR | `routectl_cli::handlers::ingress_handle` | `ingress chunk render failed` | An ingress renderer bug ended a stream with a terminal error: file a bug. |
 | WARN | `routectl_cli::handlers::control` | `capability purge refused ...`, `capability purge superseded ...`, `capability purge could not persist its clear ...` | The purge did not happen. A non-loopback caller or a foreign authority means the control route is exposed or a browser page reached it: check the listen address and find the caller. Busy, stale registry, shutting down, or superseded: retry. Could not persist: check usage-writer health (`outcome`). |
 | ERROR / WARN | `routectl_cli::handlers::usage_capture` | `capability events carried no registry generation` (ERROR); `cache_auto_outcome` (WARN, thrash) | ERROR: an internal invariant broke and capability learning for that request is lost; file a bug. WARN: an auto-emitted cache breakpoint is written on every request and never read; disable auto-emit for that provider (see the `cache_auto_outcome` section). |
