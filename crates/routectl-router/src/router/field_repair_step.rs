@@ -694,11 +694,13 @@ impl<'a> FieldRepairPlan<'a> {
         request_features: &[String],
         now: Instant,
     ) -> Vec<SettledStep> {
-        let steps: Vec<RepairStep<'a>> = self.pending.drain(..).collect();
-        self.committed
-            .extend(steps.iter().map(|step| FieldIdentity::of_row(&step.row)));
-        steps
-            .into_iter()
+        self.committed.extend(
+            self.pending
+                .iter()
+                .map(|step| FieldIdentity::of_row(&step.row)),
+        );
+        self.pending
+            .drain(..)
             .map(|step| step.commit(request_features, now))
             .collect()
     }
