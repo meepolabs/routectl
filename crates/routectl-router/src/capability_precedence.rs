@@ -102,8 +102,9 @@ pub enum Routing {
     Drop,
 }
 
-/// A precedence tier, strongest first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// A precedence tier. Tiers order strongest first, by their position in the
+/// private `PRECEDENCE` list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
     /// An operator wire floor pins the beta token.
     Pin,
@@ -136,6 +137,30 @@ impl Layer {
     /// Whether the operator stage ([`resolve_operator`]) applies this tier.
     const fn is_operator(self) -> bool {
         matches!(self, Self::Pin | Self::Representability | Self::Override)
+    }
+
+    /// This tier's position in [`PRECEDENCE`], strongest first.
+    const fn rank(self) -> usize {
+        let mut i = 0;
+        while i < PRECEDENCE.len() {
+            if PRECEDENCE[i] as usize == self as usize {
+                return i;
+            }
+            i += 1;
+        }
+        panic!("a Layer is missing from PRECEDENCE")
+    }
+}
+
+impl Ord for Layer {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl PartialOrd for Layer {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

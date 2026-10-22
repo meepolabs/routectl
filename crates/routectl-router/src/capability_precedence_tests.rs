@@ -6,8 +6,6 @@ use super::*;
 
 use routectl_core::wire_check::EgressKind;
 
-use crate::capability_display::resolve_display;
-
 const FEATURE: CellContext = CellContext {
     capability_enabled: true,
     beta_flag: false,
@@ -538,6 +536,16 @@ fn learned_input_from_a_snapshot_entry_applies_the_dispatch_rules() {
     ];
     for (name, entry, expected) in rows {
         assert_eq!(LearnedInput::from_entry(&entry, now), expected, "{name}");
+    }
+}
+
+#[test]
+fn layer_order_is_the_position_in_the_precedence_list() {
+    for (i, a) in PRECEDENCE.iter().enumerate() {
+        for (j, b) in PRECEDENCE.iter().enumerate() {
+            assert_eq!(a.cmp(b), i.cmp(&j), "{a:?} vs {b:?}");
+            assert_eq!(a < b, i < j, "{a:?} < {b:?}");
+        }
     }
 }
 
