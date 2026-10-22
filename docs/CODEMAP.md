@@ -2870,35 +2870,30 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   for the probe re-check's `probe_failure_class`.
   `FieldRepairPlan::apply_named` owns the whole effect transactionally, ordered
   select-check-mutate-charge-release: SELECT the admitted candidate the
-  rejection names (refusing outright when it names none, or when that field
-  is already committed or still pending on this target, unless its row
-  re-repairs it), re-check presence, CHECK the
-  allowance
-  (`RepairBudget::check_or_mark_refusal`, a read that marks a refusal), apply the row's transform as the
+  rejection names (refusing outright when it names none), re-check presence,
+  CHECK the allowance (`RepairBudget::check_or_mark_refusal`), apply the row's
+  transform as the
   private `FieldEdit` the rejection's `RejectionValue` resolves it to (drop the
   row's carriers: both for `AnthropicThinkingDisplay`, since otherwise the
   egress re-derives it, and the one canonical field for a sampling row; rewrite it
   to the one accepted value the rejection named; or clamp the emitted limit to
   the named ceiling through `FieldSurface::clamp_to`, only when
   `clamp_lowers` says the ceiling is below the emitted limit), then DRAW,
-  RELEASE every other candidate's guard (only the first repair finds any;
-  pinning those slots would starve a sibling request that CAN settle them),
-  re-stamp the estimate through
-  `dispatch::restamp_calibration_estimate`, push a pending step, and return
-  the rejection status. The plan and its steps live in
-  `field_repair_step.rs`. The
+  RELEASE every other candidate's guard, re-stamp the estimate through
+  `dispatch::restamp_calibration_estimate`, and return the rejection status.
+  The plan and its steps live in `field_repair_step.rs`. The
   draw follows the mutation so a drop that removes nothing charges nothing, and
   every repaired-state flag is set only on the returned `Some`. A `drop_from`
   that unexpectedly removes nothing FAILS CLOSED -- returns `None`, having
   mutated and charged nothing -- with a `debug_assert` naming the divergence;
   release behavior deliberately does not rest on that assertion being compiled,
   and a `cfg(not(debug_assertions))` test exercises the branch through a
-  test-only divergent surface. `commit_pending` settles each pending step for
-  its own row alone (the rejection named it and the retry is evidence about
-  it); `settle_success`
+  test-only divergent surface. `commit_pending` settles each REPAIRED row
+  alone (the rejection named it and the retry is evidence about it);
+  `settle_success`
   clears EVERY admitted row (an unrepaired success means every carried field was
   accepted) and so returns a `Vec` rather than an `Option`; both are no-ops
-  without a guard, release-by-drop otherwise. A step's commit teaches only a repair
+  without a guard, release-by-drop otherwise. A commit teaches only a repair
   that wrote a value (rewrite or ceiling, carried as the verdict's value) or
   dropped an unsupported field. The WARN action token is closed:
   `field_drop_repair`, `field_lossy_drop_repair` (a value-refused drop),
@@ -2933,13 +2928,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   NOT one of those call sites: it stays on the bare `derive_feature_keys`
   catalog vocabulary alone, since a field verdict is never a
   feature-naming-template candidate
-- `src/router/field_repair_step.rs` -- child module of `field_repair.rs`:
-  `FieldRepairPlan` (pending `RepairStep`s, committed field identities),
-  `apply_named`, `commit_pending`, `moved_on_by`, `rerepairs_same_field`;
-  test-only opt-in in `src/router/field_repair_rerepair_opt_in.rs`. Tests:
-  `field_repair_step_tests.rs`, `field_repair_chain_tests.rs` with fragments
-  `src/router/field_repair_chain_support_tests.rs` and
-  `src/router/field_repair_chain_exit_tests.rs`
+- `src/router/field_repair_step.rs` -- child of `field_repair.rs`: `FieldRepairPlan`,
+  `RepairStep`, `apply_named`, `commit_pending`, `moved_on_by`; test-only opt-in
+  `src/router/field_repair_rerepair_opt_in.rs`. Tests:
+  `field_repair_step_tests.rs`, `field_repair_chain_tests.rs`,
+  `field_repair_chain_support_tests.rs`, `field_repair_chain_exit_tests.rs`
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
@@ -3215,11 +3208,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe_generic` hands it to `Router::observe_transcript_rejection`. A site
   whose `matched_edit` is not `None` short-circuits
   to `learn_revert::answer_declared_edit` (undo or `Proceed`; no proposer
-  reads it, with two exceptions that fall through to the proposers: a
-  `MatchedEdit::One` at `EditSite::RequiredFieldDefault` that was not undone,
-  `RejectionSite::unreverted_reaches_proposers`, since the upstream may refuse
-  routectl's own value and a learned repair can supply another; and an earlier
-  field repair whose named row re-repairs its field, `rerepairs_declared_field`);
+  reads it, with two exceptions: a `MatchedEdit::One` at
+  `EditSite::RequiredFieldDefault` that was not undone falls through to the
+  proposers, `RejectionSite::unreverted_reaches_proposers`, since the upstream
+  may refuse routectl's own value and a learned repair can supply another;
+  and `rerepairs_declared_field`);
   otherwise it builds a read-only
   `RejectionInput` and runs `arbitrate`: the ONE precedence, the static
   `ARBITRATION_ORDER` of `Proposer`s (no trait objects) over the closed
@@ -3244,10 +3237,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   complete control in its child module
   `src/router/learn_engine_surface_tests.rs`; per-dialect egress location (the
   settlement's `in_egress` reading) in
-  `src/router/learn_engine_location_tests.rs` (every closed-table row,
-  refused on its lane against the real egress body, reads as carried in its
-  `include!`d fragment `src/router/learn_engine_presence_tests.rs`), and the
-  dispatch behavior on
+  `src/router/learn_engine_location_tests.rs` (with its fragment
+  `src/router/learn_engine_presence_tests.rs`), and the dispatch behavior on
   both surfaces (absent-path skip, repair when carried) in its child module
   `src/router/learn_engine_dispatch_tests.rs`
 - `src/router/learn_settle.rs` -- child module of `learn_engine.rs`: how
@@ -3255,18 +3246,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   commits the negative, an outright carried success clears it; on the
   `CountTokens` surface the plan is dropped (slots released, nothing
   committed or cleared) and the degradation reports `repair_succeeded`
-  without `learned`. Field: a repaired success commits every pending step
-  (learned claim derived from each commit), an unrepaired one clears;
-  `settle_field_moved_on` commits the pending steps on a rejection naming a
-  different field the sent body is confirmed to carry. Canary: an unrepaired
+  without `learned`. Field: a repaired success commits, an unrepaired one
+  clears (plus `settle_field_moved_on`). Canary: an unrepaired
   success disproves the verdict, one after its repaired retry re-confirms it
 - `src/router/learn_rejection.rs` -- child module of `learn_engine.rs`:
-  `AttemptLearning::on_rejection` and its body: the declared-edit answer
-  (undo, `Proceed`, or left to the proposers for a required-field default or
-  a re-repairing field repair), the
-  transcript stop, the moved-on field settlement, and the arbitration over
-  the proposers; the wrapper clears the budget's refusal mark on entry and
-  counts it once per rejection on the target's lane
+  `AttemptLearning::on_rejection`, the per-rejection entry point
 - `src/router/learn_beta_repair.rs` -- child module of `learn_engine.rs`:
   `EngineSink`, the `RepairSink` the arbitration applies every repair
   through, and the beta repair, `try_beta_repair`: once per target, draws
@@ -3346,28 +3330,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/count_tokens_wire_tests.rs`
 - `src/router/rejection_parser.rs` -- `parse_rejection` -> `NamedRejection`,
   `RejectionKind`, `rejected_beta_flags`: per-dialect parse of an upstream
-  rejection envelope; also `localized_field` -> `LocalizedField` (the
-  row-less `FieldIdentity` a rejection names, plus its tier), with
-  `FieldIdentity::of_row` for a table row (identity pinned in
-  `src/router/rejection_parser_identity_tests.rs`)
+  rejection envelope; also `localized_field` -> `LocalizedField` and
+  `FieldIdentity` (tests: `src/router/rejection_parser_identity_tests.rs`)
 - `src/router/repair_budget.rs` -- the per-request reactive-repair ceiling
   (`RepairBudget` + `REPAIRS_PER_REQUEST`) shared by all three dispatch
   walks: declared ABOVE each chain / seat loop beside the other
-  request-scoped locals and threaded by `&mut`, so the one allowance is
-  shared across repair kinds, across chained field steps on one target, and
-  across every fallback hop. Complements each kind's own per-target gate
-  (once per field for the field kind, once per target for the others); every
+  request-scoped locals and threaded by `&mut`, so an N-target fallback
+  chain pays the request's allowance rather than one repair per target.
+  Complements each repair kind's own gate; every
   arm draws it LAST, after its own conditions hold. Cross-walk coverage is
   in two places: `src/router/repair_budget_cross_walk_tests.rs` for the
   replay kind (behavioral on `complete` and `stream`; that kind cannot reach
   `count_tokens`), and `src/router/field_repair_tests.rs` for the field
   kind, which IS behavioral on all three walks and carries the N-seat
   token-count ceiling test. Each walk's wrapper (`complete_with_options`,
-  `stream_with_options`, `count_tokens_settling`) owns the budget and records
-  `spent()` in the repairs-per-request histogram once per request; a repair
-  arm refused for want of allowance marks the budget, and
-  `AttemptLearning::on_rejection` counts that mark once per rejection on the
-  target's lane (`take_refusal`)
+  `stream_with_options`, `count_tokens_settling`) owns the budget
 - `src/router/opening_lookup.rs` -- read-only pre-dispatch lookups for a
   client-facing opening count: `Router::publication_generation` (the
   per-Router probe incarnation, which advances on EVERY `publish_router`,
@@ -3464,14 +3441,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   routing away on its own. An F3 negative sourced from a probe carries
   routing authority and is included like any other acting negative. Matching
   rows map to the public `ActingFieldVerdict { state_key, feature_key, phase,
-  source }`. Also owns the per-lane tallies: crate-internal `LaneTally`
-  (total plus a capped per-lane map and an `other` bucket under one lock),
-  projected as `LaneLossyRepairs { lane, lossy }` via
-  `Router::lossy_repairs_by_lane` and as `LaneBudgetExhaustions { lane,
-  exhausted }` via `Router::budget_exhaustions_by_lane`; plus
-  `ChainStepTally` (chained repair steps a settling plan committed or
-  dropped) and `RepairDrawHistogram` (requests by draws spent, one bucket
-  per count up to `REPAIRS_PER_REQUEST`).
+  source }`. Also owns the lossy-repair, budget-exhaustion, repair-chain and
+  repairs-per-request tallies (`LaneTally`, `ChainStepTally`,
+  `RepairDrawHistogram`) and their `Router` reads (`LaneLossyRepairs` via
+  `Router::lossy_repairs_by_lane`).
   `Router::field_repair_counters() -> FieldRepairCounters` reads the same
   three atomics the repair WARN section of LOGGING.md documents
   (`repair_attempted`/`repair_succeeded`/`verdicts_learned`) without the
@@ -3484,9 +3457,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `capability_learn::count_parser_unlocalized`, by
   `observe_field_parser_blindness` (via the shared
   `Router::rejection_localizes_no_field` predicate) and by
-  `transcript_defect::Router::observe_transcript_rejection`), plus the chain
-  and budget counters (`chain_steps_committed`, `chain_steps_dropped`,
-  `budget_exhausted`). Both alarm halves are
+  `transcript_defect::Router::observe_transcript_rejection`), plus the
+  repair-chain and budget-exhaustion counters. Both alarm halves are
   reported together deliberately: the outstanding count is exposure that MIGHT
   later be disproved and the lifetime total is exposure that WAS, so either
   number alone reads as the other. Both are
@@ -3498,9 +3470,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Router::fidelity_snapshot() -> FidelitySnapshot` is the coherent entry point:
   ONE learned-registry read feeds BOTH the acting-verdict derivation and the
   detailed rows, plus the repair counters, the per-lane lossy rows
-  (`lossy_by_lane`), the per-lane budget-exhaustion rows
-  (`exhausted_by_lane`), the `repairs_per_request` histogram, and the
-  existing `ProbeSchedulerSnapshot`. That coherence is the reason the type exists -- four
+  (`lossy_by_lane`), the budget-exhaustion and repairs-per-request
+  observability, and the existing `ProbeSchedulerSnapshot`. That coherence is the reason the type exists -- four
   separate reads meant four moments, so an acting count could describe one
   registry state while the rows described another and a reader reconciling them
   could not tell a documented filter from a race. Its `PreflightBlockedReason`
@@ -6732,8 +6703,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   through `lane_cell::resolve_entries` -> `ResolvedEntry`),
   `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
-  see `field_verdict_log.rs`), `lossy_repairs_by_lane()`,
-  `budget_exhaustions_by_lane()` and `repairs_per_request()` (for the doctor
+  see `field_verdict_log.rs`), `lossy_repairs_by_lane()` and the
+  budget-exhaustion and repairs-per-request reads (for the doctor
   panel), `fidelity_snapshot()` (the coherent fidelity read, a PURE
   router-side read -- see
   `routectl-router/src/router/fidelity_status.rs`), `wire_check_snapshot()`
@@ -6832,15 +6803,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   writer_degraded, emission, gate)` reads `view.fidelity_snapshot()` -- ONE
   coherent router read -- then emits one aggregated INFO,
   `"envelope field verdict snapshot"`, carrying: every `FieldRepairCounters`
-  counter (the metrics totals, BOTH halves of the wrong-repair alarm
+  counter -- the metrics totals, BOTH halves of the wrong-repair alarm
   (`rc_field_outstanding_unconfirmed_total`, current, and
   `rc_field_disproved_requests_total`, lifetime-monotonic),
   `rc_field_preflight_actions_total`, `rc_parser_unlocalized_total`, and the
-  chain-step and budget-exhaustion totals),
+  repair-chain and budget-exhaustion totals --
   `rc_acting_field_verdicts{,_total}`, the per-verdict
   `rc_field_verdict_rows{,_total,_omitted}`, the per-lane
-  `rc_field_repair_lossy_by_lane` and `rc_field_repair_budget_exhausted_by_lane`
-  (each with `_lanes_total` / `_lanes_omitted`), `rc_field_repairs_per_request`,
+  `rc_field_repair_lossy_by_lane` (with `_lanes_total` / `_lanes_omitted`),
+  the budget-exhaustion rows and repairs-per-request histogram,
   the process-global
   `rc_usage_writer_degraded`, and the
   probe scheduler's `rc_probe_*` state (including the probe-health
@@ -6883,8 +6854,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   locating a real construction rather than matching nothing
 - `src/handlers/status/fidelity_log.rs` -- the RENDERING under that emitter:
   `rendered_verdicts` flattens each verdict DTO to tokens, counts,
-  and booleans; `rendered_lossy_lanes` and `rendered_exhausted_lanes` bound
-  the per-lane lossy and budget-exhaustion rows. Split from the emitter because the judgement lives here -- several
+  and booleans; `rendered_lossy_lanes` / `rendered_exhausted_lanes` bound the
+  per-lane rows. Split from the emitter because the judgement lives here -- several
   DTO fields are `Option`s whose absent case is a real operator-facing state
   rather than missing data, and each gets its own literal: `unknown` for a
   transform class this build's table does not carry (and for the quorum only a
@@ -6971,8 +6942,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   failure counters (`capability_events_dropped_full` / `write_errors` /
   `capability_writer_unavailable`) read once through
   `UsageHealthView::capability_writes`, `lossy_repairs_by_lane` (the
-  facade's per-lane lossy field-repair rows), `budget_exhaustions_by_lane`
-  and `repairs_per_request`. Config-load errors are already redacted inside the gather (no
+  facade's per-lane lossy field-repair rows), and the budget-exhaustion and
+  repairs-per-request rows. Config-load errors are already redacted inside the gather (no
   second copy). `config_path: None` -> `no_config_path` unavailable; a gather
   failure -> `doctor_unavailable`
 - `src/handlers/status/doctor_tests.rs` -- `#[path]` sidecar coverage of the

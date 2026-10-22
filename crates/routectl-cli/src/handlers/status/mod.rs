@@ -900,7 +900,7 @@ mod tests {
                 "{name} panel should carry data"
             );
         }
-        // Each panel carries its OWN schema_version (usage 3, health 6,
+        // Each panel carries its OWN schema_version (usage 3, health 7,
         // doctor 19, config 3).
         assert_eq!(panels["health"]["schema_version"], 7);
         assert_eq!(panels["config"]["schema_version"], 3);
