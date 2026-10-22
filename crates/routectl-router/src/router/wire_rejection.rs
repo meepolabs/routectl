@@ -12,7 +12,8 @@
 //!
 //! The same settlement says whether the body that went out carries the path
 //! at all, which the learning engine reads to leave alone a rejection naming
-//! a path routectl never sent.
+//! a path routectl never sent, and to commit earlier repairs only when a
+//! later rejection names a field the body is confirmed to carry.
 //!
 //! A rejected token count is only read for its site: its body is a
 //! projection of the client's, so it is never compared or recorded.
