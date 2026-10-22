@@ -45,6 +45,7 @@ use routectl_core::{ChatRequest, sanitize_for_log};
 
 use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey};
 use crate::field_verdict_value::{ValueSlot, VerdictValue};
+use crate::state_key::StateKey;
 
 use super::edit_declare::{declare_field_edit, fidelity_dialect};
 use super::rejection_parser::{
@@ -2185,13 +2186,13 @@ impl Router {
     pub(super) fn note_field_repair(
         &self,
         meta: &mut DispatchMeta,
-        state_key: &str,
+        target: RepairTarget<'_>,
         plan: &FieldRepairPlan<'_>,
     ) -> FieldRepairHandle {
         let field_path = plan
             .repaired_path()
             .expect("a reported repair names the row it dropped");
-        self.note_field_repair_at(meta, state_key, field_path, plan.repair_action())
+        self.note_field_repair_at(meta, target, field_path, plan.repair_action())
     }
 
     /// Record a field repair by the path it repaired and its action token:
@@ -2201,14 +2202,18 @@ impl Router {
     pub(super) fn note_field_repair_at(
         &self,
         meta: &mut DispatchMeta,
-        state_key: &str,
+        target: RepairTarget<'_>,
         field_path: &'static str,
         action: &'static str,
     ) -> FieldRepairHandle {
         let handle = FieldRepairHandle(meta.field_repairs.len());
         meta.field_repairs.push(super::FieldRepair {
             action,
-            state_key: sanitize_for_log(state_key),
+            state_key: sanitize_for_log(target.state_key),
+            lane: target.lane.map_or_else(
+                || super::field_verdict_observability::LOSSY_REPAIR_OTHER_LANE.to_string(),
+                StateKey::for_log,
+            ),
             field_path,
             reason: FIELD_REASON_UPSTREAM_REJECTION,
             repair_attempted: true,
@@ -2217,7 +2222,7 @@ impl Router {
         });
         self.metrics.incr_field_repair_attempted();
         if repair_action_is_lossy(action) {
-            self.metrics.incr_field_repair_lossy();
+            self.metrics.incr_field_repair_lossy(target.lane);
         }
         handle
     }
@@ -2243,6 +2248,14 @@ impl Router {
     }
 }
 
+/// The repaired target's two identities: the runtime state key and the
+/// learned lane the lossy tally and the WARN's `lane` field key on.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RepairTarget<'a> {
+    pub(super) state_key: &'a str,
+    pub(super) lane: Option<&'a StateKey>,
+}
+
 /// Which of a request's repair records a walk settles: the position the
 /// recorder pushed it at. Records are only ever appended, so a handle stays
 /// valid for the whole request.
@@ -2260,6 +2273,7 @@ pub(super) fn emit_field_repair(meta: &DispatchMeta) {
         tracing::warn!(
             action = record.action,
             state_key = %sanitize_for_log(&record.state_key),
+            lane = %sanitize_for_log(&record.lane),
             field_path = record.field_path,
             reason = record.reason,
             repair_attempted = record.repair_attempted,

@@ -3,10 +3,15 @@
 //! field repair or a durably purged verdict stays observable at INFO without
 //! any response-body change.
 
+use std::collections::BTreeMap;
+
+use parking_lot::Mutex;
 use routectl_core::{EvidenceSource, FailurePhase, Verdict, sanitize_for_log};
+use serde::Serialize;
 
 use crate::field_capability::capability_key_is_catalog_scoped;
 use crate::learned_capability::LearnedRegistryEntry;
+use crate::state_key::StateKey;
 
 use super::Router;
 
@@ -72,7 +77,104 @@ pub struct FieldRepairCounters {
     pub parser_unlocalized: u64,
 }
 
+/// Most learned lanes the lossy-repair tally names individually. A lane first
+/// seen once this many are named is counted under [`LOSSY_REPAIR_OTHER_LANE`].
+///
+/// The lane set is operator configuration, but a reload that renames provider
+/// entries or upstreams mints new lanes for the life of the process, so the map
+/// needs a ceiling of its own. A code constant, never a config knob.
+pub(super) const LOSSY_REPAIR_LANE_CAP: usize = 256;
+
+/// The overflow bucket of the lossy-repair tally: lanes past
+/// [`LOSSY_REPAIR_LANE_CAP`], and a target with no learned lane. Cannot collide
+/// with a real lane, every serialized one of which carries the `#` separator.
+pub(super) const LOSSY_REPAIR_OTHER_LANE: &str = "other";
+
+/// The process-lifetime lossy field-repair count, in total and per learned lane.
+///
+/// Total and map move under ONE lock, so a quiescent read always has the
+/// per-lane rows summing to the total.
+#[derive(Debug, Default)]
+pub(super) struct LossyRepairTally {
+    inner: Mutex<LossyRepairCounts>,
+}
+
+#[derive(Debug, Default)]
+struct LossyRepairCounts {
+    total: u64,
+    /// Keyed by the serialized lane, unsanitized: the raw form is injective,
+    /// a sanitized one is not. Sanitized when projected into rows.
+    by_lane: BTreeMap<String, u64>,
+    other: u64,
+}
+
+impl LossyRepairTally {
+    /// Count one lossy repair on `lane`.
+    pub(super) fn record(&self, lane: Option<&StateKey>) {
+        let mut counts = self.inner.lock();
+        counts.total += 1;
+        let Some(lane) = lane else {
+            counts.other += 1;
+            return;
+        };
+        if let Some(count) = counts.by_lane.get_mut(lane.as_lane_key()) {
+            *count += 1;
+        } else if counts.by_lane.len() < LOSSY_REPAIR_LANE_CAP {
+            counts.by_lane.insert(lane.as_lane_key().to_string(), 1);
+        } else {
+            counts.other += 1;
+        }
+    }
+
+    pub(super) fn total(&self) -> u64 {
+        self.inner.lock().total
+    }
+
+    /// One row per named lane in lane order, then the overflow bucket when it
+    /// has counted anything.
+    fn rows(&self) -> Vec<LaneLossyRepairs> {
+        let counts = self.inner.lock();
+        let mut rows: Vec<LaneLossyRepairs> = counts
+            .by_lane
+            .iter()
+            .map(|(lane, &lossy)| LaneLossyRepairs {
+                lane: sanitize_for_log(lane),
+                lossy,
+            })
+            .collect();
+        if counts.other > 0 {
+            rows.push(LaneLossyRepairs {
+                lane: LOSSY_REPAIR_OTHER_LANE.to_string(),
+                lossy: counts.other,
+            });
+        }
+        rows
+    }
+}
+
+/// One learned lane's share of the lossy field-repair count.
+///
+/// `lane` is the `provider_entry#upstream` lane key, `sanitize_for_log`-SANITIZED
+/// at construction for the same reason as [`ActingFieldVerdict`]: its only
+/// destinations are operator surfaces. Or the overflow token `other`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct LaneLossyRepairs {
+    /// The sanitized learned lane key, or `other`.
+    pub lane: String,
+    /// Lossy repairs counted on the lane over the process lifetime.
+    pub lossy: u64,
+}
+
 impl Router {
+    /// The lossy field-repair count split by learned lane: at most
+    /// 256 named lanes plus the `other` bucket, whose
+    /// counts sum to [`FieldRepairCounters::repair_lossy`] when no repair lands
+    /// between the two reads.
+    pub fn lossy_repairs_by_lane(&self) -> Vec<LaneLossyRepairs> {
+        self.metrics.field_repair_lossy.rows()
+    }
+
     /// Read the live envelope-field repair counters, for the status/doctor
     /// surfaces to log at INFO. `&self` delegate over the private metrics
     /// counters, mirroring [`Router::learned_capability_snapshot`].

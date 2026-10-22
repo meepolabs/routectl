@@ -158,7 +158,10 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// precedence dispatch applies, so `layer` and `source` gain the values `pin`
 /// (an operator wire floor pins the flag, verdict `forced_supported`) and
 /// `representability` (a lane that cannot carry the flag, verdict
-/// `unrepresentable`, action `withhold`).
+/// `unrepresentable`, action `withhold`). The served `/status/doctor` panel
+/// gains `lossy_repairs_by_lane`: one `{lane, lossy}` row per learned lane a
+/// lossy field repair landed on (at most 256), plus an `other` row for lanes
+/// past that cap and targets with no learned lane.
 const SCHEMA_VERSION: u32 = 18;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a

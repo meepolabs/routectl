@@ -637,7 +637,11 @@ impl<'a> AttemptLearning<'a> {
             return false;
         };
         self.field_reject_status = status;
-        self.reactive_repair = Some(self.router.note_field_repair(meta, &target.state_key, plan));
+        self.reactive_repair = Some(self.router.note_field_repair(
+            meta,
+            target.repair_target(),
+            plan,
+        ));
         self.skip_replay_backoff = true;
         true
     }
@@ -678,7 +682,7 @@ impl<'a> AttemptLearning<'a> {
         if let Some(path) = repair.lossy_path {
             self.canary_lossy_repair = Some(self.router.note_field_repair_at(
                 meta,
-                &target.state_key,
+                target.repair_target(),
                 path,
                 FIELD_ACTION_LOSSY_DROP_REPAIR,
             ));

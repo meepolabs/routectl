@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use super::super::field_repair::{
     FIELD_ACTION_CEILING_FILL_REPAIR, FIELD_ACTION_CEILING_REPAIR, FIELD_ACTION_DROP_REPAIR,
     FIELD_ACTION_LOSSY_DROP_REPAIR, FIELD_ACTION_REWRITE_REPAIR, FIELD_REASON_UPSTREAM_REJECTION,
-    TEST_REWRITE_ACCEPTED, TEST_REWRITE_KWARG, TEST_REWRITE_PATH, TEST_UNSUPPORTED_PATH,
-    TEST_UNSUPPORTED_SENTINEL,
+    RepairTarget, TEST_REWRITE_ACCEPTED, TEST_REWRITE_KWARG, TEST_REWRITE_PATH,
+    TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL,
 };
 use super::super::rejection_parser::rejected_wire_path;
 use super::PendingWireRejection;
@@ -679,6 +679,7 @@ fn repair_of(field_path: &'static str, succeeded: bool) -> FieldRepair {
     FieldRepair {
         action: FIELD_ACTION_DROP_REPAIR,
         state_key: STATE_KEY.to_string(),
+        lane: "other".to_string(),
         field_path,
         reason: FIELD_REASON_UPSTREAM_REJECTION,
         repair_attempted: true,
@@ -738,7 +739,15 @@ fn each_recorded_repair_action_counts_lossy_exactly_when_its_finding_is_lossy() 
         let mut meta = DispatchMeta::for_alias(ALIAS);
         meta.wire_rejections.push(container_key_rejection());
 
-        let handle = router.note_field_repair_at(&mut meta, STATE_KEY, CONTAINER_KEY_PATH, action);
+        let handle = router.note_field_repair_at(
+            &mut meta,
+            RepairTarget {
+                state_key: STATE_KEY,
+                lane: None,
+            },
+            CONTAINER_KEY_PATH,
+            action,
+        );
         router.note_field_repair_succeeded(&mut meta, handle, false);
         router.emit_wire_rejections(&meta);
 

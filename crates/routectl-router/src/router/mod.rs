@@ -104,7 +104,7 @@ pub use field_repair::{
     TEST_REWRITE_PATH,
 };
 pub use field_verdict_observability::{
-    ActingFieldVerdict, FieldRepairCounters, acting_field_verdicts,
+    ActingFieldVerdict, FieldRepairCounters, LaneLossyRepairs, acting_field_verdicts,
 };
 pub use learned_lanes::{LearnedLaneProjection, ResolvedLearnedLane};
 pub use opening_lookup::OpeningLane;
@@ -700,8 +700,9 @@ struct RouterMetrics {
     /// whose rejection refused the VALUE sent in the field rather than the
     /// field: the drop served the attempt but changed what the client asked
     /// for, and learned nothing. A rising count says a lane is serving
-    /// requests on a weaker contract than the client set.
-    field_repair_lossy_total: AtomicU64,
+    /// requests on a weaker contract than the client set. Split by learned
+    /// lane under the same lock as the total.
+    field_repair_lossy: field_verdict_observability::LossyRepairTally,
     /// The subset of [`field_repair_attempted_total`](Self::field_repair_attempted_total)
     /// whose repaired re-dispatch actually succeeded. The pair is what makes
     /// the arm answerable: a rising attempted count with a flat succeeded
@@ -914,15 +915,15 @@ impl RouterMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Count one fired repair that answered a refused value.
-    fn incr_field_repair_lossy(&self) {
-        self.field_repair_lossy_total
-            .fetch_add(1, Ordering::Relaxed);
+    /// Count one fired lossy repair on `lane`, `None` for a target with no
+    /// learned lane.
+    fn incr_field_repair_lossy(&self, lane: Option<&crate::state_key::StateKey>) {
+        self.field_repair_lossy.record(lane);
     }
 
     /// Read the cumulative lossy-field-repair count.
     fn field_repair_lossy_total(&self) -> u64 {
-        self.field_repair_lossy_total.load(Ordering::Relaxed)
+        self.field_repair_lossy.total()
     }
 
     /// Count one fired repair whose re-dispatch succeeded.
@@ -1739,6 +1740,9 @@ pub struct FieldRepair {
     pub action: &'static str,
     /// Sanitized `[providers]` state key of the repaired target.
     pub state_key: String,
+    /// Sanitized learned lane (`provider_entry#upstream`) of the repaired
+    /// target, or `other` for a target with no learned lane.
+    pub lane: String,
     /// The closed-table qualified dotted path that was repaired.
     pub field_path: &'static str,
     /// Why the repair fired (closed token).
@@ -2110,6 +2114,14 @@ impl DispatchTarget {
         self.learned_lane
             .as_ref()
             .map(crate::state_key::StateKey::as_lane_key)
+    }
+
+    /// The identities a field repair on this target is recorded under.
+    const fn repair_target(&self) -> field_repair::RepairTarget<'_> {
+        field_repair::RepairTarget {
+            state_key: self.state_key.as_str(),
+            lane: self.learned_lane.as_ref(),
+        }
     }
 }
 

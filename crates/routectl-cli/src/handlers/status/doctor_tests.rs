@@ -372,6 +372,44 @@ async fn a_forced_capability_drop_increments_the_rendered_counter() {
     assert_eq!(after["capability_writer_unavailable"], 0);
 }
 
+/// The `/status/doctor` payload carries the lossy field-repair count per
+/// learned lane, read from the live router on every build.
+///
+/// Mutation check: build `lossy_repairs_by_lane` as an empty list -> red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_doctor_panel_carries_the_lossy_repairs_by_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+    )
+    .unwrap();
+    let state = state_with_config(Some(config_path.clone()));
+    let before = doctor_json(&state).await;
+    assert_eq!(
+        before["data"]["lossy_repairs_by_lane"],
+        serde_json::json!([]),
+        "control: no lossy repair yet"
+    );
+
+    let router = Router::new(Arc::new(Config::default()));
+    let seeded = routectl_router::seed_distinct_fidelity_counters_for_tests(&router);
+    let lane = router.lossy_repairs_by_lane()[0].lane.clone();
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = Arc::new(StatusState::from_app(
+        &app,
+        Some(config_path),
+        DaemonMeta::for_test(),
+    ));
+
+    let after = doctor_json(&state).await;
+    assert_eq!(
+        after["data"]["lossy_repairs_by_lane"],
+        serde_json::json!([{ "lane": lane, "lossy": seeded.repair_lossy }]),
+    );
+}
+
 async fn doctor_json(state: &Arc<StatusState>) -> Value {
     let resp = super::super::status_router()
         .with_state(Arc::clone(state))

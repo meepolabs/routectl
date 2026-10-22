@@ -28,8 +28,8 @@ use axum::extract::State;
 use serde::Serialize;
 
 use routectl_core::failure_class::LastOutcome;
-use routectl_router::DoctorReport;
 use routectl_router::router::RouteTargetStatus;
+use routectl_router::{DoctorReport, LaneLossyRepairs};
 
 use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
 use super::router_view::StatusRouterView;
@@ -42,7 +42,7 @@ use crate::commands::doctor::{GatherSources, build_report_no_network, gather_con
 /// [`DoctorReport`]'s own `schema_version` (18): the panel embeds that report
 /// verbatim, so it must not invent a parallel number. The panel's own
 /// `capability_writes` block joined at 13 alongside the report's matrix
-/// change.
+/// change, and its `lossy_repairs_by_lane` list at 18.
 pub const DOCTOR_SCHEMA_VERSION: u32 = 18;
 
 /// The no-network doctor report plus the circuit-derived reachability summary
@@ -57,6 +57,9 @@ pub(super) struct DoctorPanel {
     /// The daemon's capability-persistence failure counters, read once per
     /// build from the writer's own shared counters.
     capability_writes: CapabilityWriteCounters,
+    /// The process-lifetime lossy field-repair count per learned lane: at
+    /// most 256 named lanes plus the `other` overflow bucket.
+    lossy_repairs_by_lane: Vec<LaneLossyRepairs>,
 }
 
 /// One dispatch target's reachability, derived from its last settled outcome.
@@ -110,6 +113,7 @@ fn build_panel_data(
         report,
         reachability,
         capability_writes,
+        lossy_repairs_by_lane: view.lossy_repairs_by_lane(),
     }
 }
 

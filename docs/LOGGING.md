@@ -385,6 +385,7 @@ upstream body, and the session key are never carried:
 |---|---|
 | `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it), `field_rewrite_repair` when the field was rewritten to the one accepted value the rejection named (learned like a drop of a refused field, and counted lossy: the served value is not the client's), `field_ceiling_repair` when a client's token limit was lowered to the ceiling the rejection named, `field_ceiling_fill_repair` when the lowered limit was the one routectl filled in for a client that sent none (lossless: the client asked for no particular limit). Both ceiling repairs learn the named ceiling |
 | `state_key` | Sanitized `[providers]` state key of the repaired target |
+| `lane` | Sanitized learned lane (`provider_entry#upstream`) of the repaired target, the key the per-lane lossy map below counts on; `other` for a target with no learned lane |
 | `field_path` | The closed-table qualified dotted path that was repaired |
 | `reason` | Why the repair fired (`upstream_field_rejection`) |
 | `repair_attempted` | The repair arm fired |
@@ -433,6 +434,16 @@ does not take, and a `field_ceiling_fill_repair` of the limit routectl
 filled in, are not lossy. The same rule decides the `repaired_lossy`
 outcome on a wire-check rejection finding, so the counter and the
 findings always agree.
+
+The same count is also kept per learned lane (`provider_entry#upstream`,
+the `lane` field on the WARN above), surfaced on the INFO snapshot below as
+`rc_field_repair_lossy_by_lane` and on the `/status/doctor` panel as
+`lossy_repairs_by_lane`. The map names at most 256 lanes; a lane first seen
+after that, and a target with no learned lane, count under the overflow
+token `other`, which no real lane can equal because every lane key carries
+`#`. Total and map move under one lock, so the rows sum to
+`rc_field_repair_lossy_total`. There is no `field_path` split: the WARN
+already names the path.
 
 Only the lossy drop never commits a verdict, so the same rejection is
 repaired again on every request that carries the value; a lossy count
@@ -699,6 +710,9 @@ consume the slots real traffic needs.
 |---|---|
 | `rc_field_repair_attempted_total` | Same counter as the repair WARN section above |
 | `rc_field_repair_lossy_total` | Same counter as the repair WARN section above: the subset of attempted repairs whose repaired request carries something other than what the client sent (a value-refused drop, a rewrite, or a lowered client token limit), by the same rule as the `repaired_lossy` wire-check outcome. Rising with the attempted count while `rc_field_verdicts_learned_total` stays flat is a lane refusing a value, not a fault |
+| `rc_field_repair_lossy_lanes_total` | Count of lanes the lossy map HAS, before the render ceiling: at most 256 named lanes plus `other` when it has counted anything |
+| `rc_field_repair_lossy_lanes_omitted` | Lane rows the render ceiling dropped; non-zero says the map field is a SUBSET |
+| `rc_field_repair_lossy_by_lane` | The lossy map rows that fit, one `{ lane, lossy }` per lane in lane-key order then `other`: `lane` is the sanitized learned lane or the overflow token `other`, `lossy` its share of `rc_field_repair_lossy_total`. Capped at the same 32-row code constant as the verdict rows |
 | `rc_field_repair_succeeded_total` | Same counter as the repair WARN section above |
 | `rc_field_verdicts_learned_total` | Same counter as the repair WARN section above |
 | `rc_field_outstanding_unconfirmed_total` | CURRENT: requests riding on a verdict no canary has re-confirmed yet, summed over every resident identity. Rises and falls -- exposure that MIGHT later be disproved |
@@ -2168,7 +2182,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::router` | `rejecting invalid alias glob pattern; entry ignored`, `refusing resolved model: its runtime state key is ambiguous` (boot / reload) | Fix the `[aliases]` glob, or rename the model or pool member so its state key is unique. |
 | WARN | `routectl_router::router` | `invalidation` event (reload) | Catalog-scoped learned capabilities are evicted: expect re-learning. No action unless the catalog or overlay change was unintended. |
 | WARN | `routectl_router::router::count_tokens` | `alias chain has no count_tokens-capable provider` | Add a token-count-capable provider to the alias, or expect 501s. |
-| WARN | `routectl_router::router::{field_preflight,field_repair}` | `envelope_field_preflight` (acted), `envelope_field_repaired` (once per repair) | A learned verdict rewrote a client request, or an upstream rejected a field that was then dropped: review `field_path` and provenance, and purge the verdict if it is wrong. |
+| WARN | `routectl_router::router::{field_preflight,field_repair}` | `envelope_field_preflight` (acted), `envelope_field_repaired` (once per repair) | A learned verdict rewrote a client request, or an upstream rejected a field that was then dropped: review `field_path`, `lane` and provenance, and purge the verdict if it is wrong. |
 | WARN | `routectl_router::router::prefix_rewrite` | `cache_prefix_rewritten_in_epoch` (once per process) | A client rewrote its cached prefix mid-session, so later turns pay full price: investigate the client. |
 | WARN | `routectl_router::router::{probe_lifecycle,probe_payload_capture}` | `probe_activation_refused`, `probe_payload_retention_refused` (once per router incarnation) | The probe queue is full (check `queued` / `in_flight` / `backing_off` for a stuck upstream), or a client's beta context breached retention bounds (review `payload_refusals_total`). |
 | WARN | `routectl_router::router::overlays` | `ignoring auth-reserved header from [models.X] header_extras` | Remove the header from `[models.X] header_extras`; put credentials in `api_key_ref` / `auth_kind`. |

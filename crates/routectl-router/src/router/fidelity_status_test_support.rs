@@ -21,6 +21,10 @@ use super::{CanaryPosture, FieldVerdictStatus, PreflightBlockedReason};
 use crate::router::Router;
 use crate::router::field_verdict_observability::FieldRepairCounters;
 
+/// Provider entry of the lane the distinct-counter seed records its lossy repairs
+/// and its canary exposure on.
+const SEEDED_LANE_PROVIDER: &str = "seeded";
+
 /// A [`FieldVerdictStatus`]'s fields, as a constructable value.
 ///
 /// EXISTS FOR CROSS-CRATE TESTS, and the shape is deliberate on both counts.
@@ -122,8 +126,10 @@ pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepair
     for _ in 0..11 {
         router.metrics.incr_field_repair_succeeded();
     }
+    let seeded_lane = crate::state_key::StateKey::new(SEEDED_LANE_PROVIDER, "seeded-upstream")
+        .expect("a separator-free provider entry mints a lane");
     for _ in 0..13 {
-        router.metrics.incr_field_repair_lossy();
+        router.metrics.incr_field_repair_lossy(Some(&seeded_lane));
     }
     for _ in 0..5 {
         router.metrics.incr_field_verdicts_learned();
@@ -139,7 +145,7 @@ pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepair
     // values, since reporting either as the other is the inversion an operator
     // cannot detect.
     let key = FieldVerdictKey::from_capability_key(
-        crate::state_key::StateKey::new("seeded", "seeded-upstream")
+        crate::state_key::StateKey::new(SEEDED_LANE_PROVIDER, "seeded-upstream")
             .expect("a separator-free provider entry mints a lane"),
         crate::field_capability::field_capability_key("thinking.enabled.display")
             .expect("the grounded path is well-formed"),

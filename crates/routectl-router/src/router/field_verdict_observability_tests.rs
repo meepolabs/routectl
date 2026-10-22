@@ -336,3 +336,197 @@ fn field_repair_counters_reports_the_preflight_and_parser_halves_separately() {
         "and the parser half counts rejections no field path was localized from",
     );
 }
+
+// ---------------------------------------------------------------------------
+// The per-lane lossy-repair tally
+// ---------------------------------------------------------------------------
+
+/// Record one lossy repair on `lane` through the shared recorder, the way a
+/// dispatch walk does.
+fn record_lossy(router: &Router, lane: Option<&crate::state_key::StateKey>) -> DispatchMeta {
+    let mut meta = DispatchMeta::for_alias("a");
+    router.note_field_repair_at(
+        &mut meta,
+        super::field_repair::RepairTarget {
+            state_key: "nickname",
+            lane,
+        },
+        THINKING_DISPLAY_PATH,
+        super::field_repair::FIELD_ACTION_LOSSY_DROP_REPAIR,
+    );
+    meta
+}
+
+fn lane(provider_entry: &str) -> crate::state_key::StateKey {
+    crate::state_key::StateKey::fixture(provider_entry)
+}
+
+/// `(lane, lossy)` pairs of the router's per-lane rows.
+fn lane_rows(router: &Router) -> Vec<(String, u64)> {
+    router
+        .lossy_repairs_by_lane()
+        .into_iter()
+        .map(|row| (row.lane, row.lossy))
+        .collect()
+}
+
+fn assert_rows_sum_to_total(name: &str, router: &Router) {
+    let sum: u64 = router
+        .lossy_repairs_by_lane()
+        .iter()
+        .map(|row| row.lossy)
+        .sum();
+    assert_eq!(
+        sum,
+        router.field_repair_counters().repair_lossy,
+        "{name}: the per-lane rows sum to the lossy total",
+    );
+}
+
+/// Each lossy repair lands on the learned lane of the target it repaired, and
+/// a lane-less target lands in the overflow bucket.
+///
+/// Mutation checks: key the tally by a constant lane -> red on `two lanes`;
+/// count a lane-less repair on no row -> red on `no learned lane`.
+#[test]
+fn lossy_repairs_count_on_the_lane_they_repaired() {
+    type Row<'a> = (&'a str, Vec<Option<&'a str>>, Vec<(&'a str, u64)>);
+    let rows: [Row<'_>; 3] = [
+        (
+            "two lanes",
+            vec![Some("alpha"), Some("beta"), Some("alpha")],
+            vec![("alpha#fixture-upstream", 2), ("beta#fixture-upstream", 1)],
+        ),
+        ("no learned lane", vec![None], vec![("other", 1)]),
+        (
+            "a lane beside a lane-less target",
+            vec![Some("alpha"), None],
+            vec![("alpha#fixture-upstream", 1), ("other", 1)],
+        ),
+    ];
+    for (name, repairs, expected) in rows {
+        let router = bare_router();
+        for provider_entry in repairs {
+            let lane = provider_entry.map(lane);
+            record_lossy(&router, lane.as_ref());
+        }
+
+        let expected: Vec<(String, u64)> = expected
+            .into_iter()
+            .map(|(lane, lossy)| (lane.to_string(), lossy))
+            .collect();
+        assert_eq!(lane_rows(&router), expected, "{name}");
+        assert_rows_sum_to_total(name, &router);
+    }
+}
+
+/// The tally names at most 256 lanes: the 257th distinct lane counts under
+/// `other`, while a lane already named keeps counting on its own row.
+///
+/// Mutation checks: drop the cap check in `LossyRepairTally::record` -> red
+/// (257 named rows, no `other`); route a named lane to `other` once the cap is
+/// reached -> red on the first lane's count.
+#[test]
+fn the_lane_past_the_cap_counts_under_other() {
+    let router = bare_router();
+    let lanes: Vec<_> = (0..=super::field_verdict_observability::LOSSY_REPAIR_LANE_CAP)
+        .map(|n| lane(&format!("lane{n:03}")))
+        .collect();
+    for lane in &lanes {
+        record_lossy(&router, Some(lane));
+    }
+    record_lossy(&router, Some(&lanes[0]));
+
+    let rows = lane_rows(&router);
+    assert_eq!(
+        rows.len(),
+        super::field_verdict_observability::LOSSY_REPAIR_LANE_CAP + 1,
+        "256 named lanes plus the overflow bucket",
+    );
+    assert_eq!(
+        rows.last(),
+        Some(&("other".to_string(), 1)),
+        "the 257th distinct lane lands in other",
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|(name, _)| name == "lane256#fixture-upstream"),
+        "and is not named",
+    );
+    assert_eq!(
+        rows[0],
+        ("lane000#fixture-upstream".to_string(), 2),
+        "a lane named before the cap keeps counting on its own row",
+    );
+    assert_eq!(router.field_repair_counters().repair_lossy, 258);
+    assert_rows_sum_to_total("past the cap", &router);
+}
+
+/// A lossless repair moves no lane row: the map counts exactly what the total
+/// counts.
+#[test]
+fn a_lossless_repair_adds_no_lane_row() {
+    let router = bare_router();
+    let lossless = lane("alpha");
+    let mut meta = DispatchMeta::for_alias("a");
+    router.note_field_repair_at(
+        &mut meta,
+        super::field_repair::RepairTarget {
+            state_key: "nickname",
+            lane: Some(&lossless),
+        },
+        THINKING_DISPLAY_PATH,
+        super::field_repair::FIELD_ACTION_DROP_REPAIR,
+    );
+
+    assert!(router.lossy_repairs_by_lane().is_empty());
+    assert_eq!(
+        router.field_repair_counters().repair_attempted,
+        1,
+        "premise"
+    );
+}
+
+/// A lane key is sanitized on the way into a row and the WARN, never logged raw.
+#[test]
+fn a_lane_key_is_sanitized_into_its_row_and_its_warn() {
+    let router = bare_router();
+    let raw = crate::state_key::StateKey::new("alpha", "up\nstream").expect("lane mints");
+    let meta = record_lossy(&router, Some(&raw));
+
+    let events = routectl_testkit::capture_events(|| super::field_repair::emit_field_repair(&meta));
+
+    let rows = lane_rows(&router);
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].0.contains('\n'), "row lane is sanitized: {rows:?}");
+    assert_eq!(rows[0].0, raw.for_log());
+    assert_eq!(events[0].field("lane"), Some(raw.for_log().as_str()));
+}
+
+/// Every repair WARN names the learned lane of the target it repaired, or
+/// `other` for a lane-less target.
+///
+/// Mutation check: drop `lane` from `emit_field_repair` -> red.
+#[test]
+fn every_repair_warn_carries_the_repaired_lane() {
+    let rows: [(&str, Option<&str>, &str); 2] = [
+        ("a learned lane", Some("alpha"), "alpha#fixture-upstream"),
+        ("no learned lane", None, "other"),
+    ];
+    for (name, provider_entry, expected) in rows {
+        let router = bare_router();
+        let lane = provider_entry.map(lane);
+        let meta = record_lossy(&router, lane.as_ref());
+
+        let events =
+            routectl_testkit::capture_events(|| super::field_repair::emit_field_repair(&meta));
+
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN && e.message == "envelope_field_repaired")
+            .collect();
+        assert_eq!(warns.len(), 1, "{name}: one WARN per repair");
+        assert_eq!(warns[0].field("lane"), Some(expected), "{name}");
+    }
+}

@@ -83,7 +83,7 @@ pub(crate) struct FidelityEvent {
 #[cfg(test)]
 type EventObserver = std::sync::Mutex<Option<tokio::sync::oneshot::Sender<FidelityEvent>>>;
 
-use super::fidelity_log::{Bounded, RenderedVerdict, rendered_verdicts};
+use super::fidelity_log::{Bounded, RenderedVerdict, rendered_lossy_lanes, rendered_verdicts};
 use super::router_view::StatusRouterView;
 
 /// Message of the snapshot line. Stable and greppable, and named so a test can
@@ -233,7 +233,8 @@ fn emit_if_admitted(
     now: Instant,
 ) {
     let verdicts = rendered_verdicts(&snapshot.verdicts);
-    let fingerprint = line_fingerprint(snapshot, &verdicts, writer_degraded);
+    let lossy_lanes = rendered_lossy_lanes(&snapshot.lossy_by_lane);
+    let fingerprint = line_fingerprint(snapshot, &verdicts, &lossy_lanes, writer_degraded);
     if !gate.admit(fingerprint, now) {
         return;
     }
@@ -251,6 +252,9 @@ fn emit_if_admitted(
     tracing::info!(
         rc_field_repair_attempted_total = snapshot.counters.repair_attempted,
         rc_field_repair_lossy_total = snapshot.counters.repair_lossy,
+        rc_field_repair_lossy_lanes_total = lossy_lanes.total,
+        rc_field_repair_lossy_lanes_omitted = lossy_lanes.omitted,
+        rc_field_repair_lossy_by_lane = ?lossy_lanes.rows,
         rc_field_repair_succeeded_total = snapshot.counters.repair_succeeded,
         rc_field_verdicts_learned_total = snapshot.counters.verdicts_learned,
         rc_field_outstanding_unconfirmed_total = snapshot.counters.outstanding_unconfirmed,
@@ -334,6 +338,7 @@ impl FidelityGate {
 fn line_fingerprint(
     snapshot: &FidelitySnapshot,
     verdicts: &Bounded<RenderedVerdict>,
+    lossy_lanes: &Bounded<routectl_router::LaneLossyRepairs>,
     writer_degraded: bool,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -357,6 +362,8 @@ fn line_fingerprint(
         acting_omitted(snapshot),
         verdicts.total,
         verdicts.omitted,
+        lossy_lanes.total,
+        lossy_lanes.omitted,
         snapshot.probes.queued,
         snapshot.probes.in_flight,
         snapshot.probes.backing_off,
@@ -367,6 +374,7 @@ fn line_fingerprint(
     probe_settlement_token(&snapshot.probes).hash(&mut hasher);
     hash_debug(&mut hasher, bounded_acting(snapshot));
     hash_debug(&mut hasher, &verdicts.rows);
+    hash_debug(&mut hasher, &lossy_lanes.rows);
     hasher.finish()
 }
 

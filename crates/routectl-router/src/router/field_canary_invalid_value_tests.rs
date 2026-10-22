@@ -409,9 +409,11 @@ fn install_two_repair_seats(roles: &[TwoRepairRole]) -> (Router, Vec<Arc<Observe
 ///
 /// Mutation checks: let the recorder replace the request's previous record
 /// instead of appending -> red (one record, the canary's outcome lost); emit
-/// only the first record -> red (one WARN). Settling by handle rather than by
-/// recency is pinned by `a_success_settles_each_repair_on_its_own_record`:
-/// here the only success settles the latest record either way.
+/// only the first record -> red (one WARN); record either repair under a
+/// target's lane other than its own `learned_lane` -> red on the `lane` fields
+/// and the per-lane lossy row. Settling by handle rather than by recency is
+/// pinned by `a_success_settles_each_repair_on_its_own_record`: here the only
+/// success settles the latest record either way.
 #[test]
 fn a_canary_lossy_repair_and_a_fallback_repair_each_keep_their_record() {
     let (router, observed) =
@@ -492,6 +494,27 @@ fn a_canary_lossy_repair_and_a_fallback_repair_each_keep_their_record() {
     assert_eq!(counters.repair_lossy, 1);
     assert_eq!(counters.repair_succeeded, 1);
     assert_eq!(counters.verdicts_learned, 1);
+    let canary_lane = crate::router::probe_test_support::seat_chain_lane("m0").for_log();
+    let fallback_lane = crate::router::probe_test_support::seat_chain_lane("m1").for_log();
+    assert_eq!(
+        router
+            .lossy_repairs_by_lane()
+            .into_iter()
+            .map(|row| (row.lane, row.lossy))
+            .collect::<Vec<_>>(),
+        vec![(canary_lane.clone(), 1)],
+        "the canary's lossy repair counts on the canary target's learned lane",
+    );
+    let warn_lanes: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.message == "envelope_field_repaired")
+        .map(|e| e.field("lane").map(str::to_string))
+        .collect();
+    assert_eq!(
+        warn_lanes,
+        vec![Some(canary_lane), Some(fallback_lane)],
+        "each WARN names the learned lane of the target it repaired",
+    );
 
     let warns: Vec<_> = events
         .iter()
