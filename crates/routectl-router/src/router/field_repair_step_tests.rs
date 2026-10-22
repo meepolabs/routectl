@@ -395,7 +395,10 @@ fn a_pending_step_on_one_thinking_type_row_refuses_the_other() {
 }
 
 /// A committed field stays repaired for the rest of the target, and the plan
-/// still reads as having applied a repair once nothing is pending.
+/// still reads as having applied a repair once nothing is pending. On a
+/// settling plan the verdict the commit persisted also refuses a fresh claim,
+/// so the non-settling plan, which claims nothing, is where the committed
+/// field's memory alone refuses the repair.
 ///
 /// Mutation check: drop the committed-identity read in `repaired_field` -> red
 /// (the committed ceiling clamps again and draws).
@@ -403,7 +406,7 @@ fn a_pending_step_on_one_thinking_type_row_refuses_the_other() {
 fn a_committed_field_is_never_repaired_again_and_the_plan_stays_applied() {
     let router = router();
     let mut req = three_field_req();
-    let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
+    let mut plan = plan(&router, &req, FieldSettlementMode::NonSettling);
     let mut budget = RepairBudget::per_request();
     assert!(!plan.has_applied(), "premise: nothing applied yet");
     assert!(apply_ceiling(&mut plan, &mut req, &mut budget, 2048).is_some());
