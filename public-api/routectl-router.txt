@@ -8206,11 +8206,11 @@ impl core::clone::Clone for routectl_router::Layer
 pub fn routectl_router::Layer::clone(&self) -> routectl_router::Layer
 impl core::cmp::Eq for routectl_router::Layer
 impl core::cmp::Ord for routectl_router::Layer
-pub fn routectl_router::Layer::cmp(&self, &routectl_router::Layer) -> core::cmp::Ordering
+pub fn routectl_router::Layer::cmp(&self, &Self) -> core::cmp::Ordering
 impl core::cmp::PartialEq for routectl_router::Layer
 pub fn routectl_router::Layer::eq(&self, &routectl_router::Layer) -> bool
 impl core::cmp::PartialOrd for routectl_router::Layer
-pub fn routectl_router::Layer::partial_cmp(&self, &routectl_router::Layer) -> core::option::Option<core::cmp::Ordering>
+pub fn routectl_router::Layer::partial_cmp(&self, &Self) -> core::option::Option<core::cmp::Ordering>
 impl core::fmt::Debug for routectl_router::Layer
 pub fn routectl_router::Layer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for routectl_router::Layer
