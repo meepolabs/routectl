@@ -547,7 +547,7 @@ impl<'a> FieldRepairPlan<'a> {
         // below follows it. Splitting the read from the draw is what lets the
         // order be "check, mutate, then charge" without a charge that a failed
         // mutation would have to unwind.
-        if !budget.can_draw() {
+        if !budget.check_or_mark_refusal() {
             return None;
         }
         // Claimed before the mutation: a field whose claim a sibling request
@@ -588,13 +588,13 @@ impl<'a> FieldRepairPlan<'a> {
         // body this call already changed: the caller would leave the arm without
         // re-dispatching, and the mutated attempt would sit in a walk that
         // believes it never repaired -- a silently altered request, which is
-        // strictly worse than either repairing or refusing. `can_draw` above is
+        // strictly worse than either repairing or refusing. `check_or_mark_refusal` above is
         // what makes the refusal impossible, so the invariant is asserted rather
         // than branched on, and NO path below the mutation returns `None`.
         let charged = budget.draw();
         debug_assert!(
             charged,
-            "can_draw held before the mutation, so the draw after it cannot fail",
+            "check_or_mark_refusal held before the mutation, so the draw after it cannot fail",
         );
         // A clamped fill is still the egress's declared default; a second
         // declaration at the same pointer would read as a conflict to the next

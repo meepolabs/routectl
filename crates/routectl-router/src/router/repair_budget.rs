@@ -41,10 +41,13 @@ pub(super) const REPAIRS_PER_REQUEST: u8 = 5;
 /// helpers rather than re-created there: a fresh budget per seat is
 /// exactly the per-target reset this type exists to remove.
 ///
-/// It also remembers whether a repair arm was REFUSED for want of allowance
-/// since the walk last asked ([`Self::take_refusal`]): the refusal happens
-/// inside whichever arm proposed the repair, and the walk counts it once per
-/// rejection however many arms were refused.
+/// It also carries a refusal mark: set whenever a repair arm is refused for
+/// want of allowance, by [`Self::draw`] or [`Self::check_or_mark_refusal`].
+/// The refusal happens inside whichever arm proposed the repair, but the walk
+/// counts it once per rejection however many arms were refused, so the mark
+/// is a per-rejection window: the walk clears it with [`Self::take_refusal`]
+/// when a rejection enters the learner, and takes it once when the learner
+/// has decided. Nothing else reads or clears it.
 #[derive(Debug)]
 pub(super) struct RepairBudget {
     remaining: u8,
@@ -60,7 +63,8 @@ impl RepairBudget {
         }
     }
 
-    /// Whether an allowance remains, WITHOUT spending it.
+    /// Whether an allowance remains, WITHOUT spending it, marking a refusal
+    /// when none does.
     ///
     /// Exists so a repair arm can order its steps as "check, mutate, then
     /// charge": a caller that must not charge for a mutation it failed to make
@@ -68,10 +72,10 @@ impl RepairBudget {
     /// is a charge for a repair the wire never saw. Pairing this read with a
     /// later draw keeps the check cheap and the charge truthful.
     ///
-    /// Spends nothing, but a `false` answer is recorded as a refusal: only a
-    /// repair arm whose own conditions already hold asks, so an empty
+    /// Spends nothing, but a `false` answer sets the refusal mark: call it
+    /// only from a repair arm whose own conditions already hold, so an empty
     /// allowance here is a repair the request could not pay for.
-    pub(super) const fn can_draw(&mut self) -> bool {
+    pub(super) const fn check_or_mark_refusal(&mut self) -> bool {
         if self.remaining == 0 {
             self.refused = true;
             return false;

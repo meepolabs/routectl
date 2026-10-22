@@ -1016,7 +1016,7 @@ impl Router {
         // Presence is re-read here rather than assumed from the restoration:
         // the request has been through a dispatch since, and a drop that
         // removes nothing must not be reported as a repair.
-        if !surface.present_in(attempt_req) || !budget.can_draw() {
+        if !surface.present_in(attempt_req) || !budget.check_or_mark_refusal() {
             return None;
         }
         if !surface.drop_from(attempt_req) {
@@ -1032,7 +1032,7 @@ impl Router {
         let charged = budget.draw();
         debug_assert!(
             charged,
-            "can_draw held before the mutation, so the draw after it cannot fail",
+            "check_or_mark_refusal held before the mutation, so the draw after it cannot fail",
         );
         super::dispatch::restamp_calibration_estimate(attempt_req, meta);
         Some(CanaryRepair {

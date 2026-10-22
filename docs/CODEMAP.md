@@ -2873,7 +2873,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   rejection names (refusing outright when it names none, and refusing a second
   call outright once one row has been repaired), re-check presence, CHECK the
   allowance
-  (`RepairBudget::can_draw`, a read), apply the row's transform as the
+  (`RepairBudget::check_or_mark_refusal`, a read that marks a refusal), apply the row's transform as the
   private `FieldEdit` the rejection's `RejectionValue` resolves it to (drop the
   row's carriers: both for `AnthropicThinkingDisplay`, since otherwise the
   egress re-derives it, and the one canonical field for a sampling row; rewrite it
@@ -3073,7 +3073,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Router::canary_repaired_retry(plan, attempt_req, meta, budget, named, err)`
   is the canary's same-field repair, all-or-nothing like the
   reactive `FieldRepairPlan::apply_named`, and it draws the request's shared
-  `RepairBudget` like every other repair (`can_draw` before the drop, `draw`
+  `RepairBudget` like every other repair (`check_or_mark_refusal` before the drop, `draw`
   after it). Its `named` is
   the field-row proposal the learning engine resolved from the NATIVE failure
   class, never the operator-remapped one, through the same `rejected_field`
