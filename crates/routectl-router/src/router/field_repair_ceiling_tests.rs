@@ -871,7 +871,9 @@ mod converse_ceiling {
         assert_eq!(attempt.max_tokens, Some(LOWER_LIMIT), "premise");
 
         let second = plan
-            .commit(400, Vec::new(), past_decay)
+            .commit_pending(&[], past_decay)
+            .pop()
+            .and_then(|step| step.learned)
             .expect("the repaired success commits");
 
         assert_eq!(

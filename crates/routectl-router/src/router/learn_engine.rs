@@ -320,8 +320,6 @@ pub(super) struct AttemptLearning<'a> {
     learned_probe_guard: LearnedProbeGuard,
     replay_repair: Option<ReplayRepairHandle>,
     replay_reject_status: u16,
-    reactive_repair: Option<FieldRepairHandle>,
-    field_reject_status: u16,
     /// The ONLY thing that separates a canary success that disproves the
     /// verdict from one that re-confirms it, so it is set exclusively by the
     /// canary's repair branch and never inferred from the request's shape.
@@ -364,8 +362,6 @@ impl<'a> AttemptLearning<'a> {
             learned_probe_guard,
             replay_repair: None,
             replay_reject_status: 0,
-            reactive_repair: None,
-            field_reject_status: 0,
             canary_repair_attempted: false,
             canary_reject_status: 0,
             canary_lossy_repair: None,
@@ -627,21 +623,20 @@ impl<'a> AttemptLearning<'a> {
         meta: &mut DispatchMeta,
         budget: &mut RepairBudget,
     ) -> bool {
-        if self.reactive_repair.is_some() {
-            return false;
-        }
         let Some(plan) = self.field_plan.as_mut() else {
             return false;
         };
-        let Some(status) = plan.apply_named(named, attempt_req, meta, budget, err) else {
+        if plan.has_pending() {
             return false;
-        };
-        self.field_reject_status = status;
-        self.reactive_repair = Some(self.router.note_field_repair(
-            meta,
-            target.repair_target(),
-            plan,
-        ));
+        }
+        if plan
+            .apply_named(named, attempt_req, meta, budget, err)
+            .is_none()
+        {
+            return false;
+        }
+        self.router
+            .note_field_repair(meta, target.repair_target(), plan);
         self.skip_replay_backoff = true;
         true
     }

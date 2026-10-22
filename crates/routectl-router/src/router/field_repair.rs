@@ -38,22 +38,19 @@
 use std::time::Instant;
 
 use routectl_core::Error;
-use routectl_core::capability::SignalTier;
 use routectl_core::failure_class::FailureClass;
-use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{ChatRequest, sanitize_for_log};
 
-use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey};
-use crate::field_verdict_value::{ValueSlot, VerdictValue};
+use crate::field_verdict::FieldVerdictKey;
+use crate::field_verdict_value::ValueSlot;
 use crate::state_key::StateKey;
 
-use super::edit_declare::{declare_field_edit, fidelity_dialect};
-use super::rejection_parser::{
-    NamedRejection, OPENAI_UNSUPPORTED_CODE, RejectionKind, RejectionValue, parse_rejection,
-};
-use super::repair_budget::RepairBudget;
+use super::edit_declare::fidelity_dialect;
+use super::rejection_parser::{NamedRejection, OPENAI_UNSUPPORTED_CODE, parse_rejection};
+#[cfg(test)]
+use super::rejection_parser::{RejectionKind, RejectionValue};
 
-use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
+use super::{DispatchMeta, DispatchTarget, Router};
 
 /// `anthropic-api`, as `ProviderEntry::kind_str` spells it: one of the kinds
 /// field repair admits ([`field_repair_admits_kind`]).
@@ -1531,437 +1528,13 @@ pub(super) enum FieldSettlementMode {
     NonSettling,
 }
 
-/// The admitted L0 repair for one attempt: EVERY closed-table row the attempt
-/// carries, each with the two-phase guard whose settlement the dispatch arm
-/// owes, plus which row (if any) the arm actually repaired.
-///
-/// One candidate per present row rather than only the first, because the
-/// rejection decides WHICH row is repaired and the upstream can name any of
-/// them: an admission holding only the first present row starves a rejection
-/// naming a later one -- the arm would find the plan's row unnamed, leave the
-/// rejection on its ordinary terminal path, and the repairable field would
-/// never be repaired on that lane. The one-repair-per-attempt ceiling is
-/// unchanged: exactly one candidate can be applied, and applying it RELEASES
-/// every other candidate's guard (see [`Self::apply_named`]).
-///
-/// Holding this is the PROVISIONAL phase -- nothing is persisted while it
-/// lives. The dispatch arm settles it exactly once: [`Self::commit`] when
-/// the repaired retry succeeded, [`Self::settle_success`] when the
-/// unrepaired attempt succeeded outright, and release-by-drop on every other
-/// exit (a repeat rejection, an unrelated error, a fallback hop, a client
-/// disconnect), which learns nothing and strands no slot.
-pub(super) struct FieldRepairPlan<'a> {
-    /// The table the candidates were admitted from, and so the only rows a
-    /// rejection may name for this plan.
-    #[cfg(test)]
-    table: FieldRepairTable,
-    candidates: Vec<FieldRepairCandidate<'a>>,
-    /// Index into `candidates` of the row a successful [`Self::apply_named`] dropped.
-    /// `None` until one succeeds, which is what makes the one-repair ceiling a
-    /// property of the plan rather than of a caller's flag alone.
-    repaired: Option<usize>,
-    /// What the rejection that drove the repair refused. A refused FIELD may
-    /// commit; a refused value commits only through a rewrite.
-    repaired_kind: Option<RejectionKind>,
-    /// The edit a successful [`Self::apply_named`] made, or `None` until one
-    /// succeeds. A rewrite commits whatever the rejection refused: its value
-    /// is the upstream's own named answer, not a guess.
-    applied: Option<FieldEdit>,
-    /// How confidently that rejection was attributed to the row. The commit
-    /// records it, so an inferred attribution persists without acting until an
-    /// independent request corroborates it.
-    repaired_tier: Option<SignalTier>,
-    /// Whether the applied ceiling lowered routectl's fill rather than a
-    /// client value.
-    fill_clamped: bool,
-    /// The wire dialect the attempt shares with its client, for declaring the
-    /// repair's edit; `None` on a translation lane.
-    wire: Option<IngressDialect>,
-}
+#[path = "field_repair_step.rs"]
+mod field_repair_step;
 
-/// One admitted row: the closed-table path, surface and transform, plus the
-/// guard whose settlement this row owes.
-struct FieldRepairCandidate<'a> {
-    path: &'static str,
-    surface: FieldSurface,
-    transform: FieldTransform,
-    /// `Some` only for a SETTLING walk. `None` is the non-settling plan: it
-    /// repairs for the answer its caller returns and can settle nothing, so it
-    /// holds no single-flight claim (leaving it available to a sibling request
-    /// that CAN settle) and consults no resident verdict. Both settlements are
-    /// no-ops on it -- the type carries the capability rather than every
-    /// settlement site re-checking a mode flag.
-    guard: Option<FieldRepairGuard<'a>>,
-}
-
-/// The concrete edit one repair makes: a row's transform resolved against the
-/// rejection that named it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FieldEdit {
-    Drop,
-    Rewrite(&'static str),
-    Ceiling(u32),
-}
-
-impl FieldEdit {
-    /// The edit `transform` makes for `named`, or `None` when it makes none:
-    /// a rewrite whose rejection named no shape, and a ceiling whose rejection
-    /// named no ceiling.
-    const fn for_rejection(transform: FieldTransform, named: &NamedRejection) -> Option<Self> {
-        match (transform, named.value) {
-            (FieldTransform::Drop, _) => Some(Self::Drop),
-            (FieldTransform::Rewrite { .. }, Some(RejectionValue::Shape(value))) => {
-                Some(Self::Rewrite(value))
-            }
-            (FieldTransform::Ceiling, Some(RejectionValue::Ceiling(ceiling))) => {
-                Some(Self::Ceiling(ceiling))
-            }
-            (FieldTransform::Rewrite { .. }, Some(RejectionValue::Ceiling(_)) | None)
-            | (FieldTransform::Ceiling, Some(RejectionValue::Shape(_)) | None) => None,
-        }
-    }
-
-    fn apply_to(self, surface: FieldSurface, req: &mut ChatRequest) -> bool {
-        match self {
-            Self::Drop => surface.drop_from(req),
-            Self::Rewrite(value) => surface.rewrite_in(req, value),
-            Self::Ceiling(ceiling) => surface.clamp_to(req, ceiling),
-        }
-    }
-
-    const fn declared_kind(self) -> EditKind {
-        match self {
-            Self::Drop => EditKind::Remove,
-            Self::Rewrite(_) | Self::Ceiling(_) => EditKind::Rewrite,
-        }
-    }
-
-    /// The value a verdict committed for this edit applies: none for a drop.
-    const fn verdict_value(self) -> Option<VerdictValue> {
-        match self {
-            Self::Drop => None,
-            Self::Rewrite(value) => Some(VerdictValue::Shape(value)),
-            Self::Ceiling(ceiling) => Some(VerdictValue::Ceiling(ceiling)),
-        }
-    }
-}
-
-impl FieldRepairPlan<'_> {
-    /// The closed-table path a successful [`Self::apply_named`] dropped, or `None`
-    /// when this plan has not repaired anything. A code-authored literal,
-    /// never upstream text, so it is safe in an operator-facing field.
-    pub(super) fn repaired_path(&self) -> Option<&'static str> {
-        self.repaired.map(|idx| self.candidates[idx].path)
-    }
-
-    /// The value the applied repair wrote, or `None` for a drop.
-    fn written_value(&self) -> Option<VerdictValue> {
-        self.applied.and_then(FieldEdit::verdict_value)
-    }
-
-    /// The closed-set WARN action token for the repair this plan applied.
-    fn repair_action(&self) -> &'static str {
-        match self.applied {
-            Some(FieldEdit::Rewrite(_)) => FIELD_ACTION_REWRITE_REPAIR,
-            Some(FieldEdit::Ceiling(_)) if self.fill_clamped => FIELD_ACTION_CEILING_FILL_REPAIR,
-            Some(FieldEdit::Ceiling(_)) => FIELD_ACTION_CEILING_REPAIR,
-            Some(FieldEdit::Drop) | None
-                if self.repaired_kind == Some(RejectionKind::InvalidValue) =>
-            {
-                FIELD_ACTION_LOSSY_DROP_REPAIR
-            }
-            Some(FieldEdit::Drop) | None => FIELD_ACTION_DROP_REPAIR,
-        }
-    }
-
-    /// Whether the applied repair may commit a verdict once its retry succeeds.
-    fn repair_teaches(&self) -> bool {
-        self.written_value().is_some()
-            || self.repaired_kind == Some(RejectionKind::UnsupportedField)
-    }
-
-    /// Perform the repair for whichever admitted row `err` names: apply that
-    /// row's transform to the attempt request, re-stamp the calibration estimate,
-    /// CHARGE the shared per-request budget, and RELEASE every other
-    /// candidate's guard -- all or nothing.
-    ///
-    /// The rejection is matched against every admitted row rather than against
-    /// one chosen at admission time: the upstream names the field, so the row
-    /// it names is the row to repair. Matching is on the SURFACE (see
-    /// [`Router::rejection_names_field_surface`]).
-    ///
-    /// The budget draw lives here, inside the successful branch, rather than in
-    /// the caller's condition chain. The drop can legitimately remove nothing
-    /// (the request changed under the arm), and a draw in the condition would
-    /// then have charged a request that did not repair -- a charge nothing
-    /// observable can see, since the arm falls through to the ordinary error
-    /// path either way. Ordering the two the other way means the budget and
-    /// the mutation succeed or fail together.
-    ///
-    /// `Some(status)` -- repaired: the named row's field is gone, the estimate
-    /// describes the new payload, one repair was charged, and the caller must
-    /// re-dispatch and later settle this plan. `None` -- nothing happened: no
-    /// mutation, no charge, no guard released, and the caller must NOT mark the
-    /// attempt repaired or select the commit settlement.
-    #[cfg(test)]
-    pub(super) fn apply(
-        &mut self,
-        attempt_req: &mut ChatRequest,
-        meta: &mut DispatchMeta,
-        budget: &mut RepairBudget,
-        native_class: &FailureClass,
-        rejection: &Error,
-        provider_kind: &str,
-    ) -> Option<u16> {
-        let named = rejected_field(self.table, native_class, rejection, provider_kind)?;
-        self.apply_named(named, attempt_req, meta, budget, rejection)
-    }
-
-    /// Repair for a rejection already resolved to its closed-table row: the
-    /// admitted candidate whose SURFACE that row names.
-    pub(super) fn apply_named(
-        &mut self,
-        named: NamedRejection,
-        attempt_req: &mut ChatRequest,
-        meta: &mut DispatchMeta,
-        budget: &mut RepairBudget,
-        rejection: &Error,
-    ) -> Option<u16> {
-        // A plan that has already repaired must not repair again: the ceiling
-        // is one drop per attempt, and a second would mutate a body the arm
-        // already re-dispatched.
-        if self.repaired.is_some() {
-            return None;
-        }
-        // WHICH row: the one the upstream named. Refusing here is
-        // pre-mutation, so an unnamed rejection leaves the request and every
-        // guard exactly as the caller handed them over.
-        let idx = self
-            .candidates
-            .iter()
-            .position(|candidate| candidate.surface == named.row.surface)?;
-        let edit = FieldEdit::for_rejection(self.candidates[idx].transform, &named)?;
-        let status = self.apply_candidate(idx, edit, attempt_req, meta, budget, rejection)?;
-        self.repaired_kind = Some(named.kind);
-        self.repaired_tier = Some(named.tier);
-        self.applied = Some(edit);
-        Some(status)
-    }
-
-    /// The EFFECT half of [`Self::apply_named`], for the candidate at `idx`: the
-    /// presence re-check, the allowance check, the edit, the charge, the guard
-    /// releases, and the estimate re-stamp.
-    ///
-    /// Split from the rejection-to-candidate SELECTION above so the fail-closed
-    /// branch below is reachable in a release test build: the divergent surface
-    /// that manufactures the presence/drop disagreement reports itself present
-    /// unconditionally, so giving it a closed-table row would make every request
-    /// in a test build carry it. This is the entry point that test drives.
-    #[cfg_attr(not(test), allow(clippy::needless_pass_by_ref_mut))]
-    fn apply_candidate(
-        &mut self,
-        idx: usize,
-        edit: FieldEdit,
-        attempt_req: &mut ChatRequest,
-        meta: &mut DispatchMeta,
-        budget: &mut RepairBudget,
-        rejection: &Error,
-    ) -> Option<u16> {
-        let surface = self.candidates[idx].surface;
-        // Presence is re-read HERE rather than trusted from admission: the
-        // request has been through a dispatch since, and a drop that removes
-        // nothing must not consume the allowance.
-        if !surface.present_in(attempt_req) {
-            return None;
-        }
-        // Availability is CHECKED, not spent: an exhausted allowance must leave
-        // the request untouched, so this precedes the mutation, while the charge
-        // below follows it. Splitting the read from the draw is what lets the
-        // order be "check, mutate, then charge" without a charge that a failed
-        // mutation would have to unwind.
-        if !budget.can_draw() {
-            return None;
-        }
-        let fill_clamped =
-            matches!(edit, FieldEdit::Ceiling(_)) && surface.clamp_writes_fill(attempt_req);
-        if !edit.apply_to(surface, attempt_req) {
-            // FAIL CLOSED. A rewrite may refuse by design: the value is
-            // already carried, or the rewritten body failed its read-back. A
-            // ceiling may too: the request already meets the named limit. A
-            // drop cannot: `present_in` held immediately above and nothing
-            // between touches the request, so reaching here means the two have
-            // diverged -- a bug in this module. The debug assertion names it in
-            // development, but the RELEASE behavior must not depend on that
-            // assertion being compiled: absorbing the inconsistency silently
-            // would report a repair the wire never saw, charge the allowance for
-            // it, and let the caller select the commit settlement. So the
-            // release path returns None, having mutated nothing and charged
-            // nothing. This is the LAST point at which `None` is a correct
-            // answer: it is still pre-mutation, so refusing here leaves the
-            // request exactly as the caller handed it over.
-            debug_assert!(
-                edit != FieldEdit::Drop,
-                "a present surface must take a drop; presence and the drop have diverged",
-            );
-            return None;
-        }
-        // Charged UNCONDITIONALLY now, and this is the one place that must not
-        // have a refusal branch. The field is already gone from `attempt_req`,
-        // so returning `None` here would report "no repair" for a request whose
-        // body this call already changed: the caller would leave the arm without
-        // re-dispatching, and the mutated attempt would sit in a walk that
-        // believes it never repaired -- a silently altered request, which is
-        // strictly worse than either repairing or refusing. `can_draw` above is
-        // what makes the refusal impossible, so the invariant is asserted rather
-        // than branched on, and NO path below the mutation returns `None`.
-        let charged = budget.draw();
-        debug_assert!(
-            charged,
-            "can_draw held before the mutation, so the draw after it cannot fail",
-        );
-        // A clamped fill is still the egress's declared default; a second
-        // declaration at the same pointer would read as a conflict to the next
-        // rejection there and keep it from the proposers.
-        if !fill_clamped {
-            declare_field_edit(
-                attempt_req,
-                self.wire,
-                EditSite::FieldRepair,
-                surface,
-                edit.declared_kind(),
-            );
-        }
-        self.fill_clamped = fill_clamped;
-        self.repaired = Some(idx);
-        // Every OTHER candidate's guard is released now rather than held to
-        // settlement. This attempt has spent its one repair on `idx`, so no
-        // outcome it reaches can settle another row: the arm's commit speaks
-        // for the repaired row alone. Releasing frees each unused
-        // single-flight slot for a sibling request that CAN settle that row,
-        // instead of pinning it for the rest of this walk.
-        for (other, candidate) in self.candidates.iter_mut().enumerate() {
-            if other != idx {
-                drop(candidate.guard.take());
-            }
-        }
-        super::dispatch::restamp_calibration_estimate(attempt_req, meta);
-        Some(
-            super::class_observe::upstream_facts(rejection)
-                .status
-                .unwrap_or(0),
-        )
-    }
-
-    /// A guardless plan over the divergent test surface: the shape that reaches
-    /// `apply`'s fail-closed branch. Test-only, and deliberately not
-    /// constructible any other way.
-    #[cfg(all(test, not(debug_assertions)))]
-    pub(super) fn divergent_for_tests() -> Self {
-        Self {
-            table: FieldRepairTable::default(),
-            candidates: vec![FieldRepairCandidate {
-                // Outside the closed table deliberately: the surface is not a
-                // row (see `FieldRepairTable`), and this path exists only so the
-                // candidate is well formed.
-                path: "divergent.surface.for.tests",
-                surface: FieldSurface::DivergentForTests,
-                transform: FieldTransform::Drop,
-                guard: None,
-            }],
-            repaired: None,
-            repaired_kind: None,
-            applied: None,
-            repaired_tier: None,
-            fill_clamped: false,
-            wire: None,
-        }
-    }
-
-    /// Drive [`Self::apply_candidate`] for this plan's only candidate, skipping
-    /// the rejection-to-candidate selection.
-    ///
-    /// Test-only, and the ONLY way the fail-closed branch is reachable: the
-    /// divergent surface has no closed-table row, so no rejection can select it.
-    /// The production effect path is called directly, so a mutation to the
-    /// refusal, the charge, or the mutation ordering is observable here.
-    #[cfg(all(test, not(debug_assertions)))]
-    pub(super) fn apply_sole_candidate_for_tests(
-        &mut self,
-        attempt_req: &mut ChatRequest,
-        meta: &mut DispatchMeta,
-        budget: &mut RepairBudget,
-        rejection: &Error,
-    ) -> Option<u16> {
-        assert_eq!(
-            self.candidates.len(),
-            1,
-            "the divergent fixture holds exactly one candidate",
-        );
-        self.apply_candidate(0, FieldEdit::Drop, attempt_req, meta, budget, rejection)
-    }
-
-    /// Phase two after a successful repaired retry: persist the REPAIRED row's
-    /// verdict and return the emission row for the capability-event sink, or
-    /// `None` for a non-settling plan (which persists nothing and emits
-    /// nothing) and for a plan that repaired nothing.
-    ///
-    /// Only the repaired row commits. The rejection named that row, and the
-    /// retry that succeeded is evidence about that row alone -- every other
-    /// candidate's guard was already released by [`Self::apply_named`].
-    ///
-    /// And only when the rejection refused the FIELD, the repair rewrote it to
-    /// the one accepted value the rejection named, or it lowered a token limit
-    /// to the ceiling the rejection named. A refused value repaired
-    /// by a DROP says the lane accepts the field, so a verdict dropping it
-    /// would strip every valid value from every later request on the lane;
-    /// such a plan releases its guard here and persists nothing.
-    ///
-    /// The commit carries the attribution tier of the rejection that drove the
-    /// repair: a self-identifying verdict acts at once, an inferred one persists
-    /// pending and acts only once a later request corroborates it. A rewrite
-    /// or ceiling commit also carries the value it wrote, so the persisted
-    /// verdict names what it rewrites or clamps to.
-    ///
-    /// `request_features` is taken BY VALUE: the guard stores it on the event
-    /// row, so a borrow here would only be cloned one frame deeper.
-    pub(super) fn commit(
-        mut self,
-        upstream_status: u16,
-        request_features: Vec<String>,
-        now: Instant,
-    ) -> Option<CapabilityLearnEvent> {
-        let idx = self.repaired?;
-        let tier = self.repaired_tier?;
-        if !self.repair_teaches() {
-            return None;
-        }
-        let value = self.written_value();
-        self.candidates[idx].guard.take()?.commit(
-            tier,
-            value,
-            upstream_status,
-            request_features,
-            now,
-        )
-    }
-
-    /// Phase two after the UNREPAIRED attempt succeeded: every carried field is
-    /// accepted, so drop any resident verdict for each admitted row and return
-    /// the cleared rows so the ledger records the clears and a warm rebuild
-    /// cannot resurrect them.
-    ///
-    /// One event per row that actually had a resident entry removed; empty for
-    /// an attempt whose rows had none, and for every non-settling plan. A
-    /// non-settling walk must NOT clear: the removal would be invisible to the
-    /// ledger, so the next warm rebuild would resurrect a verdict this process
-    /// had already dropped.
-    pub(super) fn settle_success(mut self) -> Vec<CapabilityClearedEvent> {
-        self.candidates
-            .iter_mut()
-            .filter_map(|candidate| candidate.guard.take()?.clear())
-            .collect()
-    }
-}
+#[cfg(test)]
+use field_repair_step::FieldEdit;
+pub(super) use field_repair_step::FieldRepairPlan;
+use field_repair_step::{FieldRepairCandidate, GuardAdmission};
 
 impl Router {
     /// Claim the envelope-field repair slot for EVERY closed-table field the
@@ -1980,10 +1553,9 @@ impl Router {
     /// Every present row is admitted, not only the first: the REJECTION decides
     /// which row is repaired, and the upstream can name any carried field. An
     /// admission holding only the first present row would leave a rejection
-    /// naming a later row unrepairable on that lane forever. The
-    /// one-repair-per-attempt ceiling is enforced by
-    /// [`FieldRepairPlan::apply_named`], which applies exactly one candidate and
-    /// releases every other candidate's guard.
+    /// naming a later row unrepairable on that lane forever. The first
+    /// [`FieldRepairPlan::apply_named`] releases every other candidate's guard;
+    /// a later repair claims its row again through the same admission.
     ///
     /// This is NOT a pre-flight rewrite: nothing here reads a resident verdict
     /// in order to modify the outgoing request. An acting verdict REFUSES the
@@ -2071,6 +1643,7 @@ impl Router {
         // from upstream text: every row whose surface this attempt actually
         // carries, in table source order.
         let table = self.field_repair_table();
+        let generation = self.registry_generation();
         let candidates: Vec<FieldRepairCandidate<'a>> = present_rows(table, attempt_req)
             .filter_map(|row| {
                 // A NON-SETTLING walk admits the row guardless: it repairs for
@@ -2080,43 +1653,33 @@ impl Router {
                 // unable to mint or clear -- the guard it would need does not
                 // exist on its candidate.
                 if mode == FieldSettlementMode::NonSettling {
-                    return Some(FieldRepairCandidate {
-                        path: row.path,
-                        surface: row.surface,
-                        transform: row.transform,
-                        guard: None,
-                    });
+                    return Some(FieldRepairCandidate::unsettled(row));
                 }
                 let key =
                     FieldVerdictKey::new(target.learned_lane.as_ref()?, row.path, provider_kind)?;
                 let guard = self.field_verdicts().admit_provisional(
                     &key,
                     &lane.base_url,
-                    self.registry_generation(),
+                    generation,
                     now,
                 )?;
-                Some(FieldRepairCandidate {
-                    path: row.path,
-                    surface: row.surface,
-                    transform: row.transform,
-                    guard: Some(guard),
-                })
+                Some(FieldRepairCandidate::admitted(row, key, guard))
             })
             .collect();
         if candidates.is_empty() {
             return None;
         }
-        Some(FieldRepairPlan {
-            #[cfg(test)]
+        let reclaim = (mode == FieldSettlementMode::Settling).then(|| GuardAdmission {
+            registry: self.field_verdicts(),
+            base_url: lane.base_url,
+            generation,
+        });
+        Some(FieldRepairPlan::admitted(
             table,
             candidates,
-            repaired: None,
-            repaired_kind: None,
-            applied: None,
-            repaired_tier: None,
-            fill_clamped: false,
-            wire: fidelity_dialect(target, attempt_req),
-        })
+            fidelity_dialect(target, attempt_req),
+            reclaim,
+        ))
     }
 
     /// What the rejection `err`, natively classified as `native_class`,
@@ -2181,18 +1744,20 @@ impl Router {
     /// the client set and the lane accepts, and an operator needs to tell that
     /// apart from a drop of a field the lane does not take at all.
     ///
-    /// Returns the handle the walk settles THIS record through, so a later
-    /// repair elsewhere in the walk cannot take its outcome.
+    /// The record's handle is stamped on the plan's latest step, which settles
+    /// THIS record, so a later repair elsewhere in the walk cannot take its
+    /// outcome.
     pub(super) fn note_field_repair(
         &self,
         meta: &mut DispatchMeta,
         target: RepairTarget<'_>,
-        plan: &FieldRepairPlan<'_>,
-    ) -> FieldRepairHandle {
-        let field_path = plan
-            .repaired_path()
-            .expect("a reported repair names the row it dropped");
-        self.note_field_repair_at(meta, target, field_path, plan.repair_action())
+        plan: &mut FieldRepairPlan<'_>,
+    ) {
+        let (field_path, action) = plan
+            .latest_record()
+            .expect("a reported repair names the row it repaired");
+        let handle = self.note_field_repair_at(meta, target, field_path, action);
+        plan.stamp_latest(handle);
     }
 
     /// Record a field repair by the path it repaired and its action token:
@@ -2402,9 +1967,10 @@ mod field_learner_disjointness_tests;
 #[cfg(test)]
 mod table_tests {
     use super::*;
+    use routectl_core::capability::SignalTier;
 
-    /// This module's own source, for the control-flow guard over `apply`.
-    const SOURCE: &str = include_str!("field_repair.rs");
+    /// The repair plan's source, for the control-flow guard over `apply`.
+    const SOURCE: &str = include_str!("field_repair_step.rs");
 
     /// The body of `FieldRepairPlan::apply_candidate` -- the EFFECT half of the
     /// repair, from its signature's opening brace to the closing brace at its

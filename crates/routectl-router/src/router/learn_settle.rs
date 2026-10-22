@@ -52,23 +52,26 @@ impl AttemptLearning<'_> {
     /// an UNREPAIRED success proves the field is accepted, so any resident
     /// verdict clears.
     pub(super) fn settle_field_success(&mut self, req: &ChatRequest, meta: &mut DispatchMeta) {
-        let Some(plan) = self.field_plan.take() else {
+        let Some(mut plan) = self.field_plan.take() else {
             return;
         };
-        if let Some(repair) = self.reactive_repair {
+        if plan.has_pending() {
             let features = super::super::field_repair::request_feature_keys(
                 self.router.field_repair_table(),
                 req,
             );
-            // The `learned` claim is derived from what the commit actually
-            // PERSISTED, never asserted alongside it: a non-settling plan
-            // commits nothing, and a summary that claimed otherwise would be a
-            // false persistence claim.
-            let learned = plan.commit(self.field_reject_status, features, Instant::now());
-            let persisted = learned.is_some();
-            meta.learned_capabilities.extend(learned);
-            self.router
-                .note_field_repair_succeeded(meta, repair, persisted);
+            // Each `learned` claim is derived from what that step's commit
+            // actually PERSISTED, never asserted alongside it: a non-settling
+            // plan commits nothing, and a summary that claimed otherwise would
+            // be a false persistence claim.
+            for step in plan.commit_pending(&features, Instant::now()) {
+                let persisted = step.learned.is_some();
+                meta.learned_capabilities.extend(step.learned);
+                if let Some(repair) = step.handle {
+                    self.router
+                        .note_field_repair_succeeded(meta, repair, persisted);
+                }
+            }
         } else {
             meta.cleared_capabilities.extend(plan.settle_success());
         }

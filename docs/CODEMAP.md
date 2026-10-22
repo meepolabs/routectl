@@ -2846,8 +2846,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Every present row is admitted rather than only the first, because the
   REJECTION decides which row is repaired and the upstream can name any carried
   field: an admission holding one row would leave a rejection naming a later row
-  unrepairable on that lane forever. The one-repair-per-attempt ceiling is
-  enforced by `apply` instead. Suppression sits
+  unrepairable on that lane forever. Suppression sits
   ABOVE the settlement-mode branch deliberately: the guard's own admission also
   refuses a local target, but only a SETTLING walk reaches that admission, so
   checking it there alone let a result-only walk mutate the body, spend the
@@ -2881,13 +2880,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   to the one accepted value the rejection named; or clamp the emitted limit to
   the named ceiling through `FieldSurface::clamp_to`, only when
   `clamp_lowers` says the ceiling is below the emitted limit), then DRAW,
-  RELEASE every other candidate's guard -- this
-  attempt has spent its one repair, so no outcome can settle another row, and
-  pinning those slots would starve a sibling request that CAN settle them --
+  RELEASE every other candidate's guard (only the first repair finds any;
+  pinning those slots would starve a sibling request that CAN settle them),
   re-stamp the estimate through
-  `dispatch::restamp_calibration_estimate`, and return the rejection status.
-  `repaired_path()` names the row that was repaired, which is what the arm's
-  WARN renders. The
+  `dispatch::restamp_calibration_estimate`, push a pending step, and return
+  the rejection status. The plan and its steps live in
+  `field_repair_step.rs`. The
   draw follows the mutation so a drop that removes nothing charges nothing, and
   every repaired-state flag is set only on the returned `Some`. A `drop_from`
   that unexpectedly removes nothing FAILS CLOSED -- returns `None`, having
@@ -2933,6 +2931,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   NOT one of those call sites: it stays on the bare `derive_feature_keys`
   catalog vocabulary alone, since a field verdict is never a
   feature-naming-template candidate
+- `src/router/field_repair_step.rs` -- child module of `field_repair.rs`:
+  `FieldRepairPlan` and its `pending: Vec<RepairStep>`, one step per applied
+  repair (row, edit, kind, tier, fill_clamped, repair handle, reject status,
+  guard). `apply_named` adds a step for a field no pending step repaired
+  (`FieldIdentity::of_row`; `rerepairs_same_field` is false for every row);
+  a later step re-claims a released row's guard through `admit_provisional`
+  with the admission inputs the plan keeps (`GuardAdmission`), and a
+  sibling-held claim refuses the step. `commit_pending` settles every step
+  with its own tier / value / status and returns one `SettledStep` (handle +
+  event) each; every other exit releases by drop. Coverage in
+  `field_repair_step_tests.rs`
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
@@ -4579,7 +4588,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   zero or out-of-range ceiling, empty or non-ASCII -> `None` plus a WARN
   (`field_verdict_value_malformed`) and `malformed_total()`. A decoded shape is
   the row's own `&'static` member, never the stored text. A rewrite or ceiling
-  commit (`FieldRepairPlan::commit` -> `FieldRepairGuard::commit`) carries
+  commit (`FieldRepairPlan::commit_pending` -> `FieldRepairGuard::commit`) carries
   `Some(Shape)` / `Some(Ceiling)` on `CapabilityLearnEvent::value`, and
   `routectl-cli`'s `capability_ack_drain` writes it to `upstream_token` (NULL
   for a drop). `FieldValueStore` holds each identity's resident value keyed

@@ -279,9 +279,6 @@ pub(super) fn rejected_wire_path(
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct FieldIdentity(Vec<String>);
 
-// The pending-step comparison that consumes the identity lands in a
-// following change; until then only tests reach it.
-#[cfg_attr(not(test), allow(dead_code))]
 impl FieldIdentity {
     fn folded<'s>(segments: impl IntoIterator<Item = &'s str>) -> Self {
         let mut segments: Vec<String> = segments.into_iter().map(str::to_owned).collect();

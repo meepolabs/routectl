@@ -3480,12 +3480,12 @@ fn a_rejection_naming_the_first_present_row_repairs_that_row() {
 }
 
 #[test]
-fn only_one_row_is_repaired_per_attempt_and_the_rest_release_their_slots() {
-    // The one-repair ceiling, and the slot hygiene that must accompany it: the
-    // unused candidate's single-flight slot is RELEASED by the apply rather
-    // than pinned to settlement, so a sibling request that can settle that row
-    // is admitted immediately. Measured through a second carry for the same
-    // target: the released row admits, the repaired row does not.
+fn a_repeat_of_the_repaired_field_repairs_nothing_and_the_rest_release_their_slots() {
+    // The slot hygiene of the first repair: the unused candidate's
+    // single-flight slot is RELEASED by the apply rather than pinned to
+    // settlement, so a sibling request that can settle that row is admitted
+    // immediately. Measured through a second carry for the same target: the
+    // released row admits, the repaired row does not.
     let (router, _seen) = single_seat(Answer::ServeImmediately);
     let original = req_both_rows(ALIAS);
     let mut attempt = original.clone();
@@ -3507,8 +3507,8 @@ fn only_one_row_is_repaired_per_attempt_and_the_rest_release_their_slots() {
         "premise: the named row repaired",
     );
 
-    // A second `apply` on the same plan repairs nothing: the ceiling is one
-    // drop per attempt, and a second would mutate a body the arm already
+    // A second rejection naming the SAME field repairs nothing: a pending step
+    // already answers it, and a second would mutate a body the arm already
     // re-dispatched.
     let after_first = serde_json::to_value(&attempt).unwrap();
     assert!(
@@ -3521,7 +3521,7 @@ fn only_one_row_is_repaired_per_attempt_and_the_rest_release_their_slots() {
             ANTHROPIC,
         )
         .is_none(),
-        "a plan that already repaired must refuse a second apply",
+        "a plan must refuse a second repair of a field it already repaired",
     );
     assert_eq!(
         serde_json::to_value(&attempt).unwrap(),
@@ -4103,18 +4103,15 @@ fn an_ordinary_system_prompt_carries_no_test_only_closed_table_row() {
 }
 
 // ---------------------------------------------------------------------------
-// The double-apply guard refuses a second, differently-named rejection
+// A second rejection naming a different present row adds a step
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_second_rejection_naming_a_different_present_row_is_refused() {
-    // THE DOUBLE-APPLY PIN, and the shape that makes it non-vacuous: the second
-    // rejection names a DIFFERENT row that is still present and still admitted,
-    // so every reason to refuse except the one-repair ceiling is absent. A guard
-    // removed would repair it -- mutating a body the arm has already
-    // re-dispatched, charging a second draw against the request's one allowance,
-    // and re-pointing `repaired_path` so the commit would learn the wrong
-    // identity.
+fn a_second_rejection_naming_a_different_present_row_repairs_it() {
+    // The chaining shape: the second rejection names a DIFFERENT row that is
+    // still present. The first repair released that row's slot, so the second
+    // claims it again, draws once more, and adds a step beside the first; the
+    // first edit stays on the body.
     let (router, _seen) = single_seat(Answer::ServeImmediately);
     let original = req_both_rows(ALIAS);
     let mut attempt = original.clone();
@@ -4135,22 +4132,13 @@ fn a_second_rejection_naming_a_different_present_row_is_refused() {
         )
     };
     assert!(first.is_some(), "premise: the first rejection repaired");
-    assert_eq!(plan.repaired_path(), Some(GROUNDED_PATH));
-    assert!(
-        !carries_field(&attempt),
-        "premise: that row's field is gone"
-    );
     assert!(
         carries_system(&attempt),
-        "premise: the OTHER row's surface is still present, so a second apply has \
-         something it could mutate",
+        "premise: the OTHER row's surface is still present",
     );
-    let body_after_first = serde_json::to_value(&attempt).unwrap();
-    // Read rather than drained: draining a copy would need a cloneable budget,
-    // and a budget a caller can copy is one it can spend twice.
     let remaining_after_first = budget.remaining();
 
-    // Second apply: the PREFIX row, named, present, admitted.
+    // Second apply: the PREFIX row, named, present.
     let second = {
         let _injection = super::super::field_repair::provisional::inject(PREFIX_PATH);
         plan.apply(
@@ -4163,32 +4151,24 @@ fn a_second_rejection_naming_a_different_present_row_is_refused() {
         )
     };
 
+    assert!(second.is_some(), "a different field is repaired");
     assert!(
-        second.is_none(),
-        "one repair per attempt: a plan that already repaired must refuse a second, \
-         however well named the rejection",
-    );
-    assert_eq!(
-        serde_json::to_value(&attempt).unwrap(),
-        body_after_first,
-        "and must mutate NOTHING: the arm has already re-dispatched this body",
+        !carries_system(&attempt),
+        "the second row's surface is gone"
     );
     assert!(
-        carries_system(&attempt),
-        "the second row's surface survives, which is the mutation a removed guard \
-         would have made",
+        !carries_field(&attempt),
+        "and the first repair's edit stays on the body",
     );
     assert_eq!(
         budget.remaining(),
-        remaining_after_first,
-        "and must draw NO further budget: the refusal precedes the charge",
+        remaining_after_first - 1,
+        "the second repair draws exactly one more",
     );
     assert_eq!(
-        plan.repaired_path(),
-        Some(GROUNDED_PATH),
-        "and the learned attribution still names the FIRST row: a re-pointed path \
-         would have the commit persist a verdict for a row this attempt never \
-         repaired",
+        plan.pending_paths(),
+        vec![GROUNDED_PATH, PREFIX_PATH],
+        "two pending steps, oldest first",
     );
 }
 
