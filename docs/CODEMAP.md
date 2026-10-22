@@ -2936,7 +2936,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   repair (row, edit, kind, tier, fill_clamped, repair handle, reject status,
   guard). `apply_named` adds a step for a field this target has not
   repaired, pending or committed (`FieldIdentity::of_row`;
-  `rerepairs_same_field` is false for every row);
+  `rerepairs_same_field` is false for every row; a row it held for would
+  supersede the pending step on its field, taking over that step's guard
+  rather than re-claiming it, and the superseded step counts as dropped;
+  the engine's declared-edit gate in `learn_rejection.rs` consults the same
+  predicate so such a refusal reaches the proposers; a test build opts one
+  row in through the `#[cfg(test)]` module
+  `src/router/field_repair_rerepair_opt_in.rs`);
   a later step re-claims a released row's guard through `admit_provisional`
   with the admission inputs the plan keeps (`GuardAdmission`), and a
   sibling-held claim refuses the step. `commit_pending` settles every step
@@ -2956,7 +2962,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the counted step exits, budget exhaustion and repairs-per-request buckets
   in the fragment `src/router/field_repair_chain_exit_tests.rs`). A settling
   plan counts its steps committed in `commit_pending` and still-pending steps
-  dropped in its `Drop`
+  dropped in its `Drop`. The histogram of repairs per request is read with
+  `Router::repairs_per_request` and carried on `FidelitySnapshot`, one
+  bucket per draw count from zero through the allowance
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,

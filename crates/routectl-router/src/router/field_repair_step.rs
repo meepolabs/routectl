@@ -68,39 +68,10 @@ pub(in crate::router) fn rerepairs_same_field(
     false
 }
 
-/// A test build's scoped opt-in of one row into [`rerepairs_same_field`], so
-/// the same-field path can be exercised without a production row that takes
-/// it.
+/// A test build's scoped opt-in of one row into [`rerepairs_same_field`].
 #[cfg(test)]
-pub(in crate::router) mod rerepair_opt_in {
-    use std::cell::Cell;
-
-    use super::FieldRepairRow;
-
-    thread_local! {
-        static OPTED_IN: Cell<Option<&'static str>> = const { Cell::new(None) };
-    }
-
-    pub(super) fn covers(row: &FieldRepairRow) -> bool {
-        OPTED_IN.with(Cell::get) == Some(row.path)
-    }
-
-    /// Make the row at `path` re-repair its field on this thread until the
-    /// returned guard drops.
-    pub(in crate::router) fn opt_in(path: &'static str) -> OptIn {
-        OPTED_IN.with(|cell| cell.set(Some(path)));
-        OptIn(())
-    }
-
-    /// Clears the opt-in on drop.
-    pub(in crate::router) struct OptIn(());
-
-    impl Drop for OptIn {
-        fn drop(&mut self) {
-            OPTED_IN.with(|cell| cell.set(None));
-        }
-    }
-}
+#[path = "field_repair_rerepair_opt_in.rs"]
+pub(in crate::router) mod rerepair_opt_in;
 
 /// The admitted L0 repair for one attempt: EVERY closed-table row the attempt
 /// carries, each with the two-phase guard whose settlement the dispatch arm
