@@ -3892,10 +3892,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   yielded an `EvidenceScope`; its clones share one take-once scope slot.
   `wrap` folds each Ok chunk (`EvidenceFold`: choice count, last
   finish_reason, merged usage, reasoning / tool-call / search-evidence flags,
-  text only for strict output, under `STREAM_EVIDENCE_BYTE_CAP`; a second
-  choice or overflow spoils it) and records the natural end only when the
-  inner stream returns None with no Err seen; `settle` reads the minimal
-  response through `observe_response_evidence` on the caller's Router
+  text only for strict output; one `STREAM_EVIDENCE_BYTE_CAP` budget covers
+  the kept text, the last finish_reason and the serialized usage
+  `server_tool_use`, charged before each is retained; a second choice or
+  overflow spoils it) and records the natural end only when the inner stream
+  returns None with no Err seen; `settle` reads the minimal response through
+  `observe_response_evidence` on the caller's Router and returns whether the
+  detectors read it (false when spoiled, unended, already taken, or refused
+  by that Router's config)
 - `src/router/capability_owner_sweep.rs` -- `owns_learned_entry` (does this
   Router's config own a `RecordedLearnedEntry`) and
   `sweep_unowned_learned_entries`, which removes (through the generation
@@ -6400,8 +6404,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `finalize(Outcome::Ok)`), reading verified observations only through the
   router published at settle time (`StreamEvidenceSettler` over the daemon's
   `ArcSwap<Router>`) and draining them via
-  `usage_capture::drain_observation_events`. Dropped unsettled it writes
-  nothing and counts the exit. `rc_stream_evidence_total{result,exit}` is a
+  `usage_capture::drain_observation_events`. A settle whose fold the
+  detectors did not read counts `abandoned/ended`; dropped unsettled it
+  writes nothing and counts the exit. `rc_stream_evidence_total{result,exit}` is a
   process-global counter flushed by the router-metrics driver.
   Tests: unit tests inline; the exit table, the complete-vs-stream parity
   fixture and the openai-compat truncation case through the real
@@ -7714,8 +7719,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/lane_cell.rs` -- the one `(learned lane, capability)` cell builder for
   the read-only surfaces (used by the doctor capability matrix; the status
   learned projection is its intended next consumer). `lane_metas(&Config, entries)` builds the
-  lane rows (the router's `LearnedLaneProjection`, then unrouted learned keys,
-  each `LaneMeta` carrying its provider entry, upstream, kind and mapped
+  lane rows sorted by lane key (the router's `LearnedLaneProjection` together
+  with unrouted learned keys, each `LaneMeta` carrying its provider entry, upstream, kind and mapped
   models); `resolve_cell(meta, capability, &CellSources) -> LaneCell` gathers
   every tier's inputs (`operator_pins_capability` per nickname,
   `OverrideRegistry::resolve`, `LearnedInput::from_entry`,
