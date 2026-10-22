@@ -382,6 +382,13 @@ pub enum BetaLaneReading {
         /// Where the lapsed negative's evidence came from.
         source: EvidenceSource,
     },
+    /// A lapsed negative whose re-probe slot is free, read under
+    /// [`ProbeClaim::Peek`]: the slot was left unclaimed for a later
+    /// claiming read.
+    ProbeFree {
+        /// Where the lapsed negative's evidence came from.
+        source: EvidenceSource,
+    },
     /// A verified-working positive owns the key.
     VerifiedPositive {
         /// Where the positive's evidence came from.
@@ -399,6 +406,10 @@ pub enum ProbeClaim {
     Claim,
     /// Never claim: a lapsed negative reads as still acting.
     Forgo,
+    /// Never claim, but tell a free slot from a held one: a lapsed negative
+    /// whose slot is free reads [`BetaLaneReading::ProbeFree`], and one whose
+    /// slot another request holds reads as still acting.
+    Peek,
 }
 
 /// Non-claiming view of the resident negative for a key.
@@ -2830,6 +2841,7 @@ impl LearnedCapabilityRegistry {
                 let decision = match claim {
                     ProbeClaim::Claim => self.acting_negative_for_in(entries, &key, now),
                     ProbeClaim::Forgo => Self::unclaimed_decision_in(entries, &key),
+                    ProbeClaim::Peek => self.peeked_decision_in(entries, &key, now),
                 };
                 match decision {
                     RoutingDecision::RouteAway { signal, phase } => {
@@ -2838,6 +2850,9 @@ impl LearnedCapabilityRegistry {
                             tier: signal,
                             source,
                         }
+                    }
+                    RoutingDecision::ProbeAdmitted if claim == ProbeClaim::Peek => {
+                        BetaLaneReading::ProbeFree { source }
                     }
                     RoutingDecision::ProbeAdmitted => BetaLaneReading::ProbeAdmitted { source },
                     RoutingDecision::Allow if Self::is_verified_working_in(entries, &key) => {
@@ -2854,6 +2869,29 @@ impl LearnedCapabilityRegistry {
             | GenerationOutcome::Reserved
             | GenerationOutcome::Exhausted
             | GenerationOutcome::FieldNamespace => None,
+        }
+    }
+
+    /// [`Self::acting_negative_for_in`]'s decision without the claim:
+    /// `ProbeAdmitted` here means the negative has lapsed and its slot is
+    /// free, and the slot is left exactly as it was.
+    fn peeked_decision_in(
+        &self,
+        entries: &BTreeMap<RegistryKey, LearnedEntry>,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> RoutingDecision {
+        let Some(entry) = entries.get(key).filter(|entry| entry.is_acting()) else {
+            return RoutingDecision::Allow;
+        };
+        let decision = entry.acting_decision();
+        if matches!(decision, RoutingDecision::Allow)
+            || !entry.has_lapsed(self.field_repair_table(), key, now)
+            || entry.in_flight
+        {
+            decision
+        } else {
+            RoutingDecision::ProbeAdmitted
         }
     }
 

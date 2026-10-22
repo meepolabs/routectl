@@ -122,6 +122,7 @@ fn computer_use_override_keeps_a_dated_computer_request_off_the_target() {
             chain,
             &computer_request_features(),
             "computer-alias",
+            DispatchSurface::Complete,
             &mut admissions,
         )
         .expect("the unflagged target survives");

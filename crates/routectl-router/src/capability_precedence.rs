@@ -163,7 +163,8 @@ pub enum LearnedInput {
 
 impl LearnedInput {
     /// The input a dispatch read yields. `ProbeAdmitted` is a lapsed negative
-    /// whose re-probe slot this read claimed.
+    /// whose re-probe slot this read claimed; `ProbeFree` one whose free slot
+    /// a non-claiming read left for the claiming read to take.
     pub(crate) const fn from_reading(reading: BetaLaneReading) -> Option<Self> {
         match reading {
             BetaLaneReading::ActingNegative {
@@ -175,7 +176,9 @@ impl LearnedInput {
                 tier,
                 source,
             }),
-            BetaLaneReading::ProbeAdmitted { source } => Some(Self::Lapsed { source }),
+            BetaLaneReading::ProbeAdmitted { source } | BetaLaneReading::ProbeFree { source } => {
+                Some(Self::Lapsed { source })
+            }
             BetaLaneReading::VerifiedPositive { source } => Some(Self::Verified { source }),
             BetaLaneReading::NoVerdict => None,
         }

@@ -455,6 +455,7 @@ fn all_lanes_demoted_leaves_a_non_empty_chain() {
             vec![a, b],
             &["web_search".to_string()],
             "alias",
+            DispatchSurface::Complete,
             &mut Vec::new(),
         )
         .expect("a fully demoted chain still survives via the tail");
@@ -485,6 +486,7 @@ fn one_hard_drop_with_rest_demoted_leaves_a_non_empty_chain() {
             vec![hard, soft],
             &["web_search".to_string()],
             "alias",
+            DispatchSurface::Complete,
             &mut Vec::new(),
         )
         .expect("the demoted survivor keeps the chain non-empty");
@@ -616,6 +618,7 @@ fn prior_demoted_target_keeps_learned_f1_strip_keys() {
             vec![target],
             &["advisor".to_string(), "web_search".to_string()],
             "alias",
+            DispatchSurface::Complete,
             &mut Vec::new(),
         )
         .expect("the prior-demoted lane survives in the tail");

@@ -3400,7 +3400,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `beta_pinned_for_target`, `override_forces_supported`,
   `apply_strip_interceptor` (the pre-dispatch strip hook -> `StripDecision`),
   the `FilterSource`/`StripDecision` enums, and the
-  `catalog_capabilities`/`emit_feature_unsupported` helpers
+  `catalog_capabilities`/`emit_feature_unsupported` helpers. Ahead of the
+  claiming pass, `refuse_if_excluded_everywhere` (Complete and Stream only)
+  fails the request with `CapabilityUnsupportedEverywhere` when a non-field
+  feature is `hard_exclusion_eligible` on every target, read through the
+  non-claiming `ProbeClaim::Peek` (a lapsed negative with a free slot is not
+  eligible; one whose slot is held is), with a WARN and
+  `rc_capability_hard_excluded_total`
+- `src/router/hard_exclusion_tests.rs` -- the all-lanes refusal: eligible rows
+  fail with the typed error and claim nothing, soft rows (inferred, pinned,
+  `force_supported`, strip-eligible, count_tokens, lapsed with a free slot)
+  keep the tail, a fail-fast leaves a sibling feature's slots untouched, and a
+  router-level row learns the negative, decays it, dispatches one probe and
+  restores the refusal on the same-capability rejection
 - `src/router/capability_precedence_walk_tests.rs` -- one row per precedence
   tier driving `filter_chain_by_features` and asserting the walk's routing,
   strip and re-probe outcome equals the seam `Resolution` for inputs gathered

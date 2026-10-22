@@ -1,17 +1,17 @@
-//! The learned-only tail: a chain whose every member carries an acting learned
-//! negative is still attempted (route-away-with-floor) rather than hard-emptied,
-//! an `unsupported` override match returns NotImplemented, and two
-//! distinct negatives on one target both re-probe and clear without leaking a
-//! probe slot.
+//! The learned-only chain: a chain whose every member refuses a capability
+//! outright fails with the typed refusal before dialing anyone (never the
+//! static 501), an `unsupported` override match returns NotImplemented, and
+//! two distinct negatives on one target both re-probe and clear without
+//! leaking a probe slot.
 
 use super::*;
 
 // ---------------------------------------------------------------------------
-// The learned-only tail: route-away-with-floor vs a statically-empty 501.
+// The learned-only chain: a typed refusal vs a statically-empty 501.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn all_targets_learned_still_attempts_the_tail() {
+async fn all_targets_refusing_outright_fail_before_dialing() {
     let a = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
     let b = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
     let router = build_router(
@@ -43,24 +43,29 @@ async fn all_targets_learned_still_attempts_the_tail() {
         "learned_tail",
     )))
     .await;
-    assert!(
-        matches!(d2.result, Err(Error::Upstream { status: 400, .. })),
-        "a learned-only chain must still attempt (not 501): {:?}",
-        d2.result,
+    let Err(Error::CapabilityUnsupportedEverywhere { capability, lanes }) = &d2.result else {
+        panic!(
+            "every lane refusing the capability must fail with the typed refusal: {:?}",
+            d2.result,
+        );
+    };
+    assert_eq!(&**capability, WEB_SEARCH);
+    assert_eq!(lanes.len(), 2, "both lanes named");
+    assert_eq!(
+        hits(&a).await,
+        1,
+        "no lane is re-dialed into a known rejection"
     );
-    assert!(
-        !matches!(d2.result, Err(Error::NotImplemented(..))),
-        "learned negatives must never hard-empty the chain",
-    );
-    assert!(
-        hits(&a).await >= 2 && hits(&b).await >= 2,
-        "the learned tail must be attempted (both targets re-dialed)",
+    assert_eq!(
+        hits(&b).await,
+        1,
+        "no lane is re-dialed into a known rejection"
     );
     assert!(
         events.iter().any(|e| e.level == tracing::Level::WARN
-            && e.message.contains("de-prioritized tail")
-            && e.field("source") == Some("learned")),
-        "entering the learned tail must emit a WARN tagged source=learned",
+            && e.field("event") == Some("hard_exclusion")
+            && e.field("capability_key") == Some(WEB_SEARCH)),
+        "the refusal must WARN with event=hard_exclusion",
     );
 }
 

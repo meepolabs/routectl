@@ -3837,6 +3837,26 @@ essential = ["advisor", "context_management"]
   reload. Flipping it does NOT expire the learned negatives it affects:
   they are still true, and re-probing one would send a request the
   operator just declared should route away.
+- **When every lane refuses: the request fails** -- on a complete or
+  stream request, if every target in the chain refuses a requested
+  capability outright, routectl answers 400 `invalid_request_error` naming
+  the capability before contacting any upstream, rather than walking the
+  chain into the same rejection on each lane. A target refuses outright
+  when its learned negative is self-identifying (the upstream named the
+  capability; an inferred negative never counts), from the F1 or F2
+  phase, and routes the target away: the capability is not strippable
+  there, or it is listed in `essential`. So listing a droppable key here
+  is what lets it fail the request rather than be stripped. A lane the
+  operator pins (a beta floor that re-adds the capability's token) or
+  masks with `force_supported` never counts, and count_tokens requests
+  keep the soft tail. A lapsed negative whose re-probe slot is free sends
+  that probe instead of failing; the refusal lifts on its own once a
+  re-probe succeeds.
+- **Escape hatches** -- `[capability.overrides.<spec>].force_supported`
+  on one lane makes that lane serve the capability again (and so ends the
+  refusal), and `routectl capability purge` removes a wrong learned
+  negative. The refusal WARNs (`event=hard_exclusion`, see LOGGING.md)
+  and counts on `rc_capability_hard_excluded_total`.
 
 Operator capability overrides nest under this parent as
 `[capability.overrides]` (keyed by `"provider"` or `"provider:nickname"`)

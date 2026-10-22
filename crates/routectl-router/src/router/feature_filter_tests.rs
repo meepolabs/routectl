@@ -1261,6 +1261,7 @@ fn filter_chain_keeps_stripped_target_and_tails_route_away() {
             vec![strip_t, route_t],
             &["context_management".to_string(), "web_search".to_string()],
             "alias",
+            DispatchSurface::Complete,
             &mut admissions,
         )
         .unwrap();
@@ -1308,6 +1309,7 @@ fn a_resident_field_verdict_soft_tails_its_target_like_any_other_negative() {
             vec![field_t, clean_t],
             &[field_key()],
             "alias",
+            DispatchSurface::Complete,
             &mut admissions,
         )
         .unwrap();
@@ -1348,6 +1350,7 @@ fn multiple_acting_negatives_on_distinct_targets_compose_without_duplication() {
             vec![field_t, catalog_t, clean_t],
             &[field_key(), "web_search".to_string()],
             "alias",
+            DispatchSurface::Complete,
             &mut admissions,
         )
         .unwrap();
@@ -1427,6 +1430,7 @@ fn filter_chain_is_a_bijection_that_never_crosses_operators_under_any_input_orde
                 chain,
                 &[field_key(), "web_search".to_string()],
                 "alias",
+                DispatchSurface::Complete,
                 &mut admissions,
             )
             .unwrap();
@@ -1478,6 +1482,7 @@ fn a_target_carrying_both_a_field_and_a_catalog_negative_tails_exactly_once_and_
             vec![mixed_t.clone(), clean_t.clone()],
             &requested_features,
             "alias",
+            DispatchSurface::Complete,
             &mut admissions,
         )
         .unwrap();
@@ -1508,6 +1513,7 @@ fn a_target_carrying_both_a_field_and_a_catalog_negative_tails_exactly_once_and_
             vec![mixed_t.clone(), clean_t.clone()],
             &requested_features,
             "alias",
+            DispatchSurface::Complete,
             &mut admissions,
         )
         .unwrap();
@@ -1532,6 +1538,7 @@ fn a_target_carrying_both_a_field_and_a_catalog_negative_tails_exactly_once_and_
             vec![mixed_t, clean_t],
             &requested_features,
             "alias",
+            DispatchSurface::Complete,
             &mut admissions,
         )
         .unwrap();

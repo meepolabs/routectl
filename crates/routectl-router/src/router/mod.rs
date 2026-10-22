@@ -564,6 +564,11 @@ struct RouterMetrics {
     /// tail (soft-drop). Bumped by the dispatch path when the tail is
     /// entered.
     d17_tail_total: AtomicU64,
+    /// Inference requests refused before dispatch because every chain
+    /// target refuses a requested capability outright (an acting
+    /// self-identifying F1/F2 negative that routes away). Bumped once per
+    /// refused request by the feature filter's pre-pass.
+    capability_hard_excluded_total: AtomicU64,
     /// Capabilities stripped in place at a dispatch path (the interceptor
     /// returned `Stripped`). Bumped once per successful strip run, not per
     /// capability key.
@@ -858,6 +863,11 @@ impl RouterMetrics {
         self.d17_tail_total.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn incr_capability_hard_excluded(&self) {
+        self.capability_hard_excluded_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     fn incr_strip(&self) {
         self.strip_total.fetch_add(1, Ordering::Relaxed);
     }
@@ -1066,6 +1076,11 @@ impl RouterMetrics {
         self.d17_tail_total.load(Ordering::Relaxed)
     }
 
+    /// Read the cumulative hard-exclusion refusal count.
+    fn capability_hard_excluded_total(&self) -> u64 {
+        self.capability_hard_excluded_total.load(Ordering::Relaxed)
+    }
+
     /// Read the cumulative in-place-strip count.
     fn strip_total(&self) -> u64 {
         self.strip_total.load(Ordering::Relaxed)
@@ -1186,6 +1201,7 @@ impl RouterMetrics {
             rc_probe_failures_total = self.probe_failures_total(),
             rc_invalidations_total = self.invalidations_total(),
             rc_d17_tail_total = self.d17_tail_total(),
+            rc_capability_hard_excluded_total = self.capability_hard_excluded_total(),
             rc_strip_total = self.strip_total(),
             rc_strip_rollback_total = self.strip_rollback_total(),
             rc_strip_strict_rejected_total = self.strip_strict_rejected_total(),
@@ -1233,6 +1249,7 @@ impl RouterMetrics {
             rc_probe_failures_total = self.probe_failures_total(),
             rc_invalidations_total = self.invalidations_total(),
             rc_d17_tail_total = self.d17_tail_total(),
+            rc_capability_hard_excluded_total = self.capability_hard_excluded_total(),
             rc_strip_total = self.strip_total(),
             rc_strip_rollback_total = self.strip_rollback_total(),
             rc_strip_strict_rejected_total = self.strip_strict_rejected_total(),

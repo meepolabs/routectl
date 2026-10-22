@@ -2316,6 +2316,7 @@ fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
         "rc_probe_failures_total",
         "rc_invalidations_total",
         "rc_d17_tail_total",
+        "rc_capability_hard_excluded_total",
         "rc_strip_total",
         "rc_strip_rollback_total",
         "rc_strip_strict_rejected_total",

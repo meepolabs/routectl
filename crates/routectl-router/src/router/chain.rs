@@ -467,7 +467,8 @@ impl Router {
     /// `in_flight` slot latches and the target routes away permanently.
     ///
     /// `surface` is the entry point resolving the chain: a lapsed beta
-    /// negative claims its re-probe only on an inference surface.
+    /// negative claims its re-probe only on an inference surface, and only an
+    /// inference surface fails on a capability every target refuses.
     pub(super) fn dispatch_chain_for_request(
         &self,
         req: &ChatRequest,
@@ -479,7 +480,8 @@ impl Router {
         )?;
         let features = super::field_repair::request_feature_keys(self.field_repair_table(), req);
         let mut admissions = Vec::new();
-        let chain = self.filter_chain_by_features(chain, &features, &req.model, &mut admissions)?;
+        let chain =
+            self.filter_chain_by_features(chain, &features, &req.model, surface, &mut admissions)?;
         // Window pass AFTER the feature filter, never before: "the last
         // surviving target" must be counted against the chain the HARD
         // capability drops left behind. Reversed, the window pass could skip

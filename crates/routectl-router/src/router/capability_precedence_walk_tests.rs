@@ -181,6 +181,7 @@ fn the_dispatch_walk_acts_on_the_seam_resolution_for_every_tier() {
                 vec![target, clean],
                 &[key.to_string()],
                 "alias",
+                DispatchSurface::Complete,
                 &mut admissions,
             )
             .expect("the clean sibling keeps the chain non-empty");

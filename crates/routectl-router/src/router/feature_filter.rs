@@ -92,16 +92,23 @@ impl Router {
     /// filtered out -- the architect's "terminal empty-chain" path. A
     /// chain that was empty before filtering surfaces via the existing
     /// `Err(Error::UnknownAlias(...))` path on `dispatch_chain`.
+    ///
+    /// On an inference `surface`, a feature every target refuses outright
+    /// fails the request with `Error::CapabilityUnsupportedEverywhere`
+    /// before the claiming pass runs (see
+    /// [`Self::refuse_if_excluded_everywhere`]).
     pub(super) fn filter_chain_by_features(
         &self,
         chain: Vec<DispatchTarget>,
         features: &[String],
         alias: &str,
+        surface: DispatchSurface,
         admissions: &mut Vec<ProbeAdmission>,
     ) -> Result<Vec<DispatchTarget>> {
         if features.is_empty() || chain.is_empty() {
             return Ok(chain);
         }
+        self.refuse_if_excluded_everywhere(&chain, features, alias, surface)?;
         // SOFT-DROP: an override `unsupported` match hard-drops the
         // target; a learned or catalog-prior match moves it to a
         // de-prioritized tail. The result is
@@ -270,22 +277,10 @@ impl Router {
         target: &DispatchTarget,
         features: &'f [FeatureKey],
     ) -> ControlFlow<&'f FeatureKey, Vec<(&'f FeatureKey, CellContext, OpenCell)>> {
-        let nickname = target.nickname.as_deref().unwrap_or("");
         let mut open = Vec::with_capacity(features.len());
         for feature in features {
-            let verdict = self.override_registry.resolve(
-                &target.provider_name,
-                nickname,
-                feature,
-                target.provider_kind.unwrap_or(""),
-            );
-            let ctx = CellContext::new(
-                feature,
-                &self.config.capability,
-                target.egress_kind,
-                &target.upstream,
-            );
-            match resolve_operator(self.beta_pinned_for_target(target, feature), verdict, ctx) {
+            let (ctx, stage) = self.operator_cell(target, feature);
+            match stage {
                 Stage::Decided(decided) if decided.routing() == Routing::Drop => {
                     return ControlFlow::Break(feature);
                 }
@@ -294,6 +289,128 @@ impl Router {
             }
         }
         ControlFlow::Continue(open)
+    }
+
+    /// The operator tiers' verdict on one `(target, feature)` cell, with the
+    /// cell's context: the one place both the claiming pass and the
+    /// hard-exclusion pre-pass gather the operator inputs.
+    fn operator_cell(&self, target: &DispatchTarget, feature: &str) -> (CellContext, Stage) {
+        let verdict = self.override_registry.resolve(
+            &target.provider_name,
+            target.nickname.as_deref().unwrap_or(""),
+            feature,
+            target.provider_kind.unwrap_or(""),
+        );
+        let ctx = CellContext::new(
+            feature,
+            &self.config.capability,
+            target.egress_kind,
+            &target.upstream,
+        );
+        let stage = resolve_operator(self.beta_pinned_for_target(target, feature), verdict, ctx);
+        (ctx, stage)
+    }
+
+    /// Fail the request when some requested feature is refused outright on
+    /// every target, before any re-probe slot is claimed.
+    ///
+    /// It runs ahead of the claiming pass and reads the registry without
+    /// claiming: an error returned after a claim would leave that slot held
+    /// with no dispatch to settle it, locking the lane out of its re-probe.
+    /// A target counts as refusing only when the seam calls its cell
+    /// [`Resolution::hard_exclusion_eligible`]. A lapsed negative whose slot
+    /// is free makes the chain ineligible, so the claiming pass dispatches the
+    /// probe; one whose slot another request holds still counts as refusing,
+    /// so a burst of requests does not each send a known rejection.
+    ///
+    /// count_tokens keeps the soft tail: it never fails here. Neither does an
+    /// envelope-field key: a field negative is answered by repairing the
+    /// field (the pre-flight and reactive repair paths), never by refusing
+    /// the request.
+    fn refuse_if_excluded_everywhere(
+        &self,
+        chain: &[DispatchTarget],
+        features: &[FeatureKey],
+        alias: &str,
+        surface: DispatchSurface,
+    ) -> Result<()> {
+        if matches!(surface, DispatchSurface::CountTokens) {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let Some(feature) = features.iter().find(|feature| {
+            !crate::field_capability::capability_key_is_field_verdict(feature)
+                && chain
+                    .iter()
+                    .all(|target| self.cell_refuses_outright(target, feature, now))
+        }) else {
+            return Ok(());
+        };
+        let mut lanes: Vec<String> = Vec::with_capacity(chain.len());
+        for lane in chain
+            .iter()
+            .filter_map(|target| target.learned_key(feature))
+        {
+            if !lanes.iter().any(|seen| seen == lane) {
+                lanes.push(lane.to_string());
+            }
+        }
+        let lane_list = lanes
+            .iter()
+            .map(|lane| sanitize_for_log(lane))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            event = "hard_exclusion",
+            alias = %sanitize_for_log(alias),
+            capability_key = %sanitize_for_log(feature),
+            lanes = %lane_list,
+            surface = surface.as_str(),
+            "capability refused on every lane; request excluded before dispatch",
+        );
+        self.metrics.incr_capability_hard_excluded();
+        Err(Error::capability_unsupported_everywhere(
+            feature.as_str(),
+            lanes,
+        ))
+    }
+
+    /// Whether the seam calls this target's cell for `feature` refused
+    /// outright, from a learned read that claims nothing.
+    fn cell_refuses_outright(&self, target: &DispatchTarget, feature: &str, now: Instant) -> bool {
+        let Stage::Open(cell) = self.operator_cell(target, feature).1 else {
+            return false;
+        };
+        let learned = self.peeked_learned_input(target, feature, cell, now);
+        let prior = target
+            .provider_kind
+            .and_then(|_| target.capability_prior(feature));
+        resolve_open(learned, None, prior, cell).hard_exclusion_eligible()
+    }
+
+    /// The learned read for one open feature that never claims a re-probe
+    /// slot: a lapsed negative with a free slot reads as lapsed, one whose
+    /// slot is held reads as still acting.
+    fn peeked_learned_input(
+        &self,
+        target: &DispatchTarget,
+        feature: &str,
+        cell: OpenCell,
+        now: Instant,
+    ) -> Option<LearnedInput> {
+        if !cell.reads_learned() {
+            return None;
+        }
+        let provider_kind = target.provider_kind?;
+        let learned_key = target.learned_key(feature)?;
+        let (reading, _) = self.beta_reading_with_generation(
+            learned_key,
+            feature,
+            provider_kind,
+            ProbeClaim::Peek,
+            now,
+        );
+        LearnedInput::from_reading(reading)
     }
 
     /// The claiming learned read for one open feature, or `None` when the
@@ -577,3 +694,7 @@ mod feature_filter_read_tests;
 #[cfg(test)]
 #[path = "computer_tool_key_tests.rs"]
 mod computer_tool_key_tests;
+
+#[cfg(test)]
+#[path = "hard_exclusion_tests.rs"]
+mod hard_exclusion_tests;

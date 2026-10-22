@@ -129,6 +129,7 @@ fn override_unsupported_hard_drops_and_empties_chain() {
         vec![target],
         &["web_search".to_string()],
         "alias-x",
+        DispatchSurface::Complete,
         &mut chain_admissions,
     ) {
         Err(Error::NotImplemented(_, _)) => {}

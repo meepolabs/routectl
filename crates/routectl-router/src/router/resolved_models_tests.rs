@@ -1296,7 +1296,13 @@ fn learned_negative_deprioritizes_target_to_tail() {
     let mut out = Vec::new();
     let events = routectl_testkit::capture_events(|| {
         out = router
-            .filter_chain_by_features(vec![front, back], &features, "alias", &mut Vec::new())
+            .filter_chain_by_features(
+                vec![front, back],
+                &features,
+                "alias",
+                DispatchSurface::Complete,
+                &mut Vec::new(),
+            )
             .expect("a supported survivor keeps the chain non-empty");
     });
 
@@ -1350,7 +1356,13 @@ fn static_unsupported_emptying_chain_returns_not_implemented() {
     let only = learned_target(&router, "only");
     let features = vec!["web_search".to_string()];
 
-    let result = router.filter_chain_by_features(vec![only], &features, "alias", &mut Vec::new());
+    let result = router.filter_chain_by_features(
+        vec![only],
+        &features,
+        "alias",
+        DispatchSurface::Complete,
+        &mut Vec::new(),
+    );
 
     assert!(
         matches!(result, Err(Error::NotImplemented(..))),
@@ -1360,23 +1372,34 @@ fn static_unsupported_emptying_chain_returns_not_implemented() {
 
 #[test]
 fn sole_learned_tail_target_still_attempts_and_counts_d17() {
+    // A corroborated inferred negative: it acts, but never refuses the
+    // capability outright, so the sole lane enters the tail on an inference
+    // surface instead of failing the request.
     let router = Router::new(learned_provider_config());
     let only = learned_target(&router, "only");
-    router.learned_capabilities.observe(
-        &learned_lane("only"),
-        "web_search",
-        "anthropic-api",
-        routectl_core::capability::SignalTier::SelfIdentifying,
-        routectl_core::capability::FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
-        std::time::Instant::now(),
-    );
+    for _ in 0..2 {
+        router.learned_capabilities.observe(
+            &learned_lane("only"),
+            "web_search",
+            "anthropic-api",
+            routectl_core::capability::SignalTier::Inferred,
+            routectl_core::capability::FailurePhase::F1,
+            EvidenceSource::Live,
+            None,
+            std::time::Instant::now(),
+        );
+    }
     let features = vec!["web_search".to_string()];
 
     let events = routectl_testkit::capture_events(|| {
         let out = router
-            .filter_chain_by_features(vec![only], &features, "alias", &mut Vec::new())
+            .filter_chain_by_features(
+                vec![only],
+                &features,
+                "alias",
+                DispatchSurface::Complete,
+                &mut Vec::new(),
+            )
             .expect("a learned-only chain proceeds into the de-prioritized tail");
         assert_eq!(out.len(), 1, "the sole tail target is still attempted");
         assert_eq!(out[0].state_key, "only");
@@ -1416,7 +1439,13 @@ fn kill_switch_off_skips_the_learned_consult() {
     let features = vec!["web_search".to_string()];
 
     let out = router
-        .filter_chain_by_features(vec![front, back], &features, "alias", &mut Vec::new())
+        .filter_chain_by_features(
+            vec![front, back],
+            &features,
+            "alias",
+            DispatchSurface::Complete,
+            &mut Vec::new(),
+        )
         .expect("kill switch off leaves the chain intact");
 
     // The learned negative is ignored: original order, nothing tailed.
@@ -1452,25 +1481,39 @@ fn expired_learned_negative_admits_one_probe_through_filter() {
     // First pass: the lapsed negative admits a probe -> the target stays
     // in the supported set (routed to), and the probe is counted.
     let out = router
-        .filter_chain_by_features(vec![only.clone()], &features, "alias", &mut Vec::new())
+        .filter_chain_by_features(
+            vec![only.clone()],
+            &features,
+            "alias",
+            DispatchSurface::Complete,
+            &mut Vec::new(),
+        )
         .expect("an admitted probe routes to the target");
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].state_key, "only");
     assert_eq!(router.metrics.probe_attempts_total(), 1);
     assert_eq!(router.metrics.d17_tail_total(), 0);
 
-    // Second pass: the probe slot is claimed (in_flight) -> concurrent
-    // lookups keep routing away, landing the target in the tail.
-    let out2 = router
-        .filter_chain_by_features(vec![only], &features, "alias", &mut Vec::new())
-        .expect("a claimed in-flight probe routes away into the tail");
-    assert_eq!(out2.len(), 1);
+    // Second pass: the probe slot is claimed (in_flight), so the negative
+    // still acts. On this sole lane that refuses the capability outright,
+    // and no second probe is admitted.
+    let out2 = router.filter_chain_by_features(
+        vec![only],
+        &features,
+        "alias",
+        DispatchSurface::Complete,
+        &mut Vec::new(),
+    );
+    assert!(
+        matches!(out2, Err(Error::CapabilityUnsupportedEverywhere { .. })),
+        "a held probe slot keeps the sole lane refusing: {:?}",
+        out2.err(),
+    );
     assert_eq!(
         router.metrics.probe_attempts_total(),
         1,
         "exactly one probe is admitted per decay lapse",
     );
-    assert_eq!(router.metrics.d17_tail_total(), 1);
 }
 
 #[test]

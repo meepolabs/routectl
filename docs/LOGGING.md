@@ -1414,6 +1414,7 @@ Summary (grep the `event` field to isolate a kind):
 | `expire_probe` | INFO | `routectl_router::learned_capability` | `lapsed learned negative admitted for its single re-probe` |
 | `evict` | WARN | `routectl_router::learned_capability` | `learned-capability registry at capacity; evicted oldest entry` |
 | `route_away` | INFO / WARN | `routectl_router::router::feature_filter` | `capability negative de-prioritized this target to the tail` (INFO) / `capability negative routed this target away; request survives only via the de-prioritized tail` (WARN) |
+| `hard_exclusion` | WARN | `routectl_router::router::feature_filter` | `capability refused on every lane; request excluded before dispatch` |
 | `count_tokens` | INFO | `routectl_router::router::count_tokens` | `count_tokens seat terminal; resilience class policy applied` |
 | `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; catalog-scoped learned capabilities are evicted at the replay boundary` |
 | `strip` | WARN | `routectl_router::router::feature_filter` | `capability_strip_decision` |
@@ -1781,6 +1782,45 @@ WARN routectl_router::router::feature_filter event=route_away state_key=only
    only via the de-prioritized tail"
 ```
 
+### `hard_exclusion` (WARN)
+
+Emitted once per refused request when every target in an inference
+request's chain (complete or stream, never count_tokens) refuses a
+requested capability outright, so the request fails before any upstream
+contact. A target refuses outright only when an acting self-identifying
+F1 or F2 learned negative routes it away: the capability is not
+strippable there (or the operator listed it in `[capability] essential`),
+no operator `force_supported` override masks it, and no operator beta
+floor pins it. An inferred negative never counts, nor does an
+envelope-field (`field:`) negative, which is repaired instead. A lapsed
+negative whose single re-probe slot is free makes the request dispatch
+that probe instead; one whose slot another request holds still counts.
+
+Each refusal also bumps `rc_capability_hard_excluded_total` on the DEBUG
+router metrics snapshot. The client gets a 400 `invalid_request_error`
+naming only the capability; the ingress WARN `capability unsupported on
+every lane; refused before dispatch` and the usage row
+(`error_class = capability_unsupported`) record the same refusal.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `hard_exclusion`. |
+| `alias` | string | The requested model or alias. |
+| `capability_key` | string | The first requested capability (in request order) every target refuses. |
+| `lanes` | string | The refusing learned lanes (`provider_entry#upstream`), comma-separated, each log-sanitized. |
+| `surface` | string | `complete` or `stream`. |
+
+```
+WARN routectl_router::router::feature_filter event=hard_exclusion alias=chain
+  capability_key=web_search lanes="p#a, p#b" surface=complete
+  "capability refused on every lane; request excluded before dispatch"
+```
+
+Operator action: if the negative is wrong, `routectl capability purge` it
+or add a `force_supported` override for the lane; otherwise route the
+alias to a lane that supports the capability. Recovery is automatic once a
+negative lapses and its re-probe succeeds.
+
 ### `count_tokens` (INFO)
 
 Emitted once when a `count_tokens` seat reaches its class/remap/debit
@@ -2135,6 +2175,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::router::window_gate` | `window_gate_skip` (throttled) | Requests exceed the target model's context window: add a larger-window target or reduce request size. |
 | WARN | `routectl_router::router::{capability_learn,capability_observe,beta_report_learn,feature_filter,capability_purge}` | capability events `learn`, `observe`, `route_away` (tail-only arm), `strip`, `suppression`, `purge_abandoned` | Learned state changed which target serves traffic or what a request carries: review `capability_key` on `state_key` and `routectl capability purge` it if wrong. `suppression`: remove a contradicted `force_supported` override. `purge_abandoned`: the purge did not persist; check the capability store writer and retry. See [Capability intelligence events](#capability-intelligence-events). |
 | WARN | `routectl_router::router::capability_learn` | `bedrock_validation_unmatched` (once per request per target) | A Bedrock validation rejection matched no capability template, which means upstream wording drifted: file a bug with the rejection shape. |
+| WARN | `routectl_router::router::feature_filter` | `capability refused on every lane; request excluded before dispatch` | Every target refuses the capability outright, so the request was refused with a 400 before dispatch: purge a wrong negative, add `force_supported` for a lane that does support it, or route the alias to a capable lane. See [`hard_exclusion`](#hard_exclusion-warn). |
 | WARN | `routectl_router::router::feature_filter` | `alias chain filtered to empty by unsupported overrides` | No target supports the requested features per the overrides: add a capable target or relax the `unsupported` override. |
 | WARN | `routectl_router::router::chain` | `alias resolved to empty chain ...` | The alias has no usable target: fix the alias or re-enable a target. |
 | WARN | `routectl_router::catalog` | `cache-pricing override is degenerate; falling back to the baked row` | Config validation normally rejects this at load, so a line here means validation was bypassed: fix the `[cache_pricing]` override and file a bug. |

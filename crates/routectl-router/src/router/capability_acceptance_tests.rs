@@ -347,6 +347,7 @@ fn scenario_b_forced_search_absent_acts_f3_yet_routing_stays_allow() {
             vec![target(&router, "m1", &[]), target(&router, "m2", &[])],
             &[WEB_SEARCH.to_string()],
             "alias",
+            DispatchSurface::Complete,
             &mut Vec::new(),
         )
         .expect("the advisory suspect never empties the chain");
@@ -436,6 +437,7 @@ fn scenario_d_verified_positive_masks_catalog_prior() {
             ],
             &[WEB_SEARCH.to_string()],
             "alias",
+            DispatchSurface::Complete,
             &mut Vec::new(),
         )
         .expect("the chain survives");
