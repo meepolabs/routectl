@@ -100,10 +100,6 @@ pub struct FieldRepairCounters {
     /// allowance could not pay for, counted once per rejection. A rejection no
     /// repair proposed for is not counted, empty allowance or not.
     pub budget_exhausted: u64,
-    /// Finished requests by how many repairs each spent: index `n` counts the
-    /// requests that drew exactly `n`, from zero up to the whole per-request
-    /// allowance. Recorded once per request on every walk.
-    pub repairs_per_request: [u64; REPAIR_DRAW_BUCKETS],
 }
 
 /// Most learned lanes a per-lane tally names individually. A lane first seen
@@ -218,8 +214,11 @@ impl RepairDrawHistogram {
         self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
     }
 
-    fn snapshot(&self) -> [u64; REPAIR_DRAW_BUCKETS] {
-        std::array::from_fn(|bucket| self.buckets[bucket].load(Ordering::Relaxed))
+    fn snapshot(&self) -> Vec<u64> {
+        self.buckets
+            .iter()
+            .map(|bucket| bucket.load(Ordering::Relaxed))
+            .collect()
     }
 }
 
@@ -295,8 +294,15 @@ impl Router {
             chain_steps_committed: self.metrics.field_chain_steps.committed(),
             chain_steps_dropped: self.metrics.field_chain_steps.dropped(),
             budget_exhausted: self.metrics.repair_budget_exhausted.total(),
-            repairs_per_request: self.metrics.repairs_per_request.snapshot(),
         }
+    }
+
+    /// Finished requests by how many repairs each spent: index `n` counts the
+    /// requests that drew exactly `n`, from zero up to the whole per-request
+    /// allowance, so the list has one more entry than that allowance. Recorded
+    /// once per request on every walk.
+    pub fn repairs_per_request(&self) -> Vec<u64> {
+        self.metrics.repairs_per_request.snapshot()
     }
 }
 

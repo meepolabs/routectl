@@ -323,6 +323,7 @@ impl Router {
             counters: self.field_repair_counters(),
             lossy_by_lane: self.lossy_repairs_by_lane(),
             exhausted_by_lane: self.budget_exhaustions_by_lane(),
+            repairs_per_request: self.repairs_per_request(),
             acting: super::acting_field_verdicts(&learned),
             verdicts: self.verdict_rows_from(learned),
             probes: self.probe_scheduler_snapshot(),
@@ -689,6 +690,10 @@ pub struct FidelitySnapshot {
     /// at most 256 named lanes plus an `other` overflow bucket. Sampled at its
     /// own instant, like the counters.
     pub exhausted_by_lane: Vec<LaneBudgetExhaustions>,
+    /// Finished requests by repairs spent, one entry per draw count from zero
+    /// through the per-request allowance (see [`Router::repairs_per_request`]).
+    /// Sampled at its own instant, like the counters.
+    pub repairs_per_request: Vec<u64>,
     /// Every currently ACTING field verdict, derived from the same learned
     /// snapshot as `verdicts` below.
     pub acting: Vec<ActingFieldVerdict>,

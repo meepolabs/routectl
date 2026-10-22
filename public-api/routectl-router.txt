@@ -4240,6 +4240,7 @@ pub routectl_router::router::FidelitySnapshot::counters: routectl_router::FieldR
 pub routectl_router::router::FidelitySnapshot::exhausted_by_lane: alloc::vec::Vec<routectl_router::LaneBudgetExhaustions>
 pub routectl_router::router::FidelitySnapshot::lossy_by_lane: alloc::vec::Vec<routectl_router::LaneLossyRepairs>
 pub routectl_router::router::FidelitySnapshot::probes: routectl_router::ProbeSchedulerSnapshot
+pub routectl_router::router::FidelitySnapshot::repairs_per_request: alloc::vec::Vec<u64>
 pub routectl_router::router::FidelitySnapshot::verdicts: alloc::vec::Vec<routectl_router::FieldVerdictStatus>
 impl core::clone::Clone for routectl_router::FidelitySnapshot
 pub fn routectl_router::FidelitySnapshot::clone(&self) -> routectl_router::FidelitySnapshot
@@ -4471,7 +4472,6 @@ pub routectl_router::router::FieldRepairCounters::preflight_actions: u64
 pub routectl_router::router::FieldRepairCounters::repair_attempted: u64
 pub routectl_router::router::FieldRepairCounters::repair_lossy: u64
 pub routectl_router::router::FieldRepairCounters::repair_succeeded: u64
-pub routectl_router::router::FieldRepairCounters::repairs_per_request: [u64; 6]
 pub routectl_router::router::FieldRepairCounters::verdicts_learned: u64
 impl core::clone::Clone for routectl_router::FieldRepairCounters
 pub fn routectl_router::FieldRepairCounters::clone(&self) -> routectl_router::FieldRepairCounters
@@ -5258,6 +5258,7 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::budget_exhaustions_by_lane(&self) -> alloc::vec::Vec<routectl_router::LaneBudgetExhaustions>
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 pub fn routectl_router::router::Router::lossy_repairs_by_lane(&self) -> alloc::vec::Vec<routectl_router::LaneLossyRepairs>
+pub fn routectl_router::router::Router::repairs_per_request(&self) -> alloc::vec::Vec<u64>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::calibrated_estimate(&self, &str, &str, u64) -> core::option::Option<u64>
 pub fn routectl_router::router::Router::opening_lane(&self, &str) -> core::option::Option<routectl_router::OpeningLane>
@@ -12967,6 +12968,7 @@ pub routectl_router::FidelitySnapshot::counters: routectl_router::FieldRepairCou
 pub routectl_router::FidelitySnapshot::exhausted_by_lane: alloc::vec::Vec<routectl_router::LaneBudgetExhaustions>
 pub routectl_router::FidelitySnapshot::lossy_by_lane: alloc::vec::Vec<routectl_router::LaneLossyRepairs>
 pub routectl_router::FidelitySnapshot::probes: routectl_router::ProbeSchedulerSnapshot
+pub routectl_router::FidelitySnapshot::repairs_per_request: alloc::vec::Vec<u64>
 pub routectl_router::FidelitySnapshot::verdicts: alloc::vec::Vec<routectl_router::FieldVerdictStatus>
 impl core::clone::Clone for routectl_router::FidelitySnapshot
 pub fn routectl_router::FidelitySnapshot::clone(&self) -> routectl_router::FidelitySnapshot
@@ -13142,7 +13144,6 @@ pub routectl_router::FieldRepairCounters::preflight_actions: u64
 pub routectl_router::FieldRepairCounters::repair_attempted: u64
 pub routectl_router::FieldRepairCounters::repair_lossy: u64
 pub routectl_router::FieldRepairCounters::repair_succeeded: u64
-pub routectl_router::FieldRepairCounters::repairs_per_request: [u64; 6]
 pub routectl_router::FieldRepairCounters::verdicts_learned: u64
 impl core::clone::Clone for routectl_router::FieldRepairCounters
 pub fn routectl_router::FieldRepairCounters::clone(&self) -> routectl_router::FieldRepairCounters
@@ -16937,6 +16938,7 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::budget_exhaustions_by_lane(&self) -> alloc::vec::Vec<routectl_router::LaneBudgetExhaustions>
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 pub fn routectl_router::router::Router::lossy_repairs_by_lane(&self) -> alloc::vec::Vec<routectl_router::LaneLossyRepairs>
+pub fn routectl_router::router::Router::repairs_per_request(&self) -> alloc::vec::Vec<u64>
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::calibrated_estimate(&self, &str, &str, u64) -> core::option::Option<u64>
 pub fn routectl_router::router::Router::opening_lane(&self, &str) -> core::option::Option<routectl_router::OpeningLane>

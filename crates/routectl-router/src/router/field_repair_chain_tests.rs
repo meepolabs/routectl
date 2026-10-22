@@ -176,7 +176,7 @@ mod repair_chain {
             [SENT_MAX_TOKENS, MODEL_LIMIT, LOWER_LIMIT].map(|v| Some(u64::from(v))),
         );
         assert_eq!(
-            router.field_repair_counters().repairs_per_request,
+            router.repairs_per_request(),
             one_request_in(2),
             "two repairs drawn",
         );

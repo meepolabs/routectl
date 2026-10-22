@@ -442,6 +442,7 @@ async fn the_doctor_panel_carries_the_budget_exhaustions_and_repair_buckets() {
     let router = Router::new(Arc::new(Config::default()));
     let seeded = routectl_router::seed_distinct_fidelity_counters_for_tests(&router);
     let lane = router.budget_exhaustions_by_lane()[0].lane.clone();
+    let seeded_buckets = router.repairs_per_request();
     let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let state = Arc::new(StatusState::from_app(
         &app,
@@ -456,7 +457,7 @@ async fn the_doctor_panel_carries_the_budget_exhaustions_and_repair_buckets() {
     );
     assert_eq!(
         after["data"]["repairs_per_request"],
-        serde_json::json!(seeded.repairs_per_request),
+        serde_json::json!(seeded_buckets),
     );
 }
 

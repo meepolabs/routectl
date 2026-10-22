@@ -124,7 +124,7 @@ fn build_panel_data(
         capability_writes,
         lossy_repairs_by_lane: view.lossy_repairs_by_lane(),
         budget_exhaustions_by_lane: view.budget_exhaustions_by_lane(),
-        repairs_per_request: view.field_repair_counters().repairs_per_request.to_vec(),
+        repairs_per_request: view.repairs_per_request(),
     }
 }
 

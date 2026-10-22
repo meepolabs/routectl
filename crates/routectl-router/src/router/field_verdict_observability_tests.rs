@@ -11,6 +11,7 @@ use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdic
 
 use crate::config::Config;
 use crate::learned_capability::LearnedRegistryEntry;
+use crate::router::repair_budget::REPAIRS_PER_REQUEST;
 
 const THINKING_DISPLAY_PATH: &str = "thinking.enabled.display";
 const COMPUTER_USE_DISPLAY_PATH: &str = "computer_use.display_number";
@@ -592,14 +593,15 @@ fn budget_exhaustion_past_the_lane_cap_counts_under_other_and_sums_to_the_total(
 fn repairs_per_request_counts_each_request_in_its_draw_bucket() {
     let router = bare_router();
 
-    for draws in [0, 2, 2, 5] {
+    for draws in [0, 2, 2, REPAIRS_PER_REQUEST] {
         router.metrics.record_repairs_per_request(draws);
     }
 
-    assert_eq!(
-        router.field_repair_counters().repairs_per_request,
-        [1, 0, 2, 0, 0, 1],
-    );
+    let mut expected = vec![0; usize::from(REPAIRS_PER_REQUEST) + 1];
+    expected[0] = 1;
+    expected[2] = 2;
+    expected[usize::from(REPAIRS_PER_REQUEST)] = 1;
+    assert_eq!(router.repairs_per_request(), expected);
 }
 
 /// The chain-step exits and the histogram start at zero, so a later nonzero
@@ -613,9 +615,12 @@ fn the_chain_exit_counters_start_at_zero() {
             counters.chain_steps_committed,
             counters.chain_steps_dropped,
             counters.budget_exhausted,
-            counters.repairs_per_request,
         ),
-        (0, 0, 0, [0; 6]),
+        (0, 0, 0),
+    );
+    assert_eq!(
+        bare_router().repairs_per_request(),
+        vec![0; usize::from(REPAIRS_PER_REQUEST) + 1],
     );
     assert!(bare_router().budget_exhaustions_by_lane().is_empty());
 }

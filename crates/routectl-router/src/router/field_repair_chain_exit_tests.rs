@@ -24,8 +24,8 @@ fn exhausted_lanes(router: &Router) -> Vec<(String, u64)> {
 }
 
 /// A histogram with one request in `bucket`.
-fn one_request_in(bucket: usize) -> [u64; 6] {
-    let mut buckets = [0; 6];
+fn one_request_in(bucket: usize) -> Vec<u64> {
+    let mut buckets = vec![0; usize::from(REPAIRS_PER_REQUEST) + 1];
     buckets[bucket] = 1;
     buckets
 }
@@ -244,7 +244,7 @@ async fn a_plain_refusal_on_an_empty_allowance_is_not_exhaustion() {
         "premise: the plain refusal follows the fifth repair"
     );
     assert_eq!(
-        router.field_repair_counters().repairs_per_request,
+        router.repairs_per_request(),
         one_request_in(5),
         "premise: the allowance was spent when the plain refusal arrived",
     );
@@ -289,11 +289,7 @@ async fn a_request_with_no_repair_lands_in_bucket_zero_on_every_walk() {
         drive(&router, walk, req_on(ALIAS)).await;
 
         assert_eq!(seen.calls(), 1, "{walk:?}: premise");
-        assert_eq!(
-            router.field_repair_counters().repairs_per_request,
-            one_request_in(0),
-            "{walk:?}",
-        );
+        assert_eq!(router.repairs_per_request(), one_request_in(0), "{walk:?}");
     }
 }
 
@@ -307,11 +303,7 @@ async fn a_two_key_request_lands_in_bucket_two_on_every_walk() {
         drive(&router, walk, two_key_req()).await;
 
         assert_eq!(seat.calls(), 3, "{walk:?}: premise");
-        assert_eq!(
-            router.field_repair_counters().repairs_per_request,
-            one_request_in(2),
-            "{walk:?}",
-        );
+        assert_eq!(router.repairs_per_request(), one_request_in(2), "{walk:?}");
     }
 }
 
@@ -335,7 +327,7 @@ async fn a_request_that_spends_the_allowance_lands_in_the_last_bucket_on_every_w
             "{walk:?}: premise",
         );
         assert_eq!(
-            router.field_repair_counters().repairs_per_request,
+            router.repairs_per_request(),
             one_request_in(usize::from(REPAIRS_PER_REQUEST)),
             "{walk:?}",
         );

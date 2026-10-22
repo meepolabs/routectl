@@ -135,6 +135,12 @@ impl StatusRouterView {
         self.router.budget_exhaustions_by_lane()
     }
 
+    /// Finished requests by repairs spent, one bucket per draw count, for the
+    /// doctor panel.
+    pub fn repairs_per_request(&self) -> Vec<u64> {
+        self.router.repairs_per_request()
+    }
+
     /// The WHOLE fidelity surface in one coherent router read: counters, acting
     /// verdicts, detailed per-verdict rows, and the probe scheduler snapshot.
     ///

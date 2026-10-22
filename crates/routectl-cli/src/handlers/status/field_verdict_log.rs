@@ -274,7 +274,7 @@ fn emit_if_admitted(
         rc_field_repair_budget_exhausted_lanes_total = exhausted_lanes.total,
         rc_field_repair_budget_exhausted_lanes_omitted = exhausted_lanes.omitted,
         rc_field_repair_budget_exhausted_by_lane = ?exhausted_lanes.rows,
-        rc_field_repairs_per_request = ?snapshot.counters.repairs_per_request,
+        rc_field_repairs_per_request = ?snapshot.repairs_per_request,
         rc_acting_field_verdicts_total = snapshot.acting.len(),
         rc_acting_field_verdicts = ?bounded_acting(snapshot),
         rc_acting_field_verdicts_omitted = acting_omitted(snapshot),
@@ -401,7 +401,7 @@ fn line_fingerprint(
     hash_debug(&mut hasher, &verdicts.rows);
     hash_debug(&mut hasher, &lanes.lossy.rows);
     hash_debug(&mut hasher, &lanes.exhausted.rows);
-    hash_debug(&mut hasher, &counters.repairs_per_request);
+    hash_debug(&mut hasher, &snapshot.repairs_per_request);
     hasher.finish()
 }
 

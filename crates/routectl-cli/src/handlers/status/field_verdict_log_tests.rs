@@ -127,6 +127,7 @@ const WRITER_HEALTHY: bool = false;
 fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
     let router = fixture_router();
     let seeded = routectl_router::seed_distinct_fidelity_counters_for_tests(&router);
+    let seeded_buckets = router.repairs_per_request();
     let view = view_over(router);
 
     let info = captured_snapshot(|| {
@@ -190,10 +191,10 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
         seeded.chain_steps_dropped,
         seeded.budget_exhausted,
     ];
-    values.extend(seeded.repairs_per_request);
+    values.extend(&seeded_buckets);
     assert_eq!(
         info.field("rc_field_repairs_per_request"),
-        Some(format!("{:?}", seeded.repairs_per_request).as_str()),
+        Some(format!("{seeded_buckets:?}").as_str()),
         "the histogram renders its buckets in draw order",
     );
     assert!(
@@ -1279,7 +1280,7 @@ fn a_change_to_any_reported_input_emits_a_line() {
         FingerprintRow {
             name: "repairs per request",
             setup: no_setup,
-            change: |i| i.snapshot.counters.repairs_per_request[2] += 1,
+            change: |i| i.snapshot.repairs_per_request[2] += 1,
         },
         FingerprintRow {
             name: "probe activations",
