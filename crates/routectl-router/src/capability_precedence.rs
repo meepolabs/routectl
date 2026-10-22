@@ -164,7 +164,6 @@ pub enum LearnedInput {
 impl LearnedInput {
     /// The input a dispatch read yields. `ProbeAdmitted` is a lapsed negative
     /// whose re-probe slot this read claimed.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn from_reading(reading: BetaLaneReading) -> Option<Self> {
         match reading {
             BetaLaneReading::ActingNegative {
@@ -308,6 +307,12 @@ impl CellContext {
     /// Whether the lane's wire can carry the capability at all.
     pub(crate) const fn representable(self) -> bool {
         self.representable
+    }
+
+    /// Whether the capability is a droppable the operator has not marked
+    /// essential.
+    pub(crate) const fn droppable(self) -> bool {
+        self.droppable
     }
 
     /// A context with arbitrary facts, including combinations no lane

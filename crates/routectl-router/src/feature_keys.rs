@@ -45,8 +45,8 @@ use serde_json::Value;
 /// deduped list in first-seen order.
 ///
 /// Skips `ToolDef::Custom`, `Other` entries without a string `type`, and
-/// a `type` with any `.`-separated segment in the envelope-field namespace
-/// for tool-type derivation. Additionally appends the request-derived
+/// a `type` with any `.`-separated segment in the envelope-field or the
+/// beta-flag namespace for tool-type derivation. Additionally appends the request-derived
 /// `structured_output` key (after any tool-type keys) when the request
 /// needs constrained decoding -- see the module docs for the three
 /// trigger sources (`output_config.format`, a strict tool, or the
@@ -70,7 +70,9 @@ pub fn derive_feature_keys(
                 // repair table, never from a client-chosen tool type -- not
                 // even one segment of a dotted type, which Bedrock key
                 // normalization can reduce the type to.
-                if crate::field_capability::token_reaches_field_namespace(type_str) {
+                if crate::field_capability::token_reaches_field_namespace(type_str)
+                    || token_reaches_beta_namespace(type_str)
+                {
                     continue;
                 }
                 let key = canonical_tool_key(type_str);
@@ -90,6 +92,16 @@ pub fn derive_feature_keys(
         keys.push(STRUCTURED_OUTPUT_KEY.to_string());
     }
     keys
+}
+
+/// Whether any `.`-separated segment of a client tool `type` sits in the
+/// beta-flag namespace. A beta key is minted only from the `anthropic-beta`
+/// header path; Bedrock key normalization can reduce a dotted type to one
+/// segment, so a segment alone must not reach it either.
+fn token_reaches_beta_namespace(token: &str) -> bool {
+    token
+        .split('.')
+        .any(crate::beta_capability::capability_key_is_beta)
 }
 
 /// True when the request needs constrained decoding: a canonical
@@ -294,6 +306,20 @@ mod tests {
             ToolDef::Other(json!({ "type": format!(".{segment}.enabled") })),
             ToolDef::Other(json!({ "type": format!("toolConfig.{segment}") })),
             ToolDef::Other(json!({ "type": format!("additionalModelRequestFields.{segment}") })),
+            ToolDef::Other(json!({ "type": "web_search_20250305" })),
+        ];
+        assert_eq!(derive_feature_keys(&tools, None, None), vec!["web_search"]);
+    }
+
+    /// Mutation check: drop the beta refusal in `derive_feature_keys` -> red.
+    #[test]
+    fn derive_skips_a_tool_type_in_the_beta_namespace() {
+        let key = crate::beta_capability::beta_capability_key("context-management-2025-06-27")
+            .expect("a well-formed flag");
+        let tools = vec![
+            ToolDef::Other(json!({ "type": key })),
+            ToolDef::Other(json!({ "type": format!("toolConfig.{key}") })),
+            ToolDef::Other(json!({ "type": format!("additionalModelRequestFields.{key}") })),
             ToolDef::Other(json!({ "type": "web_search_20250305" })),
         ];
         assert_eq!(derive_feature_keys(&tools, None, None), vec!["web_search"]);

@@ -4,8 +4,8 @@
 //! verified-working > prior > unknown`, plus the never-empty two-pass
 //! invariants, the F2-never-strips guard, the same-chain-F1 F2 suppression,
 //! and demoted-target strip-key survival. Sibling sidecars pin adjacent
-//! slices; this module is the single place the whole precedence chain is
-//! asserted end to end.
+//! slices; `capability_precedence_walk_tests` asserts the walk acts on the
+//! precedence seam's resolution tier by tier.
 
 use super::*;
 

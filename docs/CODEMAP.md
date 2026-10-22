@@ -3389,18 +3389,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/feature_filter.rs` -- capability pre-filter + strip-interceptor
   application: `filter_chain_by_features` (alias-chain pre-filter with the
   prior/learned soft-drop tail: prior-demoted targets sort ahead of
-  learned-demoted ones), `unsupported_feature_for_target` (override hard-drop
-  > learned strip/route > verified-working mask > catalog prior, all under the
-  capability kill switch; F2 learned negatives always route away, never strip;
-  a resident acting VerifiedWorking positive masks a `Some(false)` catalog
-  prior via `learned_capabilities.is_verified_working`; both the strip verdict
-  and the probe-bypass strip WARN consult
-  `capability_strip::effective_action_for` with the `[capability] essential`
-  list so verdict and WARN cannot drift),
+  learned-demoted ones), `unsupported_feature_for_target` (gathers each
+  feature's inputs and maps the `capability_precedence` seam's `Resolution`
+  onto route-away source, strip keys and admissions: `resolve_operator` runs
+  over every feature before any claiming learned read, so an override drop,
+  `force_supported`, the kill switch or a pinned beta key never claims a
+  re-probe slot; `resolve_open` decides the learned and prior tiers; a learned
+  tail outranks a prior tail and drops the strip set),
   `beta_pinned_for_target`, `override_forces_supported`,
   `apply_strip_interceptor` (the pre-dispatch strip hook -> `StripDecision`),
   the `FilterSource`/`StripDecision` enums, and the
   `catalog_capabilities`/`emit_feature_unsupported` helpers
+- `src/router/capability_precedence_walk_tests.rs` -- one row per precedence
+  tier driving `filter_chain_by_features` and asserting the walk's routing,
+  strip and re-probe outcome equals the seam `Resolution` for inputs gathered
+  independently on the test side
 - `src/router/field_verdict_observability.rs` -- derives the currently ACTING
   field verdicts out of a `learned_capabilities()` snapshot, for live
   visibility rather than routing: `acting_field_verdicts(entries)` keeps only

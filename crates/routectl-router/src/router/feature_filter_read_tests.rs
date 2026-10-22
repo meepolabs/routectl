@@ -18,7 +18,7 @@ use crate::learned_capability::{BoundaryCut, EntryVerdict, ExportedEntry};
 
 /// A lapsed learned negative: `expires_at == now`, which the filter's later
 /// `Instant::now()` reads as expired, so its re-probe slot is claimable.
-fn seed_lapsed(router: &Router, nickname: &str, feature: &str) {
+pub(super) fn seed_lapsed(router: &Router, nickname: &str, feature: &str) {
     let base = Instant::now();
     router
         .learned_capabilities
@@ -224,4 +224,89 @@ fn a_superseded_router_acts_on_no_learned_verdict_but_still_demotes_on_prior() {
         Some(("web_search".to_string(), FilterSource::Learned))
     );
     assert_eq!(current.1.len(), 1);
+}
+
+/// The lapsed entry seeded for `feature` on `nickname`'s lane, read after
+/// the filter ran.
+fn lapsed_entry_in_flight(router: &Router, nickname: &str, feature: &str) -> bool {
+    router
+        .learned_capabilities
+        .export_entries()
+        .into_iter()
+        .find(|e| e.state_key == lane_of(nickname) && e.feature_key == feature)
+        .expect("the seeded lapsed negative stays resident")
+        .in_flight
+}
+
+#[test]
+fn an_operator_decided_cell_never_takes_the_claiming_read() {
+    const PIN: &str = "[providers.p.header_extras]\n\
+                       \"anthropic-beta\" = \"context-management-2025-06-27\"\n";
+    let beta_key = crate::beta_capability::beta_capability_key("context-management-2025-06-27")
+        .expect("a well-formed flag mints a key");
+    // Each row: (name, extra config, kill switch on, feature, expected
+    // verdict source, claiming reads). Every row seeds the SAME lapsed
+    // negative on its feature, so a read would claim the slot and flip
+    // `in_flight`. The last two rows are the positive controls: an
+    // unpinned beta key and a pinned FEATURE key both stay open, read once
+    // and claim, which proves the seed and the counter can show a read.
+    let rows = [
+        (
+            "override route-away",
+            "[capability.overrides.p]\nunsupported = [\"context_management\"]\n",
+            true,
+            "context_management",
+            Some(FilterSource::Override),
+            0,
+        ),
+        (
+            "force_supported override",
+            "[capability.overrides.p]\nforce_supported = [\"context_management\"]\n",
+            true,
+            "context_management",
+            None,
+            0,
+        ),
+        ("kill switch off", "", false, "context_management", None, 0),
+        ("pinned beta key", PIN, true, beta_key.as_str(), None, 0),
+        (
+            "unpinned beta key (control)",
+            "",
+            true,
+            beta_key.as_str(),
+            None,
+            1,
+        ),
+        (
+            "pinned feature key still re-probes",
+            PIN,
+            true,
+            "context_management",
+            None,
+            1,
+        ),
+    ];
+    for (name, extra, enabled, feature, expected_source, expected_reads) in rows {
+        // Arrange -- the hook goes in after seeding and target construction.
+        let mut config = base_config(extra);
+        config.capability.enabled = enabled;
+        let router = Router::new(Arc::new(config));
+        let target = target_with_priors(&router, "nick", &[]);
+        seed_lapsed(&router, "nick", feature);
+        let count = count_entries_locks(&router);
+
+        // Act
+        let (verdict, admissions, strip_keys) = filter(&router, &target, &[feature.to_string()]);
+
+        // Assert -- the count is read before the export below takes the lock.
+        assert_eq!(count.load(Ordering::SeqCst), expected_reads, "{name}");
+        assert_eq!(verdict.map(|(_, source)| source), expected_source, "{name}");
+        assert!(strip_keys.is_empty(), "{name}: nothing strips");
+        assert_eq!(admissions.len(), expected_reads, "{name}: admissions");
+        assert_eq!(
+            lapsed_entry_in_flight(&router, "nick", feature),
+            expected_reads == 1,
+            "{name}: in_flight",
+        );
+    }
 }

@@ -1,12 +1,17 @@
 //! Capability pre-filter + strip-interceptor application.
 
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::time::Instant;
 
-use routectl_core::capability::{FailurePhase, normalize_capability_key};
+use routectl_core::capability::normalize_capability_key;
 use routectl_core::failure_class::MatchedBy;
 use routectl_core::{ChatRequest, Error, Result, sanitize_for_log};
 
+use crate::capability_precedence::{
+    CellContext, Layer, LearnedInput, OpenCell, Resolution, Routing, Stage, Wire, resolve_open,
+    resolve_operator,
+};
 use crate::capability_strip::{Outcome, RequestInterceptor, StripContext, StripInterceptor};
 use crate::catalog::EffectiveRow;
 use crate::learned_capability::{BetaLaneReading, ProbeClaim};
@@ -210,57 +215,27 @@ impl Router {
 
     /// The single decision site for "is any requested feature
     /// unsupported for this target, and by which source". Returns the
-    /// FIRST matched `(feature, source)` or `None` if the target
-    /// supports every requested feature.
+    /// strongest `(feature, source)` or `None` if the target keeps its place.
     ///
-    /// The union is over the operator-override registry plus the learned
-    /// registry. The override consult reads the `[capability.overrides]`
-    /// table through one provenance-preserving read-model; a `RouteAway`
-    /// verdict is consulted FIRST so it hard-drops (reporting its source
-    /// label) ahead of any learned signal.
-    /// When the kill switch is on, a non-expired acting learned negative
-    /// for this `(learned lane, feature)` is consulted after.
+    /// This gathers each feature's inputs and maps the precedence seam's
+    /// [`Resolution`] onto the filter's outputs; every precedence decision
+    /// is the seam's ([`resolve_operator`], then [`resolve_open`]).
     ///
-    /// A `ForceSupported` override masks a feature: it short-circuits that
-    /// feature to Allow BEFORE the learned consult, suppressing an acting
-    /// learned negative and -- because the mask precedes probe-admission
-    /// logic (the `in_flight` flip happens inside `acting_negative_for`) --
-    /// ensuring a masked cell never claims a re-probe slot.
+    /// The operator stage runs over EVERY feature before any learned read, so
+    /// an override drop, a `force_supported` mask or a pinned beta key never
+    /// reaches the claiming read and never flips `in_flight`. A pinned
+    /// feature key stays open (the pin only rules out strip), so it still
+    /// reads, and a lapsed negative on it still re-probes.
     ///
-    /// The learned consult is admission-bearing: an expired negative whose
-    /// re-probe slot this caller claims returns `None` (route to the target
-    /// and test it), counting the probe attempt as a side effect and
-    /// recording the claim in `admissions` so the dispatch path can settle
-    /// it. The `in_flight` flip itself happens inside `acting_negative_for`.
+    /// The learned read is admission-bearing: a lapsed negative whose
+    /// re-probe slot this caller claims counts the probe attempt and lands in
+    /// `admissions` so the dispatch path can settle it. Every open feature is
+    /// read, so no admission is dropped by an earlier feature's verdict.
     ///
-    /// Strip-vs-route verdict: when the learned pass finds acting negatives,
-    /// each is classified by
-    /// [`capability_strip::effective_action_for`](crate::capability_strip::effective_action_for)
-    /// -- the baked
-    /// [`action_for`](crate::capability_strip::action_for) table as the
-    /// operator's `[capability] essential` list tightens it, so a
-    /// globally-essential droppable routes away instead of stripping.
-    /// If EVERY acting negative is a droppable `Strip` capability detected in
-    /// phase F1 that no operator beta floor pins to the wire, the target is NOT
-    /// unsupported -- it returns `None` and the strip keys land in
-    /// `strip_keys` (sorted, normalized) for the caller to attach. If ANY
-    /// acting negative maps to `RouteAway`, is operator-pinned, or was
-    /// detected in a phase other than F1 (F2 feature-naming negatives NEVER
-    /// strip -- they are not droppable wire tokens), the whole target routes
-    /// away (`Some((feature, Learned))`, `strip_keys` left empty) -- a target
-    /// is never half-stripped. An admitted re-probe is excluded from
-    /// `strip_keys` (the full request tests the real capability); its
-    /// admission still reaches `admissions`. Override `RouteAway` matches
-    /// hard-drop FIRST, ahead of any learned or strip decision.
-    ///
-    /// Prior pass (lowest precedence): after override and learned, a
-    /// `Some(false)` catalog capability prior for a feature the learned pass
-    /// left open soft-tails the target (`Some((feature, Prior))`). Gated
-    /// behind the same kill switch as the learned pass -- one switch covers
-    /// the whole capability-truth subsystem, so an operator can neutralize a
-    /// bad shipped prior. The prior never contributes a strip key, and it
-    /// never re-decides a feature the learned pass already ruled on (override
-    /// hard-drop > learned > prior).
+    /// Mapping: a learned tail demotes the whole target with `strip_keys`
+    /// left empty (a target is never half-stripped); otherwise every
+    /// strip-in-place feature lands in `strip_keys` (sorted, normalized), and
+    /// they survive a catalog-prior tail.
     fn unsupported_feature_for_target(
         &self,
         target: &DispatchTarget,
@@ -268,9 +243,35 @@ impl Router {
         admissions: &mut Vec<ProbeAdmission>,
         strip_keys: &mut Vec<String>,
     ) -> Option<(FeatureKey, FilterSource)> {
-        // Override consult: the registry (built from
-        // `[capability.overrides]`) hard-drops on a `RouteAway`.
+        let open = match self.operator_stage(target, features) {
+            ControlFlow::Break(dropped) => return Some((dropped.clone(), FilterSource::Override)),
+            ControlFlow::Continue(open) => open,
+        };
+        let now = Instant::now();
+        let resolved: Vec<(&FeatureKey, Resolution)> = open
+            .into_iter()
+            .map(|(feature, ctx, cell)| {
+                let learned = self.learned_input_for(target, feature, ctx, cell, admissions, now);
+                // A target with no provider kind consults no capability truth,
+                // the catalog prior included.
+                let prior = target
+                    .provider_kind
+                    .and_then(|_| target.capability_prior(feature));
+                (feature, resolve_open(learned, None, prior, cell))
+            })
+            .collect();
+        map_resolutions(&resolved, target.provider_kind, strip_keys)
+    }
+
+    /// The operator stage for every feature: `Break` with the first feature
+    /// an override drops, else `Continue` with the features left open.
+    fn operator_stage<'f>(
+        &self,
+        target: &DispatchTarget,
+        features: &'f [FeatureKey],
+    ) -> ControlFlow<&'f FeatureKey, Vec<(&'f FeatureKey, CellContext, OpenCell)>> {
         let nickname = target.nickname.as_deref().unwrap_or("");
+        let mut open = Vec::with_capacity(features.len());
         for feature in features {
             let verdict = self.override_registry.resolve(
                 &target.provider_name,
@@ -278,176 +279,69 @@ impl Router {
                 feature,
                 target.provider_kind.unwrap_or(""),
             );
-            if verdict == Some(crate::override_registry::OverrideVerdict::RouteAway) {
-                return Some((feature.clone(), FilterSource::Override));
+            let ctx = CellContext::new(
+                feature,
+                &self.config.capability,
+                target.egress_kind,
+                &target.upstream,
+            );
+            match resolve_operator(self.beta_pinned_for_target(target, feature), verdict, ctx) {
+                Stage::Decided(decided) if decided.routing() == Routing::Drop => {
+                    return ControlFlow::Break(feature);
+                }
+                Stage::Decided(_) => {}
+                Stage::Open(cell) => open.push((feature, ctx, cell)),
             }
         }
-        // Learned pass: consult the adaptive registry only when the kill
-        // switch is on and the target carries a provider kind (legacy /
-        // direct-construction targets without one skip the registry).
-        // Scan EVERY feature: an earlier feature's `ProbeAdmitted` must not
-        // short-circuit a later feature's acting negative, and the claiming
-        // read flips `in_flight` as a side effect on `ProbeAdmitted`, so every
-        // admission has to reach `admissions` for its guard to settle the slot
-        // -- dropping one leaks `in_flight` and blocks that feature from ever
-        // re-probing. Any `RouteAway` tail-drops the target after the full scan.
-        if self.config.capability.enabled
-            && let Some(provider_kind) = target.provider_kind
-        {
-            let now = Instant::now();
-            let mut route_away: Option<FeatureKey> = None;
-            let mut strip: Vec<String> = Vec::new();
-            // Features the learned pass acted on (strip, route-away, or
-            // probe-admit). A catalog prior is weaker evidence and must not
-            // re-decide a feature the learned registry already ruled on, so
-            // the prior pass below skips these; a feature the learned pass
-            // found no verdict for stays open to the prior.
-            let mut learned_claimed: Vec<&str> = Vec::new();
-            // Features whose one learned read found a verified-working
-            // positive: the prior pass skips them without a second read.
-            let mut verified_positive: Vec<&str> = Vec::new();
-            for feature in features {
-                // ForceSupported mask: an operator `force_supported`
-                // override short-circuits this feature to Allow BEFORE the
-                // claiming read runs, so a masked cell never suppresses only
-                // the verdict while still claiming a re-probe slot (the
-                // `in_flight` flip happens inside that read). A `RouteAway`
-                // override can never reach here -- it hard-dropped in the
-                // consult above.
-                if self.override_forces_supported(target, feature, provider_kind) {
-                    continue;
-                }
-                let Some(learned_key) = target.learned_key(feature) else {
-                    continue;
-                };
-                let (reading, read_generation) = self.beta_reading_with_generation(
-                    learned_key,
-                    feature,
-                    provider_kind,
-                    ProbeClaim::Claim,
-                    now,
+        ControlFlow::Continue(open)
+    }
+
+    /// The claiming learned read for one open feature, or `None` when the
+    /// learned tier cannot speak (kill switch off, no provider kind, no
+    /// lane). A claimed re-probe is recorded in `admissions`.
+    fn learned_input_for(
+        &self,
+        target: &DispatchTarget,
+        feature: &str,
+        ctx: CellContext,
+        cell: OpenCell,
+        admissions: &mut Vec<ProbeAdmission>,
+        now: Instant,
+    ) -> Option<LearnedInput> {
+        if !cell.reads_learned() {
+            return None;
+        }
+        let provider_kind = target.provider_kind?;
+        let learned_key = target.learned_key(feature)?;
+        let (reading, generation) = self.beta_reading_with_generation(
+            learned_key,
+            feature,
+            provider_kind,
+            ProbeClaim::Claim,
+            now,
+        );
+        if let BetaLaneReading::ProbeAdmitted { .. } = reading {
+            self.metrics.incr_probe_attempts();
+            let normalized = normalize_capability_key(feature, provider_kind);
+            if probe_bypasses_a_strip(ctx, cell) {
+                tracing::warn!(
+                    event = "strip",
+                    state_key = %sanitize_for_log(&target.state_key),
+                    capability_key = %normalized,
+                    outcome = "probe_bypassed",
+                    "capability_strip_decision",
                 );
-                match reading {
-                    BetaLaneReading::ActingNegative { phase, .. } => {
-                        learned_claimed.push(feature);
-                        // Strip-vs-route: a droppable capability the operator
-                        // has not pinned to the wire is stripped in place ONLY
-                        // when the negative was detected in F1 (a wire-token
-                        // strip phase). F2 (feature-naming) and any other phase
-                        // ALWAYS route away and NEVER strip -- an F2 negative is
-                        // not a droppable wire token, so stripping cannot make
-                        // the request succeed. A pinned strip would be re-added
-                        // downstream, so its "success" is false -- route away.
-                        // The consult reads the operator `essential` list, so a
-                        // globally-essential droppable routes away too.
-                        if phase == FailurePhase::F1
-                            && matches!(
-                                crate::capability_strip::effective_action_for(
-                                    feature,
-                                    &self.config.capability.essential,
-                                ),
-                                crate::capability_strip::CapabilityAction::Strip(_)
-                            )
-                            && !self.beta_pinned_for_target(target, feature)
-                        {
-                            strip.push(normalize_capability_key(feature, provider_kind));
-                        } else if route_away.is_none() {
-                            route_away = Some(feature.clone());
-                        }
-                    }
-                    BetaLaneReading::ProbeAdmitted { .. } => {
-                        learned_claimed.push(feature);
-                        self.metrics.incr_probe_attempts();
-                        let normalized = normalize_capability_key(feature, provider_kind);
-                        // Probe bypass: the admitted feature tests the REAL
-                        // capability on the full request, so it is never
-                        // stripped -- a stripped success would falsely clear
-                        // the negative the probe is meant to re-verify. When
-                        // the bypassed feature WOULD otherwise have been
-                        // stripped in place (a droppable `Strip` the operator
-                        // has not pinned to the wire -- the exact condition the
-                        // `RouteAway` arm strips on), surface it: the strip WARN
-                        // vocabulary's `probe_bypassed` outcome fires here, with
-                        // the same field shape as the per-decision WARN in
-                        // `apply_strip_interceptor`. Route-away features do not
-                        // fire -- they were never strip-eligible. Capability
-                        // TOKEN and state_key only -- never request bodies.
-                        //
-                        // No F2 phase guard here: `ProbeAdmitted` carries no
-                        // phase (the negative lapsed into a re-probe), so this
-                        // WARN cannot be phase-refined. It is harmless -- an
-                        // admitted probe bypasses stripping regardless of phase,
-                        // so no F2 negative is ever actually stripped here.
-                        if matches!(
-                            crate::capability_strip::effective_action_for(
-                                feature,
-                                &self.config.capability.essential,
-                            ),
-                            crate::capability_strip::CapabilityAction::Strip(_)
-                        ) && !self.beta_pinned_for_target(target, feature)
-                        {
-                            tracing::warn!(
-                                event = "strip",
-                                state_key = %sanitize_for_log(&target.state_key),
-                                capability_key = %normalized,
-                                outcome = "probe_bypassed",
-                                "capability_strip_decision",
-                            );
-                        }
-                        admissions.push(ProbeAdmission {
-                            state_key: target.state_key.clone(),
-                            learned_key: learned_key.to_string(),
-                            feature: normalized,
-                            provider_kind,
-                            // From the read that granted it, not a later sample.
-                            generation: read_generation,
-                        });
-                    }
-                    BetaLaneReading::VerifiedPositive { .. } => verified_positive.push(feature),
-                    BetaLaneReading::NoVerdict => {}
-                }
             }
-            // ANY route-away (or operator-pinned) acting negative demotes the
-            // whole target; the strip set is abandoned so a mixed target is
-            // never half-stripped-half-routed.
-            if let Some(feature) = route_away {
-                return Some((feature, FilterSource::Learned));
-            }
-            if !strip.is_empty() {
-                strip.sort_unstable();
-                strip.dedup();
-                *strip_keys = strip;
-            }
-            // Prior pass: the catalog capability prior is the lowest-
-            // precedence signal (override hard-drop > learned >
-            // verified-working > prior > unknown), so it runs LAST and only
-            // speaks for a feature the higher tiers left open. It is gated
-            // behind the SAME kill switch as the learned pass: a catalog
-            // prior is shipped vendor data that can be wrong or stale, so an
-            // operator hit by a bad `prior=false` needs the kill switch to
-            // neutralize it (one switch covers the whole capability-truth
-            // subsystem). `force_supported` masks a prior the same way it
-            // masks a learned negative, and a resident acting VerifiedWorking
-            // positive (seen by the learned pass's read) likewise masks it --
-            // a confirmed positive outranks a stale catalog demotion. A `Some(false)` prior soft-tails the
-            // target (weaker evidence -> the prior tail); `None` /
-            // `Some(true)` are permissive no-ops. The prior never contributes
-            // a strip key -- a catalog assertion is not a strippable wire
-            // token -- but any strip key the learned pass set above SURVIVES
-            // this demotion.
-            for feature in features {
-                if learned_claimed.contains(&feature.as_str())
-                    || verified_positive.contains(&feature.as_str())
-                    || self.override_forces_supported(target, feature, provider_kind)
-                {
-                    continue;
-                }
-                if target.capability_prior(feature) == Some(false) {
-                    return Some((feature.clone(), FilterSource::Prior));
-                }
-            }
+            admissions.push(ProbeAdmission {
+                state_key: target.state_key.clone(),
+                learned_key: learned_key.to_string(),
+                feature: normalized,
+                provider_kind,
+                // From the read that granted it, not a later sample.
+                generation,
+            });
         }
-        None
+        LearnedInput::from_reading(reading)
     }
 
     /// Whether an operator beta floor pins capability `feature` on this
@@ -469,11 +363,10 @@ impl Router {
     }
 
     /// Whether an operator `force_supported` override masks `feature` for
-    /// this target -- the single consult shared by the act side (which
-    /// short-circuits a masked feature to Allow before probe admission) and
-    /// the learn side (which suppresses the observe for a masked cell). The
-    /// same `(provider, nickname)` two-tier resolve both paths key on, so a
-    /// mask is never honored on one side and missed on the other.
+    /// this target, for the learn side (which suppresses the observe for a
+    /// masked cell). It reads the same `(provider, nickname)` two-tier
+    /// resolve the act side hands the precedence seam, so a mask is never
+    /// honored on one side and missed on the other.
     pub(super) fn override_forces_supported(
         &self,
         target: &DispatchTarget,
@@ -566,6 +459,45 @@ impl Router {
     }
 }
 
+/// Whether an admitted re-probe skips a strip the cell would otherwise get:
+/// an acting F1 negative strips a droppable feature key the operator does
+/// not pin. An admitted probe sends the real capability (a stripped success
+/// would falsely clear the negative), so the `probe_bypassed` strip outcome
+/// is reported instead.
+const fn probe_bypasses_a_strip(ctx: CellContext, cell: OpenCell) -> bool {
+    !ctx.beta_flag() && ctx.droppable() && !cell.pinned()
+}
+
+/// Map each open feature's [`Resolution`] onto the filter's outputs. A
+/// learned tail outranks a prior tail whatever the feature order, and the
+/// first feature in request order names the tail within a tier.
+fn map_resolutions(
+    resolved: &[(&FeatureKey, Resolution)],
+    provider_kind: Option<&'static str>,
+    strip_keys: &mut Vec<String>,
+) -> Option<(FeatureKey, FilterSource)> {
+    let tail = resolved
+        .iter()
+        .filter(|(_, resolution)| resolution.routing() == Routing::Tail)
+        .min_by_key(|(_, resolution)| resolution.layer());
+    if let Some((feature, resolution)) = tail
+        && resolution.layer() == Some(Layer::Learned)
+    {
+        return Some(((*feature).clone(), FilterSource::Learned));
+    }
+    let mut strip: Vec<String> = resolved
+        .iter()
+        .filter(|(_, resolution)| resolution.wire() == Wire::Strip)
+        .map(|(feature, _)| normalize_capability_key(feature, provider_kind.unwrap_or("")))
+        .collect();
+    if !strip.is_empty() {
+        strip.sort_unstable();
+        strip.dedup();
+        *strip_keys = strip;
+    }
+    tail.map(|(feature, _)| ((*feature).clone(), FilterSource::Prior))
+}
+
 /// The merged catalog capability priors for a resolved model, cloned off
 /// its `EffectiveRow`. Empty when the cell is `Disabled` / `Missing` (the
 /// conservative no-prior baseline) or carries no capability data.
@@ -633,6 +565,10 @@ mod strip_wire_egress_tests;
 #[cfg(test)]
 #[path = "capability_precedence_matrix_tests.rs"]
 mod capability_precedence_matrix_tests;
+
+#[cfg(test)]
+#[path = "capability_precedence_walk_tests.rs"]
+mod capability_precedence_walk_tests;
 
 #[cfg(test)]
 #[path = "feature_filter_read_tests.rs"]
