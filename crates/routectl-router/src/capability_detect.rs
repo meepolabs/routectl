@@ -57,6 +57,12 @@ const SEARCH_EVIDENCE_TYPE_TAGS: &[&str] = &["web_search_tool_result"];
 /// code execution.
 const WEB_SEARCH_REQUEST_KEYS: &[&str] = &["web_search_requests"];
 
+/// Every capability key a detector here can emit. An evidence reader keys its
+/// learned lanes on this list ahead of detection, so an observation for a key
+/// missing from it is never admitted: a new detector adds its key here.
+pub const DETECTABLE_CAPABILITIES: [&str; 4] =
+    [STRUCTURED_OUTPUT, WEB_SEARCH, PROMPT_CACHING, THINKING];
+
 /// Per-capability request intent, derived router-side while the request is
 /// still in hand. Detectors read intent from here; they never consult the
 /// config, the registry, or a clock.

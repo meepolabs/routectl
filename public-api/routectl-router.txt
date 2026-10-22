@@ -4138,6 +4138,112 @@ impl<T> typenum::type_operators::Same for routectl_router::router::DispatchedStr
 pub type routectl_router::router::DispatchedStream::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::DispatchedStream where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::DispatchedStream::into_shared(self) -> Shared
+pub struct routectl_router::router::EvidencePolicy
+pub routectl_router::router::EvidencePolicy::admit_suspect: bool
+impl core::clone::Clone for routectl_router::router::EvidencePolicy
+pub fn routectl_router::router::EvidencePolicy::clone(&self) -> routectl_router::router::EvidencePolicy
+impl core::cmp::Eq for routectl_router::router::EvidencePolicy
+impl core::cmp::PartialEq for routectl_router::router::EvidencePolicy
+pub fn routectl_router::router::EvidencePolicy::eq(&self, &routectl_router::router::EvidencePolicy) -> bool
+impl core::fmt::Debug for routectl_router::router::EvidencePolicy
+pub fn routectl_router::router::EvidencePolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::router::EvidencePolicy
+impl core::marker::StructuralPartialEq for routectl_router::router::EvidencePolicy
+impl core::marker::Freeze for routectl_router::router::EvidencePolicy
+impl core::marker::Send for routectl_router::router::EvidencePolicy
+impl core::marker::Sync for routectl_router::router::EvidencePolicy
+impl core::marker::Unpin for routectl_router::router::EvidencePolicy
+impl core::marker::UnsafeUnpin for routectl_router::router::EvidencePolicy
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::EvidencePolicy
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::EvidencePolicy
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::router::EvidencePolicy where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::router::EvidencePolicy::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::router::EvidencePolicy where U: core::convert::From<T>
+pub fn routectl_router::router::EvidencePolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::EvidencePolicy where U: core::convert::Into<T>
+pub type routectl_router::router::EvidencePolicy::Error = core::convert::Infallible
+pub fn routectl_router::router::EvidencePolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::EvidencePolicy where U: core::convert::TryFrom<T>
+pub type routectl_router::router::EvidencePolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::EvidencePolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::EvidencePolicy where T: core::clone::Clone
+pub type routectl_router::router::EvidencePolicy::Owned = T
+pub fn routectl_router::router::EvidencePolicy::clone_into(&self, &mut T)
+pub fn routectl_router::router::EvidencePolicy::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::EvidencePolicy where T: core::clone::Clone
+pub fn routectl_router::router::EvidencePolicy::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::EvidencePolicy where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::EvidencePolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::EvidencePolicy where T: ?core::marker::Sized
+pub fn routectl_router::router::EvidencePolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::EvidencePolicy where T: ?core::marker::Sized
+pub fn routectl_router::router::EvidencePolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::EvidencePolicy where T: core::clone::Clone
+pub unsafe fn routectl_router::router::EvidencePolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::EvidencePolicy
+pub fn routectl_router::router::EvidencePolicy::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::EvidencePolicy where T: core::clone::Clone
+pub fn routectl_router::router::EvidencePolicy::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::EvidencePolicy
+impl<T> outref::AsOut<T> for routectl_router::router::EvidencePolicy where T: core::marker::Copy
+pub fn routectl_router::router::EvidencePolicy::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::EvidencePolicy where T: ?core::marker::Sized
+pub fn routectl_router::router::EvidencePolicy::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::EvidencePolicy::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::EvidencePolicy
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::EvidencePolicy
+impl<T> typenum::type_operators::Same for routectl_router::router::EvidencePolicy
+pub type routectl_router::router::EvidencePolicy::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::EvidencePolicy where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::EvidencePolicy::into_shared(self) -> Shared
+pub struct routectl_router::router::EvidenceScope
+impl core::clone::Clone for routectl_router::router::EvidenceScope
+pub fn routectl_router::router::EvidenceScope::clone(&self) -> routectl_router::router::EvidenceScope
+impl core::fmt::Debug for routectl_router::router::EvidenceScope
+pub fn routectl_router::router::EvidenceScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::router::EvidenceScope
+impl core::marker::Send for routectl_router::router::EvidenceScope
+impl core::marker::Sync for routectl_router::router::EvidenceScope
+impl core::marker::Unpin for routectl_router::router::EvidenceScope
+impl core::marker::UnsafeUnpin for routectl_router::router::EvidenceScope
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::EvidenceScope
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::EvidenceScope
+impl<T, U> core::convert::Into<U> for routectl_router::router::EvidenceScope where U: core::convert::From<T>
+pub fn routectl_router::router::EvidenceScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::EvidenceScope where U: core::convert::Into<T>
+pub type routectl_router::router::EvidenceScope::Error = core::convert::Infallible
+pub fn routectl_router::router::EvidenceScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::EvidenceScope where U: core::convert::TryFrom<T>
+pub type routectl_router::router::EvidenceScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::EvidenceScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::EvidenceScope where T: core::clone::Clone
+pub type routectl_router::router::EvidenceScope::Owned = T
+pub fn routectl_router::router::EvidenceScope::clone_into(&self, &mut T)
+pub fn routectl_router::router::EvidenceScope::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::EvidenceScope where T: core::clone::Clone
+pub fn routectl_router::router::EvidenceScope::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::EvidenceScope where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::EvidenceScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::EvidenceScope where T: ?core::marker::Sized
+pub fn routectl_router::router::EvidenceScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::EvidenceScope where T: ?core::marker::Sized
+pub fn routectl_router::router::EvidenceScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::EvidenceScope where T: core::clone::Clone
+pub unsafe fn routectl_router::router::EvidenceScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::EvidenceScope
+pub fn routectl_router::router::EvidenceScope::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::EvidenceScope where T: core::clone::Clone
+pub fn routectl_router::router::EvidenceScope::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::EvidenceScope
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::EvidenceScope where T: ?core::marker::Sized
+pub fn routectl_router::router::EvidenceScope::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::EvidenceScope::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::EvidenceScope
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::EvidenceScope
+impl<T> typenum::type_operators::Same for routectl_router::router::EvidenceScope
+pub type routectl_router::router::EvidenceScope::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::EvidenceScope where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::EvidenceScope::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::FidelitySnapshot
 pub routectl_router::router::FidelitySnapshot::acting: alloc::vec::Vec<routectl_router::ActingFieldVerdict>
 pub routectl_router::router::FidelitySnapshot::counters: routectl_router::FieldRepairCounters
@@ -5059,6 +5165,8 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::learned_lane_projection(&self) -> routectl_router::LearnedLaneProjection
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::observe_response_evidence(&self, &routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>)
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
 pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize
@@ -16169,6 +16277,8 @@ impl routectl_router::router::Router
 pub fn routectl_router::router::Router::field_repair_counters(&self) -> routectl_router::FieldRepairCounters
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::learned_lane_projection(&self) -> routectl_router::LearnedLaneProjection
+impl routectl_router::router::Router
+pub fn routectl_router::router::Router::observe_response_evidence(&self, &routectl_router::router::EvidenceScope, &routectl_core::schema::ChatResponse, routectl_router::router::EvidencePolicy, &mut alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>)
 impl routectl_router::router::Router
 pub fn routectl_router::router::Router::owns_learned_entry(&self, &routectl_router::RecordedLearnedEntry) -> bool
 pub fn routectl_router::router::Router::sweep_unowned_learned_entries(&self) -> usize

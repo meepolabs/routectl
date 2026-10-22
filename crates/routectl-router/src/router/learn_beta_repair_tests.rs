@@ -415,7 +415,7 @@ fn count_tokens_repairs_a_named_beta_and_never_mints() {
         assert_eq!(outcome.withheld, owned(&[NAMED]), "{surface:?}");
 
         // Act: the repaired attempt succeeds.
-        learning.on_success(
+        let _scope = learning.on_success(
             &UntranslatedCapabilities::default(),
             &fixture.target,
             &fixture.req,

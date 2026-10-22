@@ -509,7 +509,9 @@ impl Router {
                     // count. Read from the CLIENT request, as the messages
                     // walks do, so a repaired commit keys on what the caller
                     // asked for rather than the repaired body.
-                    learning.on_success(
+                    // A token count carries no response evidence, so the
+                    // count surface never yields a scope.
+                    let _no_evidence = learning.on_success(
                         &UntranslatedCapabilities::default(),
                         &target,
                         req,

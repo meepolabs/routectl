@@ -34,7 +34,9 @@ use crate::cost_gate::{break_even_k, emission_break_even_k};
 use super::beta_report_learn::install_beta_assembly;
 use super::cache_plan::{AutoCacheRequestPlan, CacheDecision, CacheInjection};
 use super::capability_learn::LearnDedupeKey;
-use super::capability_observe::{UntranslatedCapabilities, install_translation_report};
+use super::capability_observe::{
+    EvidencePolicy, UntranslatedCapabilities, install_translation_report,
+};
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
@@ -701,22 +703,26 @@ impl Router {
                         // Then settle the replay carry, the envelope-field
                         // carry, and the re-verification canary against this
                         // success.
-                        learning.on_success(&untranslated, target, &req, &mut learn_dedupe, meta);
-                        // Response-evidence observer: the success-arm mirror of
-                        // `observe_for_learning`. Reads structural positive /
-                        // suspected-absence evidence off the assembled response
-                        // and admits it (read-only, post-response, no dispatch
-                        // blocking). Self-gates on the kill switch. The
-                        // streaming arm records nothing (no assembled response
-                        // exists there -- fail closed).
-                        self.observe_capabilities(
-                            &req,
-                            &resp,
-                            target,
+                        let evidence = learning.on_success(
                             &untranslated,
+                            target,
+                            &req,
+                            &mut learn_dedupe,
                             meta,
-                            Instant::now(),
                         );
+                        // The assembled response is complete evidence, so a
+                        // missing shape here is a real absence: suspects are
+                        // admitted.
+                        if let Some(scope) = evidence {
+                            self.observe_response_evidence(
+                                &scope,
+                                &resp,
+                                EvidencePolicy {
+                                    admit_suspect: true,
+                                },
+                                &mut meta.capability_observations,
+                            );
+                        }
                         // Subscription-quota feed, the non-streaming half. The
                         // reading rides on the assembled response, and this arm
                         // is terminal (it returns immediately below), so the
@@ -1483,11 +1489,16 @@ impl Router {
                         // Then settle the replay carry and the envelope-field
                         // carry against this first content (see
                         // `complete_inner`); a stream holds no canary.
-                        learning.on_success(&untranslated, target, &req, &mut learn_dedupe, meta);
-                        // No response-evidence observation on the stream path:
-                        // no assembled response exists here to read structural
-                        // evidence from, so positive detection fails closed. A
-                        // later stream assembler is purely additive.
+                        // No response evidence is read on the stream path yet:
+                        // first content is not the end of the response, so the
+                        // scope is dropped and nothing is observed.
+                        drop(learning.on_success(
+                            &untranslated,
+                            target,
+                            &req,
+                            &mut learn_dedupe,
+                            meta,
+                        ));
                         // Stamp the client-visible label on every Ok chunk
                         // (including the terminal / usage-only chunk) before
                         // the breaker wrap. The closure owns the label String

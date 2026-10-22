@@ -25,7 +25,7 @@ use serde_json::json;
 
 use crate::config::{Config, CredentialSource, ProviderEntry};
 use crate::resolved::ResolvedModel;
-use crate::router::RouterOptions;
+use crate::router::{DispatchMeta, RouterOptions};
 
 // --- provider stubs ----------------------------------------------------
 
@@ -926,4 +926,147 @@ fn an_admitted_suspect_absence_retains_its_evidence_class_on_the_resident_entry(
         Some(SCHEMA_MISMATCH),
         "a suspect-absence entry must carry its class too",
     );
+}
+
+// --- evidence policy and scope generation ------------------------------
+
+/// A forced web-search request whose clean response carries no search
+/// evidence: the input that yields a suspected-absence observation.
+fn forced_search_request() -> ChatRequest {
+    ChatRequest {
+        model: "m1".into(),
+        messages: vec![].into(),
+        tools: Some(vec![ToolDef::Other(json!({"type": "web_search_20250305"}))]),
+        tool_choice: Some(json!({"type": "any"})),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_policy_without_suspects_admits_verified_evidence_only() {
+    // (name, admit_suspect, F3 suspects expected after two corroborating reads)
+    let rows = [
+        ("suspects admitted (positive control)", true, 1),
+        ("verified only", false, 0),
+    ];
+    for (name, admit_suspect, want_suspects) in rows {
+        // Arrange
+        let router = router_with(OPENAI_P1, NoopProvider::new());
+        let target = openai_target(&router);
+        let scope = router
+            .evidence_scope(
+                &forced_search_request(),
+                &target,
+                &UntranslatedCapabilities::default(),
+            )
+            .expect("an own-credential lane with the subsystem on yields a scope");
+        let resp = clean_response(assistant_text("no search happened"), None);
+        let policy = EvidencePolicy { admit_suspect };
+        let now = Instant::now();
+        let mut events = Vec::new();
+
+        // Act: two reads, since an inferred suspect acts only once corroborated.
+        router.observe_response_evidence_at(&scope, &resp, policy, &mut events, now);
+        router.observe_response_evidence_at(&scope, &resp, policy, &mut events, now);
+
+        // Assert
+        let suspects = events
+            .iter()
+            .filter(|e| e.direction == ObservationDirection::SuspectAbsence)
+            .count();
+        assert_eq!(suspects, want_suspects, "{name}: suspects on the ride-out");
+        assert_eq!(
+            router.metrics.f3_suspect_total(),
+            want_suspects as u64,
+            "{name}: suspect counter"
+        );
+        assert_eq!(
+            router.learned_capabilities.snapshot().len(),
+            want_suspects,
+            "{name}: resident entries"
+        );
+    }
+}
+
+#[test]
+fn a_verified_only_policy_still_admits_a_verified_positive() {
+    // Arrange
+    let router = router_with(OPENAI_P1, NoopProvider::new());
+    let target = openai_target(&router);
+    let req = structured_output_request(&["name"]);
+    let scope = router
+        .evidence_scope(&req, &target, &UntranslatedCapabilities::default())
+        .expect("a scope");
+    let resp = clean_response(assistant_text(r#"{"name":"ok"}"#), None);
+    let mut events = Vec::new();
+
+    // Act
+    router.observe_response_evidence(
+        &scope,
+        &resp,
+        EvidencePolicy {
+            admit_suspect: false,
+        },
+        &mut events,
+    );
+
+    // Assert
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].capability_key, STRUCTURED_OUTPUT);
+    assert_eq!(events[0].direction, ObservationDirection::Verified);
+    assert_eq!(router.metrics.verified_working_total(), 1);
+}
+
+#[test]
+fn a_scope_taken_before_a_reload_admits_nothing() {
+    // (name, scope taken on the superseded router, events expected)
+    let rows = [
+        (
+            "scope taken on the live router (positive control)",
+            false,
+            1,
+        ),
+        ("scope taken on the superseded router", true, 0),
+    ];
+    for (name, scope_on_old, want) in rows {
+        // Arrange: two Routers sharing one registry across a boundary.
+        let config: Config = toml::from_str(OPENAI_P1).expect("valid test toml");
+        let (old, live) =
+            super::super::generation_barrier_tests::superseded_pair_with(Arc::new(config));
+        let scoping = if scope_on_old { &old } else { &live };
+        let req = structured_output_request(&["name"]);
+        let scope = scoping
+            .evidence_scope(
+                &req,
+                &openai_target(scoping),
+                &UntranslatedCapabilities::default(),
+            )
+            .expect("a scope");
+        let resp = clean_response(assistant_text(r#"{"name":"ok"}"#), None);
+        let mut events = Vec::new();
+
+        // Act: the live router reads the response, as a settle after the
+        // reload would.
+        live.observe_response_evidence(
+            &scope,
+            &resp,
+            EvidencePolicy {
+                admit_suspect: true,
+            },
+            &mut events,
+        );
+
+        // Assert
+        assert_eq!(events.len(), want, "{name}: events");
+        assert_eq!(
+            live.learned_capabilities.snapshot().len(),
+            want,
+            "{name}: resident entries"
+        );
+        assert_eq!(
+            live.metrics.verified_working_total(),
+            want as u64,
+            "{name}: counter"
+        );
+    }
 }

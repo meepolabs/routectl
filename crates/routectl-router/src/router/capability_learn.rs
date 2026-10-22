@@ -458,11 +458,41 @@ impl Router {
         now: Instant,
     ) -> crate::learned_capability::GenerationOutcome<crate::learned_capability::ObserveOutcome>
     {
+        self.observe_learned_capability_in(
+            self.registry_generation(),
+            state_key,
+            feature_key,
+            provider_kind,
+            tier,
+            phase,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    /// [`Self::observe_learned_capability`] submitted at a caller-held
+    /// `generation` instead of this Router's current one, for evidence whose
+    /// scope was taken earlier and may have outlived a reload.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn observe_learned_capability_in(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+        tier: SignalTier,
+        phase: FailurePhase,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> crate::learned_capability::GenerationOutcome<crate::learned_capability::ObserveOutcome>
+    {
         if crate::field_capability::learned_key_enters_field_namespace(feature_key, provider_kind) {
             return crate::learned_capability::GenerationOutcome::FieldNamespace;
         }
         self.learned_capabilities.observe_in_generation(
-            self.registry_generation(),
+            generation,
             state_key,
             feature_key,
             provider_kind,
@@ -486,8 +516,33 @@ impl Router {
         now: Instant,
     ) -> crate::learned_capability::GenerationOutcome<crate::learned_capability::PositiveOutcome>
     {
-        self.learned_capabilities.observe_positive_in_generation(
+        self.observe_verified_capability_in(
             self.registry_generation(),
+            state_key,
+            feature_key,
+            provider_kind,
+            source,
+            evidence_class,
+            now,
+        )
+    }
+
+    /// [`Self::observe_verified_capability`] submitted at a caller-held
+    /// `generation`, with the same staleness rule.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn observe_verified_capability_in(
+        &self,
+        generation: u64,
+        state_key: &str,
+        feature_key: &str,
+        provider_kind: &str,
+        source: EvidenceSource,
+        evidence_class: Option<&str>,
+        now: Instant,
+    ) -> crate::learned_capability::GenerationOutcome<crate::learned_capability::PositiveOutcome>
+    {
+        self.learned_capabilities.observe_positive_in_generation(
+            generation,
             state_key,
             feature_key,
             provider_kind,

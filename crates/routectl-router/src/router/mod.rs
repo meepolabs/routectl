@@ -79,7 +79,7 @@ mod wire_response;
 pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_health::CapabilityPersistenceHealth;
 pub use capability_learn::CapabilityLearnEvent;
-pub use capability_observe::CapabilityObserveEvent;
+pub use capability_observe::{CapabilityObserveEvent, EvidencePolicy, EvidenceScope};
 pub use capability_purge::{PurgeOutcome, ReservedPurge, ReservedSeedLift};
 use dispatch::k_query_key;
 #[cfg(test)]

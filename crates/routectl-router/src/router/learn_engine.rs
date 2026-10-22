@@ -32,7 +32,7 @@ use routectl_core::wire_check::{EditSite, RejectionProvenance};
 use routectl_core::{BetaAssembly, ChatRequest, Error, sanitize_for_log};
 
 use super::capability_learn::LearnDedupeKey;
-use super::capability_observe::UntranslatedCapabilities;
+use super::capability_observe::{EvidenceScope, UntranslatedCapabilities};
 use super::class_observe::{DispatchSurface, upstream_facts};
 use super::dispatch::{
     REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION, replay_rejection_body_free,
@@ -732,6 +732,12 @@ impl<'a> AttemptLearning<'a> {
     /// surface's beta repair served its answer and settles nothing. Each settlement rides its learned or
     /// cleared rows out on `meta`, so the ledger records them and a warm
     /// rebuild does not resurrect a negative this request disproved.
+    ///
+    /// Returns the scope the attempt's response evidence is read against, or
+    /// `None` when none may be read: on the count surface (a token count
+    /// carries no response to read), and wherever
+    /// [`Router::evidence_scope`] refuses.
+    #[must_use]
     pub(super) fn on_success(
         &mut self,
         untranslated: &UntranslatedCapabilities,
@@ -739,7 +745,7 @@ impl<'a> AttemptLearning<'a> {
         req: &ChatRequest,
         dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
-    ) {
+    ) -> Option<EvidenceScope> {
         let repaired = if self.count_surface {
             &[][..]
         } else {
@@ -763,6 +769,10 @@ impl<'a> AttemptLearning<'a> {
         if self.canary_enabled {
             self.settle_canary_success(req, meta);
         }
+        if self.count_surface {
+            return None;
+        }
+        self.router.evidence_scope(req, target, untranslated)
     }
 }
 

@@ -344,7 +344,7 @@ fn count_tokens_engine_drops_a_repaired_replay_carry() {
         );
 
         // Act
-        learning.on_success(
+        let _scope = learning.on_success(
             &UntranslatedCapabilities::default(),
             &target,
             &attempt_req,
@@ -427,4 +427,96 @@ fn admit_carries_honors_non_settling_mode() {
         sibling.field_plan.is_none(),
         "the settling admission holds the slot against its sibling"
     );
+}
+
+#[test]
+fn on_success_yields_an_evidence_scope_only_where_response_evidence_may_be_read() {
+    const KILLED: &str = "[capability]\nenabled = false\n\n[providers.p1]\n\
+        kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
+        api_key_ref = \"literal:k\"\n";
+    const FORWARDED: &str = "[providers.p1]\nkind = \"anthropic-api\"\n\
+        base_url = \"https://api.anthropic.com\"\ncredential_source = \"forwarded\"\n";
+    enum Target {
+        Expanded,
+        WithoutProviderKind,
+    }
+    // (name, config, surface, target, scope expected)
+    let rows = [
+        (
+            "complete on an own-credential lane (positive control)",
+            OPENAI_COMPAT,
+            DispatchSurface::Complete,
+            Target::Expanded,
+            true,
+        ),
+        (
+            "stream on an own-credential lane (positive control)",
+            OPENAI_COMPAT,
+            DispatchSurface::Stream,
+            Target::Expanded,
+            true,
+        ),
+        (
+            "count_tokens",
+            OPENAI_COMPAT,
+            DispatchSurface::CountTokens,
+            Target::Expanded,
+            false,
+        ),
+        (
+            "forwarded credential",
+            FORWARDED,
+            DispatchSurface::Complete,
+            Target::Expanded,
+            false,
+        ),
+        (
+            "kill switch off",
+            KILLED,
+            DispatchSurface::Complete,
+            Target::Expanded,
+            false,
+        ),
+        (
+            "no provider kind",
+            OPENAI_COMPAT,
+            DispatchSurface::Complete,
+            Target::WithoutProviderKind,
+            false,
+        ),
+    ];
+    for (name, config, surface, shape, want_scope) in rows {
+        // Arrange
+        let router = router(config, ReplayScheme::Gray);
+        let req = request();
+        let target =
+            match shape {
+                Target::Expanded => target(&router, &req),
+                Target::WithoutProviderKind => {
+                    let provider: Arc<dyn Provider> = Arc::new(LaneProvider(ReplayScheme::Gray));
+                    super::super::super::chain::into_one_dispatch_target(Arc::new(
+                        ResolvedModel::new(NICKNAME, "p1", provider, "wire-model"),
+                    ))
+                }
+            };
+        assert_eq!(
+            target.provider_kind.is_none(),
+            matches!(shape, Target::WithoutProviderKind),
+            "{name}: premise: the fixture carries the provider kind under test"
+        );
+        let mut learning = AttemptLearning::new(&router, surface, LearnedProbeGuard::inert());
+        let mut meta = DispatchMeta::for_alias(NICKNAME);
+
+        // Act
+        let scope = learning.on_success(
+            &UntranslatedCapabilities::default(),
+            &target,
+            &req,
+            &mut HashSet::new(),
+            &mut meta,
+        );
+
+        // Assert
+        assert_eq!(scope.is_some(), want_scope, "{name}");
+    }
 }
