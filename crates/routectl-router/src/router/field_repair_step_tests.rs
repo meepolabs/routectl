@@ -144,7 +144,7 @@ fn a_second_rejection_naming_a_different_field_adds_a_step() {
 /// on the same key; a non-settling plan holds no claim, so there the
 /// pending-field refusal alone stands between the rejection and a second clamp.
 ///
-/// Mutation check: delete the `repairs_pending_field` refusal in
+/// Mutation check: delete the `repaired_field` refusal in
 /// `apply_named` -> red on `non_settling` (the second ceiling clamps again and
 /// draws).
 #[test]
@@ -392,4 +392,30 @@ fn a_pending_step_on_one_thinking_type_row_refuses_the_other() {
         let drawn = remaining - budget.remaining();
         assert_eq!(drawn, u8::from(expected.is_some()), "{name}");
     }
+}
+
+/// A committed field stays repaired for the rest of the target, and the plan
+/// still reads as having applied a repair once nothing is pending.
+///
+/// Mutation check: drop the committed-identity read in `repaired_field` -> red
+/// (the committed ceiling clamps again and draws).
+#[test]
+fn a_committed_field_is_never_repaired_again_and_the_plan_stays_applied() {
+    let router = router();
+    let mut req = three_field_req();
+    let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
+    let mut budget = RepairBudget::per_request();
+    assert!(!plan.has_applied(), "premise: nothing applied yet");
+    assert!(apply_ceiling(&mut plan, &mut req, &mut budget, 2048).is_some());
+    let committed = plan.commit_pending(&[], Instant::now());
+    assert_eq!(committed.len(), 1, "premise");
+    let remaining = budget.remaining();
+
+    let again = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
+
+    assert_eq!(again, None);
+    assert_eq!(req.max_tokens, Some(2048), "the committed value stands");
+    assert_eq!(budget.remaining(), remaining, "no draw");
+    assert!(!plan.has_pending());
+    assert!(plan.has_applied(), "a drained plan still applied a repair");
 }

@@ -2333,5 +2333,6 @@ include!("field_repair_sampling_param_tests.rs");
 include!("field_repair_ceiling_tests.rs");
 include!("field_repair_ceiling_fill_tests.rs");
 include!("field_repair_beta_chain_tests.rs");
+include!("field_repair_chain_tests.rs");
 
 include!("field_repair_declare_tests.rs");
