@@ -4377,7 +4377,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   lookups key on, so overrides match client flags case-insensitively) and
   `operator_betas` (the provider + model `header_extras["anthropic-beta"]`
   floor, read by the dispatch overlay, the pin predicate and the factory
-  beta-floor warnings); the
+  beta-floor warnings), and `refuses_beta_bag_key(egress_kind, upstream)`, the
+  Converse representability check `CellContext` folds into the precedence
+  seam; the
   module is crate-internal, the root re-exports `capability_key_is_beta`,
   `beta_override_key`, `BetaSeedScope`, and (test-utils) the constructor
 - `src/beta_seed.rs` -- `BEDROCK_BETA_SEED` / `BEDROCK_SEED_PROVIDER_KIND`, the
