@@ -272,6 +272,60 @@ pub(super) fn rejected_wire_path(
     })
 }
 
+/// The field a rejection or a closed-table row names, with a tagged-union
+/// value segment folded away (`thinking.type.<token>` -> `thinking.type`), so
+/// a refused rewrite of a field compares equal to the field it rewrote.
+/// Segments are canonical names only; `Debug` prints their count.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct FieldIdentity(Vec<String>);
+
+// The pending-step comparison that consumes the identity lands in a
+// following change; until then only tests reach it.
+#[cfg_attr(not(test), allow(dead_code))]
+impl FieldIdentity {
+    fn folded<'s>(segments: impl IntoIterator<Item = &'s str>) -> Self {
+        let mut segments: Vec<String> = segments.into_iter().map(str::to_owned).collect();
+        if segments.len() == 3 && segments[0] == "thinking" && segments[1] == "type" {
+            segments.pop();
+        }
+        Self(segments)
+    }
+
+    pub(super) fn of_row(row: &FieldRepairRow) -> Self {
+        Self::folded(row.path.split('.'))
+    }
+}
+
+impl fmt::Debug for FieldIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FieldIdentity({} segments)", self.0.len())
+    }
+}
+
+/// A localized rejection's field identity and the tier its attribution earns,
+/// whether or not the closed table has a row for the field.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct LocalizedField {
+    pub(super) identity: FieldIdentity,
+    pub(super) tier: SignalTier,
+}
+
+/// The field a rejection names and its tier. Reads only; `None` exactly when
+/// [`rejected_wire_path`] is.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn localized_field(
+    provider_kind: &str,
+    status: u16,
+    parsed: Option<&ParsedErrorBody>,
+) -> Option<LocalizedField> {
+    let localized = localize(provider_kind, status, parsed?)?;
+    Some(LocalizedField {
+        identity: FieldIdentity::folded(localized.segments.iter().copied()),
+        tier: localized.tier,
+    })
+}
+
 /// One raw dotted segment split into its name and trailing bracket indices
 /// (`tools[0]` -> `tools`, `0`), empty names dropped. Only called on a path
 /// [`canonical_segments`] accepted, so every bracket holds an index.
@@ -735,3 +789,7 @@ mod tests;
 #[cfg(test)]
 #[path = "rejection_parser_beta_tests.rs"]
 mod beta_tests;
+
+#[cfg(test)]
+#[path = "rejection_parser_identity_tests.rs"]
+mod identity_tests;
