@@ -1184,7 +1184,7 @@ fn displayed_resolution(
                 .any(|marker| marker.state_key == lane && marker.feature_key == key)
         },
     );
-    crate::capability_display::resolve_display(DisplayInputs {
+    crate::capability_precedence::resolve_display(DisplayInputs {
         pinned: crate::capability_precedence::operator_pins_capability(
             config,
             &target.provider_name,

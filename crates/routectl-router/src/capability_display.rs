@@ -3,10 +3,8 @@
 //! tags naming which tier a shown signal came from.
 //!
 //! The cell itself is resolved by the precedence seam's display mode,
-//! [`resolve_display`], which picks among these tokens; it is re-exported
-//! here beside them.
-
-pub use crate::capability_precedence::resolve_display;
+//! [`resolve_display`](crate::capability_precedence::resolve_display), which
+//! picks among these tokens.
 
 /// Display verdict token for an operator route-away override cell. A
 /// PANEL-ONLY token, distinct from the core

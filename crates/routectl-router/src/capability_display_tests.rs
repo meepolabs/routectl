@@ -12,7 +12,7 @@ use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdic
 
 use crate::capability_precedence::{
     ACTION_ALLOW, ACTION_DROP, ACTION_NONE, ACTION_REPROBE, ACTION_ROUTE_AWAY, ACTION_STRIP,
-    ACTION_WITHHOLD, CellContext, DisplayInputs, Layer, LearnedInput, SeedCell,
+    ACTION_WITHHOLD, CellContext, DisplayInputs, Layer, LearnedInput, SeedCell, resolve_display,
 };
 use crate::override_registry::OverrideVerdict;
 

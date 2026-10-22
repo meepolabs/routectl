@@ -4923,13 +4923,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   surface renders for a capability cell: `FORCED_SUPPORTED` /
   `FORCED_UNSUPPORTED` / `VERDICT_MIXED` / `VERDICT_UNREPRESENTABLE` and the
   source tags `SOURCE_{PIN, REPRESENTABILITY, OVERRIDE, LIVE, PROBE, SEED,
-  PRIOR}`; re-exports `resolve_display` beside them. A sibling table test
-  pins each tier's display projection
+  PRIOR}`, which `capability_precedence::resolve_display` picks among. A
+  sibling table test pins each tier's display projection
 - `src/capability_precedence.rs` -- the one pure precedence resolution for a
   `(target, capability)` cell. The tier order `pin > representability >
   override > learned > seed > prior` lives once, in the private `PRECEDENCE`
-  list; the dispatch stages and the display mode both walk it, and a const
-  assertion keeps the operator tiers leading it. Staged so a decided cell
+  list; the dispatch stages and the display mode both walk it, `Layer`'s
+  `Ord` is its position there, and a const assertion keeps the operator
+  tiers leading it. Staged so a decided cell
   never reaches the claiming learned read: `resolve_operator(pinned,
   override_verdict, CellContext) -> Stage { Decided(Resolution) |
   Open(OpenCell) }`, then `resolve_open(learned: Option<LearnedInput>, seed,
