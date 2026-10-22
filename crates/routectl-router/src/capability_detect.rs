@@ -1,5 +1,6 @@
 //! Pure, stateless positive-evidence detectors over a terminal successful
-//! non-streaming [`ChatResponse`].
+//! [`ChatResponse`]: a complete response as returned, or the minimal response
+//! a streamed reply's evidence fold builds at the stream's natural end.
 //!
 //! Each detector reads STRUCTURAL evidence from the canonical response --
 //! never "no error occurred" -- and emits a [`CapabilityObservation`]. A
@@ -111,7 +112,7 @@ pub struct CapabilityObservation {
 }
 
 /// Run the clean-stop gate, then every detector, over a terminal
-/// successful non-streaming response. Returns an empty vector when the
+/// successful response (complete, or folded from a stream). Returns an empty vector when the
 /// gate rejects; otherwise one observation per detector that fired.
 pub fn detect(ctx: &DetectorContext, resp: &ChatResponse) -> Vec<CapabilityObservation> {
     let Some(choice) = clean_stop_choice(resp) else {

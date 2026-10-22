@@ -796,9 +796,10 @@ pub fn operator_pins_capability(
 /// `anthropic_beta` floor, or a provider or model `header_extras`
 /// `anthropic-beta` contribution. The floor walk under
 /// [`operator_pins_capability`]; a caller holding a capability key asks
-/// that instead. Called directly only for a flag that mints no capability
-/// key, which the floor can still pin because floor entries are not checked
-/// against the flag grammar.
+/// that instead. Asking with the flag itself is needed only for a flag
+/// outside the beta capability key grammar: the floor can still pin it,
+/// because floor entries are not checked against that grammar, but no
+/// capability key names it.
 pub fn operator_pins_flag(
     config: &Config,
     provider_entry: &str,

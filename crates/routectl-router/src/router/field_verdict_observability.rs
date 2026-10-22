@@ -20,27 +20,25 @@ use super::Router;
 /// Read fresh from the live [`Router`] on every call rather than cached, so
 /// a status/doctor read never lags the counters it reports.
 ///
-/// `#[non_exhaustive]`: a growth type -- each new observable the field pipeline
-/// gains lands here as another counter, so adding one stays a non-breaking
-/// change for readers. Adding one DOES oblige updating the places that enumerate
-/// the counters by hand, none of which compilation will force: the status
-/// reporter (`log_field_verdict_snapshot` in the CLI), the `rc_field_*` table in
-/// `docs/LOGGING.md`, and the CODEMAP passages describing this set
-/// (`rg -i field_repair_counters docs/CODEMAP.md` -- several passages describe
-/// it, so grep for them rather than trusting a remembered list). Miss them and
-/// the counter exists but is never reported and nowhere documented.
+/// `#[non_exhaustive]`: each new observable the field pipeline gains lands
+/// here as another counter, so a reader outside this crate never breaks when
+/// one is added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FieldRepairCounters {
     /// Cumulative fired envelope-field repairs.
     pub repair_attempted: u64,
-    /// The subset of `repair_attempted` whose rejection refused the VALUE sent
-    /// in the field rather than the field: the drop served the request on a
-    /// weaker contract than the client set, and learns nothing.
+    /// The subset of `repair_attempted` that served the request carrying
+    /// something other than what the client sent: a drop of a field whose
+    /// VALUE was refused, a rewrite of the field to the accepted value the
+    /// rejection named, or a client token limit lowered to the named ceiling.
+    /// A drop of a field the lane does not take, and a lowered limit routectl
+    /// filled in itself, are not lossy.
     ///
-    /// Read beside `verdicts_learned`: a lossy count rising with the attempted
-    /// count while nothing is learned is the steady state of a lane refusing a
-    /// value, not a fault -- and without this count it reads as one.
+    /// Read beside `verdicts_learned`: only the value-refused drop learns
+    /// nothing, so a lossy count rising with the attempted count while nothing
+    /// is learned is the steady state of a lane refusing a value, not a
+    /// fault, and without this count it reads as one.
     pub repair_lossy: u64,
     /// Cumulative fired repairs whose re-dispatch succeeded.
     pub repair_succeeded: u64,

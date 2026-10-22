@@ -441,9 +441,13 @@ the `lane` field on the WARN above), surfaced on the INFO snapshot below as
 `lossy_repairs_by_lane`. The map names at most 256 lanes; a lane first seen
 after that, and a target with no learned lane, count under the overflow
 token `other`, which no real lane can equal because every lane key carries
-`#`. Total and map move under one lock, so the rows sum to
-`rc_field_repair_lossy_total`. There is no `field_path` split: the WARN
-already names the path.
+`#`. Total and map move under one lock, so the router's full tally (every
+named lane plus `other`, as the doctor panel carries it) sums to
+`rc_field_repair_lossy_total`. The INFO rendering is capped at 32 rows like
+every row-carrying field on that line: when the tally has more,
+`rc_field_repair_lossy_lanes_omitted` says how many were left off, and the
+rendered rows then sum to less than the total. There is no `field_path`
+split: the WARN already names the path.
 
 Only the lossy drop never commits a verdict, so the same rejection is
 repaired again on every request that carries the value; a lossy count
