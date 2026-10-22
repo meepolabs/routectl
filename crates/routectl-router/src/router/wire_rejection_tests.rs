@@ -18,9 +18,10 @@ use routectl_core::{
 use serde_json::{Value, json};
 
 use super::super::field_repair::{
-    FIELD_ACTION_CEILING_REPAIR, FIELD_ACTION_DROP_REPAIR, FIELD_ACTION_LOSSY_DROP_REPAIR,
-    FIELD_ACTION_REWRITE_REPAIR, FIELD_REASON_UPSTREAM_REJECTION, TEST_REWRITE_ACCEPTED,
-    TEST_REWRITE_KWARG, TEST_REWRITE_PATH, TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL,
+    FIELD_ACTION_CEILING_FILL_REPAIR, FIELD_ACTION_CEILING_REPAIR, FIELD_ACTION_DROP_REPAIR,
+    FIELD_ACTION_LOSSY_DROP_REPAIR, FIELD_ACTION_REWRITE_REPAIR, FIELD_REASON_UPSTREAM_REJECTION,
+    TEST_REWRITE_ACCEPTED, TEST_REWRITE_KWARG, TEST_REWRITE_PATH, TEST_UNSUPPORTED_PATH,
+    TEST_UNSUPPORTED_SENTINEL,
 };
 use super::super::rejection_parser::rejected_wire_path;
 use super::PendingWireRejection;
@@ -540,6 +541,11 @@ async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns(
                 row.label,
                 "{surface:?} {name}: the outcome label the finding carries"
             );
+            assert_eq!(
+                router.field_repair_counters().repair_lossy,
+                u64::from(row.expected == FieldRepairOutcome::RepairedLossy),
+                "{surface:?} {name}: the lossy counter agrees with the outcome"
+            );
             let warned = events
                 .iter()
                 .filter(|e| e.target == WARN_TARGET && e.message == UNREPAIRED_WARN)
@@ -712,47 +718,44 @@ fn a_rejected_container_key_joins_its_repair_by_the_unmasked_field() {
     }
 }
 
-/// Mutation check: drop the ceiling token from the lossy arm of
-/// `field_repair_outcome` -> red on `ceiling`.
+/// One rule decides lossiness for both readers: each action recorded through
+/// the shared recorder moves the lossy counter exactly when its wire finding
+/// joins as `RepairedLossy`.
+///
+/// Mutation check: drop the rewrite token from `repair_action_is_lossy` -> red
+/// on `rewrite` (the counter stays flat and the outcome reads `Repaired`).
 #[test]
-fn each_succeeded_repair_action_joins_its_own_outcome() {
+fn each_recorded_repair_action_counts_lossy_exactly_when_its_finding_is_lossy() {
     let rows = [
-        (
-            "drop",
-            FIELD_ACTION_DROP_REPAIR,
-            FieldRepairOutcome::Repaired,
-        ),
-        (
-            "lossy drop",
-            FIELD_ACTION_LOSSY_DROP_REPAIR,
-            FieldRepairOutcome::RepairedLossy,
-        ),
-        (
-            "rewrite",
-            FIELD_ACTION_REWRITE_REPAIR,
-            FieldRepairOutcome::RepairedLossy,
-        ),
-        (
-            "ceiling",
-            FIELD_ACTION_CEILING_REPAIR,
-            FieldRepairOutcome::RepairedLossy,
-        ),
+        ("drop", FIELD_ACTION_DROP_REPAIR, false),
+        ("lossy drop", FIELD_ACTION_LOSSY_DROP_REPAIR, true),
+        ("rewrite", FIELD_ACTION_REWRITE_REPAIR, true),
+        ("client ceiling", FIELD_ACTION_CEILING_REPAIR, true),
+        ("fill ceiling", FIELD_ACTION_CEILING_FILL_REPAIR, false),
     ];
-    for (name, action, expected) in rows {
+    for (name, action, lossy) in rows {
         let router = router(NEVER_SAMPLED, vec![]);
         let mut meta = DispatchMeta::for_alias(ALIAS);
         meta.wire_rejections.push(container_key_rejection());
-        meta.field_repairs = vec![FieldRepair {
-            action,
-            ..repair_of(CONTAINER_KEY_PATH, true)
-        }];
 
+        let handle = router.note_field_repair_at(&mut meta, STATE_KEY, CONTAINER_KEY_PATH, action);
+        router.note_field_repair_succeeded(&mut meta, handle, false);
         router.emit_wire_rejections(&meta);
 
+        let expected = if lossy {
+            FieldRepairOutcome::RepairedLossy
+        } else {
+            FieldRepairOutcome::Repaired
+        };
+        assert_eq!(
+            router.field_repair_counters().repair_lossy,
+            u64::from(lossy),
+            "{name}: lossy counter",
+        );
         assert_eq!(
             rejections(&router.wire_check_snapshot()),
             [("/metadata/*".to_string(), "client_unchanged", expected)],
-            "{name}",
+            "{name}: wire outcome",
         );
     }
 }

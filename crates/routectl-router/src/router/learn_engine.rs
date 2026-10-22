@@ -39,7 +39,8 @@ use super::dispatch::{
 };
 use super::field_preflight::FieldPreflightPlan;
 use super::field_repair::{
-    FieldRepairHandle, FieldRepairPlan, FieldRepairRow, FieldRepairTable, FieldSettlementMode,
+    FIELD_ACTION_LOSSY_DROP_REPAIR, FieldRepairHandle, FieldRepairPlan, FieldRepairRow,
+    FieldRepairTable, FieldSettlementMode,
 };
 use super::learn_proposers::{BetaProposer, CapabilityProposer, FieldRowProposer, ReplayProposer};
 use super::learn_revert::{MatchedEdit, SentSlot, TargetRevert, answer_declared_edit};
@@ -673,11 +674,12 @@ impl<'a> AttemptLearning<'a> {
         self.canary_repair_attempted = true;
         self.canary_reject_status = repair.status;
         if let Some(path) = repair.lossy_path {
-            self.canary_lossy_repair =
-                Some(
-                    self.router
-                        .note_field_repair_at(meta, &target.state_key, path, true),
-                );
+            self.canary_lossy_repair = Some(self.router.note_field_repair_at(
+                meta,
+                &target.state_key,
+                path,
+                FIELD_ACTION_LOSSY_DROP_REPAIR,
+            ));
         }
         self.skip_replay_backoff = true;
         true

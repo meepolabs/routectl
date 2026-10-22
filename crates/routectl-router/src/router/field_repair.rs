@@ -80,6 +80,19 @@ pub(super) const FIELD_ACTION_CEILING_REPAIR: &str = "field_ceiling_repair";
 /// request carries nothing the client asked for differently. Closed set.
 pub(super) const FIELD_ACTION_CEILING_FILL_REPAIR: &str = "field_ceiling_fill_repair";
 
+/// Whether a repair recorded under `action` served the attempt on a request
+/// carrying something other than what the client sent: a drop of a field
+/// whose VALUE was refused, a rewrite to the accepted value, or a lowered
+/// client token limit. A drop of a field the lane does not take, or a lowered
+/// fill routectl itself supplied, changes nothing the client asked for. The
+/// lossy counter and the wire finding's repair outcome both read this.
+pub(super) fn repair_action_is_lossy(action: &str) -> bool {
+    matches!(
+        action,
+        FIELD_ACTION_LOSSY_DROP_REPAIR | FIELD_ACTION_REWRITE_REPAIR | FIELD_ACTION_CEILING_REPAIR
+    )
+}
+
 /// Reason token: the attempt drew an upstream rejection naming this field
 /// path. Closed set.
 pub(super) const FIELD_REASON_UPSTREAM_REJECTION: &str = "upstream_field_rejection";
@@ -1640,18 +1653,6 @@ impl FieldRepairPlan<'_> {
         self.repaired.map(|idx| self.candidates[idx].path)
     }
 
-    /// Whether the repair this plan applied served the attempt by changing a
-    /// value the client asked for and the lane accepts: a DROP of a field
-    /// whose VALUE was refused, or a lowered client token limit. Lowering
-    /// routectl's own fill is lossless.
-    pub(super) fn repaired_lossy(&self) -> bool {
-        match self.applied {
-            Some(FieldEdit::Drop) => self.repaired_kind == Some(RejectionKind::InvalidValue),
-            Some(FieldEdit::Ceiling(_)) => !self.fill_clamped,
-            Some(FieldEdit::Rewrite(_)) | None => false,
-        }
-    }
-
     /// The value the applied repair wrote, or `None` for a drop.
     fn written_value(&self) -> Option<VerdictValue> {
         self.applied.and_then(FieldEdit::verdict_value)
@@ -1663,7 +1664,11 @@ impl FieldRepairPlan<'_> {
             Some(FieldEdit::Rewrite(_)) => FIELD_ACTION_REWRITE_REPAIR,
             Some(FieldEdit::Ceiling(_)) if self.fill_clamped => FIELD_ACTION_CEILING_FILL_REPAIR,
             Some(FieldEdit::Ceiling(_)) => FIELD_ACTION_CEILING_REPAIR,
-            Some(FieldEdit::Drop) | None if self.repaired_lossy() => FIELD_ACTION_LOSSY_DROP_REPAIR,
+            Some(FieldEdit::Drop) | None
+                if self.repaired_kind == Some(RejectionKind::InvalidValue) =>
+            {
+                FIELD_ACTION_LOSSY_DROP_REPAIR
+            }
             Some(FieldEdit::Drop) | None => FIELD_ACTION_DROP_REPAIR,
         }
     }
@@ -2186,31 +2191,23 @@ impl Router {
         let field_path = plan
             .repaired_path()
             .expect("a reported repair names the row it dropped");
-        let handle = self.note_field_repair_at(meta, state_key, field_path, plan.repaired_lossy());
-        if let Some(record) = meta.field_repairs.get_mut(handle.0) {
-            record.action = plan.repair_action();
-        }
-        handle
+        self.note_field_repair_at(meta, state_key, field_path, plan.repair_action())
     }
 
-    /// Record a field repair by the path it dropped and whether it was lossy:
+    /// Record a field repair by the path it repaired and its action token:
     /// the shared recorder behind [`Self::note_field_repair`] and the canary's
     /// refused-value repair, so both report through one summary and one set
-    /// of counters.
+    /// of counters, and the lossy counter reads [`repair_action_is_lossy`].
     pub(super) fn note_field_repair_at(
         &self,
         meta: &mut DispatchMeta,
         state_key: &str,
         field_path: &'static str,
-        lossy: bool,
+        action: &'static str,
     ) -> FieldRepairHandle {
         let handle = FieldRepairHandle(meta.field_repairs.len());
         meta.field_repairs.push(super::FieldRepair {
-            action: if lossy {
-                FIELD_ACTION_LOSSY_DROP_REPAIR
-            } else {
-                FIELD_ACTION_DROP_REPAIR
-            },
+            action,
             state_key: sanitize_for_log(state_key),
             field_path,
             reason: FIELD_REASON_UPSTREAM_REJECTION,
@@ -2219,7 +2216,7 @@ impl Router {
             learned: false,
         });
         self.metrics.incr_field_repair_attempted();
-        if lossy {
+        if repair_action_is_lossy(action) {
             self.metrics.incr_field_repair_lossy();
         }
         handle

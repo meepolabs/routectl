@@ -376,7 +376,7 @@ upstream body, and the session key are never carried:
 
 | Field | Meaning |
 |---|---|
-| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it), `field_rewrite_repair` when the field was rewritten to the one accepted value the rejection named (learned like a drop of a refused field), `field_ceiling_repair` when a client's token limit was lowered to the ceiling the rejection named, `field_ceiling_fill_repair` when the lowered limit was the one routectl filled in for a client that sent none (lossless: the client asked for no particular limit). Both ceiling repairs learn the named ceiling |
+| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it), `field_rewrite_repair` when the field was rewritten to the one accepted value the rejection named (learned like a drop of a refused field, and counted lossy: the served value is not the client's), `field_ceiling_repair` when a client's token limit was lowered to the ceiling the rejection named, `field_ceiling_fill_repair` when the lowered limit was the one routectl filled in for a client that sent none (lossless: the client asked for no particular limit). Both ceiling repairs learn the named ceiling |
 | `state_key` | Sanitized `[providers]` state key of the repaired target |
 | `field_path` | The closed-table qualified dotted path that was repaired |
 | `reason` | Why the repair fired (`upstream_field_rejection`) |
@@ -417,13 +417,23 @@ Read them as a pair -- a rising attempted count with a flat succeeded
 count means the dropped field was not what the upstream objected to.
 
 `rc_field_repair_lossy_total` is the subset of attempted repairs whose
-rejection refused a VALUE rather than the field and whose row DROPS it
-(a rewrite row's refused-value repair commits like any other). Those
-lossy drops never commit a verdict, so the same rejection is repaired
-again on every request that carries the value; a lossy count rising with the attempted
-count and a flat learned count is that steady state, not a fault. The
-captured `anthropic-api` `thinking.display` enum rejection is one such
-case today.
+repaired request carries something other than what the client sent:
+`field_lossy_drop_repair` (a drop of a field whose VALUE was refused),
+`field_rewrite_repair` (the field rewritten to the accepted value the
+rejection named), and `field_ceiling_repair` (a client's token limit
+lowered to the named ceiling). A `field_drop_repair` of a field the lane
+does not take, and a `field_ceiling_fill_repair` of the limit routectl
+filled in, are not lossy. The same rule decides the `repaired_lossy`
+outcome on a wire-check rejection finding, so the counter and the
+findings always agree.
+
+Only the lossy drop never commits a verdict, so the same rejection is
+repaired again on every request that carries the value; a lossy count
+rising with the attempted count and a flat learned count is that steady
+state, not a fault. The captured `anthropic-api` `thinking.display` enum
+rejection is one such case today. A rewrite or a client ceiling repair
+commits its verdict, so later requests are adjusted before dispatch and
+count under `rc_field_preflight_actions_total` instead.
 
 One SETTLEMENT limitation to read alongside the counters, because it
 makes two token-count call paths behave differently on purpose. The
@@ -681,7 +691,7 @@ consume the slots real traffic needs.
 | Field | Meaning |
 |---|---|
 | `rc_field_repair_attempted_total` | Same counter as the repair WARN section above |
-| `rc_field_repair_lossy_total` | Same counter as the repair WARN section above: the subset of attempted repairs that answered a refused VALUE and learned nothing. Rising with the attempted count while `rc_field_verdicts_learned_total` stays flat is a lane refusing a value, not a fault |
+| `rc_field_repair_lossy_total` | Same counter as the repair WARN section above: the subset of attempted repairs whose repaired request carries something other than what the client sent (a value-refused drop, a rewrite, or a lowered client token limit), by the same rule as the `repaired_lossy` wire-check outcome. Rising with the attempted count while `rc_field_verdicts_learned_total` stays flat is a lane refusing a value, not a fault |
 | `rc_field_repair_succeeded_total` | Same counter as the repair WARN section above |
 | `rc_field_verdicts_learned_total` | Same counter as the repair WARN section above |
 | `rc_field_outstanding_unconfirmed_total` | CURRENT: requests riding on a verdict no canary has re-confirmed yet, summed over every resident identity. Rises and falls -- exposure that MIGHT later be disproved |

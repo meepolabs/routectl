@@ -234,7 +234,11 @@ async fn a_rejection_naming_one_accepted_value_rewrites_to_it_and_commits() {
     assert_eq!(summary.action, super::FIELD_ACTION_REWRITE_REPAIR);
     assert!(summary.repair_succeeded);
     assert!(summary.learned, "the summary reports the committed verdict");
-    assert_eq!(router.metrics.field_repair_lossy_total(), 0);
+    assert_eq!(
+        router.metrics.field_repair_lossy_total(),
+        1,
+        "the served request carries a value the client did not send",
+    );
     assert_eq!(router.field_repair_counters().verdicts_learned, 1);
 }
 
