@@ -78,7 +78,7 @@ impl AttemptLearning<'_> {
         rejection: &Rejection<'_>,
         meta: &mut DispatchMeta,
     ) {
-        if !RejectionSite::confirms_path_present(rejection.site.as_ref()) {
+        if !confirms_path_present(rejection.site.as_ref()) {
             return;
         }
         let Some(mut plan) = self.field_plan.take() else {
@@ -144,4 +144,11 @@ impl AttemptLearning<'_> {
                 .extend(plan.settle_disproved(self.router.field_verdicts()));
         }
     }
+}
+
+/// Whether the body that went out is confirmed to carry the path the
+/// rejection names. Unknown presence is not confirmation: only a field the
+/// upstream read can prove it read past the fields before it.
+fn confirms_path_present(site: Option<&RejectionSite>) -> bool {
+    site.and_then(|site| site.in_egress) == Some(true)
 }
