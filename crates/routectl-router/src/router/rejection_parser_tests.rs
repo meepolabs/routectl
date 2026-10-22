@@ -6,7 +6,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use routectl_core::capability::SignalTier;
+use routectl_core::capability::{COMPUTER_USE, FailurePhase, SignalTier};
+use routectl_core::error::Error;
+use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy};
 use routectl_core::{MAX_ERROR_BODY_BYTES, ParsedErrorBody, UpstreamBody};
 use serde_json::{Value, json};
 
@@ -191,7 +193,9 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
         ),
         // Names a refused tool type in prose, with the model id and a
-        // model-specific list of accepted types around it; no wire path.
+        // model-specific list of accepted types around it; no wire path. The
+        // capability matcher attributes it instead (see the tool-type corpus
+        // test below).
         (
             "anthropic-api/tool-type-computer-unsupported-messages",
             Outcome::NotLocalized,
@@ -336,6 +340,45 @@ fn every_bedrock_validation_canary_resolves_to_a_row_or_is_reported_unresolved()
     .collect();
 
     assert_eq!(bedrock_canary_outcomes(), expected);
+}
+
+/// Every committed rejection fixture, whatever lane captured it, read as an
+/// anthropic-api `BadRequest`: only the captured refused-tool-type envelope
+/// names a capability, and it names `computer_use` as self-identifying wire
+/// evidence.
+#[test]
+fn only_the_tool_type_fixture_attributes_a_capability_on_anthropic_api() {
+    let mut attributed = BTreeMap::new();
+    let mut read = 0;
+    for kind_dir in std::fs::read_dir(rejections_dir()).expect("rejections dir") {
+        let kind_dir = kind_dir.expect("dir entry").path();
+        let kind = kind_dir.file_name().unwrap().to_str().unwrap().to_string();
+        for file in std::fs::read_dir(&kind_dir).expect("kind dir") {
+            let case = file.expect("file entry").path();
+            let case = case.file_stem().unwrap().to_str().unwrap().to_string();
+            let (status, body) = fixture(&kind, &case);
+            let err = Error::upstream_full("p", status, body, None, None, None);
+            let class = ClassifiedFailure {
+                class: FailureClass::BadRequest,
+                matched_by: MatchedBy::Status,
+            };
+            if let Some(resolved) =
+                crate::capability_matcher::resolve_requested_capability(ANTHROPIC, &err, &class)
+            {
+                attributed.insert(format!("{kind}/{case}"), resolved);
+            }
+            read += 1;
+        }
+    }
+
+    assert!(read > 20, "premise: the whole corpus was read, got {read}");
+    assert_eq!(
+        attributed,
+        BTreeMap::from([(
+            "anthropic-api/tool-type-computer-unsupported-messages".to_string(),
+            (COMPUTER_USE.to_string(), SelfIdentifying, FailurePhase::F1,),
+        )]),
+    );
 }
 
 #[test]

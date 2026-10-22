@@ -587,6 +587,61 @@ async fn inferred_prefill_is_dormant_and_not_learned() {
     assert!(router.learned_capabilities.is_empty());
 }
 
+/// The committed first-party 400 refusing a `computer_20250124` tool.
+fn anthropic_tool_type_provider() -> Arc<CapabilityRejectingProvider> {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/rejections/anthropic-api/tool-type-computer-unsupported-messages.json"
+    ))
+    .expect("valid tool-type fixture");
+    Arc::new(CapabilityRejectingProvider {
+        id: "p1",
+        status: 400,
+        body: fixture["body"].as_str().expect("fixture body").into(),
+        upstream_type: fixture["lifted_type"].as_str().map(str::to_string),
+        upstream_code: None,
+        calls: AtomicUsize::new(0),
+    })
+}
+
+#[tokio::test]
+async fn anthropic_refused_tool_type_is_learned_when_the_request_carries_it() {
+    let router = router_with(ANTHROPIC_P1, anthropic_tool_type_provider());
+
+    let (dispatched, events) = Box::pin(with_capture(
+        router.complete_with_options(req_with_tool("computer_20250124"), RouterOptions::default()),
+    ))
+    .await;
+
+    assert!(dispatched.result.is_err());
+    assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
+    let ev = &dispatched.meta.learned_capabilities[0];
+    assert_eq!(ev.capability_key, "computer_use");
+    assert_eq!(ev.provider_kind, "anthropic-api");
+    assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
+    assert_eq!(ev.phase, FailurePhase::F1);
+    assert_eq!(learn_warns(&events).len(), 1);
+    assert!(!router.learned_capabilities.is_empty());
+}
+
+#[tokio::test]
+async fn anthropic_refused_tool_type_absent_from_the_request_is_not_learned() {
+    // The rejection names `computer_use`, but the request carried a
+    // different tool: the membership gate refuses a capability that was not
+    // in flight.
+    let router = router_with(ANTHROPIC_P1, anthropic_tool_type_provider());
+
+    let (dispatched, events) = Box::pin(with_capture(router.complete_with_options(
+        req_with_tool("web_search_20250305"),
+        RouterOptions::default(),
+    )))
+    .await;
+
+    assert!(dispatched.result.is_err());
+    assert!(dispatched.meta.learned_capabilities.is_empty());
+    assert!(learn_warns(&events).is_empty());
+    assert!(router.learned_capabilities.is_empty());
+}
+
 #[tokio::test]
 async fn operator_remapped_class_is_not_learned() {
     // The operator remaps 400 to feature-unsupported: the class is now

@@ -239,12 +239,12 @@ pub fn resolve_requested_capability(
             resolve_self_identifying(provider_kind, err, capability)
         }
         FailureClass::BadRequest if provider_kind == BEDROCK_KIND => match_bedrock_validation(err),
-        // F2 self-identifying feature-naming outranks F1 inferred prose, so it
-        // is tried first; with the shipped-empty tables it always falls
-        // through to the inferred arm on real traffic.
-        FailureClass::BadRequest => {
-            match_feature_naming(provider_kind, err).or_else(|| match_inferred(provider_kind, err))
-        }
+        // Self-identifying arms outrank inferred prose, so they are tried
+        // first; with the shipped-empty F2 tables the feature-naming arm always
+        // falls through on real traffic.
+        FailureClass::BadRequest => match_feature_naming(provider_kind, err)
+            .or_else(|| match_anthropic_tool_rejection(provider_kind, err))
+            .or_else(|| match_inferred(provider_kind, err)),
         _ => None,
     }
 }
@@ -548,8 +548,8 @@ const PYDANTIC_TOOLS_HEAD: &str = "tools.";
 const PYDANTIC_TAG_SEAM: &str = ": Input tag '";
 const PYDANTIC_TAG_TAIL: &str = " found using 'type' does not match any of the expected tags: ";
 
-const AWS_TOOL_TYPES_SEAM: &str = " does not support tool types: ";
-const AWS_SUGGESTION_SEAM: &str = ". Did you mean one of ";
+const TOOL_TYPES_SEAM: &str = " does not support tool types: ";
+const SUGGESTION_SEAM: &str = ". Did you mean one of ";
 
 /// The middle-anchored Bedrock tool-type rejections the single-token
 /// templates cannot bracket, because each ends in a variable list of
@@ -559,6 +559,29 @@ const AWS_SUGGESTION_SEAM: &str = ". Did you mean one of ";
 fn match_bedrock_tool_rejection(unwrapped: &str) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     let token = extract_pydantic_tool_tag(unwrapped)
         .or_else(|| extract_unsupported_tool_type(unwrapped))?;
+    rejected_tool_type_capability(token)
+}
+
+/// The first-party Messages API arm for a refused tool type: the nested
+/// `error.message` carries the same `'<model>' does not support tool types:
+/// <type>. Did you mean one of <list>` rejection Bedrock returns, so it runs
+/// through the same extractor and keys identically. The first-party surface
+/// never wraps the message, so no Converse prefix is removed.
+fn match_anthropic_tool_rejection(
+    provider_kind: &str,
+    err: &Error,
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
+    if provider_kind != routectl_core::provider_kind::config::ANTHROPIC_API {
+        return None;
+    }
+    let message = upstream_error_field(err, "message")?;
+    rejected_tool_type_capability(extract_unsupported_tool_type(message.trim())?)
+}
+
+/// A tool type an upstream named as refused, keyed through [`tool_type_key`].
+/// The upstream named the wire tool type, so the match is self-identifying
+/// [`FailurePhase::F1`] evidence.
+fn rejected_tool_type_capability(token: &str) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     let capability = tool_type_key(token)?;
     Some((capability, SignalTier::SelfIdentifying, FailurePhase::F1))
 }
@@ -596,8 +619,8 @@ fn extract_unsupported_tool_type(message: &str) -> Option<&str> {
         return None;
     }
     let (token, _) = rest
-        .strip_prefix(AWS_TOOL_TYPES_SEAM)?
-        .split_once(AWS_SUGGESTION_SEAM)?;
+        .strip_prefix(TOOL_TYPES_SEAM)?
+        .split_once(SUGGESTION_SEAM)?;
     (is_safe_token(token) && !token.contains(',')).then_some(token)
 }
 
@@ -1992,6 +2015,122 @@ mod tests {
                 "kind {kind}"
             );
         }
+    }
+
+    // --- First-party refused tool type: the Bedrock extractor, nested body ---
+
+    /// The captured first-party Messages API 400 for a `computer_20250124`
+    /// tool sent to a model that does not offer it.
+    const ANTHROPIC_TOOL_TYPE_FIXTURE: &str = include_str!(
+        "../tests/fixtures/rejections/anthropic-api/tool-type-computer-unsupported-messages.json"
+    );
+
+    /// `(body, lifted_type)` of the committed first-party tool-type rejection.
+    fn anthropic_tool_type_rejection() -> (String, String) {
+        let fx: serde_json::Value =
+            serde_json::from_str(ANTHROPIC_TOOL_TYPE_FIXTURE).expect("valid tool-type fixture");
+        (
+            fx["body"].as_str().expect("fixture body").to_string(),
+            fx["lifted_type"]
+                .as_str()
+                .expect("fixture lifted_type")
+                .to_string(),
+        )
+    }
+
+    #[test]
+    fn anthropic_tool_type_rejection_resolves_to_computer_use() {
+        // Arrange: the captured body, classified for real.
+        let (body, ty) = anthropic_tool_type_rejection();
+        let err = upstream(400, &body, Some(&ty), None);
+        let classified = classify(&err, Some("anthropic-api"));
+        assert_eq!(classified.class, FailureClass::BadRequest);
+
+        // Act
+        let got = resolve_requested_capability("anthropic-api", &err, &classified);
+
+        // Assert
+        assert_eq!(
+            got,
+            Some((
+                COMPUTER_USE.to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1
+            ))
+        );
+    }
+
+    #[test]
+    fn anthropic_tool_type_rejection_is_scoped_to_its_provider_kind() {
+        let (body, ty) = anthropic_tool_type_rejection();
+        let err = upstream(400, &body, Some(&ty), None);
+        for kind in ["openai-compat", "openai-responses", "bedrock", "gemini"] {
+            assert_eq!(
+                resolve_requested_capability(kind, &err, &cf(FailureClass::BadRequest)),
+                None,
+                "kind {kind}"
+            );
+        }
+    }
+
+    /// Every tool-type sentence the extractor must refuse, carried in the
+    /// first-party nested body: two rejected types, no suggestion list, a
+    /// model id that is not token-shaped, the Converse wrapper the first-party
+    /// surface never sends, a sentence ahead of the model id, a sentence about
+    /// something other than tool types, and the pydantic tag rejection this
+    /// surface has no capture for.
+    #[test]
+    fn anthropic_tool_type_near_misses_do_not_resolve() {
+        let fx = capture_fixture();
+        let near = &fx["near_miss_messages"];
+        let message = |key: &str| {
+            near[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("near-miss {key}"))
+                .to_string()
+        };
+        let (body, _) = anthropic_tool_type_rejection();
+        let captured: serde_json::Value = serde_json::from_str(&body).expect("fixture body json");
+        let captured = captured["error"]["message"]
+            .as_str()
+            .expect("captured message");
+        let cases = [
+            ("two_tokens", message("aws_two_tokens")),
+            ("no_suggestion", message("aws_no_suggestion")),
+            ("model_with_space", message("aws_model_with_space")),
+            (
+                "converse_wrapper",
+                format!("The model returned the following errors: {captured}"),
+            ),
+            ("leading_sentence", format!("Invalid request. {captured}")),
+            (
+                "other_noun",
+                captured.replacen(" tool types: ", " thinking types: ", 1),
+            ),
+            (
+                "pydantic_tag",
+                "tools.0: Input tag 'computer_20250124' found using 'type' does not match \
+                 any of the expected tags: 'custom'"
+                    .to_string(),
+            ),
+        ];
+        for (name, message) in &cases {
+            let got = resolve_requested_capability(
+                "anthropic-api",
+                &upstream(400, &anthropic_body(message), None, None),
+                &cf(FailureClass::BadRequest),
+            );
+            assert_eq!(got, None, "near-miss {name} must not learn");
+        }
+        let control = resolve_requested_capability(
+            "anthropic-api",
+            &upstream(400, &anthropic_body(captured), None, None),
+            &cf(FailureClass::BadRequest),
+        );
+        assert!(
+            control.is_some(),
+            "the same harness resolves the captured message"
+        );
     }
 
     // --- Arm 3: F2 feature-naming anchored-template engine ---
