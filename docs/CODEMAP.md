@@ -5848,6 +5848,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   two durable beta-flag facts (a learned beta negative, an operator seed lift):
   a real Router behind a recording seat, persisted through the production
   writer and read back by a second Router; declared from `server/mod.rs`
+- `src/server/essential_routeaway_daemon_tests.rs` -- assembled-daemon
+  acceptance for learned capability refusals across a two-lane Bedrock chain
+  (one mock origin per lane, negatives learned from committed rejection
+  captures through real dispatch): an operator-essential droppable routes
+  away with the tool intact, a self-identifying refusal on every lane
+  answers the typed 400 with no dial (complete and stream), inferred
+  negatives everywhere still dispatch, a `force_supported` added after every
+  lane refused (a graceful restart on the same ledger restores the
+  negatives) sends the request to that lane, and count_tokens is never
+  refused; declared from `server/mod.rs`
 - `src/server/capability_boundary.rs` -- the replay boundary a
   revision-changing reload must commit BEFORE it publishes the replacement
   router, in two phases. `admit_capability_boundary(usage, router) ->
