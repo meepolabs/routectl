@@ -366,8 +366,19 @@ mod repair_chain {
         );
     }
 
+    /// Each verdict carries the features of the request the CLIENT sent: the
+    /// disabled thinking the first repair rewrote is still among them, on
+    /// the moved-on commit as on the success commit.
     fn assert_two_key_settled(meta: &crate::router::DispatchMeta, label: &str) {
         assert_eq!(verdicts(meta), two_key_verdicts(), "{label}");
+        for event in &meta.learned_capabilities {
+            assert!(
+                event.request_features.contains(&thinking_disabled_key()),
+                "{label}: {} features {:?}",
+                event.capability_key,
+                event.request_features,
+            );
+        }
         assert_eq!(
             succeeded(meta),
             vec![
@@ -384,6 +395,8 @@ mod repair_chain {
 
     /// Mutation check: put back the one-step-per-target gate in
     /// `try_field_repair` -> red (the max_tokens refusal reaches the client).
+    /// Derive the moved-on commit's features from the refused attempt
+    /// instead of the client's request -> red (the rewritten field is gone).
     #[tokio::test]
     async fn two_refused_fields_on_anthropic_api_complete_converge_in_one_request() {
         let seat = ChainSeat::new(Egress::Anthropic, two_key);
