@@ -66,8 +66,8 @@ use super::transcript_defect::{
 use super::wire_response::{declare_model_relabel, declare_provider_attribution};
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
 
-/// Message/event name of the single aggregated reasoning-replay
-/// degradation WARN. Stable, greppable, closed-set.
+/// Message/event name of the reasoning-replay degradation WARN. Stable,
+/// greppable, closed-set.
 const REPLAY_DEGRADE_EVENT: &str = "reasoning_replay_degraded";
 /// Action token: the fixed strip-repair correctness branch stripped the
 /// carried reasoning artifacts and re-dispatched the same target once.
@@ -103,29 +103,31 @@ fn target_drops_responses_reasoning(provider_kind: Option<&str>) -> bool {
     provider_kind != Some(RESPONSES_PROVIDER_KIND)
 }
 
-/// Emit the single aggregated reasoning-replay degradation WARN for a
-/// resolved request. Fires exactly ONCE when the strip-repair branch
-/// degraded a carried reasoning artifact anywhere in the chain walk, and
-/// not at all otherwise. Carries closed-set tokens and counts only --
-/// never the artifact bytes, a reasoning item id, a hash, the session
-/// key, or the upstream body. The request span already supplies
-/// `request_id` correlation across the retry and fallback hops.
+/// Emit the reasoning-replay degradation WARN for a resolved request: one
+/// line per strip-repair that fired anywhere in the chain walk, in the order
+/// they fired, and none otherwise. The request's repair ceiling bounds the
+/// line count. Every line carries `repair_count`, the request's total, so a
+/// reader of any one line knows whether siblings exist. Carries closed-set
+/// tokens and counts only -- never the artifact bytes, a reasoning item id,
+/// a hash, the session key, or the upstream body. The request span already
+/// supplies `request_id` correlation across the retry and fallback hops.
 pub(super) fn emit_replay_degradation(meta: &DispatchMeta) {
-    let Some(deg) = meta.replay_degradation.as_ref() else {
-        return;
-    };
-    tracing::warn!(
-        action = deg.action,
-        target_lane = deg.target_lane.as_str(),
-        state_key = %sanitize_for_log(&deg.state_key),
-        source_schemes = %join_schemes(deg.source_schemes.as_slice()),
-        reason = deg.reason,
-        artifact_count = deg.artifact_count,
-        repair_attempted = deg.repair_attempted,
-        repair_succeeded = deg.repair_succeeded,
-        learned = deg.learned,
-        "{REPLAY_DEGRADE_EVENT}",
-    );
+    let repair_count = meta.replay_degradations.len();
+    for deg in &meta.replay_degradations {
+        tracing::warn!(
+            action = deg.action,
+            target_lane = deg.target_lane.as_str(),
+            state_key = %sanitize_for_log(&deg.state_key),
+            source_schemes = %join_schemes(deg.source_schemes.as_slice()),
+            reason = deg.reason,
+            artifact_count = deg.artifact_count,
+            repair_attempted = deg.repair_attempted,
+            repair_succeeded = deg.repair_succeeded,
+            learned = deg.learned,
+            repair_count,
+            "{REPLAY_DEGRADE_EVENT}",
+        );
+    }
 }
 
 /// Join replay scheme tokens into a stable, comma-separated closed-set

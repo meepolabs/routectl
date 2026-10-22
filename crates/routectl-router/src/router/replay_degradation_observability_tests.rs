@@ -1,5 +1,5 @@
-//! Observability coverage for reasoning-replay degradation: the single
-//! aggregated per-request WARN, its closed-set token payload, and the
+//! Observability coverage for reasoning-replay degradation: one WARN per
+//! strip-repair, its closed-set token payload, and the
 //! blob-leak audit across the WARN, the TRACE lines, and the generic
 //! retry/fallback error path. Modeled on `observability_seam_tests`: a
 //! mock provider carrying sentinel reasoning bytes and upstream body,
@@ -22,7 +22,7 @@ use routectl_core::{
 use routectl_testkit::{capture_lines, with_capture};
 use serde_json::json;
 
-use crate::config::Config;
+use crate::config::{AliasValue, Config};
 use crate::resolved::ResolvedModel;
 
 /// Sentinel reasoning-artifact bytes: the blob and the reasoning item id.
@@ -168,6 +168,74 @@ api_key_ref = "literal:k"
 auth_kind = "api-key"
 "#;
 
+/// A two-leg `openai-responses` chain, each leg on its own provider entry so
+/// the replay single-flight keys and the state keys differ per leg. The
+/// first leg rejects even the stripped variant and the second serves it, so
+/// one request spends both repairs its ceiling allows and settles only the
+/// second.
+fn two_repair_router() -> (Router, Arc<ReplayMockProvider>, Arc<ReplayMockProvider>) {
+    let toml_text = r#"
+[providers.p0]
+kind = "openai-responses"
+api_key_ref = "literal:k"
+auth_kind = "api-key"
+
+[providers.p1]
+kind = "openai-responses"
+api_key_ref = "literal:k"
+auth_kind = "api-key"
+"#;
+    let mut config: Config = toml::from_str(toml_text).expect("valid test toml");
+    config.aliases.insert(
+        "chain".to_string(),
+        AliasValue::Chain(vec!["m0".to_string(), "m1".to_string()]),
+    );
+    let mut router = Router::new(Arc::new(config));
+    let rejecting = Arc::new(ReplayMockProvider::always_reject());
+    let repairing = Arc::new(ReplayMockProvider::repairing());
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "m0".to_string(),
+        Arc::new(ResolvedModel::new(
+            "m0",
+            "p0",
+            rejecting.clone() as Arc<dyn Provider>,
+            "wire-0",
+        )),
+    );
+    models.insert(
+        "m1".to_string(),
+        Arc::new(ResolvedModel::new(
+            "m1",
+            "p1",
+            repairing.clone() as Arc<dyn Provider>,
+            "wire-1",
+        )),
+    );
+    router.install_resolved_models(models);
+    (router, rejecting, repairing)
+}
+
+fn req_carrying_artifact_on(alias: &str) -> ChatRequest {
+    ChatRequest {
+        model: alias.into(),
+        ..req_carrying_artifact()
+    }
+}
+
+/// Assert no WARN message or field carries the artifact blob, the reasoning
+/// item id, or the upstream body.
+fn assert_warns_leak_nothing(warns: &[&routectl_testkit::CapturedEvent]) {
+    for ev in warns {
+        for probe in [REASONING_BLOB, REASONING_ID, BODY_MARKER] {
+            assert!(!ev.message.contains(probe), "WARN message leaked: {probe}");
+            for (k, v) in &ev.fields {
+                assert!(!v.contains(probe), "WARN field {k} leaked: {probe}");
+            }
+        }
+    }
+}
+
 fn router_with(provider: Arc<dyn Provider>) -> Router {
     let config: Config = toml::from_str(SINGLE_TARGET_TOML).expect("valid test toml");
     let mut router = Router::new(Arc::new(config));
@@ -180,7 +248,7 @@ fn router_with(provider: Arc<dyn Provider>) -> Router {
     router
 }
 
-/// Count the aggregated degradation WARN events among captured events.
+/// The degradation WARN events among captured events, in emission order.
 fn degrade_warns(
     events: &[routectl_testkit::CapturedEvent],
 ) -> Vec<&routectl_testkit::CapturedEvent> {
@@ -199,11 +267,11 @@ async fn degradation_emits_exactly_one_warn_with_closed_tokens() {
     // Act
     let (result, events) = with_capture(Box::pin(router.complete(req_carrying_artifact()))).await;
 
-    // Assert: the stripped repair succeeded, and EXACTLY one aggregated
-    // degradation WARN fired for the whole request.
+    // Assert: the stripped repair succeeded, and its one repair produced
+    // EXACTLY one degradation WARN.
     assert!(result.is_ok(), "the stripped repair must succeed");
     let warns = degrade_warns(&events);
-    assert_eq!(warns.len(), 1, "exactly one degradation WARN per request");
+    assert_eq!(warns.len(), 1, "one repair, one degradation WARN");
     let ev = warns[0];
     assert_eq!(ev.level, tracing::Level::WARN);
     assert_eq!(ev.field("action"), Some("strip_repair"));
@@ -214,10 +282,87 @@ async fn degradation_emits_exactly_one_warn_with_closed_tokens() {
     assert_eq!(ev.field("repair_attempted"), Some("true"));
     assert_eq!(ev.field("repair_succeeded"), Some("true"));
     assert_eq!(ev.field("learned"), Some("true"));
+    assert_eq!(ev.field("repair_count"), Some("1"));
     assert!(
         ev.field("state_key").is_some_and(|s| !s.is_empty()),
         "the sanitized state key rides the WARN"
     );
+    let names: Vec<&str> = ev.fields.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "action",
+            "target_lane",
+            "state_key",
+            "source_schemes",
+            "reason",
+            "artifact_count",
+            "repair_attempted",
+            "repair_succeeded",
+            "learned",
+            "repair_count",
+        ],
+        "a single repair keeps the established line and appends only the count"
+    );
+}
+
+#[tokio::test]
+async fn two_repairs_emit_one_warn_each_settling_its_own_record() {
+    // Arrange: the first leg's stripped repair is rejected again, so the walk
+    // falls to the second leg, whose stripped repair serves.
+    let (router, rejecting, repairing) = two_repair_router();
+
+    // Act
+    let (result, events) =
+        with_capture(Box::pin(router.complete(req_carrying_artifact_on("chain")))).await;
+
+    // Assert: both legs repaired once, and each repair has its own WARN in
+    // firing order, with its own state key and its own settlement.
+    assert!(result.is_ok(), "the second leg's stripped repair serves");
+    assert_eq!(
+        rejecting.calls.load(Ordering::SeqCst),
+        2,
+        "carried + repair"
+    );
+    assert_eq!(
+        repairing.calls.load(Ordering::SeqCst),
+        2,
+        "carried + repair"
+    );
+    let warns = degrade_warns(&events);
+    assert_eq!(warns.len(), 2, "one degradation WARN per repair");
+    let (first, second) = (warns[0], warns[1]);
+    for ev in [first, second] {
+        assert_eq!(ev.level, tracing::Level::WARN);
+        assert_eq!(ev.field("action"), Some("strip_repair"));
+        assert_eq!(ev.field("repair_attempted"), Some("true"));
+        assert_eq!(ev.field("repair_count"), Some("2"));
+    }
+    assert_ne!(
+        first.field("state_key"),
+        second.field("state_key"),
+        "each line names the target it repaired"
+    );
+    assert_eq!(first.field("repair_succeeded"), Some("false"));
+    assert_eq!(first.field("learned"), Some("false"));
+    assert_eq!(second.field("repair_succeeded"), Some("true"));
+    assert_eq!(second.field("learned"), Some("true"));
+}
+
+#[tokio::test]
+async fn two_repair_warns_carry_no_blob_id_or_body() {
+    // Arrange
+    let (router, _rejecting, _repairing) = two_repair_router();
+
+    // Act
+    let (result, events) =
+        with_capture(Box::pin(router.complete(req_carrying_artifact_on("chain")))).await;
+
+    // Assert: both lines are scanned, not only the first.
+    assert!(result.is_ok());
+    let warns = degrade_warns(&events);
+    assert_eq!(warns.len(), 2);
+    assert_warns_leak_nothing(&warns);
 }
 
 #[tokio::test]
@@ -254,13 +399,7 @@ async fn warn_carries_no_blob_id_or_body() {
     assert!(result.is_ok());
     let warns = degrade_warns(&events);
     assert_eq!(warns.len(), 1);
-    let ev = warns[0];
-    for probe in [REASONING_BLOB, REASONING_ID, BODY_MARKER] {
-        assert!(!ev.message.contains(probe), "WARN message leaked: {probe}");
-        for (k, v) in &ev.fields {
-            assert!(!v.contains(probe), "WARN field {k} leaked: {probe}");
-        }
-    }
+    assert_warns_leak_nothing(&warns);
 }
 
 #[tokio::test]
@@ -277,6 +416,34 @@ async fn trace_across_repair_path_leaks_no_blob_id_or_body() {
     // Assert: the request failed, and no captured line at ANY level carries
     // the artifact blob, the reasoning item id, or the upstream body.
     assert!(result.is_err());
+    for line in &lines {
+        for probe in [REASONING_BLOB, REASONING_ID, BODY_MARKER] {
+            assert!(!line.contains(probe), "TRACE line leaked {probe}: {line}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn two_repair_fallback_path_leaks_no_blob_id_or_body_at_trace() {
+    // Arrange: the first leg's repeat rejection falls back to the second leg,
+    // so the generic fallback logs render the classified rejection before the
+    // second repair. Capture EVERY line at TRACE.
+    let (router, _rejecting, _repairing) = two_repair_router();
+
+    // Act
+    let (result, lines) =
+        capture_lines(Box::pin(router.complete(req_carrying_artifact_on("chain")))).await;
+
+    // Assert
+    assert!(result.is_ok());
+    let degrade_lines = lines
+        .iter()
+        .filter(|line| line.contains(super::REPLAY_DEGRADE_EVENT))
+        .count();
+    assert_eq!(
+        degrade_lines, 2,
+        "premise: the capture holds both degradation lines"
+    );
     for line in &lines {
         for probe in [REASONING_BLOB, REASONING_ID, BODY_MARKER] {
             assert!(!line.contains(probe), "TRACE line leaked {probe}: {line}");

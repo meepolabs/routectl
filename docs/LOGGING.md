@@ -307,11 +307,17 @@ ROUTECTL_LOG=routectl=trace ROUTECTL_LOG_REDACT_PROMPTS=1 \
 
 When a request carries reasoning-replay artifacts onto a lane that
 rejects them, the router strips them and re-dispatches the same target
-once (the fixed strip-repair branch). Each such request emits EXACTLY
-ONE aggregated WARN at resolution -- `"reasoning_replay_degraded"` -- and
-none when nothing degraded. The line carries a CLOSED SET of tokens
-only, never the artifact bytes, a reasoning item id, any hash/digest,
-the session key, or the upstream body:
+once (the fixed strip-repair branch). Each such request emits ONE WARN
+PER REPAIR at resolution -- `"reasoning_replay_degraded"` -- in the order
+the repairs fired, and none when nothing degraded. A fallback chain can
+repair on more than one target, up to the per-request repair ceiling
+(two, shared with the envelope-field repair), so a request emits at most
+two lines. Each line describes its own target's repair and settlement;
+`repair_count` on every line is the request's total, so a request that
+repaired once emits exactly one line with `repair_count=1`. The line
+carries a CLOSED SET of tokens and counts only, never the artifact
+bytes, a reasoning item id, any hash/digest, the session key, or the
+upstream body:
 
 | Field | Meaning |
 |---|---|
@@ -324,6 +330,7 @@ the session key, or the upstream body:
 | `repair_attempted` | The strip-repair branch fired |
 | `repair_succeeded` | The stripped re-dispatch reached success / first chunk |
 | `learned` | The confirmed negative was persisted to the learned registry |
+| `repair_count` | Strip-repairs this request made, the same on every line |
 
 Correlate across the retry/fallback hops with the request span's
 `request_id`. A classified replay rejection is converted to a body-free
@@ -2073,7 +2080,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 
 | Level | Target | Message prefix | Why actionable / operator action |
 |---|---|---|---|
-| WARN | `routectl_router::router::dispatch` | `reasoning_replay_degraded` (once per request) | Carried reasoning was stripped for `target_lane`. If frequent, pin the session to one lane or scheme. |
+| WARN | `routectl_router::router::dispatch` | `reasoning_replay_degraded` (once per repair) | Carried reasoning was stripped for `target_lane`. If frequent, pin the session to one lane or scheme. |
 | WARN | `routectl_router::router::dispatch` | `cache_volatile_in_caller_prefix` (once per process per kind) | The client marks volatile content cacheable, so each request writes a cache entry nothing reads: fix the client's breakpoint placement. |
 | WARN | `routectl_router::router::dispatch` | `reasoning context/mode dropped ...` (once per request) | The client's `reasoning.context` / `mode` cannot be represented on `provider`: route Responses-dialect clients to an OpenAI Responses target. |
 | WARN | `routectl_router::router::{dispatch,count_tokens}` | `gate blocked`, `stream gate blocked`, `count_tokens gate blocked` | `provider` is rate-limited or its breaker is open: check upstream health or raise `rpm_limit`. A refusal by a credential park (`gate_kind = credential_parked`) logs at DEBUG instead: the park already warned once when it parked. |

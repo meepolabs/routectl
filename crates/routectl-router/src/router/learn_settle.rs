@@ -8,6 +8,7 @@ use routectl_core::ChatRequest;
 use crate::feature_keys::derive_feature_keys;
 
 use super::super::DispatchMeta;
+use super::super::replay_repair::settle_replay_repair;
 use super::AttemptLearning;
 
 impl AttemptLearning<'_> {
@@ -25,14 +26,12 @@ impl AttemptLearning<'_> {
         };
         if self.count_surface {
             drop(plan);
-            if self.replay_repair_attempted
-                && let Some(deg) = meta.replay_degradation.as_mut()
-            {
-                deg.repair_succeeded = true;
+            if let Some(repair) = self.replay_repair {
+                settle_replay_repair(meta, repair, false);
             }
             return;
         }
-        if self.replay_repair_attempted {
+        if let Some(repair) = self.replay_repair {
             let features = derive_feature_keys(
                 req.tools.as_deref().unwrap_or(&[]),
                 req.provider_extras.as_ref(),
@@ -43,10 +42,7 @@ impl AttemptLearning<'_> {
                 &features,
                 Instant::now(),
             ));
-            if let Some(deg) = meta.replay_degradation.as_mut() {
-                deg.repair_succeeded = true;
-                deg.learned = true;
-            }
+            settle_replay_repair(meta, repair, true);
         } else {
             meta.cleared_capabilities.extend(plan.settle_success());
         }

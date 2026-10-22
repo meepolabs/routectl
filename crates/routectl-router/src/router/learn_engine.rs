@@ -46,7 +46,9 @@ use super::learn_proposers::{BetaProposer, CapabilityProposer, FieldRowProposer,
 use super::learn_revert::{MatchedEdit, SentSlot, TargetRevert, answer_declared_edit};
 use super::rejection_parser::{NamedRejection, RawPath, RejectionKind, RejectionValue};
 use super::repair_budget::RepairBudget;
-use super::replay_repair::{ReplayCarryPlan, strip_replay_artifacts_recalibrating};
+use super::replay_repair::{
+    ReplayCarryPlan, ReplayRepairHandle, record_replay_repair, strip_replay_artifacts_recalibrating,
+};
 use super::runtime_gate::LearnedProbeGuard;
 use super::wire_rejection::note_beta_repair_succeeded;
 use super::{DispatchMeta, DispatchTarget, ReplayDegradation, Router};
@@ -316,7 +318,7 @@ pub(super) struct AttemptLearning<'a> {
     replay_plan: Option<ReplayCarryPlan<'a>>,
     preflight: FieldPreflightPlan<'a>,
     learned_probe_guard: LearnedProbeGuard,
-    replay_repair_attempted: bool,
+    replay_repair: Option<ReplayRepairHandle>,
     replay_reject_status: u16,
     reactive_repair: Option<FieldRepairHandle>,
     field_reject_status: u16,
@@ -360,7 +362,7 @@ impl<'a> AttemptLearning<'a> {
             replay_plan: None,
             preflight: FieldPreflightPlan::default(),
             learned_probe_guard,
-            replay_repair_attempted: false,
+            replay_repair: None,
             replay_reject_status: 0,
             reactive_repair: None,
             field_reject_status: 0,
@@ -580,7 +582,7 @@ impl<'a> AttemptLearning<'a> {
         meta: &mut DispatchMeta,
         budget: &mut RepairBudget,
     ) -> bool {
-        if self.replay_repair_attempted {
+        if self.replay_repair.is_some() {
             return false;
         }
         let Some(plan) = self.replay_plan.as_ref() else {
@@ -589,10 +591,9 @@ impl<'a> AttemptLearning<'a> {
         if !budget.draw() {
             return false;
         }
-        self.replay_repair_attempted = true;
         self.replay_reject_status = upstream_facts(err).status.unwrap_or(0);
         let lane = plan.lane();
-        meta.replay_degradation = Some(ReplayDegradation {
+        let degradation = ReplayDegradation {
             action: REPLAY_ACTION_STRIP_REPAIR,
             target_lane: lane,
             state_key: sanitize_for_log(&target.state_key),
@@ -602,7 +603,8 @@ impl<'a> AttemptLearning<'a> {
             repair_attempted: true,
             repair_succeeded: false,
             learned: false,
-        });
+        };
+        self.replay_repair = Some(record_replay_repair(meta, degradation));
         strip_replay_artifacts_recalibrating(attempt_req, lane, meta);
         self.skip_replay_backoff = true;
         true

@@ -3996,7 +3996,7 @@ pub routectl_router::router::DispatchMeta::reduction_strategy: core::option::Opt
 pub routectl_router::router::DispatchMeta::reduction_strings_compressed: core::option::Option<u64>
 pub routectl_router::router::DispatchMeta::reduction_strings_rejected: core::option::Option<u64>
 pub routectl_router::router::DispatchMeta::reduction_strings_skipped: core::option::Option<u64>
-pub routectl_router::router::DispatchMeta::replay_degradation: core::option::Option<routectl_router::router::ReplayDegradation>
+pub routectl_router::router::DispatchMeta::replay_degradations: alloc::vec::Vec<routectl_router::router::ReplayDegradation>
 pub routectl_router::router::DispatchMeta::resolved_alias: alloc::string::String
 pub routectl_router::router::DispatchMeta::response_check: core::option::Option<routectl_router::ResponseCheck>
 pub routectl_router::router::DispatchMeta::selection_decision: core::option::Option<&'static str>
@@ -12364,7 +12364,7 @@ pub routectl_router::DispatchMeta::reduction_strategy: core::option::Option<&'st
 pub routectl_router::DispatchMeta::reduction_strings_compressed: core::option::Option<u64>
 pub routectl_router::DispatchMeta::reduction_strings_rejected: core::option::Option<u64>
 pub routectl_router::DispatchMeta::reduction_strings_skipped: core::option::Option<u64>
-pub routectl_router::DispatchMeta::replay_degradation: core::option::Option<routectl_router::router::ReplayDegradation>
+pub routectl_router::DispatchMeta::replay_degradations: alloc::vec::Vec<routectl_router::router::ReplayDegradation>
 pub routectl_router::DispatchMeta::resolved_alias: alloc::string::String
 pub routectl_router::DispatchMeta::response_check: core::option::Option<routectl_router::ResponseCheck>
 pub routectl_router::DispatchMeta::selection_decision: core::option::Option<&'static str>

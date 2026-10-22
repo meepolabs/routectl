@@ -1551,15 +1551,16 @@ pub struct DispatchMeta {
     /// Collected ONLY at `LearnedProbeGuard::settle_success`. Additive,
     /// defaults empty.
     pub cleared_capabilities: Vec<CapabilityClearedEvent>,
-    /// Reasoning-replay degradation record for the whole chain walk.
-    /// `Some` exactly when the fixed strip-repair branch fired for this
-    /// request -- carried reasoning artifacts drew the proven replay
-    /// rejection and were stripped for a same-target re-dispatch. The
-    /// single aggregated degradation WARN reads it ONCE at request
-    /// resolution; `None` means nothing degraded (no WARN). Carries only
-    /// closed-set tokens and counts -- never the artifact bytes, an item
-    /// id, a hash, the session key, or the upstream body, at any level.
-    pub replay_degradation: Option<ReplayDegradation>,
+    /// Reasoning-replay degradation records for the whole chain walk, ONE PER
+    /// STRIP-REPAIR THAT FIRED, in the order they fired. A strip-repair fires
+    /// when carried reasoning artifacts drew the proven replay rejection and
+    /// were stripped for a same-target re-dispatch. Each record is settled in
+    /// place by the walk that made it, and the degradation WARN reads every
+    /// record ONCE at request resolution; empty means nothing degraded (no
+    /// WARN). Carries only closed-set tokens and counts -- never the artifact
+    /// bytes, an item id, a hash, the session key, or the upstream body, at
+    /// any level.
+    pub replay_degradations: Vec<ReplayDegradation>,
     /// Envelope-field repair records for the whole walk, ONE PER REPAIR THAT
     /// FIRED, in the order they fired. A repair fires when an upstream
     /// rejection named a field in the closed repair table and the mapped
@@ -1724,9 +1725,9 @@ pub struct FieldRepair {
     pub learned: bool,
 }
 
-/// Closed-set facts about a reasoning-replay strip-repair that fired
-/// during a chain walk, aggregated onto [`DispatchMeta`] for the single
-/// per-request degradation WARN. Every field is a stable token or a
+/// Closed-set facts about one reasoning-replay strip-repair that fired
+/// during a chain walk, recorded onto [`DispatchMeta`] for that repair's
+/// degradation WARN. Every field is a stable token or a
 /// count: deliberately NO artifact bytes, reasoning item id, hash /
 /// digest, session key, or upstream body, at any verbosity. The request
 /// span already supplies `request_id` correlation across the retry and
@@ -1804,7 +1805,7 @@ impl DispatchMeta {
             learned_capabilities: Vec::new(),
             capability_observations: Vec::new(),
             cleared_capabilities: Vec::new(),
-            replay_degradation: None,
+            replay_degradations: Vec::new(),
             field_repairs: Vec::new(),
             field_preflight: Vec::new(),
             wire_rejections: Vec::new(),

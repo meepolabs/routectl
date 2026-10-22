@@ -366,10 +366,12 @@ fn count_tokens_engine_drops_a_repaired_replay_carry() {
         let sibling_carries = sibling.replay_plan.is_some();
         drop(sibling);
         drop(learning);
-        let degradation = meta
-            .replay_degradation
-            .as_ref()
-            .expect("the repair records a degradation");
+        assert_eq!(
+            meta.replay_degradations.len(),
+            1,
+            "{surface:?}: one repair, one record"
+        );
+        let degradation = &meta.replay_degradations[0];
         assert!(degradation.repair_succeeded, "{surface:?}: repair served");
         let committed = !meta.learned_capabilities.is_empty();
         let resident = !router.learned_capability_snapshot().is_empty();

@@ -43,7 +43,10 @@ use routectl_core::{
 use crate::learned_replay::{ReplayLearnKey, ReplayProbeGuard};
 
 use super::edit_declare::{declare_replay_strip, replay_strip_ids};
-use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
+use super::{
+    CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, ReplayDegradation,
+    Router,
+};
 
 /// The carried-artifact admission for one dispatch target: the single-flight
 /// guards held while the optimistically-carried variant is in flight, the
@@ -273,6 +276,37 @@ impl Router {
             schemes,
             guards,
         })
+    }
+}
+
+/// Which of a request's replay-degradation records a walk settles: the
+/// position the recorder pushed it at. Records are only ever appended, so a
+/// handle stays valid for the whole request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ReplayRepairHandle(usize);
+
+/// Append the record of one strip-repair that fired, returning the handle the
+/// walk settles THIS record through, so a later repair elsewhere in the walk
+/// cannot take its outcome.
+pub(super) fn record_replay_repair(
+    meta: &mut DispatchMeta,
+    degradation: ReplayDegradation,
+) -> ReplayRepairHandle {
+    let handle = ReplayRepairHandle(meta.replay_degradations.len());
+    meta.replay_degradations.push(degradation);
+    handle
+}
+
+/// Record that the stripped re-dispatch behind `repair` succeeded, and whether
+/// that outcome persisted the negative.
+pub(super) fn settle_replay_repair(
+    meta: &mut DispatchMeta,
+    repair: ReplayRepairHandle,
+    learned: bool,
+) {
+    if let Some(record) = meta.replay_degradations.get_mut(repair.0) {
+        record.repair_succeeded = true;
+        record.learned = learned;
     }
 }
 
