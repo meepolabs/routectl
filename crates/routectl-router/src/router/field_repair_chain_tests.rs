@@ -386,6 +386,11 @@ mod repair_chain {
         assert_two_key_bodies(&seat, "complete");
         assert_two_key_settled(&dispatched.meta, "complete");
         assert_eq!(router.field_verdicts().snapshot_len(), 2);
+        assert_eq!(
+            rejection_outcomes(&router),
+            vec![crate::wire_check_state::FieldRepairOutcome::RepairedLossy; 2],
+            "each refusal joins its own repair record",
+        );
     }
 
     #[tokio::test]
