@@ -1014,3 +1014,375 @@ async fn without_an_override_a_mixed_case_flag_is_forwarded_as_sent() {
     assert!(seen[0].routectl_internal.withheld_betas.is_empty());
     assert_eq!(seen[0].anthropic_beta, vec![MIXED_CASE_FLAG.to_string()]);
 }
+
+// --- the withheld set as the precedence seam decides it ---
+
+/// One Converse entry `cv` whose floor pins [`CONVERSE_FLOOR`], appended to
+/// the fixture config so a row can reach the representability tier.
+const CONVERSE_ENTRY: &str = "[providers.cv]\n\
+                              kind = \"bedrock\"\n\
+                              region = \"us-east-1\"\n\
+                              creds = { kind = \"default-chain\" }\n\
+                              api_shape = \"converse\"\n\
+                              anthropic_beta = [\"fx-converse-floor\"]\n";
+const CONVERSE_FLOOR: &str = "fx-converse-floor";
+const NON_CLAUDE: &str = "us.amazon.nova-2-lite-v1:0";
+
+fn target_for(router: &Router, provider_name: &str, upstream: &str) -> DispatchTarget {
+    let provider: Arc<dyn Provider> = RecordingProvider::new();
+    let model = ResolvedModel::new("m", provider_name, provider, upstream);
+    router
+        .expand_chain_to_targets(vec![Arc::new(model)], None)
+        .pop()
+        .expect("a non-seat model expands to one target")
+}
+
+/// The withheld set and the admissions one claiming pass yields.
+fn withheld_and_admissions(
+    router: &Router,
+    target: &DispatchTarget,
+    entry: &str,
+) -> (Vec<String>, usize) {
+    let mut admissions = Vec::new();
+    let out = router.withheld_betas_for_target(
+        target,
+        &betas(&[entry]),
+        ProbeClaim::Claim,
+        &mut admissions,
+        Instant::now(),
+    );
+    (out, admissions.len())
+}
+
+#[test]
+fn each_tier_decides_its_beta_cell_through_the_seam() {
+    // Arrange -- one flag per row. The router's seed names only the seed rows'
+    // flags, so the pinned row's acting negative is the one tier it beats.
+    let mut router = router(&format!(
+        "{}[capability.overrides.bed]\nunsupported = [\"beta:fx-override-off\"]\n",
+        capability(true),
+    ));
+    router.set_beta_seed_for_tests(&["fx-seed-only", "fx-seed-cleared"]);
+    let target = target_on(&router, "bed");
+    plant_acting_negative(&router, &target, "fx-pinned");
+    seed_positive(&router, &target, "fx-override-off");
+    seed_lapsed_negative(&router, &target, "fx-lapsed");
+    seed_lapsed_negative(&router, &target, "fx-lapsed-piece");
+    mark_seed_cleared(&router, &target, "fx-seed-cleared");
+    // (name, client entry, withheld, admissions)
+    let rows: &[(&str, &str, bool, usize)] = &[
+        (
+            "a pinned flag with an acting learned negative is sent",
+            "fx-pinned",
+            false,
+            0,
+        ),
+        (
+            "a route-away override withholds over a learned positive",
+            "fx-override-off",
+            true,
+            0,
+        ),
+        (
+            "a lapsed negative whose slot is claimed is sent with one admission",
+            "fx-lapsed",
+            false,
+            1,
+        ),
+        (
+            "a lapsed negative on a multi-flag entry forgoes its slot and withholds",
+            "fx-unknown,fx-lapsed-piece",
+            true,
+            0,
+        ),
+        ("the seed alone withholds", "fx-seed-only", true, 0),
+        ("a cleared seed is sent", "fx-seed-cleared", false, 0),
+    ];
+
+    for (name, entry, want_withheld, want_admissions) in rows {
+        // Act
+        let (out, admissions) = withheld_and_admissions(&router, &target, entry);
+
+        // Assert
+        let want: Vec<String> = if *want_withheld {
+            vec![(*entry).to_string()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(out, want, "{name}: withheld");
+        assert_eq!(admissions, *want_admissions, "{name}: admissions");
+    }
+}
+
+/// How a parity row's cell is seeded before the pass.
+#[derive(Clone, Copy, Debug)]
+enum CellSeed {
+    Nothing,
+    Acting,
+    Lapsed,
+    Verified,
+    Uncorroborated,
+    AdvisoryLiveF3,
+    SeedCleared,
+    ActingOverClearedSeed,
+}
+
+fn seed_cell(router: &Router, target: &DispatchTarget, flag: &str, seed: CellSeed) {
+    let observe = |tier, phase| {
+        router.learned_capabilities.observe(
+            &lane_of(target),
+            &key(flag),
+            BEDROCK,
+            tier,
+            phase,
+            EvidenceSource::Live,
+            None,
+            Instant::now(),
+        );
+    };
+    match seed {
+        CellSeed::Nothing => {}
+        CellSeed::Acting => plant_acting_negative(router, target, flag),
+        CellSeed::Lapsed => seed_lapsed_negative(router, target, flag),
+        CellSeed::Verified => seed_positive(router, target, flag),
+        CellSeed::Uncorroborated => observe(SignalTier::Inferred, FailurePhase::F1),
+        CellSeed::AdvisoryLiveF3 => observe(SignalTier::SelfIdentifying, FailurePhase::F3),
+        CellSeed::SeedCleared => mark_seed_cleared(router, target, flag),
+        CellSeed::ActingOverClearedSeed => {
+            mark_seed_cleared(router, target, flag);
+            plant_acting_negative(router, target, flag);
+        }
+    }
+}
+
+/// The seam's resolution of one cell from inputs gathered here off the
+/// config and registry snapshots (the dispatch pass gathers its own), in
+/// display mode.
+fn displayed_resolution(
+    router: &Router,
+    target: &DispatchTarget,
+    flag: &str,
+) -> crate::capability_precedence::Resolution {
+    use crate::capability_precedence::{CellContext, DisplayInputs, LearnedInput};
+    let key = key(flag);
+    let lane = lane_of(target);
+    let now = Instant::now();
+    let config = &router.config;
+    let learned = router
+        .learned_capability_snapshot()
+        .iter()
+        .find(|entry| entry.state_key == lane && entry.feature_key == key)
+        .and_then(|entry| LearnedInput::from_entry(entry, now));
+    let seed = crate::beta_seed::seed_state_for_key(
+        crate::beta_capability::BetaSeedScope::new(BEDROCK, FIXTURE_SEED),
+        BEDROCK,
+        &key,
+        || {
+            router
+                .learned_seed_clear_snapshot()
+                .iter()
+                .any(|marker| marker.state_key == lane && marker.feature_key == key)
+        },
+    );
+    crate::capability_display::resolve_display(DisplayInputs {
+        pinned: crate::capability_precedence::operator_pins_capability(
+            config,
+            &target.provider_name,
+            &target.model.header_extras,
+            &key,
+        ),
+        override_verdict: router.override_registry.resolve(
+            &target.provider_name,
+            target.nickname.as_deref().unwrap_or(""),
+            &key,
+            BEDROCK,
+        ),
+        learned,
+        seed,
+        prior: None,
+        ctx: CellContext::for_lane(config, &target.provider_name, &target.upstream, &key),
+    })
+}
+
+/// The claiming dispatch pass is the inference surface's; a token count
+/// forgoes the slot, which a snapshot cannot see, so it has no row here.
+#[test]
+fn the_withheld_set_equals_the_display_resolution_of_the_same_inputs() {
+    use crate::capability_precedence::{Layer, Wire};
+    let bed = ("bed", "anthropic.claude-test-v1:0");
+    let cv = ("cv", NON_CLAUDE);
+    let route_away = "[capability.overrides.bed]\nunsupported = [\"beta:fx-learned-pos\"]\n";
+    let forced = "[capability.overrides.bed]\n\
+                  force_supported = [\"beta:fx-unknown\", \"beta:fx-seed-only\"]\n";
+    // (name, extra config, kill switch on, lane, flag, cell seed, deciding tier)
+    let rows = [
+        (
+            "no tier speaks",
+            "",
+            true,
+            bed,
+            "fx-unknown",
+            CellSeed::Nothing,
+            None,
+        ),
+        (
+            "the seed withholds",
+            "",
+            true,
+            bed,
+            "fx-seed-only",
+            CellSeed::Nothing,
+            Some(Layer::Seed),
+        ),
+        (
+            "a cleared seed sends",
+            "",
+            true,
+            bed,
+            "fx-seed-only",
+            CellSeed::SeedCleared,
+            Some(Layer::Seed),
+        ),
+        (
+            "an acting negative withholds",
+            "",
+            true,
+            bed,
+            "fx-unknown",
+            CellSeed::Acting,
+            Some(Layer::Learned),
+        ),
+        (
+            "an acting negative withholds over a cleared seed",
+            "",
+            true,
+            bed,
+            "fx-seed-only",
+            CellSeed::ActingOverClearedSeed,
+            Some(Layer::Learned),
+        ),
+        (
+            "a verified positive sends over the seed",
+            "",
+            true,
+            bed,
+            "fx-seed-only",
+            CellSeed::Verified,
+            Some(Layer::Learned),
+        ),
+        (
+            "a lapsed negative re-probes over the seed",
+            "",
+            true,
+            bed,
+            "fx-seed-only",
+            CellSeed::Lapsed,
+            Some(Layer::Learned),
+        ),
+        (
+            "an uncorroborated negative falls to the seed",
+            "",
+            true,
+            bed,
+            "fx-seed-only",
+            CellSeed::Uncorroborated,
+            Some(Layer::Seed),
+        ),
+        (
+            "an advisory live F3 negative falls to the seed",
+            "",
+            true,
+            bed,
+            "fx-seed-only",
+            CellSeed::AdvisoryLiveF3,
+            Some(Layer::Seed),
+        ),
+        (
+            "the kill switch off silences the learned tier, not the seed",
+            "",
+            false,
+            bed,
+            "fx-seed-only",
+            CellSeed::Verified,
+            Some(Layer::Seed),
+        ),
+        (
+            "a pinned flag sends over an acting negative",
+            "",
+            true,
+            bed,
+            "fx-pinned",
+            CellSeed::Acting,
+            Some(Layer::Pin),
+        ),
+        (
+            "a route-away override withholds over a positive",
+            route_away,
+            true,
+            bed,
+            "fx-learned-pos",
+            CellSeed::Verified,
+            Some(Layer::Override),
+        ),
+        (
+            "force_supported sends over an acting negative",
+            forced,
+            true,
+            bed,
+            "fx-unknown",
+            CellSeed::Acting,
+            Some(Layer::Override),
+        ),
+        (
+            "force_supported sends over the seed",
+            forced,
+            true,
+            bed,
+            "fx-seed-only",
+            CellSeed::Nothing,
+            Some(Layer::Override),
+        ),
+        (
+            "a non-Claude Converse lane cannot carry the flag",
+            "",
+            true,
+            cv,
+            "fx-unknown",
+            CellSeed::Verified,
+            Some(Layer::Representability),
+        ),
+        (
+            "a pinned flag rides a non-Claude Converse lane",
+            "",
+            true,
+            cv,
+            CONVERSE_FLOOR,
+            CellSeed::Acting,
+            Some(Layer::Pin),
+        ),
+    ];
+    for (name, extra, enabled, (provider_name, upstream), flag, seed, want_layer) in rows {
+        // Arrange
+        let router = router(&format!("{}{CONVERSE_ENTRY}{extra}", capability(enabled)));
+        let target = target_for(&router, provider_name, upstream);
+        seed_cell(&router, &target, flag, seed);
+        let expected = displayed_resolution(&router, &target, flag);
+        assert_eq!(expected.layer(), want_layer, "{name}: the row's tier");
+
+        // Act
+        let (out, admissions) = withheld_and_admissions(&router, &target, flag);
+
+        // Assert
+        let want: Vec<String> = if expected.wire() == Wire::Send {
+            Vec::new()
+        } else {
+            vec![flag.to_string()]
+        };
+        assert_eq!(out, want, "{name}: wire");
+        assert_eq!(
+            admissions,
+            usize::from(expected.reprobe()),
+            "{name}: re-probe"
+        );
+    }
+}

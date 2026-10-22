@@ -1,23 +1,19 @@
 //! Per-target withheld client beta flags, decided once at chain resolution.
 //!
 //! Each target gets the set of client `anthropic-beta` flags it must not send.
-//! Precedence, strongest first, per (target, flag):
+//! Each (target, flag) cell is decided by the capability precedence seam
+//! ([`resolve_operator`], then [`resolve_open`]); this module only gathers the
+//! cell's inputs (the operator floor pin, whether the lane can carry the beta
+//! bag key at all, the override, the learned reading and the shipped seed)
+//! and maps the seam's wire axis onto send or withhold.
 //!
-//! 1. operator floor pin -- the flag is re-added on the wire regardless, so
-//!    nothing is withheld;
-//! 2. a Bedrock Converse target whose upstream is provably not Anthropic --
-//!    withholds every client flag: such a model refuses the `anthropic_beta`
-//!    bag key itself, whatever flags it carries. An upstream that proves
-//!    neither (an inference-profile ARN) falls through;
-//! 3. operator override on the flag's capability key -- `force_supported`
-//!    sends, `unsupported` withholds (a beta flag never routes a target away);
-//! 4. learned lane verdict, only with the capability subsystem enabled -- an
-//!    acting negative withholds, a lapsed one admits a re-probe and sends on
-//!    an inference surface (a token count carries no capability test, so
-//!    there it stays withheld and the slot stays free), a verified positive
-//!    sends;
-//! 5. the shipped Bedrock seed -- withholds, independent of the kill switch,
-//!    unless the registry holds a seed-clear marker for the cell.
+//! The learned reading is claiming: a lapsed negative whose re-probe slot this
+//! pass claims sends the flag on an inference surface so the request re-tests
+//! it. A token count carries no capability test, so there the lapsed negative
+//! stays withheld and the slot stays free.
+//!
+//! A flag that mints no capability key reaches no keyed tier: only the floor
+//! pin (matched by spelling) and the lane's bag-key refusal decide it.
 //!
 //! A forwarded-credential target withholds nothing: the client owns that
 //! credential and its beta choices.
@@ -28,25 +24,30 @@ use routectl_core::ChatRequest;
 use routectl_core::capability::normalize_capability_key;
 
 use crate::beta_capability::beta_capability_key;
+use crate::capability_precedence::{
+    CellContext, LearnedInput, OpenCell, SeedCell, Stage, Wire, resolve_open, resolve_operator,
+};
 use crate::learned_capability::{BetaLaneReading, ProbeClaim};
-use crate::override_registry::OverrideVerdict;
 
 use super::class_observe::DispatchSurface;
 use super::{DispatchTarget, ProbeAdmission, Router};
 
-/// What the precedence chain decided for one flag on one target.
+/// What happens to one client flag on one target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BetaVerdict {
     Send,
     Withhold,
-    /// Undecided by every tier above the seed.
-    Open,
 }
 
-/// Whether `target` is a Converse lane to a model that refuses the
-/// `anthropic_beta` bag key outright, so no client flag can ride it.
-fn refuses_the_beta_bag_key(target: &DispatchTarget) -> bool {
-    crate::beta_capability::refuses_beta_bag_key(target.egress_kind, &target.upstream)
+impl BetaVerdict {
+    /// The seam's wire axis as a beta decision: anything but a send keeps
+    /// the flag off the wire.
+    const fn from_wire(wire: Wire) -> Self {
+        match wire {
+            Wire::Send => Self::Send,
+            Wire::Withhold | Wire::Strip => Self::Withhold,
+        }
+    }
 }
 
 impl Router {
@@ -129,8 +130,9 @@ impl Router {
         withheld
     }
 
-    /// Run the precedence chain for one flag, falling back to the seed when
-    /// every stronger tier leaves the flag open.
+    /// Gather one flag's inputs and resolve them through the precedence
+    /// seam. The claiming learned read runs only for a cell the operator
+    /// tiers left open.
     fn beta_verdict(
         &self,
         target: &DispatchTarget,
@@ -139,109 +141,99 @@ impl Router {
         admissions: &mut Vec<ProbeAdmission>,
         now: Instant,
     ) -> BetaVerdict {
-        let key = beta_capability_key(flag);
-        if self.client_beta_pinned(target, key.as_deref(), flag) {
-            return BetaVerdict::Send;
-        }
-        if refuses_the_beta_bag_key(target) {
-            return BetaVerdict::Withhold;
-        }
-        let Some(key) = key else {
-            return BetaVerdict::Send;
+        let Some(key) = beta_capability_key(flag) else {
+            return self.unkeyed_flag_verdict(target, flag);
         };
-        match self.override_beta_verdict(target, &key) {
-            BetaVerdict::Open => {}
-            decided => return decided,
-        }
-        match self.learned_beta_verdict(target, &key, claim, admissions, now) {
-            BetaVerdict::Open => {}
-            decided => return decided,
-        }
-        if self.seed_withholds(target, &key, flag) {
-            BetaVerdict::Withhold
-        } else {
-            BetaVerdict::Send
-        }
-    }
-
-    /// Whether the operator floor pins the client `flag`, asked through its
-    /// capability `key` when the flag mints one. A flag outside the key
-    /// grammar can still be pinned, since floor entries are not checked
-    /// against that grammar, so it is matched on the floor by spelling.
-    fn client_beta_pinned(&self, target: &DispatchTarget, key: Option<&str>, flag: &str) -> bool {
-        match key {
-            Some(key) => self.beta_pinned_for_target(target, key),
-            None => crate::capability_precedence::operator_pins_flag(
-                &self.config,
-                &target.provider_name,
-                &target.model.header_extras,
-                flag,
-            ),
-        }
-    }
-
-    fn override_beta_verdict(&self, target: &DispatchTarget, key: &str) -> BetaVerdict {
-        match self.override_registry.resolve(
+        let override_verdict = self.override_registry.resolve(
             &target.provider_name,
             target.nickname.as_deref().unwrap_or(""),
-            key,
+            &key,
             target.provider_kind.unwrap_or(""),
+        );
+        let ctx = CellContext::new(
+            &key,
+            &self.config.capability,
+            target.egress_kind,
+            &target.upstream,
+        );
+        let resolution = match resolve_operator(
+            self.beta_pinned_for_target(target, &key),
+            override_verdict,
+            ctx,
         ) {
-            Some(OverrideVerdict::ForceSupported) => BetaVerdict::Send,
-            Some(OverrideVerdict::RouteAway) => BetaVerdict::Withhold,
-            None => BetaVerdict::Open,
+            Stage::Decided(decided) => decided,
+            Stage::Open(cell) => {
+                let learned = self.learned_beta_input(target, &key, cell, claim, admissions, now);
+                resolve_open(learned, self.seed_cell(target, &key), None, cell)
+            }
+        };
+        BetaVerdict::from_wire(resolution.wire())
+    }
+
+    /// A flag outside the key grammar has no override, learned or seed cell,
+    /// but the operator floor can still pin it (floor entries are not checked
+    /// against that grammar, so it is matched by spelling), and a lane that
+    /// refuses the beta bag key cannot carry it.
+    fn unkeyed_flag_verdict(&self, target: &DispatchTarget, flag: &str) -> BetaVerdict {
+        let pinned = crate::capability_precedence::operator_pins_flag(
+            &self.config,
+            &target.provider_name,
+            &target.model.header_extras,
+            flag,
+        );
+        if pinned
+            || !crate::beta_capability::refuses_beta_bag_key(target.egress_kind, &target.upstream)
+        {
+            BetaVerdict::Send
+        } else {
+            BetaVerdict::Withhold
         }
     }
 
-    /// The learned lane's verdict on `key`. Claiming a lapsed negative's
-    /// re-probe slot pushes its admission and sends the flag, so the full
-    /// request re-tests it; under [`ProbeClaim::Forgo`] the lapsed negative
-    /// keeps withholding.
-    fn learned_beta_verdict(
+    /// The claiming learned read for an open beta cell, or `None` when the
+    /// learned tier cannot speak (kill switch off, no provider kind, no
+    /// lane). Claiming a lapsed negative's re-probe slot pushes its
+    /// admission; under [`ProbeClaim::Forgo`] the read reports the lapsed
+    /// negative as acting and leaves the slot free.
+    fn learned_beta_input(
         &self,
         target: &DispatchTarget,
         key: &str,
+        cell: OpenCell,
         claim: ProbeClaim,
         admissions: &mut Vec<ProbeAdmission>,
         now: Instant,
-    ) -> BetaVerdict {
-        if !self.config.capability.enabled {
-            return BetaVerdict::Open;
+    ) -> Option<LearnedInput> {
+        if !cell.reads_learned() {
+            return None;
         }
-        let Some(provider_kind) = target.provider_kind else {
-            return BetaVerdict::Open;
-        };
-        let Some(learned_key) = target.learned_key(key) else {
-            return BetaVerdict::Open;
-        };
+        let provider_kind = target.provider_kind?;
+        let learned_key = target.learned_key(key)?;
         let (reading, generation) =
             self.beta_reading_with_generation(learned_key, key, provider_kind, claim, now);
-        match reading {
-            BetaLaneReading::ActingNegative { .. } => BetaVerdict::Withhold,
-            BetaLaneReading::ProbeAdmitted { .. } => {
-                self.metrics.incr_probe_attempts();
-                admissions.push(ProbeAdmission {
-                    state_key: target.state_key.clone(),
-                    learned_key: learned_key.to_string(),
-                    feature: normalize_capability_key(key, provider_kind),
-                    provider_kind,
-                    generation,
-                });
-                BetaVerdict::Send
-            }
-            BetaLaneReading::VerifiedPositive { .. } => BetaVerdict::Send,
-            BetaLaneReading::NoVerdict => BetaVerdict::Open,
+        if let BetaLaneReading::ProbeAdmitted { .. } = reading {
+            self.metrics.incr_probe_attempts();
+            admissions.push(ProbeAdmission {
+                state_key: target.state_key.clone(),
+                learned_key: learned_key.to_string(),
+                feature: normalize_capability_key(key, provider_kind),
+                provider_kind,
+                generation,
+            });
         }
+        LearnedInput::from_reading(reading)
     }
 
-    fn seed_withholds(&self, target: &DispatchTarget, key: &str, flag: &str) -> bool {
+    /// The seed's state on this target's `(lane, key)` cell, under the
+    /// router's seed list.
+    fn seed_cell(&self, target: &DispatchTarget, key: &str) -> Option<SeedCell> {
         let scope = crate::beta_capability::BetaSeedScope::new(
             crate::beta_seed::BEDROCK_SEED_PROVIDER_KIND,
             self.beta_seed,
         );
-        crate::beta_seed::seed_state(scope, target.provider_kind.unwrap_or(""), flag, || {
+        crate::beta_seed::seed_state_for_key(scope, target.provider_kind.unwrap_or(""), key, || {
             self.seed_cleared_for_cell(target, key)
-        }) == Some(crate::capability_precedence::SeedCell::Withhold)
+        })
     }
 
     /// Whether the seed has been cleared for this target's (lane, flag) cell.
