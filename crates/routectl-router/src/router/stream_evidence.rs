@@ -288,10 +288,12 @@ impl EvidenceFold {
     }
 
     /// Replace `released` retained bytes with `charged` ones, spoiling the
-    /// fold instead when the result would pass [`STREAM_EVIDENCE_BYTE_CAP`]
-    /// or the size is unknown (`None`). Call before retaining the new value.
+    /// fold instead when the result would pass [`STREAM_EVIDENCE_BYTE_CAP`],
+    /// the size is unknown (`None`), or `released` exceeds what is retained.
+    /// Call before retaining the new value.
     fn recharge(&mut self, released: usize, charged: Option<usize>) -> bool {
-        let next = charged.and_then(|bytes| (self.retained - released).checked_add(bytes));
+        let next =
+            charged.and_then(|bytes| self.retained.checked_sub(released)?.checked_add(bytes));
         match next {
             Some(next) if next <= STREAM_EVIDENCE_BYTE_CAP => {
                 self.retained = next;

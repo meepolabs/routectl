@@ -476,6 +476,19 @@ fn a_fold_past_the_byte_cap_spoils() {
 }
 
 #[test]
+fn releasing_more_than_is_retained_spoils_the_fold() {
+    // Arrange
+    let mut fold = EvidenceFold::new(true);
+
+    // Act
+    let kept = fold.recharge(1, Some(0));
+
+    // Assert
+    assert!(!kept);
+    assert!(fold.spoiled);
+}
+
+#[test]
 fn an_untracked_reply_never_spoils_on_size() {
     let long = "x".repeat(STREAM_EVIDENCE_BYTE_CAP + 1);
 
