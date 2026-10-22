@@ -47,18 +47,27 @@ mod repair_chain {
     }
 
     /// A seat that assembles each attempt's body with the real egress,
-    /// deposits it into the attempt's wire tap, and answers per `respond`.
+    /// deposits it into the attempt's wire tap for the first `deposits`
+    /// attempts, and answers per `respond`.
     struct ChainSeat {
         egress: Egress,
         respond: Respond,
+        deposits: usize,
         bodies: Mutex<Vec<serde_json::Value>>,
     }
 
     impl ChainSeat {
         fn new(egress: Egress, respond: Respond) -> Arc<Self> {
+            Self::depositing(egress, respond, usize::MAX)
+        }
+
+        /// A seat whose attempts from position `deposits` on leave the wire
+        /// tap empty, as an egress that never recorded its body would.
+        fn depositing(egress: Egress, respond: Respond, deposits: usize) -> Arc<Self> {
             Arc::new(Self {
                 egress,
                 respond,
+                deposits,
                 bodies: Mutex::new(Vec::new()),
             })
         }
@@ -99,14 +108,16 @@ mod repair_chain {
 
         fn answer(&self, req: &ChatRequest) -> Result<()> {
             let body = self.body_of(req)?;
-            if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
-                tap.deposit(serde_json::to_vec(&body).expect("serialize").into());
-            }
             let position = {
                 let mut bodies = self.bodies.lock();
                 bodies.push(body.clone());
                 bodies.len() - 1
             };
+            if let Some(tap) = req.routectl_internal.wire_tap.as_ref()
+                && position < self.deposits
+            {
+                tap.deposit(serde_json::to_vec(&body).expect("serialize").into());
+            }
             (self.respond)(&body, position).map_or(Ok(()), Err)
         }
     }
@@ -633,7 +644,7 @@ mod repair_chain {
         assert_nothing_committed(&router, &dispatched, &stop_refused_inferred(), "inferred");
     }
 
-    /// Mutation check: drop the `names_absent_path` guard in
+    /// Mutation check: drop the `confirms_path_present` check in
     /// `settle_field_moved_on` -> red.
     #[tokio::test]
     async fn a_refusal_naming_a_path_the_body_lacked_commits_nothing() {
@@ -651,6 +662,32 @@ mod repair_chain {
             "premise: the body lacked the named path"
         );
         assert_nothing_committed(&router, &dispatched, &absent_top_k_refused(), "absent path");
+    }
+
+    /// The refused field went out, but the attempt left no record of the
+    /// body, so nothing confirms the upstream read past the pending field.
+    ///
+    /// Mutation check: let `confirms_path_present` accept unknown presence
+    /// (`!= Some(false)`) -> red.
+    #[tokio::test]
+    async fn a_refusal_whose_path_presence_is_unknown_commits_nothing() {
+        let seat = ChainSeat::depositing(
+            Egress::Anthropic,
+            |body, _| disabled_then(body, stop_refused),
+            1,
+        );
+        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+
+        let dispatched = router
+            .complete_with_options(anthropic_req(4096, true), RouterOptions::new())
+            .await;
+
+        assert_eq!(
+            seat.bodies()[1]["stop_sequences"],
+            json!([STOP]),
+            "premise: the named field went out, only its record is missing",
+        );
+        assert_nothing_committed(&router, &dispatched, &stop_refused(), "unknown presence");
     }
 
     const OPERATOR_EXTRA: &str = "payload_extras = { metadata = { op_key = \"v\" } }\n";

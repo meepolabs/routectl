@@ -88,6 +88,13 @@ impl RejectionSite {
         site.and_then(|site| site.in_egress) == Some(false)
     }
 
+    /// Whether the body that went out is confirmed to carry the path the
+    /// rejection names. Unknown presence is not confirmation: only a field
+    /// the upstream read can prove it read past the fields before it.
+    fn confirms_path_present(site: Option<&Self>) -> bool {
+        site.and_then(|site| site.in_egress) == Some(true)
+    }
+
     /// Whether a declared edit that could not be undone still leaves the
     /// rejection to the proposers: only one routectl-written required field
     /// does, since the upstream may refuse routectl's value and a learned

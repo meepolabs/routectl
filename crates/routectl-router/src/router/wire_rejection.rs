@@ -291,9 +291,14 @@ fn provenance_of(
 /// validator implied (an untagged union member's default) or one key of a
 /// client's that contains a dot.
 ///
+/// A path whose last segment is the value of a `type` tag
+/// (`thinking.type.disabled`) is carried when the body holds that value
+/// there; a different value says nothing either way.
+///
 /// On Converse the model names its own fields relative to the field bag and
-/// the request validator names them from the root, bag included. A path the
-/// root lacks is looked for in the bag; one neither carries is `None`, not
+/// the request validator names them from the root, bag included. A root path
+/// Converse spells in `inferenceConfig` is looked for there, and any other
+/// path the root lacks in the bag; one none of them carries is `None`, not
 /// absent, because the model also reads fields the Converse body spells
 /// elsewhere. A bag-prefixed path on any other egress names a shape that
 /// body does not have.
@@ -304,13 +309,60 @@ fn egress_location(egress: EgressKind, sent: &Value, path: &[String]) -> Option<
     }
     match walk(sent, path, TagOrKey::Unresolved) {
         Walk::Found(_) => Some(true),
+        Walk::Mismatch if carries_tag_value(sent, path) => Some(true),
         Walk::Mismatch | Walk::Ambiguous => None,
         Walk::Missing { .. } if egress == EgressKind::BedrockConverse && !bag_prefixed => {
-            let bag = sent.get(CONVERSE_FIELD_BAG)?;
-            matches!(walk(bag, path, TagOrKey::Unresolved), Walk::Found(_)).then_some(true)
+            converse_location(sent, path)
         }
         Walk::Missing { last } => last.then_some(false),
     }
+}
+
+/// Where a Converse body carries a root path its root lacks: in
+/// `inferenceConfig` for the fields Converse spells there, else in the field
+/// bag. `Some(true)` when found, `None` otherwise.
+fn converse_location(sent: &Value, path: &[String]) -> Option<bool> {
+    if let Some(spelled) = converse_inference_spelling(path) {
+        return sent
+            .get(CONVERSE_INFERENCE_CONFIG)
+            .and_then(|config| config.get(spelled))
+            .map(|_| true);
+    }
+    let bag = sent.get(CONVERSE_FIELD_BAG)?;
+    match walk(bag, path, TagOrKey::Unresolved) {
+        Walk::Found(_) => Some(true),
+        Walk::Mismatch if carries_tag_value(bag, path) => Some(true),
+        _ => None,
+    }
+}
+
+/// The Converse body object carrying the inference parameters.
+const CONVERSE_INFERENCE_CONFIG: &str = "inferenceConfig";
+
+/// The `inferenceConfig` key Converse spells a root request field as, for
+/// the fields a Converse rejection names at the root.
+fn converse_inference_spelling(path: &[String]) -> Option<&'static str> {
+    match path {
+        [field] if field == "temperature" => Some("temperature"),
+        [field] if field == "max_tokens" => Some("maxTokens"),
+        _ => None,
+    }
+}
+
+/// Whether `body` holds the last segment of `path` as the value of the
+/// `type` tag the segment before it names.
+fn carries_tag_value(body: &Value, path: &[String]) -> bool {
+    let [prefix @ .., tag, value] = path else {
+        return false;
+    };
+    if tag != UNION_TAG {
+        return false;
+    }
+    let tag_path = &path[..=prefix.len()];
+    matches!(
+        walk(body, tag_path, TagOrKey::Unresolved),
+        Walk::Found(Value::String(sent)) if sent == value
+    )
 }
 
 /// The value at `path` (raw keys and indices) in `body`.

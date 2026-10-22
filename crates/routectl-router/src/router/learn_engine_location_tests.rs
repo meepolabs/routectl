@@ -520,14 +520,14 @@ fn converse_site_rows() -> [SiteRow; 8] {
             in_egress: None,
         },
         SiteRow {
-            // The captured rejection names the refused VALUE: the walk meets
-            // a scalar before the path ends, which says nothing of absence.
+            // The captured rejection names the refused VALUE as the last
+            // segment, and the bag's thinking union holds exactly that tag.
             name: "the captured Converse rejection naming a refused value",
             provider_block: CONVERSE,
             dialect: IngressDialect::Anthropic,
             sent: Some(converse_thinking_enabled),
             err: || fixture_rejection(CONVERSE_FIXTURE),
-            in_egress: None,
+            in_egress: Some(true),
         },
         SiteRow {
             name: "the captured Converse temperature refusal, temperature in inferenceConfig",
@@ -535,7 +535,7 @@ fn converse_site_rows() -> [SiteRow; 8] {
             dialect: IngressDialect::Anthropic,
             sent: Some(converse_inference_temperature),
             err: || fixture_rejection(BEDROCK_TEMPERATURE_FIXTURE),
-            in_egress: None,
+            in_egress: Some(true),
         },
         SiteRow {
             name: "the captured Converse temperature refusal beside an empty bag",
@@ -543,7 +543,7 @@ fn converse_site_rows() -> [SiteRow; 8] {
             dialect: IngressDialect::Anthropic,
             sent: Some(converse_inference_temperature_and_empty_bag),
             err: || fixture_rejection(BEDROCK_TEMPERATURE_FIXTURE),
-            in_egress: None,
+            in_egress: Some(true),
         },
         SiteRow {
             name: "a bag-prefixed path on an Invoke body, which has no bag",
@@ -564,10 +564,10 @@ fn the_settlement_reads_each_rejection_against_the_body_that_went_out() {
 }
 
 /// The Converse temperature refusal names a root path a Converse body never
-/// spells at the root, so the walk cannot call it absent and no proposer is
-/// suppressed. The rejection does localize, and the same walk reads a root
-/// field the body lacks as absent, so the `None` is about where Converse
-/// spells temperature.
+/// spells at the root; it is read where Converse spells it, in
+/// `inferenceConfig`, so the walk confirms it carried rather than calling it
+/// absent, and no proposer is suppressed. The rejection does localize, and the
+/// same walk reads a root field the body lacks as absent.
 #[cfg(feature = "bedrock")]
 #[test]
 fn a_converse_temperature_refusal_is_not_read_as_an_absent_field() {
@@ -583,10 +583,10 @@ fn a_converse_temperature_refusal_is_not_read_as_an_absent_field() {
         "temperature in inferenceConfig",
         converse_inference_temperature,
         || fixture_rejection(BEDROCK_TEMPERATURE_FIXTURE),
-        None,
+        Some(true),
     );
     let site = settle_site(&refusal);
-    assert_eq!(site.in_egress, None, "{}", refusal.name);
+    assert_eq!(site.in_egress, Some(true), "{}", refusal.name);
     assert!(
         site.locator
             .as_ref()
@@ -781,6 +781,8 @@ fn absence_counts_only_for_a_reason_that_refuses_what_was_sent() {
         assert_eq!(settle(&row), row.in_egress, "{}", row.name);
     }
 }
+
+include!("learn_engine_presence_tests.rs");
 
 #[path = "learn_engine_dispatch_tests.rs"]
 mod learn_engine_dispatch_tests;

@@ -2948,7 +2948,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   after a moved-on commit drains the steps, so a later success commits and
   never takes the `settle_success` clear path. The engine calls the moved-on
   check once per rejection (`learn_settle.rs` `settle_field_moved_on`, after
-  the declared-edit undo, skipped for a path the sent body lacked). Coverage
+  the declared-edit undo, only for a path the sent body is confirmed to
+  carry; unknown presence commits nothing). Coverage
   in `field_repair_step_tests.rs` and the walk-level
   `field_repair_chain_tests.rs`
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
@@ -3253,7 +3254,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   complete control in its child module
   `src/router/learn_engine_surface_tests.rs`; per-dialect egress location (the
   settlement's `in_egress` reading) in
-  `src/router/learn_engine_location_tests.rs`, and the dispatch behavior on
+  `src/router/learn_engine_location_tests.rs` (every closed-table row,
+  refused on its lane against the real egress body, reads as carried in its
+  `include!`d fragment `src/router/learn_engine_presence_tests.rs`), and the
+  dispatch behavior on
   both surfaces (absent-path skip, repair when carried) in its child module
   `src/router/learn_engine_dispatch_tests.rs`
 - `src/router/learn_settle.rs` -- child module of `learn_engine.rs`: how

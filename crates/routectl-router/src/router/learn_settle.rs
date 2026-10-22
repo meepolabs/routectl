@@ -68,15 +68,17 @@ impl AttemptLearning<'_> {
     }
 
     /// Commit every pending step when a repaired retry was refused for a
-    /// different field the body that went out carried: the upstream read past
-    /// each pending field, so each is proven even if the new field cannot be
-    /// repaired. Features come from the client's request, as on success.
+    /// different field the body that went out is confirmed to carry: the
+    /// upstream read past each pending field, so each is proven even if the
+    /// new field cannot be repaired. A field whose presence cannot be told
+    /// commits nothing. Features come from the client's request, as on
+    /// success.
     pub(super) fn settle_field_moved_on(
         &mut self,
         rejection: &Rejection<'_>,
         meta: &mut DispatchMeta,
     ) {
-        if RejectionSite::names_absent_path(rejection.site.as_ref()) {
+        if !RejectionSite::confirms_path_present(rejection.site.as_ref()) {
             return;
         }
         let Some(mut plan) = self.field_plan.take() else {
