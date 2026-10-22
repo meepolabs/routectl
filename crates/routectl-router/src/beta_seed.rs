@@ -23,3 +23,74 @@ pub const BEDROCK_BETA_SEED: &[&str] = &[
 pub const fn shipped_scope() -> crate::beta_capability::BetaSeedScope {
     crate::beta_capability::BetaSeedScope::new(BEDROCK_SEED_PROVIDER_KIND, BEDROCK_BETA_SEED)
 }
+
+/// The seed's state on one `(lane, flag)` cell under `scope`: `None` when the
+/// seed does not cover the lane's kind and the flag, `Cleared` when the
+/// registry holds a seed-clear marker for the cell, else `Withhold`.
+/// `marker_present` is only consulted for a covered cell.
+pub fn seed_state(
+    scope: crate::beta_capability::BetaSeedScope,
+    provider_kind: &str,
+    flag: &str,
+    marker_present: impl FnOnce() -> bool,
+) -> Option<crate::capability_precedence::SeedCell> {
+    use crate::capability_precedence::SeedCell;
+    if !scope.covers_flag(provider_kind, flag) {
+        return None;
+    }
+    Some(if marker_present() {
+        SeedCell::Cleared
+    } else {
+        SeedCell::Withhold
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability_precedence::SeedCell;
+
+    const KIND: &str = "bedrock";
+    const SEED: &[&str] = &["fx-seeded"];
+
+    fn scope() -> crate::beta_capability::BetaSeedScope {
+        crate::beta_capability::BetaSeedScope::new(KIND, SEED)
+    }
+
+    #[test]
+    fn seed_state_reads_coverage_then_the_clear_marker() {
+        let rows: &[(&str, &str, &str, bool, Option<SeedCell>)] = &[
+            (
+                "covered, no marker",
+                KIND,
+                "fx-seeded",
+                false,
+                Some(SeedCell::Withhold),
+            ),
+            (
+                "covered, marker",
+                KIND,
+                "fx-seeded",
+                true,
+                Some(SeedCell::Cleared),
+            ),
+            ("uncovered kind", "anthropic-api", "fx-seeded", true, None),
+            ("unseeded flag", KIND, "fx-other", true, None),
+        ];
+        for (name, kind, flag, marker, expected) in rows {
+            assert_eq!(
+                seed_state(scope(), kind, flag, || *marker),
+                *expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn seed_state_never_reads_the_marker_for_an_uncovered_cell() {
+        let state = seed_state(scope(), "anthropic-api", "fx-seeded", || {
+            panic!("marker read for an uncovered cell")
+        });
+        assert_eq!(state, None);
+    }
+}

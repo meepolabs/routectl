@@ -120,8 +120,13 @@ impl BetaSeedScope {
     /// True when `feature_key` is the beta key of a seeded flag and
     /// `provider_kind` is the kind the seed applies to.
     pub fn covers(&self, provider_kind: &str, feature_key: &str) -> bool {
-        provider_kind == self.provider_kind
-            && beta_flag_of(feature_key).is_some_and(|flag| self.flags.contains(&flag))
+        beta_flag_of(feature_key).is_some_and(|flag| self.covers_flag(provider_kind, flag))
+    }
+
+    /// True when `flag` is a seeded flag and `provider_kind` is the kind the
+    /// seed applies to.
+    pub fn covers_flag(&self, provider_kind: &str, flag: &str) -> bool {
+        provider_kind == self.provider_kind && self.flags.contains(&flag)
     }
 }
 

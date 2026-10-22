@@ -1361,3 +1361,49 @@ fn a_rejected_submission_leaves_no_pending_state_and_a_retry_succeeds() {
     // (This is proven structurally: `Rejected` has no `receipt` field to
     // pass to `commit_boundary_transition`, so the compiler prevents it.)
 }
+
+/// The acting-negative reading carries the tier of the entry that acts, so a
+/// caller can tell a self-identifying negative from a corroborated inferred one.
+#[test]
+fn an_acting_negative_reading_carries_the_entry_signal_tier() {
+    let now = Instant::now();
+    for (key, tier, observations) in [
+        ("web_search", SignalTier::SelfIdentifying, 1),
+        ("structured_output", SignalTier::Inferred, 2),
+    ] {
+        // Arrange
+        let reg = registry();
+        for _ in 0..observations {
+            reg.observe(
+                "nick",
+                key,
+                "openai-compat",
+                tier,
+                FailurePhase::F2,
+                EvidenceSource::Live,
+                None,
+                now,
+            );
+        }
+
+        // Act
+        let reading = reg.beta_reading_in_generation(
+            reg.generation(),
+            "nick",
+            key,
+            "openai-compat",
+            ProbeClaim::Forgo,
+            now,
+        );
+
+        // Assert
+        assert_eq!(
+            reading.map(|(reading, _)| reading),
+            Some(BetaLaneReading::ActingNegative {
+                phase: FailurePhase::F2,
+                tier,
+            }),
+            "{tier:?}",
+        );
+    }
+}

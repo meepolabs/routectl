@@ -4347,7 +4347,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `beta_override_key`, `BetaSeedScope`, and (test-utils) the constructor
 - `src/beta_seed.rs` -- `BEDROCK_BETA_SEED` / `BEDROCK_SEED_PROVIDER_KIND`, the
   shipped prior of client beta flags a `bedrock` target withholds absent a
-  stronger verdict; `shipped_scope` (root: `shipped_beta_seed_scope`)
+  stronger verdict; `shipped_scope` (root: `shipped_beta_seed_scope`);
+  `seed_state(scope, provider_kind, flag, marker_present) -> Option<SeedCell>`
+  (root: `beta_seed_state`) decides a cell's seed state once
 - `src/field_capability.rs` -- sole owner of the envelope-field capability
   namespace (crate-internal): `field_capability_key` mints a bounded key from a
   qualified dotted path, `capability_key_is_catalog_scoped` classifies any key
@@ -4910,6 +4912,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `lane_strips_capability(config, provider_entry, models, capability)`
   mirrors the filter's strip-vs-route policy (essential list + operator beta
   floor via `router::operator_betas`)
+- `src/capability_precedence.rs` -- the one pure precedence resolution for a
+  `(target, capability)` cell, `pin > override > learned > seed > prior`,
+  staged so a decided cell never reaches the claiming learned read:
+  `resolve_operator(pinned, override_verdict, CellContext) -> Stage {
+  Decided(Resolution) | Open(OpenCell) }`, then `resolve_open(learned:
+  Option<LearnedInput>, seed, prior, OpenCell) -> Resolution`;
+  `resolve_display(DisplayInputs)` is the display mode and also fills
+  `overridden`. `Resolution` has two axes, `Wire { Send | Withhold | Strip }`
+  and `Routing { Keep | Tail | Drop }`, plus `layer` (`Layer::as_str`: `pin` /
+  `override` / `learned` / `seed` / `prior`), `supported`, `as_str` (the
+  `ACTION_*` tokens) and `hard_exclusion_eligible`. A pin decides a beta key
+  outright (send) and on a feature key only rules out strip.
+  `LearnedInput::{from_reading, from_entry}` adapt a dispatch read or a
+  snapshot entry. `refuses_beta_bag_key(egress_kind, upstream)` is the
+  Converse representability pre-check. Owns `SeedCell` (re-exported by
+  `capability_display`)
 - `src/capability_vocab.rs` -- map-on-read for the persisted capability-event
   vocabulary: stored rows are never rewritten; replay maps each row's tokens
   forward from its `vocab_version` (NULL = `LEGACY_VOCAB_VERSION` 1) to

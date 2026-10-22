@@ -329,7 +329,7 @@ impl Router {
                     now,
                 );
                 match reading {
-                    BetaLaneReading::ActingNegative { phase } => {
+                    BetaLaneReading::ActingNegative { phase, .. } => {
                         learned_claimed.push(feature);
                         // Strip-vs-route: a droppable capability the operator
                         // has not pinned to the wire is stripped in place ONLY

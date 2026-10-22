@@ -26,12 +26,10 @@ use std::time::Instant;
 
 use routectl_core::ChatRequest;
 use routectl_core::capability::normalize_capability_key;
-use routectl_core::wire_check::EgressKind;
 
 use crate::beta_capability::beta_capability_key;
 use crate::learned_capability::{BetaLaneReading, ProbeClaim};
 use crate::override_registry::OverrideVerdict;
-use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
 
 use super::class_observe::DispatchSurface;
 use super::{DispatchTarget, ProbeAdmission, Router};
@@ -48,8 +46,7 @@ pub(super) enum BetaVerdict {
 /// Whether `target` is a Converse lane to a model that refuses the
 /// `anthropic_beta` bag key outright, so no client flag can ride it.
 fn refuses_the_beta_bag_key(target: &DispatchTarget) -> bool {
-    target.egress_kind == Some(EgressKind::BedrockConverse)
-        && anthropic_family(&target.upstream) == AnthropicFamily::No
+    crate::capability_precedence::refuses_beta_bag_key(target.egress_kind, &target.upstream)
 }
 
 impl Router {

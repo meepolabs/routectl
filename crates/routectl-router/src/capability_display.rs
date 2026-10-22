@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 
+pub use crate::capability_precedence::SeedCell;
 use crate::config::{Config, ModelEntry, ProviderEntry};
 use crate::learned_capability::LearnedRegistryEntry;
 use crate::override_registry::OverrideVerdict;
@@ -47,15 +48,6 @@ pub const SOURCE_PROBE: &str = "probe";
 pub const SOURCE_PRIOR: &str = "prior";
 /// Source tag: the shipped beta seed.
 pub const SOURCE_SEED: &str = "seed";
-
-/// The shipped beta seed's state on one cell it covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeedCell {
-    /// The seed withholds the flag on the lane.
-    Withhold,
-    /// A seed-clear marker lifts the seed on the lane, so the flag is sent.
-    Cleared,
-}
 
 /// The resolved display verdict for one capability matrix cell.
 ///

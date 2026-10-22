@@ -363,6 +363,9 @@ pub enum BetaLaneReading {
         /// Detection phase that attributed the negative; the feature filter's
         /// strip-vs-route-away choice reads it.
         phase: FailurePhase,
+        /// Signal tier of the negative: only a self-identifying one can
+        /// exclude a capability from every lane.
+        tier: SignalTier,
     },
     /// A lapsed negative's single re-probe slot was claimed by this read.
     ProbeAdmitted,
@@ -2808,8 +2811,11 @@ impl LearnedCapabilityRegistry {
                     ProbeClaim::Forgo => Self::unclaimed_decision_in(entries, &key),
                 };
                 match decision {
-                    RoutingDecision::RouteAway { phase, .. } => {
-                        BetaLaneReading::ActingNegative { phase }
+                    RoutingDecision::RouteAway { signal, phase } => {
+                        BetaLaneReading::ActingNegative {
+                            phase,
+                            tier: signal,
+                        }
                     }
                     RoutingDecision::ProbeAdmitted => BetaLaneReading::ProbeAdmitted,
                     RoutingDecision::Allow if Self::is_verified_working_in(entries, &key) => {
