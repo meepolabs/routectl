@@ -3270,7 +3270,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   commits the negative, an outright carried success clears it; on the
   `CountTokens` surface the plan is dropped (slots released, nothing
   committed or cleared) and the degradation reports `repair_succeeded`
-  without `learned`. Field: a repaired success commits (persisted claim
+  without `learned`. Field: a repaired success commits (learned claim
   derived from the commit), an unrepaired one clears. Canary: an unrepaired
   success disproves the verdict, one after its repaired retry re-confirms it
 - `src/router/learn_rejection.rs` -- child module of `learn_engine.rs`:

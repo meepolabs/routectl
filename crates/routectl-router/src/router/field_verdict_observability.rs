@@ -44,7 +44,9 @@ pub struct FieldRepairCounters {
     pub repair_lossy: u64,
     /// Cumulative fired repairs whose re-dispatch succeeded.
     pub repair_succeeded: u64,
-    /// Cumulative envelope-field verdicts persisted after a confirmed repair.
+    /// Cumulative envelope-field verdicts inserted into the live learned
+    /// registry after a confirmed repair. Counts the insert, not the durable
+    /// write, which can still be refused.
     pub verdicts_learned: u64,
     /// Requests currently riding on a verdict no canary has re-confirmed yet,
     /// summed over every resident identity -- the OUTSTANDING half of the
@@ -82,7 +84,7 @@ pub struct FieldRepairCounters {
     ///
     /// Not the same count as `verdicts_learned`, and not a subset of it either
     /// way round: a proven step whose repair teaches nothing (a refused VALUE
-    /// repaired by a drop) is committed here and persists no verdict, while
+    /// repaired by a drop) is committed here and learns no verdict, while
     /// `verdicts_learned` counts only the steps whose commit put a verdict in
     /// the learned registry. Neither claims durability: a verdict counted there
     /// can still fail its durable write, which is reported on the capability

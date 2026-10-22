@@ -101,16 +101,17 @@ impl AttemptLearning<'_> {
     ) {
         let features =
             super::super::field_repair::request_feature_keys(self.router.field_repair_table(), req);
-        // Each `learned` claim is derived from what that step's commit
-        // actually PERSISTED, never asserted alongside it: a non-settling
-        // plan commits nothing, and a summary that claimed otherwise would
-        // be a false persistence claim.
+        // Each `learned` claim is derived from whether that step's commit
+        // actually inserted a verdict into the live learned registry, never
+        // asserted alongside it: a non-settling plan commits nothing, and a
+        // summary that claimed otherwise would be a false learning claim.
+        // The durable write is reported separately and may still be refused.
         for step in plan.commit_pending(&features, Instant::now()) {
-            let persisted = step.learned.is_some();
+            let learned = step.learned.is_some();
             meta.learned_capabilities.extend(step.learned);
             if let Some(repair) = step.handle {
                 self.router
-                    .note_field_repair_succeeded(meta, repair, persisted);
+                    .note_field_repair_succeeded(meta, repair, learned);
             }
         }
     }
