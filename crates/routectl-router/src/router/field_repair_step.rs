@@ -19,10 +19,13 @@
 //!
 //! A field this target already repaired, pending or committed, is not
 //! repaired again unless its row says so ([`rerepairs_same_field`], false for
-//! every row). The type
-//! keeps no one-step-per-field invariant on purpose: a rewrite row that
-//! re-repairs the same field within the request's budget, then maps every
-//! refused value it sent to the one that succeeded, needs two pending steps on
+//! every row). For a row that does, a same-field refusal says the value the
+//! pending step wrote was refused too, so the new step SUPERSEDES that step:
+//! it takes over the pending step's guard (the field's single-flight claim is
+//! still held by it, so claiming again would refuse) and the superseded step
+//! settles as dropped, never committing on its own. The type keeps no
+//! one-step-per-field invariant on purpose: a row that later maps every
+//! refused value it sent to the one that succeeded needs two pending steps on
 //! one field.
 
 use std::borrow::Cow;
@@ -54,8 +57,49 @@ use super::{
 /// Whether `row` may be repaired again while an earlier step on the same
 /// field is still pending. False for every row: no row has a second repair
 /// that differs from its first.
-pub(super) const fn rerepairs_same_field(_row: &FieldRepairRow) -> bool {
+#[cfg_attr(not(test), allow(clippy::missing_const_for_fn))]
+pub(in crate::router) fn rerepairs_same_field(
+    #[cfg_attr(not(test), allow(unused_variables))] row: &FieldRepairRow,
+) -> bool {
+    #[cfg(test)]
+    if rerepair_opt_in::covers(row) {
+        return true;
+    }
     false
+}
+
+/// A test build's scoped opt-in of one row into [`rerepairs_same_field`], so
+/// the same-field path can be exercised without a production row that takes
+/// it.
+#[cfg(test)]
+pub(in crate::router) mod rerepair_opt_in {
+    use std::cell::Cell;
+
+    use super::FieldRepairRow;
+
+    thread_local! {
+        static OPTED_IN: Cell<Option<&'static str>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn covers(row: &FieldRepairRow) -> bool {
+        OPTED_IN.with(Cell::get) == Some(row.path)
+    }
+
+    /// Make the row at `path` re-repair its field on this thread until the
+    /// returned guard drops.
+    pub(in crate::router) fn opt_in(path: &'static str) -> OptIn {
+        OPTED_IN.with(|cell| cell.set(Some(path)));
+        OptIn(())
+    }
+
+    /// Clears the opt-in on drop.
+    pub(in crate::router) struct OptIn(());
+
+    impl Drop for OptIn {
+        fn drop(&mut self) {
+            OPTED_IN.with(|cell| cell.set(None));
+        }
+    }
 }
 
 /// The admitted L0 repair for one attempt: EVERY closed-table row the attempt
@@ -450,7 +494,8 @@ impl<'a> FieldRepairPlan<'a> {
     /// admitted candidate whose SURFACE that row names.
     ///
     /// A row whose field identity this target already repaired, pending or
-    /// committed, is refused unless [`rerepairs_same_field`] holds for it; a
+    /// committed, is refused unless [`rerepairs_same_field`] holds for it,
+    /// in which case the new step supersedes a pending one on that field; a
     /// DIFFERENT field adds a step beside the earlier ones.
     pub(in crate::router) fn apply_named(
         &mut self,
@@ -492,6 +537,29 @@ impl<'a> FieldRepairPlan<'a> {
                 .pending
                 .iter()
                 .any(|step| FieldIdentity::of_row(&step.row) == identity)
+    }
+
+    /// The pending step a repair of `row` supersedes: one on the same field,
+    /// when the row re-repairs a field. Its guard is the field's claim, so
+    /// the new step takes it over rather than claiming again.
+    fn superseded_step(&self, row: &FieldRepairRow) -> Option<usize> {
+        if !rerepairs_same_field(row) {
+            return None;
+        }
+        let identity = FieldIdentity::of_row(row);
+        self.pending
+            .iter()
+            .position(|step| FieldIdentity::of_row(&step.row) == identity)
+    }
+
+    /// Remove the pending step at `at`, counted as dropped, and hand its
+    /// guard to the step that supersedes it.
+    fn supersede(&mut self, at: usize) -> Option<FieldRepairGuard<'a>> {
+        let superseded = self.pending.remove(at);
+        if let Some(exits) = self.exits {
+            exits.add_dropped(1);
+        }
+        superseded.guard
     }
 
     /// The guard a step on candidate `idx` settles through. A row the first
@@ -551,8 +619,11 @@ impl<'a> FieldRepairPlan<'a> {
             return None;
         }
         // Claimed before the mutation: a field whose claim a sibling request
-        // now holds is not repaired here, and the rejection stays terminal.
-        let reclaimed = match self.claim(idx) {
+        // now holds is not repaired here, and the rejection stays terminal. A
+        // superseded step already holds this field's claim, so nothing is
+        // claimed for it.
+        let superseded = self.superseded_step(&row);
+        let reclaimed = match superseded.map_or_else(|| self.claim(idx), |_| Claim::Kept) {
             Claim::Refused => return None,
             Claim::Reclaimed(guard) => Some(guard),
             Claim::Kept => None,
@@ -608,7 +679,10 @@ impl<'a> FieldRepairPlan<'a> {
                 edit.declared_kind(),
             );
         }
-        let guard = reclaimed.or_else(|| self.candidates[idx].guard.take());
+        let guard = match superseded {
+            Some(at) => self.supersede(at),
+            None => reclaimed.or_else(|| self.candidates[idx].guard.take()),
+        };
         // Every OTHER candidate's guard is released now rather than held to
         // settlement, which frees each unused single-flight slot for a sibling
         // request that CAN settle that row instead of pinning it for the rest

@@ -123,6 +123,102 @@ mod repair_chain {
     }
 
     // -----------------------------------------------------------------------
+    // A row that re-repairs its field
+    // -----------------------------------------------------------------------
+
+    /// A lower limit than the captured one, named by the captured template.
+    const LOWER_LIMIT: u32 = 64_000;
+
+    /// The captured max_tokens refusal re-spelled for the limit the first
+    /// repair wrote: a refusal of the value that repair sent. Synthesized
+    /// from the committed template, so it parses exactly as a real one would.
+    fn lower_limit_refused() -> Error {
+        anthropic_rejection(&format!(
+            "max_tokens: {MODEL_LIMIT} > {LOWER_LIMIT}, which is the maximum allowed number \
+             of output tokens for claude-haiku-5-5"
+        ))
+    }
+
+    /// Refuse a max_tokens above the model limit, then one above the lower
+    /// limit, else serve. Thinking is never refused.
+    fn max_tokens_twice(body: &serde_json::Value, _: usize) -> Option<Error> {
+        let sent = sent_max_tokens(body)?;
+        if sent > u64::from(MODEL_LIMIT) {
+            return Some(max_tokens_rejection());
+        }
+        (sent > u64::from(LOWER_LIMIT)).then(lower_limit_refused)
+    }
+
+    /// On a same-wire lane, a row that re-repairs its field answers a refusal
+    /// of the value its own repair wrote with a second repair of that field,
+    /// within the request's budget; the second step supersedes the first, so
+    /// only the value that succeeded commits.
+    ///
+    /// Mutation checks: drop the re-repair predicate from the declared-edit
+    /// gate in `answer_declared` -> red (the earlier repair's declaration
+    /// stops the refusal before the proposers); claim the field afresh
+    /// instead of taking over the superseded step's guard in
+    /// `apply_candidate` -> red (the pending step's claim refuses it).
+    #[tokio::test]
+    async fn a_row_that_rerepairs_its_field_repairs_a_refused_repair_value() {
+        let seat = ChainSeat::new(Egress::Anthropic, max_tokens_twice);
+        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let _opt_in = super::super::rerepair_opt_in::opt_in(MAX_TOKENS_PATH);
+
+        let dispatched = router
+            .complete_with_options(two_key_req(), RouterOptions::new())
+            .await;
+
+        assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+        let sent: Vec<_> = seat.bodies().iter().map(sent_max_tokens).collect();
+        assert_eq!(
+            sent,
+            [SENT_MAX_TOKENS, MODEL_LIMIT, LOWER_LIMIT].map(|v| Some(u64::from(v))),
+        );
+        assert_eq!(
+            router.field_repair_counters().repairs_per_request,
+            one_request_in(2),
+            "two repairs drawn",
+        );
+        assert_eq!(
+            verdicts(&dispatched.meta),
+            vec![(
+                key(MAX_TOKENS_PATH),
+                Some(VerdictValue::Ceiling(LOWER_LIMIT))
+            )],
+            "only the final step commits",
+        );
+        assert_eq!(
+            succeeded(&dispatched.meta),
+            vec![
+                (MAX_TOKENS_PATH, false, false),
+                (MAX_TOKENS_PATH, true, true)
+            ],
+        );
+        assert_eq!(
+            step_exits(&router),
+            (1, 1),
+            "the superseded step is dropped"
+        );
+    }
+
+    /// Control: without the opt-in, the same refusal stops at the earlier
+    /// repair's declaration and reaches the client.
+    #[tokio::test]
+    async fn without_the_opt_in_a_refused_repair_value_reaches_the_client() {
+        let seat = ChainSeat::new(Egress::Anthropic, max_tokens_twice);
+        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+
+        let dispatched = router
+            .complete_with_options(two_key_req(), RouterOptions::new())
+            .await;
+
+        assert!(dispatched.result.is_err(), "premise");
+        assert_eq!(seat.calls(), 2);
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
     // What commits nothing
     // -----------------------------------------------------------------------
 

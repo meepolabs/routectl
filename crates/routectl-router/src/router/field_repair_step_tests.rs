@@ -16,7 +16,7 @@ use super::super::super::rejection_parser::RejectionValue;
 use super::super::super::repair_budget::RepairBudget;
 use super::super::super::{DispatchMeta, DispatchTarget, Router};
 use super::super::{FieldRepairTable, FieldSettlementMode, closed_table, provisional};
-use super::{FieldEdit, FieldRepairPlan, RepairStep, rerepairs_same_field};
+use super::{FieldEdit, FieldRepairPlan, RepairStep, rerepair_opt_in, rerepairs_same_field};
 
 const TEMPERATURE: &str = "temperature";
 const TOP_P: &str = "top_p";
@@ -295,6 +295,62 @@ fn no_row_rerepairs_its_field() {
     for row in rows {
         assert!(!rerepairs_same_field(row), "{}", row.path);
     }
+}
+
+/// A request carrying only the max_tokens row.
+fn max_tokens_req() -> ChatRequest {
+    ChatRequest {
+        temperature: None,
+        top_p: None,
+        ..three_field_req()
+    }
+}
+
+/// A row that re-repairs its field supersedes the pending step on it: the
+/// new step takes over that step's claim rather than claiming again, so one
+/// claim is held across both repairs, and only the final step commits.
+///
+/// Mutation checks: claim afresh instead of taking the superseded step's
+/// guard -> red (the in-flight claim refuses the second repair); drop the
+/// superseded step's guard instead of handing it over -> red (a sibling
+/// admits, and the commit learns nothing).
+#[test]
+fn a_same_field_rerepair_takes_over_the_pending_steps_claim() {
+    let router = router();
+    let mut req = max_tokens_req();
+    let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
+    let mut budget = RepairBudget::per_request();
+    let _opt_in = rerepair_opt_in::opt_in(MAX_TOKENS);
+    assert_eq!(
+        apply_ceiling(&mut plan, &mut req, &mut budget, 2048),
+        Some(400),
+        "premise",
+    );
+
+    let second = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
+
+    assert_eq!(second, Some(400), "the same field repairs again");
+    assert_eq!(req.max_tokens, Some(1024));
+    assert_eq!(budget.spent(), 2, "each repair draws");
+    assert_eq!(
+        plan.pending_paths(),
+        vec![MAX_TOKENS],
+        "superseded, not added"
+    );
+    assert!(
+        plan_or_none(&router, &max_tokens_req()).is_none(),
+        "the field's claim is still held, so a sibling is refused",
+    );
+    let settled = plan.commit_pending(&[], Instant::now());
+    let learned: Vec<_> = settled
+        .into_iter()
+        .map(|step| step.learned.map(|event| event.value))
+        .collect();
+    assert_eq!(
+        learned,
+        vec![Some(Some(crate::VerdictValue::Ceiling(1024)))],
+        "only the final step commits, with the value that succeeded",
+    );
 }
 
 /// The plan holds no one-step-per-field invariant: two pending steps on one

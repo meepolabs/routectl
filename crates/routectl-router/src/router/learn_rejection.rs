@@ -5,10 +5,12 @@
 //! once per rejection.
 
 use routectl_core::ChatRequest;
+use routectl_core::wire_check::EditSite;
 
 use super::super::DispatchMeta;
 use super::super::dispatch::replay_rejection_body_free;
-use super::super::learn_revert::answer_declared_edit;
+use super::super::field_repair::{rejected_field, rerepairs_same_field};
+use super::super::learn_revert::{MatchedEdit, answer_declared_edit};
 use super::super::repair_budget::RepairBudget;
 use super::learn_beta_repair::EngineSink;
 use super::{
@@ -94,8 +96,8 @@ impl AttemptLearning<'_> {
     /// The decision for a rejection laid to declared routectl edits: a retry
     /// when the one edit was undone, otherwise `Proceed` with no proposer
     /// consulted. `None` when no declared edit explains the rejection, or
-    /// when the one edit not undone is a required-field default, which the
-    /// proposers then answer.
+    /// when the one edit not undone is a required-field default or a field
+    /// repair whose row re-repairs its field, which the proposers then answer.
     fn answer_declared(
         &mut self,
         rejection: &Rejection<'_>,
@@ -112,7 +114,9 @@ impl AttemptLearning<'_> {
             budget,
         )?;
         if !reverted {
-            if RejectionSite::unreverted_reaches_proposers(rejection.site.as_ref()) {
+            if RejectionSite::unreverted_reaches_proposers(rejection.site.as_ref())
+                || self.rerepairs_declared_field(rejection)
+            {
                 return None;
             }
             return Some(FailureDecision::Proceed);
@@ -121,6 +125,25 @@ impl AttemptLearning<'_> {
         Some(FailureDecision::Retry {
             last_err_body_free: None,
         })
+    }
+
+    /// Whether the one declared edit a rejection names is an earlier field
+    /// repair, and the row the rejection names re-repairs its field: the
+    /// upstream refused the value that repair wrote, which a further repair
+    /// of the same field may answer.
+    fn rerepairs_declared_field(&self, rejection: &Rejection<'_>) -> bool {
+        let is_field_repair = matches!(
+            rejection.site.as_ref().map(|site| &site.matched_edit),
+            Some(MatchedEdit::One(edit)) if edit.site() == EditSite::FieldRepair
+        );
+        is_field_repair
+            && rejected_field(
+                self.router.field_repair_table(),
+                rejection.native_class,
+                rejection.err,
+                rejection.target.provider_kind.unwrap_or(""),
+            )
+            .is_some_and(|named| rerepairs_same_field(named.row))
     }
 
     /// Run [`arbitrate`] over the proposers and turn its verdict into the
