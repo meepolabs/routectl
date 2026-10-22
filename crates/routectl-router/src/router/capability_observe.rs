@@ -423,6 +423,12 @@ impl Router {
 }
 
 impl EvidenceScope {
+    /// Whether the attempt requested strict output, so a reader must keep the
+    /// response text for the schema check.
+    pub(super) const fn strict_output_requested(&self) -> bool {
+        self.detector_context.strict_output_requested
+    }
+
     /// The learned-registry key the served target holds for `capability_key`.
     fn learned_key(&self, capability_key: &str) -> Option<&str> {
         self.learned_keys

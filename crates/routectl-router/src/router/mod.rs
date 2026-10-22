@@ -71,6 +71,7 @@ mod runtime_gate;
 mod state_slots;
 mod status;
 mod sticky;
+mod stream_evidence;
 mod transcript_defect;
 mod window_gate;
 mod wire_check;
@@ -117,6 +118,7 @@ use routectl_core::capability::FailurePhase;
 use routectl_core::capability::SignalTier;
 use runtime_gate::{LearnedProbeGuard, ProbeAdmission};
 pub use status::RouteTargetStatus;
+pub use stream_evidence::StreamEvidence;
 pub use wire_response::ResponseCheck;
 
 #[cfg(test)]
@@ -1617,6 +1619,14 @@ pub struct DispatchMeta {
     /// on. The ingress renderer takes it and hands it the document the
     /// client received.
     pub response_check: Option<ResponseCheck>,
+    /// The response evidence of a successful streamed attempt, settled by the
+    /// caller once the stream has been delivered to its natural end. `None`
+    /// on a complete dispatch (read inline into
+    /// [`Self::capability_observations`]), on a failed one, and wherever no
+    /// evidence may be read for the served target (the kill switch is off, a
+    /// forwarded credential, no provider kind). Clones of this meta share the
+    /// carrier's single scope, so it settles at most once.
+    pub stream_evidence: Option<StreamEvidence>,
 }
 
 /// Closed-set facts about one canonical pre-flight planning decision,
@@ -1810,6 +1820,7 @@ impl DispatchMeta {
             wire_rejections: Vec::new(),
             wire_reverts: Vec::new(),
             response_check: None,
+            stream_evidence: None,
         }
     }
 

@@ -3852,8 +3852,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   re-probe)
 - `src/router/capability_observe.rs` -- response-evidence observer: the
   SUCCESS-arm mirror of `observe_for_learning`, run inline on the terminal
-  successful NON-STREAMING response (the streaming arm records nothing -- no
-  assembled response, fail closed). `CapabilityObserveEvent` (the additive
+  successful NON-STREAMING response (the streaming arm hands its scope to
+  `stream_evidence.rs` instead). `CapabilityObserveEvent` (the additive
   `DispatchMeta.capability_observations` ride-along row: capability_key,
   evidence_class, direction, tier, source + state_key, provider_kind,
   request_features -- the columns a later warm-rebuild replays; NO ledger
@@ -3873,6 +3873,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `output_config.format.schema` or a strict tool's `input_schema`),
   `forces_web_search` (bounded `tool_choice` directive read),
   `reasoning_requested`, `cache_requested`
+- `src/router/stream_evidence.rs` -- streamed response evidence:
+  `StreamEvidence` (public, opaque), carried on
+  `DispatchMeta::stream_evidence` from a successful streamed attempt that
+  yielded an `EvidenceScope`; its clones share one take-once scope slot.
+  `wrap` folds each Ok chunk (`EvidenceFold`: choice count, last
+  finish_reason, merged usage, reasoning / tool-call / search-evidence flags,
+  text only for strict output, under `STREAM_EVIDENCE_BYTE_CAP`; a second
+  choice or overflow spoils it) and records the natural end only when the
+  inner stream returns None with no Err seen; `settle` reads the minimal
+  response through `observe_response_evidence` on the caller's Router
 - `src/router/capability_owner_sweep.rs` -- `owns_learned_entry` (does this
   Router's config own a `RecordedLearnedEntry`) and
   `sweep_unowned_learned_entries`, which removes (through the generation

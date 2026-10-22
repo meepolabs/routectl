@@ -1,8 +1,8 @@
 //! Coverage for the response-evidence observer (`observe_capabilities`): the
 //! kill switch, `DetectorContext` derivation, stage-two admission with the
 //! `Live` source, per-request dedupe, the acting-only ride-along on
-//! `DispatchMeta`, the dedicated counters + WARNs, and the streaming-arm gap
-//! (records nothing). The admission path is exercised through the real
+//! `DispatchMeta`, the dedicated counters + WARNs, and the streaming arm
+//! (reads nothing inline; its evidence waits on the stream carrier). The admission path is exercised through the real
 //! registry so detector output, admission, and the read-model verdict all
 //! participate.
 
@@ -709,7 +709,7 @@ fn schema_mismatch_body_is_f3_suspect() {
     );
 }
 
-// --- streaming records nothing -----------------------------------------
+// --- streaming reads nothing inline ------------------------------------
 
 #[tokio::test]
 async fn streaming_success_records_no_observation() {
@@ -723,8 +723,9 @@ async fn streaming_success_records_no_observation() {
         .stream_with_options(req, RouterOptions::default())
         .await;
 
-    // Assert: the stream succeeded, but the observer never ran on the stream
-    // path -- the ride-along is empty and no positive counter bumped.
+    // Assert: the stream succeeded, but no evidence is read at first content:
+    // the ride-along is empty and no positive counter bumped until the
+    // stream's carrier is settled.
     assert!(dispatched.result.is_ok());
     assert!(dispatched.meta.capability_observations.is_empty());
     assert_eq!(router.metrics.verified_working_total(), 0);

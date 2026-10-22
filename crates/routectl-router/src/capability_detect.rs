@@ -47,7 +47,7 @@ const CLEAN_STOP_ALLOW: &[&str] = &["stop", "tool_calls", "pause_turn"];
 /// ran. The generic `server_tool_use` block is NOT in this set -- it is
 /// shared with code execution and other server tools, so keying on its
 /// bare `type` would over-attribute.
-const SEARCH_EVIDENCE_TYPE_TAGS: &[&str] = &["web_search_tool_result"];
+pub const SEARCH_EVIDENCE_TYPE_TAGS: &[&str] = &["web_search_tool_result"];
 
 /// Usage `server_tool_use` sub-keys whose positive integer count proves a
 /// web search ran. The `server_tool_use` object is a per-server-tool

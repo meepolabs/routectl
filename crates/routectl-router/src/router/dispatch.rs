@@ -60,6 +60,7 @@ use super::repair_budget::RepairBudget;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
+use super::stream_evidence::StreamEvidence;
 use super::transcript_defect::{
     egress_pairing_refusal, is_transcript_rejection, record_transcript_defect,
 };
@@ -1491,16 +1492,12 @@ impl Router {
                         // Then settle the replay carry and the envelope-field
                         // carry against this first content (see
                         // `complete_inner`); a stream holds no canary.
-                        // No response evidence is read on the stream path yet:
-                        // first content is not the end of the response, so the
-                        // scope is dropped and nothing is observed.
-                        drop(learning.on_success(
-                            &untranslated,
-                            target,
-                            &req,
-                            &mut learn_dedupe,
-                            meta,
-                        ));
+                        // First content is not the end of the response, so the
+                        // evidence scope rides out on the meta and the caller
+                        // settles it once the stream has ended naturally.
+                        meta.stream_evidence = learning
+                            .on_success(&untranslated, target, &req, &mut learn_dedupe, meta)
+                            .map(StreamEvidence::new);
                         // Stamp the client-visible label on every Ok chunk
                         // (including the terminal / usage-only chunk) before
                         // the breaker wrap. The closure owns the label String
@@ -1511,15 +1508,21 @@ impl Router {
                         let label = resolve_reported_model(target, &req.model);
                         declare_model_relabel(wire_tap.as_ref());
                         self.carry_response_check(target, &attempt_req, wire_tap.as_ref(), meta);
-                        let relabeled = stream.map(move |item| match item {
-                            Ok(mut chunk) => {
-                                chunk.model = label.clone();
-                                Ok(chunk)
-                            }
-                            Err(e) => Err(e),
-                        });
+                        let relabeled = stream
+                            .map(move |item| match item {
+                                Ok(mut chunk) => {
+                                    chunk.model = label.clone();
+                                    Ok(chunk)
+                                }
+                                Err(e) => Err(e),
+                            })
+                            .boxed();
+                        let folded = match &meta.stream_evidence {
+                            Some(evidence) => evidence.wrap(relabeled),
+                            None => relabeled,
+                        };
                         return Ok(wrap_with_breaker_accounting(
-                            relabeled.boxed(),
+                            folded,
                             state,
                             target.provider_kind,
                             // Subscription-quota feed, the STREAMING half.
