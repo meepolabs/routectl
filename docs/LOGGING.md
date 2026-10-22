@@ -361,19 +361,25 @@ the registry.
 When an upstream rejects a request by naming a WIRE FIELD PATH the router
 has a grounded repair for, the router applies that row's transform --
 DROP the field, or REWRITE it to the one accepted value the rejection
-names as a replacement -- and re-dispatches the same target once (the
+names as a replacement -- and re-dispatches the same target (the
 reactive L0 field repair). A rewrite row whose rejection names no single
 accepted replacement, or names the value the request already carries,
-repairs nothing. Each such request emits ONE WARN PER REPAIR at
-resolution -- `"envelope_field_repaired"` -- and none when no repair
-fired. It fires on all three dispatch walks
+repairs nothing. A repaired retry refused for a DIFFERENT field is
+repaired again on the same target, so one target can repair several
+fields in turn; each field is repaired at most once per target, and a
+refusal of the field just repaired stops the chain. Each such request
+emits ONE WARN PER REPAIR at resolution -- `"envelope_field_repaired"`
+-- and none when no repair fired. It fires on all three dispatch walks
 (`complete`, `stream` pre-content, and `count_tokens`), at request
 resolution rather than per attempt. A request whose walk never repairs
 twice (the common case) emits exactly one line, unchanged in shape. A
-fallback walk can repair on several targets -- for example a re-verification
-canary's refused-value repair on one target and a reactive repair on the
-next -- and then emits one line per repair in the order they fired, each
-carrying its own `state_key`, `field_path`, and outcome. The request
+request that repaired several fields, on one target or across a fallback
+walk (for example a re-verification canary's refused-value repair on one
+target and a reactive repair on the next), emits one line per repair in
+the order they fired, each carrying its own `state_key`, `field_path`,
+and outcome, so one target can contribute several lines. An earlier line
+of a chain reads `repair_succeeded=true` when a later refusal of a
+different field proved it, even if the request then failed. The request
 repair allowance bounds the count, so a request never emits more than five.
 
 The line is content-free by construction. `field_path` is the repair
@@ -389,7 +395,7 @@ upstream body, and the session key are never carried:
 | `field_path` | The closed-table qualified dotted path that was repaired |
 | `reason` | Why the repair fired (`upstream_field_rejection`) |
 | `repair_attempted` | The repair arm fired |
-| `repair_succeeded` | The repaired re-dispatch reached success / first chunk / a count |
+| `repair_succeeded` | The repaired re-dispatch reached success / first chunk / a count, or was refused for a different field the sent body carried (which proves this repair) |
 | `learned` | The confirmed verdict was persisted to the learned registry |
 
 Two verdict-lifecycle lines accompany it at INFO, both carrying

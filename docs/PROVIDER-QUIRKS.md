@@ -402,7 +402,7 @@ The HTTP-Referer / X-Title headers improve OpenRouter's analytics and can affect
 
 Default works. The OpenAI dialect maps canonical `reasoning.effort` -> wire `reasoning_effort` and drops sampling params on reasoning models automatically (driven by `model_profile.rs`).
 
-For a model that table does not list, routectl learns the drop. An `openai-compat` upstream that answers `Unsupported parameter: '<name>' is not supported with this model.` (or names it in `error.param`) for `temperature`, `top_p`, `presence_penalty` or `frequency_penalty` gets one retry on the same target without that parameter. When the retry succeeds, the lane learns the drop and later requests to it go out without the parameter. The static table stays: OpenAI names one parameter per 400 and routectl repairs one field per request, so a request carrying two refused parameters would fail every time and never learn. `logprobs` and `top_logprobs` are not learned.
+For a model that table does not list, routectl learns the drop. An `openai-compat` upstream that answers `Unsupported parameter: '<name>' is not supported with this model.` (or names it in `error.param`) for `temperature`, `top_p`, `presence_penalty` or `frequency_penalty` gets one retry on the same target without that parameter. When the retry succeeds, or is refused for another parameter it still carries, the lane learns the drop and later requests to it go out without the parameter; a request carrying several refused parameters is repaired one parameter per retry, within the request's allowance of five repairs. The static table stays for the models it lists, so their requests need no refused attempt at all. `logprobs` and `top_logprobs` are not learned.
 
 ```toml
 [providers.openai]
