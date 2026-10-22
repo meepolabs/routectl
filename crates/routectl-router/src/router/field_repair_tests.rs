@@ -87,9 +87,11 @@ fn field_reject_body() -> &'static str {
 
 /// Chain length, strictly greater than the ceiling so a per-target budget
 /// and the shared per-request budget give DIFFERENT repair counts on one
-/// fixture: per-target would permit one repair per leg (four), the shared
-/// ceiling permits `REPAIRS_PER_REQUEST` (two).
-const CHAIN_TARGETS: usize = 4;
+/// fixture: per-target would permit one repair per leg, the shared ceiling
+/// permits `REPAIRS_PER_REQUEST`. At least two above the ceiling: the
+/// token-count walk repairs on the first `REPAIRS_PER_REQUEST` seats, stops
+/// on the next, and must leave the last seat unvisited.
+const CHAIN_TARGETS: usize = 7;
 
 /// The alias every fixture dispatches through. Deliberately NOT a model
 /// name: an alias whose own name is also a chain member re-resolves through
@@ -557,9 +559,9 @@ fn calls_observed(observed: &[Arc<Observed>]) -> usize {
 /// ceiling assertion cannot pass vacuously on a walk that stopped early.
 fn assert_every_seat_dispatched(observed: &[Arc<Observed>], surface: &str) {
     assert!(
-        CHAIN_TARGETS > usize::from(REPAIRS_PER_REQUEST),
-        "the fixture must offer more repair-eligible seats than the ceiling permits, or a \
-         per-seat budget would produce the same count as the shared one",
+        CHAIN_TARGETS >= usize::from(REPAIRS_PER_REQUEST) + 2,
+        "the fixture must offer at least two more repair-eligible seats than the ceiling \
+         permits, or a per-seat budget would produce the same count as the shared one",
     );
     for (idx, seen) in observed.iter().enumerate() {
         assert!(
@@ -742,12 +744,14 @@ async fn count_tokens_spends_at_most_the_request_ceiling_across_an_n_seat_walk()
     // The two budget shapes are distinguishable here, and the assertions below
     // name both numbers rather than only the repair count:
     //
-    // - SHARED (correct): seats 1 and 2 repair and hand the walk on; seat 3's
-    //   carried rejection finds the budget spent, so its 400 is a terminal
-    //   caller-shaped error and the walk stops there. Three seats visited, two
-    //   repairs.
+    // - SHARED (correct): the first `REPAIRS_PER_REQUEST` seats repair and hand
+    //   the walk on; the next seat's carried rejection finds the budget spent,
+    //   so its 400 is a terminal caller-shaped error and the walk stops there.
+    //   One seat more than the ceiling is visited, and the ceiling's worth of
+    //   repairs is paid.
     // - PER-SEAT (the defect): every seat repairs and hands the walk on, so
-    //   all four are visited and four repairs are paid for one logical count.
+    //   all `CHAIN_TARGETS` are visited and each pays one repair for one
+    //   logical count.
     let _injection = provisional::inject(REJECTED_PATH);
     let (router, observed) = chain_of(ALIAS, CHAIN_TARGETS, Answer::RejectThenWalk);
 

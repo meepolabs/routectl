@@ -242,35 +242,35 @@ async fn assert_refused_value_canary_row(row: &RepairedRetryRow) {
 /// targets have spent the request's allowance, a due canary later in the
 /// chain gets no repaired redispatch.
 ///
-/// Every seat refuses the display value on every attempt, so the first two
-/// seats each spend one reactive repair and then fall back, and the third --
-/// whose verdict is acting with its canary due -- restores the field and draws
-/// the same rejection with nothing left to spend.
+/// Every seat refuses the display value on every attempt, so each seat ahead
+/// of the canary spends one reactive repair and then falls back until the
+/// allowance is gone, and the canary seat -- whose verdict is acting with its
+/// canary due -- restores the field and draws the same rejection with nothing
+/// left to spend.
 ///
 /// Mutation check: hand `canary_repaired_retry` a fresh budget at the call
-/// site -> red (the canary seat dispatches a third repaired attempt).
+/// site -> red (the canary seat dispatches a repaired attempt past the ceiling).
 #[tokio::test]
 async fn a_due_canary_after_the_request_allowance_is_spent_redispatches_nothing() {
-    let (router, observed) = install_display_seats(3, false);
-    plant_eligible_with_canary_due(&router, "m2");
+    let allowance = usize::from(super::repair_budget::REPAIRS_PER_REQUEST);
+    let canary_seat = format!("m{allowance}");
+    let (router, observed) = install_display_seats(allowance + 1, false);
+    plant_eligible_with_canary_due(&router, &canary_seat);
 
     let dispatched = router
         .complete_with_options(req_on(ALIAS), RouterOptions::new())
         .await;
 
     assert!(dispatched.result.is_err(), "premise: no seat serves");
+    for (idx, seen) in observed[..allowance].iter().enumerate() {
+        assert_eq!(
+            seen.carried_per_attempt(),
+            vec![true, false],
+            "premise: seat {idx} spent one reactive repair of the allowance",
+        );
+    }
     assert_eq!(
-        observed[0].carried_per_attempt(),
-        vec![true, false],
-        "premise: the first seat spent one reactive repair",
-    );
-    assert_eq!(
-        observed[1].carried_per_attempt(),
-        vec![true, false],
-        "premise: the second seat spent the other",
-    );
-    assert_eq!(
-        observed[2].carried_per_attempt(),
+        observed[allowance].carried_per_attempt(),
         vec![true],
         "the canary seat restored the field and, with the allowance spent, dispatched \
          no repaired retry",
@@ -278,7 +278,7 @@ async fn a_due_canary_after_the_request_allowance_is_spent_redispatches_nothing(
     assert!(
         router
             .field_verdicts()
-            .is_negative_acting(&verdict_key("m2"), Instant::now()),
+            .is_negative_acting(&verdict_key(&canary_seat), Instant::now()),
         "a refused value leaves the verdict acting, repaired or not",
     );
 }

@@ -42,9 +42,9 @@ fn a_draw_past_the_allowance_is_refused_and_stays_refused() {
 }
 
 #[test]
-fn the_allowance_is_two_repairs_per_logical_request() {
+fn the_allowance_is_five_repairs_per_logical_request() {
     // The ceiling is a forever-visible operator-facing bound: a change
     // to it changes how many upstream calls one client request can cost,
     // so it is pinned here rather than left to drift silently.
-    assert_eq!(REPAIRS_PER_REQUEST, 2);
+    assert_eq!(REPAIRS_PER_REQUEST, 5);
 }

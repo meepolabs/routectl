@@ -291,54 +291,56 @@ async fn a_rejection_naming_two_accepted_values_rewrites_nothing_and_commits_not
     assert_eq!(router.field_repair_counters().repair_attempted, 0);
 }
 
-/// A rewrite and a drop draw ONE allowance: seat one rewrites, seat two
-/// drops, and seat three's rewritable rejection finds the allowance spent.
+/// A rewrite and a drop draw ONE allowance: the seats ahead of the last
+/// alternate rewriting and dropping until the allowance is spent, and the last
+/// seat's rewritable rejection finds it spent.
 ///
-/// Mutation check: skip the allowance check for a rewrite edit -> red (seat
-/// three repairs too).
+/// Mutation check: skip the allowance check for a rewrite edit -> red (the
+/// last seat repairs too).
 #[tokio::test]
 async fn a_rewrite_and_a_drop_share_the_per_request_ceiling() {
-    let (router, seats) = rewrite_chain(&[
-        RewriteAnswer::RewriteThenWalk,
-        RewriteAnswer::DropThenWalk,
-        RewriteAnswer::RewriteThenWalk,
-    ]);
-    assert_eq!(
-        usize::from(REPAIRS_PER_REQUEST),
-        2,
-        "premise: the third repair in this request is one past the ceiling",
-    );
+    let allowance = usize::from(REPAIRS_PER_REQUEST);
+    let answers: Vec<RewriteAnswer> = (0..allowance)
+        .map(|idx| {
+            if idx % 2 == 0 {
+                RewriteAnswer::RewriteThenWalk
+            } else {
+                RewriteAnswer::DropThenWalk
+            }
+        })
+        .chain(std::iter::once(RewriteAnswer::RewriteThenWalk))
+        .collect();
+    let (router, seats) = rewrite_chain(&answers);
     let mut req = req_with_rewrite_field();
     req.user = Some(super::TEST_UNSUPPORTED_SENTINEL.to_string());
 
     let result = router.complete(req).await;
 
     assert!(result.is_err(), "no seat serves");
-    let seat_one = seats[0].values();
-    assert_eq!(
-        seat_one.len(),
-        2,
-        "seat one: carried attempt plus one repair"
-    );
-    assert_eq!(
-        seat_one[1].as_deref(),
-        Some(super::TEST_REWRITE_ACCEPTED[0]),
-        "seat one's repair was the rewrite",
-    );
-    let seat_two = seats[1].seen.lock().clone();
-    assert_eq!(
-        seat_two.len(),
-        2,
-        "seat two: carried attempt plus one repair"
-    );
     assert!(
-        !RefusedFieldSeat::carries(&seat_two[1]),
-        "seat two's repair was the drop",
+        allowance >= 2,
+        "premise: the allowance spans both edit kinds"
     );
+    for (idx, seat) in seats[..allowance].iter().enumerate() {
+        let seen = seat.seen.lock().clone();
+        assert_eq!(seen.len(), 2, "seat {idx}: carried attempt plus one repair");
+        if idx % 2 == 0 {
+            assert_eq!(
+                rewrite_value(&seen[1]).as_deref(),
+                Some(super::TEST_REWRITE_ACCEPTED[0]),
+                "seat {idx}'s repair was the rewrite",
+            );
+        } else {
+            assert!(
+                !RefusedFieldSeat::carries(&seen[1]),
+                "seat {idx}'s repair was the drop",
+            );
+        }
+    }
     assert_eq!(
-        seats[2].calls(),
+        seats[allowance].calls(),
         1,
-        "seat three: its repairable rejection finds the shared allowance spent",
+        "the last seat: its repairable rejection finds the shared allowance spent",
     );
 }
 

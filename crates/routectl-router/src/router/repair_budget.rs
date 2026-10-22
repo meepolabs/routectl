@@ -28,7 +28,7 @@
 
 /// Reactive repair re-dispatches one client request may spend, summed
 /// across repair kinds and across every target in its fallback chain.
-pub(super) const REPAIRS_PER_REQUEST: u8 = 2;
+pub(super) const REPAIRS_PER_REQUEST: u8 = 5;
 
 /// The remaining repair allowance for one logical client request.
 ///

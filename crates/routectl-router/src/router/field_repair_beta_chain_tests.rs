@@ -208,15 +208,32 @@ mod beta_repair_chain {
         }
     }
 
+    /// Upstream calls per seat when every seat opens with the field
+    /// rejection and then names a beta flag. Each full seat draws two repairs;
+    /// an odd allowance leaves one draw for a seat's field repair, so its beta
+    /// repair is denied and the walk moves on; the seat that opens on a spent
+    /// allowance gets its carried attempt only.
+    fn field_then_beta_calls(allowance: usize) -> Vec<usize> {
+        let mut calls = vec![3; allowance / 2];
+        if allowance % 2 == 1 {
+            calls.push(2);
+        }
+        calls.push(1);
+        calls
+    }
+
     #[tokio::test]
     async fn a_field_repair_and_a_beta_repair_spend_the_one_request_budget() {
-        // Arrange: two targets, each opening with the field rejection.
+        // Arrange: enough targets to spend the allowance, each opening with
+        // the field rejection, plus one that finds it spent.
         let _injection = provisional::inject(REJECTED_PATH);
-        let mut router = Router::new(Arc::new(chain_config(BETA_ALIAS, 2)));
-        let seats = [
-            Arc::new(FieldThenBetaSeat::default()),
-            Arc::new(FieldThenBetaSeat::default()),
-        ];
+        let allowance = usize::from(REPAIRS_PER_REQUEST);
+        let expected_calls = field_then_beta_calls(allowance);
+        let mut router = Router::new(Arc::new(chain_config(BETA_ALIAS, expected_calls.len())));
+        let seats: Vec<Arc<FieldThenBetaSeat>> = expected_calls
+            .iter()
+            .map(|_| Arc::new(FieldThenBetaSeat::default()))
+            .collect();
         let models: BTreeMap<String, Arc<ResolvedModel>> = seats
             .iter()
             .enumerate()
@@ -240,9 +257,9 @@ mod beta_repair_chain {
             .await;
 
         // Assert: the first target repaired the field, then the beta flag.
-        assert_eq!(
-            REPAIRS_PER_REQUEST, 2,
-            "premise: the ceiling is two repairs"
+        assert!(
+            allowance >= 2,
+            "premise: one target can spend both a field and a beta repair"
         );
         assert!(dispatched.result.is_err(), "every target refuses");
         let first = seats[0].seen.lock().clone();
@@ -264,23 +281,32 @@ mod beta_repair_chain {
             vec![Vec::<String>::new(), Vec::new(), vec![NAMED.to_string()]],
             "only the third attempt withheld the named flag",
         );
+        // Every draw is one repair, whichever kind: the per-seat calls add up
+        // to one carried attempt per seat plus exactly the allowance.
+        let calls: Vec<usize> = seats.iter().map(|seat| seat.calls()).collect();
+        assert_eq!(
+            calls, expected_calls,
+            "field and beta repairs draw the one allowance in walk order",
+        );
+        assert_eq!(
+            calls.iter().sum::<usize>(),
+            seats.len() + allowance,
+            "one carried attempt per target plus the shared allowance",
+        );
         assert_eq!(
             dispatched.meta.field_repairs.len(),
-            1,
-            "one field repair fired"
+            allowance.div_ceil(2),
+            "one field repair per target that still had an allowance to draw",
         );
-        // The second target's field rejection is a third repair: denied, and
-        // the walk ends without looping.
-        assert_eq!(
-            seats[1].calls(),
-            1,
-            "the spent budget denies a third repair"
-        );
+        // The last target's field rejection is one repair past the ceiling:
+        // denied, and the walk ends without looping.
+        let last = seats.last().expect("the chain has targets");
         assert!(
-            seats[1].seen.lock()[0]
+            last.seen.lock()[0]
                 .routectl_internal
                 .withheld_betas
                 .is_empty(),
+            "the spent budget withholds nothing on the last target",
         );
     }
 }

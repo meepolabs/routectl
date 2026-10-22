@@ -11,6 +11,7 @@ use routectl_core::{ChatRequest, Result};
 use serde_json::json;
 
 use super::super::super::field_repair::TEST_UNSUPPORTED_SENTINEL;
+use super::super::super::repair_budget::REPAIRS_PER_REQUEST;
 use super::*;
 use crate::wire_check_state::FieldRepairOutcome;
 
@@ -199,12 +200,13 @@ async fn a_target_reverts_at_most_once() {
 }
 
 /// The revert draws the one per-request repair budget. A chain whose
-/// reverted retries each fall back spends it on the first two targets; the
-/// third target's rejection finds it spent and is not re-sent.
+/// reverted retries each fall back spends it on the targets ahead of the
+/// last; the last target's rejection finds it spent and is not re-sent.
 #[tokio::test]
 async fn a_spent_repair_budget_leaves_the_rejection_unrepaired() {
+    const TARGETS: usize = REPAIRS_PER_REQUEST as usize + 1;
     for surface in SURFACES {
-        let providers: Vec<_> = (0..3)
+        let providers: Vec<_> = (0..TARGETS)
             .map(|_| ScriptedProvider::new(faithful, refuse_op_key_then_unavailable))
             .collect();
         let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
@@ -213,15 +215,16 @@ async fn a_spent_repair_budget_leaves_the_rejection_unrepaired() {
         let outcome = dispatch(&router, surface, anthropic_request()).await;
 
         let calls: Vec<usize> = providers.iter().map(|p| p.calls()).collect();
+        let mut expected = vec![2; TARGETS - 1];
+        expected.push(1);
         assert_eq!(
-            calls,
-            [2, 2, 1],
-            "{surface:?}: the third target is not re-sent"
+            calls, expected,
+            "{surface:?}: the last target is not re-sent"
         );
         assert!(!outcome.served, "{surface:?}");
         assert_eq!(
             rejections(&router.wire_check_snapshot()),
-            [("routectl_added", FieldRepairOutcome::Unrepaired); 3],
+            [("routectl_added", FieldRepairOutcome::Unrepaired); TARGETS],
             "{surface:?}: one finding per rejection"
         );
         assert_nothing_learned(&router, &outcome, &format!("{surface:?}"));

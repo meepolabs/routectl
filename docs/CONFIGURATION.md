@@ -859,7 +859,7 @@ skips a rejection that names no flags (`invalid beta flag`), skips one
 naming a flag the request's own body requires (the structured-outputs or
 `thinking.display` `"updates"` beta, which the egress would re-add),
 skips a flag already withheld, and does nothing on a forwarded
-credential. It is one of the at most two repairs a request may draw,
+credential. It is one of the at most five repairs a request may draw,
 shared with field repair, and a target repairs a beta
 rejection once. The re-send is logged at `debug`, with flag names only.
 The same repair runs on an `anthropic-api` provider, Mantle's Anthropic

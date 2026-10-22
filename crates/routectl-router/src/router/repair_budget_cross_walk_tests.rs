@@ -70,8 +70,8 @@ const REPLAY_REJECT_BODY: &str = r#"{"error":{"code":"validation_error","message
 /// Chain length, chosen strictly greater than the ceiling so a per-target
 /// budget and the shared per-request budget give DIFFERENT repair counts on
 /// the same fixture. A per-target budget would permit one repair per target
-/// (four); the shared ceiling permits `REPAIRS_PER_REQUEST` (two).
-const CHAIN_TARGETS: usize = 4;
+/// (`CHAIN_TARGETS`); the shared ceiling permits `REPAIRS_PER_REQUEST`.
+const CHAIN_TARGETS: usize = 7;
 
 /// A mock lane whose replay validator always rejects: the carried variant
 /// AND the repaired (stripped) variant both draw the proven rejection, so
@@ -351,7 +351,7 @@ fn assert_fixture_exercised_every_target(mocks: &[Arc<AlwaysRejectingLane>], sur
 #[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn complete_spends_at_most_the_request_ceiling_across_an_n_target_chain() {
-    // Arrange -- four repair-eligible targets, one logical request.
+    // Arrange -- more repair-eligible targets than the ceiling, one logical request.
     let (router, mocks) = rejecting_chain("chain");
 
     // Act

@@ -311,8 +311,8 @@ once (the fixed strip-repair branch). Each such request emits ONE WARN
 PER REPAIR at resolution -- `"reasoning_replay_degraded"` -- in the order
 the repairs fired, and none when nothing degraded. A fallback chain can
 repair on more than one target, up to the per-request repair ceiling
-(two, shared with the envelope-field repair), so a request emits at most
-two lines. Each line describes its own target's repair and settlement;
+(five, shared with the envelope-field repair), so a request emits at most
+five lines. Each line describes its own target's repair and settlement;
 `repair_count` on every line is the request's total, so a request that
 repaired once emits exactly one line with `repair_count=1`. The line
 carries a CLOSED SET of tokens and counts only, never the artifact
@@ -370,11 +370,11 @@ fired. It fires on all three dispatch walks
 (`complete`, `stream` pre-content, and `count_tokens`), at request
 resolution rather than per attempt. A request whose walk never repairs
 twice (the common case) emits exactly one line, unchanged in shape. A
-fallback walk can repair on two targets -- for example a re-verification
+fallback walk can repair on several targets -- for example a re-verification
 canary's refused-value repair on one target and a reactive repair on the
 next -- and then emits one line per repair in the order they fired, each
 carrying its own `state_key`, `field_path`, and outcome. The request
-repair allowance bounds the count, so a request never emits more than two.
+repair allowance bounds the count, so a request never emits more than five.
 
 The line is content-free by construction. `field_path` is the repair
 table's OWN path literal, not text read out of the rejection, so no
