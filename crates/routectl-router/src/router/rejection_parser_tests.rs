@@ -171,6 +171,14 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         ("anthropic-api/beta-two-flags-mantle", Outcome::NotLocalized),
         (
+            "anthropic-api/count-tokens-thinking-adaptive-display-enum",
+            unresolved("thinking.adaptive.display", SelfIdentifying, InvalidValue),
+        ),
+        (
+            "anthropic-api/count-tokens-thinking-display-enum",
+            Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
+        ),
+        (
             "anthropic-api/max-tokens-above-model-limit-messages",
             Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
         ),
@@ -181,6 +189,12 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         (
             "anthropic-api/thinking-type-disabled-unsupported",
             Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        ),
+        // Names a refused tool type in prose, with the model id and a
+        // model-specific list of accepted types around it; no wire path.
+        (
+            "anthropic-api/tool-type-computer-unsupported-messages",
+            Outcome::NotLocalized,
         ),
         (
             "bedrock/beta-bag-key-extraneous-converse",
@@ -215,6 +229,16 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "bedrock/thinking-type-enabled-unsupported",
             Outcome::Row("thinking.type.enabled", SelfIdentifying, UnsupportedField),
         ),
+        // Range errors that name the parameter only in prose, with a null or
+        // absent `param`.
+        (
+            "openai-compat/temperature-out-of-range-deepseek",
+            Outcome::NotLocalized,
+        ),
+        (
+            "openai-compat/temperature-out-of-range-openrouter",
+            Outcome::NotLocalized,
+        ),
         (
             "openai-compat/unsupported-parameter-temperature",
             Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, UnsupportedField),
@@ -230,6 +254,10 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         (
             "openai-compat/unsupported-parameter-frequency-penalty",
             Outcome::Row("frequency_penalty", SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "openai-responses/reasoning-effort-invalid-value-codex",
+            Outcome::NotLocalized,
         ),
     ]
     .into_iter()
@@ -639,7 +667,7 @@ fn the_plural_unsupported_parameters_wording_is_not_localized() {
 }
 
 #[test]
-fn openai_responses_has_no_parser_and_no_committed_rejection_fixture() {
+fn openai_responses_has_no_parser_so_its_committed_fixtures_localize_nothing() {
     let structured = UpstreamBody::new(openai_coded_body(
         "anything at all",
         Some(DISPLAY_PATH),
@@ -665,9 +693,18 @@ fn openai_responses_has_no_parser_and_no_committed_rejection_fixture() {
         )
         .is_none()
     );
+    let responses: Vec<Outcome> = corpus_outcomes()
+        .into_iter()
+        .filter(|(case, _)| case.starts_with("openai-responses/"))
+        .map(|(_, outcome)| outcome)
+        .collect();
     assert!(
-        rejections_dir().is_dir() && !rejections_dir().join(OPENAI_RESPONSES).exists(),
-        "a committed Responses rejection fixture must come with a deliberate parser arm",
+        !responses.is_empty(),
+        "premise: a Responses capture is committed"
+    );
+    assert!(
+        responses.iter().all(|o| *o == Outcome::NotLocalized),
+        "a Responses rejection fixture that localizes needs a deliberate parser arm: {responses:?}",
     );
 }
 

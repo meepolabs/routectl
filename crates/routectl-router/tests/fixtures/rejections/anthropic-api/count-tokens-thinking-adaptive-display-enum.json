@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-10-21, claude-haiku-5-5, OAuth seat, POST /v1/messages/count_tokens): a thinking display value outside the enum. The client sent thinking.type enabled; routectl sent it as adaptive because the model is configured for adaptive thinking, so the path named is thinking.adaptive.display. error.message is verbatim. lifted_type is the error.type routectl lifts from the body. The body is the logged envelope with request_id dropped.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"thinking.adaptive.display: Input should be 'summarized', 'omitted'\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}

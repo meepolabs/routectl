@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on openai-compat (2026-10-21, DeepSeek platform api.deepseek.com, deepseek-flash, API key): temperature 5, outside the documented range. param is null; the message names the parameter in prose. error.message is verbatim except the upstream request id inside it, replaced by a zero uuid. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid temperature value, the valid range of temperature is [0, 2] (request_id: 00000000-0000-0000-0000-000000000000)\",\"param\":null,\"type\":\"invalid_request_error\"}}"
+}

@@ -1,0 +1,5 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-10-21, claude-haiku-5-5, OAuth seat, POST /v1/messages/count_tokens): thinking.type enabled with a display value outside the enum. count_tokens validates the field and names the same path the Messages API does. error.message is verbatim. lifted_type is the error.type routectl lifts from the body. The body is the logged envelope with request_id dropped.",
+  "status": 400,
+  "body": "{\"error\":{\"message\":\"thinking.enabled.display: Input should be 'summarized', 'omitted'\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}

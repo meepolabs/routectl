@@ -1,0 +1,5 @@
+{
+  "note": "Tier 1, captured on openai-compat (2026-10-21, OpenRouter aggregator openrouter.ai/api/v1, google/gemma-4-31b-it:free, API key): temperature 5, outside the accepted range, refused by the aggregator before any model provider was chosen (metadata.provider_name is null). code is a number and there is no type or param. error.message is verbatim. An aggregator envelope grounds only that host.",
+  "status": 400,
+  "body": "{\"error\":{\"code\":400,\"message\":\"Expected temperature to be at most 2, received 5\",\"metadata\":{\"provider_name\":null}}}"
+}
