@@ -454,27 +454,40 @@ fn a_pending_step_on_one_thinking_type_row_refuses_the_other() {
 /// still reads as having applied a repair once nothing is pending. On a
 /// settling plan the verdict the commit persisted also refuses a fresh claim,
 /// so the non-settling plan, which claims nothing, is where the committed
-/// field's memory alone refuses the repair.
+/// field's memory alone refuses the repair. A row that re-repairs its field
+/// supersedes only a PENDING step, so it is refused the same way.
 ///
-/// Mutation check: drop the committed-identity read in `repaired_field` -> red
-/// (the committed ceiling clamps again and draws).
+/// Mutation checks: drop the committed-identity read in `repaired_field` ->
+/// red on both rows; let the re-repair predicate bypass the committed read ->
+/// red on the opted-in row (the committed ceiling clamps again and draws).
 #[test]
 fn a_committed_field_is_never_repaired_again_and_the_plan_stays_applied() {
-    let router = router();
-    let mut req = three_field_req();
-    let mut plan = plan(&router, &req, FieldSettlementMode::NonSettling);
-    let mut budget = RepairBudget::per_request();
-    assert!(!plan.has_applied(), "premise: nothing applied yet");
-    assert!(apply_ceiling(&mut plan, &mut req, &mut budget, 2048).is_some());
-    let committed = plan.commit_pending(&[], Instant::now());
-    assert_eq!(committed.len(), 1, "premise");
-    let remaining = budget.remaining();
+    for (name, rerepairs) in [("plain row", false), ("re-repairing row", true)] {
+        let router = router();
+        let mut req = three_field_req();
+        let mut plan = plan(&router, &req, FieldSettlementMode::NonSettling);
+        let mut budget = RepairBudget::per_request();
+        let _opt_in = rerepairs.then(|| rerepair_opt_in::opt_in(MAX_TOKENS));
+        assert!(!plan.has_applied(), "{name}: premise: nothing applied yet");
+        let first = apply_ceiling(&mut plan, &mut req, &mut budget, 2048);
+        assert!(first.is_some(), "{name}: premise");
+        let committed = plan.commit_pending(&[], Instant::now());
+        assert_eq!(committed.len(), 1, "{name}: premise");
+        let remaining = budget.remaining();
 
-    let again = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
+        let again = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
 
-    assert_eq!(again, None);
-    assert_eq!(req.max_tokens, Some(2048), "the committed value stands");
-    assert_eq!(budget.remaining(), remaining, "no draw");
-    assert!(!plan.has_pending());
-    assert!(plan.has_applied(), "a drained plan still applied a repair");
+        assert_eq!(again, None, "{name}");
+        assert_eq!(
+            req.max_tokens,
+            Some(2048),
+            "{name}: the committed value stands"
+        );
+        assert_eq!(budget.remaining(), remaining, "{name}: no draw");
+        assert!(!plan.has_pending(), "{name}");
+        assert!(
+            plan.has_applied(),
+            "{name}: a drained plan still applied a repair"
+        );
+    }
 }

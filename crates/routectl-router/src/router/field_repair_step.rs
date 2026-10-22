@@ -17,8 +17,8 @@
 //! ([`FieldRepairPlan::moved_on_by`]), since an upstream that moved on to
 //! another field accepted the fields it passed.
 //!
-//! A field this target already repaired, pending or committed, is not
-//! repaired again unless its row says so ([`rerepairs_same_field`], false for
+//! A field this target already committed is never repaired again; one still
+//! pending is not unless its row says so ([`rerepairs_same_field`], false for
 //! every row). For a row that does, a same-field refusal says the value the
 //! pending step wrote was refused too, so the new step SUPERSEDES that step:
 //! it takes over the pending step's guard (the field's single-flight claim is
@@ -464,9 +464,9 @@ impl<'a> FieldRepairPlan<'a> {
     /// Repair for a rejection already resolved to its closed-table row: the
     /// admitted candidate whose SURFACE that row names.
     ///
-    /// A row whose field identity this target already repaired, pending or
-    /// committed, is refused unless [`rerepairs_same_field`] holds for it,
-    /// in which case the new step supersedes a pending one on that field; a
+    /// A row whose field this target already committed is refused; one still
+    /// pending is refused unless [`rerepairs_same_field`] holds for the row,
+    /// in which case the new step supersedes the pending one on that field; a
     /// DIFFERENT field adds a step beside the earlier ones.
     pub(in crate::router) fn apply_named(
         &mut self,
@@ -495,19 +495,16 @@ impl<'a> FieldRepairPlan<'a> {
         self.apply_candidate(idx, repair, attempt_req, meta, budget, rejection)
     }
 
-    /// Whether this target already repaired the field `row` names, in a step
-    /// still pending or one already committed, and the row does not re-repair
-    /// a field.
+    /// Whether this target already repaired the field `row` names: in a
+    /// committed step, always; in a pending step, unless the row re-repairs.
     fn repaired_field(&self, row: &FieldRepairRow) -> bool {
-        if rerepairs_same_field(row) {
-            return false;
-        }
         let identity = FieldIdentity::of_row(row);
         self.committed.contains(&identity)
-            || self
-                .pending
-                .iter()
-                .any(|step| FieldIdentity::of_row(&step.row) == identity)
+            || (!rerepairs_same_field(row)
+                && self
+                    .pending
+                    .iter()
+                    .any(|step| FieldIdentity::of_row(&step.row) == identity))
     }
 
     /// The pending step a repair of `row` supersedes: one on the same field,
