@@ -2951,7 +2951,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the declared-edit undo, only for a path the sent body is confirmed to
   carry; unknown presence commits nothing). Coverage
   in `field_repair_step_tests.rs` and the walk-level
-  `field_repair_chain_tests.rs`
+  `field_repair_chain_tests.rs` (its chain seat, rejections and requests in
+  the `include!`d fragment `src/router/field_repair_chain_support_tests.rs`)
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
