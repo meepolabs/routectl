@@ -76,6 +76,52 @@ pub(super) struct RejectionSite {
     pub(super) sent: SentSlot,
     /// The rejection's position among the request's pending rejections.
     pub(super) pending: usize,
+    /// The effort level the body that went out sent.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by effort-level resolution of a refusal")
+    )]
+    pub(super) sent_effort: SentEffort,
+    /// The thinking shape the body that went out sent beside its effort.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by effort-level resolution of a refusal")
+    )]
+    pub(super) thinking: ThinkingShape,
+}
+
+/// The effort level a rejected attempt's egress body sent, read where its
+/// egress kind carries it. Closed: never holds upstream or client bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SentEffort {
+    /// A member of the effort rank, by its index in
+    /// [`routectl_providers::effort::VALID_EFFORT_TOKENS`].
+    Rank(usize),
+    /// The body carries no effort.
+    Absent,
+    /// The body carries an effort outside the rank: `none`, an unknown
+    /// token, or a value that is not a string.
+    OutOfRank,
+    /// Cannot be told: no egress record, an unparseable body, or an egress
+    /// kind whose effort is not read.
+    Unknown,
+}
+
+/// The Anthropic `thinking` shape a rejected attempt's egress body sent
+/// beside its effort. Closed: an unrecognized type reads [`Self::Unknown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ThinkingShape {
+    Adaptive,
+    Enabled,
+    Disabled,
+    BetweenTools,
+    /// The body carries no `thinking` object.
+    Absent,
+    /// A `thinking` value whose type is missing or unrecognized, no egress
+    /// record, an unparseable body, or an egress kind not read.
+    Unknown,
+    /// The egress kind has no thinking object; its effort stands alone.
+    NoThinkingObject,
 }
 
 impl RejectionSite {

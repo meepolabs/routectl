@@ -781,3 +781,411 @@ fn a_pending_rejection_debug_never_shows_the_unmasked_key() {
     );
     assert!(!rendered.contains(CONTAINER_KEY), "{rendered}");
 }
+
+// ---------------------------------------------------------------------------
+// The sent effort level and thinking shape, read off the egress body
+// ---------------------------------------------------------------------------
+
+mod sent_effort_and_thinking {
+    use routectl_core::wire_check::WireTap;
+    use routectl_core::{AnthropicThinking, ReasoningConfig, ThinkingObject};
+    use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
+
+    use super::super::read_site;
+    use super::*;
+    use crate::router::learn_engine::{RejectionSite, SentEffort, ThinkingShape};
+    use crate::router::wire_check::lend_request_record;
+
+    /// A body routectl sends, built by a real egress from `req`.
+    type Egress = fn(&ChatRequest) -> Value;
+
+    struct Row {
+        name: &'static str,
+        egress: EgressKind,
+        build: Egress,
+        req: fn() -> ChatRequest,
+        effort: SentEffort,
+        thinking: ThinkingShape,
+    }
+
+    /// The rank index of `token`, read from the rank table itself.
+    fn rank(token: &str) -> SentEffort {
+        let index = routectl_providers::effort::VALID_EFFORT_TOKENS
+            .iter()
+            .position(|&member| member == token)
+            .expect("premise: the token is a rank member");
+        SentEffort::Rank(index)
+    }
+
+    /// An Anthropic client's request as the ingress parses it: `thinking` on
+    /// the native carrier (absent when `None`) and `effort` both canonical
+    /// and in the forward-compat `output_config` extras.
+    fn anthropic_request(thinking: Option<Value>, effort: Option<&str>) -> ChatRequest {
+        let mut req = request(IngressDialect::Anthropic);
+        req.max_tokens = Some(4096);
+        req.messages = vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }]
+        .into();
+        req.routectl_internal.anthropic_thinking = thinking
+            .map_or(AnthropicThinking::SentNone, |t| {
+                AnthropicThinking::Sent(ThinkingObject::from_client(t).expect("an object"))
+            });
+        if let Some(effort) = effort {
+            req.reasoning = Some(ReasoningConfig {
+                effort: Some(effort.to_string()),
+                ..Default::default()
+            });
+            req.provider_extras = Some(json!({"output_config": {"effort": effort}}));
+        }
+        req
+    }
+
+    /// `req` with a `tool_choice` that forces tool use, which strips active
+    /// thinking late in body assembly.
+    fn forcing_tool_use(mut req: ChatRequest) -> ChatRequest {
+        req.tools = Some(vec![routectl_core::ToolDef::Custom(
+            routectl_core::CustomTool {
+                name: "calc".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                cache_control: None,
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            },
+        )]);
+        req.tool_choice = Some(json!("required"));
+        req
+    }
+
+    fn messages_body(req: &ChatRequest) -> Value {
+        AnthropicApiProvider::new(AnthropicApiConfig::new("effort-seat", "k"))
+            .normalize_request(req)
+            .expect("the messages body assembles")
+    }
+
+    #[cfg(feature = "bedrock")]
+    fn bedrock_cfg(
+        api_shape: routectl_providers::bedrock::BedrockApiShape,
+    ) -> routectl_providers::bedrock::BedrockConfig {
+        routectl_providers::bedrock::BedrockConfig {
+            id: "bedrock:p0".into(),
+            region: "us-east-1".into(),
+            model_id: "us.anthropic.claude-sonnet-5".into(),
+            api_shape,
+            creds: routectl_providers::bedrock::BedrockCreds::BearerKey {
+                key: ["effort", "seat", "test"].join("-"),
+            },
+            user_agent: None,
+            header_extras: Vec::new(),
+            anthropic_beta: Vec::new(),
+            additional_model_request_fields: None,
+            adaptive_thinking: None,
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    fn invoke_body(req: &ChatRequest) -> Value {
+        let cfg = bedrock_cfg(routectl_providers::bedrock::BedrockApiShape::Invoke);
+        routectl_providers::bedrock::invoke::normalize_request(&cfg, req)
+            .expect("the invoke body assembles")
+    }
+
+    #[cfg(feature = "bedrock")]
+    fn converse_body(req: &ChatRequest) -> Value {
+        let cfg = bedrock_cfg(routectl_providers::bedrock::BedrockApiShape::Converse);
+        routectl_providers::bedrock::converse::normalize_request(&cfg, req)
+            .expect("the converse body assembles")
+    }
+
+    /// The OpenAI Responses body on the api-key auth lane.
+    #[cfg(feature = "openai-responses")]
+    fn responses_body(req: &ChatRequest) -> Value {
+        use routectl_providers::openai_responses::{
+            AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
+        };
+        let mut cfg = OpenAiResponsesConfig::new("openai-responses:test", "literal:test");
+        cfg.auth_kind = AuthKind::ApiKey;
+        OpenAiResponsesProvider::new(cfg)
+            .normalize_request(req)
+            .expect("the responses body assembles")
+    }
+
+    #[cfg(feature = "openai-responses")]
+    fn responses_request(effort: Option<&str>) -> ChatRequest {
+        let mut req = anthropic_request(None, None);
+        req.routectl_internal.anthropic_thinking = AnthropicThinking::NotCaptured;
+        req.reasoning = effort.map(|effort| ReasoningConfig {
+            effort: Some(effort.to_string()),
+            ..Default::default()
+        });
+        req
+    }
+
+    fn rows() -> Vec<Row> {
+        let mut rows = vec![
+            Row {
+                name: "anthropic-api adaptive beside high",
+                egress: EgressKind::AnthropicApi,
+                build: messages_body,
+                req: || anthropic_request(Some(json!({"type": "adaptive"})), Some("high")),
+                effort: rank("high"),
+                thinking: ThinkingShape::Adaptive,
+            },
+            Row {
+                name: "anthropic-api enabled beside xhigh",
+                egress: EgressKind::AnthropicApi,
+                build: messages_body,
+                req: || {
+                    anthropic_request(
+                        Some(json!({"type": "enabled", "budget_tokens": 2048})),
+                        Some("xhigh"),
+                    )
+                },
+                effort: rank("xhigh"),
+                thinking: ThinkingShape::Enabled,
+            },
+            Row {
+                name: "anthropic-api disabled beside none, out of rank",
+                egress: EgressKind::AnthropicApi,
+                build: messages_body,
+                req: || anthropic_request(Some(json!({"type": "disabled"})), Some("none")),
+                effort: SentEffort::OutOfRank,
+                thinking: ThinkingShape::Disabled,
+            },
+            Row {
+                name: "anthropic-api an unknown effort token, out of rank",
+                egress: EgressKind::AnthropicApi,
+                build: messages_body,
+                req: || anthropic_request(Some(json!({"type": "adaptive"})), Some("turbo")),
+                effort: SentEffort::OutOfRank,
+                thinking: ThinkingShape::Adaptive,
+            },
+            Row {
+                name: "anthropic-api an unknown thinking type",
+                egress: EgressKind::AnthropicApi,
+                build: messages_body,
+                req: || anthropic_request(Some(json!({"type": "focused"})), Some("max")),
+                effort: rank("max"),
+                thinking: ThinkingShape::Unknown,
+            },
+            Row {
+                name: "anthropic-api effort with no thinking object",
+                egress: EgressKind::AnthropicApi,
+                build: messages_body,
+                req: || anthropic_request(None, Some("max")),
+                effort: rank("max"),
+                thinking: ThinkingShape::Absent,
+            },
+            Row {
+                name: "anthropic-api neither effort nor thinking",
+                egress: EgressKind::AnthropicApi,
+                build: messages_body,
+                req: || anthropic_request(None, None),
+                effort: SentEffort::Absent,
+                thinking: ThinkingShape::Absent,
+            },
+            Row {
+                name: "anthropic-api adaptive stripped by a forced tool choice",
+                egress: EgressKind::AnthropicApi,
+                build: messages_body,
+                req: || {
+                    forcing_tool_use(anthropic_request(
+                        Some(json!({"type": "adaptive"})),
+                        Some("high"),
+                    ))
+                },
+                effort: rank("high"),
+                thinking: ThinkingShape::Absent,
+            },
+            Row {
+                name: "a lane whose effort is not read fails closed",
+                egress: EgressKind::AnthropicApiMantle,
+                build: messages_body,
+                req: || anthropic_request(Some(json!({"type": "adaptive"})), Some("high")),
+                effort: SentEffort::Unknown,
+                thinking: ThinkingShape::Unknown,
+            },
+        ];
+        rows.extend(bedrock_rows());
+        rows.extend(responses_rows());
+        rows
+    }
+
+    #[cfg(feature = "bedrock")]
+    fn bedrock_rows() -> Vec<Row> {
+        vec![
+            Row {
+                name: "invoke adaptive beside medium",
+                egress: EgressKind::BedrockInvoke,
+                build: invoke_body,
+                req: || anthropic_request(Some(json!({"type": "adaptive"})), Some("medium")),
+                effort: rank("medium"),
+                thinking: ThinkingShape::Adaptive,
+            },
+            Row {
+                name: "invoke between_tools beside xhigh",
+                egress: EgressKind::BedrockInvoke,
+                build: invoke_body,
+                req: || anthropic_request(Some(json!({"type": "between_tools"})), Some("xhigh")),
+                effort: rank("xhigh"),
+                thinking: ThinkingShape::BetweenTools,
+            },
+            Row {
+                name: "converse adaptive beside low, inside the field bag",
+                egress: EgressKind::BedrockConverse,
+                build: converse_body,
+                req: || anthropic_request(Some(json!({"type": "adaptive"})), Some("low")),
+                effort: rank("low"),
+                thinking: ThinkingShape::Adaptive,
+            },
+            Row {
+                name: "converse disabled beside an out-of-rank effort",
+                egress: EgressKind::BedrockConverse,
+                build: converse_body,
+                req: || anthropic_request(Some(json!({"type": "disabled"})), Some("none")),
+                effort: SentEffort::OutOfRank,
+                thinking: ThinkingShape::Disabled,
+            },
+            Row {
+                name: "converse neither effort nor thinking",
+                egress: EgressKind::BedrockConverse,
+                build: converse_body,
+                req: || anthropic_request(None, None),
+                effort: SentEffort::Absent,
+                thinking: ThinkingShape::Absent,
+            },
+            Row {
+                name: "converse adaptive stripped by a forced tool choice",
+                egress: EgressKind::BedrockConverse,
+                build: converse_body,
+                req: || {
+                    forcing_tool_use(anthropic_request(
+                        Some(json!({"type": "adaptive"})),
+                        Some("high"),
+                    ))
+                },
+                effort: rank("high"),
+                thinking: ThinkingShape::Absent,
+            },
+        ]
+    }
+
+    #[cfg(not(feature = "bedrock"))]
+    fn bedrock_rows() -> Vec<Row> {
+        Vec::new()
+    }
+
+    #[cfg(feature = "openai-responses")]
+    fn responses_rows() -> Vec<Row> {
+        vec![
+            Row {
+                name: "openai-responses minimal",
+                egress: EgressKind::OpenaiResponses,
+                build: responses_body,
+                req: || responses_request(Some("minimal")),
+                effort: rank("minimal"),
+                thinking: ThinkingShape::NoThinkingObject,
+            },
+            Row {
+                name: "openai-responses no reasoning",
+                egress: EgressKind::OpenaiResponses,
+                build: responses_body,
+                req: || responses_request(None),
+                effort: SentEffort::Absent,
+                thinking: ThinkingShape::NoThinkingObject,
+            },
+        ]
+    }
+
+    #[cfg(not(feature = "openai-responses"))]
+    fn responses_rows() -> Vec<Row> {
+        Vec::new()
+    }
+
+    /// The site settled for a rejection naming no path, on an `egress` lane
+    /// whose tap received `sent` as the body that went out (`None` deposits
+    /// nothing).
+    fn site_for(egress: EgressKind, req: &ChatRequest, sent: Option<Vec<u8>>) -> RejectionSite {
+        let dialect = egress.wire_dialect().unwrap_or(IngressDialect::Anthropic);
+        let tap = WireTap::admitted();
+        if let Some(sent) = sent {
+            tap.deposit(sent.into());
+        }
+        lend_request_record(req, &tap, |record| {
+            let record = record.expect("premise: the request carries its client bytes");
+            read_site(Lane::of(dialect, egress), &record, None, 0)
+        })
+    }
+
+    #[test]
+    fn the_sent_effort_and_thinking_shape_read_off_each_lane_egress_body() {
+        for row in rows() {
+            // Arrange
+            let req = (row.req)();
+            let sent = serde_json::to_vec(&(row.build)(&req)).expect("serialize");
+
+            // Act
+            let site = site_for(row.egress, &req, Some(sent));
+
+            // Assert
+            assert_eq!(site.sent_effort, row.effort, "{}", row.name);
+            assert_eq!(site.thinking, row.thinking, "{}", row.name);
+        }
+    }
+
+    #[test]
+    fn a_site_with_no_readable_egress_body_is_unknown_for_both() {
+        let req = anthropic_request(Some(json!({"type": "adaptive"})), Some("high"));
+        for (name, sent) in [
+            ("no egress record", None),
+            ("unparseable", Some(b"not json".to_vec())),
+        ] {
+            let site = site_for(EgressKind::AnthropicApi, &req, sent);
+
+            assert_eq!(site.sent_effort, SentEffort::Unknown, "{name}");
+            assert_eq!(site.thinking, ThinkingShape::Unknown, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_sent_effort_and_thinking_shape_debug_as_closed_tokens_only() {
+        // Arrange
+        const EFFORT_SENTINEL: &str = "effort-sentinel-q7";
+        const THINKING_SENTINEL: &str = "thinking-sentinel-q7";
+        let req = anthropic_request(
+            Some(json!({"type": THINKING_SENTINEL})),
+            Some(EFFORT_SENTINEL),
+        );
+        let body = messages_body(&req);
+        let wire = body.to_string();
+        assert!(
+            wire.contains(EFFORT_SENTINEL) && wire.contains(THINKING_SENTINEL),
+            "premise: the body carries both sentinels: {wire}"
+        );
+
+        // Act
+        let site = site_for(
+            EgressKind::AnthropicApi,
+            &req,
+            Some(serde_json::to_vec(&body).expect("serialize")),
+        );
+        let rendered = format!("{site:?}");
+
+        // Assert
+        assert!(
+            rendered.contains("sent_effort: OutOfRank") && rendered.contains("thinking: Unknown"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(EFFORT_SENTINEL), "{rendered}");
+        assert!(!rendered.contains(THINKING_SENTINEL), "{rendered}");
+    }
+}

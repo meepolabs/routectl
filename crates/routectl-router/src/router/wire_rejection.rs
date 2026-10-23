@@ -25,11 +25,12 @@ use routectl_core::wire_check::{
     AttemptRecord, EgressKind, Lane, LaneClass, Leg, RejectionProvenance, WirePath, WireTap,
 };
 use routectl_core::{ChatRequest, Error, sanitize_for_log};
+use routectl_providers::effort::VALID_EFFORT_TOKENS;
 use serde_json::Value;
 
 use super::class_observe::upstream_facts;
 use super::field_repair::repair_action_is_lossy;
-use super::learn_engine::RejectionSite;
+use super::learn_engine::{RejectionSite, SentEffort, ThinkingShape};
 use super::learn_revert::{
     EditAttribution, MatchedEdit, SentSlot, WireRevert, attributable, revert_outcome,
 };
@@ -212,9 +213,15 @@ fn read_site(
     pending: usize,
 ) -> RejectionSite {
     let path = exact_locator(rejected);
-    let sent = path
-        .and(record.egress())
+    let body = record
+        .egress()
         .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+    let (sent_effort, thinking) = body
+        .as_ref()
+        .map_or((SentEffort::Unknown, ThinkingShape::Unknown), |body| {
+            effort_and_thinking(lane.egress(), body)
+        });
+    let sent = path.and(body);
     let provenance = provenance_of(lane, record, path, sent.as_ref());
     let in_egress = path
         .zip(sent.as_ref())
@@ -238,6 +245,70 @@ fn read_site(
             .map(|(path, sent)| SentSlot::at(sent, path))
             .unwrap_or_default(),
         pending,
+        sent_effort,
+        thinking,
+    }
+}
+
+/// The effort level and thinking shape `sent`, the body that went out on an
+/// `egress` lane, carries where that egress spells them: at the root of an
+/// Anthropic Messages body, inside the Converse field bag, and at
+/// `reasoning.effort` on OpenAI Responses, which has no thinking object.
+/// Every other egress is unknown for both, so nothing downstream acts on a
+/// shape it cannot read.
+fn effort_and_thinking(egress: EgressKind, sent: &Value) -> (SentEffort, ThinkingShape) {
+    match egress {
+        EgressKind::AnthropicApi | EgressKind::BedrockInvoke => anthropic_effort_and_thinking(sent),
+        EgressKind::BedrockConverse => sent
+            .get(CONVERSE_FIELD_BAG)
+            .map_or((SentEffort::Absent, ThinkingShape::Absent), |bag| {
+                anthropic_effort_and_thinking(bag)
+            }),
+        EgressKind::OpenaiResponses => (
+            sent_effort_of(sent.get("reasoning").and_then(|r| r.get("effort"))),
+            ThinkingShape::NoThinkingObject,
+        ),
+        EgressKind::AnthropicApiMantle
+        | EgressKind::OpenaiCompat
+        | EgressKind::OpenaiCompatMantle
+        | EgressKind::OpenaiResponsesMantle
+        | EgressKind::Gemini
+        | EgressKind::Local => (SentEffort::Unknown, ThinkingShape::Unknown),
+    }
+}
+
+/// The `output_config.effort` and `thinking.type` of an Anthropic Messages
+/// shaped object.
+fn anthropic_effort_and_thinking(fields: &Value) -> (SentEffort, ThinkingShape) {
+    let effort = fields.get("output_config").and_then(|oc| oc.get("effort"));
+    (
+        sent_effort_of(effort),
+        thinking_shape_of(fields.get("thinking")),
+    )
+}
+
+/// Where `effort` sits in the effort rank.
+fn sent_effort_of(effort: Option<&Value>) -> SentEffort {
+    let Some(effort) = effort else {
+        return SentEffort::Absent;
+    };
+    effort
+        .as_str()
+        .and_then(|token| VALID_EFFORT_TOKENS.iter().position(|&rank| rank == token))
+        .map_or(SentEffort::OutOfRank, SentEffort::Rank)
+}
+
+/// The shape a `thinking` value names by its `type` tag.
+fn thinking_shape_of(thinking: Option<&Value>) -> ThinkingShape {
+    let Some(thinking) = thinking else {
+        return ThinkingShape::Absent;
+    };
+    match thinking.get(UNION_TAG).and_then(Value::as_str) {
+        Some("adaptive") => ThinkingShape::Adaptive,
+        Some("enabled") => ThinkingShape::Enabled,
+        Some("disabled") => ThinkingShape::Disabled,
+        Some("between_tools") => ThinkingShape::BetweenTools,
+        _ => ThinkingShape::Unknown,
     }
 }
 
