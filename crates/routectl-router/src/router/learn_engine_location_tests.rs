@@ -464,12 +464,12 @@ fn site_rows() -> Vec<SiteRow> {
     }
     if cfg!(feature = "openai-responses") {
         rows.push(SiteRow {
-            name: "an openai-responses egress, a body parameter named in error.param, not carried",
+            name: "an openai-responses egress, whose envelope no parser reads",
             provider_block: OPENAI_RESPONSES,
             dialect: IngressDialect::Responses,
             sent: Some(unchanged),
             err: || openai_rejection(TEST_UNSUPPORTED_PATH),
-            in_egress: Some(false),
+            in_egress: None,
         });
     }
     if cfg!(feature = "gemini") {

@@ -184,11 +184,18 @@ fn each_localize_arm_yields_a_field_exactly_when_the_wire_path_read_does() {
             None,
         ),
         (
-            "responses structured param",
+            "responses structured effort param",
+            OPENAI_RESPONSES,
+            400,
+            openai_body("anything at all", Some("reasoning.effort")),
+            Some(SelfIdentifying),
+        ),
+        (
+            "responses structured param other than the effort one",
             OPENAI_RESPONSES,
             400,
             openai_body("anything at all", Some("top_p")),
-            Some(SelfIdentifying),
+            None,
         ),
         (
             "kind without a parser",

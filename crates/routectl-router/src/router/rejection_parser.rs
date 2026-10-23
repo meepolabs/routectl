@@ -23,11 +23,15 @@
 //! accepted value the envelope names. Candidates come ONLY from the template
 //! position a grounded arm knows to list replacements (the quoted list after
 //! `Input should be `, the quoted token after `Use `, the type the thinking
-//! off-switch template says to send), never from a scan of the whole message: an envelope may also echo the value it refused, and that
-//! echo can be a member of the set. A candidate counts only when it equals a
-//! member of the row's closed accepted set, and only exactly ONE named member
-//! fills it; none or several leave it empty, so a rewrite never picks between
-//! candidates.
+//! off-switch template says to send), never from a scan of the whole
+//! message: an envelope may also echo the value it refused, and that echo can
+//! be a member of the set. A candidate counts only when it equals a member of
+//! the row's closed accepted set, and only exactly ONE named member fills it;
+//! none or several leave it empty, so a rewrite never picks between them.
+//!
+//! [`effort`] reads the effort value lists: `Supported levels`, the serde
+//! variant list, and on openai-responses `Supported values are`, where only
+//! `error.param == reasoning.effort` localizes (onto `output_config.effort`).
 
 use std::fmt;
 
@@ -35,10 +39,16 @@ use routectl_core::capability::SignalTier;
 use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::WirePath;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
-use routectl_providers::effort::VALID_EFFORT_TOKENS;
 
 use super::field_repair::{FieldRepairRow, FieldRepairTable, FieldTransform};
 use crate::field_verdict_value::canonical_ceiling;
+
+#[path = "rejection_parser_effort.rs"]
+mod effort;
+use effort::{
+    effort_field_levels, localize_responses, quoted_list, responses_effort_field,
+    unknown_effort_variant, unsupported_effort_level,
+};
 
 /// Statuses a caller-shaped field rejection arrives on. Everything else says
 /// nothing about the request envelope.
@@ -96,32 +106,10 @@ static THINKING_TYPES: [ThinkingType; 4] = [
     },
 ];
 
-/// Separators between members of a value list, longest first so `, or ` and
-/// `, and ` are not read as `, ` followed by prose.
-const LIST_SEPARATORS: [&str; 4] = [", and ", ", or ", ", ", " or "];
-
 const OPENAI_UNSUPPORTED_PREFIX: &str = "Unsupported parameter: '";
 const OPENAI_UNSUPPORTED_SUFFIX: &str = "' is not supported with this model.";
 /// The openai `error.code` that refuses a named parameter.
 pub(super) const OPENAI_UNSUPPORTED_CODE: &str = "unsupported_parameter";
-
-/// The `error.param` the Responses API names an effort level refusal by, and
-/// the wire path that level travels in.
-const RESPONSES_EFFORT_PARAM: &str = "reasoning.effort";
-
-/// The Responses refusal of a value outside the effort enum, exactly as
-/// captured: `<lead-in><refused>'<close><values>.`, the values a quoted list.
-const RESPONSES_INVALID_VALUE_LEAD_IN: &str = "Invalid value: '";
-const RESPONSES_INVALID_VALUE_CLOSE: &str = "'. ";
-/// The Responses refusal of an enum value the model does not take, exactly as
-/// captured: `<lead-in><refused><middle><model><close><values>.`. The model
-/// id is never read; only a nonempty single token is accepted there.
-const RESPONSES_UNSUPPORTED_VALUE_LEAD_IN: &str = "Unsupported value: '";
-const RESPONSES_UNSUPPORTED_VALUE_MIDDLE: &str = "' is not supported with the '";
-const RESPONSES_UNSUPPORTED_VALUE_CLOSE: &str = "' model. ";
-/// The lead-in of the value list both Responses value refusals end with.
-const RESPONSES_SUPPORTED_VALUES: &str = "Supported values are: ";
-const RESPONSES_SUPPORTED_VALUES_CLOSE: &str = ".";
 
 /// Bedrock's refusal of the `temperature` field, exactly as captured on
 /// Converse. The message names no path, so only this exact text localizes.
@@ -154,24 +142,6 @@ const BETA_ENVELOPE_TAIL: &str = " for the `anthropic-beta` header. Please consu
 const BETA_LIST_SEPARATOR: &str = ", ";
 /// The only status a beta rejection arrives on.
 const BETA_REJECTION_STATUS: u16 = 400;
-
-/// The field an effort level travels in on the Messages body.
-const EFFORT_PATH: &str = "output_config.effort";
-
-/// The effort-level refusal, exactly as captured on anthropic-api and on
-/// Bedrock Invoke and Converse: `<lead-in>'<refused>'<middle><levels><close>`,
-/// the levels a bare list. The message names no path; only this exact text
-/// localizes.
-const EFFORT_LEVEL_LEAD_IN: &str = "This model does not support effort level '";
-const EFFORT_LEVEL_MIDDLE: &str = "'. Supported levels: ";
-const EFFORT_LEVEL_CLOSE: &str = ".";
-
-/// The serde enum rejection Bedrock returns for an unknown effort variant:
-/// `<lead-in><refused>`<middle><variants>`, each variant backtick-quoted.
-/// Generic enum text: it names no field, so the effort path it implies is
-/// only inferred, and only a list naming an effort level implies it.
-const UNKNOWN_VARIANT_LEAD_IN: &str = "unknown variant ";
-const UNKNOWN_VARIANT_MIDDLE: &str = ", expected one of ";
 
 /// The location-prefix reason that refuses the field itself; every other
 /// reason refuses the value.
@@ -393,96 +363,6 @@ fn named_accepted(row: &FieldRepairRow, replacements: &[&str]) -> Option<&'stati
     named.all(|other| other == first).then_some(first)
 }
 
-/// How the members of a value list are spelled.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ListMembers {
-    /// Each member delimited by `'`, `"` or a backtick.
-    Quoted,
-    /// Each member a bare run of name bytes (`high, low, medium.`).
-    Bare,
-}
-
-impl ListMembers {
-    fn leading(self, text: &str) -> Option<(&str, &str)> {
-        match self {
-            Self::Quoted => leading_quoted(text),
-            Self::Bare => leading_bare(text),
-        }
-    }
-}
-
-/// The leading quoted list in `text`; see [`list_members`].
-fn quoted_list(text: &str) -> Vec<&str> {
-    list_members(text, ListMembers::Quoted)
-}
-
-/// The leading run of members in `text` joined by a list separator
-/// (`'a', 'b' or 'c'`, `a, b, and c`). Text after the last member that does
-/// not start with a separator ends the run, so trailing prose (an echo of
-/// the refused input, a closing period, a parser position tail) never
-/// contributes. A separator not followed by a cleanly spelled member
-/// (unterminated, or carrying a `\`) invalidates the whole list: it names
-/// nothing.
-pub(super) fn list_members(text: &str, members: ListMembers) -> Vec<&str> {
-    list_and_rest(text, members).map_or_else(Vec::new, |(tokens, _)| tokens)
-}
-
-/// The members [`list_members`] reads and the text after the last one, or
-/// `None` when the list names nothing.
-fn list_and_rest(text: &str, members: ListMembers) -> Option<(Vec<&str>, &str)> {
-    let mut tokens = Vec::new();
-    let mut rest = text;
-    loop {
-        // No member here: `text` starts with none, a separator promised
-        // another member that never came (a truncated `'a' or `), or a
-        // member was not cleanly spelled. Either way the list names nothing.
-        let (token, after) = members.leading(rest)?;
-        tokens.push(token);
-        match LIST_SEPARATORS
-            .iter()
-            .find_map(|separator| after.strip_prefix(separator))
-        {
-            Some(next) => rest = next,
-            None => return Some((tokens, after)),
-        }
-    }
-}
-
-/// The `'...'`, `"..."` or `` `...` `` span `text` starts with, and the text
-/// after it. A span carrying a backslash is refused: an escaped delimiter
-/// would move the token boundary, and no grounded envelope escapes a
-/// closed-set value.
-fn leading_quoted(text: &str) -> Option<(&str, &str)> {
-    let quote = text
-        .chars()
-        .next()
-        .filter(|c| matches!(c, '\'' | '"' | '`'))?;
-    let (token, after) = text[1..].split_once(quote)?;
-    (!token.contains('\\')).then_some((token, after))
-}
-
-/// The nonempty run of name bytes `text` starts with, and the text after it.
-fn leading_bare(text: &str) -> Option<(&str, &str)> {
-    let end = text
-        .bytes()
-        .position(|b| !is_name_byte(b))
-        .unwrap_or(text.len());
-    (end > 0).then(|| text.split_at(end))
-}
-
-/// The members of `tokens` in the effort rank as a bitmask: bit `i` set
-/// when `tokens` names member `i` of [`VALID_EFFORT_TOKENS`]. Tokens outside
-/// the rank (`none`, a serde catch-all variant, an unknown level) set
-/// nothing, so a list of only such tokens is `0`.
-pub(super) fn levels_mask(tokens: &[&str]) -> u8 {
-    tokens
-        .iter()
-        .filter_map(|token| VALID_EFFORT_TOKENS.iter().position(|rank| rank == token))
-        .fold(0, |mask, index| mask | (1 << index))
-}
-
-const _: () = assert!(VALID_EFFORT_TOKENS.len() <= u8::BITS as usize);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dialect {
     AnthropicApi,
@@ -528,7 +408,7 @@ struct LocalizedPath<'a> {
         expect(dead_code, reason = "read by the ranked effort resolution")
     )]
     echoed: Option<&'a str>,
-    /// The effort levels among `replacements`, as a [`levels_mask`]; `0`
+    /// The effort levels among `replacements`, as a [`effort::levels_mask`]; `0`
     /// unless the path is the effort field.
     #[cfg_attr(
         not(test),
@@ -569,11 +449,7 @@ fn localize<'a>(
         Dialect::OpenAiResponses => localize_responses(parsed),
     }?;
     let segments = canonical_segments(dialect, attribution.path)?;
-    let levels = if segments.iter().copied().eq(EFFORT_PATH.split('.')) {
-        levels_mask(&attribution.replacements)
-    } else {
-        0
-    };
+    let levels = effort_field_levels(&segments, &attribution.replacements);
     Some(LocalizedPath {
         raw: attribution.path,
         segments,
@@ -668,43 +544,6 @@ fn localize_message(message: &str) -> Option<Attribution<'_>> {
         .or_else(|| messages_output_ceiling(message))
         .or_else(|| unsupported_effort_level(message))
         .or_else(|| location_prefix(message))
-}
-
-/// `This model does not support effort level '<x>'. Supported levels: a, b,
-/// c.`, verbatim: the levels a nonempty bare list ended by the closing period
-/// and nothing after it.
-fn unsupported_effort_level(message: &str) -> Option<Attribution<'_>> {
-    let rest = message.strip_prefix(EFFORT_LEVEL_LEAD_IN)?;
-    let (echoed, rest) = rest.split_once(EFFORT_LEVEL_MIDDLE)?;
-    let (levels, close) = list_and_rest(rest, ListMembers::Bare)?;
-    (is_name(echoed) && close == EFFORT_LEVEL_CLOSE).then_some(Attribution {
-        path: EFFORT_PATH,
-        tier: SignalTier::SelfIdentifying,
-        kind: RejectionKind::InvalidValue,
-        presupposes_presence: true,
-        replacements: levels,
-        ceiling: None,
-        echoed: Some(echoed),
-    })
-}
-
-/// ``unknown variant `<x>`, expected one of `a`, `b` ...``. The text after the
-/// variant list (a parser position) is never read. A list naming no effort
-/// level is another enum's, so it localizes nothing.
-fn unknown_effort_variant(message: &str) -> Option<Attribution<'_>> {
-    let rest = message.strip_prefix(UNKNOWN_VARIANT_LEAD_IN)?;
-    let (echoed, rest) = rest.strip_prefix('`')?.split_once('`')?;
-    let rest = rest.strip_prefix(UNKNOWN_VARIANT_MIDDLE)?;
-    let variants = list_members(rest, ListMembers::Quoted);
-    (is_name(echoed) && levels_mask(&variants) != 0).then_some(Attribution {
-        path: EFFORT_PATH,
-        tier: SignalTier::Inferred,
-        kind: RejectionKind::InvalidValue,
-        presupposes_presence: false,
-        replacements: variants,
-        ceiling: None,
-        echoed: Some(echoed),
-    })
 }
 
 /// `"a.b" is not supported for this model. Use "x.y" ...`
@@ -811,52 +650,6 @@ fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
     })
 }
 
-/// The OpenAI envelope reading, plus the refused level and the listed levels
-/// when `error.param` names the effort field and the message is one of the
-/// captured value refusals. A value list under any other `error.param` names
-/// another field's values and is never read.
-fn localize_responses(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
-    let attribution = localize_openai(parsed)?;
-    if attribution.path != RESPONSES_EFFORT_PARAM {
-        return Some(attribution);
-    }
-    let Some((echoed, levels)) = parsed.error_message().and_then(responses_value_refusal) else {
-        return Some(attribution);
-    };
-    Some(Attribution {
-        presupposes_presence: true,
-        replacements: levels,
-        echoed: Some(echoed),
-        ..attribution
-    })
-}
-
-/// `Invalid value: '<x>'. Supported values are: ...` or `Unsupported value:
-/// '<x>' is not supported with the '<model>' model. Supported values are:
-/// ...`, verbatim: the refused value a name and the values a nonempty quoted
-/// list ended by the closing period and nothing after it.
-fn responses_value_refusal(message: &str) -> Option<(&str, Vec<&str>)> {
-    let (echoed, rest) = invalid_value_head(message).or_else(|| unsupported_value_head(message))?;
-    let rest = rest.strip_prefix(RESPONSES_SUPPORTED_VALUES)?;
-    let (values, close) = list_and_rest(rest, ListMembers::Quoted)?;
-    (is_name(echoed) && close == RESPONSES_SUPPORTED_VALUES_CLOSE).then_some((echoed, values))
-}
-
-fn invalid_value_head(message: &str) -> Option<(&str, &str)> {
-    message
-        .strip_prefix(RESPONSES_INVALID_VALUE_LEAD_IN)?
-        .split_once(RESPONSES_INVALID_VALUE_CLOSE)
-}
-
-fn unsupported_value_head(message: &str) -> Option<(&str, &str)> {
-    let rest = message.strip_prefix(RESPONSES_UNSUPPORTED_VALUE_LEAD_IN)?;
-    let (echoed, rest) = rest.split_once(RESPONSES_UNSUPPORTED_VALUE_MIDDLE)?;
-    let (model, rest) = rest.split_once(RESPONSES_UNSUPPORTED_VALUE_CLOSE)?;
-    let single_token =
-        !model.is_empty() && !model.contains(|c: char| c.is_whitespace() || c == '\'');
-    single_token.then_some((echoed, rest))
-}
-
 /// `Unsupported parameter: '<x>' is not supported with this model.`
 fn unsupported_parameter(message: &str) -> Option<&str> {
     message
@@ -954,13 +747,8 @@ fn canonical_segments(dialect: Dialect, raw: &str) -> Option<Vec<&str>> {
     if dialect == Dialect::Bedrock && segments.first() == Some(&CONVERSE_FIELD_BAG) {
         segments.remove(0);
     }
-    if dialect == Dialect::OpenAiResponses
-        && segments
-            .iter()
-            .copied()
-            .eq(RESPONSES_EFFORT_PARAM.split('.'))
-    {
-        segments = EFFORT_PATH.split('.').collect();
+    if dialect == Dialect::OpenAiResponses {
+        segments = responses_effort_field(segments);
     }
     (!segments.is_empty()).then_some(segments)
 }

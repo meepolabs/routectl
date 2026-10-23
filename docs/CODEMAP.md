@@ -3332,6 +3332,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `RejectionKind`, `rejected_beta_flags`: per-dialect parse of an upstream
   rejection envelope; also `localized_field` -> `LocalizedField` and
   `FieldIdentity` (tests: `src/router/rejection_parser_identity_tests.rs`)
+- `src/router/rejection_parser_effort.rs` -- child module of
+  `rejection_parser`: the value-list reader (`list_members`, `levels_mask`)
+  and the effort refusal templates (`Supported levels`, the serde
+  unknown-variant list, the openai-responses `reasoning.effort` value
+  refusals, the only `error.param` that localizes on that kind)
+- `src/router/rejection_parser_effort_tests.rs` -- `include!`d fragment of
+  `rejection_parser_tests.rs`: the list reader, the effort templates and the
+  openai-responses effort refusals
 - `src/router/repair_budget.rs` -- the per-request reactive-repair ceiling
   (`RepairBudget` + `REPAIRS_PER_REQUEST`) shared by all three dispatch
   walks: declared ABOVE each chain / seat loop beside the other

@@ -397,6 +397,65 @@ mod repair_chain {
     // A moved-on commit stands when the next field cannot be repaired
     // -----------------------------------------------------------------------
 
+    /// The captured sonnet-4-6 refusal of the effort level, exactly as the
+    /// upstream returned it.
+    fn effort_level_refused() -> Error {
+        Error::upstream(
+            "chain-seat",
+            400,
+            disabled_fixture_body(include_str!(
+                "../../tests/fixtures/rejections/anthropic-api/effort-xhigh-unsupported-sonnet-4-6.json"
+            )),
+        )
+    }
+
+    /// A `Supported levels` refusal names the effort field, which the
+    /// pending thinking rewrite never touched and the retried body carried:
+    /// the upstream read past the rewritten field, so that step commits,
+    /// while the effort refusal itself, with no row, reaches the client.
+    ///
+    /// Mutation check: break the `Supported levels` template -> red (nothing
+    /// commits).
+    #[tokio::test]
+    async fn a_supported_levels_refusal_after_a_thinking_rewrite_commits_the_rewrite() {
+        let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
+            disabled_then(body, effort_level_refused)
+        });
+        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+
+        let dispatched = router
+            .complete_with_options(disabled_req(Some("xhigh")), RouterOptions::new())
+            .await;
+
+        let bodies = seat.bodies();
+        assert_eq!(bodies.len(), 2, "refused, rewritten and refused again");
+        assert_eq!(thinking_type(&bodies[1]), Some("adaptive"), "premise");
+        assert_eq!(
+            bodies[1]["output_config"]["effort"],
+            json!("xhigh"),
+            "premise: the retried body carried the named effort field",
+        );
+        let err = dispatched.result.as_ref().expect_err("the refusal");
+        assert_eq!(
+            err.parsed_body().and_then(|p| p.error_message()),
+            effort_level_refused()
+                .parsed_body()
+                .and_then(|p| p.error_message()),
+            "the latest refusal reaches the client",
+        );
+        assert_eq!(
+            verdicts(&dispatched.meta),
+            vec![(
+                thinking_disabled_key(),
+                Some(VerdictValue::Shape("thinking.type.adaptive")),
+            )],
+        );
+        assert_eq!(
+            succeeded(&dispatched.meta),
+            vec![(THINKING_DISABLED_PATH, true, true)],
+        );
+    }
+
     /// Mutation check: read the remapped class instead of the native one in
     /// `settle_field_moved_on` -> red on `remapped` (an operator routing
     /// preference would decide what the upstream proved).

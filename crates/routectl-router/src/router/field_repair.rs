@@ -1260,9 +1260,8 @@ pub(super) fn recheck_payloads(
 /// can classify. Every other kind is refused by [`attributable_field_lane`]
 /// and by the lane gates that call [`field_repair_admits_kind`].
 ///
-/// Absent on purpose: `openai-responses` (its rejections localize, but a
-/// structured `param` there resolves any closed-table row, `temperature`
-/// included, and no fixture on that kind grounds any of them) and `gemini`.
+/// Absent on purpose: `openai-responses` (only its effort refusals localize,
+/// and the closed table has no effort row) and `gemini`.
 const FIELD_REPAIR_KINDS: &[&str] = &[ANTHROPIC_API_KIND, BEDROCK_KIND, OPENAI_COMPAT_KIND];
 
 /// `bedrock`, as `ProviderEntry::kind_str` spells it.
