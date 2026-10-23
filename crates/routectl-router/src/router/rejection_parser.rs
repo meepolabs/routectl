@@ -41,6 +41,7 @@ use routectl_core::wire_check::WirePath;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
 
 use super::field_repair::{FieldRepairRow, FieldRepairTable, FieldTransform};
+use super::learn_engine::SentEffort;
 use crate::field_verdict_value::canonical_ceiling;
 
 #[path = "rejection_parser_beta.rs"]
@@ -50,8 +51,8 @@ pub(super) use beta::rejected_beta_flags;
 #[path = "rejection_parser_effort.rs"]
 mod effort;
 use effort::{
-    effort_field_levels, localize_responses, quoted_list, responses_effort_field,
-    unknown_effort_variant, unsupported_effort_level,
+    effort_field_levels, is_effort_field, localize_responses, quoted_list, ranked_rejection,
+    responses_effort_field, unknown_effort_variant, unsupported_effort_level,
 };
 
 /// Statuses a caller-shaped field rejection arrives on. Everything else says
@@ -159,6 +160,10 @@ pub(super) enum RejectionValue {
     Shape(&'static str),
     /// A token limit the upstream named for the field.
     Ceiling(u32),
+    /// The effort levels the upstream listed as accepted, as a rank bitmask
+    /// (bit `i` for member `i` of the effort rank); never empty, and never
+    /// holding the level the ranked row's refusal was sent.
+    Levels(u8),
 }
 
 /// A rejection attributed to one closed-table row.
@@ -178,17 +183,26 @@ pub(super) struct NamedRejection {
 /// not parse, no arm localizes a path, or the path has no row. A path ending
 /// in an array index names one element, not the field a row describes, so it
 /// has no row either.
+///
+/// A refusal of the effort field names the row of the level `sent`, the one
+/// the refused attempt's egress body carried, never a level read from the
+/// envelope; see [`effort::ranked_rejection`] for when it names none.
 pub(super) fn parse_rejection(
     table: FieldRepairTable,
     provider_kind: &str,
     status: u16,
     parsed: Option<&ParsedErrorBody>,
+    sent: SentEffort,
 ) -> Option<NamedRejection> {
     let localized = localize(provider_kind, status, parsed?)?;
     if localized.ends_in_index {
         return None;
     }
-    let row = resolve(table.for_kind(provider_kind), &localized.segments)?;
+    let table = table.for_kind(provider_kind);
+    if is_effort_field(&localized.segments) {
+        return ranked_rejection(table, &localized, sent);
+    }
+    let row = resolve(table, &localized.segments)?;
     Some(NamedRejection {
         row,
         tier: localized.tier,
@@ -403,17 +417,9 @@ struct LocalizedPath<'a> {
     ceiling: Option<u32>,
     /// The refused value the envelope's template echoes, a nonempty run of
     /// name bytes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the ranked effort resolution")
-    )]
     echoed: Option<&'a str>,
     /// The effort levels among `replacements`, as a [`effort::levels_mask`]; `0`
     /// unless the path is the effort field.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the ranked effort resolution")
-    )]
     levels: u8,
 }
 
@@ -657,10 +663,14 @@ fn unsupported_parameter(message: &str) -> Option<&str> {
         .strip_suffix(OPENAI_UNSUPPORTED_SUFFIX)
 }
 
+/// The row whose path is exactly `segments`. A ranked row's last segment is
+/// a level the envelope does not get to choose, so no ranked row resolves
+/// here, however the envelope spells its path.
 fn resolve(table: FieldRepairTable, segments: &[&str]) -> Option<&'static FieldRepairRow> {
-    table
-        .lane_rows()
-        .find(|row| row.path.split('.').eq(segments.iter().copied()))
+    table.lane_rows().find(|row| {
+        !matches!(row.transform, FieldTransform::RankedRewrite { .. })
+            && row.path.split('.').eq(segments.iter().copied())
+    })
 }
 
 /// The canonical segments of `raw`: indices (`.0` or `[0]`) dropped, on

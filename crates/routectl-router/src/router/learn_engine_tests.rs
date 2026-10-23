@@ -193,5 +193,70 @@ fn the_arbitration_order_decides_every_contested_rejection() {
     }
 }
 
+/// The field-row proposer resolves an effort refusal against the level the
+/// site read off the refused attempt's egress body, and against nothing when
+/// there is no site.
+#[test]
+fn the_field_row_proposer_reads_the_sent_effort_off_the_site() {
+    use super::super::learn_proposers::FieldRowProposer;
+    use super::{EffortRank, Proposal, Proposer, RejectionSite, SentEffort, ThinkingShape};
+
+    // Arrange
+    let target = anthropic_target();
+    let err = Error::upstream(
+        "p1",
+        400,
+        json!({"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "This model does not support effort level 'xhigh'. Supported levels: high, low, medium.",
+        }})
+        .to_string(),
+    );
+    let class = effective(FailureClass::BadRequest);
+    let site = |sent_effort| RejectionSite {
+        provenance: routectl_core::wire_check::RejectionProvenance::ClientUnchanged,
+        in_egress: Some(true),
+        matched_edit: super::MatchedEdit::None,
+        locator: None,
+        sent: super::SentSlot::default(),
+        pending: 0,
+        sent_effort,
+        thinking: ThinkingShape::Adaptive,
+    };
+    let xhigh = SentEffort::Rank(EffortRank::of_token("xhigh").expect("a rank member"));
+    for (name, site, expected) in [
+        (
+            "sent xhigh",
+            Some(site(xhigh)),
+            Some("output_config.effort.xhigh"),
+        ),
+        ("sent effort unknown", Some(site(SentEffort::Unknown)), None),
+        ("no site", None, None),
+    ] {
+        let input = RejectionInput {
+            err: &err,
+            class: &class,
+            native_class: &FailureClass::BadRequest,
+            target: &target,
+            replay_carried: false,
+            table: FieldRepairTable::default(),
+            site,
+            client_betas: &[],
+            withheld_betas: &[],
+            beta_assembly: None,
+        };
+
+        // Act
+        let proposed = FieldRowProposer.propose(&input);
+
+        // Assert
+        let row = proposed.map(|proposal| match proposal {
+            Proposal::FieldRow { row, .. } => row.path,
+            other => panic!("{name}: not a field row: {other:?}"),
+        });
+        assert_eq!(row, expected, "{name}");
+    }
+}
+
 #[path = "learn_engine_surface_tests.rs"]
 mod learn_engine_surface_tests;

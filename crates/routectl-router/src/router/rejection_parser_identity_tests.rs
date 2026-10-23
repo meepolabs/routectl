@@ -280,9 +280,13 @@ fn a_rejection_with_a_row_carries_the_row_tier_and_folds_onto_the_row_identity()
                 .insert(kind.clone());
         }
         let parsed = UpstreamBody::new(body.clone());
-        let Some(named) =
-            parse_rejection(FieldRepairTable::default(), &kind, status, parsed.parsed())
-        else {
+        let Some(named) = parse_rejection(
+            FieldRepairTable::default(),
+            &kind,
+            status,
+            parsed.parsed(),
+            crate::router::learn_engine::SentEffort::Unknown,
+        ) else {
             continue;
         };
         let field = field(&kind, status, &body).expect("a resolved row localizes a field");
@@ -319,7 +323,14 @@ fn a_self_identifying_rejection_on_a_path_with_no_row_still_names_its_field() {
     let body = anthropic_body("zzz_two: Extra inputs are not permitted");
     let parsed = UpstreamBody::new(body.clone());
     assert!(
-        parse_rejection(FieldRepairTable::default(), ANTHROPIC, 400, parsed.parsed()).is_none(),
+        parse_rejection(
+            FieldRepairTable::default(),
+            ANTHROPIC,
+            400,
+            parsed.parsed(),
+            crate::router::learn_engine::SentEffort::Unknown
+        )
+        .is_none(),
         "no row for the path"
     );
 

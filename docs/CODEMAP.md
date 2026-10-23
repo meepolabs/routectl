@@ -3347,10 +3347,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `rejection_parser`: the value-list reader (`list_members`, `levels_mask`)
   and the effort refusal templates (`Supported levels`, the serde
   unknown-variant list, the openai-responses `reasoning.effort` value
-  refusals, the only `error.param` that localizes on that kind)
+  refusals, the only `error.param` that localizes on that kind), and
+  `ranked_rejection`: an effort refusal named as the ranked row of the level
+  the refused attempt's egress body sent, with `RejectionValue::Levels`, or
+  no row when that level is unknown, echoed differently or listed
 - `src/router/rejection_parser_effort_tests.rs` -- `include!`d fragment of
   `rejection_parser_tests.rs`: the list reader, the effort templates and the
   openai-responses effort refusals
+- `src/router/rejection_parser_ranked_tests.rs` -- `include!`d fragment of
+  `rejection_parser_tests.rs`: ranked resolution against the sent level and
+  every reading that fails closed to no row
 - `src/router/repair_budget.rs` -- the per-request reactive-repair ceiling
   (`RepairBudget` + `REPAIRS_PER_REQUEST`) shared by all three dispatch
   walks: declared ABOVE each chain / seat loop beside the other

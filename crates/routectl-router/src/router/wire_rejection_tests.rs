@@ -793,10 +793,11 @@ mod sent_effort_and_thinking {
 
     use super::super::read_site;
     use super::*;
-    use crate::router::learn_engine::{RejectionSite, SentEffort, ThinkingShape};
+    use crate::router::learn_engine::{EffortRank, RejectionSite, SentEffort, ThinkingShape};
     use crate::router::wire_check::lend_request_record;
 
-    /// A body routectl sends, built by a real egress from `req`.
+    /// A body routectl sends, built by a real egress from `req` or, for a
+    /// shape no egress emits, by hand.
     type Egress = fn(&ChatRequest) -> Value;
 
     struct Row {
@@ -808,13 +809,9 @@ mod sent_effort_and_thinking {
         thinking: ThinkingShape,
     }
 
-    /// The rank index of `token`, read from the rank table itself.
+    /// The rank member `token` spells.
     fn rank(token: &str) -> SentEffort {
-        let index = routectl_providers::effort::VALID_EFFORT_TOKENS
-            .iter()
-            .position(|&member| member == token)
-            .expect("premise: the token is a rank member");
-        SentEffort::Rank(index)
+        SentEffort::Rank(EffortRank::of_token(token).expect("premise: the token is a rank member"))
     }
 
     /// An Anthropic client's request as the ingress parses it: `thinking` on
@@ -1014,6 +1011,32 @@ mod sent_effort_and_thinking {
                 effort: SentEffort::Unknown,
                 thinking: ThinkingShape::Unknown,
             },
+            Row {
+                name: "openai-responses on Mantle is not read",
+                egress: EgressKind::OpenaiResponsesMantle,
+                build: |_| json!({"reasoning": {"effort": "high"}}),
+                req: || anthropic_request(None, None),
+                effort: SentEffort::Unknown,
+                thinking: ThinkingShape::Unknown,
+            },
+            // A number names no level, so it is out of rank rather than absent:
+            // the body did carry an effort.
+            Row {
+                name: "anthropic-api an effort that is not a string, out of rank",
+                egress: EgressKind::AnthropicApi,
+                build: |_| json!({"output_config": {"effort": 3}, "thinking": {"type": "adaptive"}}),
+                req: || anthropic_request(None, None),
+                effort: SentEffort::OutOfRank,
+                thinking: ThinkingShape::Adaptive,
+            },
+            Row {
+                name: "anthropic-api a thinking object with no type",
+                egress: EgressKind::AnthropicApi,
+                build: |_| json!({"output_config": {"effort": "high"}, "thinking": {}}),
+                req: || anthropic_request(None, None),
+                effort: rank("high"),
+                thinking: ThinkingShape::Unknown,
+            },
         ];
         rows.extend(bedrock_rows());
         rows.extend(responses_rows());
@@ -1148,12 +1171,62 @@ mod sent_effort_and_thinking {
         for (name, sent) in [
             ("no egress record", None),
             ("unparseable", Some(b"not json".to_vec())),
+            ("a JSON string", Some(b"\"high\"".to_vec())),
+            ("a JSON array", Some(b"[]".to_vec())),
         ] {
             let site = site_for(EgressKind::AnthropicApi, &req, sent);
 
             assert_eq!(site.sent_effort, SentEffort::Unknown, "{name}");
             assert_eq!(site.thinking, ThinkingShape::Unknown, "{name}");
         }
+    }
+
+    /// The same refused body read by both settlements: a messages attempt
+    /// reads the effort it sent, and a token count reads it as unknown, since
+    /// a count body drops the effort whatever the request carried.
+    #[test]
+    fn a_count_rejection_site_never_reports_the_sent_effort() {
+        // Arrange
+        let provider = ScriptedProvider::boxed(|_, client| client, |_| Ok(()));
+        let router = router(NEVER_SAMPLED, vec![Arc::clone(&provider)]);
+        let model = ResolvedModel::new("m0", "p0", provider, "upstream");
+        let target = router
+            .expand_chain_to_targets(vec![Arc::new(model)], None)
+            .pop()
+            .expect("one target");
+        let req = anthropic_request(Some(json!({"type": "adaptive"})), Some("high"));
+        let sent = serde_json::to_vec(&messages_body(&req)).expect("serialize");
+        let err = rejection("output_config.effort", REFUSED_FIELD);
+        let read = |count: bool| {
+            let mut attempt_req = req.clone();
+            let (tap, charge) = router.install_wire_tap(&target, &mut attempt_req);
+            let tap = tap.expect("premise: the rejection lane is tapped");
+            tap.deposit(sent.clone().into());
+            let site = if count {
+                drop(charge);
+                router.read_count_rejection_site(&target, &attempt_req, Some(&tap), &err)
+            } else {
+                let mut meta = DispatchMeta::for_alias(ALIAS);
+                router.settle_failed_attempt(
+                    &target,
+                    &attempt_req,
+                    Some(&tap),
+                    charge,
+                    &err,
+                    &mut meta,
+                )
+            };
+            site.expect("premise: the site is read")
+        };
+
+        // Act
+        let messages = read(false);
+        let count = read(true);
+
+        // Assert
+        assert_eq!(messages.sent_effort, rank("high"), "control");
+        assert_eq!(count.sent_effort, SentEffort::Unknown);
+        assert_eq!(count.thinking, messages.thinking);
     }
 
     #[test]

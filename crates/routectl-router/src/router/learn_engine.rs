@@ -30,6 +30,7 @@ use routectl_core::failure_class::{
 };
 use routectl_core::wire_check::{EditSite, RejectionProvenance};
 use routectl_core::{BetaAssembly, ChatRequest, Error, sanitize_for_log};
+use routectl_providers::effort::VALID_EFFORT_TOKENS;
 
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::{EvidenceScope, UntranslatedCapabilities};
@@ -77,10 +78,6 @@ pub(super) struct RejectionSite {
     /// The rejection's position among the request's pending rejections.
     pub(super) pending: usize,
     /// The effort level the body that went out sent.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by effort-level resolution of a refusal")
-    )]
     pub(super) sent_effort: SentEffort,
     /// The thinking shape the body that went out sent beside its effort.
     #[cfg_attr(
@@ -90,13 +87,39 @@ pub(super) struct RejectionSite {
     pub(super) thinking: ThinkingShape,
 }
 
+/// A member of the effort rank, by its index in [`VALID_EFFORT_TOKENS`].
+/// Built only from a token the rank holds, so its bit and token never fall
+/// outside the rank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct EffortRank(u8);
+
+// Every rank index has a bit in a `u8` mask.
+const _: () = assert!(VALID_EFFORT_TOKENS.len() <= u8::BITS as usize);
+
+impl EffortRank {
+    /// The rank member `token` spells, or `None` for any other token.
+    pub(super) fn of_token(token: &str) -> Option<Self> {
+        let index = VALID_EFFORT_TOKENS.iter().position(|&rank| rank == token)?;
+        u8::try_from(index).ok().map(Self)
+    }
+
+    /// This level's bit in a rank bitmask.
+    pub(super) const fn bit(self) -> u8 {
+        1 << self.0
+    }
+
+    /// This level's token.
+    pub(super) fn token(self) -> &'static str {
+        VALID_EFFORT_TOKENS[usize::from(self.0)]
+    }
+}
+
 /// The effort level a rejected attempt's egress body sent, read where its
 /// egress kind carries it. Closed: never holds upstream or client bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SentEffort {
-    /// A member of the effort rank, by its index in
-    /// [`routectl_providers::effort::VALID_EFFORT_TOKENS`].
-    Rank(usize),
+    /// A member of the effort rank.
+    Rank(EffortRank),
     /// The body carries no effort.
     Absent,
     /// The body carries an effort outside the rank: `none`, an unknown
@@ -125,6 +148,11 @@ pub(super) enum ThinkingShape {
 }
 
 impl RejectionSite {
+    /// The effort level the refused attempt sent, unknown with no site.
+    pub(super) fn sent_effort_of(site: Option<&Self>) -> SentEffort {
+        site.map_or(SentEffort::Unknown, |site| site.sent_effort)
+    }
+
     /// Whether the rejection names a path the body that went out did not
     /// carry. Such a rejection cannot be about anything routectl sent there,
     /// so no path-keyed proposal may act on it.

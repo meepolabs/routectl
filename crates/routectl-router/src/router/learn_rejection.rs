@@ -142,6 +142,7 @@ impl AttemptLearning<'_> {
                 rejection.native_class,
                 rejection.err,
                 rejection.target.provider_kind.unwrap_or(""),
+                RejectionSite::sent_effort_of(rejection.site.as_ref()),
             )
             .is_some_and(|named| rerepairs_same_field(named.row))
     }

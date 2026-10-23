@@ -10,6 +10,7 @@ use routectl_core::failure_class::classify;
 use serde_json::json;
 
 use crate::capability_matcher::resolve_requested_capability;
+use crate::router::learn_engine::{EffortRank, SentEffort};
 
 /// The pydantic reason the anthropic-api and bedrock dialects refuse a field
 /// with.
@@ -88,13 +89,27 @@ fn dialect_rejections(path: &str) -> Vec<(&'static str, &'static str, Error)> {
     ]
 }
 
+/// The path an upstream names to refuse `row`, and the effort level the
+/// refused request sent: a ranked row's level is the sent level, never a
+/// segment of the named path.
+fn refused_as(row: &FieldRepairRow) -> (&'static str, SentEffort) {
+    match row.surface {
+        FieldSurface::Effort(level) => (
+            "output_config.effort",
+            SentEffort::Rank(EffortRank::of_token(level).expect("a ranked row names a level")),
+        ),
+        _ => (row.path, SentEffort::Unknown),
+    }
+}
+
 /// Mutation check: add a closed-table row whose path a generic resolver
 /// translates (e.g. `output_config.format`, or a bedrock `advisor` row) -> red
 /// on that row's kind.
 #[test]
 fn no_closed_table_row_resolves_a_generic_capability_in_any_repair_kind() {
     for row in closed_table() {
-        for (kind, shape, err) in dialect_rejections(row.path) {
+        let (path, sent) = refused_as(row);
+        for (kind, shape, err) in dialect_rejections(path) {
             let classified = classify(&err, Some(kind));
             let table = crate::router::FieldRepairTable::default();
             let in_view = table
@@ -103,7 +118,7 @@ fn no_closed_table_row_resolves_a_generic_capability_in_any_repair_kind() {
                 .any(|lane_row| lane_row.path == row.path);
 
             assert_eq!(
-                rejected_field(table, &classified.class, &err, kind).is_some(),
+                rejected_field(table, &classified.class, &err, kind, sent).is_some(),
                 in_view,
                 "control: {kind} ({shape}) names `{}` to the field parser under {:?} exactly \
                  when the kind's view carries the row",

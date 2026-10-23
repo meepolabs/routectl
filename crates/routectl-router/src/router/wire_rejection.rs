@@ -25,12 +25,11 @@ use routectl_core::wire_check::{
     AttemptRecord, EgressKind, Lane, LaneClass, Leg, RejectionProvenance, WirePath, WireTap,
 };
 use routectl_core::{ChatRequest, Error, sanitize_for_log};
-use routectl_providers::effort::VALID_EFFORT_TOKENS;
 use serde_json::Value;
 
 use super::class_observe::upstream_facts;
 use super::field_repair::repair_action_is_lossy;
-use super::learn_engine::{RejectionSite, SentEffort, ThinkingShape};
+use super::learn_engine::{EffortRank, RejectionSite, SentEffort, ThinkingShape};
 use super::learn_revert::{
     EditAttribution, MatchedEdit, SentSlot, WireRevert, attributable, revert_outcome,
 };
@@ -163,8 +162,13 @@ impl Router {
             status,
             err.parsed_body(),
         );
+        // A count body is a projection that omits the effort, so its absence
+        // there says nothing about the request.
         let site = lend_request_record(attempt_req, tap, |record| {
-            Some(read_site(lane, &record?, rejected.as_ref(), 0))
+            Some(RejectionSite {
+                sent_effort: SentEffort::Unknown,
+                ..read_site(lane, &record?, rejected.as_ref(), 0)
+            })
         })?;
         if let Some(attribution) = EditAttribution::of(&site.matched_edit, site.provenance) {
             let path = rejected.map_or_else(WirePath::root, |named| named.wire);
@@ -218,6 +222,7 @@ fn read_site(
         .and_then(|body| serde_json::from_slice::<Value>(body).ok());
     let (sent_effort, thinking) = body
         .as_ref()
+        .filter(|body| body.is_object())
         .map_or((SentEffort::Unknown, ThinkingShape::Unknown), |body| {
             effort_and_thinking(lane.egress(), body)
         });
@@ -256,7 +261,7 @@ fn read_site(
 /// `reasoning.effort` on OpenAI Responses, which has no thinking object.
 /// Every other egress is unknown for both, so nothing downstream acts on a
 /// shape it cannot read.
-fn effort_and_thinking(egress: EgressKind, sent: &Value) -> (SentEffort, ThinkingShape) {
+pub(super) fn effort_and_thinking(egress: EgressKind, sent: &Value) -> (SentEffort, ThinkingShape) {
     match egress {
         EgressKind::AnthropicApi | EgressKind::BedrockInvoke => anthropic_effort_and_thinking(sent),
         EgressKind::BedrockConverse => sent
@@ -287,14 +292,15 @@ fn anthropic_effort_and_thinking(fields: &Value) -> (SentEffort, ThinkingShape) 
     )
 }
 
-/// Where `effort` sits in the effort rank.
+/// Where `effort` sits in the effort rank. A value that is not a string is
+/// out of rank: it names no level.
 fn sent_effort_of(effort: Option<&Value>) -> SentEffort {
     let Some(effort) = effort else {
         return SentEffort::Absent;
     };
     effort
         .as_str()
-        .and_then(|token| VALID_EFFORT_TOKENS.iter().position(|&rank| rank == token))
+        .and_then(EffortRank::of_token)
         .map_or(SentEffort::OutOfRank, SentEffort::Rank)
 }
 

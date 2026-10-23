@@ -9,16 +9,20 @@ use std::path::PathBuf;
 use routectl_core::capability::{COMPUTER_USE, FailurePhase, SignalTier};
 use routectl_core::error::Error;
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy};
+use routectl_core::wire_check::EgressKind;
 use routectl_core::{MAX_ERROR_BODY_BYTES, ParsedErrorBody, UpstreamBody};
 use serde_json::{Value, json};
 
 use super::super::field_repair::{FieldRepairRow, FieldTransform, closed_table, grounded_table};
+use super::super::learn_engine::SentEffort;
+use super::super::wire_rejection::effort_and_thinking;
 use super::{
     FieldIdentity, LocalizedPath, RejectionKind, RejectionValue, THINKING_TYPES, localize,
     parse_rejection, rejected_wire_path,
 };
 
 const BEDROCK_CAPTURE: &str = include_str!("../../tests/fixtures/bedrock_validation_capture.json");
+const EFFORT_CAPTURE: &str = include_str!("../../tests/fixtures/effort_capture.json");
 const FORCED_TOOL_CHOICE_CAPTURE: &str =
     include_str!("../../tests/fixtures/forced_tool_choice_capture.json");
 
@@ -34,6 +38,7 @@ const THINKING_DISABLED_PATH: &str = "thinking.type.disabled";
 const TEMPERATURE_PATH: &str = "temperature";
 const MAX_TOKENS_PATH: &str = "max_tokens";
 const EFFORT_PATH: &str = "output_config.effort";
+const EFFORT_XHIGH: &str = "output_config.effort.xhigh";
 /// The off-switch template exactly as the committed Bedrock capture spells it.
 const THINKING_SWITCH_MESSAGE: &str = "To turn thinking off on this model, send \"thinking\": \
      {\"type\": \"between_tools\"} instead of {\"type\": \"disabled\"}. The model does not \
@@ -54,13 +59,22 @@ enum Outcome {
     NotLocalized,
 }
 
+/// What the parser makes of one envelope drawn by a request whose sent
+/// effort level is not known.
 fn outcome(kind: &str, status: u16, body: &str) -> Outcome {
+    outcome_sent(kind, status, body, SentEffort::Unknown)
+}
+
+/// What the parser makes of one envelope drawn by a request that sent the
+/// effort level `sent`.
+fn outcome_sent(kind: &str, status: u16, body: &str, sent: SentEffort) -> Outcome {
     let body = UpstreamBody::new(body);
     if let Some(named) = parse_rejection(
         crate::router::FieldRepairTable::default(),
         kind,
         status,
         body.parsed(),
+        sent,
     ) {
         return Outcome::Row(named.row.path, named.tier, named.kind);
     }
@@ -130,8 +144,35 @@ fn replacements(kind: &str, status: u16, body: &str) -> Option<Vec<String>> {
     )
 }
 
+/// The egress a capture record's lane sends through.
+fn capture_egress(lane: &str) -> EgressKind {
+    match lane {
+        "anthropic-oauth" => EgressKind::AnthropicApi,
+        "bedrock-invoke" => EgressKind::BedrockInvoke,
+        "bedrock-converse" => EgressKind::BedrockConverse,
+        "codex" => EgressKind::OpenaiResponses,
+        "mantle-responses" => EgressKind::OpenaiResponsesMantle,
+        "openrouter-anthropic" => EgressKind::OpenaiCompat,
+        other => panic!("capture lane {other} has no egress mapping"),
+    }
+}
+
+/// The effort level the request that drew the `<kind>/<case>` fixture sent,
+/// read from its capture record's request shape by the egress reader itself;
+/// unknown for a fixture with no capture record.
+fn captured_sent_effort(fixture: &str) -> SentEffort {
+    let capture: Value = serde_json::from_str(EFFORT_CAPTURE).unwrap();
+    capture["cases"]
+        .get(fixture)
+        .map_or(SentEffort::Unknown, |case| {
+            let egress = capture_egress(case["lane"].as_str().unwrap());
+            effort_and_thinking(egress, &case["request_shape"]).0
+        })
+}
+
 /// Every `rejections/<kind>/<case>.json` fixture, keyed `<kind>/<case>`, with
-/// the outcome the parser reaches for it on the lane kind its directory names.
+/// the outcome the parser reaches for it on the lane kind its directory names,
+/// given the effort level its captured request sent.
 fn corpus_outcomes() -> BTreeMap<String, Outcome> {
     let mut outcomes = BTreeMap::new();
     for kind_dir in std::fs::read_dir(rejections_dir()).expect("rejections dir") {
@@ -144,7 +185,9 @@ fn corpus_outcomes() -> BTreeMap<String, Outcome> {
                 serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
             let status = u16::try_from(fixture["status"].as_u64().unwrap()).unwrap();
             let body = fixture["body"].as_str().unwrap();
-            outcomes.insert(format!("{kind}/{case}"), outcome(&kind, status, body));
+            let key = format!("{kind}/{case}");
+            let sent = captured_sent_effort(&key);
+            outcomes.insert(key, outcome_sent(&kind, status, body, sent));
         }
     }
     outcomes
@@ -187,6 +230,8 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "anthropic-api/effort-invalid-value-openrouter",
             Outcome::NotLocalized,
         ),
+        // Each effort fixture resolves to the row of the level its captured
+        // request sent. A bogus level is out of rank, so it names no row.
         (
             "anthropic-api/effort-invalid-value-opus-4-8",
             unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
@@ -199,11 +244,11 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "anthropic-api/effort-xhigh-unsupported-opus-4-5",
-            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+            Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
         (
             "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
-            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+            Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
         // Effort sent with thinking disabled: the thinking refusal wins and
         // the effort level is never named.
@@ -246,11 +291,11 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ("bedrock/beta-redact-thinking-invoke", Outcome::NotLocalized),
         (
             "bedrock/effort-extra-input-invoke-opus-4-5",
-            unresolved(EFFORT_PATH, SelfIdentifying, UnsupportedField),
+            Outcome::Row(EFFORT_XHIGH, SelfIdentifying, UnsupportedField),
         ),
         (
             "bedrock/effort-invalid-value-invoke-opus-4-5-beta",
-            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+            Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
         // The serde unknown-variant message names a variant, not a path:
         // only the effort levels in its list imply the field.
@@ -264,11 +309,11 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "bedrock/effort-xhigh-unsupported-converse-sonnet-4-6",
-            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+            Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
         (
             "bedrock/effort-xhigh-unsupported-invoke-sonnet-4-6",
-            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+            Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
         (
             "bedrock/max-tokens-above-model-limit",
@@ -331,7 +376,11 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "openai-responses/reasoning-effort-minimal-unsupported-codex",
-            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+            Outcome::Row(
+                "output_config.effort.minimal",
+                SelfIdentifying,
+                InvalidValue,
+            ),
         ),
     ]
     .into_iter()
@@ -601,7 +650,8 @@ fn near_miss_messages_resolve_to_no_row() {
                 crate::router::FieldRepairTable::default(),
                 kind,
                 400,
-                parsed.parsed()
+                parsed.parsed(),
+                SentEffort::Unknown
             )
             .is_none(),
             "near miss {name} resolved to a row",
@@ -616,7 +666,8 @@ fn near_miss_messages_resolve_to_no_row() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             400,
-            control.parsed()
+            control.parsed(),
+            SentEffort::Unknown
         )
         .is_some(),
         "the same harness resolves a grounded message",
@@ -686,6 +737,7 @@ fn each_arm_assigns_its_tier() {
             kind,
             400,
             body.parsed(),
+            SentEffort::Unknown,
         ) {
             let rewrite =
                 (named.row.path == THINKING_DISABLED_PATH).then_some("thinking.type.between_tools");
@@ -804,7 +856,8 @@ fn a_path_ending_in_an_index_names_no_row() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             400,
-            control.parsed()
+            control.parsed(),
+            SentEffort::Unknown
         )
         .map(|n| n.row.path),
         Some(DISPLAY_PATH),
@@ -823,7 +876,8 @@ fn a_path_ending_in_an_index_names_no_row() {
                 crate::router::FieldRepairTable::default(),
                 ANTHROPIC,
                 400,
-                body.parsed()
+                body.parsed(),
+                SentEffort::Unknown
             )
             .is_none(),
             "{path}",
@@ -884,6 +938,7 @@ fn openai_responses_localizes_no_structured_param_but_the_effort_one() {
                 kind,
                 400,
                 body.parsed(),
+                SentEffort::Unknown,
             )
             .map(|named| (named.row.path, named.tier, named.kind))
         };
@@ -931,7 +986,8 @@ fn the_unsupported_parameter_template_must_match_exactly() {
                 crate::router::FieldRepairTable::default(),
                 OPENAI_COMPAT,
                 400,
-                body.parsed()
+                body.parsed(),
+                SentEffort::Unknown
             )
             .is_none(),
             "{message}",
@@ -964,6 +1020,7 @@ fn indices_and_the_converse_field_bag_canonicalize_onto_the_row() {
             kind,
             400,
             body.parsed(),
+            SentEffort::Unknown,
         );
 
         assert_eq!(
@@ -986,7 +1043,8 @@ fn the_converse_field_bag_is_only_removed_on_bedrock() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             400,
-            body.parsed()
+            body.parsed(),
+            SentEffort::Unknown
         )
         .is_none()
     );
@@ -1006,7 +1064,8 @@ fn a_non_ascii_or_over_long_param_resolves_to_none() {
                 crate::router::FieldRepairTable::default(),
                 OPENAI_COMPAT,
                 400,
-                body.parsed()
+                body.parsed(),
+                SentEffort::Unknown
             )
             .is_none(),
             "{param:?}",
@@ -1018,7 +1077,8 @@ fn a_non_ascii_or_over_long_param_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             OPENAI_COMPAT,
             400,
-            control.parsed()
+            control.parsed(),
+            SentEffort::Unknown
         )
         .is_some(),
         "the same path, bounded, resolves",
@@ -1035,6 +1095,7 @@ fn the_named_row_is_a_table_entry_holding_no_body_bytes() {
         ANTHROPIC,
         400,
         body.parsed(),
+        SentEffort::Unknown,
     )
     .expect("display row");
 
@@ -1066,7 +1127,8 @@ fn an_over_cap_or_absent_parse_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             400,
-            over_cap.parsed()
+            over_cap.parsed(),
+            SentEffort::Unknown
         )
         .is_none()
     );
@@ -1075,7 +1137,8 @@ fn an_over_cap_or_absent_parse_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             400,
-            None::<&ParsedErrorBody>
+            None::<&ParsedErrorBody>,
+            SentEffort::Unknown
         )
         .is_none()
     );
@@ -1090,7 +1153,8 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             422,
-            anthropic.parsed()
+            anthropic.parsed(),
+            SentEffort::Unknown
         )
         .is_some(),
         "premise: the body resolves on a parsed kind and rejection status",
@@ -1101,7 +1165,8 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             "gemini",
             400,
-            anthropic.parsed()
+            anthropic.parsed(),
+            SentEffort::Unknown
         )
         .is_none()
     );
@@ -1110,7 +1175,8 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             "gemini",
             400,
-            openai.parsed()
+            openai.parsed(),
+            SentEffort::Unknown
         )
         .is_none()
     );
@@ -1119,7 +1185,8 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             500,
-            anthropic.parsed()
+            anthropic.parsed(),
+            SentEffort::Unknown
         )
         .is_none()
     );
@@ -1128,7 +1195,8 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             429,
-            anthropic.parsed()
+            anthropic.parsed(),
+            SentEffort::Unknown
         )
         .is_none()
     );
@@ -1145,7 +1213,8 @@ fn an_anthropic_message_outside_an_invalid_request_error_resolves_to_none() {
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
             400,
-            body.parsed()
+            body.parsed(),
+            SentEffort::Unknown
         )
         .is_none()
     );
@@ -1267,6 +1336,7 @@ fn the_accepted_value_fills_only_for_exactly_one_named_member() {
             ANTHROPIC,
             400,
             body.parsed(),
+            SentEffort::Unknown,
         )
         .unwrap_or_else(|| panic!("{name}: resolves the rewrite row"));
 
@@ -1315,6 +1385,7 @@ fn a_drop_row_never_carries_an_accepted_value() {
         ANTHROPIC,
         400,
         body.parsed(),
+        SentEffort::Unknown,
     )
     .expect("display row");
 
@@ -1336,6 +1407,7 @@ fn the_thinking_enabled_fixture_names_the_adaptive_rewrite() {
         BEDROCK,
         status,
         body.parsed(),
+        SentEffort::Unknown,
     )
     .expect("the captured envelope names the grounded row");
 
@@ -1366,6 +1438,7 @@ fn each_thinking_disabled_fixture_names_its_rewrite_on_the_disabled_row() {
             kind,
             status,
             body.parsed(),
+            SentEffort::Unknown,
         )
         .unwrap_or_else(|| panic!("{kind}: the captured envelope names the grounded row"));
 
@@ -1661,6 +1734,7 @@ fn named_value(kind: &str, body: &str) -> Option<(&'static str, Option<Rejection
         kind,
         400,
         body.parsed(),
+        SentEffort::Unknown,
     )
     .map(|named| (named.row.path, named.value))
 }
@@ -1976,3 +2050,4 @@ fn messages_ceiling_near_misses_name_no_ceiling() {
 }
 
 include!("rejection_parser_effort_tests.rs");
+include!("rejection_parser_ranked_tests.rs");

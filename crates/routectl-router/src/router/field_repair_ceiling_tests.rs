@@ -313,8 +313,14 @@ async fn an_unsupported_max_tokens_refusal_resolves_the_row_and_makes_no_edit() 
     let req = max_tokens_only_req(1000);
     let err = unsupported_max_tokens();
     let class = routectl_core::failure_class::classify(&err, Some("openai-compat")).class;
-    let named = super::rejected_field(router.field_repair_table(), &class, &err, "openai-compat")
-        .expect("premise: the refusal names a row");
+    let named = super::rejected_field(
+        router.field_repair_table(),
+        &class,
+        &err,
+        "openai-compat",
+        crate::router::learn_engine::SentEffort::Unknown,
+    )
+    .expect("premise: the refusal names a row");
     assert_eq!(named.row.path, "max_tokens", "premise");
     assert_eq!(named.value, None, "premise: the refusal names no number");
 

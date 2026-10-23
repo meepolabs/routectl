@@ -228,8 +228,14 @@ impl FieldEdit {
             (FieldTransform::Ceiling, Some(RejectionValue::Ceiling(ceiling))) => {
                 Some(Self::Ceiling(ceiling))
             }
-            (FieldTransform::Rewrite { .. }, Some(RejectionValue::Ceiling(_)) | None)
-            | (FieldTransform::Ceiling, Some(RejectionValue::Shape(_)) | None)
+            (
+                FieldTransform::Rewrite { .. },
+                Some(RejectionValue::Ceiling(_) | RejectionValue::Levels(_)) | None,
+            )
+            | (
+                FieldTransform::Ceiling,
+                Some(RejectionValue::Shape(_) | RejectionValue::Levels(_)) | None,
+            )
             | (FieldTransform::RankedRewrite { .. }, _) => None,
         }
     }
@@ -457,7 +463,13 @@ impl<'a> FieldRepairPlan<'a> {
         rejection: &Error,
         provider_kind: &str,
     ) -> Option<u16> {
-        let named = rejected_field(self.table, native_class, rejection, provider_kind)?;
+        let named = rejected_field(
+            self.table,
+            native_class,
+            rejection,
+            provider_kind,
+            super::super::learn_engine::SentEffort::Unknown,
+        )?;
         self.apply_named(named, attempt_req, meta, budget, rejection)
     }
 

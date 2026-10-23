@@ -11,7 +11,7 @@ use super::Router;
 use super::class_observe::upstream_facts;
 use super::dispatch::replay_rejection_body_free;
 use super::field_repair::rejected_field;
-use super::learn_engine::{Proposal, Proposer, RejectionInput};
+use super::learn_engine::{Proposal, Proposer, RejectionInput, RejectionSite};
 use super::rejection_parser::rejected_beta_flags;
 
 /// Proposes the reasoning-replay strip when the attempt carried replay
@@ -39,6 +39,7 @@ impl Proposer for FieldRowProposer {
             input.native_class,
             input.err,
             input.target.provider_kind.unwrap_or(""),
+            RejectionSite::sent_effort_of(input.site.as_ref()),
         )?;
         Some(Proposal::FieldRow {
             row: named.row,

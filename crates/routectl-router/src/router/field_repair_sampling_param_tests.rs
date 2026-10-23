@@ -921,6 +921,7 @@ mod responses_param_refusals {
                 &classify(&refused, Some("openai-responses")).class,
                 &refused,
                 "openai-responses",
+                crate::router::learn_engine::SentEffort::Unknown,
             );
             let target = router
                 .dispatch_chain_for_request(

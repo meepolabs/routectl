@@ -46,6 +46,7 @@ use crate::field_verdict_value::ValueSlot;
 use crate::state_key::StateKey;
 
 use super::edit_declare::fidelity_dialect;
+use super::learn_engine::SentEffort;
 use super::rejection_parser::{NamedRejection, OPENAI_UNSUPPORTED_CODE, parse_rejection};
 #[cfg(test)]
 use super::rejection_parser::{RejectionKind, RejectionValue};
@@ -1516,11 +1517,16 @@ pub(super) fn request_feature_keys(table: FieldRepairTable, req: &ChatRequest) -
 ///
 /// The class is read FIRST, so the parser is never consulted for a class
 /// that cannot carry a field rejection.
+///
+/// `sent` is the effort level the refused attempt's egress body carried; a
+/// caller with no record of that body passes [`SentEffort::Unknown`], and an
+/// effort refusal then names no row.
 pub(super) fn rejected_field(
     table: FieldRepairTable,
     class: &FailureClass,
     err: &Error,
     provider_kind: &str,
+    sent: SentEffort,
 ) -> Option<NamedRejection> {
     if !class_can_name_a_field(class, provider_kind) {
         return None;
@@ -1530,7 +1536,7 @@ pub(super) fn rejected_field(
         return named;
     }
     let status = super::class_observe::upstream_facts(err).status?;
-    parse_rejection(table, provider_kind, status, err.parsed_body())
+    parse_rejection(table, provider_kind, status, err.parsed_body(), sent)
 }
 
 /// Whether a failure class, on a lane of `provider_kind`, can carry a
@@ -1773,7 +1779,7 @@ impl Router {
         err: &Error,
         provider_kind: &str,
     ) -> Option<NamedRejection> {
-        rejected_field(table, native_class, err, provider_kind)
+        rejected_field(table, native_class, err, provider_kind, SentEffort::Unknown)
             .filter(|named| named.row.surface == surface)
     }
 
@@ -1789,7 +1795,8 @@ impl Router {
         provider_kind: &str,
     ) -> bool {
         class_can_name_a_field(native_class, provider_kind)
-            && rejected_field(table, native_class, err, provider_kind).is_none()
+            && rejected_field(table, native_class, err, provider_kind, SentEffort::Unknown)
+                .is_none()
     }
 
     /// Record that the field repair fired for this request, for the
@@ -2296,6 +2303,7 @@ mod table_tests {
                     &FailureClass::BadRequest,
                     &rejection_naming(unknown, "Extra inputs are not permitted"),
                     ANTHROPIC_API_KIND,
+                    crate::router::learn_engine::SentEffort::Unknown,
                 )
                 .is_none(),
                 "`{unknown}` is outside the closed table and must resolve to no row",
@@ -2310,6 +2318,7 @@ mod table_tests {
                 &FailureClass::BadRequest,
                 &rejection_naming("thinking.enabled.display", "Extra inputs are not permitted"),
                 ANTHROPIC_API_KIND,
+                crate::router::learn_engine::SentEffort::Unknown,
             )
             .is_some(),
             "control: the grounded path resolves through the same parser",
@@ -2522,6 +2531,7 @@ mod table_tests {
             &FailureClass::BadRequest,
             &captured,
             ANTHROPIC_API_KIND,
+            crate::router::learn_engine::SentEffort::Unknown,
         )
         .expect("the captured display rejection names its row");
 
@@ -2543,7 +2553,8 @@ mod table_tests {
                 crate::router::FieldRepairTable::default(),
                 &FailureClass::BadRequest,
                 &captured,
-                ANTHROPIC_API_KIND
+                ANTHROPIC_API_KIND,
+                crate::router::learn_engine::SentEffort::Unknown
             )
             .is_some(),
             "premise: the captured rejection resolves on anthropic-api",
@@ -2553,7 +2564,8 @@ mod table_tests {
                 crate::router::FieldRepairTable::default(),
                 &FailureClass::BadRequest,
                 &captured,
-                "gemini"
+                "gemini",
+                crate::router::learn_engine::SentEffort::Unknown
             )
             .is_none(),
             "a lane kind with no parser names nothing",
@@ -2577,7 +2589,8 @@ mod table_tests {
                     crate::router::FieldRepairTable::default(),
                     &FailureClass::BadRequest,
                     &unparsed,
-                    ANTHROPIC_API_KIND
+                    ANTHROPIC_API_KIND,
+                    crate::router::learn_engine::SentEffort::Unknown
                 )
                 .is_none(),
                 "an error carrying no parsed envelope names nothing: {unparsed:?}",
@@ -2602,7 +2615,8 @@ mod table_tests {
                 crate::router::FieldRepairTable::default(),
                 &FailureClass::BadRequest,
                 &captured,
-                ANTHROPIC_API_KIND
+                ANTHROPIC_API_KIND,
+                crate::router::learn_engine::SentEffort::Unknown
             )
             .is_none(),
             "an injected path with no row resolves to nothing, whatever the body says",
@@ -2672,6 +2686,7 @@ mod table_tests {
                 &FailureClass::RateLimited,
                 &Error::upstream("p", 429, "{}"),
                 ANTHROPIC_API_KIND,
+                crate::router::learn_engine::SentEffort::Unknown,
             )
             .is_none(),
             "an injected resolution must not lift a class that cannot carry a field rejection",

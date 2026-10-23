@@ -8,8 +8,12 @@ use routectl_core::ParsedErrorBody;
 use routectl_core::capability::SignalTier;
 use routectl_providers::effort::VALID_EFFORT_TOKENS;
 
-use super::super::field_repair::{FieldRepairTable, FieldTransform};
-use super::{Attribution, RejectionKind, is_name, is_name_byte, localize_openai};
+use super::super::field_repair::{FieldRepairTable, FieldSurface, FieldTransform};
+use super::super::learn_engine::SentEffort;
+use super::{
+    Attribution, LocalizedPath, NamedRejection, RejectionKind, RejectionValue, is_name,
+    is_name_byte, localize_openai,
+};
 
 /// The field an effort level travels in on the Messages body.
 const EFFORT_PATH: &str = "output_config.effort";
@@ -149,14 +153,65 @@ pub(super) fn levels_mask(tokens: &[&str]) -> u8 {
 
 const _: () = assert!(VALID_EFFORT_TOKENS.len() <= u8::BITS as usize);
 
+/// Whether `segments` spell the canonical effort field.
+pub(super) fn is_effort_field(segments: &[&str]) -> bool {
+    segments.iter().copied().eq(EFFORT_PATH.split('.'))
+}
+
 /// The [`levels_mask`] of `replacements` when `segments` is the canonical
 /// effort field; `0` for any other field, whatever its list names.
 pub(super) fn effort_field_levels(segments: &[&str], replacements: &[&str]) -> u8 {
-    if segments.iter().copied().eq(EFFORT_PATH.split('.')) {
+    if is_effort_field(segments) {
         levels_mask(replacements)
     } else {
         0
     }
+}
+
+/// A refusal of the effort field, named as the ranked row of the level
+/// `sent`, the one the refused attempt's egress body carried.
+///
+/// Fails closed, naming no row, when the sent level is not a rank member
+/// (unknown, absent, `none` or another token), when the envelope echoes a
+/// refused value other than the sent level, or when the lane's view has no
+/// ranked row for it. A refused field carries no value. A refused value
+/// carries the levels the envelope listed, and names no row when that list
+/// holds the sent level (the envelope contradicts its own refusal) or no
+/// rank member at all.
+pub(super) fn ranked_rejection(
+    table: FieldRepairTable,
+    localized: &LocalizedPath<'_>,
+    sent: SentEffort,
+) -> Option<NamedRejection> {
+    let SentEffort::Rank(rank) = sent else {
+        return None;
+    };
+    if localized
+        .echoed
+        .is_some_and(|echoed| echoed != rank.token())
+    {
+        return None;
+    }
+    let value = match localized.kind {
+        RejectionKind::UnsupportedField => None,
+        RejectionKind::InvalidValue => {
+            let listed = localized.levels;
+            if listed == 0 || listed & rank.bit() != 0 {
+                return None;
+            }
+            Some(RejectionValue::Levels(listed))
+        }
+    };
+    let row = table.lane_rows().find(|row| {
+        matches!(row.transform, FieldTransform::RankedRewrite { .. })
+            && row.surface == FieldSurface::Effort(rank.token())
+    })?;
+    Some(NamedRejection {
+        row,
+        tier: localized.tier,
+        kind: localized.kind,
+        value,
+    })
 }
 
 /// Whether `segments` spell the path of a ranked closed-table row, whose last
