@@ -142,6 +142,7 @@ impl<'a> FieldRepairPlan<'a> {
             fill_clamped,
             handle: None,
             reject_status,
+            mintable: repair.mintable,
             guard,
         });
         self.applied = true;
@@ -245,6 +246,7 @@ impl<'a> FieldRepairPlan<'a> {
             edit: FieldEdit::Drop,
             kind: RejectionKind::UnsupportedField,
             tier: SignalTier::SelfIdentifying,
+            mintable: true,
         };
         self.apply_candidate(0, repair, attempt_req, meta, budget, rejection)
     }

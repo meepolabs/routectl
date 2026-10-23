@@ -80,10 +80,6 @@ pub(super) struct RejectionSite {
     /// The effort level the body that went out sent.
     pub(super) sent_effort: SentEffort,
     /// The thinking shape the body that went out sent beside its effort.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by effort-level resolution of a refusal")
-    )]
     pub(super) thinking: ThinkingShape,
 }
 
@@ -151,6 +147,11 @@ impl RejectionSite {
     /// The effort level the refused attempt sent, unknown with no site.
     pub(super) fn sent_effort_of(site: Option<&Self>) -> SentEffort {
         site.map_or(SentEffort::Unknown, |site| site.sent_effort)
+    }
+
+    /// The thinking shape the refused attempt sent, unknown with no site.
+    pub(super) fn thinking_of(site: Option<&Self>) -> ThinkingShape {
+        site.map_or(ThinkingShape::Unknown, |site| site.thinking)
     }
 
     /// Whether the rejection names a path the body that went out did not
@@ -548,10 +549,12 @@ impl<'a> AttemptLearning<'a> {
     /// that removes nothing charges nothing and every repaired-state flag is
     /// set only on its `Some`. It also selects WHICH admitted row to repair --
     /// the one the rejection names -- and releases every other candidate's
-    /// guard.
+    /// guard. `thinking` is the thinking shape the refused attempt sent.
+    #[allow(clippy::too_many_arguments)]
     fn try_field_repair(
         &mut self,
         named: NamedRejection,
+        thinking: ThinkingShape,
         err: &Error,
         target: &DispatchTarget,
         attempt_req: &mut ChatRequest,
@@ -562,7 +565,7 @@ impl<'a> AttemptLearning<'a> {
             return false;
         };
         if plan
-            .apply_named(named, attempt_req, meta, budget, err)
+            .apply_named(named, thinking, attempt_req, meta, budget, err)
             .is_none()
         {
             return false;

@@ -1,21 +1,26 @@
 //! The effort rows: welded to the effort rank, read and rewritten through
 //! their two carriers, scoped off the kinds with no grounded effort refusal,
-//! and absent while the target clamps the effort itself.
+//! and absent while the target clamps the effort itself; the replacement a
+//! refusal's level list picks, and the thinking shapes that may learn it.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
+use routectl_core::capability::SignalTier;
 use routectl_core::{ChatRequest, ReasoningConfig};
 use routectl_providers::effort::VALID_EFFORT_TOKENS;
 use serde_json::json;
 
 use super::super::class_observe::DispatchSurface;
+use super::super::learn_engine::{EffortRank, SentEffort, ThinkingShape};
 use super::super::probe_test_support::{OkProvider, remote_router_without_negative};
+use super::super::rejection_parser::{NamedRejection, RejectionKind, RejectionValue};
 use super::super::{DispatchTarget, Router};
+use super::effort::{ranked_replacement, ranked_step_mints};
 use super::{
-    FIELD_REPAIRS, FieldRepairTable, FieldSettlementMode, FieldSurface, FieldTransform,
-    TransformClass, grounded_field_feature_keys, present_rows,
+    FIELD_REPAIRS, FieldEdit, FieldRepairTable, FieldSettlementMode, FieldSurface, FieldTransform,
+    TransformClass, grounded_field_feature_keys, parse_rejection, present_rows,
 };
 use crate::field_verdict_value::ValueSlot;
 
@@ -448,4 +453,238 @@ fn an_openai_compat_lane_admits_no_effort_candidate() {
         candidates(&sampled).contains(&"temperature"),
         "control: the lane admits temperature"
     );
+}
+
+/// The rank bitmask of `levels`.
+fn mask(levels: &[&str]) -> u8 {
+    levels
+        .iter()
+        .map(|level| EffortRank::of_token(level).expect("a rank member").bit())
+        .fold(0, |mask, bit| mask | bit)
+}
+
+fn rank(level: &str) -> EffortRank {
+    EffortRank::of_token(level).expect("a rank member")
+}
+
+/// `(name, refused, listed, excluded, picked)`.
+type PickCase = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+    Option<&'static str>,
+);
+
+/// The replacement is the nearest listed level below the refused one, else
+/// the nearest above it, never the refused level or an excluded one, and none
+/// when nothing listed is left.
+///
+/// Mutation checks: prefer the higher branch first in `ranked_replacement`
+/// -> red on "lower over higher"; take the first lower level instead of the
+/// last -> red on "nearest lower"; drop `!excluded` -> red on "excluded".
+#[test]
+fn the_replacement_is_the_nearest_lower_listed_level_else_the_nearest_higher() {
+    let cases: [PickCase; 8] = [
+        (
+            "nearest lower",
+            "xhigh",
+            &["high", "low", "medium"],
+            &[],
+            Some("high"),
+        ),
+        (
+            "lower over higher",
+            "xhigh",
+            &["high", "low", "max", "medium"],
+            &[],
+            Some("high"),
+        ),
+        (
+            "only higher: nearest higher",
+            "minimal",
+            &["high", "low", "medium"],
+            &[],
+            Some("low"),
+        ),
+        (
+            "only higher, a gap",
+            "low",
+            &["max", "xhigh"],
+            &[],
+            Some("xhigh"),
+        ),
+        ("empty list", "max", &[], &[], None),
+        ("only the refused level", "high", &["high"], &[], None),
+        (
+            "excluded levels are skipped",
+            "xhigh",
+            &["high", "medium"],
+            &["high"],
+            Some("medium"),
+        ),
+        (
+            "every listed level excluded",
+            "xhigh",
+            &["high"],
+            &["high"],
+            None,
+        ),
+    ];
+
+    for (name, refused, listed, excluded, expected) in cases {
+        let refused = rank(refused);
+        let excluded = mask(excluded) | refused.bit();
+
+        let picked = ranked_replacement(refused, mask(listed), excluded).map(EffortRank::token);
+
+        assert_eq!(picked, expected, "{name}");
+    }
+}
+
+/// Over every refused level, listed set and excluded set, the pick is a
+/// listed rank member that is neither refused nor excluded, below the refused
+/// level whenever such a member is open, and the nearest one on its side.
+#[test]
+fn every_pick_is_an_open_listed_level_nearest_on_its_side() {
+    let members: Vec<EffortRank> = VALID_EFFORT_TOKENS
+        .iter()
+        .map(|level| rank(level))
+        .collect();
+    let masks = 0..=u8::MAX >> (u8::BITS as usize - VALID_EFFORT_TOKENS.len());
+    for &refused in &members {
+        for listed in masks.clone() {
+            for excluded in masks.clone() {
+                let open = |level: EffortRank| {
+                    level != refused && listed & level.bit() != 0 && excluded & level.bit() == 0
+                };
+                let at = |level: EffortRank| members.iter().position(|m| *m == level);
+                let lower = members
+                    .iter()
+                    .copied()
+                    .rev()
+                    .find(|&level| open(level) && at(level) < at(refused));
+                let higher = members
+                    .iter()
+                    .copied()
+                    .find(|&level| open(level) && at(level) > at(refused));
+
+                let picked = ranked_replacement(refused, listed, excluded);
+
+                assert_eq!(
+                    picked,
+                    lower.or(higher),
+                    "refused {} listed {listed:#08b} excluded {excluded:#08b}",
+                    refused.token(),
+                );
+                assert!(picked.is_none_or(open), "an open listed level");
+            }
+        }
+    }
+}
+
+/// Only an adaptive or enabled thinking beside the effort, or a body with no
+/// thinking object at all, lets a ranked repair be learned.
+///
+/// Mutation check: make `Disabled` mintable in `ranked_step_mints` -> red.
+#[test]
+fn a_ranked_repair_is_learnable_only_beside_a_shape_it_cannot_depend_on() {
+    let cases = [
+        (ThinkingShape::Adaptive, true),
+        (ThinkingShape::Enabled, true),
+        (ThinkingShape::NoThinkingObject, true),
+        (ThinkingShape::Disabled, false),
+        (ThinkingShape::BetweenTools, false),
+        (ThinkingShape::Absent, false),
+        (ThinkingShape::Unknown, false),
+    ];
+
+    for (shape, mints) in cases {
+        assert_eq!(ranked_step_mints(shape), mints, "{shape:?}");
+    }
+}
+
+/// The ranked row an effort refusal named, with the levels it listed.
+fn ranked_named(level: &str, value: Option<RejectionValue>) -> NamedRejection {
+    let row = FieldRepairTable::grounded_only()
+        .row_for_path(&format!("{EFFORT_FIELD}.{level}"))
+        .expect("a ranked row");
+    NamedRejection {
+        row,
+        tier: SignalTier::SelfIdentifying,
+        kind: if value.is_some() {
+            RejectionKind::InvalidValue
+        } else {
+            RejectionKind::UnsupportedField
+        },
+        value,
+    }
+}
+
+/// A ranked row rewrites the refused level to the picked one; a refused
+/// effort field, which lists no level, makes no edit.
+#[test]
+fn a_ranked_row_rewrites_to_the_picked_level_and_a_refused_field_makes_no_edit() {
+    let listed = ranked_named(
+        "xhigh",
+        Some(RejectionValue::Levels(mask(&["high", "low"]))),
+    );
+    let higher = ranked_named("minimal", Some(RejectionValue::Levels(mask(&["medium"]))));
+    let field = ranked_named("xhigh", None);
+
+    assert_eq!(
+        FieldEdit::for_rejection(listed.row.transform, &listed),
+        Some(FieldEdit::Rewrite("high")),
+    );
+    assert_eq!(
+        FieldEdit::for_rejection(higher.row.transform, &higher),
+        Some(FieldEdit::Rewrite("medium")),
+    );
+    assert_eq!(FieldEdit::for_rejection(field.row.transform, &field), None);
+}
+
+/// A refusal of the effort FIELD on each lane that sends one resolves to the
+/// sent level's row and makes no edit, so nothing is repaired or learned: the
+/// Bedrock bare `Extra inputs`, and a structured Responses
+/// `unsupported_parameter` naming `reasoning.effort`.
+#[test]
+fn a_refused_effort_field_resolves_to_its_row_and_makes_no_edit() {
+    let cases = [
+        (
+            "bedrock bare extra inputs",
+            "bedrock",
+            json!({"message": "output_config.effort: Extra inputs are not permitted"}),
+        ),
+        (
+            "responses unsupported parameter",
+            "openai-responses",
+            json!({"error": {
+                "message": "Unsupported parameter: 'reasoning.effort' is not supported with this model.",
+                "type": "invalid_request_error",
+                "param": "reasoning.effort",
+                "code": "unsupported_parameter",
+            }}),
+        ),
+    ];
+
+    for (name, kind, body) in cases {
+        let body = routectl_core::UpstreamBody::new(body.to_string());
+        let named = parse_rejection(
+            FieldRepairTable::grounded_only().for_kind(kind),
+            kind,
+            400,
+            body.parsed(),
+            SentEffort::Rank(rank("high")),
+        )
+        .unwrap_or_else(|| panic!("{name}: premise: the refusal names the sent level's row"));
+
+        assert_eq!(named.row.path, "output_config.effort.high", "{name}");
+        assert_eq!(named.kind, RejectionKind::UnsupportedField, "{name}");
+        assert_eq!(named.value, None, "{name}");
+        assert_eq!(
+            FieldEdit::for_rejection(named.row.transform, &named),
+            None,
+            "{name}"
+        );
+    }
 }

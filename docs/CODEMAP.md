@@ -2939,7 +2939,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   carrier-preserving rewrite (`write_effort`), plus `RowScope`, the per-kind
   view `FieldRepairTable::for_kind` applies (ranked effort rows off
   openai-compat) to `present_rows`, pre-flight and rejection resolution
-  (tests: `src/router/field_repair_effort_tests.rs`, the rank weld included)
+  (tests: `src/router/field_repair_effort_tests.rs`, the rank weld included),
+  and the ranked repair: `ranked_replacement` (nearest lower listed level, else
+  nearest higher, never a sent one), `ranked_edit_value` (the level
+  `FieldEdit::for_rejection` writes for a ranked row) and `ranked_step_mints`
+  (the thinking shapes a ranked step may be learned beside); router rows in
+  `src/router/field_repair_chain_effort_tests.rs`, an `include!`d fragment of
+  `field_repair_chain_tests.rs`
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,

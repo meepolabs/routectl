@@ -372,6 +372,7 @@ fn two_pending_steps_on_one_field_are_representable() {
             fill_clamped: false,
             handle: None,
             reject_status: 400,
+            mintable: true,
             guard: None,
         });
     }
@@ -411,6 +412,7 @@ fn thinking_step(path: &str) -> RepairStep<'static> {
         fill_clamped: false,
         handle: None,
         reject_status: 400,
+        mintable: true,
         guard: None,
     }
 }

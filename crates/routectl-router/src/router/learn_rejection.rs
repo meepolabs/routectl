@@ -9,8 +9,9 @@ use routectl_core::wire_check::EditSite;
 
 use super::super::DispatchMeta;
 use super::super::dispatch::replay_rejection_body_free;
-use super::super::field_repair::{rejected_field, rerepairs_same_field};
+use super::super::field_repair::{is_ranked, rejected_field, rerepairs_same_field};
 use super::super::learn_revert::{MatchedEdit, answer_declared_edit};
+use super::super::rejection_parser::NamedRejection;
 use super::super::repair_budget::RepairBudget;
 use super::learn_beta_repair::EngineSink;
 use super::{
@@ -38,9 +39,12 @@ impl AttemptLearning<'_> {
     /// naming a path one or more declared routectl edits put on the wire is
     /// answered by undoing that edit, or not at all, and no proposer reads
     /// it: such a rejection says nothing about what the upstream accepts.
-    /// The one exception is a single required field routectl wrote with its
-    /// own value: when that edit is not undone, the proposers read the
-    /// rejection as if no edit explained it.
+    /// The exceptions are one edit, not undone, whose value a learned repair
+    /// may replace (see [`Self::answer_declared`]): a required field routectl
+    /// wrote with its own value, an effort the egress injected that the
+    /// rejection refuses as a ranked level, and a field repair whose row
+    /// re-repairs its field. The proposers read those rejections as if no
+    /// edit explained them.
     ///
     /// On `Retry` after the replay repair the running error is the
     /// rejection's body-free form, so a re-gate refusal cannot surface the
@@ -96,8 +100,9 @@ impl AttemptLearning<'_> {
     /// The decision for a rejection laid to declared routectl edits: a retry
     /// when the one edit was undone, otherwise `Proceed` with no proposer
     /// consulted. `None` when no declared edit explains the rejection, or
-    /// when the one edit not undone is a required-field default or a field
-    /// repair whose row re-repairs its field, which the proposers then answer.
+    /// when the one edit not undone is a required-field default, an injected
+    /// effort the rejection refuses as a ranked level, or a field repair whose
+    /// row re-repairs its field, which the proposers then answer.
     fn answer_declared(
         &mut self,
         rejection: &Rejection<'_>,
@@ -115,6 +120,7 @@ impl AttemptLearning<'_> {
         )?;
         if !reverted {
             if RejectionSite::unreverted_reaches_proposers(rejection.site.as_ref())
+                || self.ranks_injected_effort(rejection)
                 || self.rerepairs_declared_field(rejection)
             {
                 return None;
@@ -127,24 +133,48 @@ impl AttemptLearning<'_> {
         })
     }
 
+    /// Whether the one declared edit a rejection names is the egress's own
+    /// effort injection, and the rejection refuses that effort as a ranked
+    /// level: the upstream refused the level the request emits, which a ranked
+    /// repair answers whether the egress or the client wrote the field. The
+    /// egress declares the whole `output_config` when the client sent none, so
+    /// only a client `output_config` without an effort reaches this.
+    fn ranks_injected_effort(&self, rejection: &Rejection<'_>) -> bool {
+        Self::declared_edit_is(rejection, EditSite::EffortInjection)
+            && self
+                .named_row(rejection)
+                .is_some_and(|named| is_ranked(named.row))
+    }
+
     /// Whether the one declared edit a rejection names is an earlier field
     /// repair, and the row the rejection names re-repairs its field: the
     /// upstream refused the value that repair wrote, which a further repair
     /// of the same field may answer.
     fn rerepairs_declared_field(&self, rejection: &Rejection<'_>) -> bool {
-        let is_field_repair = matches!(
-            rejection.site.as_ref().map(|site| &site.matched_edit),
-            Some(MatchedEdit::One(edit)) if edit.site() == EditSite::FieldRepair
-        );
-        is_field_repair
-            && rejected_field(
-                self.router.field_repair_table(),
-                rejection.native_class,
-                rejection.err,
-                rejection.target.provider_kind.unwrap_or(""),
-                RejectionSite::sent_effort_of(rejection.site.as_ref()),
-            )
-            .is_some_and(|named| rerepairs_same_field(named.row))
+        Self::declared_edit_is(rejection, EditSite::FieldRepair)
+            && self
+                .named_row(rejection)
+                .is_some_and(|named| rerepairs_same_field(named.row))
+    }
+
+    /// Whether the one declared edit a rejection names was made at `site`.
+    fn declared_edit_is(rejection: &Rejection<'_>, site: EditSite) -> bool {
+        matches!(
+            rejection.site.as_ref().map(|s| &s.matched_edit),
+            Some(MatchedEdit::One(edit)) if edit.site() == site
+        )
+    }
+
+    /// The closed-table row a rejection names, as the field-row proposer
+    /// would resolve it.
+    fn named_row(&self, rejection: &Rejection<'_>) -> Option<NamedRejection> {
+        rejected_field(
+            self.router.field_repair_table(),
+            rejection.native_class,
+            rejection.err,
+            rejection.target.provider_kind.unwrap_or(""),
+            RejectionSite::sent_effort_of(rejection.site.as_ref()),
+        )
     }
 
     /// Run [`arbitrate`] over the proposers and turn its verdict into the
@@ -163,6 +193,7 @@ impl AttemptLearning<'_> {
             .as_ref()
             .filter(|_| !self.count_surface)
             .map(|site| site.pending);
+        let thinking = RejectionSite::thinking_of(rejection.site.as_ref());
         let input = RejectionInput {
             err,
             class,
@@ -183,6 +214,7 @@ impl AttemptLearning<'_> {
             meta,
             budget,
             pending_rejection,
+            thinking,
         };
         match arbitrate(&input, &mut sink) {
             Arbitration::ReplayStrip => FailureDecision::Retry {

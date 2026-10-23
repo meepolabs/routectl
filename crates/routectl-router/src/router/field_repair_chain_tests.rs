@@ -7,13 +7,15 @@
 // An `include!`d FRAGMENT of `field_repair_tests.rs`, sharing the thinking
 // seat helpers of `field_repair_thinking_type_tests.rs` and
 // `field_repair_thinking_disabled_tests.rs`; its own seat, rejections and
-// requests are in `field_repair_chain_support_tests.rs`.
+// requests are in `field_repair_chain_support_tests.rs`, and its ranked
+// effort rows in `field_repair_chain_effort_tests.rs`.
 
 mod repair_chain {
     use super::*;
 
     include!("field_repair_chain_support_tests.rs");
     include!("field_repair_chain_exit_tests.rs");
+    include!("field_repair_chain_effort_tests.rs");
 
     // -----------------------------------------------------------------------
     // Two keys, one request, every walk
@@ -409,50 +411,64 @@ mod repair_chain {
         )
     }
 
+    /// Refuse disabled thinking, then an `xhigh` effort with the captured
+    /// level list, else serve.
+    fn disabled_then_xhigh(body: &serde_json::Value, _: usize) -> Option<Error> {
+        if thinking_type(body) == Some("disabled") {
+            return Some(anthropic_disabled_rejection());
+        }
+        (body["output_config"]["effort"] == json!("xhigh")).then(effort_level_refused)
+    }
+
     /// A `Supported levels` refusal names the effort field, which the
     /// pending thinking rewrite never touched and the retried body carried:
-    /// the upstream read past the rewritten field, so that step commits,
-    /// while the effort refusal itself, with no row, reaches the client.
+    /// the upstream read past the rewritten field, so that step commits.
+    /// The refusal then repairs the effort the client sent to the nearest
+    /// lower level it lists, beside the adaptive thinking the rewrite sent,
+    /// and the served retry learns that level too.
     ///
     /// Mutation check: break the `Supported levels` template -> red (nothing
     /// commits).
     #[tokio::test]
-    async fn a_supported_levels_refusal_after_a_thinking_rewrite_commits_the_rewrite() {
-        let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
-            disabled_then(body, effort_level_refused)
-        });
+    async fn a_supported_levels_refusal_after_a_thinking_rewrite_commits_both_repairs() {
+        let seat = ChainSeat::new(Egress::Anthropic, disabled_then_xhigh);
         let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
 
         let dispatched = router
             .complete_with_options(disabled_req(Some("xhigh")), RouterOptions::new())
             .await;
 
+        assert!(
+            dispatched.result.is_ok(),
+            "{:?}",
+            dispatched.result.as_ref().err()
+        );
         let bodies = seat.bodies();
-        assert_eq!(bodies.len(), 2, "refused, rewritten and refused again");
+        assert_eq!(bodies.len(), 3, "disabled refused, xhigh refused, served");
         assert_eq!(thinking_type(&bodies[1]), Some("adaptive"), "premise");
         assert_eq!(
             bodies[1]["output_config"]["effort"],
             json!("xhigh"),
             "premise: the retried body carried the named effort field",
         );
-        let err = dispatched.result.as_ref().expect_err("the refusal");
-        assert_eq!(
-            err.parsed_body().and_then(|p| p.error_message()),
-            effort_level_refused()
-                .parsed_body()
-                .and_then(|p| p.error_message()),
-            "the latest refusal reaches the client",
-        );
+        assert_eq!(thinking_type(&bodies[2]), Some("adaptive"));
+        assert_eq!(bodies[2]["output_config"]["effort"], json!("high"));
         assert_eq!(
             verdicts(&dispatched.meta),
-            vec![(
-                thinking_disabled_key(),
-                Some(VerdictValue::Shape("thinking.type.adaptive")),
-            )],
+            vec![
+                (
+                    thinking_disabled_key(),
+                    Some(VerdictValue::Shape("thinking.type.adaptive")),
+                ),
+                (key(XHIGH_PATH), Some(VerdictValue::Shape("high"))),
+            ],
         );
         assert_eq!(
             succeeded(&dispatched.meta),
-            vec![(THINKING_DISABLED_PATH, true, true)],
+            vec![
+                (THINKING_DISABLED_PATH, true, true),
+                (XHIGH_PATH, true, true)
+            ],
         );
     }
 

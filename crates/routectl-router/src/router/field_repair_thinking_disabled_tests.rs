@@ -632,4 +632,82 @@ mod bedrock_thinking_off {
             );
         }
     }
+    /// The committed Converse refusal of `xhigh`, inside the model-errors
+    /// wrapper as captured.
+    fn converse_xhigh_refused() -> ResponseTemplate {
+        ResponseTemplate::new(400)
+            .insert_header("x-amzn-ErrorType", ERROR_TYPE_HEADER)
+            .set_body_raw(
+                disabled_fixture_body(include_str!(
+                    "../../tests/fixtures/rejections/bedrock/effort-xhigh-unsupported-converse-sonnet-4-6.json"
+                )),
+                "application/json",
+            )
+    }
+
+    /// On Converse the effort travels in the field bag. A pending
+    /// between_tools rewrite is proven by the `Supported levels` refusal of
+    /// the bag's `xhigh`, which names another field, so it commits; the
+    /// refused level is then retried at `high`, and with between_tools
+    /// thinking beside it that repair learns nothing.
+    ///
+    /// Mutation check: make `BetweenTools` mintable in `ranked_step_mints` ->
+    /// red (an effort verdict is learned).
+    #[tokio::test]
+    async fn a_converse_level_refusal_after_a_thinking_rewrite_commits_the_rewrite_only() {
+        let lane = Lane::start(BedrockApiShape::Converse, Retry::Serve).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"additionalModelRequestFields": {
+                "thinking": {"type": "between_tools"},
+                "output_config": {"effort": "xhigh"},
+            }})))
+            .respond_with(converse_xhigh_refused())
+            .with_priority(1)
+            .mount(&lane.server)
+            .await;
+
+        let dispatched = lane
+            .router
+            .complete_with_options(disabled_req(Some("xhigh")), RouterOptions::new())
+            .await;
+
+        assert!(
+            dispatched.result.is_ok(),
+            "{:?}",
+            dispatched.result.as_ref().err()
+        );
+        let sent = lane.sent().await;
+        assert_eq!(
+            sent,
+            vec![
+                (json!({"type": "disabled"}), json!("xhigh")),
+                (json!({"type": "between_tools"}), json!("xhigh")),
+                (json!({"type": "between_tools"}), json!("high")),
+            ],
+        );
+        assert_eq!(
+            dispatched
+                .meta
+                .learned_capabilities
+                .iter()
+                .map(|event| (event.capability_key.clone(), event.value))
+                .collect::<Vec<_>>(),
+            vec![(
+                thinking_disabled_key(),
+                Some(crate::VerdictValue::Shape("thinking.type.between_tools")),
+            )],
+        );
+        assert_eq!(
+            dispatched
+                .meta
+                .field_repairs
+                .iter()
+                .map(|record| (record.field_path, record.repair_succeeded, record.learned))
+                .collect::<Vec<_>>(),
+            vec![
+                (THINKING_DISABLED_PATH, true, true),
+                ("output_config.effort.xhigh", true, false),
+            ],
+        );
+    }
 }

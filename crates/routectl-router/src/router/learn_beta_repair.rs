@@ -13,7 +13,7 @@ use routectl_core::{ChatRequest, Error, sanitize_for_log};
 use super::super::rejection_parser::NamedRejection;
 use super::super::repair_budget::RepairBudget;
 use super::super::{DispatchMeta, DispatchTarget};
-use super::{AttemptLearning, RepairSink};
+use super::{AttemptLearning, RepairSink, ThinkingShape};
 
 /// The repair effects against one live attempt: the target's learner state
 /// plus the request-scoped budget and the attempt body it may edit.
@@ -27,6 +27,8 @@ pub(super) struct EngineSink<'s, 'a> {
     /// The rejection's position among the request's pending wire
     /// rejections; `None` when the walk records none for it.
     pub(super) pending_rejection: Option<usize>,
+    /// The thinking shape the refused attempt's egress body sent.
+    pub(super) thinking: ThinkingShape,
 }
 
 impl RepairSink for EngineSink<'_, '_> {
@@ -43,6 +45,7 @@ impl RepairSink for EngineSink<'_, '_> {
     fn repair_field(&mut self, named: NamedRejection) -> bool {
         self.learning.try_field_repair(
             named,
+            self.thinking,
             self.err,
             self.target,
             self.attempt_req,

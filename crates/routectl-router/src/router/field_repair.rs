@@ -1594,6 +1594,7 @@ use effort::RowScope;
 #[path = "field_repair_step.rs"]
 mod field_repair_step;
 
+pub(super) use effort::is_ranked;
 #[cfg(test)]
 use field_repair_step::FieldEdit;
 #[cfg(test)]

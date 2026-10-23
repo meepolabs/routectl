@@ -34,7 +34,8 @@ use super::learn_revert::{
     EditAttribution, MatchedEdit, SentSlot, WireRevert, attributable, revert_outcome,
 };
 use super::rejection_parser::{
-    CONVERSE_FIELD_BAG, REJECTION_STATUSES, RawPath, RejectedWirePath, rejected_wire_path,
+    CONVERSE_FIELD_BAG, FieldIdentity, REJECTION_STATUSES, RawPath, RejectedWirePath,
+    rejected_wire_path,
 };
 use super::wire_check::{SampleCharge, attempt_lane, compare_request, lend_request_record};
 use super::{DispatchMeta, DispatchTarget, FieldRepair, Router};
@@ -515,7 +516,9 @@ fn walk<'v>(body: &'v Value, path: &[String], both: TagOrKey) -> Walk<'v> {
 const UNION_TAG: &str = "type";
 
 /// What field repair made of `pending`: the first repair on the same target
-/// for the same field recorded at or after the rejection. A repair whose
+/// for the same field recorded at or after the rejection, compared by field
+/// identity, so the repair of a ranked row (`output_config.effort.<level>`)
+/// answers a refusal naming the effort field. A repair whose
 /// retry did not succeed left the rejection unrepaired. Whether a succeeded
 /// repair was lossy is [`repair_action_is_lossy`], the same rule the lossy
 /// repair counter reads.
@@ -526,13 +529,14 @@ fn field_repair_outcome(
     let Some(field) = pending.field.as_ref() else {
         return FieldRepairOutcome::Unrepaired;
     };
+    let identity = FieldIdentity::folded(field.segments());
     let repair = repairs
         .get(pending.repairs_before..)
         .unwrap_or_default()
         .iter()
         .find(|repair| {
             repair.state_key == pending.state_key
-                && repair.field_path.split('.').eq(field.segments())
+                && FieldIdentity::folded(repair.field_path.split('.')) == identity
         });
     match repair {
         Some(repair) if repair.repair_succeeded => {

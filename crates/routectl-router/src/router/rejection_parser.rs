@@ -299,7 +299,7 @@ pub(super) fn rejected_wire_path(
 pub(super) struct FieldIdentity(Vec<String>);
 
 impl FieldIdentity {
-    fn folded<'s>(segments: impl IntoIterator<Item = &'s str>) -> Self {
+    pub(super) fn folded<'s>(segments: impl IntoIterator<Item = &'s str>) -> Self {
         let mut segments: Vec<String> = segments.into_iter().map(str::to_owned).collect();
         let thinking_type =
             segments.len() == 3 && segments[0] == "thinking" && segments[1] == "type";

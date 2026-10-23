@@ -40,6 +40,7 @@ use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey, FieldVerdictRegist
 use crate::field_verdict_value::VerdictValue;
 
 use super::super::field_verdict_observability::ChainStepTally;
+use super::super::learn_engine::ThinkingShape;
 use super::super::rejection_parser::{
     FieldIdentity, NamedRejection, RejectionKind, RejectionValue, localized_field,
 };
@@ -192,6 +193,10 @@ struct RepairStep<'a> {
     handle: Option<FieldRepairHandle>,
     /// The status of the rejection this step answered.
     reject_status: u16,
+    /// Whether the refusal this step answered may be learned. False for a
+    /// ranked rewrite whose refusal may have depended on the thinking shape
+    /// beside the effort; true for every other row.
+    mintable: bool,
     guard: Option<FieldRepairGuard<'a>>,
 }
 
@@ -214,12 +219,9 @@ pub(super) enum FieldEdit {
 impl FieldEdit {
     /// The edit `transform` makes for `named`, or `None` when it makes none:
     /// a rewrite whose rejection named no shape, a ceiling whose rejection
-    /// named no ceiling, and a ranked rewrite, whose replacement level no
-    /// rejection names yet.
-    pub(super) const fn for_rejection(
-        transform: FieldTransform,
-        named: &NamedRejection,
-    ) -> Option<Self> {
+    /// named no ceiling, and a ranked rewrite whose rejection listed no level
+    /// to replace the refused one with (a refused field included).
+    pub(super) fn for_rejection(transform: FieldTransform, named: &NamedRejection) -> Option<Self> {
         match (transform, named.value) {
             (FieldTransform::Drop, _) => Some(Self::Drop),
             (FieldTransform::Rewrite { .. }, Some(RejectionValue::Shape(value))) => {
@@ -227,6 +229,9 @@ impl FieldEdit {
             }
             (FieldTransform::Ceiling, Some(RejectionValue::Ceiling(ceiling))) => {
                 Some(Self::Ceiling(ceiling))
+            }
+            (FieldTransform::RankedRewrite { .. }, Some(RejectionValue::Levels(listed))) => {
+                super::effort::ranked_edit_value(named.row, listed).map(Self::Rewrite)
             }
             (
                 FieldTransform::Rewrite { .. },
@@ -236,7 +241,10 @@ impl FieldEdit {
                 FieldTransform::Ceiling,
                 Some(RejectionValue::Shape(_) | RejectionValue::Levels(_)) | None,
             )
-            | (FieldTransform::RankedRewrite { .. }, _) => None,
+            | (
+                FieldTransform::RankedRewrite { .. },
+                Some(RejectionValue::Shape(_) | RejectionValue::Ceiling(_)) | None,
+            ) => None,
         }
     }
 
@@ -265,12 +273,14 @@ impl FieldEdit {
     }
 }
 
-/// The edit a repair makes and the attribution of the rejection behind it.
+/// The edit a repair makes, the attribution of the rejection behind it, and
+/// whether its success may be learned at all.
 #[derive(Clone, Copy)]
 struct Repair {
     edit: FieldEdit,
     kind: RejectionKind,
     tier: SignalTier,
+    mintable: bool,
 }
 
 impl RepairStep<'_> {
@@ -292,9 +302,11 @@ impl RepairStep<'_> {
         }
     }
 
-    /// Whether this repair may commit a verdict once its retry succeeds.
+    /// Whether this repair may commit a verdict once its retry succeeds or
+    /// the upstream moves on to another field.
     fn repair_teaches(&self) -> bool {
-        self.written_value().is_some() || self.kind == RejectionKind::UnsupportedField
+        self.mintable
+            && (self.written_value().is_some() || self.kind == RejectionKind::UnsupportedField)
     }
 
     /// Persist this step's verdict, or release its guard when the repair
@@ -470,11 +482,20 @@ impl<'a> FieldRepairPlan<'a> {
             provider_kind,
             super::super::learn_engine::SentEffort::Unknown,
         )?;
-        self.apply_named(named, attempt_req, meta, budget, rejection)
+        self.apply_named(
+            named,
+            ThinkingShape::Unknown,
+            attempt_req,
+            meta,
+            budget,
+            rejection,
+        )
     }
 
     /// Repair for a rejection already resolved to its closed-table row: the
-    /// admitted candidate whose SURFACE that row names.
+    /// admitted candidate whose SURFACE that row names. `thinking` is the
+    /// thinking shape the refused attempt's egress body sent, which decides
+    /// whether a ranked repair may be learned.
     ///
     /// A row whose field this target already committed is refused; one still
     /// pending is refused unless [`rerepairs_same_field`] holds for the row,
@@ -483,6 +504,7 @@ impl<'a> FieldRepairPlan<'a> {
     pub(in crate::router) fn apply_named(
         &mut self,
         named: NamedRejection,
+        thinking: ThinkingShape,
         attempt_req: &mut ChatRequest,
         meta: &mut DispatchMeta,
         budget: &mut RepairBudget,
@@ -499,10 +521,12 @@ impl<'a> FieldRepairPlan<'a> {
             .iter()
             .position(|candidate| candidate.row.surface == named.row.surface)?;
         let edit = FieldEdit::for_rejection(self.candidates[idx].row.transform, &named)?;
+        let row = self.candidates[idx].row;
         let repair = Repair {
             edit,
             kind: named.kind,
             tier: named.tier,
+            mintable: !super::effort::is_ranked(&row) || super::effort::ranked_step_mints(thinking),
         };
         self.apply_candidate(idx, repair, attempt_req, meta, budget, rejection)
     }
