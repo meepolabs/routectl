@@ -2947,7 +2947,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `FieldEdit::for_rejection` writes for a ranked row) and `ranked_step_mints`
   (the thinking shapes a ranked step may be learned beside); router rows in
   `src/router/field_repair_chain_effort_tests.rs`, an `include!`d fragment of
-  `field_repair_chain_tests.rs`; openai-responses admits only the ranked rows
+  `field_repair_chain_tests.rs`, and in
+  `src/router/field_repair_chain_effort_claim_tests.rs` (a replacement level a
+  sibling claims, a refused pre-flight level, a refusal matching both the
+  effort injection and the repair), another fragment of it; openai-responses admits only the ranked rows
   (`RowScope::RankedOnly`), its router rows (codex `minimal` -> `low` on both
   auth lanes, the pre-content stream 400, the inert status-0 text) in
   `src/router/field_repair_chain_responses_tests.rs`, an `include!`d fragment

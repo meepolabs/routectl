@@ -35,22 +35,38 @@ pub(super) enum MatchedEdit {
     None,
     /// Exactly one declared edit explains it.
     One(DeclaredEdit),
-    /// Several different declared edits explain it, so none is undone.
-    Conflict,
+    /// Several different declared edits explain it, so none is undone. Holds
+    /// the sites that made them, each once.
+    Conflict(Vec<EditSite>),
 }
 
 impl MatchedEdit {
     /// The declared edits among `edits` matching `path`. The same edit
     /// declared twice is one edit.
     pub(super) fn among(edits: &[DeclaredEdit], path: &WirePath) -> Self {
-        let mut matching = edits.iter().filter(|edit| edit.matches(path));
-        let Some(first) = matching.next() else {
+        let matching: Vec<&DeclaredEdit> = edits.iter().filter(|edit| edit.matches(path)).collect();
+        let Some(first) = matching.first() else {
             return Self::None;
         };
-        if matching.all(|other| other == first) {
-            Self::One(first.clone())
-        } else {
-            Self::Conflict
+        if matching.iter().all(|other| other == first) {
+            return Self::One((*first).clone());
+        }
+        let mut sites: Vec<EditSite> = Vec::new();
+        for edit in matching {
+            if !sites.contains(&edit.site()) {
+                sites.push(edit.site());
+            }
+        }
+        Self::Conflict(sites)
+    }
+
+    /// Whether at least one declared edit explains the path and every one
+    /// was made at a site in `sites`.
+    pub(super) fn made_only_at(&self, sites: &[EditSite]) -> bool {
+        match self {
+            Self::None => false,
+            Self::One(edit) => sites.contains(&edit.site()),
+            Self::Conflict(matched) => matched.iter().all(|site| sites.contains(site)),
         }
     }
 }
@@ -87,7 +103,7 @@ impl EditAttribution {
     pub(super) const fn of(matched: &MatchedEdit, provenance: RejectionProvenance) -> Option<Self> {
         match matched {
             MatchedEdit::One(edit) => Some(Self::Declared(edit.site())),
-            MatchedEdit::Conflict => Some(Self::Conflict),
+            MatchedEdit::Conflict(_) => Some(Self::Conflict),
             MatchedEdit::None => match provenance {
                 RejectionProvenance::RoutectlAdded => Some(Self::Undeclared),
                 _ => None,
@@ -452,7 +468,7 @@ pub(super) fn answer_declared_edit(
     let site = site?;
     match &site.matched_edit {
         MatchedEdit::None => None,
-        MatchedEdit::Conflict => Some(false),
+        MatchedEdit::Conflict(_) => Some(false),
         MatchedEdit::One(edit) => {
             Some(revert.try_apply(edit, site, client_req, attempt_req, meta, budget))
         }

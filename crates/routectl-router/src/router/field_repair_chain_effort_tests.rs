@@ -616,7 +616,7 @@ fn injected_effort_req(output_config: Option<serde_json::Value>) -> ChatRequest 
 /// injected `low` is repaired like a client's effort in both shapes, and in
 /// both the pending ceiling step it proved commits first.
 ///
-/// Mutation check: drop `ranks_injected_effort` from `answer_declared` -> red
+/// Mutation check: drop `ranks_declared_effort` from `answer_declared` -> red
 /// on `client output_config` (the declared injection answers the refusal
 /// with `Proceed`, so neither the ceiling nor the effort commits); `no client
 /// output_config` stays green, its declaration matching nothing.

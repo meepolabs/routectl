@@ -14,6 +14,7 @@ use crate::field_verdict::FieldRepairGuard;
 
 use super::super::super::DispatchMeta;
 use super::super::super::edit_declare::declare_field_edit;
+use super::super::super::rejection_parser::FieldIdentity;
 use super::super::super::repair_budget::RepairBudget;
 use super::super::FieldSurface;
 use super::{FieldEdit, FieldRepairPlan, Repair, RepairStep};
@@ -32,6 +33,11 @@ pub(super) enum Claim<'a> {
     /// A fresh claim for a row an earlier step released, or one admitted
     /// after the plan's admission.
     Reclaimed(FieldRepairGuard<'a>),
+    /// No claim: a ranked replacement level whose claim a sibling request
+    /// holds, or on which a verdict acts. The refusal fully determines the
+    /// edit, so the step still repairs the attempt, but it holds no guard,
+    /// so it commits nothing and releases no slot it never took.
+    Unheld,
 }
 
 /// A candidate whose edit has been applied to the request, and what its step
@@ -48,9 +54,11 @@ pub(super) struct MutatedCandidate<'a> {
 impl<'a> FieldRepairPlan<'a> {
     /// The guard a step on candidate `idx` settles through, read before the
     /// mutation. A row the first repair released, or one admitted after the
-    /// plan's admission, is claimed through the admission's own inputs;
-    /// `None` when a sibling request holds the row's claim, or a verdict now
-    /// acts on it, so the rejection stays terminal.
+    /// plan's admission, is claimed through the admission's own inputs.
+    /// When a sibling request holds the row's claim, or a verdict now acts on
+    /// it, a ranked replacement of a level a pending step on the same field
+    /// wrote is [`Claim::Unheld`]; every other such row is `None`, so the
+    /// rejection stays terminal.
     pub(super) fn claim(&self, idx: usize) -> Option<Claim<'a>> {
         let candidate = &self.candidates[idx];
         if candidate.guard.is_some() {
@@ -68,6 +76,19 @@ impl<'a> FieldRepairPlan<'a> {
                 Instant::now(),
             )
             .map(Claim::Reclaimed)
+            .or_else(|| self.replaces_pending_level(idx).then_some(Claim::Unheld))
+    }
+
+    /// Whether candidate `idx` is a ranked row whose field a pending step
+    /// already repaired: its level is a replacement this request wrote.
+    fn replaces_pending_level(&self, idx: usize) -> bool {
+        let row = &self.candidates[idx].row;
+        let identity = FieldIdentity::of_row(row);
+        super::super::effort::is_ranked(row)
+            && self
+                .pending
+                .iter()
+                .any(|step| FieldIdentity::of_row(&step.row) == identity)
     }
 
     /// Install the step for a candidate whose edit is already in
@@ -95,6 +116,7 @@ impl<'a> FieldRepairPlan<'a> {
             fill_clamped,
         } = mutated;
         let row = self.candidates[idx].row;
+        let mintable = repair.mintable && !matches!(claim, Claim::Unheld);
         // Charged unconditionally: `check_or_mark_refusal` held before the
         // mutation, which is what makes a refusal here impossible, so the
         // invariant is asserted rather than branched on.
@@ -119,7 +141,7 @@ impl<'a> FieldRepairPlan<'a> {
             fill_clamped,
             handle: None,
             reject_status,
-            mintable: repair.mintable,
+            mintable,
             guard,
         });
         self.applied = true;
@@ -157,6 +179,7 @@ impl<'a> FieldRepairPlan<'a> {
         let guard = match claim {
             Claim::Reclaimed(guard) => Some(guard),
             Claim::Kept => self.candidates[idx].guard.take(),
+            Claim::Unheld => None,
         };
         for (other, candidate) in self.candidates.iter_mut().enumerate() {
             if other != idx {

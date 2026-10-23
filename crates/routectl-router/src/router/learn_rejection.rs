@@ -9,8 +9,8 @@ use routectl_core::wire_check::EditSite;
 
 use super::super::DispatchMeta;
 use super::super::dispatch::replay_rejection_body_free;
-use super::super::field_repair::{is_ranked, rejected_field, rerepairs_same_field};
-use super::super::learn_revert::{MatchedEdit, answer_declared_edit};
+use super::super::field_repair::{is_ranked, rejected_field};
+use super::super::learn_revert::answer_declared_edit;
 use super::super::rejection_parser::NamedRejection;
 use super::super::repair_budget::RepairBudget;
 use super::learn_beta_repair::EngineSink;
@@ -18,6 +18,14 @@ use super::{
     Arbitration, AttemptLearning, FailureDecision, Rejection, RejectionInput, RejectionSite,
     arbitrate,
 };
+
+/// The sites whose declared edit of an effort level a rejection refusing
+/// that level as a ranked one may be answered past.
+const RANKED_EFFORT_SITES: [EditSite; 3] = [
+    EditSite::EffortInjection,
+    EditSite::Preflight,
+    EditSite::FieldRepair,
+];
 
 impl AttemptLearning<'_> {
     /// Arbitrate a rejection that already passed auth recovery: every
@@ -39,12 +47,12 @@ impl AttemptLearning<'_> {
     /// naming a path one or more declared routectl edits put on the wire is
     /// answered by undoing that edit, or not at all, and no proposer reads
     /// it: such a rejection says nothing about what the upstream accepts.
-    /// The exceptions are one edit, not undone, whose value a learned repair
-    /// may replace (see [`Self::answer_declared`]): a required field routectl
-    /// wrote with its own value, an effort the egress injected that the
-    /// rejection refuses as a ranked level, and a field repair whose row
-    /// re-repairs its field. The proposers read those rejections as if no
-    /// edit explained them.
+    /// The exceptions are edits, not undone, whose value a learned repair
+    /// may replace (see [`Self::answer_declared`]): one required field
+    /// routectl wrote with its own value, and an effort level the rejection
+    /// refuses as a ranked one, written by the egress's injection, a
+    /// pre-flight or an earlier field repair, alone or together. The
+    /// proposers read those rejections as if no edit explained them.
     ///
     /// On `Retry` after the replay repair the running error is the
     /// rejection's body-free form, so a re-gate refusal cannot surface the
@@ -100,9 +108,9 @@ impl AttemptLearning<'_> {
     /// The decision for a rejection laid to declared routectl edits: a retry
     /// when the one edit was undone, otherwise `Proceed` with no proposer
     /// consulted. `None` when no declared edit explains the rejection, or
-    /// when the one edit not undone is a required-field default, an injected
-    /// effort the rejection refuses as a ranked level, or a field repair whose
-    /// row re-repairs its field, which the proposers then answer.
+    /// when the edits not undone are a required-field default, or effort
+    /// edits the rejection refuses as a ranked level, which the proposers
+    /// then answer.
     fn answer_declared(
         &mut self,
         rejection: &Rejection<'_>,
@@ -120,8 +128,7 @@ impl AttemptLearning<'_> {
         )?;
         if !reverted {
             if RejectionSite::unreverted_reaches_proposers(rejection.site.as_ref())
-                || self.ranks_injected_effort(rejection)
-                || self.rerepairs_declared_field(rejection)
+                || self.ranks_declared_effort(rejection)
             {
                 return None;
             }
@@ -133,36 +140,23 @@ impl AttemptLearning<'_> {
         })
     }
 
-    /// Whether the one declared edit a rejection names is the egress's own
-    /// effort injection, and the rejection refuses that effort as a ranked
-    /// level: the upstream refused the level the request emits, which a ranked
-    /// repair answers whether the egress or the client wrote the field. The
-    /// egress declares the whole `output_config` when the client sent none, so
-    /// only a client `output_config` without an effort reaches this.
-    fn ranks_injected_effort(&self, rejection: &Rejection<'_>) -> bool {
-        Self::declared_edit_is(rejection, EditSite::EffortInjection)
+    /// Whether every declared edit a rejection names wrote the effort level,
+    /// and the rejection refuses that effort as a ranked level: the upstream
+    /// refused the level the request emits, which a ranked repair at a level
+    /// not yet sent answers whoever wrote it. The egress injects an effort
+    /// the client did not send, a pre-flight writes a learned level, and a
+    /// field repair writes a replacement; two of them may declare the same
+    /// pointer, as an injection and the repair that replaced it do. The
+    /// egress declares the whole `output_config` when the client sent none,
+    /// so its injection reaches this only beside a client `output_config`.
+    fn ranks_declared_effort(&self, rejection: &Rejection<'_>) -> bool {
+        rejection
+            .site
+            .as_ref()
+            .is_some_and(|site| site.matched_edit.made_only_at(&RANKED_EFFORT_SITES))
             && self
                 .named_row(rejection)
                 .is_some_and(|named| is_ranked(named.row))
-    }
-
-    /// Whether the one declared edit a rejection names is an earlier field
-    /// repair, and the row the rejection names re-repairs its field (a ranked
-    /// effort row): the upstream refused the level that repair wrote, which a
-    /// further repair at a level not yet sent may answer.
-    fn rerepairs_declared_field(&self, rejection: &Rejection<'_>) -> bool {
-        Self::declared_edit_is(rejection, EditSite::FieldRepair)
-            && self
-                .named_row(rejection)
-                .is_some_and(|named| rerepairs_same_field(named.row))
-    }
-
-    /// Whether the one declared edit a rejection names was made at `site`.
-    fn declared_edit_is(rejection: &Rejection<'_>, site: EditSite) -> bool {
-        matches!(
-            rejection.site.as_ref().map(|s| &s.matched_edit),
-            Some(MatchedEdit::One(edit)) if edit.site() == site
-        )
     }
 
     /// The closed-table row a rejection names, as the field-row proposer

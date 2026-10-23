@@ -495,13 +495,15 @@ fn a_level_already_sent_is_never_picked_again() {
 }
 
 /// When a sibling request holds the replacement level's claim, the refusal of
-/// that level repairs nothing: no edit, no draw, and the earlier step stays
-/// pending alone, so the rejection stays terminal.
+/// that level is still repaired: the step draws and writes the next level,
+/// but holds no claim, so it learns nothing and its commit leaves the
+/// sibling's claim where it is. The earlier step still learns.
 ///
-/// Mutation check: make `claim` return `Claim::Kept` unconditionally -> red
-/// (the replacement is repaired while the sibling holds its claim).
+/// Mutation checks: make `claim` answer `None` for a held replacement again
+/// -> red (the refusal repairs nothing); mint the unheld step in
+/// `install_step` -> red on `pending_mintable`.
 #[test]
-fn a_sibling_holding_the_replacement_levels_claim_refuses_the_step() {
+fn a_sibling_holding_the_replacement_levels_claim_repairs_without_learning() {
     let router = router();
     let mut req = effort_req("max");
     let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
@@ -519,12 +521,123 @@ fn a_sibling_holding_the_replacement_levels_claim_refuses_the_step() {
     let spent = budget.spent();
 
     let second = ("xhigh", ["high"].as_slice());
-    let refused = apply_level(&mut plan, &mut req, &mut budget, second, adaptive);
+    let repaired = apply_level(&mut plan, &mut req, &mut budget, second, adaptive);
+
+    assert_eq!(repaired, Some(400));
+    assert_eq!(sent_level(&req), Some("high"));
+    assert_eq!(budget.spent(), spent + 1, "the step draws");
+    let (max, xhigh) = (effort_path("max"), effort_path("xhigh"));
+    assert_eq!(plan.pending_paths(), vec![max.as_str(), xhigh.as_str()]);
+    assert_eq!(plan.pending_mintable(), vec![true, false]);
+    let learned: Vec<_> = plan
+        .commit_pending(&[], Instant::now())
+        .into_iter()
+        .map(|step| step.learned.map(|event| event.capability_key))
+        .collect();
+    let key = |path: &str| crate::field_capability::field_capability_key(path).expect("a key");
+    assert_eq!(learned, vec![Some(key(&max)), None]);
+    assert!(
+        !sibling_admits(&router, "xhigh"),
+        "the sibling still holds xhigh's claim",
+    );
+    drop(sibling);
+    assert!(sibling_admits(&router, "xhigh"), "and releases it itself");
+}
+
+/// A replacement level on which a learned verdict already acts is repaired
+/// the same way: the step holds no claim, learns nothing, and leaves the
+/// acting verdict standing.
+#[test]
+fn an_acting_verdict_on_the_replacement_level_repairs_without_learning() {
+    let router = router();
+    let adaptive = ThinkingShape::Adaptive;
+    let mut taught = effort_req("xhigh");
+    let mut teacher = plan(&router, &taught, FieldSettlementMode::Settling);
+    let mut budget = RepairBudget::per_request();
+    let xhigh_refused = ("xhigh", ["high"].as_slice());
+    assert!(
+        apply_level(
+            &mut teacher,
+            &mut taught,
+            &mut budget,
+            xhigh_refused,
+            adaptive
+        )
+        .is_some()
+    );
+    let event = teacher
+        .commit_pending(&[], Instant::now())
+        .pop()
+        .and_then(|step| step.learned)
+        .expect("premise: xhigh learns high");
+    assert!(router.acknowledge_durable_field_confirmation(
+        &event.state_key,
+        &event.capability_key,
+        &event.provider_kind,
+        event.persistence_generation,
+        event.incarnation,
+        event.observations,
+    ));
+    drop(teacher);
+    let xhigh_key = crate::field_verdict::FieldVerdictKey::from_capability_key(
+        crate::state_key::StateKey::parse(&event.state_key).expect("a lane"),
+        event.capability_key.clone(),
+        event.provider_kind.clone(),
+    );
+    let acting = || {
+        router
+            .field_verdicts()
+            .is_negative_acting(&xhigh_key, Instant::now())
+    };
+    assert!(acting(), "premise: the verdict acts");
+    let mut req = effort_req("max");
+    let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
+    let mut budget = RepairBudget::per_request();
+    let max_refused = ("max", ["high", "xhigh"].as_slice());
+    assert!(apply_level(&mut plan, &mut req, &mut budget, max_refused, adaptive).is_some());
+
+    let repaired = apply_level(&mut plan, &mut req, &mut budget, xhigh_refused, adaptive);
+
+    assert_eq!(repaired, Some(400));
+    assert_eq!(sent_level(&req), Some("high"));
+    assert_eq!(plan.pending_mintable(), vec![true, false]);
+    let learned: Vec<_> = plan
+        .commit_pending(&[], Instant::now())
+        .into_iter()
+        .map(|step| step.learned.is_some())
+        .collect();
+    assert_eq!(learned, vec![true, false]);
+    assert!(acting(), "the acting verdict stands");
+}
+
+/// The first ranked step keeps the single-step rule: with no pending step on
+/// the effort field, a sibling holding the refused level's claim leaves the
+/// refusal unrepaired, with no edit and no draw.
+#[test]
+fn a_sibling_holding_the_first_refused_levels_claim_refuses_the_step() {
+    let router = router();
+    let sibling = plan_or_none(&router, &effort_req("max"));
+    assert!(sibling.is_some(), "premise: the sibling claims max");
+    let mut req = ChatRequest {
+        temperature: Some(0.5),
+        ..effort_req("max")
+    };
+    let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
+    let mut budget = RepairBudget::per_request();
+    let first = ("max", ["high", "xhigh"].as_slice());
+
+    let refused = apply_level(
+        &mut plan,
+        &mut req,
+        &mut budget,
+        first,
+        ThinkingShape::Adaptive,
+    );
 
     assert_eq!(refused, None);
-    assert_eq!(sent_level(&req), Some("xhigh"), "no edit");
-    assert_eq!(budget.spent(), spent, "no draw");
-    assert_eq!(plan.pending_paths(), vec![effort_path("max").as_str()]);
+    assert_eq!(sent_level(&req), Some("max"), "no edit");
+    assert_eq!(budget.spent(), 0, "no draw");
+    assert!(plan.pending_paths().is_empty());
 }
 
 /// A committed effort is never repaired again on the target, whatever level

@@ -1615,8 +1615,8 @@ mod field_repair_step;
 pub(super) use effort::is_ranked;
 #[cfg(test)]
 use field_repair_step::FieldEdit;
+pub(super) use field_repair_step::FieldRepairPlan;
 use field_repair_step::{FieldRepairCandidate, GuardAdmission};
-pub(super) use field_repair_step::{FieldRepairPlan, rerepairs_same_field};
 
 impl Router {
     /// Claim the envelope-field repair slot for EVERY closed-table field the

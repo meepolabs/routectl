@@ -458,6 +458,12 @@ impl<'a> FieldRepairPlan<'a> {
         self.pending.iter().map(|step| step.row.path).collect()
     }
 
+    /// Whether each pending step may be learned, oldest first.
+    #[cfg(test)]
+    pub(in crate::router) fn pending_mintable(&self) -> Vec<bool> {
+        self.pending.iter().map(|step| step.mintable).collect()
+    }
+
     /// Perform the repair for whichever admitted row `err` names: apply that
     /// row's transform to the attempt request, re-stamp the calibration estimate,
     /// CHARGE the shared per-request budget, and RELEASE every other
@@ -627,7 +633,8 @@ impl<'a> FieldRepairPlan<'a> {
             return None;
         }
         // Claimed before the mutation: a field whose claim a sibling request
-        // now holds is not repaired here, and the rejection stays terminal.
+        // now holds is not repaired here, and the rejection stays terminal,
+        // unless it is a ranked replacement level, repaired without a claim.
         let claim = self.claim(idx)?;
         let edit = repair.edit;
         let fill_clamped =
