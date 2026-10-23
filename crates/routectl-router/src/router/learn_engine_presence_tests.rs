@@ -269,7 +269,7 @@ mod closed_table_presence {
     }
 
     fn presence_rows() -> Vec<SiteRow> {
-        let mut rows = vec![
+        let rows = vec![
             carried(
                 "thinking.enabled.display, anthropic-api",
                 ANTHROPIC,
@@ -300,7 +300,11 @@ mod closed_table_presence {
             compat_row("frequency_penalty"),
         ];
         #[cfg(feature = "bedrock")]
-        rows.extend(bedrock_presence_rows());
+        let rows = {
+            let mut rows = rows;
+            rows.extend(bedrock_presence_rows());
+            rows
+        };
         rows
     }
 
@@ -360,7 +364,7 @@ mod closed_table_presence {
     /// Converse spells it, stays unknown rather than carried or absent.
     #[test]
     fn a_body_holding_another_value_or_no_spelling_stays_unknown() {
-        let mut rows = vec![SiteRow {
+        let rows = vec![SiteRow {
             name: "thinking.type.disabled refused, the body's tag is enabled",
             provider_block: ANTHROPIC,
             dialect: IngressDialect::Anthropic,
@@ -369,24 +373,28 @@ mod closed_table_presence {
             in_egress: None,
         }];
         #[cfg(feature = "bedrock")]
-        rows.extend([
-            SiteRow {
-                name: "thinking.type.enabled refused, the bag's tag is disabled",
-                provider_block: CONVERSE,
-                dialect: IngressDialect::Anthropic,
-                sent: Some(converse_disabled),
-                err: || fixture_rejection(CONVERSE_FIXTURE),
-                in_egress: None,
-            },
-            SiteRow {
-                name: "Converse temperature refused, inferenceConfig lacks it",
-                provider_block: CONVERSE,
-                dialect: IngressDialect::Anthropic,
-                sent: Some(converse_above_limit),
-                err: || fixture_rejection(BEDROCK_TEMPERATURE_FIXTURE),
-                in_egress: None,
-            },
-        ]);
+        let rows = {
+            let mut rows = rows;
+            rows.extend([
+                SiteRow {
+                    name: "thinking.type.enabled refused, the bag's tag is disabled",
+                    provider_block: CONVERSE,
+                    dialect: IngressDialect::Anthropic,
+                    sent: Some(converse_disabled),
+                    err: || fixture_rejection(CONVERSE_FIXTURE),
+                    in_egress: None,
+                },
+                SiteRow {
+                    name: "Converse temperature refused, inferenceConfig lacks it",
+                    provider_block: CONVERSE,
+                    dialect: IngressDialect::Anthropic,
+                    sent: Some(converse_above_limit),
+                    err: || fixture_rejection(BEDROCK_TEMPERATURE_FIXTURE),
+                    in_egress: None,
+                },
+            ]);
+            rows
+        };
         for row in rows {
             assert_eq!(settle(&row), row.in_egress, "{}", row.name);
         }
