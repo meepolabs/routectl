@@ -1773,6 +1773,15 @@ pub struct FieldRepair {
     pub repair_succeeded: bool,
     /// The confirmed verdict was persisted to the learned registry.
     pub learned: bool,
+    /// The effort level a ranked rewrite replaced, a member of the effort
+    /// rank; `None` for every other repair.
+    pub refused_level: Option<&'static str>,
+    /// The effort level a ranked rewrite wrote, a member of the effort rank;
+    /// `None` for every other repair.
+    pub chosen_level: Option<&'static str>,
+    /// Which way a ranked rewrite moved the level (`lower` or `higher`);
+    /// `None` for every other repair.
+    pub direction: Option<&'static str>,
 }
 
 /// Closed-set facts about one reasoning-replay strip-repair that fired

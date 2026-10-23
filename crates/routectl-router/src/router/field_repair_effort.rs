@@ -96,6 +96,50 @@ pub(super) fn ranked_edit_value(
     ranked_replacement(refused, listed, sent | refused.bit()).map(EffortRank::token)
 }
 
+/// Which way a ranked rewrite moved the effort level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PickDirection {
+    Lower,
+    /// Above the refused level: the served request may cost more than the
+    /// one the client sent.
+    Higher,
+}
+
+impl PickDirection {
+    pub(super) const fn token(self) -> &'static str {
+        match self {
+            Self::Lower => "lower",
+            Self::Higher => "higher",
+        }
+    }
+}
+
+/// A ranked rewrite's refused level, the level it wrote, and which way it
+/// moved. Both levels are rank tokens, never text read from a refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RankedPick {
+    pub(super) refused: &'static str,
+    pub(super) chosen: &'static str,
+    pub(super) direction: PickDirection,
+}
+
+/// The pick a rewrite of the ranked row `row` to `chosen` made, or `None`
+/// for any other row or a value outside the rank.
+pub(super) fn ranked_pick(row: &FieldRepairRow, chosen: &str) -> Option<RankedPick> {
+    let refused = ranked_level(row)?;
+    let chosen = EffortRank::of_token(chosen)?;
+    let direction = if chosen > refused {
+        PickDirection::Higher
+    } else {
+        PickDirection::Lower
+    };
+    Some(RankedPick {
+        refused: refused.token(),
+        chosen: chosen.token(),
+        direction,
+    })
+}
+
 /// The level a ranked row names, or `None` for any other row.
 fn ranked_level(row: &FieldRepairRow) -> Option<EffortRank> {
     match row.surface {

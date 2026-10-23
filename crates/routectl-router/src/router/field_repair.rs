@@ -70,6 +70,11 @@ pub(super) const FIELD_ACTION_LOSSY_DROP_REPAIR: &str = "field_lossy_drop_repair
 /// the one accepted value the rejection named. Closed set.
 pub(super) const FIELD_ACTION_REWRITE_REPAIR: &str = "field_rewrite_repair";
 
+/// Action token for the field-repair WARN when a ranked rewrite served a level
+/// above the refused one, so the served request may cost more than the one
+/// the client sent. Closed set.
+pub(super) const FIELD_ACTION_REWRITE_HIGHER_REPAIR: &str = "field_rewrite_higher_repair";
+
 /// Action token for the field-repair WARN when the repair lowered a token
 /// limit to the ceiling the rejection named. Closed set.
 pub(super) const FIELD_ACTION_CEILING_REPAIR: &str = "field_ceiling_repair";
@@ -81,14 +86,17 @@ pub(super) const FIELD_ACTION_CEILING_FILL_REPAIR: &str = "field_ceiling_fill_re
 
 /// Whether a repair recorded under `action` served the attempt on a request
 /// carrying something other than what the client sent: a drop of a field
-/// whose VALUE was refused, a rewrite to the accepted value, or a lowered
-/// client token limit. A drop of a field the lane does not take, or a lowered
+/// whose VALUE was refused, a rewrite to the accepted value or to a higher
+/// effort level, or a lowered client token limit. A drop of a field the lane does not take, or a lowered
 /// fill routectl itself supplied, changes nothing the client asked for. The
 /// lossy counter and the wire finding's repair outcome both read this.
 pub(super) fn repair_action_is_lossy(action: &str) -> bool {
     matches!(
         action,
-        FIELD_ACTION_LOSSY_DROP_REPAIR | FIELD_ACTION_REWRITE_REPAIR | FIELD_ACTION_CEILING_REPAIR
+        FIELD_ACTION_LOSSY_DROP_REPAIR
+            | FIELD_ACTION_REWRITE_REPAIR
+            | FIELD_ACTION_REWRITE_HIGHER_REPAIR
+            | FIELD_ACTION_CEILING_REPAIR
     )
 }
 
@@ -1842,10 +1850,10 @@ impl Router {
         target: RepairTarget<'_>,
         plan: &mut FieldRepairPlan<'_>,
     ) {
-        let (field_path, action) = plan
+        let record = plan
             .latest_record()
             .expect("a reported repair names the row it repaired");
-        let handle = self.note_field_repair_at(meta, target, field_path, action);
+        let handle = self.record_field_repair(meta, target, record);
         plan.stamp_latest(handle);
     }
 
@@ -1860,6 +1868,25 @@ impl Router {
         field_path: &'static str,
         action: &'static str,
     ) -> FieldRepairHandle {
+        let record = RepairRecord {
+            field_path,
+            action,
+            pick: None,
+        };
+        self.record_field_repair(meta, target, record)
+    }
+
+    fn record_field_repair(
+        &self,
+        meta: &mut DispatchMeta,
+        target: RepairTarget<'_>,
+        record: RepairRecord,
+    ) -> FieldRepairHandle {
+        let RepairRecord {
+            field_path,
+            action,
+            pick,
+        } = record;
         let handle = FieldRepairHandle(meta.field_repairs.len());
         meta.field_repairs.push(super::FieldRepair {
             action,
@@ -1873,6 +1900,9 @@ impl Router {
             repair_attempted: true,
             repair_succeeded: false,
             learned: false,
+            refused_level: pick.map(|pick| pick.refused),
+            chosen_level: pick.map(|pick| pick.chosen),
+            direction: pick.map(|pick| pick.direction.token()),
         });
         self.metrics.incr_field_repair_attempted();
         if repair_action_is_lossy(action) {
@@ -1910,6 +1940,15 @@ pub(super) struct RepairTarget<'a> {
     pub(super) lane: Option<&'a StateKey>,
 }
 
+/// One repair as its record names it: the closed-table path, the action
+/// token, and the ranked pick when the repair rewrote an effort level.
+#[derive(Clone, Copy, Debug)]
+struct RepairRecord {
+    field_path: &'static str,
+    action: &'static str,
+    pick: Option<effort::RankedPick>,
+}
+
 /// Which of a request's repair records a walk settles: the position the
 /// recorder pushed it at. Records are only ever appended, so a handle stays
 /// valid for the whole request.
@@ -1920,8 +1959,9 @@ pub(super) struct FieldRepairHandle(usize);
 /// repair that fired, in the order they fired, and none otherwise. Content-free
 /// by construction: closed-set tokens, the closed table's own path literal, and
 /// booleans -- never the upstream body, the rejected field's VALUE, or the
-/// session key. The request span already supplies `request_id` correlation
-/// across the hops.
+/// session key. The ranked-pick fields are rank tokens, and a repair with no
+/// pick records none of them, so its line keeps only the fields above. The
+/// request span already supplies `request_id` correlation across the hops.
 pub(super) fn emit_field_repair(meta: &DispatchMeta) {
     for record in &meta.field_repairs {
         tracing::warn!(
@@ -1933,6 +1973,9 @@ pub(super) fn emit_field_repair(meta: &DispatchMeta) {
             repair_attempted = record.repair_attempted,
             repair_succeeded = record.repair_succeeded,
             learned = record.learned,
+            refused_level = record.refused_level,
+            chosen_level = record.chosen_level,
+            direction = record.direction,
             "{FIELD_REPAIR_EVENT}",
         );
     }

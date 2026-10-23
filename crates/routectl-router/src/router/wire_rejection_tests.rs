@@ -19,9 +19,10 @@ use serde_json::{Value, json};
 
 use super::super::field_repair::{
     FIELD_ACTION_CEILING_FILL_REPAIR, FIELD_ACTION_CEILING_REPAIR, FIELD_ACTION_DROP_REPAIR,
-    FIELD_ACTION_LOSSY_DROP_REPAIR, FIELD_ACTION_REWRITE_REPAIR, FIELD_REASON_UPSTREAM_REJECTION,
-    RepairTarget, TEST_REWRITE_ACCEPTED, TEST_REWRITE_KWARG, TEST_REWRITE_PATH,
-    TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL,
+    FIELD_ACTION_LOSSY_DROP_REPAIR, FIELD_ACTION_REWRITE_HIGHER_REPAIR,
+    FIELD_ACTION_REWRITE_REPAIR, FIELD_REASON_UPSTREAM_REJECTION, RepairTarget,
+    TEST_REWRITE_ACCEPTED, TEST_REWRITE_KWARG, TEST_REWRITE_PATH, TEST_UNSUPPORTED_PATH,
+    TEST_UNSUPPORTED_SENTINEL,
 };
 use super::super::rejection_parser::rejected_wire_path;
 use super::PendingWireRejection;
@@ -685,6 +686,9 @@ fn repair_of(field_path: &'static str, succeeded: bool) -> FieldRepair {
         repair_attempted: true,
         repair_succeeded: succeeded,
         learned: false,
+        refused_level: None,
+        chosen_level: None,
+        direction: None,
     }
 }
 
@@ -731,6 +735,7 @@ fn each_recorded_repair_action_counts_lossy_exactly_when_its_finding_is_lossy() 
         ("drop", FIELD_ACTION_DROP_REPAIR, false),
         ("lossy drop", FIELD_ACTION_LOSSY_DROP_REPAIR, true),
         ("rewrite", FIELD_ACTION_REWRITE_REPAIR, true),
+        ("higher rewrite", FIELD_ACTION_REWRITE_HIGHER_REPAIR, true),
         ("client ceiling", FIELD_ACTION_CEILING_REPAIR, true),
         ("fill ceiling", FIELD_ACTION_CEILING_FILL_REPAIR, false),
     ];

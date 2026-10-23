@@ -85,8 +85,8 @@ pub(super) struct RejectionSite {
 
 /// A member of the effort rank, by its index in [`VALID_EFFORT_TOKENS`].
 /// Built only from a token the rank holds, so its bit and token never fall
-/// outside the rank.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// outside the rank. Ordered by rank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct EffortRank(u8);
 
 // Every rank index has a bit in a `u8` mask.

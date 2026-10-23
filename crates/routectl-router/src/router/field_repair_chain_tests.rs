@@ -8,8 +8,9 @@
 // seat helpers of `field_repair_thinking_type_tests.rs` and
 // `field_repair_thinking_disabled_tests.rs`; its own seat, rejections and
 // requests are in `field_repair_chain_support_tests.rs`, and its ranked
-// effort rows in `field_repair_chain_effort_tests.rs` and
-// `field_repair_chain_effort_claim_tests.rs` (anthropic-api) and
+// effort rows in `field_repair_chain_effort_tests.rs`,
+// `field_repair_chain_effort_claim_tests.rs` and
+// `field_repair_chain_effort_pick_tests.rs` (anthropic-api) and
 // `field_repair_chain_responses_tests.rs` (openai-responses).
 
 mod repair_chain {
@@ -19,6 +20,7 @@ mod repair_chain {
     include!("field_repair_chain_exit_tests.rs");
     include!("field_repair_chain_effort_tests.rs");
     include!("field_repair_chain_effort_claim_tests.rs");
+    include!("field_repair_chain_effort_pick_tests.rs");
 
     #[cfg(feature = "openai-responses")]
     mod responses {

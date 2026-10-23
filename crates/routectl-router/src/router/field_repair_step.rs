@@ -51,8 +51,9 @@ use super::super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta};
 use super::rejected_field;
 use super::{
     FIELD_ACTION_CEILING_FILL_REPAIR, FIELD_ACTION_CEILING_REPAIR, FIELD_ACTION_DROP_REPAIR,
-    FIELD_ACTION_LOSSY_DROP_REPAIR, FIELD_ACTION_REWRITE_REPAIR, FieldRepairHandle, FieldRepairRow,
-    FieldRepairTable, FieldTransform,
+    FIELD_ACTION_LOSSY_DROP_REPAIR, FIELD_ACTION_REWRITE_HIGHER_REPAIR,
+    FIELD_ACTION_REWRITE_REPAIR, FieldRepairHandle, FieldRepairRow, FieldRepairTable,
+    FieldTransform, RepairRecord,
 };
 
 /// Whether `row` may be repaired again while an earlier step on the same
@@ -300,9 +301,21 @@ impl RepairStep<'_> {
         self.edit.verdict_value()
     }
 
+    /// The ranked pick this repair made, or `None` for any other repair.
+    fn ranked_pick(&self) -> Option<super::effort::RankedPick> {
+        match self.edit {
+            FieldEdit::Rewrite(value) => super::effort::ranked_pick(&self.row, value),
+            FieldEdit::Drop | FieldEdit::Ceiling(_) => None,
+        }
+    }
+
     /// The closed-set WARN action token for this repair.
     fn repair_action(&self) -> &'static str {
+        let higher = self
+            .ranked_pick()
+            .is_some_and(|pick| pick.direction == super::effort::PickDirection::Higher);
         match self.edit {
+            FieldEdit::Rewrite(_) if higher => FIELD_ACTION_REWRITE_HIGHER_REPAIR,
             FieldEdit::Rewrite(_) => FIELD_ACTION_REWRITE_REPAIR,
             FieldEdit::Ceiling(_) if self.fill_clamped => FIELD_ACTION_CEILING_FILL_REPAIR,
             FieldEdit::Ceiling(_) => FIELD_ACTION_CEILING_REPAIR,
@@ -429,11 +442,14 @@ impl<'a> FieldRepairPlan<'a> {
         self.pending.last().map(|step| step.row.path)
     }
 
-    /// The latest repair's path and WARN action token, for its record.
-    pub(super) fn latest_record(&self) -> Option<(&'static str, &'static str)> {
-        self.pending
-            .last()
-            .map(|step| (step.row.path, step.repair_action()))
+    /// The latest repair's path, WARN action token and ranked pick, for its
+    /// record.
+    pub(super) fn latest_record(&self) -> Option<RepairRecord> {
+        self.pending.last().map(|step| RepairRecord {
+            field_path: step.row.path,
+            action: step.repair_action(),
+            pick: step.ranked_pick(),
+        })
     }
 
     /// Bind the latest repair to the request record `handle` names.

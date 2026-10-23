@@ -389,7 +389,7 @@ upstream body, and the session key are never carried:
 
 | Field | Meaning |
 |---|---|
-| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it), `field_rewrite_repair` when the field was rewritten to the one accepted value the rejection named (learned like a drop of a refused field, and counted lossy: the served value is not the client's), `field_ceiling_repair` when a client's token limit was lowered to the ceiling the rejection named, `field_ceiling_fill_repair` when the lowered limit was the one routectl filled in for a client that sent none (lossless: the client asked for no particular limit). Both ceiling repairs learn the named ceiling |
+| `action` | What the router did: `field_drop_repair` when the upstream refused the field itself, `field_lossy_drop_repair` when it refused only the VALUE sent in the field (the drop served this request on a weaker contract than the client asked for, and nothing is learned from it), `field_rewrite_repair` when the field was rewritten to the one accepted value the rejection named, or a refused effort level to a lower level the refusal listed (learned like a drop of a refused field, and counted lossy: the served value is not the client's), `field_rewrite_higher_repair` when a refused effort level was rewritten to a HIGHER level the refusal listed because it listed none lower (learned and counted lossy like a rewrite; the served request may cost more than the one the client sent), `field_ceiling_repair` when a client's token limit was lowered to the ceiling the rejection named, `field_ceiling_fill_repair` when the lowered limit was the one routectl filled in for a client that sent none (lossless: the client asked for no particular limit). Both ceiling repairs learn the named ceiling |
 | `state_key` | Sanitized `[providers]` state key of the repaired target |
 | `lane` | Sanitized learned lane (`provider_entry#upstream`) of the repaired target, the key the per-lane lossy map below counts on; `other` for a target with no learned lane |
 | `field_path` | The closed-table qualified dotted path that was repaired |
@@ -397,6 +397,13 @@ upstream body, and the session key are never carried:
 | `repair_attempted` | The repair arm fired |
 | `repair_succeeded` | The repaired re-dispatch reached success / first chunk / a count, or was refused for a different field the sent body carried (which proves this repair) |
 | `learned` | The confirmed verdict was persisted to the learned registry |
+| `refused_level` | Effort rewrites only: the refused effort level, a member of the effort rank (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
+| `chosen_level` | Effort rewrites only: the level written in its place, a member of the same rank |
+| `direction` | Effort rewrites only: `lower` or `higher`, where the chosen level sits relative to the refused one |
+
+The three effort fields are rank tokens, never text read out of the
+rejection. Every other repair carries none of them, so its line holds
+exactly the eight fields above it.
 
 Two verdict-lifecycle lines accompany it at INFO, both carrying
 normalized keys only: `"field_verdict_commit"` when a repaired retry
@@ -434,7 +441,9 @@ count means the dropped field was not what the upstream objected to.
 repaired request carries something other than what the client sent:
 `field_lossy_drop_repair` (a drop of a field whose VALUE was refused),
 `field_rewrite_repair` (the field rewritten to the accepted value the
-rejection named), and `field_ceiling_repair` (a client's token limit
+rejection named, or an effort level to a lower listed one),
+`field_rewrite_higher_repair` (an effort level rewritten to a higher
+listed one), and `field_ceiling_repair` (a client's token limit
 lowered to the named ceiling). A `field_drop_repair` of a field the lane
 does not take, and a `field_ceiling_fill_repair` of the limit routectl
 filled in, are not lossy. The same rule decides the `repaired_lossy`
@@ -726,7 +735,7 @@ consume the slots real traffic needs.
 | Field | Meaning |
 |---|---|
 | `rc_field_repair_attempted_total` | Same counter as the repair WARN section above |
-| `rc_field_repair_lossy_total` | Same counter as the repair WARN section above: the subset of attempted repairs whose repaired request carries something other than what the client sent (a value-refused drop, a rewrite, or a lowered client token limit), by the same rule as the `repaired_lossy` wire-check outcome. Rising with the attempted count while `rc_field_verdicts_learned_total` stays flat is a lane refusing a value, not a fault |
+| `rc_field_repair_lossy_total` | Same counter as the repair WARN section above: the subset of attempted repairs whose repaired request carries something other than what the client sent (a value-refused drop, a rewrite to a lower or higher value, or a lowered client token limit), by the same rule as the `repaired_lossy` wire-check outcome. Rising with the attempted count while `rc_field_verdicts_learned_total` stays flat is a lane refusing a value, not a fault |
 | `rc_field_repair_lossy_lanes_total` | Count of lanes the lossy map HAS, before the render ceiling: at most 256 named lanes plus `other` when it has counted anything |
 | `rc_field_repair_lossy_lanes_omitted` | Lane rows the render ceiling dropped; non-zero says the map field is a SUBSET |
 | `rc_field_repair_lossy_by_lane` | The lossy map rows that fit, one `{ lane, lossy }` per lane in lane-key order then `other`: `lane` is the sanitized learned lane or the overflow token `other`, `lossy` its share of `rc_field_repair_lossy_total`. Capped at the same 32-row code constant as the verdict rows |

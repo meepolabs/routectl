@@ -4407,10 +4407,13 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::router::FieldPreflightAuthorizationRecord::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::FieldRepair
 pub routectl_router::router::FieldRepair::action: &'static str
+pub routectl_router::router::FieldRepair::chosen_level: core::option::Option<&'static str>
+pub routectl_router::router::FieldRepair::direction: core::option::Option<&'static str>
 pub routectl_router::router::FieldRepair::field_path: &'static str
 pub routectl_router::router::FieldRepair::lane: alloc::string::String
 pub routectl_router::router::FieldRepair::learned: bool
 pub routectl_router::router::FieldRepair::reason: &'static str
+pub routectl_router::router::FieldRepair::refused_level: core::option::Option<&'static str>
 pub routectl_router::router::FieldRepair::repair_attempted: bool
 pub routectl_router::router::FieldRepair::repair_succeeded: bool
 pub routectl_router::router::FieldRepair::state_key: alloc::string::String

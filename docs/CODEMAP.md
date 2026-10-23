@@ -2897,7 +2897,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   that wrote a value (rewrite or ceiling, carried as the verdict's value) or
   dropped an unsupported field. The WARN action token is closed:
   `field_drop_repair`, `field_lossy_drop_repair` (a value-refused drop),
-  `field_rewrite_repair`, `field_ceiling_repair` (a client limit lowered)
+  `field_rewrite_repair`, `field_rewrite_higher_repair` (a ranked effort
+  rewrite to a level above the refused one, `ranked_pick`; every ranked
+  rewrite's record also carries `refused_level` / `chosen_level` /
+  `direction`), `field_ceiling_repair` (a client limit lowered)
   and `field_ceiling_fill_repair` (a limit routectl filled for a client
   that sent none, `clamp_writes_fill`; it declares no
   `FieldRepair` edit because the egress already declares that field as its
@@ -2943,14 +2946,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   openai-compat, ranked rows alone on openai-responses) to `present_rows`, pre-flight and rejection resolution
   (tests: `src/router/field_repair_effort_tests.rs`, the rank weld included),
   and the ranked repair: `ranked_replacement` (nearest lower listed level, else
-  nearest higher, never a sent one), `ranked_edit_value` (the level
+  nearest higher, never a sent one), `ranked_pick` (the refused level,
+  written level and `PickDirection` a ranked rewrite's record names),
+  `ranked_edit_value` (the level
   `FieldEdit::for_rejection` writes for a ranked row) and `ranked_step_mints`
   (the thinking shapes a ranked step may be learned beside); router rows in
   `src/router/field_repair_chain_effort_tests.rs`, an `include!`d fragment of
   `field_repair_chain_tests.rs`, and in
   `src/router/field_repair_chain_effort_claim_tests.rs` (a replacement level a
   sibling claims, a refused pre-flight level and the chained pre-flight after it, a refusal matching both the
-  effort injection and the repair), another fragment of it; openai-responses admits only the ranked rows
+  effort injection and the repair), another fragment of it, and in
+  `src/router/field_repair_chain_effort_pick_tests.rs` (each step's record and
+  WARN naming refused level, chosen level and direction; a higher pick's own
+  action token and lane lossy count), a third; openai-responses admits only the ranked rows
   (`RowScope::RankedOnly`), its router rows (codex `minimal` -> `low` on both
   auth lanes, the pre-content stream 400, the inert status-0 text) in
   `src/router/field_repair_chain_responses_tests.rs`, an `include!`d fragment

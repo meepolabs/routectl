@@ -101,8 +101,9 @@ async fn the_captured_display_rejection_repairs_every_walk_and_learns_nothing() 
 /// The lossy repair reaches the operator as the per-request WARN, under its
 /// own action token.
 ///
-/// Mutation check: record the lossy repair under `FIELD_ACTION_DROP_REPAIR`
-/// -> red.
+/// Mutation checks: record the lossy repair under `FIELD_ACTION_DROP_REPAIR`
+/// -> red; log a ranked-pick field as `?` (rendering `None`) -> red on the
+/// field list.
 #[test]
 fn the_display_repair_warns_once_as_a_lossy_repair() {
     let (router, _seen) = single_seat(ALIAS, Answer::ServeRepaired);
@@ -124,6 +125,25 @@ fn the_display_repair_warns_once_as_a_lossy_repair() {
     assert_eq!(warns[0].field("action"), Some("field_lossy_drop_repair"));
     assert_eq!(warns[0].field("field_path"), Some(REJECTED_PATH));
     assert_eq!(warns[0].field("learned"), Some("false"));
+    let names: Vec<_> = warns[0]
+        .fields
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "action",
+            "state_key",
+            "lane",
+            "field_path",
+            "reason",
+            "repair_attempted",
+            "repair_succeeded",
+            "learned",
+        ],
+        "a repair with no ranked pick keeps exactly the fields it always had",
+    );
 }
 
 // ---------------------------------------------------------------------------
