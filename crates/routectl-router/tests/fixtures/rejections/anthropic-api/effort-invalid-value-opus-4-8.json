@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-10-22, claude-opus-4-8, Messages, OAuth seat): an output_config.effort value outside the schema enum. The pydantic-style message lists the schema-wide levels in rank order. error.message is verbatim; the envelope keeps the captured key order, with the request id field dropped. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"output_config.effort: Input should be 'low', 'medium', 'high', 'xhigh' or 'max'\"}}"
+}

@@ -33,6 +33,7 @@ const CONVERSE_WRAPPER: &str = "The model returned the following errors: ";
 const THINKING_DISABLED_PATH: &str = "thinking.type.disabled";
 const TEMPERATURE_PATH: &str = "temperature";
 const MAX_TOKENS_PATH: &str = "max_tokens";
+const EFFORT_PATH: &str = "output_config.effort";
 /// The off-switch template exactly as the committed Bedrock capture spells it.
 const THINKING_SWITCH_MESSAGE: &str = "To turn thinking off on this model, send \"thinking\": \
      {\"type\": \"between_tools\"} instead of {\"type\": \"disabled\"}. The model does not \
@@ -180,6 +181,29 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "anthropic-api/count-tokens-thinking-display-enum",
             Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
         ),
+        // The generic top-level message; the accepted set is only in
+        // `metadata.raw`.
+        (
+            "anthropic-api/effort-invalid-value-openrouter",
+            Outcome::NotLocalized,
+        ),
+        (
+            "anthropic-api/effort-invalid-value-opus-4-8",
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+        ),
+        // Effort refusals in prose that name no wire path.
+        (
+            "anthropic-api/effort-parameter-unsupported-haiku-4-5",
+            Outcome::NotLocalized,
+        ),
+        (
+            "anthropic-api/effort-xhigh-unsupported-opus-4-5",
+            Outcome::NotLocalized,
+        ),
+        (
+            "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
+            Outcome::NotLocalized,
+        ),
         (
             "anthropic-api/max-tokens-above-model-limit-messages",
             Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
@@ -213,6 +237,31 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             Outcome::NotLocalized,
         ),
         ("bedrock/beta-redact-thinking-invoke", Outcome::NotLocalized),
+        (
+            "bedrock/effort-extra-input-invoke-opus-4-5",
+            unresolved(EFFORT_PATH, SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "bedrock/effort-invalid-value-invoke-opus-4-5-beta",
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+        ),
+        // The serde unknown-variant message names a variant, not a path.
+        (
+            "bedrock/effort-unknown-variant-converse-opus-4-8",
+            Outcome::NotLocalized,
+        ),
+        (
+            "bedrock/effort-unknown-variant-invoke-opus-4-8",
+            Outcome::NotLocalized,
+        ),
+        (
+            "bedrock/effort-xhigh-unsupported-converse-sonnet-4-6",
+            Outcome::NotLocalized,
+        ),
+        (
+            "bedrock/effort-xhigh-unsupported-invoke-sonnet-4-6",
+            Outcome::NotLocalized,
+        ),
         (
             "bedrock/max-tokens-above-model-limit",
             Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
@@ -261,6 +310,18 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "openai-responses/reasoning-effort-invalid-value-codex",
+            Outcome::NotLocalized,
+        ),
+        (
+            "openai-responses/reasoning-effort-invalid-value-codex-gpt-5-6",
+            Outcome::NotLocalized,
+        ),
+        (
+            "openai-responses/reasoning-effort-invalid-value-mantle",
+            Outcome::NotLocalized,
+        ),
+        (
+            "openai-responses/reasoning-effort-minimal-unsupported-codex",
             Outcome::NotLocalized,
         ),
     ]

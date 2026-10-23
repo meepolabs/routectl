@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on openai-responses (2026-10-22, openai.gpt-5.6-terra, Bedrock Mantle Responses lane): a reasoning.effort value outside the enum. The message lists the accepted values without minimal; error.code is invalid_value. error.message is verbatim; the envelope keeps the captured key order. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"code\":\"invalid_value\",\"message\":\"Invalid value: 'bogus'. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'.\",\"param\":\"reasoning.effort\",\"type\":\"invalid_request_error\"}}"
+}

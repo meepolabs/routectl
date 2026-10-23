@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-10-22, claude-opus-4-5, Messages, OAuth seat): output_config.effort xhigh sent to a model whose levels stop at high. The message names the refused level and lists the supported levels in alphabetical order. error.message is verbatim; the envelope keeps the captured key order, with the request id field dropped. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support effort level 'xhigh'. Supported levels: high, low, medium.\"}}"
+}

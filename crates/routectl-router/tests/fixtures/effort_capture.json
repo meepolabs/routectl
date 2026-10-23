@@ -1,0 +1,163 @@
+{
+  "note": "Effort rejection captures (2026-10-22), one entry per effort rejection fixture captured that day, keyed by its <dialect>/<case> path under rejections/. lane is the carrier the request went to; model is the model id sent. request_shape is the sent wire body projected onto its effort field and its thinking object, at their wire paths: output_config.effort (Messages and InvokeModel), additionalModelRequestFields.output_config.effort (Converse), reasoning.effort (Responses). Every entry carries exactly one effort path. A request_shape with no thinking key means no thinking object was sent. Everything else in the sent body is left out: in particular the InvokeModel opus-4-5 pair differs only by the effort anthropic_beta flag, which the beta case's fixture note names. status and message are the captured status and the verbatim upstream message; the fixture body is the full envelope.",
+  "cases": {
+    "anthropic-api/effort-invalid-value-openrouter": {
+      "lane": "openrouter-anthropic",
+      "model": "anthropic/claude-haiku-4.5",
+      "request_shape": {
+        "output_config": {
+          "effort": "bogus"
+        }
+      },
+      "status": 400,
+      "message": "Invalid Anthropic Messages API request"
+    },
+    "anthropic-api/effort-invalid-value-opus-4-8": {
+      "lane": "anthropic-oauth",
+      "model": "claude-opus-4-8",
+      "request_shape": {
+        "output_config": {
+          "effort": "bogus"
+        }
+      },
+      "status": 400,
+      "message": "output_config.effort: Input should be 'low', 'medium', 'high', 'xhigh' or 'max'"
+    },
+    "anthropic-api/effort-parameter-unsupported-haiku-4-5": {
+      "lane": "anthropic-oauth",
+      "model": "claude-haiku-4-5-20251001",
+      "request_shape": {
+        "output_config": {
+          "effort": "low"
+        }
+      },
+      "status": 400,
+      "message": "This model does not support the effort parameter."
+    },
+    "anthropic-api/effort-xhigh-unsupported-opus-4-5": {
+      "lane": "anthropic-oauth",
+      "model": "claude-opus-4-5",
+      "request_shape": {
+        "output_config": {
+          "effort": "xhigh"
+        }
+      },
+      "status": 400,
+      "message": "This model does not support effort level 'xhigh'. Supported levels: high, low, medium."
+    },
+    "anthropic-api/effort-xhigh-unsupported-sonnet-4-6": {
+      "lane": "anthropic-oauth",
+      "model": "claude-sonnet-4-6",
+      "request_shape": {
+        "output_config": {
+          "effort": "xhigh"
+        }
+      },
+      "status": 400,
+      "message": "This model does not support effort level 'xhigh'. Supported levels: high, low, max, medium."
+    },
+    "bedrock/effort-extra-input-invoke-opus-4-5": {
+      "lane": "bedrock-invoke",
+      "model": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+      "request_shape": {
+        "output_config": {
+          "effort": "xhigh"
+        }
+      },
+      "status": 400,
+      "message": "output_config.effort: Extra inputs are not permitted"
+    },
+    "bedrock/effort-invalid-value-invoke-opus-4-5-beta": {
+      "lane": "bedrock-invoke",
+      "model": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+      "request_shape": {
+        "output_config": {
+          "effort": "xhigh"
+        }
+      },
+      "status": 400,
+      "message": "output_config.effort: Input should be 'low', 'medium' or 'high'"
+    },
+    "bedrock/effort-unknown-variant-converse-opus-4-8": {
+      "lane": "bedrock-converse",
+      "model": "us.anthropic.claude-opus-4-8",
+      "request_shape": {
+        "additionalModelRequestFields": {
+          "output_config": {
+            "effort": "bogus"
+          }
+        }
+      },
+      "status": 400,
+      "message": "The model returned the following errors: unknown variant `bogus`, expected one of `low`, `medium`, `high`, `xhigh`, `max`, `Unhandled` at line 1 column 170"
+    },
+    "bedrock/effort-unknown-variant-invoke-opus-4-8": {
+      "lane": "bedrock-invoke",
+      "model": "us.anthropic.claude-opus-4-8",
+      "request_shape": {
+        "output_config": {
+          "effort": "bogus"
+        }
+      },
+      "status": 400,
+      "message": "unknown variant `bogus`, expected one of `low`, `medium`, `high`, `xhigh`, `max`, `Unhandled` at line 1 column 94"
+    },
+    "bedrock/effort-xhigh-unsupported-converse-sonnet-4-6": {
+      "lane": "bedrock-converse",
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "request_shape": {
+        "additionalModelRequestFields": {
+          "output_config": {
+            "effort": "xhigh"
+          }
+        }
+      },
+      "status": 400,
+      "message": "The model returned the following errors: This model does not support effort level 'xhigh'. Supported levels: high, low, max, medium."
+    },
+    "bedrock/effort-xhigh-unsupported-invoke-sonnet-4-6": {
+      "lane": "bedrock-invoke",
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "request_shape": {
+        "output_config": {
+          "effort": "xhigh"
+        }
+      },
+      "status": 400,
+      "message": "This model does not support effort level 'xhigh'. Supported levels: high, low, max, medium."
+    },
+    "openai-responses/reasoning-effort-invalid-value-codex-gpt-5-6": {
+      "lane": "codex",
+      "model": "gpt-5.6-terra",
+      "request_shape": {
+        "reasoning": {
+          "effort": "bogus"
+        }
+      },
+      "status": 400,
+      "message": "Invalid value: 'bogus'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'."
+    },
+    "openai-responses/reasoning-effort-invalid-value-mantle": {
+      "lane": "mantle-responses",
+      "model": "openai.gpt-5.6-terra",
+      "request_shape": {
+        "reasoning": {
+          "effort": "bogus"
+        }
+      },
+      "status": 400,
+      "message": "Invalid value: 'bogus'. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'."
+    },
+    "openai-responses/reasoning-effort-minimal-unsupported-codex": {
+      "lane": "codex",
+      "model": "gpt-5.6-terra",
+      "request_shape": {
+        "reasoning": {
+          "effort": "minimal"
+        }
+      },
+      "status": 400,
+      "message": "Unsupported value: 'minimal' is not supported with the 'gpt-5.6-terra' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'."
+    }
+  }
+}

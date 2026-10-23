@@ -3807,6 +3807,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   dialect it was captured on, tier 2 cites a public URL) and a body that is that
   dialect's error envelope (Anthropic `{type:"error",error:{type,message}}`,
   bedrock-runtime flat `{message}`, OpenAI `{error:{message,type,param,code}}`)
+- `tests/effort_capture.rs` -- welds the effort rejection fixtures to
+  their capture record `tests/fixtures/effort_capture.json` (keyed
+  `<dialect>/<case>`; `lane`, `model`, `request_shape`, `status`, `message`):
+  the record covers exactly the pinned cases, each fixture's status and
+  verbatim message equal the record's, its note names the record's model, and
+  the sent effort level reads from `request_shape` at exactly one wire path
+  (`output_config.effort`, `additionalModelRequestFields.output_config.effort`,
+  `reasoning.effort`)
 - `src/router/probe_terminal_state_tests.rs` -- tombstones, their own capacity
   bound, stale settlement, and the lane's last-outcome stamp
 - `src/router/probe_breaker_tests.rs` -- breaker non-interference: a probe

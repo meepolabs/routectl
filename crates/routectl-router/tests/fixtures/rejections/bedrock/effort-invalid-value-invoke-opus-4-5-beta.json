@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-10-22, us.anthropic.claude-opus-4-5-20251101-v1:0, InvokeModel): output_config.effort xhigh with the effort anthropic_beta flag in the body. The pydantic-style message lists the levels this model takes in rank order. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the other bedrock fixtures; the capture recorded no response headers.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"output_config.effort: Input should be 'low', 'medium' or 'high'\"}"
+}

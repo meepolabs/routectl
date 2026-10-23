@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on openai-responses (2026-10-22, gpt-5.6-terra, ChatGPT OAuth seat, codex Responses backend): reasoning.effort minimal, a schema value this model does not take. The message names the model and lists its supported values in rank order; error.code is unsupported_value. error.message is verbatim; the envelope keeps the captured key order. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"Unsupported value: 'minimal' is not supported with the 'gpt-5.6-terra' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'.\",\"type\":\"invalid_request_error\",\"param\":\"reasoning.effort\",\"code\":\"unsupported_value\"}}"
+}
