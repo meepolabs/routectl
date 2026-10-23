@@ -1835,3 +1835,152 @@ fn messages_ceiling_near_misses_name_no_ceiling() {
         "same message on openai-compat",
     );
 }
+
+mod level_list {
+    //! The value-list reader over each captured effort list grammar, and the
+    //! rank mask it feeds.
+
+    use serde_json::Value;
+
+    use super::super::{ListMembers, levels_mask, list_members};
+
+    const EFFORT_CAPTURE: &str = include_str!("../../tests/fixtures/effort_capture.json");
+
+    const MINIMAL: u8 = 1 << 0;
+    const LOW: u8 = 1 << 1;
+    const MEDIUM: u8 = 1 << 2;
+    const HIGH: u8 = 1 << 3;
+    const XHIGH: u8 = 1 << 4;
+    const MAX: u8 = 1 << 5;
+
+    /// The captured upstream message of `case` in the effort capture record.
+    fn captured_message(case: &str) -> String {
+        let capture: Value = serde_json::from_str(EFFORT_CAPTURE).unwrap();
+        capture["cases"][case]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no captured message for {case}"))
+            .to_string()
+    }
+
+    /// The members the reader takes from the text after `lead_in` in the
+    /// captured message of `case`.
+    fn listed(case: &str, lead_in: &str, members: ListMembers) -> Vec<String> {
+        let message = captured_message(case);
+        let (_, list) = message
+            .split_once(lead_in)
+            .unwrap_or_else(|| panic!("{case} has no {lead_in:?}"));
+        list_members(list, members)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn each_captured_list_grammar_reads_to_its_rank_mask() {
+        let rows: [(&str, &str, ListMembers, u8); 8] = [
+            (
+                "bedrock/effort-unknown-variant-invoke-opus-4-8",
+                "expected one of ",
+                ListMembers::Quoted,
+                LOW | MEDIUM | HIGH | XHIGH | MAX,
+            ),
+            (
+                "bedrock/effort-unknown-variant-converse-opus-4-8",
+                "expected one of ",
+                ListMembers::Quoted,
+                LOW | MEDIUM | HIGH | XHIGH | MAX,
+            ),
+            (
+                "openai-responses/reasoning-effort-invalid-value-codex-gpt-5-6",
+                "Supported values are: ",
+                ListMembers::Quoted,
+                MINIMAL | LOW | MEDIUM | HIGH | XHIGH | MAX,
+            ),
+            (
+                "openai-responses/reasoning-effort-minimal-unsupported-codex",
+                "Supported values are: ",
+                ListMembers::Quoted,
+                LOW | MEDIUM | HIGH | XHIGH | MAX,
+            ),
+            (
+                "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
+                "Supported levels: ",
+                ListMembers::Bare,
+                LOW | MEDIUM | HIGH | MAX,
+            ),
+            (
+                "anthropic-api/effort-xhigh-unsupported-opus-4-5",
+                "Supported levels: ",
+                ListMembers::Bare,
+                LOW | MEDIUM | HIGH,
+            ),
+            (
+                "bedrock/effort-invalid-value-invoke-opus-4-5-beta",
+                "Input should be ",
+                ListMembers::Quoted,
+                LOW | MEDIUM | HIGH,
+            ),
+            (
+                "anthropic-api/effort-invalid-value-opus-4-8",
+                "Input should be ",
+                ListMembers::Quoted,
+                LOW | MEDIUM | HIGH | XHIGH | MAX,
+            ),
+        ];
+        for (case, lead_in, members, expected) in rows {
+            let tokens = listed(case, lead_in, members);
+            let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            assert_eq!(levels_mask(&tokens), expected, "{case}: read {tokens:?}");
+        }
+    }
+
+    #[test]
+    fn serde_list_keeps_its_catch_all_variant_and_ends_before_the_position_tail() {
+        assert_eq!(
+            listed(
+                "bedrock/effort-unknown-variant-invoke-opus-4-8",
+                "expected one of ",
+                ListMembers::Quoted,
+            ),
+            ["low", "medium", "high", "xhigh", "max", "Unhandled"],
+        );
+    }
+
+    #[test]
+    fn bare_list_ends_at_its_closing_period() {
+        assert_eq!(
+            listed(
+                "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
+                "Supported levels: ",
+                ListMembers::Bare,
+            ),
+            ["high", "low", "max", "medium"],
+        );
+    }
+
+    #[test]
+    fn out_of_rank_members_set_no_bit() {
+        let rows: [(&str, &[&str], u8); 4] = [
+            ("in rank beside none", &["none", "low", "high"], LOW | HIGH),
+            ("catch-all variant", &["max", "Unhandled"], MAX),
+            ("only out of rank", &["none", "Unhandled", "bogus"], 0),
+            ("empty", &[], 0),
+        ];
+        for (name, tokens, expected) in rows {
+            assert_eq!(levels_mask(tokens), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_separator_with_no_member_after_it_names_nothing() {
+        let rows: [(&str, ListMembers); 4] = [
+            ("high, low, and ", ListMembers::Bare),
+            ("high, low, and .", ListMembers::Bare),
+            ("`low`, `high", ListMembers::Quoted),
+            ("'low', and 'hi\\gh'.", ListMembers::Quoted),
+        ];
+        for (text, members) in rows {
+            assert!(list_members(text, members).is_empty(), "{text:?}");
+        }
+    }
+}

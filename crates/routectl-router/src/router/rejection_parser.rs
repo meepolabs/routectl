@@ -35,6 +35,7 @@ use routectl_core::capability::SignalTier;
 use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::WirePath;
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
+use routectl_providers::effort::VALID_EFFORT_TOKENS;
 
 use super::field_repair::{FieldRepairRow, FieldRepairTable, FieldTransform};
 use crate::field_verdict_value::canonical_ceiling;
@@ -95,9 +96,9 @@ static THINKING_TYPES: [ThinkingType; 4] = [
     },
 ];
 
-/// Separators between members of an `Input should be` list, longest first so
-/// `, or ` is not read as `, ` followed by prose.
-const LIST_SEPARATORS: [&str; 3] = [", or ", ", ", " or "];
+/// Separators between members of a value list, longest first so `, or ` and
+/// `, and ` are not read as `, ` followed by prose.
+const LIST_SEPARATORS: [&str; 4] = [", and ", ", or ", ", ", " or "];
 
 const OPENAI_UNSUPPORTED_PREFIX: &str = "Unsupported parameter: '";
 const OPENAI_UNSUPPORTED_SUFFIX: &str = "' is not supported with this model.";
@@ -356,19 +357,47 @@ fn named_accepted(row: &FieldRepairRow, replacements: &[&str]) -> Option<&'stati
     named.all(|other| other == first).then_some(first)
 }
 
-/// The leading run of quoted tokens in `text` joined by a list separator
-/// (`'a', 'b' or 'c'`). Text after the last token that does not start with a
-/// separator ends the run, so trailing prose -- an echo of the refused input
-/// included -- never contributes. A separator not followed by a cleanly quoted
-/// member (unterminated, or carrying a `\`) invalidates the whole list: it
-/// names nothing.
+/// How the members of a value list are spelled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ListMembers {
+    /// Each member delimited by `'`, `"` or a backtick.
+    Quoted,
+    /// Each member a bare run of name bytes (`high, low, medium.`).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the effort level list templates")
+    )]
+    Bare,
+}
+
+impl ListMembers {
+    fn leading(self, text: &str) -> Option<(&str, &str)> {
+        match self {
+            Self::Quoted => leading_quoted(text),
+            Self::Bare => leading_bare(text),
+        }
+    }
+}
+
+/// The leading quoted list in `text`; see [`list_members`].
 fn quoted_list(text: &str) -> Vec<&str> {
+    list_members(text, ListMembers::Quoted)
+}
+
+/// The leading run of members in `text` joined by a list separator
+/// (`'a', 'b' or 'c'`, `a, b, and c`). Text after the last member that does
+/// not start with a separator ends the run, so trailing prose (an echo of
+/// the refused input, a closing period, a parser position tail) never
+/// contributes. A separator not followed by a cleanly spelled member
+/// (unterminated, or carrying a `\`) invalidates the whole list: it names
+/// nothing.
+pub(super) fn list_members(text: &str, members: ListMembers) -> Vec<&str> {
     let mut tokens = Vec::new();
     let mut rest = text;
     loop {
-        let Some((token, after)) = leading_quoted(rest) else {
+        let Some((token, after)) = members.leading(rest) else {
             // A separator promised another member that never came (a
-            // truncated `'a' or `), or a member was not cleanly quoted: the
+            // truncated `'a' or `), or a member was not cleanly spelled: the
             // list is not a list this parser can trust, so it names nothing.
             return if tokens.is_empty() {
                 tokens
@@ -387,14 +416,44 @@ fn quoted_list(text: &str) -> Vec<&str> {
     }
 }
 
-/// The `'...'` or `"..."` span `text` starts with, and the text after it. A
-/// span carrying a backslash is refused: an escaped delimiter would move the
-/// token boundary, and no grounded envelope escapes a closed-set value.
+/// The `'...'`, `"..."` or `` `...` `` span `text` starts with, and the text
+/// after it. A span carrying a backslash is refused: an escaped delimiter
+/// would move the token boundary, and no grounded envelope escapes a
+/// closed-set value.
 fn leading_quoted(text: &str) -> Option<(&str, &str)> {
-    let quote = text.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let quote = text
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\'' | '"' | '`'))?;
     let (token, after) = text[1..].split_once(quote)?;
     (!token.contains('\\')).then_some((token, after))
 }
+
+/// The nonempty run of name bytes `text` starts with, and the text after it.
+fn leading_bare(text: &str) -> Option<(&str, &str)> {
+    let end = text
+        .bytes()
+        .position(|b| !is_name_byte(b))
+        .unwrap_or(text.len());
+    (end > 0).then(|| text.split_at(end))
+}
+
+/// The members of `tokens` in the effort rank as a bitmask: bit `i` set
+/// when `tokens` names member `i` of [`VALID_EFFORT_TOKENS`]. Tokens outside
+/// the rank (`none`, a serde catch-all variant, an unknown level) set
+/// nothing, so a list of only such tokens is `0`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the effort level list templates")
+)]
+pub(super) fn levels_mask(tokens: &[&str]) -> u8 {
+    tokens
+        .iter()
+        .filter_map(|token| VALID_EFFORT_TOKENS.iter().position(|rank| rank == token))
+        .fold(0, |mask, index| mask | (1 << index))
+}
+
+const _: () = assert!(VALID_EFFORT_TOKENS.len() <= u8::BITS as usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dialect {
