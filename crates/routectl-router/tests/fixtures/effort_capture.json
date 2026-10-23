@@ -1,5 +1,5 @@
 {
-  "note": "Effort rejection captures (2026-10-22), one entry per effort rejection fixture captured that day, keyed by its <dialect>/<case> path under rejections/. lane is the carrier the request went to; model is the model id sent. request_shape is the sent wire body projected onto its effort field and its thinking object, at their wire paths: output_config.effort (Messages and InvokeModel), additionalModelRequestFields.output_config.effort (Converse), reasoning.effort (Responses). Every entry carries exactly one effort path. A request_shape with no thinking key means no thinking object was sent. Everything else in the sent body is left out: in particular the InvokeModel opus-4-5 pair differs only by the effort anthropic_beta flag, which the beta case's fixture note names. status and message are the captured status and the verbatim upstream message; the fixture body is the full envelope.",
+  "note": "Effort rejection captures (2026-10-22 and 2026-10-23), one entry per effort rejection fixture, keyed by its <dialect>/<case> path under rejections/. lane is the carrier the request went to; model is the model id sent. request_shape is the sent wire body projected onto its effort field and its thinking object, at their wire paths: output_config.effort (Messages and InvokeModel), additionalModelRequestFields.output_config.effort (Converse), reasoning.effort (Responses). Every entry carries exactly one effort path. A request_shape with no thinking key means no thinking object was sent; a thinking key holds the thinking object as sent. Everything else in the sent body is left out: in particular the InvokeModel opus-4-5 pair differs only by the effort anthropic_beta flag, which the beta case's fixture note names. status and message are the captured status and the verbatim upstream message; the fixture body is the full envelope.",
   "cases": {
     "anthropic-api/effort-invalid-value-openrouter": {
       "lane": "openrouter-anthropic",
@@ -33,6 +33,20 @@
       },
       "status": 400,
       "message": "This model does not support the effort parameter."
+    },
+    "anthropic-api/effort-xhigh-thinking-disabled-opus-5-5": {
+      "lane": "anthropic-oauth",
+      "model": "claude-opus-5-5",
+      "request_shape": {
+        "output_config": {
+          "effort": "xhigh"
+        },
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "status": 400,
+      "message": "\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
     },
     "anthropic-api/effort-xhigh-unsupported-opus-4-5": {
       "lane": "anthropic-oauth",

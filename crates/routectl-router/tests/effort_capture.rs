@@ -1,9 +1,10 @@
 //! Welds the effort rejection fixtures to their capture record
 //! (`tests/fixtures/effort_capture.json`): every record entry names a
 //! committed fixture whose status and verbatim message match the record, whose
-//! note names the record's model, whose lane belongs to its directory, and
-//! whose sent effort level reads from the record's `request_shape` at its
-//! dialect's wire path and no other.
+//! note names the record's model and capture date, whose lane belongs to its
+//! directory, whose sent effort level reads from the record's `request_shape`
+//! at its dialect's wire path and no other, and whose sent thinking shape is
+//! pinned per case.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 const CAPTURE: &str = include_str!("fixtures/effort_capture.json");
-const CAPTURE_DATE: &str = "2026-10-22";
+const FIRST_CAPTURE_DATE: &str = "2026-10-22";
 
 /// The request body shape a capture was sent in, which fixes where its
 /// effort level and thinking object sit.
@@ -74,40 +75,107 @@ enum RecordError {
     ForeignRoot(String),
 }
 
-/// Every record entry and the effort level its request sent.
-const SENT_EFFORT: [(&str, &str); 14] = [
-    ("anthropic-api/effort-invalid-value-openrouter", "bogus"),
-    ("anthropic-api/effort-invalid-value-opus-4-8", "bogus"),
-    (
-        "anthropic-api/effort-parameter-unsupported-haiku-4-5",
-        "low",
-    ),
-    ("anthropic-api/effort-xhigh-unsupported-opus-4-5", "xhigh"),
-    ("anthropic-api/effort-xhigh-unsupported-sonnet-4-6", "xhigh"),
-    ("bedrock/effort-extra-input-invoke-opus-4-5", "xhigh"),
-    ("bedrock/effort-invalid-value-invoke-opus-4-5-beta", "xhigh"),
-    ("bedrock/effort-unknown-variant-converse-opus-4-8", "bogus"),
-    ("bedrock/effort-unknown-variant-invoke-opus-4-8", "bogus"),
-    (
-        "bedrock/effort-xhigh-unsupported-converse-sonnet-4-6",
-        "xhigh",
-    ),
-    (
-        "bedrock/effort-xhigh-unsupported-invoke-sonnet-4-6",
-        "xhigh",
-    ),
-    (
-        "openai-responses/reasoning-effort-invalid-value-codex-gpt-5-6",
-        "bogus",
-    ),
-    (
-        "openai-responses/reasoning-effort-invalid-value-mantle",
-        "bogus",
-    ),
-    (
-        "openai-responses/reasoning-effort-minimal-unsupported-codex",
-        "minimal",
-    ),
+/// What one record entry's request sent, and the day it was captured.
+struct Sent {
+    key: &'static str,
+    captured: &'static str,
+    effort: &'static str,
+    /// The `thinking.type` sent, or `None` when no thinking object was sent.
+    thinking: Option<&'static str>,
+}
+
+/// Every record entry, in record key order.
+const SENT: [Sent; 15] = [
+    Sent {
+        key: "anthropic-api/effort-invalid-value-openrouter",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "bogus",
+        thinking: None,
+    },
+    Sent {
+        key: "anthropic-api/effort-invalid-value-opus-4-8",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "bogus",
+        thinking: None,
+    },
+    Sent {
+        key: "anthropic-api/effort-parameter-unsupported-haiku-4-5",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "low",
+        thinking: None,
+    },
+    Sent {
+        key: "anthropic-api/effort-xhigh-thinking-disabled-opus-5-5",
+        captured: "2026-10-23",
+        effort: "xhigh",
+        thinking: Some("disabled"),
+    },
+    Sent {
+        key: "anthropic-api/effort-xhigh-unsupported-opus-4-5",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "xhigh",
+        thinking: None,
+    },
+    Sent {
+        key: "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "xhigh",
+        thinking: None,
+    },
+    Sent {
+        key: "bedrock/effort-extra-input-invoke-opus-4-5",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "xhigh",
+        thinking: None,
+    },
+    Sent {
+        key: "bedrock/effort-invalid-value-invoke-opus-4-5-beta",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "xhigh",
+        thinking: None,
+    },
+    Sent {
+        key: "bedrock/effort-unknown-variant-converse-opus-4-8",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "bogus",
+        thinking: None,
+    },
+    Sent {
+        key: "bedrock/effort-unknown-variant-invoke-opus-4-8",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "bogus",
+        thinking: None,
+    },
+    Sent {
+        key: "bedrock/effort-xhigh-unsupported-converse-sonnet-4-6",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "xhigh",
+        thinking: None,
+    },
+    Sent {
+        key: "bedrock/effort-xhigh-unsupported-invoke-sonnet-4-6",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "xhigh",
+        thinking: None,
+    },
+    Sent {
+        key: "openai-responses/reasoning-effort-invalid-value-codex-gpt-5-6",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "bogus",
+        thinking: None,
+    },
+    Sent {
+        key: "openai-responses/reasoning-effort-invalid-value-mantle",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "bogus",
+        thinking: None,
+    },
+    Sent {
+        key: "openai-responses/reasoning-effort-minimal-unsupported-codex",
+        captured: FIRST_CAPTURE_DATE,
+        effort: "minimal",
+        thinking: None,
+    },
 ];
 
 fn rejections_dir() -> PathBuf {
@@ -228,12 +296,31 @@ fn check_entry(key: &str, entry: &Value) -> Result<(), String> {
         ));
     }
     let model = entry["model"].as_str().ok_or("record model")?;
-    let opening = format!("Tier 1, captured on {dir} ({CAPTURE_DATE}, {model}, ");
+    let captured = SENT
+        .iter()
+        .find(|sent| sent.key == key)
+        .ok_or("no capture date pinned for this entry")?
+        .captured;
+    let opening = format!("Tier 1, captured on {dir} ({captured}, {model}, ");
     let note = fixture["note"].as_str().ok_or("fixture note")?;
     if !note.starts_with(&opening) {
         return Err(format!("note does not open with {opening:?}"));
     }
     Ok(())
+}
+
+/// The `thinking.type` a record's request sent, or `None` when it sent no
+/// thinking object.
+fn record_sent_thinking(key: &str, entry: &Value) -> Result<Option<String>, String> {
+    let dialect = record_dialect(key, entry).map_err(|e| format!("{e:?}"))?;
+    thinking_at(dialect, &entry["request_shape"])
+        .map(|thinking| {
+            thinking["type"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "thinking object has no string type".to_string())
+        })
+        .transpose()
 }
 
 fn record_sent_effort(key: &str, entry: &Value) -> Result<String, String> {
@@ -255,7 +342,7 @@ fn every_effort_fixture_matches_its_capture_record() {
         .collect();
 
     // Assert
-    assert_eq!(cases.len(), SENT_EFFORT.len(), "premise: every entry read");
+    assert_eq!(cases.len(), SENT.len(), "premise: every entry read");
     assert!(
         failures.is_empty(),
         "fixtures out of step with the capture record:\n{}",
@@ -267,7 +354,7 @@ fn every_effort_fixture_matches_its_capture_record() {
 fn every_capture_names_the_effort_level_it_sent() {
     // Arrange
     let cases = capture_cases();
-    let pinned: Vec<&str> = SENT_EFFORT.iter().map(|(key, _)| *key).collect();
+    let pinned: Vec<&str> = SENT.iter().map(|sent| sent.key).collect();
     let recorded: Vec<&str> = cases.keys().map(String::as_str).collect();
 
     // Act
@@ -281,34 +368,38 @@ fn every_capture_names_the_effort_level_it_sent() {
         recorded, pinned,
         "premise: the record covers exactly the pinned cases"
     );
-    let expected: Vec<(String, Result<String, String>)> = SENT_EFFORT
+    let expected: Vec<(String, Result<String, String>)> = SENT
         .iter()
-        .map(|(key, level)| ((*key).to_string(), Ok((*level).to_string())))
+        .map(|sent| (sent.key.to_string(), Ok(sent.effort.to_string())))
         .collect();
     assert_eq!(sent, expected);
 }
 
 #[test]
-fn no_capture_sent_a_thinking_object() {
+fn every_capture_names_the_thinking_shape_it_sent() {
     // Arrange
     let cases = capture_cases();
+    let expected: BTreeMap<String, Result<Option<String>, String>> = SENT
+        .iter()
+        .map(|sent| (sent.key.to_string(), Ok(sent.thinking.map(str::to_string))))
+        .collect();
 
     // Act
-    let with_thinking: Vec<String> = cases
+    let sent: BTreeMap<String, Result<Option<String>, String>> = cases
         .iter()
-        .filter_map(|(key, entry)| match record_dialect(key, entry) {
-            Ok(dialect) => thinking_at(dialect, &entry["request_shape"])
-                .map(|_| format!("{key}: sent thinking")),
-            Err(e) => Some(format!("{key}: {e:?}")),
-        })
+        .map(|(key, entry)| (key.clone(), record_sent_thinking(key, entry)))
         .collect();
 
     // Assert
-    assert_eq!(cases.len(), SENT_EFFORT.len(), "premise: every entry read");
     assert!(
-        with_thinking.is_empty(),
-        "a capture sent thinking; its tests must read the thinking shape: {with_thinking:?}"
+        SENT.iter().any(|sent| sent.thinking.is_some()),
+        "premise: a pinned case sent thinking, so a reader that never finds one fails"
     );
+    assert!(
+        SENT.iter().any(|sent| sent.thinking.is_none()),
+        "premise: a pinned case sent no thinking, so a reader that always finds one fails"
+    );
+    assert_eq!(sent, expected);
 }
 
 #[test]

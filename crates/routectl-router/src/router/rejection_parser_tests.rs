@@ -204,6 +204,12 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
             Outcome::NotLocalized,
         ),
+        // Effort sent with thinking disabled: the thinking refusal wins and
+        // the effort level is never named.
+        (
+            "anthropic-api/effort-xhigh-thinking-disabled-opus-5-5",
+            Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        ),
         (
             "anthropic-api/max-tokens-above-model-limit-messages",
             Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),

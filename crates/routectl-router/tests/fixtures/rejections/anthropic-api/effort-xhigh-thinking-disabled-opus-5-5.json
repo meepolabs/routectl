@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-10-23, claude-opus-5-5, Messages, OAuth seat): output_config.effort xhigh sent with thinking.type disabled to a model that refuses thinking.type disabled (the same model accepted thinking.type enabled with a 200 the same day). The thinking refusal comes back, not an effort refusal: the message is byte-identical to the thinking-type-disabled-unsupported case and names no effort level. error.message is verbatim; the envelope keeps the captured key order, with the request id field dropped. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"\\\"thinking.type.disabled\\\" is not supported for this model. Use \\\"thinking.type.adaptive\\\" and \\\"output_config.effort\\\" to control thinking behavior.\"}}"
+}
