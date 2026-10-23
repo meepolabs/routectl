@@ -316,21 +316,22 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "openai-compat/unsupported-parameter-frequency-penalty",
             Outcome::Row("frequency_penalty", SelfIdentifying, UnsupportedField),
         ),
+        // `reasoning.effort` is the Responses spelling of the effort field.
         (
             "openai-responses/reasoning-effort-invalid-value-codex",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "openai-responses/reasoning-effort-invalid-value-codex-gpt-5-6",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "openai-responses/reasoning-effort-invalid-value-mantle",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "openai-responses/reasoning-effort-minimal-unsupported-codex",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
     ]
     .into_iter()
@@ -778,46 +779,44 @@ fn the_plural_unsupported_parameters_wording_is_not_localized() {
     }
 }
 
+/// The Responses lane reads the OpenAI envelope: a structured `error.param`
+/// names the same row it names on openai-compat. Whether a lane of that kind
+/// may act on the row is the field repair's decision, not the parser's.
+///
+/// Mutation check: drop the openai-responses arm of `Dialect::of_kind` ->
+/// red.
 #[test]
-fn openai_responses_has_no_parser_so_its_committed_fixtures_localize_nothing() {
+fn openai_responses_reads_a_structured_param_like_openai_compat() {
     let structured = UpstreamBody::new(openai_coded_body(
         "anything at all",
         Some(DISPLAY_PATH),
         "unsupported_parameter",
     ));
-    assert!(
+    let row = |kind| {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
-            OPENAI_COMPAT,
+            kind,
             400,
-            structured.parsed()
+            structured.parsed(),
         )
-        .is_some(),
-        "premise: the same envelope resolves on openai-compat",
-    );
+        .map(|named| (named.row.path, named.tier, named.kind))
+    };
 
-    assert!(
-        parse_rejection(
-            crate::router::FieldRepairTable::default(),
-            OPENAI_RESPONSES,
-            400,
-            structured.parsed()
-        )
-        .is_none()
+    assert_eq!(
+        row(OPENAI_COMPAT),
+        Some((DISPLAY_PATH, SelfIdentifying, UnsupportedField)),
+        "premise: the envelope resolves on openai-compat",
     );
-    let responses: Vec<Outcome> = corpus_outcomes()
-        .into_iter()
-        .filter(|(case, _)| case.starts_with("openai-responses/"))
-        .map(|(_, outcome)| outcome)
-        .collect();
-    assert!(
-        !responses.is_empty(),
-        "premise: a Responses capture is committed"
-    );
-    assert!(
-        responses.iter().all(|o| *o == Outcome::NotLocalized),
-        "a Responses rejection fixture that localizes needs a deliberate parser arm: {responses:?}",
-    );
+    assert_eq!(row(OPENAI_RESPONSES), row(OPENAI_COMPAT));
+}
+
+/// The codex backend's refusal of a sampling parameter is a bare `detail`
+/// string, not the OpenAI envelope, so it names no field.
+#[test]
+fn the_codex_detail_refusal_localizes_nothing() {
+    let body = json!({"detail": "Unsupported parameter: temperature"}).to_string();
+
+    assert_eq!(outcome(OPENAI_RESPONSES, 400, &body), Outcome::NotLocalized);
 }
 
 #[test]
@@ -1847,7 +1846,7 @@ mod level_list {
 
     const EFFORT_CAPTURE: &str = include_str!("../../tests/fixtures/effort_capture.json");
 
-    const MINIMAL: u8 = 1 << 0;
+    pub(super) const MINIMAL: u8 = 1 << 0;
     pub(super) const LOW: u8 = 1 << 1;
     pub(super) const MEDIUM: u8 = 1 << 2;
     pub(super) const HIGH: u8 = 1 << 3;
@@ -2263,5 +2262,282 @@ mod effort_templates {
         for (name, kind, body) in cases {
             assert_eq!(outcome(kind, 400, &body), Outcome::NotLocalized, "{name}");
         }
+    }
+}
+
+mod responses_effort {
+    //! The Responses effort refusals: the OpenAI envelope naming
+    //! `reasoning.effort` in `error.param`, read onto the one canonical effort
+    //! field with its echoed level and level mask, and only under that param.
+
+    use std::collections::BTreeMap;
+
+    use routectl_core::UpstreamBody;
+    use serde_json::json;
+
+    use super::level_list::{HIGH, LOW, MAX, MEDIUM, MINIMAL, XHIGH};
+    use super::{
+        EFFORT_PATH, InvalidValue, OPENAI_RESPONSES, Outcome, SelfIdentifying, fixture, localize,
+        openai_coded_body, outcome, rejected_wire_path, rejections_dir,
+    };
+
+    const RESPONSES_EFFORT_PARAM: &str = "reasoning.effort";
+    /// The codex `Invalid value` refusal, as captured.
+    const INVALID_VALUE: &str = "Invalid value: 'bogus'. Supported values are: 'none', \
+         'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.";
+    /// The codex `Unsupported value` refusal, as captured.
+    const UNSUPPORTED_VALUE: &str = "Unsupported value: 'minimal' is not supported with the \
+         'gpt-5.6-terra' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', \
+         and 'max'.";
+
+    /// What `localize` reads: canonical path, raw path, echoed level, level
+    /// mask, and whether the reason presupposes the field was sent.
+    type Reading = (String, String, Option<String>, u8, bool);
+
+    fn reading(status: u16, body: &str) -> Option<Reading> {
+        let body = UpstreamBody::new(body);
+        let localized = localize(OPENAI_RESPONSES, status, body.parsed()?)?;
+        Some((
+            localized.segments.join("."),
+            localized.raw.to_string(),
+            localized.echoed.map(str::to_owned),
+            localized.levels,
+            localized.presupposes_presence,
+        ))
+    }
+
+    fn effort(echoed: &str, levels: u8) -> Option<Reading> {
+        Some((
+            EFFORT_PATH.to_string(),
+            RESPONSES_EFFORT_PARAM.to_string(),
+            Some(echoed.to_string()),
+            levels,
+            true,
+        ))
+    }
+
+    fn body(message: &str, param: &str, code: &str) -> String {
+        openai_coded_body(message, Some(param), code)
+    }
+
+    /// Mutation checks: drop the `Unsupported value` head -> red on the
+    /// minimal case; drop the `reasoning.effort` canonical mapping -> red on
+    /// every case (the path reads `reasoning.effort`, the mask `0`).
+    #[test]
+    fn every_responses_effort_capture_reads_to_its_echo_and_level_mask() {
+        let mut readings = BTreeMap::new();
+        for file in std::fs::read_dir(rejections_dir().join(OPENAI_RESPONSES)).expect("kind dir") {
+            let path = file.expect("file entry").path();
+            let case = path.file_stem().unwrap().to_str().unwrap().to_string();
+            let (status, body) = fixture(OPENAI_RESPONSES, &case);
+            readings.insert(case, reading(status, &body));
+        }
+        let six = MINIMAL | LOW | MEDIUM | HIGH | XHIGH | MAX;
+        let without_minimal = LOW | MEDIUM | HIGH | XHIGH | MAX;
+        let expected: BTreeMap<String, Option<Reading>> = [
+            ("reasoning-effort-invalid-value-codex", effort("bogus", six)),
+            (
+                "reasoning-effort-invalid-value-codex-gpt-5-6",
+                effort("bogus", six),
+            ),
+            (
+                "reasoning-effort-invalid-value-mantle",
+                effort("bogus", without_minimal),
+            ),
+            // The refused level is echoed and absent from the list.
+            (
+                "reasoning-effort-minimal-unsupported-codex",
+                effort("minimal", without_minimal),
+            ),
+        ]
+        .into_iter()
+        .map(|(case, reading)| (case.to_string(), reading))
+        .collect();
+
+        assert_eq!(readings, expected);
+    }
+
+    /// The same envelope under any other `error.param` names that parameter
+    /// and no effort value: its list is another field's.
+    ///
+    /// Mutation check: drop the `error.param == reasoning.effort` gate in
+    /// `localize_responses` -> red (an echo and the listed values appear).
+    #[test]
+    fn a_value_list_is_read_only_under_the_effort_param() {
+        for (name, message, code, refused) in [
+            ("invalid value", INVALID_VALUE, "invalid_value", "bogus"),
+            (
+                "unsupported value",
+                UNSUPPORTED_VALUE,
+                "unsupported_value",
+                "minimal",
+            ),
+        ] {
+            assert_eq!(
+                reading(400, &body(message, RESPONSES_EFFORT_PARAM, code))
+                    .and_then(|reading| reading.2)
+                    .as_deref(),
+                Some(refused),
+                "premise: {name} reads its echo under the effort param",
+            );
+
+            let other = UpstreamBody::new(body(message, "temperature", code));
+            let localized = localize(OPENAI_RESPONSES, 400, other.parsed().unwrap())
+                .unwrap_or_else(|| panic!("{name}: a structured param still localizes"));
+
+            assert_eq!(localized.segments, ["temperature"], "{name}");
+            assert_eq!(localized.echoed, None, "{name}");
+            assert!(localized.replacements.is_empty(), "{name}");
+            assert_eq!(localized.levels, 0, "{name}");
+            assert!(!localized.presupposes_presence, "{name}");
+        }
+    }
+
+    /// A rejection status is a 400 or a 422; the status a failed codex
+    /// stream event surfaces on is 0, and it localizes nothing.
+    #[test]
+    fn the_codex_refusal_at_status_zero_localizes_nothing() {
+        let (status, body) = fixture(
+            OPENAI_RESPONSES,
+            "reasoning-effort-minimal-unsupported-codex",
+        );
+        assert_eq!(
+            outcome(OPENAI_RESPONSES, status, &body),
+            super::unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+            "premise: the same text localizes at its captured status",
+        );
+
+        assert_eq!(outcome(OPENAI_RESPONSES, 0, &body), Outcome::NotLocalized);
+        assert_eq!(
+            rejected_wire_path(
+                OPENAI_RESPONSES,
+                0,
+                UpstreamBody::new(body.as_str()).parsed()
+            ),
+            None
+        );
+    }
+
+    /// The wire locator keeps the Responses spelling, so it is looked up in
+    /// the body that went out; only the canonical field is the effort one.
+    ///
+    /// Mutation check: canonicalize `raw` as well -> red on the locator.
+    #[test]
+    fn the_locator_keeps_the_wire_spelling_and_the_field_is_canonical() {
+        let (status, body) = fixture(OPENAI_RESPONSES, "reasoning-effort-invalid-value-codex");
+        let body = UpstreamBody::new(body);
+
+        let rejected = rejected_wire_path(OPENAI_RESPONSES, status, body.parsed())
+            .expect("the codex refusal localizes");
+
+        assert!(rejected.locator.segments().eq(["reasoning", "effort"]));
+        assert!(rejected.field.segments().eq(["output_config", "effort"]));
+        assert!(rejected.presupposes_presence);
+    }
+
+    /// The canonical mapping is the Responses spelling's alone: the same
+    /// param on openai-compat stays `reasoning.effort`, and a longer path
+    /// under `reasoning` is not the effort field.
+    #[test]
+    fn only_the_responses_effort_param_maps_onto_the_effort_field() {
+        let rows = [
+            (
+                "openai-compat",
+                RESPONSES_EFFORT_PARAM,
+                RESPONSES_EFFORT_PARAM,
+            ),
+            (
+                OPENAI_RESPONSES,
+                "reasoning.effort.level",
+                "reasoning.effort.level",
+            ),
+            (OPENAI_RESPONSES, "reasoning", "reasoning"),
+            (OPENAI_RESPONSES, RESPONSES_EFFORT_PARAM, EFFORT_PATH),
+        ];
+        for (kind, param, canonical) in rows {
+            let body = UpstreamBody::new(body("anything", param, "invalid_value"));
+            let localized = localize(kind, 400, body.parsed().unwrap())
+                .unwrap_or_else(|| panic!("{kind} {param}: localizes"));
+
+            assert_eq!(localized.segments.join("."), canonical, "{kind} {param}");
+        }
+    }
+
+    #[test]
+    fn responses_value_refusal_near_misses_carry_no_echo_or_levels() {
+        let swap = |template: &str, from: &str, to: &str| {
+            assert!(
+                template.contains(from),
+                "premise: {from:?} is in the template"
+            );
+            template.replace(from, to)
+        };
+        let near_misses = [
+            (
+                "missing closing period",
+                swap(INVALID_VALUE, "'max'.", "'max'"),
+            ),
+            ("trailing prose", format!("{INVALID_VALUE} See the docs.")),
+            (
+                "one changed word",
+                swap(INVALID_VALUE, "Supported values", "Allowed values"),
+            ),
+            (
+                "echoed value is not a name",
+                swap(INVALID_VALUE, "'bogus'", "'bo gus'"),
+            ),
+            (
+                "separator with no member",
+                swap(INVALID_VALUE, ", and 'max'.", ", and ."),
+            ),
+            (
+                "bare list",
+                swap(INVALID_VALUE, "'none', 'minimal'", "none, minimal"),
+            ),
+            (
+                "model id with a space",
+                swap(UNSUPPORTED_VALUE, "'gpt-5.6-terra'", "'gpt 5.6'"),
+            ),
+            (
+                "unsupported wording without the model",
+                swap(UNSUPPORTED_VALUE, " with the 'gpt-5.6-terra' model", ""),
+            ),
+        ];
+
+        for (name, message) in near_misses {
+            let reading = reading(
+                400,
+                &body(&message, RESPONSES_EFFORT_PARAM, "invalid_value"),
+            );
+
+            assert_eq!(
+                reading,
+                Some((
+                    EFFORT_PATH.to_string(),
+                    RESPONSES_EFFORT_PARAM.to_string(),
+                    None,
+                    0,
+                    false,
+                )),
+                "{name}: the param still names the field, with no value read",
+            );
+        }
+    }
+
+    #[test]
+    fn the_codex_minimal_refusal_echoes_a_level_its_list_omits() {
+        let body = json!({"error": {
+            "message": UNSUPPORTED_VALUE,
+            "type": "invalid_request_error",
+            "param": RESPONSES_EFFORT_PARAM,
+            "code": "unsupported_value",
+        }})
+        .to_string();
+
+        let (_, _, echoed, levels, _) = reading(400, &body).expect("localizes");
+
+        assert_eq!(echoed.as_deref(), Some("minimal"));
+        assert_eq!(levels & MINIMAL, 0);
+        assert_eq!(levels, LOW | MEDIUM | HIGH | XHIGH | MAX);
     }
 }

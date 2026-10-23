@@ -294,20 +294,23 @@ async fn a_converse_rejection_is_located_in_the_field_bag() {
     .await;
 }
 
+/// The Responses envelope localizes the parameter it names, so the wire check
+/// locates it on the body that went out; the lane's kind is outside the field
+/// repair, so the rejection still proceeds unrepaired.
 #[tokio::test]
-async fn an_openai_responses_rejection_proceeds_as_with_no_wire_record() {
+async fn an_openai_responses_rejection_of_a_carried_row_is_not_repaired() {
     if !cfg!(feature = "openai-responses") {
         return;
     }
     run_dispatch_rows(&[DispatchRow {
-        name: "no parser arm",
+        name: "a kind the field repair does not admit",
         provider_block: OPENAI_RESPONSES,
         dialect: IngressDialect::Responses,
         carry: carry_test_row,
-        sent: Some(unchanged),
+        sent: Some(test_row_at_root),
         answer: |req| refuse_test_row(req, || openai_rejection(TEST_UNSUPPORTED_PATH)),
         calls: 1,
-        finding: ("unlocalized", FieldRepairOutcome::Unrepaired),
+        finding: ("routectl_added", FieldRepairOutcome::Unrepaired),
     }])
     .await;
 }

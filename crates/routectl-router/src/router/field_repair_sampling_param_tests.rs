@@ -738,3 +738,196 @@ mod openai_compat_sampling {
         }
     }
 }
+
+#[cfg(feature = "openai-responses")]
+mod responses_temperature {
+    use super::*;
+
+    use routectl_core::failure_class::classify;
+
+    const TEMPERATURE: &str = "temperature";
+
+    const RESPONSES_TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
+         [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+         [providers.p0]\nkind = \"openai-responses\"\nauth_kind = \"api-key\"\n\
+         base_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
+
+    /// The mantle-responses refusal of `temperature` as captured: the OpenAI
+    /// envelope naming the parameter in `error.param`.
+    const CAPTURED_MESSAGE: &str =
+        "Unsupported parameter: 'temperature' is not supported with this model.";
+
+    /// The refusal as the openai-responses provider surfaces it: the body
+    /// with its lifted `error.type` and `error.code`.
+    fn refusal(code: &'static str) -> Error {
+        let body = json!({"error": {
+            "code": code,
+            "message": CAPTURED_MESSAGE,
+            "param": TEMPERATURE,
+            "type": "invalid_request_error",
+        }})
+        .to_string();
+        Error::upstream_with_body(
+            "responses-seat",
+            400,
+            routectl_core::UpstreamBody::new(body),
+            None,
+            Some("invalid_request_error".into()),
+            Some(code.into()),
+        )
+    }
+
+    /// A Responses seat: deposits a body carrying `temperature` while the
+    /// request does, refuses that body with `code`'s refusal, and otherwise
+    /// serves.
+    struct ResponsesSeat {
+        code: &'static str,
+        calls: AtomicUsize,
+    }
+
+    impl ResponsesSeat {
+        fn answer(&self, req: &ChatRequest) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut body = json!({"model": "upstream", "input": "hi"});
+            if let Some(temperature) = req.temperature {
+                body[TEMPERATURE] = json!(temperature);
+            }
+            if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
+                tap.deposit(serde_json::to_vec(&body).expect("serialize").into());
+            }
+            if req.temperature.is_some() {
+                return Err(refusal(self.code));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ResponsesSeat {
+        fn id(&self) -> &'static str {
+            "responses-seat"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("responses-seat", "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            self.answer(&req).map(|()| success_response())
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.answer(&req).map(|()| {
+                stream::iter(vec![Ok(content_chunk())]).boxed()
+                    as BoxStream<'static, Result<ChatChunk>>
+            })
+        }
+    }
+
+    fn responses_router(seat: &Arc<ResponsesSeat>) -> Router {
+        let mut config: Config = toml::from_str(RESPONSES_TOML).expect("valid test toml");
+        config
+            .aliases
+            .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
+        let mut router = Router::new(Arc::new(config));
+        router.install_resolved_models(BTreeMap::from([(
+            "m0".to_string(),
+            Arc::new(ResolvedModel::new(
+                "m0",
+                "p0",
+                Arc::clone(seat) as Arc<dyn Provider>,
+                "upstream",
+            )),
+        )]));
+        router.with_capability_writes_assumed_durable_for_tests()
+    }
+
+    /// A Responses client's `temperature: 0.5`, client bytes included for
+    /// the wire check.
+    fn temperature_req() -> ChatRequest {
+        let mut req = req_on(ALIAS);
+        req.temperature = Some(0.5);
+        req.reasoning = None;
+        req.routectl_internal.anthropic_thinking_display = None;
+        req.routectl_internal.anthropic_thinking = routectl_core::AnthropicThinking::SentNone;
+        req.routectl_internal.ingress_wire = Some(routectl_core::wire_check::IngressWire {
+            dialect: routectl_core::wire_check::IngressDialect::Responses,
+            client_version: None,
+            bytes: serde_json::to_vec(&json!({
+                "model": ALIAS,
+                "input": "hi",
+                "temperature": 0.5,
+            }))
+            .expect("serialize")
+            .into(),
+        });
+        req
+    }
+
+    /// The parser names the `temperature` row on an openai-responses lane,
+    /// but the lane's kind is outside the field repair: no plan admits it, a
+    /// refusal is sent once and reaches the client, and nothing is repaired
+    /// or learned. Both codes: the captured `unsupported_parameter`, which
+    /// the class gate also refuses on this kind, and `invalid_value`, which
+    /// arrives as `BadRequest` so only the kind gate stands.
+    ///
+    /// Mutation check: add openai-responses to `FIELD_REPAIR_KINDS` -> red
+    /// (a plan is admitted).
+    #[tokio::test]
+    async fn a_responses_temperature_refusal_admits_no_plan_and_repairs_nothing() {
+        for code in ["unsupported_parameter", "invalid_value"] {
+            let seat = Arc::new(ResponsesSeat {
+                code,
+                calls: AtomicUsize::new(0),
+            });
+            let router = responses_router(&seat);
+            let req = temperature_req();
+            let named = super::super::rejected_field(
+                router.field_repair_table(),
+                &classify(&refusal(code), Some("openai-responses")).class,
+                &refusal(code),
+                "openai-responses",
+            );
+            if code == "invalid_value" {
+                assert_eq!(
+                    named.map(|named| named.row.path),
+                    Some(TEMPERATURE),
+                    "{code}: premise: the refusal names the temperature row",
+                );
+            }
+            let target = router
+                .dispatch_chain_for_request(
+                    &req,
+                    crate::router::class_observe::DispatchSurface::Complete,
+                )
+                .expect("the chain resolves")
+                .0
+                .into_iter()
+                .next()
+                .expect("one target");
+
+            let plan = router.plan_field_carry(
+                &target,
+                &req,
+                super::super::FieldSettlementMode::Settling,
+                std::time::Instant::now(),
+            );
+            let dispatched = router
+                .complete_with_options(req, RouterOptions::new())
+                .await;
+
+            assert!(plan.is_none(), "{code}: no plan admits the lane");
+            assert_eq!(seat.calls.load(Ordering::SeqCst), 1, "{code}: no retry");
+            assert!(dispatched.result.is_err(), "{code}: the refusal stands");
+            assert!(
+                dispatched.meta.field_repairs.is_empty(),
+                "{code}: no repair: {:?}",
+                dispatched.meta.field_repairs,
+            );
+            assert!(
+                dispatched.meta.learned_capabilities.is_empty(),
+                "{code}: and no verdict",
+            );
+        }
+    }
+}

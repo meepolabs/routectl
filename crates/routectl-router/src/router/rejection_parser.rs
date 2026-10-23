@@ -105,6 +105,24 @@ const OPENAI_UNSUPPORTED_SUFFIX: &str = "' is not supported with this model.";
 /// The openai `error.code` that refuses a named parameter.
 pub(super) const OPENAI_UNSUPPORTED_CODE: &str = "unsupported_parameter";
 
+/// The `error.param` the Responses API names an effort level refusal by, and
+/// the wire path that level travels in.
+const RESPONSES_EFFORT_PARAM: &str = "reasoning.effort";
+
+/// The Responses refusal of a value outside the effort enum, exactly as
+/// captured: `<lead-in><refused>'<close><values>.`, the values a quoted list.
+const RESPONSES_INVALID_VALUE_LEAD_IN: &str = "Invalid value: '";
+const RESPONSES_INVALID_VALUE_CLOSE: &str = "'. ";
+/// The Responses refusal of an enum value the model does not take, exactly as
+/// captured: `<lead-in><refused><middle><model><close><values>.`. The model
+/// id is never read; only a nonempty single token is accepted there.
+const RESPONSES_UNSUPPORTED_VALUE_LEAD_IN: &str = "Unsupported value: '";
+const RESPONSES_UNSUPPORTED_VALUE_MIDDLE: &str = "' is not supported with the '";
+const RESPONSES_UNSUPPORTED_VALUE_CLOSE: &str = "' model. ";
+/// The lead-in of the value list both Responses value refusals end with.
+const RESPONSES_SUPPORTED_VALUES: &str = "Supported values are: ";
+const RESPONSES_SUPPORTED_VALUES_CLOSE: &str = ".";
+
 /// Bedrock's refusal of the `temperature` field, exactly as captured on
 /// Converse. The message names no path, so only this exact text localizes.
 const BEDROCK_TEMPERATURE_UNSUPPORTED: &str =
@@ -470,6 +488,9 @@ enum Dialect {
     AnthropicApi,
     Bedrock,
     OpenAi,
+    /// The OpenAI envelope, naming the effort level in the Responses
+    /// spelling `reasoning.effort`.
+    OpenAiResponses,
 }
 
 impl Dialect {
@@ -478,6 +499,7 @@ impl Dialect {
             kind::ANTHROPIC_API => Some(Self::AnthropicApi),
             kind::BEDROCK => Some(Self::Bedrock),
             kind::OPENAI_COMPAT => Some(Self::OpenAi),
+            kind::OPENAI_RESPONSES => Some(Self::OpenAiResponses),
             _ => None,
         }
     }
@@ -544,6 +566,7 @@ fn localize<'a>(
             localize_bedrock(strip_converse_errors_prefix(bedrock_message(parsed)?))
         }
         Dialect::OpenAi => localize_openai(parsed),
+        Dialect::OpenAiResponses => localize_responses(parsed),
     }?;
     let segments = canonical_segments(dialect, attribution.path)?;
     let levels = if segments.iter().copied().eq(EFFORT_PATH.split('.')) {
@@ -788,6 +811,52 @@ fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
     })
 }
 
+/// The OpenAI envelope reading, plus the refused level and the listed levels
+/// when `error.param` names the effort field and the message is one of the
+/// captured value refusals. A value list under any other `error.param` names
+/// another field's values and is never read.
+fn localize_responses(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
+    let attribution = localize_openai(parsed)?;
+    if attribution.path != RESPONSES_EFFORT_PARAM {
+        return Some(attribution);
+    }
+    let Some((echoed, levels)) = parsed.error_message().and_then(responses_value_refusal) else {
+        return Some(attribution);
+    };
+    Some(Attribution {
+        presupposes_presence: true,
+        replacements: levels,
+        echoed: Some(echoed),
+        ..attribution
+    })
+}
+
+/// `Invalid value: '<x>'. Supported values are: ...` or `Unsupported value:
+/// '<x>' is not supported with the '<model>' model. Supported values are:
+/// ...`, verbatim: the refused value a name and the values a nonempty quoted
+/// list ended by the closing period and nothing after it.
+fn responses_value_refusal(message: &str) -> Option<(&str, Vec<&str>)> {
+    let (echoed, rest) = invalid_value_head(message).or_else(|| unsupported_value_head(message))?;
+    let rest = rest.strip_prefix(RESPONSES_SUPPORTED_VALUES)?;
+    let (values, close) = list_and_rest(rest, ListMembers::Quoted)?;
+    (is_name(echoed) && close == RESPONSES_SUPPORTED_VALUES_CLOSE).then_some((echoed, values))
+}
+
+fn invalid_value_head(message: &str) -> Option<(&str, &str)> {
+    message
+        .strip_prefix(RESPONSES_INVALID_VALUE_LEAD_IN)?
+        .split_once(RESPONSES_INVALID_VALUE_CLOSE)
+}
+
+fn unsupported_value_head(message: &str) -> Option<(&str, &str)> {
+    let rest = message.strip_prefix(RESPONSES_UNSUPPORTED_VALUE_LEAD_IN)?;
+    let (echoed, rest) = rest.split_once(RESPONSES_UNSUPPORTED_VALUE_MIDDLE)?;
+    let (model, rest) = rest.split_once(RESPONSES_UNSUPPORTED_VALUE_CLOSE)?;
+    let single_token =
+        !model.is_empty() && !model.contains(|c: char| c.is_whitespace() || c == '\'');
+    single_token.then_some((echoed, rest))
+}
+
 /// `Unsupported parameter: '<x>' is not supported with this model.`
 fn unsupported_parameter(message: &str) -> Option<&str> {
     message
@@ -829,7 +898,7 @@ pub(super) fn rejected_beta_flags(
             }
             strip_converse_errors_prefix(bedrock_message(parsed)?)
         }
-        Dialect::OpenAi => return None,
+        Dialect::OpenAi | Dialect::OpenAiResponses => return None,
     };
     let mut flags: Vec<String> = Vec::new();
     for flag in beta_envelope_flags(message)? {
@@ -862,9 +931,11 @@ fn resolve(table: FieldRepairTable, segments: &[&str]) -> Option<&'static FieldR
         .find(|row| row.path.split('.').eq(segments.iter().copied()))
 }
 
-/// The canonical segments of `raw`: indices (`.0` or `[0]`) dropped and, on
-/// Bedrock, a leading Converse field bag removed. `None` when `raw` is not a
-/// bounded ASCII dotted path.
+/// The canonical segments of `raw`: indices (`.0` or `[0]`) dropped, on
+/// Bedrock a leading Converse field bag removed, and on Responses the effort
+/// field's `reasoning.effort` spelling read as the Messages one, so every
+/// dialect names the effort field one way. `None` when `raw` is not a bounded
+/// ASCII dotted path.
 fn canonical_segments(dialect: Dialect, raw: &str) -> Option<Vec<&str>> {
     if !is_safe_token(raw) {
         return None;
@@ -882,6 +953,14 @@ fn canonical_segments(dialect: Dialect, raw: &str) -> Option<Vec<&str>> {
     }
     if dialect == Dialect::Bedrock && segments.first() == Some(&CONVERSE_FIELD_BAG) {
         segments.remove(0);
+    }
+    if dialect == Dialect::OpenAiResponses
+        && segments
+            .iter()
+            .copied()
+            .eq(RESPONSES_EFFORT_PARAM.split('.'))
+    {
+        segments = EFFORT_PATH.split('.').collect();
     }
     (!segments.is_empty()).then_some(segments)
 }
