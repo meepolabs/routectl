@@ -246,6 +246,8 @@ pub(super) const fn field_wire_pointer(
         (FieldSurface::MaxTokens, IngressDialect::Anthropic | IngressDialect::Chat) => {
             Some("/max_tokens")
         }
+        (FieldSurface::Effort(_), IngressDialect::Anthropic) => Some("/output_config/effort"),
+        (FieldSurface::Effort(_), IngressDialect::Responses) => Some("/reasoning/effort"),
         _ => None,
     }
 }

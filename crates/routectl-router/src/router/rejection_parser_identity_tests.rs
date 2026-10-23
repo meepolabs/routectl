@@ -3,14 +3,16 @@
 //! exists, and folds a thinking type value so a refused rewrite reads as the
 //! field it rewrote.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use routectl_core::UpstreamBody;
 use routectl_core::capability::SignalTier;
 use serde_json::{Value, json};
 
-use super::super::field_repair::{FieldRepairRow, FieldRepairTable, grounded_table};
+use super::super::field_repair::{
+    FieldRepairRow, FieldRepairTable, FieldTransform, grounded_table,
+};
 use super::{FieldIdentity, LocalizedField, localized_field, parse_rejection, rejected_wire_path};
 
 use SignalTier::{Inferred, SelfIdentifying};
@@ -261,10 +263,22 @@ fn every_committed_rejection_localizes_a_field_exactly_when_the_wire_path_read_d
     assert!(localized > 0, "the corpus localizes at least one rejection");
 }
 
+/// Every rejection that resolves to a row localizes that row's identity with
+/// the same tier. Each grounded row is reached: a row with a field of its own
+/// as a resolved row, a ranked row (whose last segment is a level the sent
+/// request names, not the envelope) through its folded identity, localized
+/// in every lane kind that spells the effort field.
 #[test]
 fn a_rejection_with_a_row_carries_the_row_tier_and_folds_onto_the_row_identity() {
     let mut reached = BTreeSet::new();
+    let mut localized: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, kind, status, body) in corpus() {
+        if let Some(field) = field(&kind, status, &body) {
+            localized
+                .entry(format!("{:?}", field.identity.0))
+                .or_default()
+                .insert(kind.clone());
+        }
         let parsed = UpstreamBody::new(body.clone());
         let Some(named) =
             parse_rejection(FieldRepairTable::default(), &kind, status, parsed.parsed())
@@ -276,12 +290,27 @@ fn a_rejection_with_a_row_carries_the_row_tier_and_folds_onto_the_row_identity()
         assert_eq!(field.identity, FieldIdentity::of_row(named.row), "{name}");
         reached.insert(named.row.path);
     }
+    let effort_spellings = BTreeSet::from([
+        ANTHROPIC.to_string(),
+        BEDROCK.to_string(),
+        OPENAI_RESPONSES.to_string(),
+    ]);
     for row in grounded_table() {
-        assert!(
-            reached.contains(row.path),
-            "row {} reached by no capture",
-            row.path
-        );
+        if matches!(row.transform, FieldTransform::RankedRewrite { .. }) {
+            let identity = format!("{:?}", FieldIdentity::of_row(row).0);
+            assert_eq!(
+                localized.get(&identity),
+                Some(&effort_spellings),
+                "ranked row {} is localized in every effort spelling",
+                row.path,
+            );
+        } else {
+            assert!(
+                reached.contains(row.path),
+                "row {} reached by no capture",
+                row.path
+            );
+        }
     }
 }
 
@@ -314,6 +343,47 @@ fn every_refused_thinking_type_shares_one_identity_with_the_type_rows() {
     }
 }
 
+/// Every effort row folds onto the one field every lane's effort refusal
+/// localizes, so a refusal of the replacement level reads as the field the
+/// repair rewrote.
+///
+/// Mutation check: drop the ranked-row fold in `FieldIdentity::folded` ->
+/// red.
+#[test]
+fn every_effort_row_shares_one_identity_with_the_effort_refusals() {
+    let identity = FieldIdentity::of_row(row("output_config.effort.high"));
+    let refusals = [
+        (
+            ANTHROPIC,
+            anthropic_body(
+                "This model does not support effort level 'xhigh'. Supported levels: high, low.",
+            ),
+        ),
+        (
+            BEDROCK,
+            bedrock_body(&format!(
+                "{CONVERSE_WRAPPER}This model does not support effort level 'xhigh'. Supported \
+                 levels: high, low."
+            )),
+        ),
+        (
+            OPENAI_RESPONSES,
+            openai_body(
+                "Invalid value: 'bogus'. Supported values are: 'low' and 'high'.",
+                Some("reasoning.effort"),
+            ),
+        ),
+    ];
+    for level in routectl_providers::effort::VALID_EFFORT_TOKENS {
+        let path = format!("output_config.effort.{level}");
+        assert_eq!(FieldIdentity::of_row(row(&path)), identity, "{path}");
+    }
+    for (kind, body) in refusals {
+        let field = field(kind, 400, &body).expect("the effort refusal localizes");
+        assert_eq!(field.identity, identity, "{kind}");
+    }
+}
+
 #[test]
 fn distinct_fields_keep_distinct_identities() {
     let identity = |path| FieldIdentity::of_row(row(path));
@@ -330,6 +400,16 @@ fn distinct_fields_keep_distinct_identities() {
             "frequency_penalty",
         ),
         ("max_tokens vs temperature", "max_tokens", "temperature"),
+        (
+            "effort vs thinking type",
+            "output_config.effort.high",
+            "thinking.type.enabled",
+        ),
+        (
+            "effort vs max_tokens",
+            "output_config.effort.high",
+            "max_tokens",
+        ),
     ];
     for (name, left, right) in cases {
         assert_ne!(identity(left), identity(right), "{name}");

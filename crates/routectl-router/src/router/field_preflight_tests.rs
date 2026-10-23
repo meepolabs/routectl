@@ -4482,5 +4482,6 @@ include!("field_preflight_persistence_tests.rs");
 include!("field_preflight_isolation_tests.rs");
 include!("field_preflight_rewrite_tests.rs");
 include!("field_preflight_ceiling_tests.rs");
+include!("field_preflight_effort_tests.rs");
 
 include!("field_preflight_declare_tests.rs");

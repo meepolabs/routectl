@@ -2933,6 +2933,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/field_repair_rerepair_test_support.rs`
 - `src/router/field_repair_step_apply.rs` -- `FieldRepairPlan::step_claim` (guard
   choice before a repair's mutation) and `install_step` (step installation after it)
+- `src/router/field_repair_effort.rs` -- child module of `field_repair`: the
+  `FieldSurface::Effort(level)` carrier reads (`emitted_effort`,
+  `effort_present`, off while the target sets `effort_levels`) and the
+  carrier-preserving rewrite (`write_effort`), plus `RowScope`, the per-kind
+  view `FieldRepairTable::for_kind` applies (ranked effort rows off
+  openai-compat) to `present_rows`, pre-flight and rejection resolution
+  (tests: `src/router/field_repair_effort_tests.rs`, the rank weld included)
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
@@ -3329,9 +3336,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   module `//!` doc; the walk's wire behavior is covered in
   `src/router/count_tokens_wire_tests.rs`
 - `src/router/rejection_parser.rs` -- `parse_rejection` -> `NamedRejection`,
-  `RejectionKind`, `rejected_beta_flags`: per-dialect parse of an upstream
-  rejection envelope; also `localized_field` -> `LocalizedField` and
-  `FieldIdentity` (tests: `src/router/rejection_parser_identity_tests.rs`)
+  `RejectionKind`: per-dialect parse of an upstream rejection envelope; also
+  `localized_field` -> `LocalizedField` and `FieldIdentity` (tests:
+  `src/router/rejection_parser_identity_tests.rs`)
+- `src/router/rejection_parser_beta.rs` -- child module of
+  `rejection_parser`: `rejected_beta_flags`, the flags one exact
+  `anthropic-beta` rejection envelope lists (tests:
+  `src/router/rejection_parser_beta_tests.rs`)
 - `src/router/rejection_parser_effort.rs` -- child module of
   `rejection_parser`: the value-list reader (`list_members`, `levels_mask`)
   and the effort refusal templates (`Supported levels`, the serde
@@ -3775,6 +3786,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_preflight_isolation_tests.rs` -- `include!`d fragment of
   `field_preflight_tests.rs`: child-process isolation with a parent deadline
   for tests whose threads may not terminate
+- `src/router/field_preflight_effort_tests.rs` -- `include!`d fragment of
+  `field_preflight_tests.rs`: a resident effort verdict rewriting the egress
+  effort to its stored level, thinking byte-identical and nothing created on
+  an effort-only request, and the effort surface's wire pointers
 - `src/router/field_repair_parser_tests.rs` -- `include!`d fragment of
   `field_repair_tests.rs`: the parser-unlocalized counter and its class gate
 - `src/probe_scheduler/queue_status_tests.rs` -- `include!`d fragment of

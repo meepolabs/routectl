@@ -466,7 +466,11 @@ impl Router {
         target: &DispatchTarget,
         surface: DispatchSurface,
     ) -> (ChatRequest, Vec<FieldPreflight>, FieldPreflightPlan<'a>) {
-        let mut rows = present_rows(self.field_repair_table(), original_req).peekable();
+        let table = target.provider_kind.map_or_else(
+            || self.field_repair_table(),
+            |provider_kind| self.field_repair_table().for_kind(provider_kind),
+        );
+        let mut rows = present_rows(table, original_req).peekable();
         if rows.peek().is_none() {
             return (
                 original_req.clone(),
@@ -635,7 +639,7 @@ impl Router {
                 }
                 Ok(PreflightEdit::Ceiling(ceiling))
             }
-            FieldTransform::Rewrite { .. } => {
+            FieldTransform::Rewrite { .. } | FieldTransform::RankedRewrite { .. } => {
                 let Some(VerdictValue::Shape(value)) = self
                     .field_verdicts()
                     .verdict_value(key, authorization.incarnation)

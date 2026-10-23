@@ -3,7 +3,7 @@
 //! row, or no localization), every grounded row is reached by a capture, and
 //! near-miss wording resolves to nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use routectl_core::capability::{COMPUTER_USE, FailurePhase, SignalTier};
@@ -12,10 +12,10 @@ use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy};
 use routectl_core::{MAX_ERROR_BODY_BYTES, ParsedErrorBody, UpstreamBody};
 use serde_json::{Value, json};
 
-use super::super::field_repair::{closed_table, grounded_table};
+use super::super::field_repair::{FieldRepairRow, FieldTransform, closed_table, grounded_table};
 use super::{
-    LocalizedPath, RejectionKind, RejectionValue, THINKING_TYPES, localize, parse_rejection,
-    rejected_wire_path,
+    FieldIdentity, LocalizedPath, RejectionKind, RejectionValue, THINKING_TYPES, localize,
+    parse_rejection, rejected_wire_path,
 };
 
 const BEDROCK_CAPTURE: &str = include_str!("../../tests/fixtures/bedrock_validation_capture.json");
@@ -462,6 +462,11 @@ fn the_forced_tool_choice_location_prefix_is_an_inferred_unresolved_path() {
     assert_eq!(reached, unresolved("tool_choice", Inferred, InvalidValue));
 }
 
+/// Every grounded row with a field of its own is reached as a row by a
+/// committed fixture. A ranked row's last segment is a level, and which level
+/// a refusal names is the sent request's, not the envelope's, so the ranked
+/// family is grounded on its folded field instead: see
+/// [`the_ranked_effort_family_is_grounded_per_spelling_and_grammar`].
 #[test]
 fn every_grounded_row_is_reached_by_a_committed_fixture() {
     let reached: Vec<&'static str> = corpus_outcomes()
@@ -473,13 +478,85 @@ fn every_grounded_row_is_reached_by_a_committed_fixture() {
         })
         .collect();
 
-    for row in grounded_table() {
+    for row in grounded_table().iter().filter(|row| !is_ranked(row)) {
         assert!(
             reached.contains(&row.path),
             "grounded row {} is reached by no committed rejection fixture",
             row.path,
         );
     }
+}
+
+fn is_ranked(row: &FieldRepairRow) -> bool {
+    matches!(row.transform, FieldTransform::RankedRewrite { .. })
+}
+
+/// How one committed envelope reads the ranked family's field: the lane kind
+/// that spells it, then the grammar (tier and kind, by name, and whether the
+/// template echoes the refused level).
+type Grammar = (String, String, String, bool);
+
+fn grammar(kind: &str, tier: SignalTier, rejection: RejectionKind, echoed: bool) -> Grammar {
+    (
+        kind.to_string(),
+        format!("{tier:?}"),
+        format!("{rejection:?}"),
+        echoed,
+    )
+}
+
+/// The grammars the committed corpus localizes onto `identity`.
+fn grammars_localizing(identity: &FieldIdentity) -> BTreeSet<Grammar> {
+    let mut grammars = BTreeSet::new();
+    for kind_dir in std::fs::read_dir(rejections_dir()).expect("rejections dir") {
+        let kind_dir = kind_dir.expect("dir entry").path();
+        let kind = kind_dir.file_name().unwrap().to_str().unwrap().to_string();
+        for file in std::fs::read_dir(&kind_dir).expect("kind dir") {
+            let case = file.expect("file entry").path();
+            let case = case.file_stem().unwrap().to_str().unwrap().to_string();
+            let (status, body) = fixture(&kind, &case);
+            let body = UpstreamBody::new(body);
+            let Some(localized) = body.parsed().and_then(|p| localize(&kind, status, p)) else {
+                continue;
+            };
+            if FieldIdentity::folded(localized.segments.iter().copied()) == *identity {
+                grammars.insert(grammar(
+                    &kind,
+                    localized.tier,
+                    localized.kind,
+                    localized.echoed.is_some(),
+                ));
+            }
+        }
+    }
+    grammars
+}
+
+/// Every ranked row folds onto one field, and the corpus localizes that
+/// field in each lane spelling (Messages on anthropic-api and Bedrock,
+/// `reasoning.effort` on Responses) and each refusal grammar: the pydantic
+/// list, `Supported levels`, the serde variant list, the bare `Extra inputs`
+/// and the Responses value refusals. The fan-out across levels is key shape,
+/// not a capture per level.
+#[test]
+fn the_ranked_effort_family_is_grounded_per_spelling_and_grammar() {
+    let ranked: Vec<&FieldRepairRow> = grounded_table().iter().filter(|r| is_ranked(r)).collect();
+    assert!(!ranked.is_empty(), "premise: the table ships ranked rows");
+    let identity = FieldIdentity::of_row(ranked[0]);
+    for row in &ranked {
+        assert_eq!(FieldIdentity::of_row(row), identity, "{}", row.path);
+    }
+    let expected = BTreeSet::from([
+        grammar(ANTHROPIC, SelfIdentifying, InvalidValue, false),
+        grammar(ANTHROPIC, SelfIdentifying, InvalidValue, true),
+        grammar(BEDROCK, SelfIdentifying, InvalidValue, false),
+        grammar(BEDROCK, SelfIdentifying, InvalidValue, true),
+        grammar(BEDROCK, SelfIdentifying, UnsupportedField, false),
+        grammar(BEDROCK, Inferred, InvalidValue, true),
+        grammar(OPENAI_RESPONSES, SelfIdentifying, InvalidValue, true),
+    ]);
+
+    assert_eq!(grammars_localizing(&identity), expected);
 }
 
 #[test]

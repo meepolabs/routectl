@@ -2276,6 +2276,14 @@ model that rejects some levels. Three cases:
   Anthropic client's own `output_config.effort` of `"none"` reaches an
   Anthropic-shape upstream as sent, beside the thinking it sent.
 
+A non-empty `effort_levels` also turns effort learning off for the model.
+routectl learns a refused effort level from the upstream's rejection and
+rewrites later requests to the level that worked, but with a clamp in
+place the level on the wire is the clamped one, not the one the request
+carried, so no effort level is repaired, rewritten before dispatch, or
+learned while the list is set. Leave it empty to let routectl learn which
+levels the model accepts.
+
 #### `max_thinking_budget` (u32, default 0)
 
 Declares the model's maximum thinking-token budget in tokens. `0` means

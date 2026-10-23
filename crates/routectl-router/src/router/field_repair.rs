@@ -152,6 +152,11 @@ pub(super) enum FieldSurface {
     /// Never dropped and never probed; a ceiling repair lowers the emitted
     /// value (see [`Self::clamp_to`]).
     MaxTokens,
+    /// The effort level a Messages-shape body emits at `output_config.effort`
+    /// (`reasoning.effort` on Responses), PRESENT when that effort is exactly
+    /// the held level; see [`effort`]. A rewrite replaces the level only in
+    /// the carriers holding it and creates none. Never dropped.
+    Effort(&'static str),
     /// Test-only: reports itself PRESENT and removes NOTHING.
     ///
     /// The real surface's presence check and drop read the same two carriers, so
@@ -279,6 +284,7 @@ impl FieldSurface {
             }
             Self::SamplingParam(param) => param.is_set(req),
             Self::MaxTokens => emitted_max_tokens(req).is_some(),
+            Self::Effort(level) => effort::effort_present(req, level),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => true,
             #[cfg(test)]
@@ -359,6 +365,7 @@ impl FieldSurface {
             // No probe payload: no token count validates a sampling parameter
             // or an output token limit.
             Self::SamplingParam(_) | Self::MaxTokens => None,
+            Self::Effort(_) => effort::emitted_effort(req).map(str::to_string),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => None,
             // No probe payload: the test-only surfaces are never rows of
@@ -419,6 +426,7 @@ impl FieldSurface {
             }
             Self::AnthropicThinkingType(_) => write_thinking_type(req, value),
             Self::SamplingParam(_) | Self::MaxTokens => {}
+            Self::Effort(refused) => effort::write_effort(req, refused, value),
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => {}
             #[cfg(test)]
@@ -499,7 +507,7 @@ impl FieldSurface {
             }
             Self::AnthropicThinkingType(_) => false,
             Self::SamplingParam(param) => param.take(req),
-            Self::MaxTokens => false,
+            Self::MaxTokens | Self::Effort(_) => false,
             #[cfg(all(test, not(debug_assertions)))]
             Self::DivergentForTests => false,
             #[cfg(test)]
@@ -704,11 +712,8 @@ fn extras_effort(req: &ChatRequest) -> Option<&serde_json::Value> {
 /// canonical effort, so a client `output_config.effort` decides when present
 /// and the canonical effort decides otherwise.
 pub(super) fn carries_positive_effort(req: &ChatRequest) -> bool {
-    let effective = match extras_effort(req) {
-        Some(sent) => sent.as_str(),
-        None => req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
-    };
-    effective.is_some_and(|effort| !routectl_core::ReasoningConfig::is_off_effort(effort))
+    effort::emitted_effort(req)
+        .is_some_and(|effort| !routectl_core::ReasoningConfig::is_off_effort(effort))
 }
 
 /// Replace the native thinking carrier with `{type: <target>}` for the row
@@ -855,6 +860,10 @@ pub(super) enum FieldTransform {
     /// ceiling also lowers a later request's limit before dispatch; it never
     /// raises one.
     Ceiling,
+    /// Replace the refused level with another member of `rank`, the closed
+    /// level set in order. The persisted value is the bare level, decoded
+    /// against `rank`.
+    RankedRewrite { rank: &'static [&'static str] },
 }
 
 impl FieldTransform {
@@ -864,6 +873,7 @@ impl FieldTransform {
         match self {
             Self::Drop => None,
             Self::Rewrite { accepted } => Some(ValueSlot::Shape(accepted)),
+            Self::RankedRewrite { rank } => Some(ValueSlot::Shape(rank)),
             Self::Ceiling => Some(ValueSlot::Ceiling),
         }
     }
@@ -883,6 +893,23 @@ pub(super) struct FieldRepairRow {
     /// a completion does, so a free count can re-check a verdict on it. Only
     /// such a row is ever probed.
     pub(super) count_tokens_validates: bool,
+}
+
+/// The row of one effort level: its path and surface spelled from the one
+/// literal, ranked against the effort rank. One invocation per rank member,
+/// in rank order; a test welds the invocations to the rank.
+macro_rules! effort_row {
+    ($level:literal) => {
+        FieldRepairRow {
+            path: concat!("output_config.effort.", $level),
+            surface: FieldSurface::Effort($level),
+            transform: FieldTransform::RankedRewrite {
+                rank: &routectl_providers::effort::VALID_EFFORT_TOKENS,
+            },
+            class: TransformClass::Envelope,
+            count_tokens_validates: false,
+        }
+    };
 }
 
 /// The CLOSED path-to-surface table: one row per qualified dotted path this
@@ -958,6 +985,12 @@ const FIELD_REPAIRS: &[FieldRepairRow] = &[
         class: TransformClass::Envelope,
         count_tokens_validates: false,
     },
+    effort_row!("minimal"),
+    effort_row!("low"),
+    effort_row!("medium"),
+    effort_row!("high"),
+    effort_row!("xhigh"),
+    effort_row!("max"),
 ];
 
 /// The qualified dotted path of the test-only prefix-impacting row. Outside
@@ -1137,6 +1170,8 @@ pub(super) fn closed_table() -> &'static [FieldRepairRow] {
 #[derive(Clone, Copy, Debug)]
 pub struct FieldRepairTable {
     rows: &'static [FieldRepairRow],
+    /// Which rows a lane may carry or name; see [`Self::for_kind`].
+    scope: RowScope,
 }
 
 impl Default for FieldRepairTable {
@@ -1151,6 +1186,7 @@ impl Default for FieldRepairTable {
         {
             Self {
                 rows: FIELD_REPAIRS,
+                scope: RowScope::All,
             }
         }
     }
@@ -1181,6 +1217,7 @@ impl FieldRepairTable {
         });
         Self {
             rows: LazyLock::force(&ROWS).as_slice(),
+            scope: RowScope::All,
         }
     }
 
@@ -1189,6 +1226,7 @@ impl FieldRepairTable {
     pub(crate) const fn grounded_only() -> Self {
         Self {
             rows: FIELD_REPAIRS,
+            scope: RowScope::All,
         }
     }
 
@@ -1197,8 +1235,25 @@ impl FieldRepairTable {
         self.rows.len()
     }
 
+    /// Every row, whatever the view: what a persisted key, a probe payload
+    /// or a census resolves against, so a verdict never strands on a view.
     pub(super) const fn rows(self) -> &'static [FieldRepairRow] {
         self.rows
+    }
+
+    /// The view a lane of `provider_kind` reads: the rows its requests can
+    /// carry and its rejections can name. A row outside the view admits no
+    /// candidate, plans no pre-flight and resolves no rejection there.
+    pub(super) fn for_kind(self, provider_kind: &str) -> Self {
+        Self {
+            scope: RowScope::of_kind(provider_kind),
+            ..self
+        }
+    }
+
+    /// The rows of this view, in table order.
+    pub(super) fn lane_rows(self) -> impl Iterator<Item = &'static FieldRepairRow> {
+        self.rows.iter().filter(move |row| self.scope.admits(row))
     }
 
     /// The row whose path is exactly `path`.
@@ -1261,7 +1316,7 @@ pub(super) fn recheck_payloads(
 /// and by the lane gates that call [`field_repair_admits_kind`].
 ///
 /// Absent on purpose: `openai-responses` (only its effort refusals localize,
-/// and the closed table has no effort row) and `gemini`.
+/// and its lane is not yet scoped to the effort rows) and `gemini`.
 const FIELD_REPAIR_KINDS: &[&str] = &[ANTHROPIC_API_KIND, BEDROCK_KIND, OPENAI_COMPAT_KIND];
 
 /// `bedrock`, as `ProviderEntry::kind_str` spells it.
@@ -1382,7 +1437,7 @@ pub fn value_slot_for_capability_key(table: FieldRepairTable, key: &str) -> Opti
         .and_then(|row| row.transform.value_slot())
 }
 
-/// EVERY closed-table row whose surface `req` carries, in table order.
+/// EVERY row of `table`'s view whose surface `req` carries, in table order.
 ///
 /// The scan shared by the pre-flight planner (which considers every present
 /// row, each gated on its own terms) and the reactive admission (which
@@ -1398,8 +1453,7 @@ pub(super) fn present_rows(
     req: &ChatRequest,
 ) -> impl Iterator<Item = FieldRepairRow> + '_ {
     table
-        .rows()
-        .iter()
+        .lane_rows()
         .filter(|row| row.surface.present_in(req))
         .copied()
 }
@@ -1527,6 +1581,10 @@ pub(super) enum FieldSettlementMode {
     NonSettling,
 }
 
+#[path = "field_repair_effort.rs"]
+mod effort;
+use effort::RowScope;
+
 #[path = "field_repair_step.rs"]
 mod field_repair_step;
 
@@ -1643,7 +1701,7 @@ impl Router {
         // The identities come from the CLOSED TABLE plus the request, never
         // from upstream text: every row whose surface this attempt actually
         // carries, in table source order.
-        let table = self.field_repair_table();
+        let table = self.field_repair_table().for_kind(provider_kind);
         let generation = self.registry_generation();
         let candidates: Vec<FieldRepairCandidate<'a>> = present_rows(table, attempt_req)
             .filter_map(|row| {
@@ -1967,6 +2025,10 @@ mod field_attribution_tests;
 mod field_learner_disjointness_tests;
 
 #[cfg(test)]
+#[path = "field_repair_effort_tests.rs"]
+mod effort_tests;
+
+#[cfg(test)]
 mod table_tests {
     use super::*;
     use routectl_core::capability::SignalTier;
@@ -2035,9 +2097,10 @@ mod table_tests {
         // something a passing suite absorbs silently.
         assert_eq!(
             FIELD_REPAIRS.len(),
-            8,
-            "the closed repair table ships exactly eight grounded rows; a new row is a new \
-             permanent commitment and updates this guard deliberately",
+            14,
+            "the closed repair table ships exactly fourteen grounded rows (eight, then one \
+             per effort level); a new row is a new permanent commitment and updates this \
+             guard deliberately",
         );
         assert_eq!(
             FIELD_REPAIRS[0].path, "thinking.enabled.display",

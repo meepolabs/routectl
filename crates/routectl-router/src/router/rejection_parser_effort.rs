@@ -8,6 +8,7 @@ use routectl_core::ParsedErrorBody;
 use routectl_core::capability::SignalTier;
 use routectl_providers::effort::VALID_EFFORT_TOKENS;
 
+use super::super::field_repair::{FieldRepairTable, FieldTransform};
 use super::{Attribution, RejectionKind, is_name, is_name_byte, localize_openai};
 
 /// The field an effort level travels in on the Messages body.
@@ -156,6 +157,15 @@ pub(super) fn effort_field_levels(segments: &[&str], replacements: &[&str]) -> u
     } else {
         0
     }
+}
+
+/// Whether `segments` spell the path of a ranked closed-table row, whose last
+/// segment is the level rather than a field name.
+pub(super) fn is_ranked_row_path(segments: &[String]) -> bool {
+    FieldRepairTable::default().rows().iter().any(|row| {
+        matches!(row.transform, FieldTransform::RankedRewrite { .. })
+            && row.path.split('.').eq(segments.iter().map(String::as_str))
+    })
 }
 
 /// The Responses spelling of the effort field read as the Messages one, so

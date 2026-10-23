@@ -213,8 +213,9 @@ pub(super) enum FieldEdit {
 
 impl FieldEdit {
     /// The edit `transform` makes for `named`, or `None` when it makes none:
-    /// a rewrite whose rejection named no shape, and a ceiling whose rejection
-    /// named no ceiling.
+    /// a rewrite whose rejection named no shape, a ceiling whose rejection
+    /// named no ceiling, and a ranked rewrite, whose replacement level no
+    /// rejection names yet.
     pub(super) const fn for_rejection(
         transform: FieldTransform,
         named: &NamedRejection,
@@ -228,7 +229,8 @@ impl FieldEdit {
                 Some(Self::Ceiling(ceiling))
             }
             (FieldTransform::Rewrite { .. }, Some(RejectionValue::Ceiling(_)) | None)
-            | (FieldTransform::Ceiling, Some(RejectionValue::Shape(_)) | None) => None,
+            | (FieldTransform::Ceiling, Some(RejectionValue::Shape(_)) | None)
+            | (FieldTransform::RankedRewrite { .. }, _) => None,
         }
     }
 
@@ -405,6 +407,15 @@ impl<'a> FieldRepairPlan<'a> {
         if let Some(step) = self.pending.last_mut() {
             step.handle = Some(handle);
         }
+    }
+
+    /// Every admitted candidate's path, in table order.
+    #[cfg(test)]
+    pub(in crate::router) fn candidate_paths(&self) -> Vec<&'static str> {
+        self.candidates
+            .iter()
+            .map(|candidate| candidate.row.path)
+            .collect()
     }
 
     /// Every pending step's path, oldest first.

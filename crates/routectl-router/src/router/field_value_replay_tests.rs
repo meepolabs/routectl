@@ -291,3 +291,88 @@ fn a_replayed_survivor_carries_only_the_value_its_repair_row_writes() {
         ]),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Effort level values
+// ---------------------------------------------------------------------------
+
+const EFFORT_LANE: &str = "ef#upstream";
+const ANTHROPIC_KIND: &str = "anthropic-api";
+
+/// A `broken` row on an anthropic-api lane for the effort row of `level`,
+/// carrying `token`.
+fn effort_row(rowid: i64, at: Instant, level: &str, token: &str) -> CapabilityEventRow {
+    CapabilityEventRow::new(
+        rowid,
+        at,
+        "broken".to_string(),
+        Some("f1".to_string()),
+        "live".to_string(),
+        Some("self-identifying".to_string()),
+        None,
+        field_key(&format!("output_config.effort.{level}")),
+        EFFORT_LANE.to_string(),
+        ANTHROPIC_KIND.to_string(),
+        CV,
+        OV,
+    )
+    .with_vocab_version(Some(crate::capability_vocab::CURRENT_VOCAB_VERSION))
+    .with_upstream_token(Some(token.to_string()))
+}
+
+fn anthropic_providers() -> BTreeMap<String, crate::config::ProviderEntry> {
+    BTreeMap::from([(
+        "ef".to_string(),
+        crate::config::ProviderEntry::anthropic_api("literal:k"),
+    )])
+}
+
+fn rebuild_effort(row: CapabilityEventRow) -> (CapabilityRebuildSummary, Option<VerdictValue>) {
+    let capability = row.capability.clone();
+    let reader = FakeReader { rows: vec![row] };
+    let (summary, values) =
+        rebuild_capabilities_with_values(&reader, &registry(), &anthropic_providers());
+    let value = values.value_for(EFFORT_LANE, &capability, ANTHROPIC_KIND);
+    (summary, value)
+}
+
+/// Every effort key restores every level of the rank it was persisted with,
+/// decoded against the rank: a learned level is never stranded at rebuild.
+///
+/// Mutation check: give `RankedRewrite` no value slot in
+/// `FieldTransform::value_slot` -> red.
+#[test]
+fn every_effort_key_restores_each_rank_level_from_its_shape_token() {
+    let base = Instant::now();
+    for refused in routectl_providers::effort::VALID_EFFORT_TOKENS {
+        for level in routectl_providers::effort::VALID_EFFORT_TOKENS {
+            let (summary, value) =
+                rebuild_effort(effort_row(1, base, refused, &format!("shape:{level}")));
+
+            assert_eq!(summary.replayed_negative, 1, "{refused} -> {level}");
+            assert_eq!(summary.degraded_value, 0, "{refused} -> {level}");
+            assert_eq!(
+                value,
+                Some(VerdictValue::Shape(level)),
+                "{refused} -> {level}"
+            );
+        }
+    }
+}
+
+/// A token outside the rank, `none` included, restores no value and is
+/// counted as refused; the verdict itself still replays.
+#[test]
+fn an_effort_token_outside_the_rank_restores_no_value() {
+    let base = Instant::now();
+    for token in ["shape:none", "shape:bogus"] {
+        let (summary, value) = rebuild_effort(effort_row(1, base, "xhigh", token));
+
+        assert_eq!(
+            summary.replayed_negative, 1,
+            "{token}: the row still replays"
+        );
+        assert_eq!(summary.degraded_value, 1, "{token}: the refusal is counted");
+        assert_eq!(value, None, "{token}");
+    }
+}

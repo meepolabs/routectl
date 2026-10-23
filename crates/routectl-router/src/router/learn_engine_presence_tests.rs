@@ -236,6 +236,136 @@ mod closed_table_presence {
         anthropic_message(message)
     }
 
+    // -----------------------------------------------------------------------
+    // Effort rows, one per level of the rank
+    // -----------------------------------------------------------------------
+
+    const EFFORT_LEVELS: [&str; 6] = routectl_providers::effort::VALID_EFFORT_TOKENS;
+
+    /// An Anthropic client's effort-only request at rank member `L`, as the
+    /// ingress parses it.
+    fn effort_req<const L: usize>() -> ChatRequest {
+        let mut req = base();
+        req.provider_extras = Some(json!({"output_config": {"effort": EFFORT_LEVELS[L]}}));
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some(EFFORT_LEVELS[L].into()),
+            ..Default::default()
+        });
+        req.routectl_internal.anthropic_thinking = AnthropicThinking::SentNone;
+        req
+    }
+
+    fn messages_effort<const L: usize>(_: &ChatRequest, _: Value) -> Value {
+        messages_body(&effort_req::<L>())
+    }
+    #[cfg(feature = "bedrock")]
+    fn invoke_effort<const L: usize>(_: &ChatRequest, _: Value) -> Value {
+        invoke_body(&effort_req::<L>())
+    }
+    #[cfg(feature = "bedrock")]
+    fn converse_effort<const L: usize>(_: &ChatRequest, _: Value) -> Value {
+        converse_body(&effort_req::<L>())
+    }
+
+    /// The `Supported levels` refusal of rank member `L`, listing one other
+    /// level.
+    fn effort_level_message<const L: usize>() -> String {
+        let other = if L == 0 {
+            EFFORT_LEVELS[1]
+        } else {
+            EFFORT_LEVELS[0]
+        };
+        format!(
+            "This model does not support effort level '{}'. Supported levels: {other}.",
+            EFFORT_LEVELS[L]
+        )
+    }
+
+    fn messages_effort_refusal<const L: usize>() -> Error {
+        anthropic_message(&effort_level_message::<L>())
+    }
+    #[cfg(feature = "bedrock")]
+    fn invoke_effort_refusal<const L: usize>() -> Error {
+        Error::upstream(
+            "scripted",
+            400,
+            json!({"message": effort_level_message::<L>()}).to_string(),
+        )
+    }
+    #[cfg(feature = "bedrock")]
+    fn converse_effort_refusal<const L: usize>() -> Error {
+        let wrapped = format!(
+            "The model returned the following errors: {}",
+            effort_level_message::<L>()
+        );
+        Error::upstream("scripted", 400, json!({"message": wrapped}).to_string())
+    }
+
+    /// The row name for rank member `level` on `lane`; leaked so it lives as
+    /// long as the `&'static` name a [`SiteRow`] carries.
+    fn effort_name(level: usize, lane: &str) -> &'static str {
+        Box::leak(format!("output_config.effort.{}, {lane}", EFFORT_LEVELS[level]).into_boxed_str())
+    }
+
+    /// One effort row per rank member on `lane`, from the per-member body and
+    /// refusal builders.
+    fn effort_lane_rows(
+        lane: &str,
+        provider_block: &'static str,
+        rows: [(Shape, fn() -> Error); 6],
+    ) -> Vec<SiteRow> {
+        rows.into_iter()
+            .enumerate()
+            .map(|(level, (sent, err))| {
+                carried(effort_name(level, lane), provider_block, sent, err)
+            })
+            .collect()
+    }
+
+    fn messages_effort_rows() -> Vec<SiteRow> {
+        effort_lane_rows(
+            "anthropic-api",
+            ANTHROPIC,
+            [
+                (messages_effort::<0>, messages_effort_refusal::<0>),
+                (messages_effort::<1>, messages_effort_refusal::<1>),
+                (messages_effort::<2>, messages_effort_refusal::<2>),
+                (messages_effort::<3>, messages_effort_refusal::<3>),
+                (messages_effort::<4>, messages_effort_refusal::<4>),
+                (messages_effort::<5>, messages_effort_refusal::<5>),
+            ],
+        )
+    }
+
+    #[cfg(feature = "bedrock")]
+    fn bedrock_effort_rows() -> Vec<SiteRow> {
+        let mut rows = effort_lane_rows(
+            "invoke",
+            INVOKE,
+            [
+                (invoke_effort::<0>, invoke_effort_refusal::<0>),
+                (invoke_effort::<1>, invoke_effort_refusal::<1>),
+                (invoke_effort::<2>, invoke_effort_refusal::<2>),
+                (invoke_effort::<3>, invoke_effort_refusal::<3>),
+                (invoke_effort::<4>, invoke_effort_refusal::<4>),
+                (invoke_effort::<5>, invoke_effort_refusal::<5>),
+            ],
+        );
+        rows.extend(effort_lane_rows(
+            "converse",
+            CONVERSE,
+            [
+                (converse_effort::<0>, converse_effort_refusal::<0>),
+                (converse_effort::<1>, converse_effort_refusal::<1>),
+                (converse_effort::<2>, converse_effort_refusal::<2>),
+                (converse_effort::<3>, converse_effort_refusal::<3>),
+                (converse_effort::<4>, converse_effort_refusal::<4>),
+                (converse_effort::<5>, converse_effort_refusal::<5>),
+            ],
+        ));
+        rows
+    }
+
     fn compat_row(param: &'static str) -> SiteRow {
         SiteRow {
             name: param,
@@ -299,12 +429,13 @@ mod closed_table_presence {
             compat_row("presence_penalty"),
             compat_row("frequency_penalty"),
         ];
+        let mut rows = rows;
+        rows.extend(messages_effort_rows());
         #[cfg(feature = "bedrock")]
-        let rows = {
-            let mut rows = rows;
+        {
             rows.extend(bedrock_presence_rows());
-            rows
-        };
+            rows.extend(bedrock_effort_rows());
+        }
         rows
     }
 
@@ -398,6 +529,36 @@ mod closed_table_presence {
         for row in rows {
             assert_eq!(settle(&row), row.in_egress, "{}", row.name);
         }
+    }
+
+    /// The presence rows cover every effort row on every lane that spells the
+    /// effort field on a Messages-shape body, so a level missing from them
+    /// is a level whose presence nothing pins.
+    #[test]
+    fn the_presence_rows_cover_every_effort_level_on_each_messages_lane() {
+        let names: Vec<&str> = presence_rows().iter().map(|row| row.name).collect();
+        let lanes: &[&str] = if cfg!(feature = "bedrock") {
+            &["anthropic-api", "invoke", "converse"]
+        } else {
+            &["anthropic-api"]
+        };
+        let effort_rows = super::super::super::field_repair::grounded_table()
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.transform,
+                    super::super::super::field_repair::FieldTransform::RankedRewrite { .. }
+                )
+            });
+        let mut covered = 0;
+        for row in effort_rows {
+            for lane in lanes {
+                let name = format!("{}, {lane}", row.path);
+                assert!(names.contains(&name.as_str()), "no presence row {name}");
+                covered += 1;
+            }
+        }
+        assert_eq!(covered, EFFORT_LEVELS.len() * lanes.len());
     }
 
     #[test]
