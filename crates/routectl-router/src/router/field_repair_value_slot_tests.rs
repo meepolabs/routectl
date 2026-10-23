@@ -59,7 +59,7 @@ fn a_value_edits_only_the_row_whose_slot_it_fills() {
     for (name, path, value, expected) in cases {
         let named = named_on(path, value);
 
-        let edit = super::FieldEdit::for_rejection(named.row.transform, &named);
+        let edit = super::FieldEdit::for_rejection(named.row.transform, &named, 0);
 
         assert_eq!(edit, expected, "{name}");
     }

@@ -2928,10 +2928,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   NOT one of those call sites: it stays on the bare `derive_feature_keys`
   catalog vocabulary alone, since a field verdict is never a
   feature-naming-template candidate
-- `src/router/field_repair_step.rs` -- `FieldRepairPlan`, `RepairStep`: `apply_named`,
-  `commit_pending`, `moved_on_by`, `settle_success`; test-only re-repair opt-in
-  `src/router/field_repair_rerepair_test_support.rs`
-- `src/router/field_repair_step_apply.rs` -- `FieldRepairPlan::step_claim` (guard
+- `src/router/field_repair_step.rs` -- `FieldRepairPlan`, `RepairStep`: `apply_named`
+  (a ranked effort row the admission did not carry is admitted on demand and
+  claimed for its own key), `commit_pending` (each pending step on the effort
+  field commits the level the last of them wrote), `moved_on_by`,
+  `settle_success`; `rerepairs_same_field` (the ranked effort rows)
+- `src/router/field_repair_step_apply.rs` -- `FieldRepairPlan::claim` (guard
   choice before a repair's mutation) and `install_step` (step installation after it)
 - `src/router/field_repair_effort.rs` -- child module of `field_repair`: the
   `FieldSurface::Effort(level)` carrier reads (`emitted_effort`,
@@ -3229,7 +3231,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `EditSite::RequiredFieldDefault` that was not undone falls through to the
   proposers, `RejectionSite::unreverted_reaches_proposers`, since the upstream
   may refuse routectl's own value and a learned repair can supply another;
-  and `rerepairs_declared_field`);
+  `ranks_injected_effort`, a matched `EffortInjection` the rejection refuses
+  as a ranked level; and `rerepairs_declared_field`, a matched `FieldRepair`
+  whose named row is a ranked effort row);
   otherwise it builds a read-only
   `RejectionInput` and runs `arbitrate`: the ONE precedence, the static
   `ARBITRATION_ORDER` of `Proposer`s (no trait objects) over the closed

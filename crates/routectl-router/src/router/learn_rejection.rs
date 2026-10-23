@@ -147,9 +147,9 @@ impl AttemptLearning<'_> {
     }
 
     /// Whether the one declared edit a rejection names is an earlier field
-    /// repair, and the row the rejection names re-repairs its field: the
-    /// upstream refused the value that repair wrote, which a further repair
-    /// of the same field may answer.
+    /// repair, and the row the rejection names re-repairs its field (a ranked
+    /// effort row): the upstream refused the level that repair wrote, which a
+    /// further repair at a level not yet sent may answer.
     fn rerepairs_declared_field(&self, rejection: &Rejection<'_>) -> bool {
         Self::declared_edit_is(rejection, EditSite::FieldRepair)
             && self

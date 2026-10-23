@@ -85,13 +85,31 @@ pub(super) fn ranked_replacement(
 }
 
 /// The level that replaces the one the ranked row `row` names, for a refusal
-/// listing the levels `listed`. Only the refused level counts as sent.
-pub(super) fn ranked_edit_value(row: &FieldRepairRow, listed: u8) -> Option<&'static str> {
-    let FieldSurface::Effort(token) = row.surface else {
-        return None;
-    };
-    let refused = EffortRank::of_token(token)?;
-    ranked_replacement(refused, listed, refused.bit()).map(EffortRank::token)
+/// listing the levels `listed`, never one in the bitmask `sent` of levels the
+/// request already sent, nor the refused one.
+pub(super) fn ranked_edit_value(
+    row: &FieldRepairRow,
+    listed: u8,
+    sent: u8,
+) -> Option<&'static str> {
+    let refused = ranked_level(row)?;
+    ranked_replacement(refused, listed, sent | refused.bit()).map(EffortRank::token)
+}
+
+/// The level a ranked row names, or `None` for any other row.
+fn ranked_level(row: &FieldRepairRow) -> Option<EffortRank> {
+    match row.surface {
+        FieldSurface::Effort(token) if is_ranked(row) => EffortRank::of_token(token),
+        _ => None,
+    }
+}
+
+/// The rank bitmask of the levels the ranked rows `rows` name: every level a
+/// request whose refusals named those rows has already sent.
+pub(super) fn sent_levels<'r>(rows: impl IntoIterator<Item = &'r FieldRepairRow>) -> u8 {
+    rows.into_iter()
+        .filter_map(ranked_level)
+        .fold(0, |mask, level| mask | level.bit())
 }
 
 /// Whether a ranked repair of a refusal drawn by an egress body whose thinking

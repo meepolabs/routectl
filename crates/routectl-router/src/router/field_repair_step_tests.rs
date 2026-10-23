@@ -1,6 +1,6 @@
 //! The pending-step plan: a second repair on a different field, the refusal of
-//! a field a pending step already repaired, the re-claim of a released guard,
-//! and per-step settlement.
+//! a field a pending step already repaired, a ranked effort row's step per
+//! refused level, the re-claim of a released guard, and per-step settlement.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -11,12 +11,13 @@ use routectl_core::failure_class::FailureClass;
 use routectl_core::{ChatRequest, Error, Message, MessageContent, Role};
 
 use super::super::super::class_observe::DispatchSurface;
+use super::super::super::learn_engine::{EffortRank, ThinkingShape};
 use super::super::super::probe_test_support::{OkProvider, remote_router_without_negative};
-use super::super::super::rejection_parser::RejectionValue;
+use super::super::super::rejection_parser::{NamedRejection, RejectionKind, RejectionValue};
 use super::super::super::repair_budget::RepairBudget;
 use super::super::super::{DispatchMeta, DispatchTarget, Router};
 use super::super::{FieldRepairTable, FieldSettlementMode, closed_table, provisional};
-use super::{FieldEdit, FieldRepairPlan, RepairStep, rerepair_opt_in, rerepairs_same_field};
+use super::{FieldEdit, FieldRepairPlan, RepairStep, rerepairs_same_field};
 
 const TEMPERATURE: &str = "temperature";
 const TOP_P: &str = "top_p";
@@ -289,96 +290,263 @@ fn a_non_settling_plan_commits_nothing_and_holds_no_claim() {
 }
 
 #[test]
-fn no_row_rerepairs_its_field() {
+fn only_the_ranked_effort_rows_rerepair_their_field() {
     let rows = closed_table();
-    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().any(rerepairs_same_field),
+        "premise: a ranked row"
+    );
     for row in rows {
-        assert!(!rerepairs_same_field(row), "{}", row.path);
+        let ranked = matches!(row.transform, super::FieldTransform::RankedRewrite { .. });
+        assert_eq!(rerepairs_same_field(row), ranked, "{}", row.path);
     }
 }
 
-/// A request carrying only the max_tokens row.
-fn max_tokens_req() -> ChatRequest {
+// -----------------------------------------------------------------------
+// A ranked effort row: one step per refused level
+// -----------------------------------------------------------------------
+
+const EFFORT: &str = "output_config.effort";
+
+/// A request whose only carried row is the effort at `level`.
+fn effort_req(level: &str) -> ChatRequest {
     ChatRequest {
         temperature: None,
         top_p: None,
+        max_tokens: None,
+        reasoning: Some(routectl_core::ReasoningConfig {
+            effort: Some(level.into()),
+            ..Default::default()
+        }),
         ..three_field_req()
     }
 }
 
-/// A row that re-repairs its field supersedes the pending step on it: the
-/// new step takes over that step's claim rather than claiming again, so one
-/// claim is held across both repairs, and only the final step commits.
+fn sent_level(req: &ChatRequest) -> Option<&str> {
+    req.reasoning.as_ref().and_then(|r| r.effort.as_deref())
+}
+
+fn effort_path(level: &str) -> String {
+    format!("{EFFORT}.{level}")
+}
+
+/// Repair a refusal of the `refused` level listing `listed`, sent beside
+/// the thinking shape `thinking`.
+fn apply_level(
+    plan: &mut FieldRepairPlan<'_>,
+    req: &mut ChatRequest,
+    budget: &mut RepairBudget,
+    (refused, listed): (&str, &[&str]),
+    thinking: ThinkingShape,
+) -> Option<u16> {
+    let row = FieldRepairTable::default()
+        .row_for_path(&effort_path(refused))
+        .expect("a ranked row");
+    let levels = listed
+        .iter()
+        .map(|level| EffortRank::of_token(level).expect("a rank member").bit())
+        .fold(0, |mask, bit| mask | bit);
+    let named = NamedRejection {
+        row,
+        tier: SignalTier::SelfIdentifying,
+        kind: RejectionKind::InvalidValue,
+        value: Some(RejectionValue::Levels(levels)),
+    };
+    plan.apply_named(
+        named,
+        thinking,
+        req,
+        &mut DispatchMeta::for_alias("default"),
+        budget,
+        &rejection(400),
+    )
+}
+
+/// Whether a sibling request at `level` is admitted that level's row.
+fn sibling_admits(router: &Router, level: &str) -> bool {
+    let path = effort_path(level);
+    plan_or_none(router, &effort_req(level))
+        .is_some_and(|sibling| sibling.candidate_paths().contains(&path.as_str()))
+}
+
+/// A refusal of the level a ranked repair wrote adds a step on that level's
+/// row beside the first, claimed on the request's behalf for its own key:
+/// each step holds its level's claim, each draws, and once proven each
+/// commits the level that finally went out under its own key.
 ///
-/// Mutation checks: claim afresh instead of taking the superseded step's
-/// guard -> red (the in-flight claim refuses the second repair); drop the
-/// superseded step's guard instead of handing it over -> red (a sibling
-/// admits, and the commit learns nothing).
+/// Mutation checks: refuse a pending ranked row in `repaired_field` -> red
+/// (the second refusal repairs nothing); commit each step's own written value
+/// instead of `proven_value` -> red (`max` learns `xhigh`).
 #[test]
-fn a_same_field_rerepair_takes_over_the_pending_steps_claim() {
+fn each_refused_level_adds_its_own_step_and_commits_the_level_that_went_out() {
     let router = router();
-    let mut req = max_tokens_req();
+    let mut req = effort_req("max");
     let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
     let mut budget = RepairBudget::per_request();
-    let _opt_in = rerepair_opt_in::opt_in(MAX_TOKENS);
-    assert_eq!(
-        apply_ceiling(&mut plan, &mut req, &mut budget, 2048),
-        Some(400),
-        "premise",
-    );
+    let adaptive = ThinkingShape::Adaptive;
+    let first = ("max", ["high", "low", "medium", "xhigh"].as_slice());
+    assert!(apply_level(&mut plan, &mut req, &mut budget, first, adaptive).is_some());
+    assert_eq!(sent_level(&req), Some("xhigh"), "premise");
 
-    let second = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
+    let second = ("xhigh", ["high", "low", "medium"].as_slice());
+    let applied = apply_level(&mut plan, &mut req, &mut budget, second, adaptive);
 
-    assert_eq!(second, Some(400), "the same field repairs again");
-    assert_eq!(req.max_tokens, Some(1024));
-    assert_eq!(budget.spent(), 2, "each repair draws");
-    assert_eq!(
-        plan.pending_paths(),
-        vec![MAX_TOKENS],
-        "superseded, not added"
+    assert_eq!(applied, Some(400));
+    assert_eq!(sent_level(&req), Some("high"));
+    assert_eq!(budget.spent(), 2, "each step draws");
+    let (max, xhigh) = (effort_path("max"), effort_path("xhigh"));
+    assert_eq!(plan.pending_paths(), vec![max.as_str(), xhigh.as_str()]);
+    for level in ["max", "xhigh"] {
+        assert!(
+            !sibling_admits(&router, level),
+            "{level}: its step holds the claim",
+        );
+    }
+    let learned: Vec<_> = plan
+        .commit_pending(&[], Instant::now())
+        .into_iter()
+        .map(|step| {
+            let event = step.learned.expect("each step learns");
+            (event.capability_key, event.value)
+        })
+        .collect();
+    let key = |path: &str| crate::field_capability::field_capability_key(path).expect("a key");
+    let high = Some(crate::VerdictValue::Shape("high"));
+    assert_eq!(learned, vec![(key(&max), high), (key(&xhigh), high)]);
+}
+
+/// Each step commits only where its own refusal may be learned: one sent
+/// beside a disabled thinking commits nothing, while the next commits.
+#[test]
+fn each_ranked_step_commits_under_its_own_mintable_bit() {
+    let router = router();
+    let mut req = effort_req("max");
+    let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
+    let mut budget = RepairBudget::per_request();
+    let first = ("max", ["high", "xhigh"].as_slice());
+    let second = ("xhigh", ["high"].as_slice());
+    assert!(
+        apply_level(
+            &mut plan,
+            &mut req,
+            &mut budget,
+            first,
+            ThinkingShape::Disabled
+        )
+        .is_some()
     );
     assert!(
-        plan_or_none(&router, &max_tokens_req()).is_none(),
-        "the field's claim is still held, so a sibling is refused",
+        apply_level(
+            &mut plan,
+            &mut req,
+            &mut budget,
+            second,
+            ThinkingShape::Adaptive
+        )
+        .is_some()
     );
-    let settled = plan.commit_pending(&[], Instant::now());
-    let learned: Vec<_> = settled
+
+    let learned: Vec<_> = plan
+        .commit_pending(&[], Instant::now())
         .into_iter()
         .map(|step| step.learned.map(|event| event.value))
         .collect();
+
     assert_eq!(
         learned,
-        vec![Some(Some(crate::VerdictValue::Ceiling(1024)))],
-        "only the final step commits, with the value that succeeded",
+        vec![None, Some(Some(crate::VerdictValue::Shape("high")))]
     );
 }
 
-/// The plan holds no one-step-per-field invariant: two pending steps on one
-/// field are representable, and each settles.
+/// The replacement is never a level the request already sent: `medium`
+/// refused listing `high, low` moves up to `high`, not back to the refused
+/// `low`, and a refusal whose list holds only levels already sent repairs
+/// nothing and draws nothing.
+///
+/// Mutation check: exclude only the refused level in `ranked_edit_value`
+/// (drop `sent`) -> red (the second repair goes back to `low`).
 #[test]
-fn two_pending_steps_on_one_field_are_representable() {
+fn a_level_already_sent_is_never_picked_again() {
     let router = router();
-    let req = three_field_req();
+    let mut req = effort_req("low");
     let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
-    let row = *FieldRepairTable::default()
-        .row_for_path(MAX_TOKENS)
-        .expect("a grounded row");
-    for ceiling in [2048, 1024] {
-        plan.pending.push(RepairStep {
-            row,
-            edit: FieldEdit::Ceiling(ceiling),
-            kind: super::RejectionKind::InvalidValue,
-            tier: SignalTier::SelfIdentifying,
-            fill_clamped: false,
-            handle: None,
-            reject_status: 400,
-            mintable: true,
-            guard: None,
-        });
-    }
+    let mut budget = RepairBudget::per_request();
+    let adaptive = ThinkingShape::Adaptive;
+    let low = ("low", ["high", "medium"].as_slice());
+    assert!(apply_level(&mut plan, &mut req, &mut budget, low, adaptive).is_some());
+    assert_eq!(
+        sent_level(&req),
+        Some("medium"),
+        "premise: nearest lower is none, so higher"
+    );
 
-    assert_eq!(plan.pending_paths(), vec![MAX_TOKENS, MAX_TOKENS]);
-    assert_eq!(plan.commit_pending(&[], Instant::now()).len(), 2);
+    let medium = ("medium", ["high", "low"].as_slice());
+    assert!(apply_level(&mut plan, &mut req, &mut budget, medium, adaptive).is_some());
+
+    assert_eq!(sent_level(&req), Some("high"), "low was already sent");
+    let spent = budget.spent();
+    let high = ("high", ["low", "medium"].as_slice());
+    assert_eq!(
+        apply_level(&mut plan, &mut req, &mut budget, high, adaptive),
+        None
+    );
+    assert_eq!(sent_level(&req), Some("high"), "nothing left to pick");
+    assert_eq!(budget.spent(), spent, "no draw");
+}
+
+/// When a sibling request holds the replacement level's claim, the refusal of
+/// that level repairs nothing: no edit, no draw, and the earlier step stays
+/// pending alone, so the rejection stays terminal.
+///
+/// Mutation check: make `claim` return `Claim::Kept` unconditionally -> red
+/// (the replacement is repaired while the sibling holds its claim).
+#[test]
+fn a_sibling_holding_the_replacement_levels_claim_refuses_the_step() {
+    let router = router();
+    let mut req = effort_req("max");
+    let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
+    let mut budget = RepairBudget::per_request();
+    let adaptive = ThinkingShape::Adaptive;
+    let first = ("max", ["high", "xhigh"].as_slice());
+    assert!(apply_level(&mut plan, &mut req, &mut budget, first, adaptive).is_some());
+    let sibling = plan_or_none(&router, &effort_req("xhigh"));
+    assert!(
+        sibling.as_ref().is_some_and(|plan| plan
+            .candidate_paths()
+            .contains(&effort_path("xhigh").as_str())),
+        "premise: the sibling claims xhigh",
+    );
+    let spent = budget.spent();
+
+    let second = ("xhigh", ["high"].as_slice());
+    let refused = apply_level(&mut plan, &mut req, &mut budget, second, adaptive);
+
+    assert_eq!(refused, None);
+    assert_eq!(sent_level(&req), Some("xhigh"), "no edit");
+    assert_eq!(budget.spent(), spent, "no draw");
+    assert_eq!(plan.pending_paths(), vec![effort_path("max").as_str()]);
+}
+
+/// A committed effort is never repaired again on the target, whatever level
+/// the refusal names.
+#[test]
+fn a_committed_effort_is_never_repaired_again() {
+    let router = router();
+    let mut req = effort_req("max");
+    let mut plan = plan(&router, &req, FieldSettlementMode::NonSettling);
+    let mut budget = RepairBudget::per_request();
+    let adaptive = ThinkingShape::Adaptive;
+    let first = ("max", ["high", "xhigh"].as_slice());
+    assert!(apply_level(&mut plan, &mut req, &mut budget, first, adaptive).is_some());
+    assert_eq!(plan.commit_pending(&[], Instant::now()).len(), 1, "premise");
+
+    let again = ("xhigh", ["high"].as_slice());
+
+    assert_eq!(
+        apply_level(&mut plan, &mut req, &mut budget, again, adaptive),
+        None
+    );
+    assert_eq!(sent_level(&req), Some("xhigh"));
 }
 
 /// A request whose native thinking carrier is `{type: enabled}`.
@@ -456,40 +624,30 @@ fn a_pending_step_on_one_thinking_type_row_refuses_the_other() {
 /// still reads as having applied a repair once nothing is pending. On a
 /// settling plan the verdict the commit persisted also refuses a fresh claim,
 /// so the non-settling plan, which claims nothing, is where the committed
-/// field's memory alone refuses the repair. A row that re-repairs its field
-/// supersedes only a PENDING step, so it is refused the same way.
+/// field's memory alone refuses the repair. A ranked row re-repairs only a
+/// PENDING step's field, so a committed effort is refused the same way (see
+/// `a_committed_effort_is_never_repaired_again`).
 ///
-/// Mutation checks: drop the committed-identity read in `repaired_field` ->
-/// red on both rows; let the re-repair predicate bypass the committed read ->
-/// red on the opted-in row (the committed ceiling clamps again and draws).
+/// Mutation check: drop the committed-identity read in `repaired_field` ->
+/// red.
 #[test]
 fn a_committed_field_is_never_repaired_again_and_the_plan_stays_applied() {
-    for (name, rerepairs) in [("plain row", false), ("re-repairing row", true)] {
-        let router = router();
-        let mut req = three_field_req();
-        let mut plan = plan(&router, &req, FieldSettlementMode::NonSettling);
-        let mut budget = RepairBudget::per_request();
-        let _opt_in = rerepairs.then(|| rerepair_opt_in::opt_in(MAX_TOKENS));
-        assert!(!plan.has_applied(), "{name}: premise: nothing applied yet");
-        let first = apply_ceiling(&mut plan, &mut req, &mut budget, 2048);
-        assert!(first.is_some(), "{name}: premise");
-        let committed = plan.commit_pending(&[], Instant::now());
-        assert_eq!(committed.len(), 1, "{name}: premise");
-        let remaining = budget.remaining();
+    let router = router();
+    let mut req = three_field_req();
+    let mut plan = plan(&router, &req, FieldSettlementMode::NonSettling);
+    let mut budget = RepairBudget::per_request();
+    assert!(!plan.has_applied(), "premise: nothing applied yet");
+    let first = apply_ceiling(&mut plan, &mut req, &mut budget, 2048);
+    assert!(first.is_some(), "premise");
+    let committed = plan.commit_pending(&[], Instant::now());
+    assert_eq!(committed.len(), 1, "premise");
+    let remaining = budget.remaining();
 
-        let again = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
+    let again = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
 
-        assert_eq!(again, None, "{name}");
-        assert_eq!(
-            req.max_tokens,
-            Some(2048),
-            "{name}: the committed value stands"
-        );
-        assert_eq!(budget.remaining(), remaining, "{name}: no draw");
-        assert!(!plan.has_pending(), "{name}");
-        assert!(
-            plan.has_applied(),
-            "{name}: a drained plan still applied a repair"
-        );
-    }
+    assert_eq!(again, None);
+    assert_eq!(req.max_tokens, Some(2048), "the committed value stands");
+    assert_eq!(budget.remaining(), remaining, "no draw");
+    assert!(!plan.has_pending());
+    assert!(plan.has_applied(), "a drained plan still applied a repair");
 }

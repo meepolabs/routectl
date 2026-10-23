@@ -159,63 +159,12 @@ mod repair_chain {
         (sent > u64::from(LOWER_LIMIT)).then(lower_limit_refused)
     }
 
-    /// On a same-wire lane, a row that re-repairs its field answers a refusal
-    /// of the value its own repair wrote with a second repair of that field,
-    /// within the request's budget; the second step supersedes the first, so
-    /// only the value that succeeded commits.
-    ///
-    /// Mutation checks: drop the re-repair predicate from the declared-edit
-    /// gate in `answer_declared` -> red (the earlier repair's declaration
-    /// stops the refusal before the proposers); claim the field afresh
-    /// instead of taking over the superseded step's guard in
-    /// `apply_candidate` -> red (the pending step's claim refuses it).
+    /// A row that is not ranked never repairs its field twice: a refusal of
+    /// the ceiling its own repair wrote stops at that repair's declaration
+    /// and reaches the client, learning nothing. The ranked effort rows'
+    /// chain is in `field_repair_chain_effort_tests.rs`.
     #[tokio::test]
-    async fn a_row_that_rerepairs_its_field_repairs_a_refused_repair_value() {
-        let seat = ChainSeat::new(Egress::Anthropic, max_tokens_twice);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
-        let _opt_in = super::super::rerepair_opt_in::opt_in(MAX_TOKENS_PATH);
-
-        let dispatched = router
-            .complete_with_options(two_key_req(), RouterOptions::new())
-            .await;
-
-        assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
-        let sent: Vec<_> = seat.bodies().iter().map(sent_max_tokens).collect();
-        assert_eq!(
-            sent,
-            [SENT_MAX_TOKENS, MODEL_LIMIT, LOWER_LIMIT].map(|v| Some(u64::from(v))),
-        );
-        assert_eq!(
-            router.repairs_per_request(),
-            one_request_in(2),
-            "two repairs drawn",
-        );
-        assert_eq!(
-            verdicts(&dispatched.meta),
-            vec![(
-                key(MAX_TOKENS_PATH),
-                Some(VerdictValue::Ceiling(LOWER_LIMIT))
-            )],
-            "only the final step commits",
-        );
-        assert_eq!(
-            succeeded(&dispatched.meta),
-            vec![
-                (MAX_TOKENS_PATH, false, false),
-                (MAX_TOKENS_PATH, true, true)
-            ],
-        );
-        assert_eq!(
-            step_exits(&router),
-            (1, 1),
-            "the superseded step is dropped"
-        );
-    }
-
-    /// Control: without the opt-in, the same refusal stops at the earlier
-    /// repair's declaration and reaches the client.
-    #[tokio::test]
-    async fn without_the_opt_in_a_refused_repair_value_reaches_the_client() {
+    async fn a_refused_repair_value_on_a_row_that_is_not_ranked_reaches_the_client() {
         let seat = ChainSeat::new(Egress::Anthropic, max_tokens_twice);
         let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
 

@@ -740,16 +740,11 @@ fn a_ranked_row_rewrites_to_the_picked_level_and_a_refused_field_makes_no_edit()
     );
     let higher = ranked_named("minimal", Some(RejectionValue::Levels(mask(&["medium"]))));
     let field = ranked_named("xhigh", None);
+    let edit = |named: &NamedRejection| FieldEdit::for_rejection(named.row.transform, named, 0);
 
-    assert_eq!(
-        FieldEdit::for_rejection(listed.row.transform, &listed),
-        Some(FieldEdit::Rewrite("high")),
-    );
-    assert_eq!(
-        FieldEdit::for_rejection(higher.row.transform, &higher),
-        Some(FieldEdit::Rewrite("medium")),
-    );
-    assert_eq!(FieldEdit::for_rejection(field.row.transform, &field), None);
+    assert_eq!(edit(&listed), Some(FieldEdit::Rewrite("high")));
+    assert_eq!(edit(&higher), Some(FieldEdit::Rewrite("medium")));
+    assert_eq!(edit(&field), None);
 }
 
 /// A refusal of the effort FIELD on each lane that sends one resolves to the
@@ -791,7 +786,7 @@ fn a_refused_effort_field_resolves_to_its_row_and_makes_no_edit() {
         assert_eq!(named.kind, RejectionKind::UnsupportedField, "{name}");
         assert_eq!(named.value, None, "{name}");
         assert_eq!(
-            FieldEdit::for_rejection(named.row.transform, &named),
+            FieldEdit::for_rejection(named.row.transform, &named, 0),
             None,
             "{name}"
         );

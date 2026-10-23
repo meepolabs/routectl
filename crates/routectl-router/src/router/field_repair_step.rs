@@ -18,15 +18,15 @@
 //! another field accepted the fields it passed.
 //!
 //! A field this target already committed is never repaired again; one still
-//! pending is not unless its row says so ([`rerepairs_same_field`], false for
-//! every row). For a row that does, a same-field refusal says the value the
-//! pending step wrote was refused too, so the new step SUPERSEDES that step:
-//! it takes over the pending step's guard (the field's single-flight claim is
-//! still held by it, so claiming again would refuse) and the superseded step
-//! settles as dropped, never committing on its own, so the repair path holds
-//! one pending step per field. The type itself keeps no one-step-per-field
-//! invariant, so a later consumer that retains each refused value beside the
-//! one that succeeded can hold two.
+//! pending is not unless its row says so ([`rerepairs_same_field`]: the ranked
+//! effort rows alone). A ranked refusal of the level a pending step wrote adds
+//! a step BESIDE that one, on the row of the level the request now sends,
+//! with its own guard on its own key: one step per refused level. Its
+//! replacement is never a level the request already sent, so the chain ends
+//! within the request's budget. When the steps are proven, every pending step
+//! on the effort field commits the level the LAST of them wrote, which is the
+//! level the upstream accepted, each under its own key and only where its own
+//! refusal may be learned.
 
 use std::borrow::Cow;
 use std::time::Instant;
@@ -38,6 +38,7 @@ use routectl_core::{ChatRequest, Error};
 
 use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey, FieldVerdictRegistry};
 use crate::field_verdict_value::VerdictValue;
+use crate::state_key::StateKey;
 
 use super::super::field_verdict_observability::ChainStepTally;
 use super::super::learn_engine::ThinkingShape;
@@ -55,23 +56,12 @@ use super::{
 };
 
 /// Whether `row` may be repaired again while an earlier step on the same
-/// field is still pending. False for every row: no row has a second repair
-/// that differs from its first.
-#[cfg_attr(not(test), allow(clippy::missing_const_for_fn))]
-pub(in crate::router) fn rerepairs_same_field(
-    #[cfg_attr(not(test), allow(unused_variables))] row: &FieldRepairRow,
-) -> bool {
-    #[cfg(test)]
-    if rerepair_opt_in::covers(row) {
-        return true;
-    }
-    false
+/// field is still pending: a ranked effort row, whose refusal names the level
+/// the request sends now, so a refusal of a replacement level is answered by
+/// another level. Every other row's second repair could only repeat its first.
+pub(in crate::router) const fn rerepairs_same_field(row: &FieldRepairRow) -> bool {
+    super::effort::is_ranked(row)
 }
-
-/// A test build's scoped opt-in of one row into [`rerepairs_same_field`].
-#[cfg(test)]
-#[path = "field_repair_rerepair_test_support.rs"]
-pub(in crate::router) mod rerepair_opt_in;
 
 /// The admitted L0 repair for one attempt: EVERY closed-table row the attempt
 /// carries, each with the two-phase guard whose settlement the dispatch arm
@@ -125,9 +115,14 @@ pub(in crate::router) struct FieldRepairPlan<'a> {
     exits: Option<&'a ChainStepTally>,
 }
 
-/// The inputs the plan's admission claimed each guard with.
+/// The inputs the plan's admission claimed each guard with, and keyed each
+/// candidate on.
 pub(super) struct GuardAdmission<'a> {
     pub(super) registry: &'a FieldVerdictRegistry,
+    /// The learned lane every candidate's key names.
+    pub(super) lane: StateKey,
+    /// The provider kind every candidate's key names.
+    pub(super) provider_kind: &'static str,
     pub(super) base_url: Cow<'a, str>,
     pub(super) generation: u64,
     /// The tally the plan's step exits are counted on.
@@ -156,6 +151,16 @@ impl<'a> FieldRepairCandidate<'a> {
         Self {
             row,
             key: None,
+            guard: None,
+        }
+    }
+
+    /// A row first carried after admission, keyed on `key` and claimed only
+    /// when a step repairs it.
+    const fn claimable(row: FieldRepairRow, key: FieldVerdictKey) -> Self {
+        Self {
+            row,
+            key: Some(key),
             guard: None,
         }
     }
@@ -220,8 +225,14 @@ impl FieldEdit {
     /// The edit `transform` makes for `named`, or `None` when it makes none:
     /// a rewrite whose rejection named no shape, a ceiling whose rejection
     /// named no ceiling, and a ranked rewrite whose rejection listed no level
-    /// to replace the refused one with (a refused field included).
-    pub(super) fn for_rejection(transform: FieldTransform, named: &NamedRejection) -> Option<Self> {
+    /// to replace the refused one with (a refused field included). `sent` is
+    /// the rank bitmask of the effort levels the request already sent, none
+    /// of which a ranked rewrite picks again.
+    pub(super) fn for_rejection(
+        transform: FieldTransform,
+        named: &NamedRejection,
+        sent: u8,
+    ) -> Option<Self> {
         match (transform, named.value) {
             (FieldTransform::Drop, _) => Some(Self::Drop),
             (FieldTransform::Rewrite { .. }, Some(RejectionValue::Shape(value))) => {
@@ -231,7 +242,7 @@ impl FieldEdit {
                 Some(Self::Ceiling(ceiling))
             }
             (FieldTransform::RankedRewrite { .. }, Some(RejectionValue::Levels(listed))) => {
-                super::effort::ranked_edit_value(named.row, listed).map(Self::Rewrite)
+                super::effort::ranked_edit_value(named.row, listed, sent).map(Self::Rewrite)
             }
             (
                 FieldTransform::Rewrite { .. },
@@ -309,17 +320,22 @@ impl RepairStep<'_> {
             && (self.written_value().is_some() || self.kind == RejectionKind::UnsupportedField)
     }
 
-    /// Persist this step's verdict, or release its guard when the repair
-    /// teaches nothing or the plan cannot settle.
+    /// Persist this step's verdict with `value`, or release its guard when
+    /// the repair teaches nothing or the plan cannot settle.
     ///
     /// Only when the rejection refused the FIELD, the repair rewrote it to
-    /// the one accepted value the rejection named, or it lowered a token limit
-    /// to the ceiling the rejection named. A refused value repaired by a DROP
+    /// the one accepted value the rejection named or to a level its list
+    /// named, or it lowered a token limit to the ceiling the rejection named.
+    /// A refused value repaired by a DROP
     /// says the lane accepts the field, so a verdict dropping it would strip
     /// every valid value from every later request on the lane.
-    fn commit(self, request_features: &[String], now: Instant) -> SettledStep {
+    fn commit(
+        self,
+        value: Option<VerdictValue>,
+        request_features: &[String],
+        now: Instant,
+    ) -> SettledStep {
         let learned = if self.repair_teaches() {
-            let value = self.written_value();
             self.guard.and_then(|guard| {
                 guard.commit(
                     self.tier,
@@ -499,8 +515,9 @@ impl<'a> FieldRepairPlan<'a> {
     ///
     /// A row whose field this target already committed is refused; one still
     /// pending is refused unless [`rerepairs_same_field`] holds for the row,
-    /// in which case the new step supersedes the pending one on that field; a
-    /// DIFFERENT field adds a step beside the earlier ones.
+    /// in which case the new step is added beside the pending one on that
+    /// field, as a DIFFERENT field's is. A ranked row the admission did not
+    /// carry (its level was written after admission) is admitted here.
     pub(in crate::router) fn apply_named(
         &mut self,
         named: NamedRejection,
@@ -516,12 +533,9 @@ impl<'a> FieldRepairPlan<'a> {
         // WHICH row: the one the upstream named. Refusing here is
         // pre-mutation, so an unnamed rejection leaves the request and every
         // guard exactly as the caller handed them over.
-        let idx = self
-            .candidates
-            .iter()
-            .position(|candidate| candidate.row.surface == named.row.surface)?;
-        let edit = FieldEdit::for_rejection(self.candidates[idx].row.transform, &named)?;
+        let idx = self.candidate_for(named.row)?;
         let row = self.candidates[idx].row;
+        let edit = FieldEdit::for_rejection(row.transform, &named, self.sent_levels(&row))?;
         let repair = Repair {
             edit,
             kind: named.kind,
@@ -529,6 +543,43 @@ impl<'a> FieldRepairPlan<'a> {
             mintable: !super::effort::is_ranked(&row) || super::effort::ranked_step_mints(thinking),
         };
         self.apply_candidate(idx, repair, attempt_req, meta, budget, rejection)
+    }
+
+    /// The candidate whose SURFACE `row` names. A ranked row with none is
+    /// admitted now, claimed only when a step repairs it; a settling plan
+    /// that cannot key it admits nothing, so no step settles without a key.
+    fn candidate_for(&mut self, row: &FieldRepairRow) -> Option<usize> {
+        if let Some(idx) = self
+            .candidates
+            .iter()
+            .position(|candidate| candidate.row.surface == row.surface)
+        {
+            return Some(idx);
+        }
+        if !super::effort::is_ranked(row) {
+            return None;
+        }
+        let candidate = match self.reclaim.as_ref() {
+            Some(admission) => FieldRepairCandidate::claimable(
+                *row,
+                FieldVerdictKey::new(&admission.lane, row.path, admission.provider_kind)?,
+            ),
+            None => FieldRepairCandidate::unsettled(*row),
+        };
+        self.candidates.push(candidate);
+        Some(self.candidates.len() - 1)
+    }
+
+    /// The rank bitmask of the effort levels the pending steps on `row`'s
+    /// field sent: each such step's row names the level it found refused.
+    fn sent_levels(&self, row: &FieldRepairRow) -> u8 {
+        let identity = FieldIdentity::of_row(row);
+        super::effort::sent_levels(
+            self.pending
+                .iter()
+                .filter(|step| FieldIdentity::of_row(&step.row) == identity)
+                .map(|step| &step.row),
+        )
     }
 
     /// Whether this target already repaired the field `row` names: in a
@@ -577,7 +628,7 @@ impl<'a> FieldRepairPlan<'a> {
         }
         // Claimed before the mutation: a field whose claim a sibling request
         // now holds is not repaired here, and the rejection stays terminal.
-        let claim = self.step_claim(idx, &row)?;
+        let claim = self.claim(idx)?;
         let edit = repair.edit;
         let fill_clamped =
             matches!(edit, FieldEdit::Ceiling(_)) && surface.clamp_writes_fill(attempt_req);
@@ -608,6 +659,8 @@ impl<'a> FieldRepairPlan<'a> {
     ///
     /// Each step's commit speaks for its own row alone: the rejection named
     /// that row, and the retry that succeeded is evidence about it. A step
+    /// that re-repairs its field commits the value the field's LAST pending
+    /// step wrote, the one the proof saw accepted, not its own. A step
     /// whose repair teaches nothing (a refused value repaired by a drop)
     /// releases its guard and persists nothing, and a non-settling plan holds
     /// no guard, so neither yields a verdict row.
@@ -627,10 +680,30 @@ impl<'a> FieldRepairPlan<'a> {
         if let Some(exits) = self.exits {
             exits.add_committed(self.pending.len());
         }
+        let values: Vec<Option<VerdictValue>> = self
+            .pending
+            .iter()
+            .map(|step| self.proven_value(step))
+            .collect();
         self.pending
             .drain(..)
-            .map(|step| step.commit(request_features, now))
+            .zip(values)
+            .map(|(step, value)| step.commit(value, request_features, now))
             .collect()
+    }
+
+    /// The value `step` commits once proven: the one the latest pending step
+    /// on its field wrote when its row re-repairs the field, else its own.
+    fn proven_value(&self, step: &RepairStep<'_>) -> Option<VerdictValue> {
+        if !rerepairs_same_field(&step.row) {
+            return step.written_value();
+        }
+        let identity = FieldIdentity::of_row(&step.row);
+        self.pending
+            .iter()
+            .rev()
+            .find(|later| FieldIdentity::of_row(&later.row) == identity)
+            .map_or_else(|| step.written_value(), RepairStep::written_value)
     }
 
     /// Phase two after the UNREPAIRED attempt succeeded: every carried field is

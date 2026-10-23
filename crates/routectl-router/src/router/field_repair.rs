@@ -1615,8 +1615,6 @@ mod field_repair_step;
 pub(super) use effort::is_ranked;
 #[cfg(test)]
 use field_repair_step::FieldEdit;
-#[cfg(test)]
-use field_repair_step::rerepair_opt_in;
 use field_repair_step::{FieldRepairCandidate, GuardAdmission};
 pub(super) use field_repair_step::{FieldRepairPlan, rerepairs_same_field};
 
@@ -1753,12 +1751,17 @@ impl Router {
         if candidates.is_empty() {
             return None;
         }
-        let reclaim = (mode == FieldSettlementMode::Settling).then(|| GuardAdmission {
-            registry: self.field_verdicts(),
-            base_url: lane.base_url,
-            generation,
-            exits: &self.metrics.field_chain_steps,
-        });
+        let reclaim = match (mode, target.learned_lane.as_ref()) {
+            (FieldSettlementMode::Settling, Some(learned_lane)) => Some(GuardAdmission {
+                registry: self.field_verdicts(),
+                lane: learned_lane.clone(),
+                provider_kind,
+                base_url: lane.base_url,
+                generation,
+                exits: &self.metrics.field_chain_steps,
+            }),
+            _ => None,
+        };
         Some(FieldRepairPlan::admitted(
             table,
             candidates,
@@ -2266,15 +2269,15 @@ mod table_tests {
         );
 
         assert_eq!(
-            FieldEdit::for_rejection(FieldTransform::Ceiling, &ceiling),
+            FieldEdit::for_rejection(FieldTransform::Ceiling, &ceiling, 0),
             None
         );
         assert_eq!(
-            FieldEdit::for_rejection(rewrite.row.transform, &rewrite),
+            FieldEdit::for_rejection(rewrite.row.transform, &rewrite, 0),
             None
         );
         assert_eq!(
-            FieldEdit::for_rejection(filled.row.transform, &filled),
+            FieldEdit::for_rejection(filled.row.transform, &filled, 0),
             Some(FieldEdit::Rewrite(TEST_REWRITE_ACCEPTED[0])),
         );
     }

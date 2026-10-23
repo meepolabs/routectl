@@ -3,12 +3,16 @@
 // beside a thinking shape the refusal cannot have depended on; a refusal of
 // the effort field itself, or one the parser cannot attribute, repairs
 // nothing; an effort the egress injected is repaired like one the client
-// sent; and a refusal of the replacement stops.
+// sent; and a refusal of the replacement is repaired again at a level not yet
+// sent, every refused level learning the level that went out.
 // An `include!`d FRAGMENT of `field_repair_chain_tests.rs`, inside its
 // `repair_chain` module, sharing its seats, rejections and readers.
 
 const XHIGH_PATH: &str = "output_config.effort.xhigh";
 const LOW_PATH: &str = "output_config.effort.low";
+const MEDIUM_PATH: &str = "output_config.effort.medium";
+const HIGH_PATH: &str = "output_config.effort.high";
+const MAX_PATH: &str = "output_config.effort.max";
 
 /// The captured opus-4-5 refusal of `xhigh`, listing `high, low, medium`.
 fn xhigh_refused() -> Error {
@@ -335,12 +339,17 @@ fn disabled_xhigh_then_high(body: &serde_json::Value, _: usize) -> Option<Error>
     }
 }
 
-/// A refusal of the level a ranked repair wrote is answered by nothing: the
-/// repair's own declared edit explains it and cannot be undone, so the
-/// rejection reaches the client, the effort step drops unlearned, and only
-/// the thinking step the effort refusal already proved stays committed.
+/// A refusal of the level a ranked repair wrote is repaired again, at a level
+/// the request has not sent: `xhigh` -> `high` -> `medium`, served. The
+/// thinking step the first effort refusal proved commits there; both effort
+/// steps commit `medium` at the success, each under its own key.
+///
+/// Mutation check: make a refusal of the pending effort read as moved-on
+/// (skip ranked steps in `moved_on_by`) -> red (the `xhigh` step commits
+/// `high` at the `high` refusal, so the effort field is committed and that
+/// refusal reaches the client).
 #[tokio::test]
-async fn a_refusal_of_the_replacement_level_stops_and_learns_no_effort() {
+async fn a_refusal_of_the_replacement_level_is_repaired_again_and_both_levels_learn() {
     let seat = ChainSeat::new(Egress::Anthropic, disabled_xhigh_then_high);
     let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
 
@@ -348,28 +357,215 @@ async fn a_refusal_of_the_replacement_level_stops_and_learns_no_effort() {
         .complete_with_options(disabled_req(Some("xhigh")), RouterOptions::new())
         .await;
 
-    let bodies = seat.bodies();
-    assert_eq!(bodies.len(), 3, "disabled, xhigh and high each refused");
-    assert_eq!(sent_effort(&bodies[2]), Some("high"), "premise");
-    let err = dispatched.result.as_ref().expect_err("the refusal");
-    assert_eq!(
-        err.parsed_body().and_then(|p| p.error_message()),
-        high_refused().parsed_body().and_then(|p| p.error_message()),
+    assert!(
+        dispatched.result.is_ok(),
+        "{:?}",
+        dispatched.result.as_ref().err()
     );
+    let sent: Vec<_> = seat
+        .bodies()
+        .iter()
+        .map(|b| sent_effort(b).map(str::to_string))
+        .collect();
+    assert_eq!(
+        sent,
+        ["xhigh", "xhigh", "high", "medium"].map(|level| Some(level.to_string())),
+        "disabled, then xhigh and high refused, then medium served",
+    );
+    assert_eq!(router.repairs_per_request(), one_request_in(3));
+    let medium = Some(VerdictValue::Shape("medium"));
     assert_eq!(
         verdicts(&dispatched.meta),
-        vec![(
-            thinking_disabled_key(),
-            Some(VerdictValue::Shape("thinking.type.adaptive")),
-        )],
+        vec![
+            (
+                thinking_disabled_key(),
+                Some(VerdictValue::Shape("thinking.type.adaptive")),
+            ),
+            (key(XHIGH_PATH), medium),
+            (key(HIGH_PATH), medium),
+        ],
     );
     assert_eq!(
         succeeded(&dispatched.meta),
         vec![
             (THINKING_DISABLED_PATH, true, true),
-            (XHIGH_PATH, false, false)
+            (XHIGH_PATH, true, true),
+            (HIGH_PATH, true, true),
         ],
     );
+}
+
+/// The captured opus-4-5 shape refusing `max`, listing every lower level.
+/// Synthesized from the captured template: no capture refuses `max`.
+fn max_refused() -> Error {
+    anthropic_rejection(
+        "This model does not support effort level 'max'. Supported levels: high, low, medium, xhigh.",
+    )
+}
+
+/// Refuse `max` listing `xhigh`, then `xhigh` with the captured list, else
+/// serve.
+fn refuse_max_then_xhigh(body: &serde_json::Value, _: usize) -> Option<Error> {
+    match sent_effort(body) {
+        Some("max") => Some(max_refused()),
+        Some("xhigh") => Some(xhigh_refused()),
+        _ => None,
+    }
+}
+
+/// One refused level after another: `max` -> `xhigh` -> `high`, served. Each
+/// refused level has its own step and draws once; the success commits `high`
+/// under both keys, and both steps end committed.
+///
+/// Mutation check: drop the on-demand admission of a ranked row the plan did
+/// not carry (`candidate_for` answers only admitted candidates) -> red (the
+/// `xhigh` refusal finds no candidate and reaches the client).
+#[tokio::test]
+async fn each_refused_level_in_a_chain_learns_the_level_that_succeeded() {
+    let seat = ChainSeat::new(Egress::Anthropic, refuse_max_then_xhigh);
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+
+    let dispatched = router
+        .complete_with_options(
+            effort_req("max", Some(json!({"type": "adaptive"}))),
+            RouterOptions::new(),
+        )
+        .await;
+
+    assert!(
+        dispatched.result.is_ok(),
+        "{:?}",
+        dispatched.result.as_ref().err()
+    );
+    let sent: Vec<_> = seat
+        .bodies()
+        .iter()
+        .map(|b| sent_effort(b).map(str::to_string))
+        .collect();
+    assert_eq!(
+        sent,
+        ["max", "xhigh", "high"].map(|level| Some(level.to_string()))
+    );
+    assert_eq!(router.repairs_per_request(), one_request_in(2), "two draws");
+    let high = Some(VerdictValue::Shape("high"));
+    assert_eq!(
+        verdicts(&dispatched.meta),
+        vec![(key(MAX_PATH), high), (key(XHIGH_PATH), high)],
+    );
+    assert_eq!(
+        succeeded(&dispatched.meta),
+        vec![(MAX_PATH, true, true), (XHIGH_PATH, true, true)],
+    );
+    assert_eq!(step_exits(&router), (2, 0));
+}
+
+/// The `Supported levels` template refusing `medium`, listing `high` and
+/// `low`. Synthesized from the captured template.
+fn medium_refused() -> Error {
+    anthropic_rejection(
+        "This model does not support effort level 'medium'. Supported levels: high, low.",
+    )
+}
+
+/// Refuse `low` listing `high, medium`, then `medium` listing `high, low`,
+/// else serve.
+fn refuse_low_then_medium(body: &serde_json::Value, _: usize) -> Option<Error> {
+    match sent_effort(body) {
+        Some("low") => Some(low_refused()),
+        Some("medium") => Some(medium_refused()),
+        _ => None,
+    }
+}
+
+/// A level the request already sent is never picked again: `low` refused
+/// moves up to `medium`; `medium` refused lists `low` below it, which was
+/// sent, so the repair moves up to `high` and is served.
+///
+/// Mutation check: exclude only the refused level in `ranked_edit_value`
+/// (drop the sent levels) -> red (the second repair goes back to `low`).
+#[tokio::test]
+async fn a_level_already_sent_is_never_picked_again_in_a_chain() {
+    let seat = ChainSeat::new(Egress::Anthropic, refuse_low_then_medium);
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+
+    let dispatched = router
+        .complete_with_options(
+            effort_req("low", Some(json!({"type": "adaptive"}))),
+            RouterOptions::new(),
+        )
+        .await;
+
+    assert!(
+        dispatched.result.is_ok(),
+        "{:?}",
+        dispatched.result.as_ref().err()
+    );
+    let sent: Vec<_> = seat
+        .bodies()
+        .iter()
+        .map(|b| sent_effort(b).map(str::to_string))
+        .collect();
+    assert_eq!(
+        sent,
+        ["low", "medium", "high"].map(|level| Some(level.to_string()))
+    );
+    let high = Some(VerdictValue::Shape("high"));
+    assert_eq!(
+        verdicts(&dispatched.meta),
+        vec![(key(LOW_PATH), high), (key(MEDIUM_PATH), high)],
+    );
+}
+
+/// The template refusing whatever level was sent, listing every other rank
+/// member: an upstream that refuses each replacement in turn.
+fn refuse_every_level(body: &serde_json::Value, _: usize) -> Option<Error> {
+    let sent = sent_effort(body)?;
+    let others: Vec<_> = routectl_providers::effort::VALID_EFFORT_TOKENS
+        .iter()
+        .filter(|level| **level != sent)
+        .copied()
+        .collect();
+    let mut listed = others;
+    listed.sort_unstable();
+    Some(anthropic_rejection(&format!(
+        "This model does not support effort level '{sent}'. Supported levels: {}.",
+        listed.join(", ")
+    )))
+}
+
+/// An upstream that refuses every level is answered with distinct levels
+/// until the request's budget is spent, and never loops: every body that
+/// went out carries a level no earlier body carried, the walk stops at the
+/// budget with the refusal, and nothing is learned.
+#[tokio::test]
+async fn refusing_every_level_ends_at_the_budget_with_every_sent_level_distinct() {
+    let seat = ChainSeat::new(Egress::Anthropic, refuse_every_level);
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+
+    let dispatched = router
+        .complete_with_options(
+            effort_req("max", Some(json!({"type": "adaptive"}))),
+            RouterOptions::new(),
+        )
+        .await;
+
+    assert!(dispatched.result.is_err(), "every level is refused");
+    let sent: Vec<_> = seat
+        .bodies()
+        .iter()
+        .filter_map(|b| sent_effort(b).map(str::to_string))
+        .collect();
+    assert_eq!(
+        sent,
+        ["max", "xhigh", "high", "medium", "low", "minimal"].map(str::to_string),
+        "each level once, nearest lower first",
+    );
+    assert_eq!(
+        router.repairs_per_request(),
+        one_request_in(usize::from(REPAIRS_PER_REQUEST)),
+    );
+    assert!(dispatched.meta.learned_capabilities.is_empty());
+    assert_eq!(step_exits(&router), (0, u64::from(REPAIRS_PER_REQUEST)));
 }
 
 // -----------------------------------------------------------------------
@@ -489,12 +685,15 @@ async fn an_injected_effort_refused_with_a_level_list_repairs_and_commits_the_pe
     }
 }
 
-/// A refused effort the walk admitted no candidate for is not repaired: a
-/// reactive thinking rewrite writes the companion `low` after admission, so
-/// the refusal of `low` still proves and commits the pending rewrite, then
-/// reaches the client.
+/// An effort written after admission is repaired too: a reactive thinking
+/// rewrite writes the companion `low`, which the walk's admission never saw,
+/// and its refusal is admitted on demand, commits the pending rewrite, and
+/// is repaired to `medium`, which the success learns.
+///
+/// Mutation check: drop the on-demand admission in `candidate_for` -> red
+/// (the refusal of `low` reaches the client).
 #[tokio::test]
-async fn a_refused_companion_effort_written_after_admission_commits_the_rewrite_only() {
+async fn a_refused_companion_effort_written_after_admission_is_repaired_and_learned() {
     let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
         if thinking_type(body) == Some("disabled") {
             return Some(anthropic_disabled_rejection());
@@ -507,19 +706,31 @@ async fn a_refused_companion_effort_written_after_admission_commits_the_rewrite_
         .complete_with_options(disabled_req(None), RouterOptions::new())
         .await;
 
+    assert!(
+        dispatched.result.is_ok(),
+        "{:?}",
+        dispatched.result.as_ref().err()
+    );
     let bodies = seat.bodies();
-    assert_eq!(bodies.len(), 2, "disabled refused, then the companion");
+    assert_eq!(
+        bodies.len(),
+        3,
+        "disabled refused, then the companion, then served"
+    );
     assert_eq!(sent_effort(&bodies[1]), Some("low"), "premise");
-    assert!(dispatched.result.is_err(), "the refusal of low stands");
+    assert_eq!(sent_effort(&bodies[2]), Some("medium"));
     assert_eq!(
         verdicts(&dispatched.meta),
-        vec![(
-            thinking_disabled_key(),
-            Some(VerdictValue::Shape("thinking.type.adaptive")),
-        )],
+        vec![
+            (
+                thinking_disabled_key(),
+                Some(VerdictValue::Shape("thinking.type.adaptive")),
+            ),
+            (key(LOW_PATH), Some(VerdictValue::Shape("medium"))),
+        ],
     );
     assert_eq!(
         succeeded(&dispatched.meta),
-        vec![(THINKING_DISABLED_PATH, true, true)],
+        vec![(THINKING_DISABLED_PATH, true, true), (LOW_PATH, true, true)],
     );
 }

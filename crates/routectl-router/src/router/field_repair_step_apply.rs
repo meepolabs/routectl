@@ -15,12 +15,12 @@ use crate::field_verdict::FieldRepairGuard;
 use super::super::super::DispatchMeta;
 use super::super::super::edit_declare::declare_field_edit;
 use super::super::super::repair_budget::RepairBudget;
-use super::super::{FieldRepairRow, FieldSurface};
-use super::{FieldEdit, FieldIdentity, FieldRepairPlan, Repair, RepairStep, rerepairs_same_field};
+use super::super::FieldSurface;
+use super::{FieldEdit, FieldRepairPlan, Repair, RepairStep};
 
 #[cfg(all(test, not(debug_assertions)))]
 use {
-    super::super::{FieldRepairTable, FieldTransform},
+    super::super::{FieldRepairRow, FieldRepairTable, FieldTransform},
     super::{FieldRepairCandidate, RejectionKind},
     routectl_core::capability::SignalTier,
 };
@@ -29,11 +29,9 @@ use {
 pub(super) enum Claim<'a> {
     /// The candidate's own admission guard, or none on a non-settling plan.
     Kept,
-    /// A fresh claim for a row an earlier step released.
+    /// A fresh claim for a row an earlier step released, or one admitted
+    /// after the plan's admission.
     Reclaimed(FieldRepairGuard<'a>),
-    /// The pending step at this index, whose guard already holds the field's
-    /// claim and passes to the step that supersedes it.
-    Supersedes(usize),
 }
 
 /// A candidate whose edit has been applied to the request, and what its step
@@ -48,33 +46,12 @@ pub(super) struct MutatedCandidate<'a> {
 }
 
 impl<'a> FieldRepairPlan<'a> {
-    /// The guard a step on candidate `idx` settles through, or `None` when a
-    /// sibling request holds the field's claim, so the rejection stays
-    /// terminal. Read before the mutation. A superseded step already holds
-    /// this field's claim, so nothing is claimed for it.
-    pub(super) fn step_claim(&self, idx: usize, row: &FieldRepairRow) -> Option<Claim<'a>> {
-        self.superseded_step(row)
-            .map_or_else(|| self.claim(idx), |at| Some(Claim::Supersedes(at)))
-    }
-
-    /// The pending step a repair of `row` supersedes: one on the same field,
-    /// when the row re-repairs a field. Its guard is the field's claim, so
-    /// the new step takes it over rather than claiming again.
-    fn superseded_step(&self, row: &FieldRepairRow) -> Option<usize> {
-        if !rerepairs_same_field(row) {
-            return None;
-        }
-        let identity = FieldIdentity::of_row(row);
-        self.pending
-            .iter()
-            .position(|step| FieldIdentity::of_row(&step.row) == identity)
-    }
-
-    /// The claim for candidate `idx` when no step is superseded. A row the
-    /// first repair released is claimed again through the admission's own
-    /// inputs; `None` when a sibling request holds the row's claim, or a
-    /// verdict now acts on it.
-    fn claim(&self, idx: usize) -> Option<Claim<'a>> {
+    /// The guard a step on candidate `idx` settles through, read before the
+    /// mutation. A row the first repair released, or one admitted after the
+    /// plan's admission, is claimed through the admission's own inputs;
+    /// `None` when a sibling request holds the row's claim, or a verdict now
+    /// acts on it, so the rejection stays terminal.
+    pub(super) fn claim(&self, idx: usize) -> Option<Claim<'a>> {
         let candidate = &self.candidates[idx];
         if candidate.guard.is_some() {
             return Some(Claim::Kept);
@@ -178,7 +155,6 @@ impl<'a> FieldRepairPlan<'a> {
     /// the first repair finds any left to release.
     fn take_step_guard(&mut self, idx: usize, claim: Claim<'a>) -> Option<FieldRepairGuard<'a>> {
         let guard = match claim {
-            Claim::Supersedes(at) => self.supersede(at),
             Claim::Reclaimed(guard) => Some(guard),
             Claim::Kept => self.candidates[idx].guard.take(),
         };
@@ -188,16 +164,6 @@ impl<'a> FieldRepairPlan<'a> {
             }
         }
         guard
-    }
-
-    /// Remove the pending step at `at`, counted as dropped, and hand its
-    /// guard to the step that supersedes it.
-    fn supersede(&mut self, at: usize) -> Option<FieldRepairGuard<'a>> {
-        let superseded = self.pending.remove(at);
-        if let Some(exits) = self.exits {
-            exits.add_dropped(1);
-        }
-        superseded.guard
     }
 
     /// A guardless plan over the divergent test surface: the shape that reaches
