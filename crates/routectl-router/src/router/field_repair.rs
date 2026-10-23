@@ -1316,15 +1316,29 @@ pub(super) fn recheck_payloads(
 /// can classify. Every other kind is refused by [`attributable_field_lane`]
 /// and by the lane gates that call [`field_repair_admits_kind`].
 ///
-/// Absent on purpose: `openai-responses` (only its effort refusals localize,
-/// and its lane is not yet scoped to the effort rows) and `gemini`.
-const FIELD_REPAIR_KINDS: &[&str] = &[ANTHROPIC_API_KIND, BEDROCK_KIND, OPENAI_COMPAT_KIND];
+/// `openai-responses` is admitted for its effort refusals alone: its lane
+/// view carries only the ranked effort rows ([`FieldRepairTable::for_kind`]).
+/// Absent on purpose: `gemini`.
+const FIELD_REPAIR_KINDS: &[&str] = &[
+    ANTHROPIC_API_KIND,
+    BEDROCK_KIND,
+    OPENAI_COMPAT_KIND,
+    OPENAI_RESPONSES_KIND,
+];
 
 /// `bedrock`, as `ProviderEntry::kind_str` spells it.
 const BEDROCK_KIND: &str = routectl_core::provider_kind::config::BEDROCK;
 
 /// `openai-compat`, as `ProviderEntry::kind_str` spells it.
 const OPENAI_COMPAT_KIND: &str = routectl_core::provider_kind::config::OPENAI_COMPAT;
+
+/// `openai-responses`, as `ProviderEntry::kind_str` spells it.
+const OPENAI_RESPONSES_KIND: &str = routectl_core::provider_kind::config::OPENAI_RESPONSES;
+
+/// The openai `error.code` that refuses a value of a named parameter. Lifted
+/// out of `BadRequest` on every kind; a field rejection only on
+/// openai-responses, whose lane view names nothing but an effort level.
+const OPENAI_UNSUPPORTED_VALUE_CODE: &str = "unsupported_value";
 
 /// Whether a field stage may act on a lane of `provider_kind` at all.
 pub(super) fn field_repair_admits_kind(provider_kind: &str) -> bool {
@@ -1548,11 +1562,13 @@ pub(super) fn rejected_field(
 /// shape, so a repair driven by one would drop a field over an unrelated
 /// fault and then learn a permanent negative from it.
 ///
-/// `BadRequest` on every kind, plus exactly one lifted feature-unsupported
-/// token: the openai-compat `unsupported_parameter` code, which the
+/// `BadRequest` on every kind, plus two lifted feature-unsupported tokens,
+/// each on one kind: the openai-compat `unsupported_parameter` code, which the
 /// classifier lifts out of `BadRequest` and which is precisely the code that
-/// refuses a named parameter. The other lifted openai tokens refuse a value or
-/// a region rather than a field, and no other kind lifts this one. A subset of
+/// refuses a named parameter; and the openai-responses `unsupported_value`
+/// code, the code a refused effort level arrives with there, admitted only
+/// because that lane's view names nothing but the effort level rows. The
+/// region token refuses no field on any kind. A subset of
 /// the generic learner's deterministic-class gate
 /// ([`super::capability_learn::f2_class_is_deterministic`]); the field arm runs
 /// first and the two learners never claim the same path (pinned by the
@@ -1561,7 +1577,9 @@ fn class_can_name_a_field(class: &FailureClass, provider_kind: &str) -> bool {
     match class {
         FailureClass::BadRequest => true,
         FailureClass::FeatureUnsupported { capability } => {
-            provider_kind == OPENAI_COMPAT_KIND && capability == OPENAI_UNSUPPORTED_CODE
+            (provider_kind == OPENAI_COMPAT_KIND && capability == OPENAI_UNSUPPORTED_CODE)
+                || (provider_kind == OPENAI_RESPONSES_KIND
+                    && capability == OPENAI_UNSUPPORTED_VALUE_CODE)
         }
         _ => false,
     }
@@ -2467,10 +2485,10 @@ mod table_tests {
     }
 
     /// Mutation checks: reduce the gate to `BadRequest` alone -> red on the
-    /// openai-compat `unsupported_parameter` row; admit every
-    /// `FeatureUnsupported` -> red on the refused lifted tokens; drop the kind
-    /// test -> red on the anthropic-api and bedrock `unsupported_parameter`
-    /// rows.
+    /// openai-compat `unsupported_parameter` and openai-responses
+    /// `unsupported_value` rows; admit every `FeatureUnsupported` -> red on
+    /// the refused lifted tokens; drop either kind test -> red on the kinds
+    /// that token is refused on.
     #[test]
     fn only_a_caller_shaped_rejection_can_name_a_field() {
         let unsupported = |token: &str| FailureClass::FeatureUnsupported {
@@ -2482,10 +2500,6 @@ mod table_tests {
                 "{kind}: the envelope-refusal class is the one a field rejection arrives on",
             );
         }
-        assert!(
-            class_can_name_a_field(&unsupported(OPENAI_UNSUPPORTED_CODE), OPENAI_COMPAT_KIND),
-            "the openai code that refuses a named parameter lifts out of BadRequest",
-        );
         let refused_everywhere = [
             FailureClass::RateLimited,
             FailureClass::Auth,
@@ -2496,7 +2510,6 @@ mod table_tests {
             FailureClass::NetworkError,
             FailureClass::Overloaded,
             FailureClass::Unknown,
-            unsupported("unsupported_value"),
             unsupported("unsupported_country_region_territory"),
             unsupported("reasoning_replay"),
         ];
@@ -2509,11 +2522,20 @@ mod table_tests {
                 );
             }
         }
-        for kind in [ANTHROPIC_API_KIND, BEDROCK_KIND] {
-            assert!(
-                !class_can_name_a_field(&unsupported(OPENAI_UNSUPPORTED_CODE), kind),
-                "{kind}: the lifted openai code is admitted on openai-compat only",
-            );
+        // Each lifted openai token that can name a field, and the one kind
+        // it is admitted on.
+        let admitted_on = [
+            (OPENAI_UNSUPPORTED_CODE, OPENAI_COMPAT_KIND),
+            (OPENAI_UNSUPPORTED_VALUE_CODE, OPENAI_RESPONSES_KIND),
+        ];
+        for (token, admitting) in admitted_on {
+            for kind in FIELD_REPAIR_KINDS {
+                assert_eq!(
+                    class_can_name_a_field(&unsupported(token), kind),
+                    *kind == admitting,
+                    "{kind}: the lifted `{token}` is admitted on {admitting} only",
+                );
+            }
         }
     }
 

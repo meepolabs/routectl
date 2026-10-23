@@ -125,6 +125,9 @@ pub(super) enum RowScope {
     /// Every row but the ranked effort rows: the kind has no captured effort
     /// refusal to ground them.
     WithoutRanked,
+    /// The ranked effort rows alone: the kind's only grounded refusals are of
+    /// an effort level, so no other row may be carried or named there.
+    RankedOnly,
 }
 
 impl RowScope {
@@ -132,6 +135,7 @@ impl RowScope {
     pub(super) fn of_kind(provider_kind: &str) -> Self {
         match provider_kind {
             kind::OPENAI_COMPAT => Self::WithoutRanked,
+            kind::OPENAI_RESPONSES => Self::RankedOnly,
             _ => Self::All,
         }
     }
@@ -140,6 +144,7 @@ impl RowScope {
         match self {
             Self::All => true,
             Self::WithoutRanked => !is_ranked(row),
+            Self::RankedOnly => is_ranked(row),
         }
     }
 }

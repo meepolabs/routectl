@@ -455,6 +455,115 @@ fn an_openai_compat_lane_admits_no_effort_candidate() {
     );
 }
 
+/// The openai-responses view carries the effort rows alone: a request
+/// carrying `temperature` beside a canonical effort presents only the effort
+/// row, and a codex or Mantle Responses refusal naming `temperature` resolves
+/// to no row. The parser does not localize that param either, so the view is
+/// asserted on its own through `present_rows`.
+///
+/// Mutation check: make `RowScope::of_kind` answer `All` for openai-responses
+/// -> red on the present rows and the row count.
+#[test]
+fn the_openai_responses_view_carries_only_the_effort_rows() {
+    let responses = FieldRepairTable::grounded_only().for_kind("openai-responses");
+    let mut req = base_req();
+    req.reasoning = canonical_effort("high");
+    req.temperature = Some(0.5);
+
+    let paths: Vec<&str> = present_rows(responses, &req).map(|row| row.path).collect();
+
+    assert_eq!(paths, vec!["output_config.effort.high"]);
+    assert_eq!(responses.lane_rows().count(), ranked_rows().len());
+    assert_eq!(
+        responses.rows().len(),
+        FIELD_REPAIRS.len(),
+        "a key lookup still sees every row"
+    );
+    let temperature_refusals = [
+        (
+            "codex unsupported parameter",
+            json!({"error": {
+                "message": "Unsupported parameter: 'temperature' is not supported with this model.",
+                "type": "invalid_request_error",
+                "param": "temperature",
+                "code": "unsupported_parameter",
+            }}),
+        ),
+        (
+            "mantle responses invalid value",
+            json!({"error": {
+                "code": "invalid_value",
+                "message": "Invalid value: 'hot'. Supported values are: 'cold'.",
+                "param": "temperature",
+                "type": "invalid_request_error",
+            }}),
+        ),
+    ];
+    for (name, body) in temperature_refusals {
+        let body = routectl_core::UpstreamBody::new(body.to_string());
+
+        let named = parse_rejection(
+            responses,
+            "openai-responses",
+            400,
+            body.parsed(),
+            SentEffort::Rank(rank("high")),
+        );
+
+        assert!(named.is_none(), "{name}");
+    }
+}
+
+/// An openai-responses router, one api-key seat on its default base URL.
+#[cfg(feature = "openai-responses")]
+fn responses_router() -> Router {
+    let mut config: crate::config::Config = toml::from_str(
+        "[providers.p0]\nkind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n\
+         auth_kind = \"api-key\"\n",
+    )
+    .expect("valid test toml");
+    config.aliases.insert(
+        "default".to_string(),
+        crate::config::AliasValue::Single("m0".to_string()),
+    );
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(std::collections::BTreeMap::from([(
+        "m0".to_string(),
+        Arc::new(crate::resolved::ResolvedModel::new(
+            "m0",
+            "p0",
+            Arc::new(OkProvider {
+                count_calls: AtomicUsize::new(0),
+            }) as Arc<dyn routectl_core::Provider>,
+            "gpt-5.6-terra",
+        )),
+    )]));
+    router.with_capability_writes_assumed_durable_for_tests()
+}
+
+/// On an openai-responses lane a request carrying `temperature` beside an
+/// effort admits the effort candidate alone.
+#[cfg(feature = "openai-responses")]
+#[test]
+fn an_openai_responses_lane_admits_only_the_effort_candidate() {
+    let router = responses_router();
+    let mut req = base_req();
+    req.reasoning = canonical_effort("high");
+    req.temperature = Some(0.5);
+
+    let plan = router.plan_field_carry(
+        &target(&router, &req),
+        &req,
+        FieldSettlementMode::Settling,
+        Instant::now(),
+    );
+
+    assert_eq!(
+        plan.map_or_else(Vec::new, |plan| plan.candidate_paths()),
+        vec!["output_config.effort.high"],
+    );
+}
+
 /// The rank bitmask of `levels`.
 fn mask(levels: &[&str]) -> u8 {
     levels

@@ -724,11 +724,11 @@ fn a_stale_confirmation_from_a_since_relearned_incarnation_falls_open() {
     assert!(carries_field(&planned));
 }
 
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "gemini")]
 #[test]
 fn a_lane_outside_the_repair_kinds_falls_open_before_any_verdict_is_read() {
     let (router, _seen) = install(
-        chain_config(ALIAS, 1, "openai-responses"),
+        chain_config(ALIAS, 1, "gemini"),
         1,
         Answer::ServeImmediately,
     );
@@ -1469,10 +1469,10 @@ fn every_fail_open_arm_returns_a_serialized_equal_original() {
         FIELD_PREFLIGHT_NOT_ELIGIBLE,
     ));
 
-    #[cfg(feature = "openai-responses")]
+    #[cfg(feature = "gemini")]
     {
         let (router, _seen) = install(
-            chain_config(ALIAS, 1, "openai-responses"),
+            chain_config(ALIAS, 1, "gemini"),
             1,
             Answer::ServeImmediately,
         );
@@ -1523,11 +1523,7 @@ fn every_fail_open_arm_returns_a_serialized_equal_original() {
 
     assert_eq!(
         cases.len(),
-        if cfg!(feature = "openai-responses") {
-            7
-        } else {
-            6
-        },
+        if cfg!(feature = "gemini") { 7 } else { 6 },
         "every refusal arm reachable here is covered"
     );
     for (label, router, req, expected_reason) in cases {

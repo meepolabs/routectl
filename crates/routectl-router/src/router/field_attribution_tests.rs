@@ -29,6 +29,16 @@ const COMPAT_MANTLE: &str = "kind = \"openai-compat\"\napi_key_ref = \"\"\n\
 #[cfg(feature = "openai-responses")]
 const RESPONSES_REMOTE: &str =
     "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n";
+/// `auth_kind` omitted: the chatgpt-oauth default.
+#[cfg(feature = "openai-responses")]
+const RESPONSES_CODEX: &str =
+    "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\naccount_id_ref = \"literal:a\"\n";
+#[cfg(feature = "openai-responses")]
+const RESPONSES_LOOPBACK: &str = "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n\
+     auth_kind = \"api-key\"\nbase_url = \"http://127.0.0.1:18080/v1\"\n";
+#[cfg(all(feature = "openai-responses", feature = "bedrock"))]
+const RESPONSES_MANTLE: &str = "kind = \"openai-responses\"\napi_key_ref = \"\"\n\
+     bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n";
 #[cfg(feature = "gemini")]
 const GEMINI_REMOTE: &str = "kind = \"gemini\"\napi_key_ref = \"literal:k\"\n";
 
@@ -142,9 +152,36 @@ fn rows() -> Vec<Row> {
         },
     ]);
     #[cfg(feature = "openai-responses")]
+    rows.extend([
+        Row {
+            name: "openai-responses api-key, own credential",
+            provider_toml: Some(RESPONSES_REMOTE),
+            forwarded: false,
+            expect: Some(("openai-responses", "https://api.openai.com/v1")),
+        },
+        Row {
+            name: "openai-responses chatgpt-oauth, own credential",
+            provider_toml: Some(RESPONSES_CODEX),
+            forwarded: false,
+            expect: Some(("openai-responses", "https://chatgpt.com/backend-api/codex")),
+        },
+        Row {
+            name: "openai-responses, forwarded",
+            provider_toml: Some(RESPONSES_REMOTE),
+            forwarded: true,
+            expect: None,
+        },
+        Row {
+            name: "openai-responses, loopback",
+            provider_toml: Some(RESPONSES_LOOPBACK),
+            forwarded: false,
+            expect: None,
+        },
+    ]);
+    #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
     rows.push(Row {
-        name: "openai-responses, own credential",
-        provider_toml: Some(RESPONSES_REMOTE),
+        name: "openai-responses, Mantle sub-lane",
+        provider_toml: Some(RESPONSES_MANTLE),
         forwarded: false,
         expect: None,
     });
@@ -190,7 +227,10 @@ fn the_attributability_decision_matches_the_table_for_every_kind() {
 #[test]
 fn each_refusing_row_parses_into_the_kind_it_names() {
     let premises: Vec<(&str, &str)> = {
-        #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+        #[cfg_attr(
+            not(any(feature = "bedrock", feature = "openai-responses")),
+            allow(unused_mut)
+        )]
         let mut premises = vec![
             (ANTHROPIC_LOOPBACK, "anthropic-api"),
             (COMPAT_LOOPBACK, "openai-compat"),
@@ -204,6 +244,10 @@ fn each_refusing_row_parses_into_the_kind_it_names() {
             (COMPAT_MANTLE, "openai-compat"),
             (BEDROCK_UNADMITTED_REGION, "bedrock"),
         ]);
+        #[cfg(feature = "openai-responses")]
+        premises.push((RESPONSES_LOOPBACK, "openai-responses"));
+        #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
+        premises.push((RESPONSES_MANTLE, "openai-responses"));
         premises
     };
     for (provider_toml, kind) in premises {

@@ -36,6 +36,9 @@ type Respond = fn(&serde_json::Value, usize) -> Option<Error>;
 enum Egress {
     Anthropic,
     OpenAiCompat,
+    /// OpenAI Responses on one auth lane.
+    #[cfg(feature = "openai-responses")]
+    OpenAiResponses(routectl_providers::openai_responses::AuthKind),
 }
 
 /// A seat that assembles each attempt's body with the real egress,
@@ -92,6 +95,8 @@ impl ChainSeat {
                 None,
                 false,
             ),
+            #[cfg(feature = "openai-responses")]
+            Egress::OpenAiResponses(auth_kind) => responses_body(auth_kind, req),
         }
     }
 
@@ -159,6 +164,8 @@ fn chain_router(seats: &[(&str, &Arc<ChainSeat>)], extra_toml: &str) -> Router {
                 let upstream = match seat.egress {
                     Egress::Anthropic => "upstream",
                     Egress::OpenAiCompat => UNPROFILED_MODEL,
+                    #[cfg(feature = "openai-responses")]
+                    Egress::OpenAiResponses(_) => "gpt-5.6-terra",
                 };
                 (
                     format!("m{idx}"),
@@ -177,6 +184,29 @@ fn chain_router(seats: &[(&str, &Arc<ChainSeat>)], extra_toml: &str) -> Router {
 
 fn anthropic_router(seat: &Arc<ChainSeat>, extra_toml: &str) -> Router {
     chain_router(&[(ANTHROPIC_API_TOML, seat)], extra_toml)
+}
+
+/// The body the OpenAI Responses egress on `auth_kind` assembles for `req`.
+///
+/// Built and dropped on a thread with no async runtime: the provider's drop
+/// persists its cookie jar under the user's home directory whenever a runtime
+/// is reachable, and a test must never write there.
+#[cfg(feature = "openai-responses")]
+fn responses_body(
+    auth_kind: routectl_providers::openai_responses::AuthKind,
+    req: &ChatRequest,
+) -> Result<serde_json::Value> {
+    use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut cfg = OpenAiResponsesConfig::new("chain-seat", "k");
+                cfg.auth_kind = auth_kind;
+                OpenAiResponsesProvider::new(cfg).normalize_request(req)
+            })
+            .join()
+            .expect("the body assembly thread finishes")
+    })
 }
 
 fn wire_checked(retry: &str) -> String {

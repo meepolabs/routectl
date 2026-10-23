@@ -178,8 +178,8 @@ fn convergence_prefix_path() -> &'static str {
 /// planner's chain expansion finds it.
 /// A provider kind field repair refuses: it has no rejection dialect in the
 /// parser.
-#[cfg(feature = "openai-responses")]
-const REFUSED_KIND: &str = "openai-responses";
+#[cfg(feature = "gemini")]
+const REFUSED_KIND: &str = "gemini";
 
 fn convergence_router(base_url: &str, kind: &str) -> Router {
     convergence_router_on(&format!(
@@ -339,7 +339,7 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
     });
 
     // A lane on a kind field repair does not act on.
-    #[cfg(feature = "openai-responses")]
+    #[cfg(feature = "gemini")]
     {
         let other_kind = convergence_router("https://example.test/v1", REFUSED_KIND);
         plant_convergence_verdict(&other_kind, envelope, ENVELOPE_QUORUM);
@@ -439,7 +439,7 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
     // surface must too -- reporting the mask here would tell an operator to edit a
     // `[capability.overrides]` cell to un-block a verdict that would stay inert on
     // that lane whatever they did to the cell.
-    #[cfg(feature = "openai-responses")]
+    #[cfg(feature = "gemini")]
     {
         let masked_on_bad_lane = convergence_router("https://example.test/v1", REFUSED_KIND);
         let mut config = (*masked_on_bad_lane.config).clone();
@@ -615,7 +615,7 @@ fn rebuild_convergence_router_with(previous: Router, config: Config) -> Router {
 /// exactly -- a rebuild that reset the kind would silently turn the refused-lane
 /// fixture into an ordinary one, and the gate-ordering case would stop
 /// discriminating.
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "gemini")]
 fn rebuild_convergence_router_with_kind(
     previous: Router,
     mut config: Config,

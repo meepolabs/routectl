@@ -515,19 +515,18 @@ fn an_opt_in_naming_another_model_on_the_same_member_does_not_opt_this_seat_in()
 // The lane's provider entry decides the lane gate
 // ---------------------------------------------------------------------------
 
-/// A config with ONE openai-responses provider-backed model plus an
+/// A config with ONE gemini provider-backed model plus an
 /// `anthropic-api` entry no model uses, for the pair below.
 ///
 /// The two provider kinds are deliberately DIFFERENT, which is what makes the pair
 /// discriminate: a lane on the `anthropic-api` entry admits pre-flight and a lane
-/// on the openai-responses one refuses it, so a resolution through anything but
+/// on the gemini one refuses it, so a resolution through anything but
 /// the lane's own entry flips one of the two rows.
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "gemini")]
 fn fallback_config() -> Config {
     use crate::config::{AliasValue, ModelEntry};
     let toml_text = format!(
-        "\n[providers.base-oc]\nkind = \"openai-responses\"\n\
-         auth_kind = \"api-key\"\napi_key_ref = \"env://K\"\n\
+        "\n[providers.base-oc]\nkind = \"gemini\"\napi_key_ref = \"env://K\"\n\
          \n[providers.{MEMBER}]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K2\"\n\
          base_url = \"https://api.anthropic.com\"\n"
     );
@@ -545,7 +544,7 @@ fn fallback_config() -> Config {
 
 /// A lane on an attributable `anthropic-api` entry reads as a supported lane, even
 /// though no model nickname happens to dispatch it.
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "gemini")]
 #[test]
 fn a_lane_on_an_anthropic_entry_resolves_that_entry_rather_than_any_model() {
     let router = router_assuming_durable_writes(fallback_config());
@@ -558,16 +557,16 @@ fn a_lane_on_an_anthropic_entry_resolves_that_entry_rather_than_any_model() {
         row.blocked_reason,
         Some(PreflightBlockedReason::UnsupportedLane),
         "the lane names an attributable anthropic-api entry, so the lane is \
-         supported -- the configured model's openai-responses entry is not what was \
+         supported -- the configured model's gemini entry is not what was \
          resolved",
     );
 }
 
 /// The other half of the pair: the configured model's own lane, on its
-/// openai-responses entry, is refused.
-#[cfg(feature = "openai-responses")]
+/// gemini entry, is refused.
+#[cfg(feature = "gemini")]
 #[test]
-fn a_lane_on_an_openai_responses_entry_is_an_unsupported_lane() {
+fn a_lane_on_a_gemini_entry_is_an_unsupported_lane() {
     let router = router_assuming_durable_writes(fallback_config());
     plant_verdict_on(&router, "base-oc#gpt-4o", grounded_key());
 
@@ -577,7 +576,7 @@ fn a_lane_on_an_openai_responses_entry_is_an_unsupported_lane() {
     assert_eq!(
         row.blocked_reason,
         Some(PreflightBlockedReason::UnsupportedLane),
-        "the lane's own entry is openai-responses, a lane pre-flight never acts on",
+        "the lane's own entry is gemini, a lane pre-flight never acts on",
     );
 }
 

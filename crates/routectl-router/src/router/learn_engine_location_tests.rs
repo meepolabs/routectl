@@ -464,7 +464,7 @@ fn site_rows() -> Vec<SiteRow> {
     }
     if cfg!(feature = "openai-responses") {
         rows.push(SiteRow {
-            name: "an openai-responses egress, whose envelope no parser reads",
+            name: "an openai-responses egress, whose parser reads only the effort param",
             provider_block: OPENAI_RESPONSES,
             dialect: IngressDialect::Responses,
             sent: Some(unchanged),

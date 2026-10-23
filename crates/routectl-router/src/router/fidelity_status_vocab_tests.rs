@@ -233,14 +233,14 @@ fn a_disabled_capability_kill_switch_reports_capability_disabled() {
 }
 
 /// A lane on a kind field repair does not act on reports `unsupported_lane`.
-#[cfg(feature = "openai-responses")]
+#[cfg(feature = "gemini")]
 #[test]
 fn a_lane_outside_the_repair_kinds_reports_unsupported_lane() {
     use crate::config::{AliasValue, ModelEntry, ProviderEntry};
     let mut config = Config::default();
     config
         .providers
-        .insert("oc".to_string(), ProviderEntry::openai_responses("env://K"));
+        .insert("oc".to_string(), ProviderEntry::gemini("env://K"));
     config
         .models
         .insert(NICKNAME.to_string(), ModelEntry::new("oc", "gpt-4o"));

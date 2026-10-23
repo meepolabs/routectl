@@ -300,7 +300,7 @@ async fn an_openai_responses_rejection_proceeds_as_with_no_wire_record() {
         return;
     }
     run_dispatch_rows(&[DispatchRow {
-        name: "no parser arm",
+        name: "a param the parser does not read",
         provider_block: OPENAI_RESPONSES,
         dialect: IngressDialect::Responses,
         carry: carry_test_row,

@@ -1330,8 +1330,11 @@ async fn a_widened_lane_repairs_and_learns_the_field_verdict() {
     }
 }
 
+/// Gemini is outside the repair kinds; openai-responses is inside them, but
+/// its lane view carries only the effort rows, so a request carrying any other
+/// row admits no candidate there either.
 #[tokio::test]
-async fn a_lane_outside_the_repair_kinds_performs_no_field_repair() {
+async fn a_lane_that_cannot_carry_the_row_performs_no_field_repair() {
     let mut refused: Vec<&str> = Vec::new();
     if cfg!(feature = "openai-responses") {
         refused.push(
