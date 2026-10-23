@@ -1,5 +1,5 @@
 {
-  "note": "Tier 1, captured on bedrock (2026-10-22, us.anthropic.claude-opus-4-8, Converse): an output_config.effort value outside the enum in additionalModelRequestFields. The serde message sits inside the Converse model-errors wrapper. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the other bedrock fixtures; the capture recorded no response headers.",
+  "note": "Tier 1, captured on bedrock (2026-10-22, us.anthropic.claude-opus-4-8, Converse): an output_config.effort value outside the enum in additionalModelRequestFields. The serde message sits inside the Converse model-errors wrapper. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the header-captured thinking-type bedrock fixtures; the capture recorded no response headers.",
   "status": 400,
   "lifted_type": "ValidationException",
   "body": "{\"message\":\"The model returned the following errors: unknown variant `bogus`, expected one of `low`, `medium`, `high`, `xhigh`, `max`, `Unhandled` at line 1 column 170\"}"

@@ -1,5 +1,5 @@
 {
-  "note": "Tier 1, captured on openai-responses (2026-10-22, gpt-5.6-terra, ChatGPT OAuth seat, codex Responses backend): a reasoning.effort value outside the enum. The message lists the schema-wide values, minimal included; error.code is invalid_value. error.message is verbatim; the envelope keeps the captured key order. lifted_type is the error.type routectl lifts from the body.",
+  "note": "Tier 1, captured on openai-responses (2026-10-22, gpt-5.6-terra, ChatGPT OAuth seat, codex Responses backend): a reasoning.effort value outside the enum. The message lists the schema-wide values, minimal included; error.code is invalid_value. error.message is verbatim; the envelope keeps the captured message-first key order; the sibling fixture reasoning-effort-invalid-value-codex.json, captured from a different model on a different date, is code-first. lifted_type is the error.type routectl lifts from the body.",
   "status": 400,
   "lifted_type": "invalid_request_error",
   "body": "{\"error\":{\"message\":\"Invalid value: 'bogus'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.\",\"type\":\"invalid_request_error\",\"param\":\"reasoning.effort\",\"code\":\"invalid_value\"}}"

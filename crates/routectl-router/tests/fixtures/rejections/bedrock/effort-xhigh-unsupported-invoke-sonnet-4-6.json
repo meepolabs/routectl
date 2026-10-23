@@ -1,5 +1,5 @@
 {
-  "note": "Tier 1, captured on bedrock (2026-10-22, us.anthropic.claude-sonnet-4-6, InvokeModel): output_config.effort xhigh sent to a model that takes max but not xhigh, with the same text as first-party. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the other bedrock fixtures; the capture recorded no response headers.",
+  "note": "Tier 1, captured on bedrock (2026-10-22, us.anthropic.claude-sonnet-4-6, InvokeModel): output_config.effort xhigh sent to a model that takes max but not xhigh, with the same text as first-party. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the header-captured thinking-type bedrock fixtures; the capture recorded no response headers.",
   "status": 400,
   "lifted_type": "ValidationException",
   "body": "{\"message\":\"This model does not support effort level 'xhigh'. Supported levels: high, low, max, medium.\"}"

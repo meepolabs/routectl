@@ -254,6 +254,7 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "bedrock/effort-unknown-variant-invoke-opus-4-8",
             Outcome::NotLocalized,
         ),
+        // Prose effort refusals, bare or Converse-wrapped, name no wire path.
         (
             "bedrock/effort-xhigh-unsupported-converse-sonnet-4-6",
             Outcome::NotLocalized,
