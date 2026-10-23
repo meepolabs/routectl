@@ -889,7 +889,7 @@ fn is_managed_codex_lane(entry: &ProviderEntry) -> bool {
             return false;
         }
         let default_base =
-            super::build::default_responses_base(OpenaiResponsesAuthKind::ChatgptOauth);
+            crate::config::default_responses_base(OpenaiResponsesAuthKind::ChatgptOauth);
         let effective = base_url.as_deref().unwrap_or(&default_base);
         return is_exact_https_host_of(effective, &[&default_base]);
     }

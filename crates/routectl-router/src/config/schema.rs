@@ -2140,6 +2140,10 @@ impl ProviderEntry {
     /// - native `bedrock`: the runtime endpoint derived from `region`, the
     ///   same derivation the provider dials; a region that fails admission
     ///   names no endpoint and answers `None`;
+    /// - `openai-responses`: the configured `base_url`, else the `auth_kind`
+    ///   default the factory dials; `None` for a `bedrock_mantle` block, whose
+    ///   endpoint the factory derives from `bedrock_mantle.region`, and for a
+    ///   bare `bedrock-mantle` marker, which the factory refuses to build;
     /// - every other kind: `None`. Their egress is not classified here, so a
     ///   caller keying a decision on it fails closed.
     pub fn classifiable_egress_base_url(&self) -> Option<std::borrow::Cow<'_, str>> {
@@ -2153,6 +2157,25 @@ impl ProviderEntry {
                 ..
             } => None,
             Self::OpenaiCompat { base_url, .. } => Some(std::borrow::Cow::Borrowed(base_url)),
+            #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
+            Self::OpenaiResponses {
+                bedrock_mantle: Some(_),
+                ..
+            } => None,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                auth_kind: OpenaiResponsesAuthKind::BedrockMantle,
+                ..
+            } => None,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                base_url,
+                auth_kind,
+                ..
+            } => Some(match base_url {
+                Some(configured) => std::borrow::Cow::Borrowed(configured.as_str()),
+                None => std::borrow::Cow::Owned(default_responses_base(*auth_kind)),
+            }),
             #[cfg(feature = "bedrock")]
             Self::Bedrock { region, .. } => {
                 routectl_providers::bedrock::endpoint::bedrock_runtime_url(region)
@@ -3066,6 +3089,28 @@ fn default_anthropic_version() -> String {
 #[cfg(feature = "gemini")]
 pub fn default_gemini_base() -> String {
     "https://generativelanguage.googleapis.com/v1beta".into()
+}
+
+/// The default Responses API base URL for an `auth_kind`, used wherever an
+/// `openai-responses` entry left `base_url` unset. Keyed on `auth_kind` at
+/// use time rather than as a serde default, because `auth_kind` is not known
+/// when `base_url`'s serde default would fire.
+#[cfg(feature = "openai-responses")]
+pub fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
+    match auth_kind {
+        OpenaiResponsesAuthKind::ChatgptOauth => "https://chatgpt.com/backend-api/codex".into(),
+        OpenaiResponsesAuthKind::ApiKey => "https://api.openai.com/v1".into(),
+        // The mantle lane derives its region-specific base_url in the
+        // factory's `bedrock_mantle` branch and returns before this
+        // fallback; the non-mantle path then rejects a bare `bedrock-mantle`
+        // marker with a Config error (in every build and for unvalidated
+        // callers) before any base_url is resolved, and
+        // `ProviderEntry::classifiable_egress_base_url` answers `None` for
+        // the marker before calling here. No path reaches here.
+        OpenaiResponsesAuthKind::BedrockMantle => {
+            unreachable!("bedrock-mantle base_url is derived in the factory mantle branch")
+        }
+    }
 }
 
 /// How an openai-compat provider expresses reasoning/thinking on the wire.

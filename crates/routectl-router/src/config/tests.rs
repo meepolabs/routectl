@@ -762,6 +762,73 @@ api_key_ref = "literal:sk-test"
     );
 }
 
+/// An `openai-responses` entry egresses to its configured `base_url`, else to
+/// the `auth_kind` default, and the Mantle sub-lane names no classifiable
+/// egress. The default rows compare against literals so a drifted default is
+/// caught here, not echoed back by the function under test.
+#[cfg(feature = "openai-responses")]
+#[test]
+fn classifiable_egress_base_url_answers_openai_responses_lanes() {
+    use routectl_providers::openai_responses::AuthKind;
+
+    let rows: Vec<(&str, ProviderEntry, Option<&str>)> = vec![
+        (
+            "chatgpt-oauth with base_url unset egresses to the codex default",
+            ProviderEntry::openai_responses("env://OPENAI_JWT"),
+            Some("https://chatgpt.com/backend-api/codex"),
+        ),
+        (
+            "api-key with base_url unset egresses to the platform default",
+            ProviderEntry::openai_responses("env://OPENAI_KEY")
+                .with_openai_responses_auth_kind(AuthKind::ApiKey),
+            Some("https://api.openai.com/v1"),
+        ),
+        (
+            "a configured base_url is the egress regardless of auth_kind",
+            ProviderEntry::openai_responses("env://OPENAI_KEY")
+                .with_openai_responses_auth_kind(AuthKind::ApiKey)
+                .with_openai_responses_base_url("https://responses.example.com/v1"),
+            Some("https://responses.example.com/v1"),
+        ),
+        (
+            "a bedrock-mantle marker without a bedrock_mantle block answers None, no panic",
+            ProviderEntry::openai_responses("env://AWS_BEARER_TOKEN_BEDROCK")
+                .with_openai_responses_auth_kind(AuthKind::BedrockMantle),
+            None,
+        ),
+    ];
+    // `auth_kind` is omitted, so it defaults to chatgpt-oauth: only the
+    // block itself can make this row answer `None`.
+    #[cfg(feature = "bedrock")]
+    let rows = {
+        let mut rows = rows;
+        rows.push((
+            "a bedrock_mantle block answers None",
+            toml::from_str::<Config>(
+                "[providers.m]\n\
+             kind = \"openai-responses\"\n\
+             api_key_ref = \"\"\n\
+             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", \
+             key_ref = \"env://AWS_BEARER_TOKEN_BEDROCK\" } }\n",
+            )
+            .expect("parse mantle responses lane")
+            .providers
+            .remove("m")
+            .expect("mantle provider"),
+            None,
+        ));
+        rows
+    };
+
+    for (name, entry, expected) in rows {
+        assert_eq!(
+            entry.classifiable_egress_base_url().as_deref(),
+            expected,
+            "{name}",
+        );
+    }
+}
+
 #[test]
 fn cache_capability_anthropic_custom_base_fails_closed() {
     let toml_text = r#"

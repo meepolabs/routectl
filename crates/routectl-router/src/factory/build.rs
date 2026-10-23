@@ -552,7 +552,7 @@ async fn build_provider_inner(
             };
             let resolved_base_url = base_url
                 .clone()
-                .unwrap_or_else(|| default_responses_base(*auth_kind));
+                .unwrap_or_else(|| crate::config::default_responses_base(*auth_kind));
             validate_base_url_scheme(name, &resolved_base_url)?;
             let mut cfg =
                 OpenAiResponsesConfig::new_with_auth(format!("openai-responses:{name}"), auth);
@@ -1766,28 +1766,6 @@ fn scheme_of(uri: &str) -> &'static str {
 // (`ChatRequest::routectl_internal`) can convert without the factory in
 // the middle. The factory no longer reads either field off
 // `[providers.X]` (both fields live on `[models.X]` now).
-
-/// Pick the default Responses API base URL for a given auth_kind. The
-/// factory uses this whenever the operator left `base_url` unset.
-/// Centralizing the mapping here (rather than computing it on TOML
-/// deserialize) avoids the chicken-and-egg problem that `auth_kind`
-/// isn't known at the same time `base_url`'s serde default would
-/// fire.
-#[cfg(feature = "openai-responses")]
-pub(super) fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
-    match auth_kind {
-        OpenaiResponsesAuthKind::ChatgptOauth => "https://chatgpt.com/backend-api/codex".into(),
-        OpenaiResponsesAuthKind::ApiKey => "https://api.openai.com/v1".into(),
-        // The mantle lane derives its region-specific base_url in the
-        // factory's `bedrock_mantle` branch and returns before this
-        // fallback; the non-mantle path then rejects a bare `bedrock-mantle`
-        // marker with a Config error (in every build and for unvalidated
-        // callers) before any base_url is resolved. No path reaches here.
-        OpenaiResponsesAuthKind::BedrockMantle => {
-            unreachable!("bedrock-mantle base_url is derived in the factory mantle branch")
-        }
-    }
-}
 
 #[cfg(test)]
 #[path = "build_tests.rs"]
