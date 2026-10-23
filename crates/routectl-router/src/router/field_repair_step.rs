@@ -33,13 +33,12 @@ use std::time::Instant;
 
 use routectl_core::capability::SignalTier;
 use routectl_core::failure_class::FailureClass;
-use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
+use routectl_core::wire_check::{EditKind, IngressDialect};
 use routectl_core::{ChatRequest, Error};
 
 use crate::field_verdict::{FieldRepairGuard, FieldVerdictKey, FieldVerdictRegistry};
 use crate::field_verdict_value::VerdictValue;
 
-use super::super::edit_declare::declare_field_edit;
 use super::super::field_verdict_observability::ChainStepTally;
 use super::super::rejection_parser::{
     FieldIdentity, NamedRejection, RejectionKind, RejectionValue, localized_field,
@@ -264,16 +263,6 @@ struct Repair {
     edit: FieldEdit,
     kind: RejectionKind,
     tier: SignalTier,
-}
-
-/// Where a step's guard comes from.
-enum Claim<'a> {
-    /// The candidate's own admission guard, or none on a non-settling plan.
-    Kept,
-    /// A fresh claim for a row an earlier step released.
-    Reclaimed(FieldRepairGuard<'a>),
-    /// A sibling request holds the row's claim, or a verdict now acts on it.
-    Refused,
 }
 
 impl RepairStep<'_> {
@@ -507,60 +496,15 @@ impl<'a> FieldRepairPlan<'a> {
                     .any(|step| FieldIdentity::of_row(&step.row) == identity))
     }
 
-    /// The pending step a repair of `row` supersedes: one on the same field,
-    /// when the row re-repairs a field. Its guard is the field's claim, so
-    /// the new step takes it over rather than claiming again.
-    fn superseded_step(&self, row: &FieldRepairRow) -> Option<usize> {
-        if !rerepairs_same_field(row) {
-            return None;
-        }
-        let identity = FieldIdentity::of_row(row);
-        self.pending
-            .iter()
-            .position(|step| FieldIdentity::of_row(&step.row) == identity)
-    }
-
-    /// Remove the pending step at `at`, counted as dropped, and hand its
-    /// guard to the step that supersedes it.
-    fn supersede(&mut self, at: usize) -> Option<FieldRepairGuard<'a>> {
-        let superseded = self.pending.remove(at);
-        if let Some(exits) = self.exits {
-            exits.add_dropped(1);
-        }
-        superseded.guard
-    }
-
-    /// The guard a step on candidate `idx` settles through. A row the first
-    /// repair released is claimed again through the admission's own inputs.
-    fn claim(&self, idx: usize) -> Claim<'a> {
-        let candidate = &self.candidates[idx];
-        if candidate.guard.is_some() {
-            return Claim::Kept;
-        }
-        let (Some(admission), Some(key)) = (self.reclaim.as_ref(), candidate.key.as_ref()) else {
-            return Claim::Kept;
-        };
-        admission
-            .registry
-            .admit_provisional(
-                key,
-                &admission.base_url,
-                admission.generation,
-                Instant::now(),
-            )
-            .map_or(Claim::Refused, Claim::Reclaimed)
-    }
-
     /// The EFFECT half of [`Self::apply_named`], for the candidate at `idx`: the
-    /// presence re-check, the allowance check, the guard claim, the edit, the
-    /// charge, the guard releases, and the estimate re-stamp.
+    /// presence re-check, the allowance check and the guard claim, then the
+    /// edit, then the step's installation.
     ///
     /// Split from the rejection-to-candidate SELECTION above so the fail-closed
     /// branch below is reachable in a release test build: the divergent surface
     /// that manufactures the presence/drop disagreement reports itself present
     /// unconditionally, so giving it a closed-table row would make every request
     /// in a test build carry it. This is the entry point that test drives.
-    #[cfg_attr(not(test), allow(clippy::needless_pass_by_ref_mut))]
     fn apply_candidate(
         &mut self,
         idx: usize,
@@ -580,152 +524,34 @@ impl<'a> FieldRepairPlan<'a> {
         }
         // Availability is CHECKED, not spent: an exhausted allowance must leave
         // the request untouched, so this precedes the mutation, while the charge
-        // below follows it. Splitting the read from the draw is what lets the
-        // order be "check, mutate, then charge" without a charge that a failed
-        // mutation would have to unwind.
+        // in `install_step` follows it.
         if !budget.check_or_mark_refusal() {
             return None;
         }
         // Claimed before the mutation: a field whose claim a sibling request
-        // now holds is not repaired here, and the rejection stays terminal. A
-        // superseded step already holds this field's claim, so nothing is
-        // claimed for it.
-        let superseded = self.superseded_step(&row);
-        let reclaimed = match superseded.map_or_else(|| self.claim(idx), |_| Claim::Kept) {
-            Claim::Refused => return None,
-            Claim::Reclaimed(guard) => Some(guard),
-            Claim::Kept => None,
-        };
+        // now holds is not repaired here, and the rejection stays terminal.
+        let claim = self.step_claim(idx, &row)?;
         let edit = repair.edit;
         let fill_clamped =
             matches!(edit, FieldEdit::Ceiling(_)) && surface.clamp_writes_fill(attempt_req);
         if !edit.apply_to(surface, attempt_req) {
-            // FAIL CLOSED. A rewrite may refuse by design: the value is
-            // already carried, or the rewritten body failed its read-back. A
-            // ceiling may too: the request already meets the named limit. A
-            // drop cannot: `present_in` held immediately above and nothing
-            // between touches the request, so reaching here means the two have
-            // diverged -- a bug in this module. The debug assertion names it in
-            // development, but the RELEASE behavior must not depend on that
-            // assertion being compiled: absorbing the inconsistency silently
-            // would report a repair the wire never saw, charge the allowance for
-            // it, and let the caller select the commit settlement. So the
-            // release path returns None, having mutated nothing and charged
-            // nothing; a guard claimed above releases as it drops. This is the
-            // LAST point at which `None` is a correct answer: it is still
-            // pre-mutation, so refusing here leaves the request exactly as the
-            // caller handed it over.
+            // FAIL CLOSED. A rewrite or a ceiling may refuse by design; a drop
+            // cannot (`present_in` held above), so one here is a divergence the
+            // release path refuses without relying on the debug assertion. A
+            // claimed guard releases as it drops. The LAST correct `None`.
             debug_assert!(
                 edit != FieldEdit::Drop,
                 "a present surface must take a drop; presence and the drop have diverged",
             );
             return None;
         }
-        // Charged UNCONDITIONALLY now, and this is the one place that must not
-        // have a refusal branch. The field is already changed in `attempt_req`,
-        // so returning `None` here would report "no repair" for a request whose
-        // body this call already changed: the caller would leave the arm without
-        // re-dispatching, and the mutated attempt would sit in a walk that
-        // believes it never repaired -- a silently altered request, which is
-        // strictly worse than either repairing or refusing. `check_or_mark_refusal` above is
-        // what makes the refusal impossible, so the invariant is asserted rather
-        // than branched on, and NO path below the mutation returns `None`.
-        let charged = budget.draw();
-        debug_assert!(
-            charged,
-            "check_or_mark_refusal held before the mutation, so the draw after it cannot fail",
-        );
-        // A clamped fill is still the egress's declared default; a second
-        // declaration at the same pointer would read as a conflict to the next
-        // rejection there and keep it from the proposers.
-        if !fill_clamped {
-            declare_field_edit(
-                attempt_req,
-                self.wire,
-                EditSite::FieldRepair,
-                surface,
-                edit.declared_kind(),
-            );
-        }
-        let guard = match superseded {
-            Some(at) => self.supersede(at),
-            None => reclaimed.or_else(|| self.candidates[idx].guard.take()),
-        };
-        // Every OTHER candidate's guard is released now rather than held to
-        // settlement, which frees each unused single-flight slot for a sibling
-        // request that CAN settle that row instead of pinning it for the rest
-        // of this walk. Only the first repair finds any left to release.
-        for (other, candidate) in self.candidates.iter_mut().enumerate() {
-            if other != idx {
-                drop(candidate.guard.take());
-            }
-        }
-        super::super::dispatch::restamp_calibration_estimate(attempt_req, meta);
-        let reject_status = super::super::class_observe::upstream_facts(rejection)
-            .status
-            .unwrap_or(0);
-        self.pending.push(RepairStep {
-            row,
-            edit,
-            kind: repair.kind,
-            tier: repair.tier,
+        let mutated = MutatedCandidate {
+            idx,
+            repair,
+            claim,
             fill_clamped,
-            handle: None,
-            reject_status,
-            guard,
-        });
-        self.applied = true;
-        Some(reject_status)
-    }
-
-    /// A guardless plan over the divergent test surface: the shape that reaches
-    /// `apply`'s fail-closed branch. Test-only, and deliberately not
-    /// constructible any other way.
-    #[cfg(all(test, not(debug_assertions)))]
-    pub(super) fn divergent_for_tests() -> Self {
-        Self::admitted(
-            FieldRepairTable::default(),
-            vec![FieldRepairCandidate::unsettled(FieldRepairRow {
-                // Outside the closed table deliberately: the surface is not a
-                // row (see `FieldRepairTable`), and this path exists only so the
-                // candidate is well formed.
-                path: "divergent.surface.for.tests",
-                surface: super::FieldSurface::DivergentForTests,
-                transform: FieldTransform::Drop,
-                class: super::TransformClass::Envelope,
-                count_tokens_validates: false,
-            })],
-            None,
-            None,
-        )
-    }
-
-    /// Drive [`Self::apply_candidate`] for this plan's only candidate, skipping
-    /// the rejection-to-candidate selection.
-    ///
-    /// Test-only, and the ONLY way the fail-closed branch is reachable: the
-    /// divergent surface has no closed-table row, so no rejection can select it.
-    /// The production effect path is called directly, so a mutation to the
-    /// refusal, the charge, or the mutation ordering is observable here.
-    #[cfg(all(test, not(debug_assertions)))]
-    pub(super) fn apply_sole_candidate_for_tests(
-        &mut self,
-        attempt_req: &mut ChatRequest,
-        meta: &mut DispatchMeta,
-        budget: &mut RepairBudget,
-        rejection: &Error,
-    ) -> Option<u16> {
-        assert_eq!(
-            self.candidates.len(),
-            1,
-            "the divergent fixture holds exactly one candidate",
-        );
-        let repair = Repair {
-            edit: FieldEdit::Drop,
-            kind: RejectionKind::UnsupportedField,
-            tier: SignalTier::SelfIdentifying,
         };
-        self.apply_candidate(0, repair, attempt_req, meta, budget, rejection)
+        Some(self.install_step(mutated, attempt_req, meta, budget, rejection))
     }
 
     /// Phase two once the pending steps are proven -- the repaired retry
@@ -789,6 +615,10 @@ impl Drop for FieldRepairPlan<'_> {
         }
     }
 }
+
+#[path = "field_repair_step_apply.rs"]
+mod apply;
+use apply::MutatedCandidate;
 
 #[cfg(test)]
 #[path = "field_repair_step_tests.rs"]

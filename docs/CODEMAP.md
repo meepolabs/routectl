@@ -2928,11 +2928,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   NOT one of those call sites: it stays on the bare `derive_feature_keys`
   catalog vocabulary alone, since a field verdict is never a
   feature-naming-template candidate
-- `src/router/field_repair_step.rs` -- child of `field_repair.rs`: `FieldRepairPlan`,
-  `RepairStep`, `apply_named`, `commit_pending`, `moved_on_by`; test-only opt-in
-  `src/router/field_repair_rerepair_test_support.rs`. Tests:
-  `field_repair_step_tests.rs`, `field_repair_chain_tests.rs`,
-  `field_repair_chain_support_tests.rs`, `field_repair_chain_exit_tests.rs`
+- `src/router/field_repair_step.rs` -- `FieldRepairPlan`, `RepairStep`: `apply_named`,
+  `commit_pending`, `moved_on_by`, `settle_success`; test-only re-repair opt-in
+  `src/router/field_repair_rerepair_test_support.rs`
+- `src/router/field_repair_step_apply.rs` -- `FieldRepairPlan::step_claim` (guard
+  choice before a repair's mutation) and `install_step` (step installation after it)
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
