@@ -488,3 +488,4 @@ include!("preflight_daemon_probe_clear_tests.rs");
 include!("preflight_daemon_thinking_disabled_tests.rs");
 include!("preflight_daemon_ceiling_tests.rs");
 include!("preflight_daemon_chain_tests.rs");
+include!("preflight_daemon_effort_tests.rs");

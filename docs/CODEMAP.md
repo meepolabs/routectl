@@ -8707,7 +8707,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `preflight_daemon_chain_tests.rs` (two refused fields in one client request
   over a real anthropic-api egress: both repairs converge and both verdicts
   land on the ledger; a loopback base URL repairs nothing; a refused verdict
-  write still serves, is reported on `capability_writes`, and lands no row)
+  write still serves, is reported on `capability_writes`, and lands no row),
+  and `preflight_daemon_effort_tests.rs` (an adaptive turn's `xhigh` refused
+  with the committed `Supported levels` capture over a real anthropic-api
+  egress is retried at `high` and learned with its value on the ledger; the
+  next turn leaves pre-flighted at `high` and draws no refusal)
 - `tests/preflight_observability_e2e.rs` -- hermetic runtime acceptance for the
   pre-flight observability floor: a real `serve_on_listener` daemon on an
   OS-assigned loopback port, a per-test tempdir usage ledger, and a provider
