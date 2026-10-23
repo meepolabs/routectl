@@ -70,7 +70,7 @@ pub(in crate::router) fn rerepairs_same_field(
 
 /// A test build's scoped opt-in of one row into [`rerepairs_same_field`].
 #[cfg(test)]
-#[path = "field_repair_rerepair_opt_in.rs"]
+#[path = "field_repair_rerepair_test_support.rs"]
 pub(in crate::router) mod rerepair_opt_in;
 
 /// The admitted L0 repair for one attempt: EVERY closed-table row the attempt

@@ -2930,7 +2930,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   feature-naming-template candidate
 - `src/router/field_repair_step.rs` -- child of `field_repair.rs`: `FieldRepairPlan`,
   `RepairStep`, `apply_named`, `commit_pending`, `moved_on_by`; test-only opt-in
-  `src/router/field_repair_rerepair_opt_in.rs`. Tests:
+  `src/router/field_repair_rerepair_test_support.rs`. Tests:
   `field_repair_step_tests.rs`, `field_repair_chain_tests.rs`,
   `field_repair_chain_support_tests.rs`, `field_repair_chain_exit_tests.rs`
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
