@@ -2,7 +2,8 @@
 // level being refused is not this request's to learn, or was written by an
 // edit routectl declared: a replacement level a sibling request holds is
 // repaired and commits nothing; a level the pre-flight wrote from a learned
-// verdict is repaired in-request; and a replacement refused where the
+// verdict is repaired in-request, and once that level is learned the
+// pre-flight follows it; and a replacement refused where the
 // egress's injection and the repair both declared the effort is repaired
 // again. A non-ranked row's pre-flight value refused stays terminal.
 // An `include!`d FRAGMENT of `field_repair_chain_tests.rs`, inside its
@@ -112,11 +113,13 @@ fn refuse_xhigh_then_high_from_the_second_request(
 /// `xhigh` request goes out at `high`, which is refused listing `low,
 /// medium`, and is retried at `medium` and served. The step is keyed on the
 /// refused `high` and learns `medium`; the resident `xhigh` verdict stands,
-/// so the request after it is pre-flighted to `high` again and, `high`'s own
-/// verdict now acting, that refusal reaches the client.
+/// and the request after it is pre-flighted through both learned levels
+/// straight to `medium`, served once with no repair.
 ///
-/// Mutation check: drop `EditSite::Preflight` from `RANKED_EFFORT_SITES` ->
-/// red (the refusal reaches the client).
+/// Mutation checks: drop `EditSite::Preflight` from `RANKED_EFFORT_SITES` ->
+/// red (the second request's refusal reaches the client); take only the
+/// first hop in `follow_effort_chain` -> red (the third request goes out at
+/// `high` and is refused).
 #[tokio::test]
 async fn a_preflight_written_level_refused_with_a_list_is_repaired_in_request() {
     let seat = ChainSeat::new(
@@ -168,20 +171,30 @@ async fn a_preflight_written_level_refused_with_a_list_is_repaired_in_request() 
     );
     assert_eq!(succeeded(&dispatched.meta), vec![(HIGH_PATH, true, true)]);
     acknowledge(&router, &dispatched);
+    let before_third = seat.calls();
     let third = router
         .complete_with_options(adaptive(), RouterOptions::new())
         .await;
+    assert!(third.result.is_ok(), "{:?}", third.result.as_ref().err());
+    let third_sent: Vec<_> = seat.bodies()[before_third..]
+        .iter()
+        .map(|b| sent_effort(b).map(str::to_string))
+        .collect();
     assert_eq!(
-        sent_effort(seat.bodies().last().expect("a body")),
-        Some("high"),
-        "the xhigh verdict still acts: clearing it is not this repair's",
+        third_sent,
+        [Some("medium".to_string())],
+        "one attempt, pre-flighted through both learned levels",
     );
-    // The pre-flight applies one verdict and does not read the one it
-    // wrote, and the first ranked step whose verdict acts keeps a refusal
-    // terminal, so once `high` is learned the next `xhigh` request is
-    // refused until the `xhigh` verdict decays.
-    assert!(third.result.is_err());
+    let acted: Vec<_> = third
+        .meta
+        .field_preflight
+        .iter()
+        .filter(|record| record.acted)
+        .map(|record| record.field_path)
+        .collect();
+    assert_eq!(acted, [Some(XHIGH_PATH), Some(HIGH_PATH)]);
     assert!(third.meta.field_repairs.is_empty());
+    assert!(verdicts(&third.meta).is_empty(), "nothing new is learned");
 }
 
 /// Refuse disabled thinking, then a `max_tokens` above the model limit, then

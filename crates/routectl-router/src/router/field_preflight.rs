@@ -95,8 +95,8 @@ use crate::field_verdict_value::VerdictValue;
 use super::class_observe::DispatchSurface;
 use super::edit_declare::{declare_field_edit, fidelity_dialect};
 use super::field_repair::{
-    FieldRepairRow, FieldSurface, FieldTransform, TransformClass, field_repair_admits_kind,
-    present_rows,
+    FieldRepairRow, FieldRepairTable, FieldSurface, FieldTransform, TransformClass,
+    field_repair_admits_kind, is_ranked, present_rows,
 };
 use super::rejection_parser::{NamedRejection, RejectionKind};
 use super::repair_budget::RepairBudget;
@@ -500,20 +500,16 @@ impl Router {
             // stays due, which is what stops a consistently-later row from
             // being starved of re-verification.
             let can_claim_canary = plan.canary.is_none();
-            let decided = self.plan_one_row(&mut planned, target, row, surface, can_claim_canary);
-            records.push(decided.record);
-            if let Some(canary) = decided.canary {
-                debug_assert!(
-                    plan.canary.is_none(),
-                    "a row may only claim the canary slot while it is free",
-                );
-                plan.canary = Some(canary);
+            let sent = ranked_level_bit(&row);
+            let decided =
+                self.plan_one_row(&mut planned, target, row, surface, can_claim_canary, sent);
+            let chains = decided.record.acted && is_ranked(&row);
+            plan.absorb(&mut records, decided);
+            if chains {
+                for hop in self.follow_effort_chain(&mut planned, target, table, surface, sent) {
+                    plan.absorb(&mut records, hop);
+                }
             }
-            // Every acting row's accounting is RETAINED, not just the first:
-            // each entry belongs to a different identity, and a dropped one
-            // would report zero requests in flight for an identity this
-            // request is in fact modifying.
-            plan.accounting.extend(decided.accounting);
         }
         (planned, records, plan)
     }
@@ -537,6 +533,7 @@ impl Router {
         row: FieldRepairRow,
         surface: DispatchSurface,
         can_claim_canary: bool,
+        sent: u8,
     ) -> RowDecision<'a> {
         let refuse = |reason| RowDecision {
             record: unchanged_record(target, Some(row.path), Some(row.class), reason),
@@ -566,7 +563,7 @@ impl Router {
         // Before the canary claim: a row this planner cannot apply has no
         // pre-flight action for a canary to withhold, so restoring it would
         // re-verify nothing.
-        let edit = match self.preflight_edit(planned, row, &key, authorization) {
+        let edit = match self.preflight_edit(planned, row, &key, authorization, sent) {
             Ok(edit) => edit,
             Err(reason) => return refuse(reason),
         };
@@ -617,13 +614,15 @@ impl Router {
     ///
     /// A rewrite or a ceiling needs the value recorded for the SAME incarnation
     /// the authorization rests on: a value from any other lifecycle never
-    /// applies. A ceiling only lowers a limit above it, never raises one.
+    /// applies. A ceiling only lowers a limit above it, never raises one. A
+    /// ranked row never writes a level in `sent`, the levels already emitted.
     fn preflight_edit(
         &self,
         planned: &ChatRequest,
         row: FieldRepairRow,
         key: &FieldVerdictKey,
         authorization: PreflightAuthorization,
+        sent: u8,
     ) -> Result<PreflightEdit, &'static str> {
         match row.transform {
             FieldTransform::Drop => Ok(PreflightEdit::Drop),
@@ -646,7 +645,7 @@ impl Router {
                 else {
                     return Err(FIELD_PREFLIGHT_NO_STORED_VALUE);
                 };
-                if row.surface.carries(planned, value) {
+                if row.surface.carries(planned, value) || emitted_before(&row, value, sent) {
                     return Err(FIELD_PREFLIGHT_VALUE_ALREADY_SENT);
                 }
                 Ok(PreflightEdit::Rewrite(value))
@@ -700,14 +699,10 @@ impl Router {
         *planned = adopted;
         // A clamped fill stays the egress's own declared default (see the
         // reactive repair's declaration).
-        if !fill_clamped {
-            declare_field_edit(
-                planned,
-                fidelity_dialect(target, planned),
-                EditSite::Preflight,
-                row.surface,
-                edit.declared_kind(),
-            );
+        let wire = fidelity_dialect(target, planned);
+        let kind = edit.declared_kind();
+        if !fill_clamped && !preflight_already_declared(planned, wire, row.surface, kind) {
+            declare_field_edit(planned, wire, EditSite::Preflight, row.surface, kind);
         }
         // Counted HERE, at the one site that swaps the rewritten body in, so the
         // count cannot outrun what actually went upstream: a decision refused by
@@ -1132,6 +1127,7 @@ fn unchanged_record(
 // below lives in a sibling file to keep this one under the size ceiling. It
 // compiles into THIS module via `include!`, so no call site's path changes.
 include!("field_preflight_provenance.rs");
+include!("field_preflight_effort_chain.rs");
 
 /// Apply `surface` to a SCRATCH clone of `original_req` and adopt it only on a
 /// reported success whose post-condition holds.

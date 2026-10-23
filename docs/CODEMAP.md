@@ -2949,7 +2949,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/field_repair_chain_effort_tests.rs`, an `include!`d fragment of
   `field_repair_chain_tests.rs`, and in
   `src/router/field_repair_chain_effort_claim_tests.rs` (a replacement level a
-  sibling claims, a refused pre-flight level, a refusal matching both the
+  sibling claims, a refused pre-flight level and the chained pre-flight after it, a refusal matching both the
   effort injection and the repair), another fragment of it; openai-responses admits only the ranked rows
   (`RowScope::RankedOnly`), its router rows (codex `minimal` -> `low` on both
   auth lanes, the pre-content stream 400, the inert status-0 text) in
@@ -3128,7 +3128,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   case two ways. `authorization_record` and `RenderedAuthorization` live in
   `src/router/field_preflight_provenance.rs`, an `include!`d fragment kept
   under this file's size ceiling; the types and imports they render stay
-  in `field_preflight.rs`. The record is populated from the EXACT `PreflightAuthorization`
+  in `field_preflight.rs`. The effort chain lives in
+  `src/router/field_preflight_effort_chain.rs`, also an `include!`d fragment:
+  after a ranked effort row rewrites the level, `follow_effort_chain` decides
+  the row of the level now emitted through the same `plan_one_row`, and keeps
+  going while each hop acts, never writing a level the request already
+  emitted (a `value_already_sent` refusal) and taking at most one hop per
+  rank member. Each adopted hop is its own record, accounting guard and
+  `rc_field_preflight_actions_total` count; the effort pointer is declared
+  once (`preflight_already_declared`). The record is populated from the EXACT `PreflightAuthorization`
   that permitted the action and never re-read: the identity's state can move
   between the gates clearing and the line being emitted, so a re-read would report
   a provenance the rewrite was never authorized under. Present on an acting
@@ -3812,7 +3820,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_preflight_effort_tests.rs` -- `include!`d fragment of
   `field_preflight_tests.rs`: a resident effort verdict rewriting the egress
   effort to its stored level, thinking byte-identical and nothing created on
-  an effort-only request, and the effort surface's wire pointers
+  an effort-only request, the effort surface's wire pointers, and the chain
+  through learned levels (two hops, a lapsed hop, two verdicts naming each
+  other, one declaration at the effort pointer)
 - `src/router/field_repair_parser_tests.rs` -- `include!`d fragment of
   `field_repair_tests.rs`: the parser-unlocalized counter and its class gate
 - `src/probe_scheduler/queue_status_tests.rs` -- `include!`d fragment of
