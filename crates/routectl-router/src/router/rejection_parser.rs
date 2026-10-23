@@ -137,6 +137,24 @@ const BETA_LIST_SEPARATOR: &str = ", ";
 /// The only status a beta rejection arrives on.
 const BETA_REJECTION_STATUS: u16 = 400;
 
+/// The field an effort level travels in on the Messages body.
+const EFFORT_PATH: &str = "output_config.effort";
+
+/// The effort-level refusal, exactly as captured on anthropic-api and on
+/// Bedrock Invoke and Converse: `<lead-in>'<refused>'<middle><levels><close>`,
+/// the levels a bare list. The message names no path; only this exact text
+/// localizes.
+const EFFORT_LEVEL_LEAD_IN: &str = "This model does not support effort level '";
+const EFFORT_LEVEL_MIDDLE: &str = "'. Supported levels: ";
+const EFFORT_LEVEL_CLOSE: &str = ".";
+
+/// The serde enum rejection Bedrock returns for an unknown effort variant:
+/// `<lead-in><refused>`<middle><variants>`, each variant backtick-quoted.
+/// Generic enum text: it names no field, so the effort path it implies is
+/// only inferred, and only a list naming an effort level implies it.
+const UNKNOWN_VARIANT_LEAD_IN: &str = "unknown variant ";
+const UNKNOWN_VARIANT_MIDDLE: &str = ", expected one of ";
+
 /// The location-prefix reason that refuses the field itself; every other
 /// reason refuses the value.
 const LOCATION_UNSUPPORTED_FIELD_REASON: &str = "Extra inputs are not permitted";
@@ -363,10 +381,6 @@ pub(super) enum ListMembers {
     /// Each member delimited by `'`, `"` or a backtick.
     Quoted,
     /// Each member a bare run of name bytes (`high, low, medium.`).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the effort level list templates")
-    )]
     Bare,
 }
 
@@ -392,26 +406,26 @@ fn quoted_list(text: &str) -> Vec<&str> {
 /// (unterminated, or carrying a `\`) invalidates the whole list: it names
 /// nothing.
 pub(super) fn list_members(text: &str, members: ListMembers) -> Vec<&str> {
+    list_and_rest(text, members).map_or_else(Vec::new, |(tokens, _)| tokens)
+}
+
+/// The members [`list_members`] reads and the text after the last one, or
+/// `None` when the list names nothing.
+fn list_and_rest(text: &str, members: ListMembers) -> Option<(Vec<&str>, &str)> {
     let mut tokens = Vec::new();
     let mut rest = text;
     loop {
-        let Some((token, after)) = members.leading(rest) else {
-            // A separator promised another member that never came (a
-            // truncated `'a' or `), or a member was not cleanly spelled: the
-            // list is not a list this parser can trust, so it names nothing.
-            return if tokens.is_empty() {
-                tokens
-            } else {
-                Vec::new()
-            };
-        };
+        // No member here: `text` starts with none, a separator promised
+        // another member that never came (a truncated `'a' or `), or a
+        // member was not cleanly spelled. Either way the list names nothing.
+        let (token, after) = members.leading(rest)?;
         tokens.push(token);
         match LIST_SEPARATORS
             .iter()
             .find_map(|separator| after.strip_prefix(separator))
         {
             Some(next) => rest = next,
-            None => return tokens,
+            None => return Some((tokens, after)),
         }
     }
 }
@@ -442,10 +456,6 @@ fn leading_bare(text: &str) -> Option<(&str, &str)> {
 /// when `tokens` names member `i` of [`VALID_EFFORT_TOKENS`]. Tokens outside
 /// the rank (`none`, a serde catch-all variant, an unknown level) set
 /// nothing, so a list of only such tokens is `0`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the effort level list templates")
-)]
 pub(super) fn levels_mask(tokens: &[&str]) -> u8 {
     tokens
         .iter()
@@ -489,6 +499,20 @@ struct LocalizedPath<'a> {
     replacements: Vec<&'a str>,
     /// The token limit the envelope's template names.
     ceiling: Option<u32>,
+    /// The refused value the envelope's template echoes, a nonempty run of
+    /// name bytes.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the ranked effort resolution")
+    )]
+    echoed: Option<&'a str>,
+    /// The effort levels among `replacements`, as a [`levels_mask`]; `0`
+    /// unless the path is the effort field.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the ranked effort resolution")
+    )]
+    levels: u8,
 }
 
 /// One arm's reading of an envelope: the raw path and what it says about it.
@@ -502,6 +526,7 @@ struct Attribution<'a> {
     presupposes_presence: bool,
     replacements: Vec<&'a str>,
     ceiling: Option<u32>,
+    echoed: Option<&'a str>,
 }
 
 fn localize<'a>(
@@ -520,15 +545,23 @@ fn localize<'a>(
         }
         Dialect::OpenAi => localize_openai(parsed),
     }?;
+    let segments = canonical_segments(dialect, attribution.path)?;
+    let levels = if segments.iter().copied().eq(EFFORT_PATH.split('.')) {
+        levels_mask(&attribution.replacements)
+    } else {
+        0
+    };
     Some(LocalizedPath {
         raw: attribution.path,
-        segments: canonical_segments(dialect, attribution.path)?,
+        segments,
         ends_in_index: ends_in_index(attribution.path),
         tier: attribution.tier,
         kind: attribution.kind,
         presupposes_presence: attribution.presupposes_presence,
         replacements: attribution.replacements,
         ceiling: attribution.ceiling,
+        echoed: attribution.echoed,
+        levels,
     })
 }
 
@@ -548,6 +581,7 @@ fn bedrock_message(parsed: &ParsedErrorBody) -> Option<&str> {
 fn localize_bedrock(message: &str) -> Option<Attribution<'_>> {
     unsupported_temperature(message)
         .or_else(|| output_ceiling(message))
+        .or_else(|| unknown_effort_variant(message))
         .or_else(|| localize_message(message))
 }
 
@@ -560,6 +594,7 @@ fn unsupported_temperature(message: &str) -> Option<Attribution<'static>> {
         presupposes_presence: true,
         replacements: Vec::new(),
         ceiling: None,
+        echoed: None,
     })
 }
 
@@ -579,6 +614,7 @@ fn output_ceiling(message: &str) -> Option<Attribution<'static>> {
         presupposes_presence: true,
         replacements: Vec::new(),
         ceiling: Some(ceiling),
+        echoed: None,
     })
 }
 
@@ -599,6 +635,7 @@ fn messages_output_ceiling(message: &str) -> Option<Attribution<'static>> {
         presupposes_presence: true,
         replacements: Vec::new(),
         ceiling: Some(ceiling),
+        echoed: None,
     })
 }
 
@@ -606,7 +643,45 @@ fn localize_message(message: &str) -> Option<Attribution<'_>> {
     quoted_not_supported(message)
         .or_else(|| thinking_off_switch(message))
         .or_else(|| messages_output_ceiling(message))
+        .or_else(|| unsupported_effort_level(message))
         .or_else(|| location_prefix(message))
+}
+
+/// `This model does not support effort level '<x>'. Supported levels: a, b,
+/// c.`, verbatim: the levels a nonempty bare list ended by the closing period
+/// and nothing after it.
+fn unsupported_effort_level(message: &str) -> Option<Attribution<'_>> {
+    let rest = message.strip_prefix(EFFORT_LEVEL_LEAD_IN)?;
+    let (echoed, rest) = rest.split_once(EFFORT_LEVEL_MIDDLE)?;
+    let (levels, close) = list_and_rest(rest, ListMembers::Bare)?;
+    (is_name(echoed) && close == EFFORT_LEVEL_CLOSE).then_some(Attribution {
+        path: EFFORT_PATH,
+        tier: SignalTier::SelfIdentifying,
+        kind: RejectionKind::InvalidValue,
+        presupposes_presence: true,
+        replacements: levels,
+        ceiling: None,
+        echoed: Some(echoed),
+    })
+}
+
+/// ``unknown variant `<x>`, expected one of `a`, `b` ...``. The text after the
+/// variant list (a parser position) is never read. A list naming no effort
+/// level is another enum's, so it localizes nothing.
+fn unknown_effort_variant(message: &str) -> Option<Attribution<'_>> {
+    let rest = message.strip_prefix(UNKNOWN_VARIANT_LEAD_IN)?;
+    let (echoed, rest) = rest.strip_prefix('`')?.split_once('`')?;
+    let rest = rest.strip_prefix(UNKNOWN_VARIANT_MIDDLE)?;
+    let variants = list_members(rest, ListMembers::Quoted);
+    (is_name(echoed) && levels_mask(&variants) != 0).then_some(Attribution {
+        path: EFFORT_PATH,
+        tier: SignalTier::Inferred,
+        kind: RejectionKind::InvalidValue,
+        presupposes_presence: false,
+        replacements: variants,
+        ceiling: None,
+        echoed: Some(echoed),
+    })
 }
 
 /// `"a.b" is not supported for this model. Use "x.y" ...`
@@ -628,6 +703,7 @@ fn quoted_not_supported(message: &str) -> Option<Attribution<'_>> {
         presupposes_presence: replacement.is_some(),
         replacements: replacement.flatten().into_iter().collect(),
         ceiling: None,
+        echoed: None,
     })
 }
 
@@ -647,6 +723,7 @@ fn thinking_off_switch(message: &str) -> Option<Attribution<'static>> {
         presupposes_presence: true,
         replacements: vec![thinking_type(accepted)?.path],
         ceiling: None,
+        echoed: None,
     })
 }
 
@@ -676,6 +753,7 @@ fn location_prefix(message: &str) -> Option<Attribution<'_>> {
         presupposes_presence: grounded,
         replacements: listed.map(quoted_list).unwrap_or_default(),
         ceiling: None,
+        echoed: None,
     })
 }
 
@@ -706,6 +784,7 @@ fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
         presupposes_presence: unsupported,
         replacements: Vec::new(),
         ceiling: None,
+        echoed: None,
     })
 }
 
@@ -826,6 +905,10 @@ fn strip_bracket_indices(segment: &str) -> Option<&str> {
         name = head;
     }
     Some(name)
+}
+
+fn is_name(token: &str) -> bool {
+    !token.is_empty() && token.bytes().all(is_name_byte)
 }
 
 fn is_index(segment: &str) -> bool {

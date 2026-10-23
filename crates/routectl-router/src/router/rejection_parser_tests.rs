@@ -191,18 +191,19 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "anthropic-api/effort-invalid-value-opus-4-8",
             unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
-        // Effort refusals in prose that name no wire path.
+        // A refusal of the effort parameter itself names neither a level
+        // nor a path.
         (
             "anthropic-api/effort-parameter-unsupported-haiku-4-5",
             Outcome::NotLocalized,
         ),
         (
             "anthropic-api/effort-xhigh-unsupported-opus-4-5",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
         // Effort sent with thinking disabled: the thinking refusal wins and
         // the effort level is never named.
@@ -251,23 +252,23 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "bedrock/effort-invalid-value-invoke-opus-4-5-beta",
             unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
-        // The serde unknown-variant message names a variant, not a path.
+        // The serde unknown-variant message names a variant, not a path:
+        // only the effort levels in its list imply the field.
         (
             "bedrock/effort-unknown-variant-converse-opus-4-8",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, Inferred, InvalidValue),
         ),
         (
             "bedrock/effort-unknown-variant-invoke-opus-4-8",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, Inferred, InvalidValue),
         ),
-        // Prose effort refusals, bare or Converse-wrapped, name no wire path.
         (
             "bedrock/effort-xhigh-unsupported-converse-sonnet-4-6",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "bedrock/effort-xhigh-unsupported-invoke-sonnet-4-6",
-            Outcome::NotLocalized,
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "bedrock/max-tokens-above-model-limit",
@@ -1847,11 +1848,11 @@ mod level_list {
     const EFFORT_CAPTURE: &str = include_str!("../../tests/fixtures/effort_capture.json");
 
     const MINIMAL: u8 = 1 << 0;
-    const LOW: u8 = 1 << 1;
-    const MEDIUM: u8 = 1 << 2;
-    const HIGH: u8 = 1 << 3;
-    const XHIGH: u8 = 1 << 4;
-    const MAX: u8 = 1 << 5;
+    pub(super) const LOW: u8 = 1 << 1;
+    pub(super) const MEDIUM: u8 = 1 << 2;
+    pub(super) const HIGH: u8 = 1 << 3;
+    pub(super) const XHIGH: u8 = 1 << 4;
+    pub(super) const MAX: u8 = 1 << 5;
 
     /// The captured upstream message of `case` in the effort capture record.
     fn captured_message(case: &str) -> String {
@@ -1981,6 +1982,286 @@ mod level_list {
         ];
         for (text, members) in rows {
             assert!(list_members(text, members).is_empty(), "{text:?}");
+        }
+    }
+}
+
+mod effort_templates {
+    //! The effort refusal templates: which committed effort capture localizes
+    //! the effort field, at what tier, with what echoed level and level mask,
+    //! and which wording near them localizes nothing.
+
+    use std::collections::BTreeMap;
+
+    use routectl_core::UpstreamBody;
+    use routectl_core::capability::SignalTier;
+
+    use super::level_list::{HIGH, LOW, MAX, MEDIUM, XHIGH};
+    use super::{
+        ANTHROPIC, BEDROCK, CONVERSE_WRAPPER, EFFORT_PATH, Inferred, InvalidValue, Outcome,
+        RejectionKind, SelfIdentifying, THINKING_DISABLED_PATH, UnsupportedField, anthropic_body,
+        bedrock_body, fixture, localize, outcome, rejections_dir,
+    };
+
+    /// The sonnet-4-6 `Supported levels` refusal, as captured.
+    const SUPPORTED_LEVELS: &str = "This model does not support effort level 'xhigh'. Supported levels: high, low, max, medium.";
+    /// The Invoke serde unknown-variant refusal, as captured.
+    const UNKNOWN_VARIANT: &str = "unknown variant `bogus`, expected one of `low`, `medium`, \
+         `high`, `xhigh`, `max`, `Unhandled` at line 1 column 94";
+
+    /// What `localize` reads from one effort capture: the canonical path,
+    /// tier, kind, echoed level and level mask.
+    type Reading = (String, SignalTier, RejectionKind, Option<String>, u8);
+
+    fn reading(kind: &str, status: u16, body: &str) -> Option<Reading> {
+        let body = UpstreamBody::new(body);
+        let localized = localize(kind, status, body.parsed()?)?;
+        Some((
+            localized.segments.join("."),
+            localized.tier,
+            localized.kind,
+            localized.echoed.map(str::to_owned),
+            localized.levels,
+        ))
+    }
+
+    fn effort(
+        tier: SignalTier,
+        kind: RejectionKind,
+        echoed: Option<&str>,
+        levels: u8,
+    ) -> Option<Reading> {
+        Some((
+            EFFORT_PATH.to_string(),
+            tier,
+            kind,
+            echoed.map(str::to_owned),
+            levels,
+        ))
+    }
+
+    /// Every committed `effort-*` capture under anthropic-api and bedrock,
+    /// keyed `<kind>/<case>`, read on the lane its directory names.
+    fn effort_corpus_readings() -> BTreeMap<String, Option<Reading>> {
+        let mut readings = BTreeMap::new();
+        for kind in [ANTHROPIC, BEDROCK] {
+            for file in std::fs::read_dir(rejections_dir().join(kind)).expect("kind dir") {
+                let path = file.expect("file entry").path();
+                let case = path.file_stem().unwrap().to_str().unwrap().to_string();
+                if !case.starts_with("effort-") {
+                    continue;
+                }
+                let (status, body) = fixture(kind, &case);
+                readings.insert(format!("{kind}/{case}"), reading(kind, status, &body));
+            }
+        }
+        readings
+    }
+
+    #[test]
+    fn every_effort_capture_reads_to_its_tier_echo_and_level_mask() {
+        let five = LOW | MEDIUM | HIGH | XHIGH | MAX;
+        let expected: BTreeMap<String, Option<Reading>> = [
+            // The accepted set is only inside `metadata.raw`.
+            ("anthropic-api/effort-invalid-value-openrouter", None),
+            (
+                "anthropic-api/effort-invalid-value-opus-4-8",
+                effort(SelfIdentifying, InvalidValue, None, five),
+            ),
+            ("anthropic-api/effort-parameter-unsupported-haiku-4-5", None),
+            (
+                "anthropic-api/effort-xhigh-thinking-disabled-opus-5-5",
+                Some((
+                    THINKING_DISABLED_PATH.to_string(),
+                    SelfIdentifying,
+                    UnsupportedField,
+                    None,
+                    0,
+                )),
+            ),
+            (
+                "anthropic-api/effort-xhigh-unsupported-opus-4-5",
+                effort(
+                    SelfIdentifying,
+                    InvalidValue,
+                    Some("xhigh"),
+                    LOW | MEDIUM | HIGH,
+                ),
+            ),
+            (
+                "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
+                effort(
+                    SelfIdentifying,
+                    InvalidValue,
+                    Some("xhigh"),
+                    LOW | MEDIUM | HIGH | MAX,
+                ),
+            ),
+            // Refuses the field itself and lists nothing.
+            (
+                "bedrock/effort-extra-input-invoke-opus-4-5",
+                effort(SelfIdentifying, UnsupportedField, None, 0),
+            ),
+            (
+                "bedrock/effort-invalid-value-invoke-opus-4-5-beta",
+                effort(SelfIdentifying, InvalidValue, None, LOW | MEDIUM | HIGH),
+            ),
+            // The catch-all `Unhandled` variant sets no bit.
+            (
+                "bedrock/effort-unknown-variant-converse-opus-4-8",
+                effort(Inferred, InvalidValue, Some("bogus"), five),
+            ),
+            (
+                "bedrock/effort-unknown-variant-invoke-opus-4-8",
+                effort(Inferred, InvalidValue, Some("bogus"), five),
+            ),
+            (
+                "bedrock/effort-xhigh-unsupported-converse-sonnet-4-6",
+                effort(
+                    SelfIdentifying,
+                    InvalidValue,
+                    Some("xhigh"),
+                    LOW | MEDIUM | HIGH | MAX,
+                ),
+            ),
+            (
+                "bedrock/effort-xhigh-unsupported-invoke-sonnet-4-6",
+                effort(
+                    SelfIdentifying,
+                    InvalidValue,
+                    Some("xhigh"),
+                    LOW | MEDIUM | HIGH | MAX,
+                ),
+            ),
+        ]
+        .into_iter()
+        .map(|(case, reading)| (case.to_string(), reading))
+        .collect();
+
+        assert_eq!(effort_corpus_readings(), expected);
+    }
+
+    /// The `Supported levels` template on every lane that sends it: bare on
+    /// anthropic-api and Bedrock Invoke, wrapped on Converse.
+    fn on_each_lane(message: &str) -> [(String, &'static str, String); 3] {
+        [
+            (
+                "anthropic-api".to_string(),
+                ANTHROPIC,
+                anthropic_body(message),
+            ),
+            ("bedrock invoke".to_string(), BEDROCK, bedrock_body(message)),
+            (
+                "bedrock converse".to_string(),
+                BEDROCK,
+                bedrock_body(&format!("{CONVERSE_WRAPPER}{message}")),
+            ),
+        ]
+    }
+
+    fn swap(from: &str, to: &str) -> String {
+        assert!(
+            SUPPORTED_LEVELS.contains(from),
+            "premise: {from:?} is in the template"
+        );
+        SUPPORTED_LEVELS.replace(from, to)
+    }
+
+    #[test]
+    fn supported_levels_near_misses_localize_nothing() {
+        for (lane, kind, body) in on_each_lane(SUPPORTED_LEVELS) {
+            assert_eq!(
+                outcome(kind, 400, &body),
+                super::unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+                "premise: the same harness localizes the exact template on {lane}",
+            );
+        }
+        let near_misses = [
+            (
+                "one changed word in the lead-in",
+                swap("does not support", "does not allow"),
+            ),
+            ("missing closing period", swap("medium.", "medium")),
+            (
+                "trailing prose",
+                format!("{SUPPORTED_LEVELS} See the docs."),
+            ),
+            (
+                "separator with no member after it",
+                swap("max, medium.", "max, ."),
+            ),
+            ("echoed level is not a name", swap("'xhigh'", "'x high'")),
+            ("empty level list", swap("high, low, max, medium.", ".")),
+            (
+                "the bare effort-parameter refusal",
+                "This model does not support the effort parameter.".to_string(),
+            ),
+        ];
+
+        for (name, message) in near_misses {
+            for (lane, kind, body) in on_each_lane(&message) {
+                assert_eq!(
+                    outcome(kind, 400, &body),
+                    Outcome::NotLocalized,
+                    "{name} on {lane}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_openrouter_metadata_list_localizes_nothing() {
+        let (status, body) = fixture(ANTHROPIC, "effort-invalid-value-openrouter");
+        assert!(
+            body.contains("\\\"values\\\"") && body.contains("output_config"),
+            "premise: the capture carries the accepted list and the path in metadata.raw",
+        );
+
+        assert_eq!(outcome(ANTHROPIC, status, &body), Outcome::NotLocalized);
+    }
+
+    #[test]
+    fn unknown_variant_near_misses_localize_nothing() {
+        assert_eq!(
+            outcome(BEDROCK, 400, &bedrock_body(UNKNOWN_VARIANT)),
+            super::unresolved(EFFORT_PATH, Inferred, InvalidValue),
+            "premise: the same harness localizes the exact template",
+        );
+        let swap = |from: &str, to: &str| {
+            assert!(
+                UNKNOWN_VARIANT.contains(from),
+                "premise: {from:?} is in the template"
+            );
+            UNKNOWN_VARIANT.replace(from, to)
+        };
+        let cases = [
+            (
+                "another enum's variant list",
+                BEDROCK,
+                bedrock_body(&swap(
+                    "`low`, `medium`, `high`, `xhigh`, `max`, `Unhandled`",
+                    "`adaptive`, `enabled`, `disabled`",
+                )),
+            ),
+            (
+                "unquoted echoed variant",
+                BEDROCK,
+                bedrock_body(&swap("`bogus`", "bogus")),
+            ),
+            (
+                "one changed word in the lead-in",
+                BEDROCK,
+                bedrock_body(&swap("unknown", "unexpected")),
+            ),
+            (
+                "same message on anthropic-api",
+                ANTHROPIC,
+                anthropic_body(UNKNOWN_VARIANT),
+            ),
+        ];
+
+        for (name, kind, body) in cases {
+            assert_eq!(outcome(kind, 400, &body), Outcome::NotLocalized, "{name}");
         }
     }
 }
