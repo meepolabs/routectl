@@ -628,6 +628,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     routectl_cli::log_sink::init();
 
     let cli = Cli::parse();
+    if cli.config.is_none() {
+        routectl_cli::config_folder::refuse_stranded_config(
+            &resolve_config_path(None),
+            std::env::var_os("HOME").as_deref(),
+        )?;
+    }
 
     match cli.cmd {
         Cmd::Serve {
@@ -1175,15 +1181,7 @@ fn resolve_config_path(explicit: Option<&std::path::Path>) -> PathBuf {
     if let Some(p) = explicit {
         return p.to_path_buf();
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(dirs::config_dir)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config")
-        });
-    base.join("routectl").join("config.toml")
+    routectl_core::config_dir::config_dir_or_relative().join("config.toml")
 }
 
 #[cfg(test)]

@@ -117,7 +117,8 @@ an entry holding the plain family name makes `[pools.anthropic]`
 unnameable, and a later `routectl login anthropic` then has nowhere to
 put a second subscription seat.
 
-Save as `~/.config/routectl/config.toml`, then `routectl config check`
+Save as `~/.config/routectl/config.toml` (or `$XDG_CONFIG_HOME/routectl/config.toml`)
+on every OS, including macOS, then `routectl config check`
 and `routectl serve`. Credentials always arrive as references --
 `env://VAR`, `file:///abs/path` (owner-only, 0600), or
 `oauth://<provider>` (populated by `routectl login <provider>`);

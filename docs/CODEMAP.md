@@ -7837,6 +7837,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (neither restart-required nor high-consequence -- `[fidelity]` has no
   active runtime behavior yet) and `[pools]` as high-consequence
   beside `[providers]`
+- `src/config_folder.rs` -- the refusal for a config left only in the old
+  macOS folder: `legacy_config_dir(home)` (`$HOME/Library/Application
+  Support/routectl`, derived on every OS), pure `stranded_config(new_cfg,
+  legacy_dir)` (`try_exists`, so an uninspectable path is an error), the
+  `StrandedConfigError` / `LegacyInspectError` texts naming both paths, and
+  `refuse_stranded_config`, which `main.rs` `run()` calls once before
+  dispatch unless `--config` / `ROUTECTL_CONFIG` names the file
 - `src/lane_cell.rs` -- the one `(learned lane, capability)` cell builder for
   the read-only surfaces (the doctor capability matrix and the `/status/health`
   learned rows). `lane_metas(&Config, entries)` builds the
@@ -8157,17 +8164,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `PROVENANCE_NOTICE`; the title is sanitized to one line
 - `src/commands/catalog/` -- `routectl catalog`, split into a
   command-entry facade plus three concern modules; every original
-  `commands::catalog::{list,verify,set,disable,export,build_list_data,render_table,print_pickup_note,verify_at,set_at,PricingVerifications,load_verifications,merge_verifications_into,load_and_merge_verifications,CatalogWriteError}`
+  `commands::catalog::{list,verify,set,disable,export,build_list_data,render_table,print_pickup_note,verify_at,set_at,PricingVerifications,load_verifications,CatalogWriteError}`
   path is preserved via re-exports.
   - `mod.rs` -- command entry + module doc (subcommand overview +
     legacy-sidecar rationale) and the re-export facade; owns
     `today_verified_at` (the one shared UTC `verified_at` stamp every writer
-    reads) and `verifications_path` (legacy sidecar location).
+    reads).
   - `verifications.rs` -- legacy `pricing_verifications.json` READ side only
-    (`PricingVerifications`, `load_verifications`, `merge_verifications_into`,
-    `load_and_merge_verifications`), migration input consumed by the v1 -> v2
-    config migration (`config migrate` folds historical sidecar stamps into
-    `config.cache_pricing` before the migrator moves them into the catalog
+    (`PricingVerifications`, `load_verifications`), migration input consumed
+    by the v1 -> v2 config migration (`config migrate` reads the sidecar beside
+    the config file and folds historical stamps into the v1 rung's
+    `cache_pricing` before the migrator moves them into the catalog
     overlay; `server::load_effective_config` no longer migrates -- it
     preflight-rejects a too-old config); nothing writes the sidecar anymore.
   - `render.rs` -- `list` rendering: `overlay_summary_line` header (revision +
@@ -8702,6 +8709,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   test sandbox: cargo sets `XDG_CONFIG_HOME` to `<workspace>/target/test-xdg`,
   and the default usage-db path resolves under it, never under the real
   `$HOME/.config`
+- `tests/config_folder.rs` -- real-binary pins of the config folder: a
+  config only in the old macOS folder stops `config check`, `serve`,
+  `doctor` and `init` naming both paths (init creates nothing), `--config`
+  gets past the check, and an empty `XDG_CONFIG_HOME` reads
+  `$HOME/.config/routectl/config.toml`
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration
   tests
 - `tests/provider_add.rs` -- integration floor for `provider add`: drives the

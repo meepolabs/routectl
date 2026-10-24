@@ -43,7 +43,6 @@ tokio-stream.workspace = true
 futures.workspace = true
 chrono.workspace = true
 uuid = { workspace = true, features = ["v4"] }
-dirs = "6"
 subtle = "2"
 # Hidden interactive API-key prompt for `provider add` (reads from the TTY
 # without echoing). The one new dependency the secret-source breadth needs;

@@ -197,7 +197,8 @@ pub enum MigrationError {
 ///
 /// `cache_pricing` is the operator's `[cache_pricing]` table, ALREADY
 /// merged with any legacy `pricing_verifications.json` stamps by the caller
-/// (see `routectl-cli`'s `commands::catalog::load_and_merge_verifications`).
+/// (`routectl-cli`'s `config migrate`, which reads the sidecar beside the
+/// config file).
 fn plan_v1_overlay(
     cache_pricing: &BTreeMap<String, CachePricingOverride>,
     overlay_path: &Path,

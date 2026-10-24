@@ -44,3 +44,7 @@ pub fn config_dir_or_relative() -> PathBuf {
 #[cfg(test)]
 #[path = "config_dir_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_dir_census_tests.rs"]
+mod census_tests;
