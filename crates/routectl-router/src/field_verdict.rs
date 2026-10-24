@@ -1012,6 +1012,93 @@ impl FieldVerdictRegistry {
     fn release_slot(&self, key: &FieldVerdictKey) {
         self.in_flight.lock().remove(key);
     }
+
+    /// The field `key` names was proven ACCEPTED by a request whose own guard
+    /// on it, if any, settles elsewhere: drop any resident verdict, read as
+    /// `generation`, and return the cleared row for the ledger.
+    ///
+    /// Claims no single-flight slot and releases none, so a sibling holding
+    /// `key`'s slot keeps it: its later commit observes afresh, and its value
+    /// is recorded under the incarnation that commit mints, so the forget
+    /// here cannot strand it.
+    pub fn clear_accepted(
+        &self,
+        key: &FieldVerdictKey,
+        generation: u64,
+    ) -> Option<CapabilityClearedEvent> {
+        self.remove_accepted(key, generation)
+    }
+
+    /// The body of every clear: the guarded removal, then the canary and
+    /// value state of the identity, then the cleared row when an entry was
+    /// actually removed.
+    ///
+    /// A lease-refused, stale, or exhausted removal clears nothing and emits
+    /// nothing: all three are refusals, so none may produce an event.
+    fn remove_accepted(
+        &self,
+        key: &FieldVerdictKey,
+        generation: u64,
+    ) -> Option<CapabilityClearedEvent> {
+        let removed = self.learned.remove_keyed_in_generation(
+            generation,
+            key.registry_key(),
+            &key.capability_key,
+            &key.provider_kind,
+        );
+        let refusal = match removed {
+            crate::learned_capability::GenerationOutcome::Applied {
+                value: cleared,
+                incarnation,
+                generation: persistence_generation,
+            } => {
+                // The identity's verdict is gone: drop its canary/quorum state
+                // too, so a later re-learn starts a clean incarnation rather
+                // than inheriting a stale cadence, claim, or confirmation count.
+                self.canaries.reset(key);
+                self.values.forget(key);
+                if !cleared {
+                    return None;
+                }
+                tracing::info!(
+                    event = "field_verdict_clear",
+                    state_key = %routectl_core::sanitize_for_log(key.registry_key()),
+                    capability_key = %key.capability_key,
+                    "envelope-field verdict cleared by an accepted request",
+                );
+                return Some(CapabilityClearedEvent {
+                    persistence_generation,
+                    incarnation,
+                    state_key: key.registry_key().to_string(),
+                    capability_key: key.capability_key.clone(),
+                    provider_kind: key.provider_kind.clone(),
+                });
+            }
+            crate::learned_capability::GenerationOutcome::Stale => (
+                "field_verdict_clear_stale",
+                "field-verdict clear refused: its admission predates the live capability generation",
+            ),
+            crate::learned_capability::GenerationOutcome::Reserved => (
+                "field_verdict_clear_reserved",
+                "field-verdict clear refused: an operator purge holds this key's lease",
+            ),
+            crate::learned_capability::GenerationOutcome::Exhausted => (
+                "field_verdict_clear_exhausted",
+                "field-verdict clear refused: the incarnation sequence is exhausted",
+            ),
+            // Unreachable for this identity: the namespace refusal applies only
+            // to the generic entry points, never to this one's own key.
+            crate::learned_capability::GenerationOutcome::FieldNamespace => return None,
+        };
+        let (event, reason) = refusal;
+        tracing::debug!(
+            event,
+            state_key = %routectl_core::sanitize_for_log(key.registry_key()),
+            capability_key = %key.capability_key,
+            "{reason}"
+        );
+        None
+    }
 }
 
 /// The single-flight repair claim for one envelope-field identity.
@@ -1246,83 +1333,9 @@ impl FieldRepairGuard<'_> {
     /// catalog-independent key is admitted from any generation.
     pub fn clear(mut self) -> Option<CapabilityClearedEvent> {
         self.settled = true;
-        let removed = self.registry.learned.remove_keyed_in_generation(
-            self.generation,
-            self.key.registry_key(),
-            &self.key.capability_key,
-            &self.key.provider_kind,
-        );
-        // A lease-refused, stale, or exhausted removal clears nothing and
-        // emits nothing: all three are refusals, so none may produce an
-        // event.
-        let (cleared, persistence_generation, incarnation) = match removed {
-            crate::learned_capability::GenerationOutcome::Applied {
-                value,
-                incarnation,
-                generation,
-            } => (value, generation, incarnation),
-            crate::learned_capability::GenerationOutcome::Stale => {
-                self.registry.release_slot(&self.key);
-                tracing::debug!(
-                    event = "field_verdict_clear_stale",
-                    state_key = %routectl_core::sanitize_for_log(self.key.registry_key()),
-                    capability_key = %self.key.capability_key,
-                    "field-verdict clear refused: its admission predates the live \
-                     capability generation"
-                );
-                return None;
-            }
-            crate::learned_capability::GenerationOutcome::Reserved => {
-                self.registry.release_slot(&self.key);
-                tracing::debug!(
-                    event = "field_verdict_clear_reserved",
-                    state_key = %routectl_core::sanitize_for_log(self.key.registry_key()),
-                    capability_key = %self.key.capability_key,
-                    "field-verdict clear refused: an operator purge holds this \
-                     key's lease"
-                );
-                return None;
-            }
-            crate::learned_capability::GenerationOutcome::Exhausted => {
-                self.registry.release_slot(&self.key);
-                tracing::debug!(
-                    event = "field_verdict_clear_exhausted",
-                    state_key = %routectl_core::sanitize_for_log(self.key.registry_key()),
-                    capability_key = %self.key.capability_key,
-                    "field-verdict clear refused: the incarnation sequence is \
-                     exhausted"
-                );
-                return None;
-            }
-            // Unreachable for this identity: the namespace refusal applies only
-            // to the generic entry points, never to this one's own key.
-            crate::learned_capability::GenerationOutcome::FieldNamespace => {
-                self.registry.release_slot(&self.key);
-                return None;
-            }
-        };
+        let removed = self.registry.remove_accepted(&self.key, self.generation);
         self.registry.release_slot(&self.key);
-        // The identity's verdict is gone: drop its canary/quorum state too,
-        // so a later re-learn starts a clean incarnation rather than
-        // inheriting a stale cadence, claim, or confirmation count.
-        self.registry.canaries.reset(&self.key);
-        self.registry.values.forget(&self.key);
-        if !cleared {
-            return None;
-        }
-        tracing::info!(
-            event = "field_verdict_clear",
-            state_key = %routectl_core::sanitize_for_log(self.key.registry_key()),
-            capability_key = %self.key.capability_key,
-            "envelope-field verdict cleared by an accepted request",
-        );
-        Some(CapabilityClearedEvent {
-            persistence_generation,
-            incarnation,
-            state_key: self.key.registry_key().to_string(),
-            capability_key: self.key.capability_key.clone(),
-            provider_kind: self.key.provider_kind.clone(),
-        })
+        removed
     }
 
     /// Settle WITHOUT learning: the repair failed, or the request hit an error

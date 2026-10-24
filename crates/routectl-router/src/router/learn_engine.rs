@@ -671,6 +671,9 @@ impl<'a> AttemptLearning<'a> {
     /// cleared rows out on `meta`, so the ledger records them and a warm
     /// rebuild does not resurrect a negative this request disproved.
     ///
+    /// `req` is the client's request, which features key on; `sent` is the
+    /// body that succeeded, whose effort level the field settlement reads.
+    ///
     /// Returns the scope the attempt's response evidence is read against, or
     /// `None` when none may be read: on the count surface (a token count
     /// carries no response to read), and wherever
@@ -681,6 +684,7 @@ impl<'a> AttemptLearning<'a> {
         untranslated: &UntranslatedCapabilities,
         target: &DispatchTarget,
         req: &ChatRequest,
+        sent: &ChatRequest,
         dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
     ) -> Option<EvidenceScope> {
@@ -703,7 +707,7 @@ impl<'a> AttemptLearning<'a> {
             note_beta_repair_succeeded(meta, position);
         }
         self.settle_replay_success(req, meta);
-        self.settle_field_success(req, meta);
+        self.settle_field_success(req, sent, target, meta);
         if self.canary_enabled {
             self.settle_canary_success(req, meta);
         }

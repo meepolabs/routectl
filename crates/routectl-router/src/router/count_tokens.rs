@@ -514,6 +514,7 @@ impl Router {
                         &UntranslatedCapabilities::default(),
                         &target,
                         req,
+                        &attempt_req,
                         &mut learn_dedupe,
                         meta,
                     );

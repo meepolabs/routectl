@@ -238,8 +238,10 @@ fn lapse_effort_verdict(router: &Router, level: &str) {
 /// A pre-flight that rewrote the effort reads the row of the level it wrote
 /// and keeps going while that level's verdict acts: two acting verdicts take
 /// `xhigh` straight to `medium`; a lapsed second verdict stops the chain at
-/// `high`; two verdicts naming each other stop at the first written level,
-/// since a hop never writes a level the request already emitted.
+/// `high`; a store holding two verdicts naming each other (one persisted
+/// before an accepted level cleared its own verdict) terminates at the first
+/// written level without looping, since a hop never writes a level the
+/// request already emitted.
 ///
 /// Mutation checks: take only the first hop in `follow_effort_chain` -> red
 /// on `two hops`; make `emitted_before` answer false -> red

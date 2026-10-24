@@ -2955,7 +2955,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `field_repair_chain_tests.rs`, and in
   `src/router/field_repair_chain_effort_claim_tests.rs` (a replacement level a
   sibling claims, a refused pre-flight level and the chained pre-flight after it, a refusal matching both the
-  effort injection and the repair), another fragment of it, and in
+  effort injection and the repair, an accepted level clearing its own verdict across requests, after an unrepaired success and on a moved-on commit), another fragment of it, and in
   `src/router/field_repair_chain_effort_pick_tests.rs` (each step's record and
   WARN naming refused level, chosen level and direction; a higher pick's own
   action token and lane lossy count), a third; openai-responses admits only the ranked rows
@@ -3287,7 +3287,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `CountTokens` surface the plan is dropped (slots released, nothing
   committed or cleared) and the degradation reports `repair_succeeded`
   without `learned`. Field: a repaired success commits, an unrepaired one
-  clears (plus `settle_field_moved_on`). Canary: an unrepaired
+  clears (plus `settle_field_moved_on`); after either, and after a moved-on
+  effort commit, the effort level the accepted body carried clears its own
+  verdict (`clear_sent_effort` -> `Router::clear_accepted_effort` in
+  `field_repair_effort.rs` -> `FieldVerdictRegistry::clear_accepted`, the
+  slot-less form of `FieldRepairGuard::clear`). Canary: an unrepaired
   success disproves the verdict, one after its repaired retry re-confirms it
 - `src/router/learn_rejection.rs` -- child module of `learn_engine.rs`:
   `AttemptLearning::on_rejection`, the per-rejection entry point

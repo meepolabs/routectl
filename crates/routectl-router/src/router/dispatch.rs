@@ -717,6 +717,7 @@ impl Router {
                             &untranslated,
                             target,
                             &req,
+                            &attempt_req,
                             &mut learn_dedupe,
                             meta,
                         );
@@ -1512,7 +1513,14 @@ impl Router {
                         // evidence scope rides out on the meta and the caller
                         // settles it once the stream has ended naturally.
                         meta.stream_evidence = learning
-                            .on_success(&untranslated, target, &req, &mut learn_dedupe, meta)
+                            .on_success(
+                                &untranslated,
+                                target,
+                                &req,
+                                &attempt_req,
+                                &mut learn_dedupe,
+                                meta,
+                            )
                             .map(StreamEvidence::new);
                         // Stamp the client-visible label on every Ok chunk
                         // (including the terminal / usage-only chunk) before

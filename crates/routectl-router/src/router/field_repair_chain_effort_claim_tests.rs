@@ -5,7 +5,9 @@
 // verdict is repaired in-request, and once that level is learned the
 // pre-flight follows it; and a replacement refused where the
 // egress's injection and the repair both declared the effort is repaired
-// again. A non-ranked row's pre-flight value refused stays terminal.
+// again. A non-ranked row's pre-flight value refused stays terminal. A
+// level the upstream accepts clears that level's own verdict, so two
+// requests teaching opposite levels leave only the later verdict.
 // An `include!`d FRAGMENT of `field_repair_chain_tests.rs`, inside its
 // `repair_chain` module, sharing its seats, rejections, readers and the
 // effort helpers of `field_repair_chain_effort_tests.rs`.
@@ -334,4 +336,359 @@ async fn a_refused_replacement_of_an_injected_effort_is_repaired_again() {
             "{name}",
         );
     }
+}
+
+// -----------------------------------------------------------------------
+// An accepted level clears its own verdict
+// -----------------------------------------------------------------------
+
+/// The same template refusing `high`, listing only higher levels, so the
+/// repair picks the nearest higher one. Synthesized from the captured
+/// template.
+fn high_refused_listing_higher() -> Error {
+    anthropic_rejection(
+        "This model does not support effort level 'high'. Supported levels: max, xhigh.",
+    )
+}
+
+/// A flapping upstream: refuse `xhigh` with the captured list at position 0
+/// only, which is the first request, and `high` listing `max, xhigh` from
+/// position 2 on; else serve.
+fn refuse_xhigh_once_then_high_listing_higher(
+    body: &serde_json::Value,
+    position: usize,
+) -> Option<Error> {
+    match sent_effort(body) {
+        Some("xhigh") if position == 0 => Some(xhigh_refused()),
+        Some("high") if position >= 2 => Some(high_refused_listing_higher()),
+        _ => None,
+    }
+}
+
+/// The capability keys of every effort verdict resident on `router`.
+fn resident_effort_keys(router: &Router) -> Vec<String> {
+    let mut keys: Vec<_> = router
+        .learned_capability_snapshot()
+        .into_iter()
+        .map(|entry| entry.feature_key)
+        .filter(|feature| feature.contains("output_config.effort."))
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn cleared_keys(meta: &crate::router::DispatchMeta) -> Vec<String> {
+    meta.cleared_capabilities
+        .iter()
+        .map(|event| event.capability_key.clone())
+        .collect()
+}
+
+/// `xhigh` sent through the walk at `adaptive`; the request must succeed
+/// with exactly one attempt at `xhigh` and no repair.
+async fn assert_xhigh_goes_out_as_sent(router: &Router, seat: &ChainSeat) {
+    let before = seat.calls();
+    let third = router
+        .complete_with_options(
+            effort_req("xhigh", Some(json!({"type": "adaptive"}))),
+            RouterOptions::new(),
+        )
+        .await;
+    assert!(third.result.is_ok(), "{:?}", third.result.as_ref().err());
+    let sent: Vec<_> = seat.bodies()[before..]
+        .iter()
+        .map(|b| sent_effort(b).map(str::to_string))
+        .collect();
+    assert_eq!(sent, [Some("xhigh".to_string())], "one attempt, as sent");
+    assert!(third.meta.field_repairs.is_empty());
+    assert!(
+        third
+            .meta
+            .field_preflight
+            .iter()
+            .all(|record| !record.acted),
+        "no learned level is applied",
+    );
+}
+
+/// Two requests teach opposite levels on one lane and the store keeps only
+/// the later: A's `xhigh` is refused and learns `xhigh -> high`; B sends
+/// `high`, refused listing only `max, xhigh`, is retried at `xhigh` and
+/// served, which learns `high -> xhigh` and, since `xhigh` was just
+/// accepted, clears A's `xhigh` verdict in the same settlement. A third
+/// `xhigh` request then goes out at `xhigh`, once, and is served.
+///
+/// Mutation checks: drop the accepted-effort clear in
+/// `settle_field_success` -> red (the third request is pre-flighted to
+/// `high`, stops at the repeat, and the refusal reaches the client); key the
+/// clear on the client's level, which is the level B's step refused, -> red
+/// (`high` is cleared instead of `xhigh`).
+#[tokio::test]
+async fn a_level_accepted_in_a_later_request_clears_the_verdict_that_refused_it() {
+    let seat = ChainSeat::new(
+        Egress::Anthropic,
+        refuse_xhigh_once_then_high_listing_higher,
+    );
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let adaptive = || Some(json!({"type": "adaptive"}));
+    let taught = router
+        .complete_with_options(effort_req("xhigh", adaptive()), RouterOptions::new())
+        .await;
+    assert_eq!(
+        verdicts(&taught.meta),
+        vec![(key(XHIGH_PATH), Some(VerdictValue::Shape("high")))],
+        "premise: xhigh learns high",
+    );
+    acknowledge(&router, &taught);
+
+    let inverse = router
+        .complete_with_options(effort_req("high", adaptive()), RouterOptions::new())
+        .await;
+
+    assert!(
+        inverse.result.is_ok(),
+        "{:?}",
+        inverse.result.as_ref().err()
+    );
+    let sent: Vec<_> = seat.bodies()[2..]
+        .iter()
+        .map(|b| sent_effort(b).map(str::to_string))
+        .collect();
+    assert_eq!(
+        sent,
+        ["high", "xhigh"].map(|level| Some(level.to_string())),
+        "premise: high refused, xhigh served",
+    );
+    assert_eq!(
+        verdicts(&inverse.meta),
+        vec![(key(HIGH_PATH), Some(VerdictValue::Shape("xhigh")))],
+    );
+    assert_eq!(cleared_keys(&inverse.meta), [key(XHIGH_PATH)]);
+    assert_eq!(resident_effort_keys(&router), [key(HIGH_PATH)]);
+    acknowledge(&router, &inverse);
+
+    assert_xhigh_goes_out_as_sent(&router, &seat).await;
+}
+
+/// The inverse of a level the pre-flight wrote: with `xhigh -> high`
+/// resident, the next `xhigh` request goes out at `high`, which is refused
+/// listing only `max, xhigh`, and is retried at `xhigh` and served. The step
+/// learns `high -> xhigh` and the accepted `xhigh` clears the verdict that
+/// wrote `high`, so a third `xhigh` request goes out as sent.
+///
+/// Mutation check: drop the accepted-effort clear in `settle_field_success`
+/// -> red (both verdicts stay resident and the third request is refused).
+#[tokio::test]
+async fn a_preflight_written_level_repaired_back_to_the_original_clears_the_original_verdict() {
+    let seat = ChainSeat::new(
+        Egress::Anthropic,
+        refuse_xhigh_once_then_high_listing_higher,
+    );
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let adaptive = || effort_req("xhigh", Some(json!({"type": "adaptive"})));
+    let taught = router
+        .complete_with_options(adaptive(), RouterOptions::new())
+        .await;
+    acknowledge(&router, &taught);
+
+    let dispatched = router
+        .complete_with_options(adaptive(), RouterOptions::new())
+        .await;
+
+    assert!(
+        dispatched.result.is_ok(),
+        "{:?}",
+        dispatched.result.as_ref().err()
+    );
+    let sent: Vec<_> = seat.bodies()[2..]
+        .iter()
+        .map(|b| sent_effort(b).map(str::to_string))
+        .collect();
+    assert_eq!(
+        sent,
+        ["high", "xhigh"].map(|level| Some(level.to_string())),
+        "the pre-flight wrote high, the repair xhigh",
+    );
+    assert_eq!(
+        verdicts(&dispatched.meta),
+        vec![(key(HIGH_PATH), Some(VerdictValue::Shape("xhigh")))],
+    );
+    assert_eq!(cleared_keys(&dispatched.meta), [key(XHIGH_PATH)]);
+    assert_eq!(resident_effort_keys(&router), [key(HIGH_PATH)]);
+    acknowledge(&router, &dispatched);
+
+    assert_xhigh_goes_out_as_sent(&router, &seat).await;
+}
+
+/// Refuse `high` listing `low, medium` at position 0 only and every `xhigh`
+/// with the captured list; else serve.
+fn refuse_high_once_and_every_xhigh(body: &serde_json::Value, position: usize) -> Option<Error> {
+    match sent_effort(body) {
+        Some("high") if position == 0 => Some(high_refused()),
+        Some("xhigh") => Some(xhigh_refused()),
+        _ => None,
+    }
+}
+
+/// Refuse `high` listing `low, medium` at position 2 only, which is the
+/// second request, and every `xhigh` with the captured list; else serve.
+fn refuse_every_xhigh_and_high_once_later(
+    body: &serde_json::Value,
+    position: usize,
+) -> Option<Error> {
+    match sent_effort(body) {
+        Some("high") if position == 2 => Some(high_refused()),
+        Some("xhigh") => Some(xhigh_refused()),
+        _ => None,
+    }
+}
+
+/// An UNREPAIRED success at a level clears that level's verdict even when
+/// the verdict kept its row out of the request's admission: a `high ->
+/// medium` verdict, learned and not yet acknowledged, is resident and
+/// acting but cannot drive pre-flight, so the next request reaches the
+/// upstream at `high`; it is served, and the `high` verdict clears. One
+/// row per way `high` reaches the wire: sent by the client, and written by
+/// the pre-flight from an acknowledged `xhigh -> high` learned first, which
+/// stays.
+///
+/// Mutation check: drop the accepted-effort clear in `settle_field_success`
+/// -> red on both rows (nothing is cleared: the acting verdict admitted no
+/// candidate to clear through).
+#[tokio::test]
+async fn an_unrepaired_success_at_a_level_clears_that_levels_verdict() {
+    let adaptive = || Some(json!({"type": "adaptive"}));
+    /// `(name, seat, levels taught in order, client level, verdicts left)`.
+    type Row = (
+        &'static str,
+        Respond,
+        &'static [&'static str],
+        &'static str,
+        &'static [&'static str],
+    );
+    let rows: [Row; 2] = [
+        (
+            "client sent high",
+            refuse_high_once_and_every_xhigh,
+            &["high"],
+            "high",
+            &[],
+        ),
+        (
+            "pre-flight wrote high",
+            refuse_every_xhigh_and_high_once_later,
+            &["xhigh", "high"],
+            "xhigh",
+            &[XHIGH_PATH],
+        ),
+    ];
+
+    for (name, respond, teach, client, stays) in rows {
+        let seat = ChainSeat::new(Egress::Anthropic, respond);
+        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let mut learned = Vec::new();
+        for level in teach {
+            let taught = router
+                .complete_with_options(effort_req(level, adaptive()), RouterOptions::new())
+                .await;
+            if *level == "xhigh" {
+                acknowledge(&router, &taught);
+            }
+            learned.extend(verdicts(&taught.meta));
+        }
+        assert_eq!(
+            learned.last(),
+            Some(&(key(HIGH_PATH), Some(VerdictValue::Shape("medium")))),
+            "{name}: premise: high learns medium last, not acknowledged",
+        );
+        let before = seat.calls();
+
+        let served = router
+            .complete_with_options(effort_req(client, adaptive()), RouterOptions::new())
+            .await;
+
+        assert!(
+            served.result.is_ok(),
+            "{name}: {:?}",
+            served.result.as_ref().err()
+        );
+        assert_eq!(
+            seat.bodies()[before..]
+                .iter()
+                .map(|b| sent_effort(b).map(str::to_string))
+                .collect::<Vec<_>>(),
+            [Some("high".to_string())],
+            "{name}: one attempt at high",
+        );
+        assert!(served.meta.field_repairs.is_empty(), "{name}");
+        assert_eq!(cleared_keys(&served.meta), [key(HIGH_PATH)], "{name}");
+        let stays: Vec<_> = stays.iter().map(|path| key(path)).collect();
+        assert_eq!(resident_effort_keys(&router), stays, "{name}");
+    }
+}
+
+/// Refuse `high` listing `low, medium` at position 0 only, every `xhigh`
+/// with the captured list, and a `high` that carries a stop sequence for
+/// the stop sequence; else serve.
+fn high_once_xhigh_then_stop(body: &serde_json::Value, position: usize) -> Option<Error> {
+    match sent_effort(body) {
+        Some("high") if position == 0 => Some(high_refused()),
+        Some("xhigh") => Some(xhigh_refused()),
+        Some("high") if body.get("stop_sequences").is_some() => Some(stop_refused()),
+        _ => None,
+    }
+}
+
+/// A moved-on commit proves the level it sent: with `high -> medium`
+/// resident, an `xhigh` request is refused and retried at `high`, and that
+/// retry is refused for its stop sequence. The upstream read past `high`,
+/// so the pending `xhigh` step commits `high` and the `high` verdict clears,
+/// though the request itself ends refused.
+///
+/// Mutation check: drop the accepted-effort clear in `settle_field_moved_on`
+/// -> red (the `high` verdict stays).
+#[tokio::test]
+async fn a_moved_on_effort_commit_clears_the_verdict_of_the_level_it_sent() {
+    let seat = ChainSeat::new(Egress::Anthropic, high_once_xhigh_then_stop);
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let adaptive = || Some(json!({"type": "adaptive"}));
+    let taught = router
+        .complete_with_options(effort_req("high", adaptive()), RouterOptions::new())
+        .await;
+    assert_eq!(
+        verdicts(&taught.meta),
+        vec![(key(HIGH_PATH), Some(VerdictValue::Shape("medium")))],
+        "premise: high learns medium",
+    );
+    let mut req = effort_req("xhigh", adaptive());
+    req.stop = Some(vec![STOP.to_string()]);
+    if let Some(wire) = req.routectl_internal.ingress_wire.as_mut() {
+        let mut client: serde_json::Value = serde_json::from_slice(&wire.bytes).expect("json");
+        client["stop_sequences"] = json!([STOP]);
+        wire.bytes = serde_json::to_vec(&client).expect("serialize").into();
+    }
+
+    let dispatched = router
+        .complete_with_options(req, RouterOptions::new())
+        .await;
+
+    assert!(
+        dispatched.result.is_err(),
+        "premise: the stop refusal ends it"
+    );
+    let sent: Vec<_> = seat.bodies()[2..]
+        .iter()
+        .map(|b| sent_effort(b).map(str::to_string))
+        .collect();
+    assert_eq!(
+        sent,
+        ["xhigh", "high"].map(|level| Some(level.to_string())),
+        "premise",
+    );
+    assert_eq!(
+        verdicts(&dispatched.meta),
+        vec![(key(XHIGH_PATH), Some(VerdictValue::Shape("high")))],
+    );
+    assert_eq!(cleared_keys(&dispatched.meta), [key(HIGH_PATH)]);
+    assert_eq!(resident_effort_keys(&router), [key(XHIGH_PATH)]);
 }

@@ -17,7 +17,10 @@ use routectl_core::ChatRequest;
 use routectl_core::provider_kind::config as kind;
 use routectl_providers::effort::VALID_EFFORT_TOKENS;
 
+use crate::field_verdict::FieldVerdictKey;
+
 use super::super::learn_engine::{EffortRank, ThinkingShape};
+use super::super::{CapabilityClearedEvent, DispatchTarget, Router};
 use super::{FieldRepairRow, FieldSurface, FieldTransform, extras_effort};
 
 /// The effort the body `req` composes: the client's `output_config.effort`
@@ -169,6 +172,41 @@ pub(super) const fn ranked_step_mints(thinking: ThinkingShape) -> bool {
         | ThinkingShape::BetweenTools
         | ThinkingShape::Absent
         | ThinkingShape::Unknown => false,
+    }
+}
+
+impl Router {
+    /// Clear the resident verdict of the effort level the body `sent` emits,
+    /// on `target`'s lane: that body was accepted, so its level is, and a
+    /// verdict saying the level is refused would send a later request away
+    /// from it, possibly back to the level that was refused in its place.
+    /// Keyed on the level that went out, whatever any repair step refused.
+    ///
+    /// Only where field repair may learn on the lane at all, and only while
+    /// the target clamps no effort: a clamped wire value is not the level
+    /// the body names.
+    pub(in crate::router) fn clear_accepted_effort(
+        &self,
+        target: &DispatchTarget,
+        sent: &ChatRequest,
+    ) -> Option<CapabilityClearedEvent> {
+        if !self.config.capability.enabled {
+            return None;
+        }
+        let provider_kind = target.provider_kind?;
+        let lane = super::attributable_field_lane(
+            &self.config,
+            &target.provider_name,
+            target.use_forwarded_credential,
+        )?;
+        if lane.provider_kind != provider_kind {
+            return None;
+        }
+        let table = self.field_repair_table().for_kind(provider_kind);
+        let row = super::present_rows(table, sent).find(is_ranked)?;
+        let key = FieldVerdictKey::new(target.learned_lane.as_ref()?, row.path, provider_kind)?;
+        self.field_verdicts()
+            .clear_accepted(&key, self.registry_generation())
     }
 }
 

@@ -9,9 +9,9 @@ use routectl_core::ChatRequest;
 
 use crate::feature_keys::derive_feature_keys;
 
-use super::super::DispatchMeta;
 use super::super::field_repair::FieldRepairPlan;
 use super::super::replay_repair::settle_replay_repair;
+use super::super::{DispatchMeta, DispatchTarget};
 use super::{AttemptLearning, Rejection, RejectionSite};
 
 impl AttemptLearning<'_> {
@@ -56,15 +56,52 @@ impl AttemptLearning<'_> {
     /// resident verdict clears. A target that applied a repair never clears,
     /// even when an earlier moved-on commit left nothing pending: the request
     /// that succeeded was not the unrepaired one.
-    pub(super) fn settle_field_success(&mut self, req: &ChatRequest, meta: &mut DispatchMeta) {
+    ///
+    /// Either way the effort level `sent` (the body that succeeded) carried
+    /// was accepted, so its own verdict clears after the commit; see
+    /// [`Self::clear_sent_effort`].
+    pub(super) fn settle_field_success(
+        &mut self,
+        req: &ChatRequest,
+        sent: &ChatRequest,
+        target: &DispatchTarget,
+        meta: &mut DispatchMeta,
+    ) {
         let Some(mut plan) = self.field_plan.take() else {
+            self.clear_sent_effort(false, sent, target, meta);
             return;
         };
+        let effort_committed = plan.has_pending_effort();
         if plan.has_applied() {
             self.commit_field_steps(&mut plan, req, meta);
         } else {
             meta.cleared_capabilities.extend(plan.settle_success());
         }
+        self.clear_sent_effort(effort_committed, sent, target, meta);
+    }
+
+    /// Clear the verdict of the effort level the accepted body `sent`
+    /// carried, AFTER any commit of the same settlement: a request that
+    /// commits `.X = Y` and then clears `.Y` leaves no window where its own
+    /// commit is undone, and two requests committing `.X = Y` and `.Y = X`
+    /// cannot both keep their verdict, since each clears the other's key
+    /// after its own commit.
+    ///
+    /// A token count proves nothing about a completion's effort, so the
+    /// count surface clears only when a settling effort step it held just
+    /// committed with the level it sent.
+    fn clear_sent_effort(
+        &self,
+        effort_committed: bool,
+        sent: &ChatRequest,
+        target: &DispatchTarget,
+        meta: &mut DispatchMeta,
+    ) {
+        if self.count_surface && !effort_committed {
+            return;
+        }
+        meta.cleared_capabilities
+            .extend(self.router.clear_accepted_effort(target, sent));
     }
 
     /// Commit every pending step when a repaired retry was refused for a
@@ -73,9 +110,14 @@ impl AttemptLearning<'_> {
     /// new field cannot be repaired. A field whose presence cannot be told
     /// commits nothing. Features come from the client's request, as on
     /// success.
+    ///
+    /// A pending effort step proven this way proves the level `sent` carried
+    /// was read past and accepted, so that level's own verdict clears after
+    /// the commit, as on success.
     pub(super) fn settle_field_moved_on(
         &mut self,
         rejection: &Rejection<'_>,
+        sent: &ChatRequest,
         meta: &mut DispatchMeta,
     ) {
         if !confirms_path_present(rejection.site.as_ref()) {
@@ -86,7 +128,11 @@ impl AttemptLearning<'_> {
         };
         let provider_kind = rejection.target.provider_kind.unwrap_or("");
         if plan.moved_on_by(rejection.native_class, rejection.err, provider_kind) {
+            let effort_committed = plan.has_pending_effort();
             self.commit_field_steps(&mut plan, rejection.client_req, meta);
+            if effort_committed {
+                self.clear_sent_effort(true, sent, rejection.target, meta);
+            }
         }
         self.field_plan = Some(plan);
     }

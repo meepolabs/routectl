@@ -348,6 +348,7 @@ fn count_tokens_engine_drops_a_repaired_replay_carry() {
             &UntranslatedCapabilities::default(),
             &target,
             &attempt_req,
+            &attempt_req,
             &mut HashSet::new(),
             &mut meta,
         );
@@ -513,6 +514,7 @@ fn on_success_yields_an_evidence_scope_only_where_response_evidence_may_be_read(
         let scope = learning.on_success(
             &UntranslatedCapabilities::default(),
             &target,
+            &req,
             &req,
             &mut HashSet::new(),
             &mut meta,

@@ -419,6 +419,7 @@ fn count_tokens_repairs_a_named_beta_and_never_mints() {
             &UntranslatedCapabilities::default(),
             &fixture.target,
             &fixture.req,
+            &fixture.req,
             &mut HashSet::new(),
             &mut meta,
         );

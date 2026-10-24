@@ -101,7 +101,7 @@ impl AttemptLearning<'_> {
         if self.transcript_rejection {
             return FailureDecision::Proceed;
         }
-        self.settle_field_moved_on(&rejection, meta);
+        self.settle_field_moved_on(&rejection, attempt_req, meta);
         self.arbitrate_proposers(rejection, attempt_req, meta, budget)
     }
 
