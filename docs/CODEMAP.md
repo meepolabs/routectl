@@ -1599,20 +1599,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ConfigVersionError` (too-new -> upgrade the binary; too-old -> `config
   migrate`, never mutated on load) rather than a confusing unknown-field
   error; `validate_cache_pricing_retired` rejects a non-empty
-  `[cache_pricing]` at v2+ as a hand-edited inconsistency;
-  `preflight_legacy_mitm_credential_source(raw_toml)` reads `[mitm]` off the
-  RAW TOML and rejects the removed `credential_source` key with an actionable
-  error naming the provider-block replacement;
-  `preflight_retired_capability_keys(raw_toml)` -> `RetiredCapabilityKeysError`
-  is a raw-TOML pre-parse naming each key retired in version 5 (`bedrock`,
-  provider `allowed_betas` / `unsupported_features`, model
-  `unsupported_features`) by dotted path only, never values; it runs after the
-  version and legacy-mitm preflights, in the shared loader, the edit-pipeline
-  preflight and `init`'s `load_existing`;
-  `preflight_removed_paid_probe_caps(raw_toml)` -> `RemovedPaidProbeCapsError`
-  refuses the removed `[fidelity] paid_probe_daily_caps` key by name, naming no
-  successor; it runs last of the raw preflights in the shared loader and the
-  edit-pipeline preflight, and up front in `config migrate` at any version
+  `[cache_pricing]` at v2+ as a hand-edited inconsistency.
+  `preflight_raw_config(raw_toml)` -> `RawConfigPreflightError`
+  (`#[non_exhaustive]`, `Display` is the wrapped check's own message) is THE
+  public raw-text driver every caller runs once, first refusal wins, in a
+  fixed order: version, then the removed `[mitm] credential_source` key
+  (`LegacyMitmCredentialSourceError`, naming the provider-block replacement),
+  then each key retired in `CAPABILITY_KEYS_RETIRED_IN` (5: `bedrock`, provider
+  `allowed_betas` / `unsupported_features`, model `unsupported_features`) by
+  dotted path only, never values (`RetiredCapabilityKeysError`), then the
+  removed `[fidelity] paid_probe_daily_caps` key, naming no successor
+  (`RemovedPaidProbeCapsError`). The three non-version checks are
+  crate-internal; only `preflight_config_version` stays public beside the
+  driver. Unparseable TOML passes every check so the typed deserialize reports
+  the real syntax error. Callers: the shared loader (`parse_config_only`), the
+  CLI edit-pipeline `preflight`, and `config migrate` (on the post-ladder
+  candidate)
 - `src/config_error.rs` -- the single production `Config` parse funnel
   `parse_config(text) -> Result<Config, String>` (re-exported from the crate
   root; consumed by `serve`/hot-reload load and every CLI config load) plus
@@ -3334,7 +3336,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   built by `Router::learned_lane_projection` (read off the dispatch targets
   the chain-expansion constructors build) or
   `LearnedLaneProjection::from_config` (the factory's static resolution
-  walk, for doctor and `probe --capabilities`, which hold no router);
+  walk, for doctor, which holds no router);
   `Router::projection_targets` also feeds `status_targets`
 - `src/router/local_refusal.rs` -- the counting functions behind
   `rc_request_refused_local_total{lane,reason}`: `Router::count_local_refusal`
@@ -5351,7 +5353,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `estimate_cost_tokens`/`CostBreakdown`/`Rates` (+ the `#[doc(hidden)]`
   record-path `estimate_cost`), `CapabilityEvent` +
   `insert_capability_event` (the append-only capability-ledger writer,
-  re-exported for the CLI capability probe's synchronous insert),
+  re-exported for synchronous inserts outside the writer task; today only
+  tests use it),
   `MigrateError`, and the `SCHEMA_VERSION` constant; carries
   `#![warn(missing_docs)]`. `prune`/`prune_capability_events`/`PruneOutcome`
   and the `META_*` schema keys are crate-internal (not re-exported)
@@ -5661,8 +5664,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `verify_readable_version`/`ensure_requests_table`): `SQLITE_OPEN_READ_WRITE`
   without `CREATE`, so a missing file is still `NoData` and a mismatched
   schema still errors -- the connection may `INSERT` but never creates or
-  migrates, letting the one-shot CLI capability probe attach to the daemon's
-  existing WAL database instead of forking a second unmigrated one. `meta`
+  migrates, so a one-shot process can attach to the daemon's existing WAL
+  database instead of forking a second unmigrated one (no production caller
+  today). `meta`
   rows under keys an older build wrote and this one no longer defines are inert:
   nothing reads, rewrites or removes them (pinned by `src/legacy_meta_tests.rs`)
 - `src/schema.rs` -- `requests` table DDL (the capture columns + `request_id
@@ -5834,7 +5838,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `src/main.rs` -- clap CLI entry point; `main` wraps `run` (which dispatches
   `serve` / `init` / `login` / `logout` / `refresh` / `whoami` / `doctor` /
-  `probe` (top-level `probe --capabilities`, distinct from `provider probe`) /
   `test` / `config` / `provider` / `usage` subcommands) and on an error routes
   the message through
   `commands::parse_error_redaction::redact_config_load_error` (fail-safe strip
@@ -6165,8 +6168,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   server sidecar: `isolate_usage_db` (points a config's usage DB at a tempdir),
   `drain_usage_writer_strict` (awaits a writer's full drain), the async
   `live_usage_writer` (one start-and-drain settle cycle on the db before
-  returning a fresh writer), `begin_writer_drain` / `WriterDrain`, and
-  `overlay_at_revision`
+  returning a fresh writer), `begin_writer_drain` / `WriterDrain`,
+  `overlay_at_revision`, and `never_shutdown` (a shutdown receiver that never
+  fires, for reload tests whose subject is not the shutdown race)
 - `src/server/router_publish.rs` -- `publish_router`, the publication step every
   reload path shares. STAMPS the replacement's probe incarnation and retires the
   outgoing incarnation's work BEFORE `router_swap.store`: between a store and a
@@ -6196,8 +6200,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   an overrunning reload task. Tests in `reload_shutdown_tests.rs`
 - `src/server/config_load.rs` -- effective-config load/parse/validate,
   re-exported at `server::` paths from `mod.rs`. The shared config loader
-  splits into `parse_config_only` (version + legacy-mitm + retired-key
-  preflights + typed parse, NO overlay) and `load_overlay_default` (overlay only);
+  splits into `parse_config_only` (one `routectl_router::preflight_raw_config`
+  call + typed parse, NO overlay; sidecar `config_load_preflight_tests.rs` pins
+  each refusal class to the driver's own message and proves a refused reload
+  candidate never replaces the published router) and `load_overlay_default` (overlay only);
   `load_effective_config_unvalidated` composes both, `load_effective_config`
   adds the fail-fast `validate_effective_config` gate, while `doctor` calls
   each independently so its capability panel degrades the two layers
@@ -7563,8 +7569,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   pipeline through the shared gate. Order: RAW version preflight FIRST
   (refuses `version < CURRENT_CONFIG_VERSION` byte-identically BEFORE any
   shared-loader call -- the loader preflight-rejects a too-old file and only
-  `config migrate` migrates it; also rejects too-new) + the legacy-mitm and
-  retired-capability-key preflights;
+  `config migrate` migrates it; also rejects too-new) via the shared
+  `edit_pipeline::preflight`, which also refuses the removed and retired keys;
   `validate_config_path` (unknown segments error with siblings pre-mutation;
   `Table` targets allowed only for unset); scalar inference
   (bool/int/float/else string -- the re-parse gate backstops mistypes);
@@ -7584,7 +7590,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (check-before-write end to end): snapshot + raw `version` read; PLAN the
   migration purely (`plan_migration` -> `MigrationPlan`, no disk mutation -- a
   `Refusal` / future-version file surfaces here with a truthful "nothing was
-  written"); then plan PHASE 2, the store-aware half the pure ladder cannot
+  written"); then `preflight_raw_config` on the post-ladder candidate (the
+  snapshot for a `NoChange` plan), so a key a rung folds is not refused while
+  one no rung removes still is; then plan PHASE 2, the store-aware half the pure ladder cannot
   own (it runs twice, and the committed bytes must reproduce what planning
   gated) -- `enumerate_seats` opens the credential store READ-ONLY through
   `OAuthStore::open` and keys its seats by provider family, and
@@ -7671,8 +7679,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (source=config vs baked-default). No generic per-key provenance tree
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
   config.toml-mutating commands (`config set/unset`, `provider add`, the login
-  auto-surface): the raw version, legacy-mitm and retired-capability-key
-  preflights (the same three the loader runs, in the same order), the in-memory
+  auto-surface, `init`): `preflight`, one call to
+  `routectl_router::preflight_raw_config` (the same driver the loader runs), the in-memory
   `parse_config` + `collect_config_validation` gate plus its error rendering,
   the pre-lock high-consequence confirmation prompt (`--yes` bypasses; a
   non-TTY stdin declines without reading, so a silent pipe cannot hang any
@@ -7703,14 +7711,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   unchanged). Emits ONE value-free audit event
   (surface/verb/name/kind/credential class -- never the value or full ref);
   owns `AddResult` {Written/NoChange/Aborted/Rotated} and the pinned
-  `credential rotated; config unchanged` line. On the `Written` path only,
-  offers a scoped capability probe against the just-added provider: `--probe`
-  dispatches without prompting, `--no-probe` suppresses it, and the
-  interactive default asks the new `AddIo::confirm_probe` seam AFTER printing
-  the cost line; the offer runs strictly after the commit + secret put and
-  writes only the capability ledger (never rolls the add back), and silently
-  skips when no single model routes to the provider yet (delegates to
-  `probe::capabilities::offer_scoped_probe`)
+  `credential rotated; config unchanged` line
 - `src/commands/provider_add/build.rs` -- provider-entry construction from
   args: `build_entry` validates the kind against the supported set and
   dispatches to the direct api-key path (`resolve_secret` -> `env://` /
@@ -7763,13 +7764,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   machine, composes each provider via `provider add` (atomic + gated +
   idempotent), then the single models/aliases write, wrapping any post-ack
   failure with the explicit re-run recovery message (config on disk stays
-  valid, captured credentials persist and are reused); AFTER routing lands it
-  offers the scoped capability probe (via
-  `probe::capabilities::offer_scoped_probe`, same
-  `--probe`/`--no-probe`/interactive semantics) for each provider written THIS
-  run whose lane did not exist during the in-loop `provider add` hook -- a
-  provider whose selectable model pre-existed was offered in-loop, so it is
-  skipped here, yielding at most one offer per provider per run
+  valid, captured credentials persist and are reused). An existing config
+  passes the shared `edit_pipeline::preflight` before any step reads it
+  (`load_existing`, and the scaffold-vs-wizard branch)
 - `src/commands/init/detect.rs` -- the detect step: `detect_offers(config,
   probes)` composes the sorted `Offer` inventory (deterministic `(source,
   kind, provider_name)` order), PURE (no lock/network/mutation, reads env +
@@ -7784,9 +7781,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/init/plan.rs` -- the wizard's PURE decision engine:
   `build_plan(&WizardAnswers, existing, offers) -> Result<WizardPlan,
   PlanError>` turns collected answers into the ordered `ProviderAddArgs` list
-  (one per selected provider, `yes: true` since init owns the one ack, and the
-  operator's `--probe`/`--no-probe` choice threaded onto each so the post-add
-  offer fires through the inherited `AddIo` seam), one `ModelWiring` per
+  (one per selected provider, `yes: true` since init owns the one ack), one `ModelWiring` per
   provider, and the single `aliases.default` nickname -- routing lands ONLY
   through `default_alias`. `selected_in_order` filters the canonical offer
   list for a total stable order; `assign_nick` picks the provider-name
@@ -8269,67 +8264,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   defaults, errors on an unknown `<name>`, renders human or `--json`
   (`{schema_version, providers:[{name, outcome}]}`, `SCHEMA_VERSION = 1`,
   UNSTABLE pre-1.0), and returns `overall_exit`
-- `src/commands/probe/resolve.rs` -- shared config resolution for the CLI
-  probe surfaces. `resolve_probe_target(config, provider, alias) ->
-  ResolvedProbeTarget { state_key, provider, model_id }` maps a scoped
-  `--alias` (a `[models]` nickname) or a bare `--provider` (resolved from the
-  single selectable model referencing it; errors on zero or many) to the
-  target's runtime identity plus the provider name and upstream model id.
-  `state_key` is that runtime identity (the `[models]` nickname), NOT the
-  learned lane: `probe --capabilities` takes the lane from the router's
-  `LearnedLaneProjection` for that nickname on `provider`, so a capability
-  probe emits on the SAME lane live traffic would
-- `src/commands/probe/capabilities.rs` -- `routectl probe --capabilities`: a
-  LIB-SHAPED core (`run_capability_probe`) plus a thin CLI wrapper (`run`).
-  The core takes only a `CanaryDispatch` seam (impl'd for `Arc<dyn Provider>`,
-  forwarding to a BARE `Provider::complete` -- never `Router`, the structural
-  isolation boundary; drivable with a fake in tests) plus a resolved
-  `CapabilityProbePlan { state_key, provider_kind, model, catalog_version,
-  overlay_revision, rates }`, and returns a `CapabilityProbeReport { estimate,
-  cells, events }` WITHOUT writing -- dispatch/classification is decoupled
-  from persistence, the wrapper writes `events` synchronously via
-  `routectl_usage::insert_capability_event` on an `open_rw` connection.
-  `ProbeCapability::{StructuredOutput, WebSearch, PromptCaching, Thinking}`
-  (`ALL`, fixed probe order) drives per-cell canary dispatch; each success
-  classifies through the SAME `routectl_router::detect` path (scoped to the
-  cell's capability), each failure through `classify` + the shared
-  `resolve_requested_capability` matcher. Emission per outcome: Verified ->
-  `cleared(probe)` THEN `verified(probe)` with the cleared event stamped
-  strictly earlier (resurrect-proof replay ordering); SuspectAbsence ->
-  `suspect(probe)` (F3); a deterministic capability-naming rejection ->
-  `broken(probe)` at F1/F2; a clean-stop-gate reject or any
-  transport/availability failure -> NO event. Every event stamps
-  `(CATALOG_VERSION, catalog_overlay::overlay_revision(overlay))` computed
-  exactly as the serve/reload boot boundary does, so `should_replay` never
-  silently drops them. Within-run lane health: a 429/timeout/5xx/auth/network
-  failure marks the lane unhealthy and the remaining cells render "skipped:
-  lane unhealthy"; a capability-level 400 is evidence, not lane health, and
-  never trips the lane. `estimate_probe_cost` (always computed pre-dispatch,
-  `total_calls * PROBE_PROFILE_V1.max_tokens` priced against the model's
-  `Rates`) gates the run behind an operator confirmation (unless `--yes`).
-  Those `Rates` come from `probe_rates`, which resolves through
-  `pricing::is_subscription` FIRST (a managed-OAuth seat is billed by seat, so
-  the estimate reads `unpriced` and no rate is looked up) and otherwise through
-  `routectl_router::effective_pricing` -> `rates_from_pricing`, so the
-  pre-flight estimate, the usage report, and `doctor` can never disagree about
-  what a lane's tokens cost -- and a `[registry]`-silent upstream now estimates
-  off the baked catalog instead of reading `unpriced`.
-  `run` and the wizard's `offer_scoped_probe` (the post-`provider add`/`init`
-  hook, scoped to one provider, caller-supplied confirm) share the
-  `dispatch_and_persist` tail (build bare provider + open ledger + run core +
-  persist + render)
-- `src/commands/probe/canary.rs` -- capability-probe canary builders + the
-  baked `PROBE_PROFILE_V1` ceiling. Four pure builders each author one minimal
-  `ChatRequest` and derive the matching `DetectorContext` (struct literal) so
-  a canary response classifies through the SAME `routectl_router::detect` path
-  a live response does: `structured_output_canary` (strict `json_schema`, one
-  required top-level key), `web_search_canary` (single search forced via
-  `tool_choice`), `prompt_caching_canary` (ordered `CachingCanary { prime,
-  read }` sharing one `cache_control`-marked prefix), `thinking_canary`
-  (extended reasoning at the minimum budget). `PROBE_PROFILE_V1` is THE single
-  const carrying the baked `max_tokens` ceiling and per-capability canary
-  counts (prompt_caching = 2, others = 1); no flag/env/config path raises
-  them, and exact-value unit tests pin every field
 - `src/commands/doctor/mod.rs` -- `routectl doctor` entry (`run`) + report
   assembly. Read-only posture: a doctor run mutates nothing
   (config/credentials/overlay/usage DB byte-identical). The aggregator is a
