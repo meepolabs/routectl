@@ -87,7 +87,7 @@ cargo build --release
 ## Quick start
 
 The guided path -- `routectl init` walks provider setup, secret
-capture, and routing, then offers a verification probe:
+capture, and routing:
 
 ```bash
 routectl init

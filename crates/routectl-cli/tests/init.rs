@@ -162,9 +162,6 @@ impl AddIo for StubInitIo {
         *self.prompt_hidden_calls.lock().unwrap() += 1;
         Ok(self.prompt_value.clone())
     }
-    fn confirm_probe(&self) -> bool {
-        false
-    }
     async fn login(&self, provider: &str) -> Result<()> {
         *self.login_calls.lock().unwrap() += 1;
         provision_login_token(provider);
@@ -233,7 +230,6 @@ fn init_args(scaffold: bool, yes: bool, default_model: Option<&str>, forwarded: 
         yes,
         default_model: default_model.map(str::to_string),
         forwarded,
-        probe: Some(false),
     }
 }
 
@@ -251,7 +247,6 @@ fn oauth_add_args(name: &str) -> ProviderAddArgs {
         credential_source: None,
         overwrite: false,
         yes: true,
-        probe: Some(false),
     }
 }
 
@@ -785,6 +780,12 @@ fn init_help_documents_the_flag_surface() {
     let help = String::from_utf8_lossy(&out.stdout);
     for flag in ["--scaffold", "--yes", "--default-model", "--forwarded"] {
         assert!(help.contains(flag), "help must document {flag}:\n{help}");
+    }
+    for removed in ["--probe", "--no-probe"] {
+        assert!(
+            !help.contains(removed),
+            "help must not document the removed {removed}:\n{help}"
+        );
     }
 }
 

@@ -227,13 +227,6 @@ enum Cmd {
         /// its alias, captured with no secret prompt.
         #[arg(long)]
         forwarded: bool,
-        /// After each provider is configured, run a capability probe against
-        /// it without prompting. Conflicts with `--no-probe`.
-        #[arg(long, conflicts_with = "no_probe")]
-        probe: bool,
-        /// Suppress the post-configuration capability-probe offer entirely.
-        #[arg(long = "no-probe")]
-        no_probe: bool,
     },
     /// Add or overwrite a provider entry in `config.toml`, routed through
     /// the same atomic, re-validated write path as `config set`. The secret
@@ -525,14 +518,6 @@ enum ProviderCmd {
         /// Skip the high-consequence confirmation prompt.
         #[arg(long)]
         yes: bool,
-        /// After a successful add, run a capability probe against the new
-        /// provider without prompting (only when a model already routes to
-        /// it). Conflicts with `--no-probe`.
-        #[arg(long, conflicts_with = "no_probe")]
-        probe: bool,
-        /// Suppress the post-add capability-probe offer entirely.
-        #[arg(long = "no-probe")]
-        no_probe: bool,
     },
     /// Probe configured providers for reachability without billing a model
     /// call. Read-only: never refreshes a token or mutates config/creds.
@@ -882,17 +867,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             yes,
             default_model,
             forwarded,
-            probe,
-            no_probe,
         } => {
             let config_path = resolve_config_path(cli.config.as_deref());
-            let probe = probe_choice(probe, no_probe);
             let args = commands::init::InitArgs {
                 scaffold,
                 yes,
                 default_model,
                 forwarded,
-                probe,
             };
             if let Err(e) = commands::init::run(&config_path, args).await {
                 eprintln!("error: {e}");
@@ -910,11 +891,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 credential_source,
                 overwrite,
                 yes,
-                probe,
-                no_probe,
             } => {
                 let config_path = resolve_config_path(cli.config.as_deref());
-                let probe = probe_choice(probe, no_probe);
                 let args = commands::provider_add::ProviderAddArgs {
                     kind,
                     name,
@@ -925,7 +903,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     credential_source,
                     overwrite,
                     yes,
-                    probe,
                 };
                 if let Err(e) = commands::provider_add::run(&config_path, args).await {
                     eprintln!("error: {e}");
@@ -1265,21 +1242,6 @@ fn resolve_config_path(explicit: Option<&std::path::Path>) -> PathBuf {
     base.join("routectl").join("config.toml")
 }
 
-/// Fold the mutually-exclusive `--probe` / `--no-probe` flag pair into the
-/// tri-state the post-add probe offer consumes: `Some(true)` dispatches
-/// without prompting, `Some(false)` suppresses the offer, and `None` (neither
-/// flag) leaves it interactive. `--probe` and `--no-probe` conflict at the
-/// clap layer, so both true never reaches here.
-const fn probe_choice(probe: bool, no_probe: bool) -> Option<bool> {
-    if no_probe {
-        Some(false)
-    } else if probe {
-        Some(true)
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1462,6 +1424,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The post-add / post-init capability-probe flags were removed outright,
+    /// not kept as no-ops: clap rejects each as an unknown argument. Each row
+    /// is a command line that parses once its trailing flag is dropped, so the
+    /// rejection is attributable to that flag alone.
+    #[test]
+    fn removed_probe_flags_are_rejected() {
+        let provider_add: &[&str] = &[
+            "routectl",
+            "provider",
+            "add",
+            "--kind",
+            "openai-compat",
+            "--name",
+            "x",
+            "--secret-ref",
+            "file:///abs/key",
+        ];
+        let init: &[&str] = &["routectl", "init", "--yes"];
+        let rows: &[(&str, &[&str], &str)] = &[
+            ("provider add --probe", provider_add, "--probe"),
+            ("provider add --no-probe", provider_add, "--no-probe"),
+            ("init --probe", init, "--probe"),
+            ("init --no-probe", init, "--no-probe"),
+        ];
+
+        for (name, base, flag) in rows {
+            assert!(
+                Cli::try_parse_from(*base).is_ok(),
+                "{name}: the base command line must parse without the flag"
+            );
+            let argv: Vec<&str> = base.iter().copied().chain([*flag]).collect();
+            let err = Cli::try_parse_from(&argv)
+                .err()
+                .unwrap_or_else(|| panic!("{name}: {argv:?} parsed but must be rejected"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{name}: {argv:?} rejected with the wrong error kind"
+            );
+        }
     }
 
     /// `--scaffold` is mutually exclusive with the wizard-flow flags at the
