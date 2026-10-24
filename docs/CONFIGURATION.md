@@ -119,7 +119,8 @@ put a second subscription seat.
 
 Save as `~/.config/routectl/config.toml` (or `$XDG_CONFIG_HOME/routectl/config.toml`)
 on every OS, including macOS, then `routectl config check`
-and `routectl serve`. Credentials always arrive as references --
+and `routectl serve`. On Windows that is `%USERPROFILE%\.config\routectl\config.toml`
+unless `XDG_CONFIG_HOME` is set. Credentials always arrive as references --
 `env://VAR`, `file:///abs/path` (owner-only, 0600), or
 `oauth://<provider>` (populated by `routectl login <provider>`);
 inline `literal:` values are rejected at parse and resolve. To add a

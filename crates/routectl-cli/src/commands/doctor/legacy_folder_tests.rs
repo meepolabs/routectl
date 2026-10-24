@@ -196,7 +196,9 @@ fn plant(dir: &Path, names: &[&str]) {
 #[test]
 fn gather_lists_the_old_folder_under_home_sorted() {
     let home = tempfile::tempdir().expect("tempdir");
-    let legacy = legacy_config_dir(Some(home.path().as_os_str())).expect("home is set");
+    let legacy = legacy_config_dir(Some(home.path().as_os_str()), None)
+        .expect("home is set")
+        .path;
     plant(&legacy, &["usage.db", "config.toml"]);
     let in_use = home.path().join(".config/routectl/config.toml");
 
@@ -223,7 +225,9 @@ fn gather_lists_the_old_folder_under_home_sorted() {
 #[test]
 fn gather_with_no_old_folder_is_absent() {
     let home = tempfile::tempdir().expect("tempdir");
-    let legacy = legacy_config_dir(Some(home.path().as_os_str())).expect("home is set");
+    let legacy = legacy_config_dir(Some(home.path().as_os_str()), None)
+        .expect("home is set")
+        .path;
     let in_use = home.path().join(".config/routectl/config.toml");
 
     assert_eq!(
@@ -236,7 +240,9 @@ fn gather_with_no_old_folder_is_absent() {
 #[test]
 fn gather_caps_names_at_eight_and_counts_the_rest() {
     let home = tempfile::tempdir().expect("tempdir");
-    let legacy = legacy_config_dir(Some(home.path().as_os_str())).expect("home is set");
+    let legacy = legacy_config_dir(Some(home.path().as_os_str()), None)
+        .expect("home is set")
+        .path;
     let names = ["j", "i", "h", "g", "f", "e", "d", "c", "b", "a", "k"];
     plant(&legacy, &names);
 
@@ -253,7 +259,9 @@ fn gather_caps_names_at_eight_and_counts_the_rest() {
 #[test]
 fn gather_treats_an_old_folder_holding_the_config_in_use_as_absent() {
     let home = tempfile::tempdir().expect("tempdir");
-    let legacy = legacy_config_dir(Some(home.path().as_os_str())).expect("home is set");
+    let legacy = legacy_config_dir(Some(home.path().as_os_str()), None)
+        .expect("home is set")
+        .path;
     plant(&legacy, &["config.toml", "usage.db"]);
 
     let folder = gather_legacy_folder(Some(&legacy), &legacy.join("config.toml"));
@@ -267,7 +275,9 @@ fn gather_reports_an_unlistable_folder_as_an_inspect_error() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = tempfile::tempdir().expect("tempdir");
-    let legacy = legacy_config_dir(Some(home.path().as_os_str())).expect("home is set");
+    let legacy = legacy_config_dir(Some(home.path().as_os_str()), None)
+        .expect("home is set")
+        .path;
     plant(&legacy, &["config.toml"]);
     std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o000)).expect("chmod");
     let readable_anyway = std::fs::read_dir(&legacy).is_ok();

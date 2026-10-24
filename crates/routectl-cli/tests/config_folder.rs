@@ -5,8 +5,8 @@
 //! the shared core rule, where an empty `XDG_CONFIG_HOME` counts as unset.
 //!
 //! Every spawn removes `XDG_CONFIG_HOME` (the workspace cargo config forces
-//! it) and `ROUTECTL_CONFIG`, and points `HOME` and the working directory at a
-//! tempdir, so no real config folder is read or written.
+//! it), `ROUTECTL_CONFIG` and `APPDATA`, and points `HOME` and the working
+//! directory at a tempdir, so no real config folder is read or written.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -50,6 +50,7 @@ impl Home {
             .args(args)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("ROUTECTL_CONFIG")
+            .env_remove("APPDATA")
             .env("HOME", self.path())
             .current_dir(self.path())
             .stdin(Stdio::null())
@@ -128,6 +129,7 @@ fn an_empty_xdg_config_home_counts_as_unset() {
         .args(["config", "check"])
         .env("XDG_CONFIG_HOME", "")
         .env_remove("ROUTECTL_CONFIG")
+        .env_remove("APPDATA")
         .env("HOME", home.path())
         .current_dir(elsewhere.path())
         .stdin(Stdio::null())

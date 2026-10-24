@@ -609,9 +609,10 @@ enum RcCmd {
 async fn main() {
     if let Err(e) = run().await {
         // Every error that reaches here propagates from a `load_config*`
-        // helper -- the loader inlines the offending config VALUE (a secret
-        // mistyped into a non-string field), user-controlled keys, and local
-        // paths. Route the Display string through the shared fail-safe
+        // helper or is the config-folder refusal (`ConfigFolderError`, whose
+        // text the redactor keeps verbatim) -- the loader inlines the
+        // offending config VALUE (a secret mistyped into a non-string field),
+        // user-controlled keys, and local paths. Route the Display string through the shared fail-safe
         // redactor, the same one `doctor` and `config edit` use. It preserves
         // a message it does not recognize as config-parse/IO verbatim, so a
         // non-loader error stays actionable and its multi-line rendering
@@ -629,9 +630,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     if cli.config.is_none() {
+        let legacy = routectl_cli::config_folder::legacy_config_dir_from_env();
         routectl_cli::config_folder::refuse_stranded_config(
             &resolve_config_path(None),
-            std::env::var_os("HOME").as_deref(),
+            legacy.as_ref().map(|legacy| legacy.path.as_path()),
         )?;
     }
 

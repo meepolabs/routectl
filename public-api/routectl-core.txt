@@ -483,6 +483,7 @@ pub mod routectl_core::config_dir
 pub fn routectl_core::config_dir::config_dir() -> core::option::Option<std::path::PathBuf>
 pub fn routectl_core::config_dir::config_dir_from(core::option::Option<&std::ffi::os_str::OsStr>, core::option::Option<&std::ffi::os_str::OsStr>) -> core::option::Option<std::path::PathBuf>
 pub fn routectl_core::config_dir::config_dir_or_relative() -> std::path::PathBuf
+pub fn routectl_core::config_dir::config_dir_or_relative_from(core::option::Option<&std::ffi::os_str::OsStr>, core::option::Option<&std::ffi::os_str::OsStr>) -> std::path::PathBuf
 pub mod routectl_core::content_part
 pub enum routectl_core::content_part::ContentPart
 pub routectl_core::content_part::ContentPart::Known(routectl_core::content_part::KnownContentPart)

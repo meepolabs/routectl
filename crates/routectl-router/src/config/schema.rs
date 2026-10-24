@@ -670,11 +670,11 @@ const fn default_retention_days() -> u32 {
 }
 
 /// Resolve routectl's own config dir through the shared core rule
-/// ([`routectl_core::config_dir::config_dir_or_relative`]): a non-empty
-/// `XDG_CONFIG_HOME`, else a non-empty `$HOME/.config`, joined with
+/// ([`routectl_core::config_dir::config_dir_or_relative`]): an absolute
+/// `XDG_CONFIG_HOME`, else an absolute `$HOME/.config`, joined with
 /// `routectl`. The result is `~`-free, so callers can hand a child path
 /// straight to SQLite or a file writer, but it is absolute only when one
-/// of those variables is: with neither set non-empty it is the relative
+/// of those variables is: with neither absolute it is the relative
 /// `.config/routectl`, resolved against the working directory.
 pub fn routectl_config_dir() -> PathBuf {
     routectl_core::config_dir::config_dir_or_relative()
@@ -3417,7 +3417,3 @@ mod registry_tests;
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod schema_tests;
-
-#[cfg(test)]
-#[path = "config_dir_tests.rs"]
-mod config_dir_tests;

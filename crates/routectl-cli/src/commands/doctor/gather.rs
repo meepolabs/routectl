@@ -21,7 +21,7 @@ use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 use crate::commands::pricing::{is_subscription, missing_equivalence_dimensions};
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
-use crate::config_folder::legacy_config_dir;
+use crate::config_folder::legacy_config_dir_from_env;
 use crate::server::CompositeStore;
 use crate::server::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, SliceReader, classify_boundary,
@@ -121,7 +121,9 @@ pub async fn gather_context_no_network(
     let orphan_seats = gather_orphan_seats(&config, &seats);
     let would_trim = compute_would_trim_panel(&config, Local::now());
     let legacy_folder = gather_legacy_folder(
-        legacy_config_dir(std::env::var_os("HOME").as_deref()).as_deref(),
+        legacy_config_dir_from_env()
+            .as_ref()
+            .map(|legacy| legacy.path.as_path()),
         config_path,
     );
 

@@ -1,7 +1,7 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use super::config_dir_from;
+use super::{config_dir_from, config_dir_or_relative_from, windows_home};
 
 /// One row: name, `XDG_CONFIG_HOME`, `HOME`, expected folder.
 type Row = (
@@ -13,7 +13,7 @@ type Row = (
 
 #[test]
 fn config_dir_from_resolves_each_variable_combination() {
-    let cases: [Row; 6] = [
+    let cases: [Row; 9] = [
         (
             "xdg set wins over home",
             Some("/xdg"),
@@ -35,6 +35,19 @@ fn config_dir_from_resolves_each_variable_combination() {
         ("home empty and xdg unset", None, Some(""), None),
         ("both empty", Some(""), Some(""), None),
         ("both unset", None, None, None),
+        (
+            "xdg relative falls back to home",
+            Some("rel/xdg"),
+            Some("/home/u"),
+            Some(PathBuf::from("/home/u/.config/routectl")),
+        ),
+        ("home relative and xdg unset", None, Some("rel/home"), None),
+        (
+            "xdg absolute wins over a relative home",
+            Some("/xdg"),
+            Some("rel/home"),
+            Some(PathBuf::from("/xdg/routectl")),
+        ),
     ];
 
     for (name, xdg, home, expected) in cases {
@@ -59,4 +72,73 @@ fn config_dir_from_honors_non_utf8_xdg() {
 
     // Assert
     assert_eq!(got, Some(PathBuf::from(xdg).join("routectl")));
+}
+
+#[test]
+fn config_dir_or_relative_from_falls_back_to_a_relative_folder() {
+    let rows: [Row; 3] = [
+        (
+            "both unset",
+            None,
+            None,
+            Some(PathBuf::from(".config/routectl")),
+        ),
+        (
+            "both relative",
+            Some("rel/xdg"),
+            Some("rel/home"),
+            Some(PathBuf::from(".config/routectl")),
+        ),
+        (
+            "home set",
+            None,
+            Some("/home/u"),
+            Some(PathBuf::from("/home/u/.config/routectl")),
+        ),
+    ];
+
+    for (name, xdg, home, expected) in rows {
+        // Act
+        let got = config_dir_or_relative_from(xdg.map(OsStr::new), home.map(OsStr::new));
+
+        // Assert
+        assert_eq!(Some(got), expected, "row: {name}");
+    }
+}
+
+/// One row: name, `HOME`, `USERPROFILE`, expected home.
+type WindowsRow = (
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<&'static str>,
+);
+
+#[test]
+fn windows_home_prefers_an_absolute_home_over_userprofile() {
+    let rows: [WindowsRow; 5] = [
+        ("absolute home wins", Some("/h"), Some("/p"), Some("/h")),
+        (
+            "empty home uses userprofile",
+            Some(""),
+            Some("/p"),
+            Some("/p"),
+        ),
+        (
+            "relative home uses userprofile",
+            Some("rel"),
+            Some("/p"),
+            Some("/p"),
+        ),
+        ("unset home uses userprofile", None, Some("/p"), Some("/p")),
+        ("both unset", None, None, None),
+    ];
+
+    for (name, home, userprofile, expected) in rows {
+        // Act
+        let got = windows_home(home.map(OsString::from), userprofile.map(OsString::from));
+
+        // Assert
+        assert_eq!(got, expected.map(OsString::from), "row: {name}");
+    }
 }
